@@ -15,6 +15,18 @@ fn at_ms(ms: i64) -> SqlStorageValue {
     SqlStorageValue::Integer(ms)
 }
 
+/// Whether `computers` are computers' ids, at most `max` of them.
+fn computers_within<'a>(computers: impl Iterator<Item = &'a str>, max: usize) -> bool {
+    let mut n = 0;
+    for c in computers {
+        n += 1;
+        if n > max || !c.starts_with("computer:") {
+            return false;
+        }
+    }
+    true
+}
+
 /// People and orgs a page lists; the log's entries a page shows.
 pub(crate) const ADMIN_PAGE: u32 = 100;
 /// The log's entries kept (the oldest go).
@@ -77,6 +89,9 @@ impl Call for Health {
 /// it read: the answer (the cell's JSON, at most `glance::KEPT_MAX_BYTES`,
 /// read at `now_ms`; none when its read failed), and the computers its
 /// trouble names (at most `glance::TROUBLE_MAX`), kept unless a newer one
+/// is; and, apart, the week's computers to keep (one a line, at most
+/// `glance::GROUPS_MAX`: a scan's, or the week kept, each with every
+/// computer seen today since), as of `week_at`, kept unless a newer one
 /// is. A call that names a hold takes none.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Glance {
@@ -88,6 +103,10 @@ pub(crate) struct Glance {
     pub held: Option<i64>,
     #[serde(default)]
     pub read: Option<String>,
+    #[serde(default)]
+    pub week: Option<String>,
+    #[serde(default)]
+    pub week_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +122,9 @@ pub(crate) struct Glanced {
     pub kept: Option<String>,
     pub kept_at: Option<i64>,
     pub kept_day: Option<i64>,
+    /// The week's computers kept, one a line, and as of when (any day's).
+    pub week: Option<String>,
+    pub week_at: Option<i64>,
     /// Until when this load holds the logs, when it is to read them.
     pub held: Option<i64>,
 }
@@ -323,9 +345,12 @@ impl RegistryCell {
     }
 
     fn glance(&self, b: Glance) -> CellResult<Glanced> {
-        use fragment_core::glance::{DAY_MS, KEPT_MAX_BYTES, KEPT_SHAPE, NEW_PEOPLE_MAX, REFRESH_LEASE_MS, TROUBLE_MAX, WEEK_MS};
-        if b.read.as_ref().is_some_and(|a| a.len() > KEPT_MAX_BYTES) || b.computers.len() > TROUBLE_MAX || !b.computers.iter().all(|c| c.starts_with("computer:")) {
-            return Err(CellError::invalid(format!("a glance's answer is at most {KEPT_MAX_BYTES} bytes, naming at most {TROUBLE_MAX} computers")));
+        use fragment_core::glance::{DAY_MS, GROUPS_MAX, KEPT_MAX_BYTES, KEPT_SHAPE, NEW_PEOPLE_MAX, REFRESH_LEASE_MS, TROUBLE_MAX, WEEK_MS};
+        let valid = b.read.as_ref().is_none_or(|a| a.len() <= KEPT_MAX_BYTES)
+            && computers_within(b.computers.iter().map(String::as_str), TROUBLE_MAX)
+            && b.week.as_ref().is_none_or(|w| b.week_at.is_some() && computers_within(w.split('\n').filter(|c| !c.is_empty()), GROUPS_MAX as usize));
+        if !valid {
+            return Err(CellError::invalid(format!("a glance's answer is at most {KEPT_MAX_BYTES} bytes, naming at most {TROUBLE_MAX} computers in trouble and {GROUPS_MAX} in its week")));
         }
         let shape = || SqlStorageValue::from(KEPT_SHAPE);
         if let Some(held) = b.held {
@@ -338,6 +363,10 @@ impl RegistryCell {
                     vec![at_ms(b.now_ms), at_ms(b.day_start), answer.as_str().into(), b.computers.join("\n").into(), shape(), at_ms(b.now_ms)],
                 )?;
             }
+            // the week apart: a scan that read is kept though the rest failed
+            if let Some((week, at)) = b.week.as_ref().zip(b.week_at) {
+                self.exec("UPDATE glance_kept SET week = ?, week_at = ? WHERE shape = ? AND (week_at IS NULL OR week_at <= ?)", vec![week.as_str().into(), at_ms(at), shape(), at_ms(at)])?;
+            }
         }
         #[derive(Deserialize)]
         struct Kept {
@@ -346,8 +375,10 @@ impl RegistryCell {
             day_start: Option<i64>,
             answer: Option<String>,
             computers: Option<String>,
+            week: Option<String>,
+            week_at: Option<i64>,
         }
-        let kept = self.row::<Kept>("SELECT busy_until, at, day_start, answer, computers FROM glance_kept WHERE shape = ?", vec![shape()])?;
+        let kept = self.row::<Kept>("SELECT busy_until, at, day_start, answer, computers, week, week_at FROM glance_kept WHERE shape = ?", vec![shape()])?;
         // held for this load when due, on its first call (and when the
         // deployment reads its logs)
         let now = js::now_ms();
@@ -356,7 +387,7 @@ impl RegistryCell {
         if let Some(until) = held {
             self.exec("INSERT INTO glance_kept (shape, busy_until) VALUES (?, ?) ON CONFLICT (shape) DO UPDATE SET busy_until = excluded.busy_until", vec![shape(), at_ms(until)])?;
         }
-        let (kept_at, kept_day, answer, computers) = kept.map_or((None, None, None, None), |k| (k.at, k.day_start, k.answer, k.computers));
+        let (kept_at, kept_day, answer, computers, week, week_at) = kept.map_or((None, None, None, None, None, None), |k| (k.at, k.day_start, k.answer, k.computers, k.week, k.week_at));
         #[derive(Deserialize)]
         struct Counts {
             hour: u64,
@@ -429,6 +460,8 @@ impl RegistryCell {
             kept: answer,
             kept_at,
             kept_day,
+            week,
+            week_at,
             held,
         })
     }

@@ -31,12 +31,14 @@
 //! one load at a time, timed by the registry's clock (`due`,
 //! `REFRESH_LEASE_MS`). A load meanwhile shows what was kept, and when it
 //! was read, but never today's numbers of another day's start. The week's
-//! scan is asked only when the week kept is older than `WEEK_LIFE_MS` or
-//! than the day's start (`week_due`); else it is carried, with when it was
-//! read. At most `ASKED_AT_ONCE` queries run at once, and a read stops at
-//! its first refusal. A read that fails leaves the last answer read
-//! standing, with when, and why the newer read failed (`shown_answer`); the
-//! week's failing alone keeps the week kept.
+//! computers are kept apart: the last scan's, with every computer seen
+//! today since (so a computer that came up stays up across a day's start
+//! when the next scan fails). The scan is asked only when the week kept is
+//! older than `WEEK_LIFE_MS` or than the day's start (`week_due`), and a
+//! scan that read is kept though the rest fails. At most `ASKED_AT_ONCE`
+//! queries run at once, and a read stops at its first refusal. A read that
+//! fails leaves the last answer read standing, with when, and why the newer
+//! read failed (`shown_answer`).
 
 use fragment_proto::org::TroubleKind;
 use serde_json::{json, Value};
@@ -443,13 +445,6 @@ pub struct Logs {
     /// read (`whys_of`), and why they were not read, when not.
     pub whys: Vec<(String, i64, String)>,
     pub whys_unread: Option<String>,
-    /// The computers awake in the last week (at most `GROUPS_MAX`), as
-    /// read at `week_at`: carried from the answer kept until the week is
-    /// due again (`week_due`); none: never read. Why its newest read
-    /// failed, when it did.
-    pub week: Option<Vec<String>>,
-    pub week_at: Option<i64>,
-    pub week_unread: Option<String>,
 }
 
 /// The kinds of trouble, by their place in a kept answer (part of its
@@ -469,9 +464,6 @@ impl Logs {
             "trouble": Value::Array(self.trouble.iter().map(|(c, k, n)| json!([c, kind(k), n])).collect()),
             "whys": Value::Array(self.whys.iter().map(|(c, at, w)| json!([c, at, w])).collect()),
             "whysUnread": self.whys_unread,
-            "week": self.week.as_deref().map(strings),
-            "weekAt": self.week_at,
-            "weekUnread": self.week_unread,
         })
         .to_string()
     }
@@ -494,17 +486,23 @@ impl Logs {
             trouble: v["trouble"].as_array()?.iter().map(|t| Some((t[0].as_str()?.to_string(), *KINDS.get(usize::try_from(t[1].as_u64()?).ok()?)?, t[2].as_u64()?))).collect::<Option<_>>()?,
             whys: v["whys"].as_array()?.iter().map(|w| Some((w[0].as_str()?.to_string(), w[1].as_i64()?, w[2].as_str()?.to_string()))).collect::<Option<_>>()?,
             whys_unread: text(&v["whysUnread"])?,
-            week: match &v["week"] {
-                Value::Null => None,
-                w => Some(strings(w)?),
-            },
-            week_at: match &v["weekAt"] {
-                Value::Null => None,
-                at => Some(at.as_i64()?),
-            },
-            week_unread: text(&v["weekUnread"])?,
         })
     }
+}
+
+/// The week's computers with `today`'s since, each once, at most
+/// `GROUPS_MAX` (a week with more is counted as this many, at least).
+pub fn week_with(mut week: Vec<String>, today: &[String]) -> Vec<String> {
+    for c in today {
+        if week.len() >= GROUPS_MAX as usize {
+            break;
+        }
+        if !week.contains(c) {
+            week.push(c.clone());
+        }
+    }
+    week.truncate(GROUPS_MAX as usize);
+    week
 }
 
 /// The computers in trouble: each kind's, by computer, the most lines
@@ -645,9 +643,9 @@ mod tests {
     }
 
     /// Goal: a kept answer reads back as it was kept, every field; one of
-    /// another shape, or none, is not one. Valid (full, and with no week,
-    /// whys or trouble), invalid (not JSON, a field missing, of another
-    /// type, a kind with no place, a count below zero).
+    /// another shape, or none, is not one. Valid (full, and with no whys or
+    /// trouble), invalid (not JSON, a field missing, of another type, a
+    /// kind with no place, a count below zero).
     #[test]
     fn a_kept_answer_reads_back_as_kept() {
         let full = Logs {
@@ -659,21 +657,17 @@ mod tests {
             trouble: vec![("computer:a".into(), TroubleKind::SavesFailing, 4), ("computer:c".into(), TroubleKind::DiskFilling, 1), ("computer:d".into(), TroubleKind::WontWake, 2)],
             whys: vec![("computer:a".into(), NOW - 60_000, "backup '/data': No space left on device (os error 28)".into())],
             whys_unread: None,
-            week: Some(vec!["computer:a".into(), "computer:e".into()]),
-            week_at: Some(NOW - 600_000),
-            week_unread: Some("Workers Observability, AwakeWeek: Too many requests".into()),
         };
         assert_eq!(Logs::of_kept(&full.kept()), Some(full.clone()));
         let bare = Logs { whys_unread: Some("too many events to answer".into()), ..Logs::default() };
-        assert_eq!(Logs::of_kept(&bare.kept()), Some(bare), "no week, whys or trouble");
+        assert_eq!(Logs::of_kept(&bare.kept()), Some(bare), "no whys or trouble");
         let kept: Value = serde_json::from_str(&full.kept()).unwrap();
         let without = |key: &str, with: Value| {
             let mut k = kept.clone();
             k[key] = with;
             Logs::of_kept(&k.to_string())
         };
-        assert_eq!(without("week", Value::Null).map(|l| l.week), Some(None), "the week never read");
-        for (key, bad) in [("now", json!([1, 2, 3])), ("now", json!([1, 2, 3, -4])), ("today", json!("computer:a")), ("trouble", json!([["computer:a", 3, 1]])), ("whys", json!([["computer:a", "now", "x"]])), ("whysUnread", json!(5)), ("weekAt", json!("then"))] {
+        for (key, bad) in [("now", json!([1, 2, 3])), ("now", json!([1, 2, 3, -4])), ("today", json!("computer:a")), ("trouble", json!([["computer:a", 3, 1]])), ("whys", json!([["computer:a", "now", "x"]])), ("whysUnread", json!(5))] {
             assert_eq!(without(key, bad.clone()), None, "{key}: {bad}");
         }
         let mut missing = kept.clone();
@@ -681,6 +675,17 @@ mod tests {
         assert_eq!(Logs::of_kept(&missing.to_string()), None, "a field missing");
         assert_eq!(Logs::of_kept("not json"), None);
         assert_eq!(Logs::of_kept("[]"), None);
+    }
+
+    /// Goal: the week takes in today's computers, each once, and stays
+    /// within `GROUPS_MAX`: valid, a computer in both, a full week.
+    #[test]
+    fn the_week_takes_in_todays_computers_bounded() {
+        let c = |n: usize| format!("computer:{n:024x}");
+        assert_eq!(week_with(vec![c(1), c(2)], &[c(2), c(3)]), [c(1), c(2), c(3)]);
+        assert_eq!(week_with(vec![], &[]), Vec::<String>::new());
+        let full: Vec<String> = (0..GROUPS_MAX as usize).map(c).collect();
+        assert_eq!(week_with(full.clone(), &[c(5000)]), full, "a full week is counted as this many, at least");
     }
 
     /// Goal: a Worker's name goes into a query only as one: valid,
