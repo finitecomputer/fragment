@@ -33,25 +33,33 @@ function swapped(c, egress, hosts) {
 // all at once (one round trip, not one each): the platform's hosts, a
 // local fleet's code.storage (`codestorage`: at a loopback address the
 // container cannot reach), each of `swapHosts` (`swapped`), each
-// `ComputerEgress` with its route as `egress(route)` makes it; and each of
-// `more`, a call that registers one of its own (the backups'). None
+// `ComputerEgress` with its route as `egress(route)` makes it. None
 // survives a stop: each start registers them again.
-export function intercept(c, egress, swapHosts, codestorage, more) {
+export function intercept(c, egress, swapHosts, codestorage) {
   const each = [
     () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
     () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
   ];
   if (codestorage) each.push(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
-  each.push(...swapped(c, egress, swapHosts), ...more);
-  return Promise.all(each.map((f) => settled(f)));
+  each.push(...swapped(c, egress, swapHosts));
+  return landed(each);
 }
 
 // `hosts` more for the swap of a running container (a Vault secret's, set
 // since it started or named by its guest's first read of its view): these
-// alone, at once, never the rest again. The backups' own, registered
-// again, would replace the grant of a save or a restore under way.
+// alone, at once, never the rest again.
 export function interceptSwap(c, egress, hosts) {
-  return Promise.all(swapped(c, egress, hosts).map((f) => settled(f)));
+  return landed(swapped(c, egress, hosts));
+}
+
+// Each of `each` (a call that registers one intercept) at once, answered
+// once every one has: one that fails fails it (the first's reason), never
+// while another is still on its way to the runtime, so nothing of a failed
+// start's lands after it.
+async function landed(each) {
+  const answers = await Promise.allSettled(each.map((f) => settled(f)));
+  const failed = answers.find((a) => a.status === "rejected");
+  if (failed) throw failed.reason;
 }
 
 // Starts container `c` (`opts`) once `intercepted()` has registered its
