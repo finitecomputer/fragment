@@ -1092,6 +1092,13 @@ own Bot Mode protocol is off in every profile
 - An agent's own skills win over managed ones, and managed over the
   platform's and Hermes' bundled ones of the same name. A managed skill an
   agent edits is first copied into its own, which then shadows it.
+- **Hermes' optional skills** (the image's `/opt/hermes/optional-skills`,
+  141 at v0.23.2) are off until the owner switches one on from the shell's
+  Skills page: an `optional/hermes/<id>.on` file in their skills fragment.
+  Each install reads the switches with the managed set, and the boot
+  copies each skill read-only beside the bundled ones; switched off, it
+  goes at the next install. One the image lacks, or whose name a managed
+  or bundled skill takes, is left out and logged (`skills.optional`).
 - **The `fragment` CLI** in an agent's terminal acts as that agent
   (cli/GUIDE.md, "As an agent"): it signs nothing; the egress signs.
 - **Its credentials** are each agent's placeholders in its profile's

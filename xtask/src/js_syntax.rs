@@ -100,6 +100,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/session-archive.test.mjs",
     "cell/shell-tests/session-text.test.mjs",
     "cell/shell-tests/simplex-settings.test.mjs",
+    "cell/shell-tests/skills-page.test.mjs",
     "cell/shell-tests/telegram-settings.test.mjs",
     "cell/shell-tests/threads.test.mjs",
 ];
