@@ -804,10 +804,17 @@ fn check() -> Result<()> {
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
         .current_dir(&root))?;
-    run(Command::new("cargo")
-        .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
-        .current_dir(Path::new(&devstack::cell_dir())))
+    // the cell's build, then the admin Worker's (cell/src/lib.rs, "Two
+    // Workers, one crate"): each its own exports
+    for features in [&[][..], &["--features", "admin"]] {
+        run(Command::new("cargo")
+            .args(["clippy", "--target", "wasm32-unknown-unknown"])
+            .args(features)
+            .args(["--", "-D", "warnings"])
+            .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
+            .current_dir(Path::new(&devstack::cell_dir())))?;
+    }
+    Ok(())
 }
 
 /// Where the one-line install fetches the CLI from.

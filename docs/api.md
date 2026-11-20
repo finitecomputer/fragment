@@ -347,7 +347,10 @@ grant's `by`, the log's).
 
 `GET /admin` (the operators' page) answers only an operator's platform
 session; to anyone else it is the 404 a missing route is, word for word.
-Its API decides again on every call. `fragment operator
+Its API decides again on every call. The admin is a Worker of its own
+(cell/src/admin.rs): the cell hands it its routes as they came, and it
+decides who asks; `GET /api/admin/health` is its so far, the rest the
+cell's until they move. `fragment operator
 people|person|pin|start-from|orgs|comp|uncomp|trials|health|log|credit|budget|payer`
 calls the same.
 
@@ -1945,6 +1948,9 @@ On the platform's host, for anyone, naming the release in
   `cargo xtask deploy` asks it until 200. An object answers a probe only
   with its header (`x-fragment-probe`), which the router never passes
   from a client.
+- `GET /healthz/admin` asks the same of the admin Worker (Operators),
+  which asks it from its own Worker: the same answer, its `release` the
+  admin's. A deploy asks it until 200 once the cell's is.
 
 ### The release's files
 

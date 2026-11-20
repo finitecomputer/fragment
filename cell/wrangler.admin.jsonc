@@ -1,0 +1,16 @@
+{
+  // The operators' admin Worker (src/admin.rs): this crate built with the
+  // `admin` feature (`cargo xtask build`, into build/admin). Only the
+  // cell's `ADMIN` binding reaches it: it has no route, and no
+  // workers.dev or preview URL. Beside the cell's config, so a local node
+  // gives both the same `.dev.vars`, as a deploy gives both the same
+  // variables and release.
+  //
+  // What it shares with the cell is the cell's, written in at render
+  // (crates/devstack `admin_config`, xtask/src/deploy.rs): the cell's
+  // compatibility date, and every one of the cell's object bindings, by
+  // its name, bound to the cell's script (a deploy's probe and an
+  // operator's wake reach every class: routed.rs `objects`, `wake`).
+  "name": "fragment-admin",
+  "main": "build/admin/index.js"
+}

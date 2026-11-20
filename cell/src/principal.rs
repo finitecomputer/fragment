@@ -120,7 +120,8 @@ const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, do
       AND e.n > COALESCE((SELECT n FROM seen s WHERE s.fragment = m.fragment), 0) LIMIT ?)) ELSE 0 END AS unread
   FROM memberships m WHERE role IS NOT NULL";
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct PrincipalCell {
     pub(crate) state: State,
     /// The state as the runtime handed it (a synchronous transaction's).
@@ -173,6 +174,7 @@ struct Hit {
     snippet: Option<String>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for PrincipalCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
