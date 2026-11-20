@@ -204,74 +204,67 @@ signer's key, 64 hex>]`.
 | `PUT /api/identities/me/picture` | a person | the image (PNG, JPEG, WebP or GIF by its bytes; at most `PICTURE_MAX_BYTES`) → `{sha, mime}` |
 | `GET /api/identities/{npub}/picture` | anyone | the bytes, `public, max-age=300`; none, 404 |
 
-### A fragment's name and an agent's picture
+### An agent's name and picture
 
-A fragment's **face** is its cell's (`meta` `face`), never a file: its
-**name** (its title, 1 to `TITLE_MAX_CHARS`), an agent's **role** (at most
-`ROLE_MAX_CHARS`, a tag beside its name; only an agent's), and its
-**picture**, its icon (Icons, below). Its kind is its live manifest's. A
-title is set at its making (the one given, else its blessed template's,
-else, at its first install, its `fragment.json`'s `meta.title`, which
-names a face that has none and nothing after) and through its face route;
-a role through its face route alone. They are the one source, kept nowhere
-else: every surface reads the face (`GET /api/fragments`, `__people`,
-`job.people`, the share sheet, `GET /api/access`, an export, a computer's
-runtime, the shell, its pages' Open Graph title). An agent with no title
-has no name (`fragment_core::face::title`): every reader shows its label
-instead (`face::agent_name`). Its label (`juniper` of `juniper--k3x9`)
-stays its `name` in a profile and in its computer's view, the word an `@`
-mention uses, which no rename changes. Once its fragment is deleted, its
-profile has neither `name` nor `fragment`, so a life made again under the
-name never lends it a face.
+A fragment's **name** (its title, 1 to `TITLE_MAX_CHARS`) and an agent's
+**role** (at most `ROLE_MAX_CHARS`, a tag beside its name; only an
+agent's) are its cell's own (`meta` `face`), never a file. Its kind is its
+live manifest's. A title is set at its making (the one given, else its
+blessed template's, else, at its first install, its `fragment.json`'s
+`meta.title`, which names a face that has none and nothing after) and
+through its face route; a role through its face route alone. An agent's
+**picture** is its fragment's `avatar.png` (PNG, JPEG, WebP or GIF by its
+bytes, at most `PICTURE_MAX_BYTES`; `fragment_core::face`) at main, read
+as main moves, so a commit of it shows with no deploy. They are the one
+source, kept nowhere else: every surface reads the face (`{kind, title?,
+role?, picture?}`: `GET /api/fragments`, `__people`, `job.people`, the
+share sheet, `GET /api/access`, an export, a computer's runtime, the
+shell, its pages' Open Graph title). An agent with no title has no name
+(`fragment_core::face::title`): every reader shows its label instead
+(`face::agent_name`). Its label (`juniper` of `juniper--k3x9`) stays its
+`name` in a profile and in its computer's view, the word an `@` mention
+uses, which no rename changes. Once its fragment is deleted, its profile
+has neither `name` nor `fragment`, so a life made again under the name
+never lends it a face.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `PUT /api/f/{name}/face` | editors (a connector's owner alone) | `{title?, role?, was?}` → `{title?, role?, picture?}` |
 
-**Changing them** sets them at once, with no deploy, so a rename never
-ships what waits on `main` (FIN-541). A title is trimmed; one blank or past
-its limit, a role past its limit or anything's but an agent's, a change
-naming neither, and one naming `picture` are 400; `was` sets it only while
-its title is that, or is already the one asked (a retry whose answer was
-lost), else 409, nothing changed: a chat titled from its first message
-keeps a rename made meanwhile. Each change is a `face.changed` event
-(`{title, role, by}`), its history; the same change again writes none.
-`fragment rename` and `fragment agent [--name N] [--picture FILE |
---no-picture]` use the face and icon routes. An agent's rename also says
-its new name in its job, in the same request and before its face: each
-whole-word mention of an old name in its `SOUL.md` (its title, the name
-its first job gave it, and that of a rename whose commit's answer was lost,
-while its job is the one that rename wrote) as the new one, a commit on `main`
-(`fragment_core::face::job_renamed`) over the job it read (an edit
-meanwhile: 409, nothing renamed). A rename that fails there changes
-neither; one whose commit landed and whose answer was lost is finished by
-the next, whatever name it asks. A job past `face::JOB_RENAME_MAX_BYTES`
-is left as it is.
+**Changing a name or role** sets it at once, with no deploy, so a rename
+never ships what waits on `main` (FIN-541). A title is trimmed; one blank
+or past its limit, a role past its limit or anything's but an agent's, a
+change naming neither, and one naming `picture` are 400; `was` sets it
+only while its title is that, or is already the one asked (a retry whose
+answer was lost; its role is then left as it is), else 409, nothing
+changed: a chat titled from its first message keeps a rename made
+meanwhile. Each change is a `face.changed` event (`{title, role, by}`),
+its history; the same change again writes none. `fragment rename` and
+`fragment agent --name` use it. An agent's rename also says its new name
+in its job, in the same request and before its face: each whole-word
+mention of its title or of the name its first job gave it in its
+`SOUL.md` at main as the new one (`fragment_core::face::job_renamed`), a
+commit over the job it read (an edit meanwhile: 409, nothing renamed). A
+rename that fails there changes neither; one whose commit lands with its
+answer lost is looked for at main, and goes on when it is there. A job
+past `face::JOB_RENAME_MAX_BYTES` is left as it is.
 
-**A client from before the face** renamed a fragment by its
-`fragment.json`'s `meta.title`, and set an agent's picture by its
-`avatar.png`, then deployed. Until those are gone (the debt ledger),
-`GET manifest` answers its title as the face's, and to an editor a mark of
-that read (`meta.titleRead`): a files write of `fragment.json` naming the
-mark, its title another than the one shown, is its title at once, while
-its face is still that one (each mark taken once; a title git holds
-already included). And an install takes, from
-its own `fragment.json` and `avatar.png` at live: a title that its last
-install's did not say, as its title (`face.changed`, `from` `fragment.json`);
-an agent's `avatar.png` changed since, checked as an icon is, as its
-picture (`picture.changed`), and one removed since, while its picture is
-still that one, as none. Nothing else of them names a face or refuses an install.
+**Changing a picture** is writing `avatar.png` (`POST
+/api/f/{agent}/files`; `fragment agent --picture FILE | --no-picture`,
+Settings): one past its limit (413) or that is no picture (400) is refused
+and nothing is committed; one pushed through git that is no picture shows
+none (`picture.refused`). **Served** at `GET
+/api/identities/{npub}/picture`, the agent fragment's npub, public as a
+person's is: the bytes main's read checked, at an address naming them
+(`?v=`, the first 12 hex of their SHA-256).
 
-**An agent's picture** is its icon, set and removed by `PUT` and `DELETE
-/api/f/{agent}/icon`: a picture (PNG, JPEG, WebP or GIF by its bytes, at
-most `PICTURE_MAX_BYTES`; `fragment_core::face::check_picture`) is kept as
-it is; a larger image is cropped by Images to fill the icon's square, a
-JPEG. It is **served** at `GET /api/identities/{npub}/picture`, the agent
-fragment's npub, public as a person's is, at an address naming its bytes
-(`?v=`, the first 12 hex of their SHA-256). One kept by a release before
-this (its `avatar.png` at the commit an install checked) is taken into its
-icon once, by its first fetch or its next daily pass (`picture.taken`;
-`picture.lost` when git no longer holds those bytes).
+An **older CLI** (the one in a computer's image, which can lag for days)
+renames an agent by writing its `fragment.json`'s `meta.title` and
+deploying. Until those are gone (the debt ledger), `GET manifest` answers
+a fragment's title as its face's, and an agent's `fragment.json` written
+through the files route with another title is its rename
+(`face.changed`, `from` `fragment.json`). Any other `fragment.json` names
+no face.
 
 ## Names (docs/cloudflare-v1.md, decision 47)
 
@@ -729,7 +722,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`, a default its face, made with `title`, has already) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template"}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `board`, `notes`, `slides` are the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400): it is the face's from its making (A fragment's name and an agent's picture). A chat's `repo` is `""`: made after the answer (Names), when its agent's computer is told it joined. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `key`, `repo`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a chat's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
+| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`, a default its face, made with `title`, has already) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template"}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `board`, `notes`, `slides` are the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400): it is the face's from its making (An agent's name and picture). A chat's `repo` is `""`: made after the answer (Names), when its agent's computer is told it joined. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `key`, `repo`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a chat's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
 | `GET /api/fragments` | any signer | → `FragmentList` (docs/wire, `fragments.list`): a `ListedFragment` row for each fragment they hold a role on. `limits` (`UploadLimits`), what a message of theirs may carry. An agent's `?for=<id>` lists that identity's, as the agent acts with them, with the agent's own `limits` |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket of `ListWatchFrame`s (docs/wire, `fragments.watch`). A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `SetArchived` → `Archived` (docs/wire): their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
@@ -1228,8 +1221,8 @@ A page's Open Graph image stays `__preview.svg`: the card is its members'.
 
 A fragment's **icon** is one 256×256 PNG of one object on a transparent
 background, which the shell's dock shows and its pages take as their
-favicon (`fragment_core::icon`, cell/src/icon.rs). An agent's icon is its
-picture (A fragment's name and an agent's picture).
+favicon (`fragment_core::icon`, cell/src/icon.rs). An agent fragment has
+none (its picture is its `avatar.png`): a making or `PUT` on one is 400.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -1802,7 +1795,7 @@ fragment's, `/api/…` included.
 | `__fragment.js` | the browser library (below) |
 | `__fragment.css` | the platform's stylesheet (below) |
 | `__markdown.js` | a module: `markdown(text, options)` → a DocumentFragment, `inline(parent, text, options)`; markdown to DOM only (HTML in the text is text; nesting stops at 32). Options: `resolve(target, kind)` → `{href, path?}` or null, `image(src, kind)` → `{src, href?}` or null, `code(text, lang)`, `breaks`; links stay http(s), mailto or relative, pictures http(s) or relative |
-| `__people?id=…&id=…` | anyone who may see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for at most 64 identities: `email` only between members (decision 48); `picture` an absolute platform URL; an agent's `fragment`, its label as `name`, its `title` and `picture` (A fragment's name and an agent's picture); an unknown id left out |
+| `__people?id=…&id=…` | anyone who may see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for at most 64 identities: `email` only between members (decision 48); `picture` an absolute platform URL; an agent's `fragment`, its label as `name`, its `title` and `picture` (An agent's name and picture); an unknown id left out |
 | `__files` | the files view (`__files.js`, `__files.css`), titled by its face's title; asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}], searchable?, home?, status?, graph?}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data; `searchable: true` when the fragment has a search index; `home`, `status` and `graph` its manifest's `files`). With no file named it opens its graph when `graph`, else `home`, else `README.md` at the root when it says more than headings, else `index.md` at the root, else the first markdown file by path. Its graph (`#graph`, `#graph/<path>` with a page chosen) draws the markdown pages (at most 2000, each under 256 KiB) and the links between them, as its reader resolves them, read from each page at its version; a page chosen there is previewed with what it links to and what links to it, and a page read lists what links to it below it. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
 | `POST __search` | its own index, from its page: `application/json` `Query` → `Found`, as `POST /api/f/{name}/search` (viewers and up, the share link too; the asker pays for the question's embedding, an anonymous one is searched by its words) |
 | `__live` | WebSocket, anyone who may see the fragment (below); its accept's waits in `Server-Timing`: `identity`, `accept` |

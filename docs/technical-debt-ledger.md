@@ -108,50 +108,23 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
-## An agent's picture from before it was its icon is taken at its first use
+## An older CLI renames an agent by its fragment.json
 
-- **Shortcut:** an agent's picture moved from its `avatar.png` at live
-  into its icon (the audit's move 4; Fragment step 10 makes the release
-  forward only). A release before kept it as the `meta` `picture` row
-  (`<sha256> <type> <commit>`); `take_picture` (cell/src/runs_on.rs)
-  reads those bytes from git once, keeps them as a blob named as its icon,
-  and drops the row (`picture.taken`; `picture.lost` when git no longer
-  holds them), at the picture's first fetch or the fragment's next daily
-  pass. Until then `icon_shown` reads the row for its address. The test
-  lever `legacy-picture` writes such a row.
-- **Risk:** none lost: a row is taken whole or kept; one whose bytes are
-  gone from git was unservable already.
-- **Delete when:** the entry below is gone (it writes such rows), this
-  release has run in production for a day after (every fragment's daily
-  pass has taken its row) and a sweep finds no `picture` row. Then
-  `MetaKey::Picture`, `take_picture`, `picture_untaken`,
-  `face::AGENT_PICTURE`, the lever and the pass's step go.
-
-## A client from before the face renames by git
-
-- **Shortcut:** clients from before an agent's face lived in its cell
-  (CLIs, the CLI inside computer images, which can lag for days, and iOS
-  builds) rename a fragment by its `fragment.json`'s `meta.title`, and set
-  an agent's picture by its `avatar.png`, then deploy. So that they keep
-  working, `GET manifest` answers the face's title (plane.rs `manifest`)
-  with a mark of the read for an editor (`meta.titleRead`, kept in
-  `MetaKey::TitleRead`), a files write naming it renames it
-  (`title_from_read`), and each install takes, from its own `fragment.json` and an agent's
-  `avatar.png`, what changed since its last install (plane.rs
-  `face_from_git`, `picture_in_git`; `MetaKey::TitleSeen`,
-  `MetaKey::PictureSeen`), as docs/api.md says ("A client from before the
-  face").
-- **Risk:** such a client writes the mark into its `fragment.json`, where
-  it stays, read by nothing once taken; an app's own code that changes
-  its `meta.title` renames it, as it did before the face. An
-  agent's install reads its `avatar.png` again only when it changed.
-- **Delete when:** the CLI release notice, the computer image pinned in
-  production and the iOS build in use are all from this release or later,
-  and a week of production logs shows no `face.changed` event from
-  `fragment.json` and no `picture.changed`. Then a Fragment step deletes
-  the three `meta` rows, and the manifest route's title and mark,
-  `title_read`, `title_from_read`, `face_from_git`, `picture_in_git` and
-  `GitPicture` go.
+- **Shortcut:** a fragment's name is its cell's own (docs/api.md, "An
+  agent's name and picture"), set by `PUT /api/f/{name}/face`. The CLI
+  before it, which a computer's image carries and which can lag for days,
+  renames an agent (`fragment agent --name`) by reading `GET manifest`,
+  writing `fragment.json` with a new `meta.title` and deploying. So that
+  an agent asked to rename itself still does, `GET manifest` answers a
+  fragment's title as its face's (plane.rs `manifest`), and an agent's
+  `fragment.json` written through the files route with another title is
+  its rename (publish.rs `renamed_by_git`).
+- **Risk:** someone editing an agent's `fragment.json` by hand renames it
+  to the title they leave there.
+- **Delete when:** the computer image pinned in production carries a CLI
+  from this release or later, and a week of production logs shows no
+  `face.changed` event from `fragment.json`. Then `renamed_by_git` and the
+  manifest route's title go.
 
 ## A computer keeps its owner's own keys from before the move
 

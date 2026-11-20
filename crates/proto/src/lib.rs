@@ -1244,9 +1244,9 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
-    /// Its picture, its icon, as the address on the platform that serves
-    /// it: an agent fragment's at its agent's identity's
-    /// (`/api/identities/<npub>/picture?v=…`), any other's at its own
+    /// Its picture, as the address on the platform that serves it: an
+    /// agent fragment's `avatar.png` at main (its agent's identity's
+    /// `/api/identities/<npub>/picture?v=…`), any other's icon
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
@@ -1319,8 +1319,8 @@ pub struct ListedFragment {
 }
 
 /// `PUT /api/f/{name}/face` (editors and up): its new title, an agent's
-/// new role (`""` takes it away), or both (docs/api.md, "A fragment's name
-/// and an agent's picture"); with `was`, only while its title is that
+/// new role (`""` takes it away), or both (docs/api.md, "An agent's
+/// name and picture"); with `was`, only while its title is that
 /// (else 409: a chat titled from its first message keeps a rename made
 /// meanwhile). Answered with its face as its lists show it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1332,8 +1332,8 @@ pub struct FaceChange {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was: Option<String>,
-    /// Its picture's address, in an answer (a change never names one: a
-    /// picture is its icon, `PUT /api/f/{name}/icon`).
+    /// Its picture's address, in an answer (a change never names one: an
+    /// agent's picture is its `avatar.png`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
 }

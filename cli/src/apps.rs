@@ -58,7 +58,7 @@ pub fn set_title(manifest: &mut Value, title: &str) -> Result<()> {
 }
 
 /// A fragment's new name: its face's title, set at once, with no commit
-/// and no deploy (docs/api.md, "A fragment's name and an agent's picture").
+/// and no deploy (docs/api.md, "An agent's name and picture").
 pub fn rename(c: &Client, name: &str, title: &str) -> Result<Value> {
     let title = checked_title(title)?;
     let name = c.fragment(name)?;

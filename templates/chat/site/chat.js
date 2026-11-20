@@ -315,7 +315,7 @@ function size(bytes) {
 }
 
 /// An agent's mark: its picture when it has one (its agent fragment's
-/// icon, served by the platform), else its image in its color. A
+/// `avatar.png`, served by the platform), else its image in its color. A
 /// picture that does not load leaves the image.
 function avatar(color, extra = "", picture = null) {
   const mark = el("span", `agent-avatar ${extra}`);

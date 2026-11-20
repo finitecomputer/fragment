@@ -2971,7 +2971,7 @@ fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::D
 
 /// An agent renamed by its owner with the CLI, `fragment agent --name`
 /// (its face's title, and its job where it named it, in a commit beside
-/// it: docs/api.md, "A fragment's name and an agent's picture"): whether
+/// it: docs/api.md, "An agent's name and picture"): whether
 /// the CLI said its new name.
 fn rename_by_cli(s: &Suite, api: &Api, home: &std::path::Path, agent: &str, title: &str) -> bool {
     s.cli_json(api, home, &["agent", agent, "--name", title, "--json"]).is_ok_and(|v| v["name"] == title)

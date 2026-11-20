@@ -122,12 +122,6 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "sha": sha, "size": size, "stored": stored }))
     }
 
-    /// The type a blob was kept as, when its upload declared one.
-    pub(crate) fn blob_mime(&self, sha: &str) -> CellResult<Option<String>> {
-        let rows = self.rows("SELECT mime FROM blobs WHERE sha = ?", vec![sha.into()])?;
-        Ok(rows.first().and_then(|r| r["mime"].as_str()).map(str::to_string))
-    }
-
     /// `GET|HEAD __blob/<sha256>` on the fragment's origin (viewers and up:
     /// serve.rs): one of this fragment's blobs, as the type its upload
     /// declared, the same bytes forever. Another fragment's hash is not
@@ -140,7 +134,8 @@ impl FragmentCell {
         if let Some(resp) = crate::serve::not_modified(req, &etag, IMMUTABLE)? {
             return Ok(resp);
         }
-        let mime = self.blob_mime(sha)?.unwrap_or_else(|| "application/octet-stream".into());
+        let rows = self.rows("SELECT mime FROM blobs WHERE sha = ?", vec![sha.into()])?;
+        let mime = rows.first().and_then(|r| r["mime"].as_str()).unwrap_or("application/octet-stream").to_string();
         let mut resp = if req.method() == Method::Head {
             let size = js::blob_head(&self.env, &self.blob_key(sha)?).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no blob {sha}")))?;
             let h = Headers::new();

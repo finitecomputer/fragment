@@ -63,8 +63,8 @@ holds. `skipped` names anything the export could not take, and why.
 
 `files/` is the fragment's files at `main`, its working copy, byte for byte:
 a file of 1 MiB or more is there whole (git holds it as a pointer to its
-blob). An agent's soul, memories and skills are its fragment's files
-(`SOUL.md`, `memories/`, `skills/`); its picture, its icon, is not. Git's history is not in the archive.
+blob). An agent's soul, memories, skills and picture are its fragment's files
+(`SOUL.md`, `memories/`, `skills/`, `avatar.png`). Git's history is not in the archive.
 
 `database/schema.sql` is the `CREATE` statements of the app's SQLite
 database, each ending in `;`. Each `database/<table>.jsonl` holds one row a

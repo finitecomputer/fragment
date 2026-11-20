@@ -337,13 +337,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
             let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
             let faced = faced["name"].as_str().unwrap_or("").to_string();
             let face_png = super::faces::orange();
-            // its name set through its face; its picture as the release
-            // before kept it, to be taken after the restart (faces.rs)
-            let (named, _) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), None)?;
-            super::faces::legacy_picture(&api, &face_owner, &faced, &face_png)?;
+            let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
             let face_path = super::faces::picture_path(&face_id, &face_png);
             let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
-            anyhow::ensure!(named.is_some_and(|r| r.status == 200) && shown, "face setup");
+            anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
             Some((face_owner, face_session, faced, face_png, face_path))
         }
     };
@@ -439,7 +436,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
             s.skip(OWED_USES, NO_COMPUTERS);
         }
     }
-    const FACE: &str = "after a restart an agent keeps its name and picture (one the release before kept, taken after the restart): its owner's list, its picture's address, and the share sheet show them";
+    const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
     match face {
         Some((face_owner, face_session, faced, face_png, face_path)) => {
             let face_row = super::faces::row(&api, &face_owner, &faced);

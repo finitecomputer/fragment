@@ -1,5 +1,5 @@
-// A fragment's display name, kept by its cell (its face: docs/api.md, "A
-// fragment's name and an agent's picture"), set with no commit and no
+// A fragment's display name, kept by its cell (its face: docs/api.md, "An agent's
+// name and picture"), set with no commit and no
 // deploy. Its address stays put. Shared by Apps, chats and agents; the
 // shell supplies its API and list.
 export function createTitles({ $, api, byName, seg, titleOf, reload }) {

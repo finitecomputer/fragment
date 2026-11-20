@@ -1,14 +1,14 @@
-//! An identity's face: what a page shows it by. A fragment's is its own,
-//! kept by its cell (`meta`): its title, an agent's role, set through its
-//! face route, and its picture, its icon (docs/api.md, "A fragment's name
-//! and an agent's picture"). A person's picture is the registry's. Both
-//! pictures are served at `/api/identities/<npub>/picture`.
+//! An identity's face: what a page shows it by. A fragment's title and an
+//! agent's role are its own, kept by its cell and set through its face
+//! route; an agent's picture is its `avatar.png` at main, which the cell
+//! reads as main moves (docs/api.md, "An agent's name and picture"). A
+//! person's picture is the registry's. Both pictures are served at
+//! `/api/identities/<npub>/picture` and take the same images.
 
 use fragment_proto::limits;
 
-/// Where an agent fragment's `avatar.png` was its picture, before its
-/// picture was its icon: read once, at the commit its last install
-/// checked, by the hand-over (the debt ledger).
+/// Where an agent fragment keeps its picture: one path, whatever the
+/// image's type, which its bytes tell.
 pub const AGENT_PICTURE: &str = "avatar.png";
 
 /// A picture's type from its first bytes (a request's content-type and a
@@ -114,8 +114,8 @@ pub fn job_first_name(job: &str) -> Option<&str> {
 }
 
 /// An agent's job as its owner's rename leaves it (the shell's Rename and
-/// `fragment agent --name`, a commit beside the rename; docs/api.md, "A
-/// fragment's name and an agent's picture"): each whole-word mention of one of `olds`
+/// `fragment agent --name`, a commit beside the rename; docs/api.md, "An agent's
+/// name and picture"): each whole-word mention of one of `olds`
 /// (case and all; a mention is whole when no letter, digit or `_` touches
 /// it) said as `name` instead, in one pass, the longest old name first.
 /// None when there is nothing to rewrite: no old name but `name` itself,

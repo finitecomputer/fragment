@@ -230,8 +230,9 @@ impl FragmentCell {
             }
             Effect::Commit => {
                 let which = self.must(MetaKey::TemplatePending)?;
+                let title = self.meta(MetaKey::TemplateTitle)?;
                 let files = match (template(&which), blessed::template(&which)) {
-                    (Some(t), _) => stamped(&self.env, t, name, self.meta(MetaKey::TemplateTitle)?.as_deref()).await?,
+                    (Some(t), _) => stamped(&self.env, t, name, title.as_deref()).await?,
                     // a blessed template is named, not copied: the release serves it
                     (None, Some(_)) => {
                         let bytes = blessed_manifest_bytes(&which);
@@ -347,20 +348,43 @@ impl FragmentCell {
         if total > fragment_proto::limits::API_FILES_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, fragment_proto::limits::API_FILES_WRITE_MAX_BYTES));
         }
+        // an agent's picture is refused here, before it is committed, as main's
+        // read of it would refuse it (docs/api.md, "An agent's name and picture")
+        if let Some(bytes) = writes.iter().find(|w| w.path == fragment_core::face::AGENT_PICTURE).and_then(|w| w.bytes.as_deref()) {
+            if self.kind()? == fragment_proto::FragmentKind::Agent {
+                fragment_core::face::check_picture(bytes).map_err(|r| crate::picture_refused(r, fragment_core::face::AGENT_PICTURE))?;
+            }
+        }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
             Wrote::Commit(sha) => {
-                // a client from before the face renaming it (plane.rs `title_from_read`)
-                let manifest = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.as_deref());
-                if self.title_from_read(manifest, &who)? {
-                    self.flush_index().await;
+                if let Some(bytes) = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.as_deref()) {
+                    self.renamed_by_git(bytes, &who).await?;
                 }
                 json_response(&json!({ "commit": sha }))
             }
             // nothing was expected, so nothing can conflict
             Wrote::Conflict(why) => Err(CellError::host(why)),
         }
+    }
+
+    /// An agent's `fragment.json` written with a title other than its
+    /// face's: an older CLI's `fragment agent --name`, which renames by
+    /// writing it (a computer's image carries its own CLI, which can lag for
+    /// days: the debt ledger). Its face takes that title; any other
+    /// fragment's `fragment.json` names nothing.
+    async fn renamed_by_git(&self, bytes: &[u8], by: &str) -> CellResult<()> {
+        let now = self.face_now()?;
+        if now.kind != fragment_proto::FragmentKind::Agent {
+            return Ok(());
+        }
+        let Ok(written) = fragment_core::manifest::parse(bytes) else { return Ok(()) };
+        let Some(title) = written.title().map(str::trim).filter(|t| Some(*t) != now.title.as_deref() && fragment_core::face::change(Some(t), None, false).is_ok()) else { return Ok(()) };
+        self.face_is(now.kind, Some(title), now.role.as_deref(), now.picture.as_deref())?;
+        self.event("face.changed", &format!("its name is {title:?}, as its fragment.json says"), json!({ "title": title, "by": by, "from": "fragment.json" }));
+        self.flush_index().await;
+        Ok(())
     }
 
     /// `POST /api/deploy {note?}`: `live` to `main`'s tip, for editors.
