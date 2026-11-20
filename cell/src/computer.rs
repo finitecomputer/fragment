@@ -2136,7 +2136,7 @@ impl ComputerCell {
             }
             return Event::SaveFailed { generation, seq, why: "a newer save was kept as it ran".into() };
         }
-        match self.keep_save(generation, records, held).await {
+        match self.keep_save(generation, records, t0, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
@@ -2207,11 +2207,12 @@ impl ComputerCell {
         })
     }
 
-    /// A save worked: it is the newest save, and the ones it pushed out of
-    /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
-    async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
+    /// A save begun at `began_ms` worked: it is the newest save, and the
+    /// ones it pushed out of the newest `SAVES_KEPT` are let go of
+    /// (`forget`). Answers it.
+    async fn keep_save(&self, generation: u64, records: Vec<Value>, began_ms: i64, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, began_ms, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");

@@ -33,6 +33,12 @@ pub struct Save {
     /// The start it is of.
     pub generation: u64,
     pub at_ms: i64,
+    /// When its capture began: saves of one start that ran at once are
+    /// kept in this order (`overtaken`), not the order they ended in. Unset
+    /// in a save kept before it was stored (before #1378): one kept before
+    /// this release's DO ran any save, so newer than none of its saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub began_ms: Option<i64>,
     /// Whether the guest answered the hold before it was taken.
     pub held: bool,
     /// Its `DirectoryBackup` records, a directory's before any inside it
@@ -385,23 +391,25 @@ impl Saves {
         Some(restored)
     }
 
-    /// The start `generation` saved `/data` as `records` at `at_ms`
-    /// (`held`: its guest answered the hold): the newest save, and the
+    /// The start `generation` saved `/data` as `records`, begun at
+    /// `began_ms`, done at `at_ms` (`held`: its guest answered the hold),
+    /// and not `overtaken`: the newest save, and the
     /// current one. A snapshot of any other save caches nothing a wake
     /// would use. The saves it pushed out of the newest `SAVES_KEPT` are
     /// let go of (`let_go`): answers what that pushed out unforgotten.
-    pub fn saved(&mut self, generation: u64, records: Vec<Value>, at_ms: i64, held: bool) -> Vec<Value> {
+    pub fn saved(&mut self, generation: u64, records: Vec<Value>, began_ms: i64, at_ms: i64, held: bool) -> Vec<Value> {
         assert!(!records.is_empty() && records.len() <= SAVE_RECORDS_MAX, "a save is one record per directory, at most {SAVE_RECORDS_MAX}");
         let id = records[0]["id"].as_str().unwrap_or_default().to_string();
         assert!(!id.is_empty(), "a save has an id");
         let depth = |r: &Value| r["dir"].as_str().map_or(0, |d| d.matches('/').count());
         assert!(records.windows(2).all(|w| depth(&w[0]) <= depth(&w[1])), "a directory's record before any inside it: {records:?}");
         assert!(!self.saves.iter().any(|s| s.id == id), "a save is kept once");
+        assert!(began_ms <= at_ms, "a save ends after it began");
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
         }
         self.numbered += 1;
-        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, held, records, unusable: false });
+        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, began_ms: Some(began_ms), held, records, unusable: false });
         let mut dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         // the save its running life came up from is kept past the newest: one
         // a start restored and came up from, the last to fall back to
@@ -434,15 +442,17 @@ impl Saves {
         &self.forgetting
     }
 
-    /// Whether a save of start `generation` begun at `since_ms` was
-    /// overtaken as it ran: the newest kept save is that start's, kept
-    /// after it began (an owner's sleep's, asked once an awake save let go
-    /// of its hold and its guest went on). The DO lets its records go:
-    /// never the newest kept ahead of a newer capture. One only asked, not
-    /// kept, overtakes nothing: a capture is kept until a newer one is
-    /// (Codex on #1378).
-    pub fn overtaken(&self, generation: u64, since_ms: i64) -> bool {
-        self.saves.first().is_some_and(|s| s.generation == generation && s.at_ms > since_ms)
+    /// Whether a save of start `generation` begun at `began_ms` was
+    /// overtaken as it ran: the newest kept save is that start's and began
+    /// after it (an owner's sleep's or restart's, asked once an awake save
+    /// let go of its hold, ending first). The DO lets its records go: never
+    /// kept ahead of a newer capture. An older one kept as it ran (ending
+    /// first) overtakes nothing: the newer is kept ahead of it (alexlwn123
+    /// on #1378). One only asked, not kept, overtakes nothing: a capture is
+    /// kept until a newer one is (Codex on #1378). So saves of one start
+    /// are kept in the order they began, whichever ends first.
+    pub fn overtaken(&self, generation: u64, began_ms: i64) -> bool {
+        self.saves.first().is_some_and(|s| s.generation == generation && s.began_ms.is_some_and(|b| b > began_ms))
     }
 
     /// Every record a wipe deletes (docs/api.md, Operators): each kept
@@ -543,8 +553,8 @@ mod tests {
     fn a_snapshot_is_used_only_for_its_save_and_image() {
         let mut s = Saves::default();
         assert_eq!(s.plan(Some(IMAGE)), Plan::Nothing);
-        s.saved(1, rec("b0"), T - 1, true);
-        s.saved(1, rec("b1"), T, true);
+        s.saved(1, rec("b0"), T - 1, T - 1, true);
+        s.saved(1, rec("b1"), T, T, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
         assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
         assert_eq!(s.plan(Some("registry/stub@sha256:2")), Plan::Backup, "another image's");
@@ -553,7 +563,7 @@ mod tests {
         assert!(other.unusable("b1"), "b0 is left");
         assert_eq!((other.plan(Some(IMAGE)), other.current().map(|c| c.id.as_str())), (Plan::Backup, Some("b0")), "the current save is another than the snapshot's");
         // the next sleep saves and takes no snapshot: the old one is dropped
-        s.saved(2, rec("b2"), T + 1, true);
+        s.saved(2, rec("b2"), T + 1, T + 1, true);
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert_eq!(s.snapshot, None);
         // a snapshot taken with a save that is no longer current is not kept
@@ -570,7 +580,7 @@ mod tests {
         let mut s = Saves::default();
         assert!(s.every_record().is_empty() && !s.has_snapshot());
         for (n, id) in ["b0", "b1", "b2", "b3"].iter().enumerate() {
-            s.saved(1, rec(id), T + n as i64, true);
+            s.saved(1, rec(id), T + n as i64, T + n as i64, true);
         }
         // b0 was pushed out of the newest three: let go of, not deleted yet
         let ids = |s: &Saves| s.every_record().iter().map(|r| r["id"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
@@ -645,7 +655,7 @@ mod tests {
         s.starting(1, RestoreSource::Nothing);
         assert!(s.came_up(1, RestoreSource::Nothing, None, Some(IMAGE), T).is_some());
         // its owner pins NEXT while it runs; its sleep saves, then snapshots
-        s.saved(1, rec("b1"), T + 10, true);
+        s.saved(1, rec("b1"), T + 10, T + 10, true);
         let of = s.image_of(1).expect("the image it runs").to_string();
         assert_eq!(of, IMAGE);
         assert!(s.snapshotted("b1", "s1", &of));
@@ -663,9 +673,9 @@ mod tests {
     #[test]
     fn the_second_ask_of_a_slow_sleep_keeps_the_first_ones_snapshot() {
         let mut s = Saves::default();
-        s.saved(3, rec("b-old"), T, true);
+        s.saved(3, rec("b-old"), T, T, true);
         // the first ask saves and snapshots
-        s.saved(4, rec("b1"), T + 70_000, true);
+        s.saved(4, rec("b1"), T + 70_000, T + 70_000, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
         // the second: its save fails once the first's destroy took the
         // container, so it takes no snapshot, and that is not news
@@ -674,8 +684,8 @@ mod tests {
         assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
         // the other order: the second's save lands while the first snapshots
         let mut s = Saves::default();
-        s.saved(4, rec("b1"), T, true);
-        s.saved(4, rec("b2"), T + 1_000, true);
+        s.saved(4, rec("b1"), T, T, true);
+        s.saved(4, rec("b2"), T + 1_000, T + 1_000, true);
         assert!(!s.snapshotted("b1", "s1", IMAGE), "the first's snapshot caches a save that is no longer current");
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert!(s.snapshotted("b2", "s2", IMAGE));
@@ -745,7 +755,7 @@ mod tests {
         assert!(c.saves.fresh() && !c.saves.has_snapshot(), "forgotten; again, the same");
         assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Backup);
         // its own sleep's snapshot is not kept
-        c.saves.saved(1, rec("b2"), c.now, true);
+        c.saves.saved(1, rec("b2"), c.now, c.now, true);
         assert!(!c.saves.snapshotted("b2", "s2", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Backup);
         let r = c.wake();
         assert_eq!((r.from, r.save.as_deref()), (RestoreSource::Backup, Some("b2")));
@@ -760,11 +770,11 @@ mod tests {
     #[test]
     fn three_saves_are_kept_newest_first() {
         let mut s = Saves::default();
-        assert!(s.saved(1, rec("a"), T, true).is_empty());
-        assert!(s.saved(1, rec("b"), T + 1, false).is_empty());
-        assert!(s.saved(2, rec("c"), T + 2, true).is_empty());
+        assert!(s.saved(1, rec("a"), T, T, true).is_empty());
+        assert!(s.saved(1, rec("b"), T + 1, T + 1, false).is_empty());
+        assert!(s.saved(2, rec("c"), T + 2, T + 2, true).is_empty());
         assert!(s.forgetting().is_empty());
-        let lost = s.saved(2, vec![json!({ "id": "d", "dir": "/data" }), json!({ "id": "d-work", "dir": "/data/work" })], T + 3, true);
+        let lost = s.saved(2, vec![json!({ "id": "d", "dir": "/data" }), json!({ "id": "d-work", "dir": "/data/work" })], T + 3, T + 3, true);
         assert!(lost.is_empty());
         assert_eq!(s.forgetting(), rec("a").as_slice(), "the oldest's records, to delete");
         assert_eq!(s.all().iter().map(|s| (s.number, s.id.as_str())).collect::<Vec<_>>(), vec![(4, "d"), (3, "c"), (2, "b")]);
@@ -788,11 +798,11 @@ mod tests {
         let ids = |s: &Saves| s.forgetting().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let mut s = Saves::default();
         for (i, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
-            s.saved(1, rec(id), T + i as i64, true);
+            s.saved(1, rec(id), T + i as i64, T + i as i64, true);
         }
         assert_eq!(ids(&s), ["a"]);
         // a's delete failed: the next save's pass finds it still, beside b
-        s.saved(1, rec("e"), T + 10, true);
+        s.saved(1, rec("e"), T + 10, T + 10, true);
         assert_eq!(ids(&s), ["a", "b"]);
         // a restart reads them back; one stored before this field reads none
         let mut s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -823,31 +833,38 @@ mod tests {
     #[should_panic(expected = "no kept save's")]
     fn a_kept_saves_record_is_never_let_go_of() {
         let mut s = Saves::default();
-        s.saved(1, rec("a"), T, true);
+        s.saved(1, rec("a"), T, T, true);
         s.let_go(rec("a"));
     }
 
-    /// Goal (P9, Codex on #1378): an awake save that a newer save of its
-    /// start overtook as it ran (kept after it began) is never kept ahead
-    /// of it; one only asked, or an older save, or another start's,
-    /// overtakes nothing, so a completed capture is kept. Restart: stored
-    /// and read back, the same.
+    /// Goal (P9, Codex and alexlwn123 on #1378): a save that a newer save
+    /// of its start overtook (kept, and begun after it) is never kept ahead
+    /// of it; one only asked, an older one kept as it ran (begun before
+    /// it, ended first), or another start's overtakes nothing, so a
+    /// completed capture is kept. Restart: stored and read back, the same;
+    /// a save stored before `began_ms` overtakes nothing.
     #[test]
     fn a_save_is_overtaken_only_by_a_newer_one_kept() {
         let mut s = Saves::default();
         assert!(!s.overtaken(1, T), "none kept");
-        s.saved(1, rec("a"), T + 10, true);
-        assert!(!s.overtaken(1, T + 20), "kept before it began");
-        assert!(s.overtaken(1, T + 5), "kept after it began");
+        s.saved(1, rec("a"), T + 10, T + 30, true);
+        assert!(s.overtaken(1, T + 5), "a newer capture kept");
+        assert!(!s.overtaken(1, T + 20), "an older one, kept as it ran");
+        assert!(!s.overtaken(1, T + 10), "itself");
         assert!(!s.overtaken(2, T + 5), "another start's");
         let s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert!(s.overtaken(1, T + 5) && !s.overtaken(1, T + 20));
+        let mut v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["saves"][0]["beganMs"], T + 10, "stored: {v}");
+        v["saves"][0].as_object_mut().unwrap().remove("beganMs");
+        let old: Saves = serde_json::from_value(v).unwrap();
+        assert!(!old.overtaken(1, T + 5) && old.all()[0].began_ms.is_none(), "a save stored before it overtakes nothing");
     }
 
     #[test]
     #[should_panic(expected = "a directory's record before any inside it")]
     fn a_save_whose_records_are_out_of_order_is_a_bug() {
         let mut s = Saves::default();
-        s.saved(1, vec![json!({ "id": "w", "dir": "/data/work" }), json!({ "id": "d", "dir": "/data" })], T, true);
+        s.saved(1, vec![json!({ "id": "w", "dir": "/data/work" }), json!({ "id": "d", "dir": "/data" })], T, T, true);
     }
 }

@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(c.apply(Event::Restart { generation: g }).actions, vec![Action::Sleep { generation: g }]);
         assert_eq!(update(&c), None, "its restart's sleep is under way");
         let (_, held, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
-        c.saves.saved(g, rec("b2"), c.now, held);
+        c.saves.saved(g, rec("b2"), c.now, c.now, held);
         c.apply(Event::Saved { generation: g, seq });
         let s = c.apply(Event::Asleep { generation: g });
         let s = c.owed(&s);

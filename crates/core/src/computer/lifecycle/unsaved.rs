@@ -679,7 +679,7 @@ mod tests {
         let asked = s.actions.iter().any(|a| matches!(a, Action::Hold { .. } | Action::Sleep { .. }));
         assert!(asked || c.life.saving().is_some(), "a try is under way: {s:?}");
         let (_, _, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
-        c.saves.saved(g, rec("b2"), c.now, true);
+        c.saves.saved(g, rec("b2"), c.now, c.now, true);
         c.apply(Event::Saved { generation: g, seq });
         assert_eq!(unsaved(&c), None, "a save worked");
         assert!(c.life.unsaved(&rules).is_none() && c.life.failing.is_none() && c.life.save_failures == 0);

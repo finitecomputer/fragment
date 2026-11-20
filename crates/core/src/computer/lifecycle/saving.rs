@@ -154,6 +154,8 @@ impl Lifecycle {
 mod tests {
     use fragment_proto::computer::LifeEnd;
 
+    use serde_json::json;
+
     use super::*;
     use crate::computer::testing::{save_asked, started, T};
     use crate::computer::*;
@@ -312,6 +314,85 @@ mod tests {
         v["saving"].as_object_mut().unwrap().remove("unheld");
         let (mut old, _) = Lifecycle::read(&v.to_string()).unwrap();
         assert_eq!(old.apply(Event::Saved { generation: g, seq }, at + 3_000).actions, vec![Action::Unhold { generation: g }]);
+    }
+
+    /// Goal (P9, alexlwn123 on #1378): an awake save past its home and its
+    /// owner's sleep's or restart's save, asked as it copies its work, are
+    /// kept in the order they began, whichever ends first: the newer
+    /// capture is the newest kept, and the restart or sleep goes on saved.
+    /// An older one ending last is let go; one ending first is kept until
+    /// the newer is (and stays the newest if the newer fails). Method: the
+    /// lifecycle's events, each save kept or let go as the DO's `save`
+    /// does (`Saves::overtaken` with the time it began), valid (both
+    /// orders), the newer failing, and the saves stored and read back
+    /// between the two ends (a restart of the DO).
+    #[test]
+    fn overlapping_saves_are_kept_in_the_order_they_began() {
+        // the DO's `save`, ending at `at`: kept unless a newer one was
+        fn end(l: &mut Lifecycle, saves: &mut Saves, g: u64, (seq, began): (u64, i64), id: &str, at: i64) -> Step {
+            let records = vec![json!({ "id": id, "dir": "/data" }), json!({ "id": format!("{id}-work"), "dir": "/data/work" })];
+            if saves.overtaken(g, began) {
+                assert!(saves.let_go(records).is_empty());
+                return l.apply(Event::SaveFailed { generation: g, seq, why: "a newer save was kept as it ran".into() }, at);
+            }
+            saves.saved(g, records, began, at, true);
+            l.apply(Event::Saved { generation: g, seq }, at)
+        }
+        let newest = |saves: &Saves| saves.all().first().map(|s| s.id.clone());
+        let reload = |saves: &Saves| serde_json::from_str::<Saves>(&serde_json::to_string(saves).unwrap()).unwrap();
+        for owner in [Event::Sleep, Event::Restart { generation: 0 }] {
+            let restart = matches!(owner, Event::Restart { .. });
+            // an awake save (A) lets go past its home; its owner's sleep or
+            // restart holds, and its save (B) begins as A copies its work
+            let overlap = || {
+                let mut l = Lifecycle::new();
+                let g = started(&mut l, T);
+                l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+                l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
+                let at = T + 10_000 + SAVE_SETTLE_MS;
+                l.apply(Event::Alarm, at);
+                let (_, _, a) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
+                l.apply(Event::HomeSaved { generation: g, seq: a }, at + 1_500);
+                l.apply(owner.clone(), at + 3_000);
+                let (_, _, b) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 4_000));
+                assert!(b > a);
+                (l, g, (a, at + 500), (b, at + 4_000), at)
+            };
+            let stops = |s: &Step, g: u64| s.actions == vec![Action::Stop { generation: g, saved: true }];
+            // A ends first (it has only its work left): kept, then B is, the newest
+            let (mut l, g, a, b, at) = overlap();
+            let mut saves = Saves::default();
+            assert!(end(&mut l, &mut saves, g, a, "a", at + 6_000).actions.is_empty(), "{owner:?}");
+            let mut saves = reload(&saves);
+            let s = end(&mut l, &mut saves, g, b, "b", at + 9_000);
+            assert_eq!(newest(&saves).as_deref(), Some("b"), "the newer capture is the newest kept: {owner:?}");
+            assert!(stops(&s, g), "its sleep goes on, saved: {owner:?}: {s:?}");
+            assert_eq!(saves.all().len(), 2, "A, older, still kept behind it: {owner:?}");
+            // B ends first: kept; A, ending after it, is let go
+            let (mut l, g, a, b, at) = overlap();
+            let mut saves = Saves::default();
+            assert!(stops(&end(&mut l, &mut saves, g, b, "b", at + 6_000), g), "{owner:?}");
+            let mut saves = reload(&saves);
+            assert!(end(&mut l, &mut saves, g, a, "a", at + 9_000).actions.is_empty(), "{owner:?}");
+            assert_eq!((newest(&saves).as_deref(), saves.all().len()), (Some("b"), 1), "A let go, never kept ahead of B: {owner:?}");
+            assert_eq!(saves.forgetting().len(), 2, "its records to delete: {owner:?}");
+            // B fails: A, ending before or after it, is the newest kept
+            for a_first in [true, false] {
+                let (mut l, g, a, b, at) = overlap();
+                let mut saves = Saves::default();
+                if a_first {
+                    end(&mut l, &mut saves, g, a, "a", at + 6_000);
+                }
+                let failed = l.apply(Event::SaveFailed { generation: g, seq: b.0, why: "R2 is down".into() }, at + 8_000);
+                if !a_first {
+                    end(&mut l, &mut saves, g, a, "a", at + 9_000);
+                }
+                assert_eq!(newest(&saves).as_deref(), Some("a"), "a capture kept for a newer one only asked: {owner:?} {a_first}");
+                if restart {
+                    assert_eq!(failed.actions, vec![Action::Stop { generation: g, saved: false }], "a restart stops whether or not it saved: {owner:?}");
+                }
+            }
+        }
     }
 
     /// The saves the lifecycle asks for, firing the alarm it asks for each

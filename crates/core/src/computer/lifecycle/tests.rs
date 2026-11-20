@@ -888,10 +888,10 @@ fn a_save_asked_again_after_a_cancel_overtakes_the_one_under_way() {
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 200));
         assert_eq!(seq, 2, "{owner:?}");
         assert!(!saves.overtaken(g, began), "a newer save only asked overtakes nothing: {owner:?}");
-        saves.saved(g, vec![serde_json::json!({ "id": "newer", "dir": "/data" })], at + 300, true);
+        saves.saved(g, vec![serde_json::json!({ "id": "newer", "dir": "/data" })], at + 200, at + 300, true);
         l.apply(Event::Saved { generation: g, seq: 2 }, at + 300);
         l.apply(Event::Asleep { generation: g }, at + 400);
         assert!(l.running().is_none(), "its sleep ended: {owner:?}");
-        assert!(saves.overtaken(g, began) && !saves.overtaken(g, at + 300), "the cancelled one, ending after it, is overtaken: {owner:?}");
+        assert!(saves.overtaken(g, began) && !saves.overtaken(g, at + 250), "the cancelled one, begun before it, is overtaken: {owner:?}");
     }
 }
