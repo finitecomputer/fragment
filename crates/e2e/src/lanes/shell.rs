@@ -4659,6 +4659,20 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     Ok(())
 }
 
+/// Screenshots of settings' row `row` (an own key's), at 1280 px and at
+/// 390 px as a phone's, named `<name>-<width>.png` in `shots`, any dialog
+/// an earlier step left open closed first; the page left at 1280 by 800,
+/// as the lane runs it.
+fn own_key_shots(b: &mut Browser, page: &Page, row: &str, shots: &std::path::Path, name: &str) -> Result<()> {
+    b.eval(page, "(document.querySelectorAll('dialog[open]').forEach((d) => d.close()), true)")?;
+    for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
+        b.viewport(page, width, height, mobile)?;
+        b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let _ = b.screenshot(page, &shots.join(format!("{name}-{width}.png")));
+    }
+    b.viewport(page, 1280, 800, false)
+}
+
 /// Two loads of settings at once (#441): the first one's read of the
 /// connections answered (no key yet) and held, the person's own key saved,
 /// and settings opened again, which show it set; the first then let go and
@@ -4681,6 +4695,8 @@ fn settings_race_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     let settled = b.until(page, HELD_SETTLED, wait);
     let after = b.eval(page, &format!("({{ state: {state} ?? null, same: document.querySelector('#settings-page .settings-layout') === window.__held.newer }})"))?;
     b.eval(page, "(window.__held.restore(), true)")?;
+    // the row of an own key set, as its person's Vault holds it (M16), at 1280 and 390 px
+    own_key_shots(b, page, &row, &s.scratch.join("shell-ui"), "own-key-set")?;
     s.ok(
         "two loads of settings at once: the older one, whose read of the connections said no key and answered last, draws nothing over the newer one; the row stays set",
         held && saved.status == 200 && newer && settled && after == json!({ "state": "set", "same": true }),
@@ -5416,6 +5432,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let _ = b.screenshot(page, &shots.join("desktop-own-models.png"));
     b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-own-models-connected.png"));
+    own_key_shots(b, page, &row, shots, "own-key-signed-in")?;
     s.ok(
         "picked, Fast and Deep start on the selected own model at High, its tier kept, and no colour (its identity's)",
         saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "deep": { "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "reasoning": "high" } }) && after["tier"] == before["tier"] && after.get("color").is_none(),
