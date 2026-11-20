@@ -4,7 +4,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
+use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
 mod legacy;
@@ -18,7 +18,7 @@ mod tests;
 
 pub use event::{Action, Ended, Event, Rules, SaveNote, Socket, Step, Wake};
 pub use saving::Saving;
-pub use starts::{alive, Alive};
+pub use starts::{alive, unplanned_start, Alive};
 pub use unsaved::{Failing, Unsaved};
 
 /// Where its lifecycle is, each phase with what is only true of it. A
@@ -45,7 +45,8 @@ pub enum Phase {
     Awake { generation: u64, since_ms: i64 },
     /// `owner`: its owner's sleep (no keepalive cancels it); `restarting`:
     /// their restart (a save that fails keeps no container); `owes_start`:
-    /// a start follows its stop (a restart's, or a wake heard as it went).
+    /// a start follows its stop (a restart's, or a wake heard as it went
+    /// that did not cancel it: `Lifecycle::cancels_sleep`).
     Sleeping {
         generation: u64,
         since_ms: i64,
@@ -192,6 +193,11 @@ pub struct Lifecycle {
     /// has, or stored before it was kept.
     #[serde(default, skip_serializing_if = "is_zero")]
     opened_ms: i64,
+    /// Since when the starts of this wake have found the container before
+    /// them still running (`Event::StartBlocked`): none once one comes up,
+    /// or as a wake or a restart counts its strikes anew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked_since_ms: Option<i64>,
 }
 
 impl Default for Lifecycle {
@@ -205,6 +211,12 @@ impl Lifecycle {
     /// as its owner's seat says: the registry tells it).
     pub fn always_on(&self) -> bool {
         self.always_on
+    }
+
+    /// Whether this wake fell back from a snapshot that would not start
+    /// (until a start comes up).
+    pub fn fell_back(&self) -> bool {
+        self.fell_back
     }
 
     pub fn new() -> Lifecycle {
@@ -233,6 +245,7 @@ impl Lifecycle {
             kept_ms: 0,
             owed_ms: None,
             opened_ms: 0,
+            blocked_since_ms: None,
         }
     }
 
@@ -435,16 +448,26 @@ impl Lifecycle {
                         // its last strike (failing, it gives up again at once)
                         self.failures = STARTS_FAILED_MAX - 1;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
                     Phase::Failed { .. } | Phase::Asleep { .. } => {
                         self.failures = 0;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
+                    Phase::Sleeping { generation, .. } if self.cancels_sleep() => {
+                        // wanted before its idle sleep's stop began: it
+                        // stays awake on the container it has
+                        self.hold(now_ms + why.hold_ms());
+                        self.sleep_cancelled(generation, now_ms, &mut step);
+                    }
                     Phase::Sleeping { generation, since_ms, owner, restarting, .. } => {
+                        // its owner's sleep, or one whose stop began: a
+                        // start once its container is gone
                         self.hold(now_ms + why.hold_ms());
                         self.phase = Phase::Sleeping { generation, since_ms, owner, restarting, owes_start: true };
                     }
@@ -466,6 +489,7 @@ impl Lifecycle {
                         // `starting` whatever it restarted (`starting`)
                         self.failures = 0;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
                     }
                     // the start under way is the restart's
@@ -484,6 +508,7 @@ impl Lifecycle {
             }
             (Phase::Starting { generation, .. }, Event::Ready { generation: g }) if g == generation => {
                 self.failures = 0;
+                self.blocked_since_ms = None;
                 self.fell_back = false;
                 self.ready = true;
                 self.metered_to_ms = now_ms;
@@ -491,6 +516,17 @@ impl Lifecycle {
                 self.begin_life(now_ms);
             }
             (Phase::Starting { generation, .. }, Event::StartFailed { generation: g, why }) if g == generation => self.failed(why, now_ms),
+            (Phase::Starting { generation, .. }, Event::StartBlocked { generation: g }) if g == generation => {
+                // nothing of it ran: made again at once, as it was asked,
+                // no strike, while the container before it may still be its
+                // sleep's, held by a snapshot; then each try is a failure
+                let since = *self.blocked_since_ms.get_or_insert(now_ms);
+                if now_ms < since + SLEEP_DEADLINE_MS {
+                    self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
+                } else {
+                    self.failed(format!("the container before it still ran {} s after its first try", (now_ms - since) / 1000), now_ms);
+                }
+            }
             (Phase::Starting { generation, .. }, Event::SnapshotFailed { generation: g, why }) if g == generation => {
                 if std::mem::replace(&mut self.fell_back, true) {
                     // its snapshot went at the first: this one is the image's
@@ -526,7 +562,8 @@ impl Lifecycle {
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
                 | Event::Exited { .. }
-                | Event::StartFailing { .. },
+                | Event::StartFailing { .. }
+                | Event::StartBlocked { .. },
             ) if !matches!(&self.phase, Phase::Sleeping { .. } | Phase::Awake { .. } | Phase::Starting { .. }) => {}
             (Phase::Starting { generation, since_ms, .. }, Event::StartFailing { generation: g }) if g == generation => {
                 self.phase = Phase::Starting { generation, since_ms, destroying: true };
@@ -601,6 +638,12 @@ impl Lifecycle {
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
+            (Phase::Awake { generation, .. }, Event::Held { generation: g, .. }) if g == generation && self.saving.is_none() => {
+                // a hold whose sleep was cancelled as it was made: its touch
+                // may have landed after the cancel let go of it, so it is
+                // let go again, and no guest stays held for nothing
+                step.actions.push(Action::Unhold { generation });
+            }
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
                 self.saving = None;
                 self.saved(now_ms, &mut step);
@@ -642,7 +685,8 @@ impl Lifecycle {
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
                 | Event::Exited { .. }
-                | Event::StartFailing { .. },
+                | Event::StartFailing { .. }
+                | Event::StartBlocked { .. },
             ) => {}
             (_, Event::Opened { socket }) => {
                 match socket {
@@ -670,10 +714,7 @@ impl Lifecycle {
                     Phase::Sleeping { generation, owner: false, .. } if socket == Socket::Keepalive && matches!(self.saving, Some(Saving::Hold { .. })) => {
                         // the guest took work as its idle sleep held it: it
                         // stays awake, and nothing it claimed is cut (P2)
-                        self.phase = Phase::Awake { generation, since_ms: now_ms };
-                        self.saving = None;
-                        self.busy_since_ms = Some(now_ms);
-                        step.actions.push(Action::Unhold { generation });
+                        self.sleep_cancelled(generation, now_ms, &mut step);
                     }
                     _ => {}
                 }
@@ -774,11 +815,18 @@ impl Lifecycle {
                 let s = self.saving.unwrap_or(Saving::Stop { since_ms, saved: false });
                 if now_ms >= s.deadline_ms() {
                     self.overdue(generation, s, now_ms, rules, &mut step);
+                } else if matches!(self.saving, Some(Saving::Stop { .. })) {
+                    step.actions.push(Action::Look { generation });
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
         }
-        step.alarm_ms = self.next_alarm();
+        step.alarm_ms = self.next_alarm().map(|at| match self.saving {
+            // a stop under way is looked at every `STOP_LOOK_MS` up to its
+            // deadline: a new isolate's look finds one its isolate lost
+            Some(Saving::Stop { since_ms, .. }) => at.min(since_ms + ((now_ms - since_ms) / STOP_LOOK_MS + 1) * STOP_LOOK_MS),
+            _ => at,
+        });
         self.assert_valid();
         step
     }

@@ -136,6 +136,14 @@ impl FragmentCell {
         Ok(Some(b))
     }
 
+    /// The agent this connector is an open door of, as its members list
+    /// names it (npub), and the door: that agent's row says it
+    /// (`member_list`), so the agent's bridge and pages know which records
+    /// relaying its owner came through its door (docs/chat-records.md).
+    pub(crate) fn door_member(&self) -> CellResult<Option<(String, String)>> {
+        Ok(self.open_binding()?.map(|b| (npub::display(&b.identity), b.door)))
+    }
+
     /// What this fragment may relay now (`effects::check_record`).
     pub(crate) fn hosted_door(&self) -> CellResult<Option<Hosted>> {
         let owner = npub::display(&self.must(MetaKey::Owner)?);

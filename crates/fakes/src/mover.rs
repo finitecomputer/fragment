@@ -47,6 +47,9 @@ pub struct Mover {
     script: Mutex<Script>,
     /// The zip it stages, and the size of each part it sends.
     zip: Mutex<(Vec<u8>, usize)>,
+    /// The files and their bytes its manifests say the zip holds, when a
+    /// lane stages a real home (`home`); a stand-in's otherwise.
+    counted: Mutex<Option<(u64, u64)>>,
     /// The last `seq` reported on each command.
     seqs: Mutex<BTreeMap<String, u64>>,
 }
@@ -55,7 +58,7 @@ impl Mover {
     pub fn new(base: &str, keys: Keys) -> Mover {
         let zip = fixture_zip(64 * 1024);
         let part = zip.len();
-        Mover { keys, base: base.trim_end_matches('/').to_string(), http: reqwest::blocking::Client::new(), script: Mutex::new(Script::Done), zip: Mutex::new((zip, part)), seqs: Mutex::default() }
+        Mover { keys, base: base.trim_end_matches('/').to_string(), http: reqwest::blocking::Client::new(), script: Mutex::new(Script::Done), zip: Mutex::new((zip, part)), counted: Mutex::default(), seqs: Mutex::default() }
     }
 
     /// The key's npub: what the deployment's `migrations.mover` names.
@@ -71,6 +74,14 @@ impl Mover {
     pub fn zip(&self, zip: Vec<u8>, part: usize) {
         assert!(part > 0, "a part holds bytes");
         *self.zip.lock().expect("the mover's zip") = (zip, part);
+        *self.counted.lock().expect("the mover's counts") = None;
+    }
+
+    /// A home's zip the next stages upload, in parts of `part` bytes, its
+    /// manifests counting its `files` and their `bytes`, as the mover's do.
+    pub fn home(&self, zip: Vec<u8>, part: usize, files: u64, bytes: u64) {
+        self.zip(zip, part);
+        *self.counted.lock().expect("the mover's counts") = Some((files, bytes));
     }
 
     /// The zip the next stages upload.
@@ -163,6 +174,7 @@ impl Mover {
     pub fn manifest(&self, c: &Command) -> Result<Manifest> {
         let phase: Phase = c.phase.filter(|_| c.kind == CommandKind::StopAndStage).with_context(|| format!("{} is no stage command", c.id))?;
         let zip = self.zip_bytes();
+        let (files, bytes) = self.counted.lock().expect("the mover's counts").unwrap_or((3, 4096));
         Ok(Manifest {
             format: STAGE_FORMAT.into(),
             old: c.old.clone(),
@@ -171,8 +183,8 @@ impl Mover {
             layout: "finite-computer".into(),
             zip_bytes: zip.len() as u64,
             zip_sha256: hex::encode(sha2::Sha256::digest(&zip)),
-            bytes: 4096,
-            files: 3,
+            bytes,
+            files,
             left: vec![LeftBehind { path: "agent/hermes-home/.env".into(), bytes: 120, why: "secret".into() }],
             left_more: None,
         })
