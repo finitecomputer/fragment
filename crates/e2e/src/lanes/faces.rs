@@ -392,15 +392,33 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     s.fake.drop_commit_answers(&repo, 1);
     let lost = rename("Jo", "Ivy")?;
     let same = rename("Jo", "Ivy")?;
+    // its job as the platform serves it (main's pin), followed by the retry
+    let served = api.signed(&paul, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None)?.text;
     let tip = s.fake.branch(&repo, "main");
-    let replay = rename("Jo", "Ivy")?;
+    let replay = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Jo", "role": "scribe", "was": "Ivy" })))?;
     let stale = rename("Kit", "Ivy")?;
     let after = (row(api, &paul, &agent)["title"].clone(), job_at(s), s.fake.branch(&repo, "main"));
     s.ok(
-        "a rename that lost its answer, asked again with the same name and `was`: done; once more, done with nothing committed; another name with that `was` is 409",
-        lost.status >= 500 && same.status == 200 && replay.status == 200 && stale.status == 409 && after == (json!("Jo"), "Jo helps with research.\n".to_string(), tip.clone()) && tip.is_some(),
-        json!({ "lost": lost.to_string(), "same": same.to_string(), "replay": replay.to_string(), "stale": stale.to_string(), "after": after, "tip": tip }),
+        "a rename that lost its answer, asked again with the same name and `was`: done, its job served as renamed; once more (with a role), done with nothing committed and its role as it was; another name with that `was` is 409",
+        lost.status >= 500 && same.status == 200 && served == "Jo helps with research.\n" && replay.status == 200 && stale.status == 409
+            && after == (json!("Jo"), "Jo helps with research.\n".to_string(), tip.clone()) && tip.is_some() && row(api, &paul, &agent).get("agentRole").is_none(),
+        json!({ "lost": lost.to_string(), "same": same.to_string(), "served": served, "replay": replay.to_string(), "stale": stale.to_string(), "after": after, "tip": tip }),
     );
+    // a refused rename's name is never taken for its old one: its job,
+    // naming someone else by it, keeps that name at the next rename
+    let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job", "files": [{ "path": "SOUL.md", "text": "Jo works with Lou.\n" }] })))?.status == 200;
+    s.fake.fail_commit_packs(true);
+    let refused = rename("Lou", "Jo");
+    s.fake.fail_commit_packs(false);
+    let refused = refused?;
+    let next = rename("Mo", "Jo")?;
+    s.ok(
+        "a rename refused (to a name its job says of someone else), then another: its job says the new name for its own and keeps the other's",
+        wrote && refused.status >= 500 && next.status == 200 && job_at(s) == "Mo works with Lou.\n" && row(api, &paul, &agent)["title"] == "Mo",
+        json!({ "refused": refused.to_string(), "next": next.to_string(), "job": job_at(s) }),
+    );
+    let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job", "files": [{ "path": "SOUL.md", "text": "Mo helps with research.\n" }] })))?;
+    anyhow::ensure!(wrote.status == 200, "its job written: {wrote}");
     let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?;
     anyhow::ensure!(back.status == 200 && job_at(s) == "Frank helps with research.\n", "renamed Frank again: {back}");
 

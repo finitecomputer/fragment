@@ -275,7 +275,7 @@ impl FragmentCell {
     /// name made again, between its awaits leaves the next life's pending
     /// template, title and repo to that life's own seed. Asked after an
     /// await and before what the step writes or commits next.
-    fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
+    pub(crate) fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.and_then(|at| at.parse::<i64>().ok()) == Some(life) {
             return Ok(());
         }

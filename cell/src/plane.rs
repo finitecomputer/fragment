@@ -356,6 +356,12 @@ impl FragmentCell {
         self.must(MetaKey::Repo)
     }
 
+    /// Its life (`created_at`): a request that awaits after it is let in
+    /// asks `same_life` of it before it writes.
+    pub(crate) fn life(&self) -> CellResult<i64> {
+        self.must(MetaKey::CreatedAt)?.parse::<i64>().map_err(|_| CellError::host("its created_at is not a time"))
+    }
+
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
         self.meta(MetaKey::pin(which))
     }
@@ -811,9 +817,13 @@ impl FragmentCell {
             GitPicture::Unchanged => {}
             GitPicture::Changed { last_commit, checked: Some((sha256, mime)) } => {
                 self.set_meta(MetaKey::PictureSeen, &format!("{last_commit} {sha256}"))?;
-                if self.meta(MetaKey::Icon)?.as_deref() != Some(sha256.as_str()) {
-                    self.set_meta(MetaKey::Picture, &format!("{sha256} {mime} {sha}"))?;
-                    self.event("picture.changed", "its picture is its avatar.png, as live has it now", json!({ "sha256": sha256, "commit": sha }));
+                match self.meta(MetaKey::Icon)?.as_deref() == Some(sha256.as_str()) {
+                    // its icon already: an older picture waiting to be taken goes
+                    true => self.del_meta(MetaKey::Picture)?,
+                    false => {
+                        self.set_meta(MetaKey::Picture, &format!("{sha256} {mime} {sha}"))?;
+                        self.event("picture.changed", "its picture is its avatar.png, as live has it now", json!({ "sha256": sha256, "commit": sha }));
+                    }
                 }
             }
             GitPicture::Changed { last_commit, checked: None } => {
@@ -1083,7 +1093,11 @@ impl FragmentCell {
         let Some(text) = self.meta(MetaKey::ManifestMain)? else { return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")) };
         let mut manifest = crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?;
         if let (Some(title), Some(fields)) = (self.face_now()?.title, manifest.as_object_mut()) {
-            if let Some(meta) = fields.entry("meta").or_insert_with(|| json!({})).as_object_mut() {
+            let meta = fields.entry("meta").or_insert_with(|| json!({}));
+            if meta.is_null() {
+                *meta = json!({});
+            }
+            if let Some(meta) = meta.as_object_mut() {
                 meta.insert("title".into(), title.into());
             }
         }
