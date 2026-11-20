@@ -5,14 +5,24 @@ the wire contract; docs/cloudflare-v1.md holds the decisions.
 
 ## The model
 
-- **Files in git, state in SQL, history in channels.** Every file is in
-  git (code.storage): code, documents, uploads, generated media. A file of
-  `fragment_core::blob::BLOB_MIN_BYTES` or more is a pointer in git whose
-  bytes live in R2 under their hash; a sync resolves pointers, so
-  computers and agents see real files, and a blob no branch tip names is
-  deleted. No file bytes persist in the cell's SQLite. App state lives in
-  the app's SQL; for a file-based app (a vault, a wiki) the files are the
-  state.
+- **A fragment holds git only where git is fundamental to its state.**
+  Git (code.storage) holds what someone authors or keeps as a file, to
+  read, diff or revert: code, sites, documents, wikis and brains, the
+  media they point at, an archive, and an agent's own self (one repo per
+  agent: its `SOUL.md`, memories and skills). What the platform or a
+  process writes as it goes, or reads to decide what to do (a name, a
+  setting, an index, a live transcript, a log), is state: it belongs in
+  the fragment's `meta` or its app's SQL, not a file, and its history on
+  a channel. Some has not moved yet, each in a change of its own: an
+  agent's settings (its `agent.json`) and a session archive's indexes are
+  still files, and the table below says where each lives today. The test: would anyone ever open it in an editor,
+  diff it or revert it? If not, it is not a file. For a file-based app
+  (a vault, a wiki, a brain) the files are the state, because people
+  author them. A file of `fragment_core::blob::BLOB_MIN_BYTES` or more is
+  a pointer in git whose bytes live in R2 under their hash; a sync
+  resolves pointers, so computers and agents see real files, and a blob
+  no branch tip names is deleted. No file bytes persist in the cell's
+  SQLite.
 - **One execution primitive: the operation.** Named, schema-typed,
   role-checked, idempotent by principal and operation id. Every trigger
   (a page, the CLI, an agent, cron, a webhook, a channel record, a file
@@ -101,6 +111,7 @@ Every change is checked against this table.
 | The image a computer's next start runs | each image name's reference in the Worker version; a computer's pin names one | the Computer DO's last look, recorded as the image each life runs |
 | A fragment's name, an agent's role | its supervisor's `meta` `face`, set at its making and through its face route (docs/api.md, "An agent's name and picture"); each change a `face.changed` event | everything read from it (lists, `__people`, status's `title` and `agentRole`, a page's Open Graph title); its computer's profile and SimpleX profile follow a rename; no chat title copies it; an agent's `SOUL.md` says each new name where it said the old, in the rename's own request; a `fragment.json`'s `meta.title` is a default a face with none takes, and written back by an older CLI with the mark `GET manifest` gave, its rename (`meta` `title_read`; the debt ledger); an agent's rename whose answer was lost is kept in `meta` `renaming` until the next; its label never changes |
 | An agent's picture | its fragment's `avatar.png` at main, read as main moves and at an agent's install (`meta` `picture`) | its face's address (`/api/identities/{npub}/picture?v=`); no deploy needed |
+| An agent's self: its `SOUL.md`, `memories/` and `skills/` | the agent fragment's git, authored by the agent and its owner | a Hermes agent's computer's checkout, synced both ways (docs/computers.md); another runtime's computer syncs none |
 | An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; `claude.model` and `claude.effort` for Claude Code; docs/computers.md, docs/bridge.md) | its computer's bridge and profile config; Settings and the agent's page read it |
 | An agent's home | its `agent.json` `home` in git (docs/api.md, "An agent's home") | read by the shell, its computer's profile and the bridge; none kept |
 | An agent's SimpleX chat | its owner's chat `<agent label>-simplex`, the agent in it | its name in the link's file, chosen once, before the chat is made |
