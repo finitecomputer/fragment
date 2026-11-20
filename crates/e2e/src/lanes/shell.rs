@@ -1134,8 +1134,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
       }
       // Every read that can change Settings' Computer known from its start,
       // in every document of this page (`add_agent_ui` holds them): the
-      // computer's (`/api/computers…`, but Settings' own `/uses`, which it
-      // draws only once answered) and the list's read, which `load` (shell.js)
+      // computer's (`/api/computers…`) and the list's read, which `load` (shell.js)
       // awaits with the computer's before it draws either. `hold()` holds
       // the computer's asked from then on and, once each read already on
       // its way has had its body read (`api` reads every answer's) and a
@@ -1145,7 +1144,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         const kind = (u, o) => {
           const p = new URL(String(u instanceof Request ? u.url : u), location.href).pathname;
           const get = (o?.method ?? (u instanceof Request ? u.method : 'GET')).toUpperCase() === 'GET';
-          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') && !p.endsWith('/uses') ? 'computer' : null;
+          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') ? 'computer' : null;
         };
         const open = new Set(), queued = [];
         let holding = false;
@@ -1700,6 +1699,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
     phone_sheet_still(s, &mut b, &page, &shots)?;
+    // before the desktop's settling, which draws it afresh after
+    agent_share_ui(s, api, &mut b, &page, &me, &shots)?;
     desktop_settle_ui(s, &mut b, &page)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
@@ -4332,7 +4333,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     };
     let id = computer["computer"].as_str().unwrap_or("").to_string();
     // the uses below, and the page's month of them, in one month
-    super::computers::pin_month(api, &id)?;
+    super::computers::pin_month(api, &id, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -4362,7 +4363,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         s.eventually(std::time::Duration::from_secs(60), || replies() > n);
     }
     let counted = s.eventually(wait, || {
-        shell(api, session, "GET", &format!("/api/computers/{id}/uses"), None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
+        shell(api, session, "GET", "/api/ledger/uses", None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
     });
     b.reload(page)?;
     let row = |p: &str| format!("#settings-connections [data-provider={p:?}]");
@@ -4418,8 +4419,21 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
-    // the lane's pictures so far are there: `dir` would start it afresh
+    // the lane's pictures so far are there: `dir` would start it afresh;
+    // this month's use, read from the person's ledger, on the cards and,
+    // by agent, in a key's sheet, at 1280 and 390 px
     let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections.png"));
+    sheet_of(b, page, &row("perplexity"))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections-sheet.png"));
+    close_sheets(b, page)?;
+    b.viewport(page, 390, 844, true)?;
+    b.eval(page, &format!("(document.querySelector('{}').scrollIntoView(), true)", row("perplexity")))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/phone-390-connections.png"));
+    sheet_of(b, page, &row("perplexity"))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/phone-390-connections-sheet.png"));
+    close_sheets(b, page)?;
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
@@ -4673,6 +4687,20 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     Ok(())
 }
 
+/// Screenshots of settings' row `row` (an own key's), at 1280 px and at
+/// 390 px as a phone's, named `<name>-<width>.png` in `shots`, any dialog
+/// an earlier step left open closed first; the page left at 1280 by 800,
+/// as the lane runs it.
+fn own_key_shots(b: &mut Browser, page: &Page, row: &str, shots: &std::path::Path, name: &str) -> Result<()> {
+    b.eval(page, "(document.querySelectorAll('dialog[open]').forEach((d) => d.close()), true)")?;
+    for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
+        b.viewport(page, width, height, mobile)?;
+        b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let _ = b.screenshot(page, &shots.join(format!("{name}-{width}.png")));
+    }
+    b.viewport(page, 1280, 800, false)
+}
+
 /// Two loads of settings at once (#441): the first one's read of the
 /// connections answered (no key yet) and held, the person's own key saved,
 /// and settings opened again, which show it set; the first then let go and
@@ -4695,6 +4723,8 @@ fn settings_race_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     let settled = b.until(page, HELD_SETTLED, wait);
     let after = b.eval(page, &format!("({{ state: {state} ?? null, same: document.querySelector('#settings-page .settings-layout') === window.__held.newer }})"))?;
     b.eval(page, "(window.__held.restore(), true)")?;
+    // the row of an own key set, as its person's Vault holds it (M16), at 1280 and 390 px
+    own_key_shots(b, page, &row, &s.scratch.join("shell-ui"), "own-key-set")?;
     s.ok(
         "two loads of settings at once: the older one, whose read of the connections said no key and answered last, draws nothing over the newer one; the row stays set",
         held && saved.status == 200 && newer && settled && after == json!({ "state": "set", "same": true }),
@@ -5430,6 +5460,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let _ = b.screenshot(page, &shots.join("desktop-own-models.png"));
     b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-own-models-connected.png"));
+    own_key_shots(b, page, &row, shots, "own-key-signed-in")?;
     s.ok(
         "picked, Fast and Deep start on the selected own model at High, its tier kept, and no colour (its identity's)",
         saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "deep": { "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "reasoning": "high" } }) && after["tier"] == before["tier"] && after.get("color").is_none(),
@@ -6027,6 +6058,55 @@ fn replies(api: &Api, session: &str, chat: &str, agent: &str, said: &str) -> usi
 fn screen_landed(s: &mut Suite, b: &mut Browser, page: &Page, agent: &str) -> bool {
     let landed = format!("/p/6080/?agent={agent}");
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, &landed, "location.search").ok() == Some(json!(format!("?agent={agent}"))))
+}
+
+/// An agent's own is its owner's alone (FIN-544): its profile's Share…
+/// opens a sheet with no invite, no link and no public, which says so in
+/// one line. Shot at 1280 and 390 px, light and dark (`agent-share-*`).
+fn agent_share_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agent = agents.iter().filter_map(|a| a["fragment"].as_str()).find(|f| label_of(f) == me.first).unwrap_or("").to_string();
+    anyhow::ensure!(!agent.is_empty(), "the first agent: {r}");
+    // a desktop's page, drawn afresh after the phone's checks
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{agent}")));
+    b.viewport(page, 1280, 900, false)?;
+    b.reload(page)?;
+    b.until(page, &format!("!document.getElementById('layout').hidden && document.querySelector({})?.getClientRects().length > 0", js(&hero)), wait);
+    // its profile, from its hero's menu, and the window's Share…
+    b.click(page, &hero)?;
+    let profile = menu_item(b, page, "Its profile")?;
+    let pane = format!("#stack .pane[data-key={}]", js(&format!("app:{agent}")));
+    let share = js(&format!("{pane} button[aria-label=\"Share…\"]"));
+    let offered = profile && b.until(page, &format!("!!document.querySelector({share})"), wait);
+    b.eval(page, &format!("(document.querySelector({share})?.click(), true)"))?;
+    let drawn = format!(
+        "(() => document.body.innerText.includes({}) && !document.querySelector('input[type=email]') && !document.querySelector('button[value=link], button[value=public]'))()",
+        js("An agent's own page stays private to its owner.")
+    );
+    let open = "document.getElementById('sheet').open && document.getAnimations().length === 0";
+    let sheet = b.until(page, open, wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", &drawn).ok() == Some(Value::Bool(true)));
+    let said = b.eval_in_frame(page, "/share/", "document.body.innerText").unwrap_or(Value::Null);
+    let mut shown = sheet;
+    for (width, height, phone) in [(1280, 900, false), (390, 844, true)] {
+        b.viewport(page, width, height, phone)?;
+        for scheme in ["light", "dark"] {
+            b.color_scheme(page, scheme)?;
+            shown &= b.until(page, open, wait);
+            let _ = b.screenshot(page, &shots.join(format!("agent-share-{width}-{scheme}.png")));
+        }
+    }
+    b.color_scheme(page, "light")?;
+    let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+    let closed = b.until(page, "!document.getElementById('sheet').open", wait);
+    b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("{pane} button[aria-label=Close]"))))?;
+    s.ok(
+        "FIN-544: an agent's profile offers Share…, whose sheet offers no invite, no link and no public, and says in one line that an agent's own page stays private to its owner, at 1280 and 390, light and dark",
+        offered && shown && closed,
+        json!({ "profile": profile, "offered": offered, "sheet": sheet, "shown": shown, "closed": closed, "said": said }),
+    );
+    Ok(())
 }
 
 /// Clicks the open menu's item named `text` (a script's click: a menu's
@@ -8274,6 +8354,158 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     Ok(())
 }
 
+/// What the shell reads of cards and of its list (`members_only_no_card_ui`):
+/// each card read, by name; and each change it reads to each row of its
+/// list (`GET /api/fragments`), a new version of that row, counted before
+/// the shell has the list.
+const CARD_READS_WATCH: &str = r#"(() => {
+  const real = window.fetch.bind(window);
+  const seen = window.__cardsSeen = { reads: {}, versions: {}, rows: {} };
+  window.fetch = async (url, o) => {
+    const u = String(url), get = (o?.method ?? "GET") === "GET", card = /^\/api\/f\/([^/]+)\/card$/.exec(u);
+    if (card && get) seen.reads[card[1]] = (seen.reads[card[1]] ?? 0) + 1;
+    const r = await real(url, o);
+    if (u === "/api/fragments" && get && r.ok) {
+      const list = await r.clone().json().catch(() => null);
+      for (const f of list?.fragments ?? []) {
+        const row = JSON.stringify(f);
+        if (seen.rows[f.name] !== row) { seen.rows[f.name] = row; seen.versions[f.name] = (seen.versions[f.name] ?? 0) + 1; }
+      }
+    }
+    return r;
+  };
+  window.__cardsSeenRestore = () => { window.fetch = real; return true; };
+  return true;
+})()"#;
+
+/// Goal: the shell asks for a card no shot makes (docs/api.md, Cards: a
+/// members-only page is never shot) once, not at every change to the list
+/// (Paul's preview console, 2026-11-19: one brain's card 404 65 times in a
+/// session), and still shows one such a fragment has or is given (Codex
+/// and Alex on #1407). Valid: a link brain made beside it is asked at each
+/// change to its row; made members only, it keeps its card on Brains and in
+/// the dock; a card uploaded to the members-only brain after its 404 shows
+/// in the dock when the page comes back after a minute, and on Brains at
+/// its next visit, its row unchanged. Invalid: their own members-only
+/// brain, which has none, asked by the dock more than once per version of
+/// its row, or by Brains more than once a visit. Method: card reads counted
+/// by name, and the versions of each row the shell read
+/// (`CARD_READS_WATCH`); the dock first, then Brains with both brains off
+/// the dock, so every read there is the page's. Apps is open again at the
+/// end, both brains gone.
+fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    b.eval(page, CARD_READS_WATCH)?;
+    // a call with the page's session; no body when `body` is null
+    let in_page = |b: &mut Browser, method: &str, path: &str, body: Value| -> Result<Value> {
+        let sent = if body.is_null() { "undefined".to_string() } else { js(&body.to_string()) };
+        b.eval(page, &format!("fetch({}, {{ method: {}, headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {sent}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json().catch(() => null) }}))", js(path), js(method)))
+    };
+    let make = |b: &mut Browser, body: Value| -> Result<String> {
+        let made = in_page(b, "POST", "/api/fragments", body)?;
+        let name = made["body"]["name"].as_str().unwrap_or_default().to_string();
+        anyhow::ensure!(made["status"] == 200 && !name.is_empty(), "a brain was not made: {made}");
+        Ok(name)
+    };
+    let own = |b: &mut Browser, name: &str, what: &str, on: bool| -> Result<()> {
+        let r = in_page(b, "PUT", &format!("/api/fragments/{name}/{what}"), json!({ what: on }))?;
+        anyhow::ensure!(r["status"] == 200, "{name}'s {what}: {r}");
+        Ok(())
+    };
+    let count = |b: &mut Browser, what: &str, name: &str| -> u64 { b.eval(page, &format!("window.__cardsSeen.{what}[{}] ?? 0", js(name))).ok().and_then(|v| v.as_u64()).unwrap_or(0) };
+    let reads = |name: &str| format!("(window.__cardsSeen.reads[{}] ?? 0)", js(name));
+    let docked = |name: &str| format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{name}\"]")));
+    let on_brains = |name: &str| format!("!!document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{name}\"]")));
+    let carded = |name: &str| format!("!!document.querySelector({})?.src.startsWith('blob:')", js(&format!("#brains-page .app-row[data-fragment=\"{name}\"] .app-row-card")));
+    let peeked = |name: &str| format!("(() => {{ const icon = document.querySelector({}); icon?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const i = document.querySelector('.card-peek:not([hidden]) img'); const shown = !!i && i.src.startsWith('blob:'); icon?.dispatchEvent(new PointerEvent('pointerleave', {{ pointerType: 'mouse' }})); return shown; }})()", js(&format!("#apps [data-key=\"app:{name}\"]")));
+    let seen = |b: &mut Browser| b.eval(page, "({ reads: window.__cardsSeen.reads, versions: window.__cardsSeen.versions })");
+    let go = |b: &mut Browser, to: &str| -> Result<bool> {
+        b.eval(page, &format!("(document.getElementById({}).click(), true)", js(&format!("{to}-link"))))?;
+        Ok(b.until(page, &format!("location.pathname === '/{to}'"), wait))
+    };
+    let private = make(b, json!({ "label": "private-brain", "template": "brain", "visibility": "members" }))?;
+    let linked = make(b, json!({ "label": "linked-brain", "template": "brain" }))?;
+
+    // the dock: each asked as it arrives; then the link brain's row changes
+    // twice (off the dock, and back), and its card is asked again
+    let arrived = b.until(page, &format!("{} && {} && {} >= 1 && {} >= 1", docked(&private), docked(&linked), reads(&private), reads(&linked)), wait);
+    let before = count(b, "reads", &linked);
+    own(b, &linked, "dock", false)?;
+    let off = b.until(page, &format!("!{}", docked(&linked)), wait);
+    own(b, &linked, "dock", true)?;
+    let again = b.until(page, &format!("{} && {} > {before}", docked(&linked), reads(&linked)), wait);
+    let (asked, versions) = (count(b, "reads", &private), count(b, "versions", &private));
+    s.ok(
+        "the dock asks for their members-only brain's card (it has none) once per version of its row, not at each change to their list, where a link brain's is asked again",
+        arrived && off && again && asked >= 1 && asked <= versions,
+        json!({ "private": private, "linked": linked, "seen": seen(b)? }),
+    );
+
+    // Brains, both off the dock: a visit in which the link brain's row
+    // changes twice (pinned, unpinned), each change asking for its card
+    own(b, &private, "dock", false)?;
+    own(b, &linked, "dock", false)?;
+    let undocked = b.until(page, &format!("!{} && !{}", docked(&private), docked(&linked)), wait);
+    let (asked, versions, mut linked_reads) = (count(b, "reads", &private), count(b, "versions", &private), count(b, "reads", &linked));
+    let mut visited = go(b, "brains")? && b.until(page, &format!("{} && {} && {} > {linked_reads}", on_brains(&private), on_brains(&linked), reads(&linked)), wait);
+    for pinned in [true, false] {
+        linked_reads = count(b, "reads", &linked);
+        own(b, &linked, "pinned", pinned)?;
+        visited = visited && b.until(page, &format!("{} > {linked_reads}", reads(&linked)), wait);
+    }
+    let by_page = count(b, "reads", &private).saturating_sub(asked);
+    let changed = count(b, "versions", &private).saturating_sub(versions);
+    s.ok(
+        "Brains asks for their members-only brain's card (it has none) once a visit, not at each change to their list, where a link brain's is asked again",
+        undocked && visited && by_page >= 1 && by_page <= 1 + changed,
+        json!({ "by_page": by_page, "changed": changed, "seen": seen(b)? }),
+    );
+    go(b, "apps")?;
+
+    let label = "a brain made members only keeps the card it has, and one uploaded to their members-only brain after its 404 shows in the dock when the page comes back and on Brains at the next visit";
+    if s.shoots_cards() {
+        // the link brain's card, once shot, made members only: still shown
+        // (a visit asks again: one while its shot was being taken may have ended first)
+        let shown = s.eventually(super::site::CARD_WAIT, || {
+            if go(b, "brains").unwrap_or(false) && b.until(page, &carded(&linked), std::time::Duration::from_secs(10)) {
+                return true;
+            }
+            let _ = go(b, "apps");
+            false
+        });
+        let before = count(b, "reads", &linked);
+        let restricted = in_page(b, "PUT", &format!("/api/f/{linked}/visibility"), json!({ "visibility": "members" }))?;
+        let kept = restricted["status"] == 200 && b.until(page, &format!("{} > {before}", reads(&linked)), wait) && b.eval(page, &carded(&linked))? == true;
+        own(b, &linked, "dock", true)?;
+        let in_dock = b.until(page, &peeked(&linked), wait);
+        // the members-only brain back on the dock (a new version of its row,
+        // asked once, 404), then given the link brain's card, its row unchanged
+        let before = count(b, "reads", &private);
+        own(b, &private, "dock", true)?;
+        let asked = b.until(page, &format!("{} && {} > {before}", docked(&private), reads(&private)), wait);
+        let put = b.eval(page, &format!("(async () => {{ const card = await fetch('/api/f/{linked}/card', {{ headers: {{ 'x-fragment-shell': '1' }} }}).then((r) => r.blob()); const r = await fetch('/api/f/{private}/card', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'image/jpeg' }}, body: card, credentials: 'same-origin' }}); return r.status; }})()"))?;
+        // the page coming back after a minute away (its clock a minute on, for the focus alone)
+        b.eval(page, "(() => { const real = Date.now; Date.now = () => real() + 61_000; try { window.dispatchEvent(new Event('focus')); } finally { Date.now = real; } return true; })()")?;
+        let in_dock_after = b.until(page, &peeked(&private), wait);
+        let on_visit = go(b, "brains")? && b.until(page, &carded(&private), wait);
+        s.ok(
+            label,
+            shown && kept && in_dock && asked && put == 200 && in_dock_after && on_visit,
+            json!({ "shown": shown, "restricted": restricted, "kept": kept, "in_dock": in_dock, "asked": asked, "put": put, "in_dock_after": in_dock_after, "on_visit": on_visit, "seen": seen(b)? }),
+        );
+    } else {
+        s.skip_card(label);
+    }
+
+    b.eval(page, "window.__cardsSeenRestore()")?;
+    for name in [&private, &linked] {
+        let gone = in_page(b, "DELETE", &format!("/api/f/{name}"), Value::Null)?;
+        anyhow::ensure!(gone["status"] == 200, "{name} was not deleted: {gone}");
+    }
+    anyhow::ensure!(go(b, "apps")? && b.until(page, &format!("!{} && !{}", docked(&private), docked(&linked)), wait), "Apps did not open again with both brains gone");
+    Ok(())
+}
+
 /// Goal: an app's Reaches shows only on one that reaches the person's
 /// accounts, and such an app has no share link and is not public (Paul on
 /// FIN-352; the cell's rule, reach.rs). Invalid: an app with no key and no
@@ -8628,6 +8860,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
+    members_only_no_card_ui(s, b, page)?;
     apps_reach_ui(s, b, page, app)?;
     b.eval(page, &format!("(() => {{ if (!{row}?.querySelector('.icon-editor')) {}?.click(); return true; }})()", control("appearance")))?;
     apps_preview_visit_ui(s, b, page, app)?;
@@ -8992,7 +9225,53 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         renamed && back && hits == json!([]),
         json!({ "renamed": renamed, "back": back, "hits": hits }),
     );
-    pinned_agent_ui(s, api, b, page, session, first_title, reader, reader_chat, shots)
+    pinned_agent_ui(s, api, b, page, session, first_title, reader, reader_chat, shots)?;
+    hero_edge_kept_ui(s, api, b, page, session, reader)
+}
+
+/// What a hero drawn again shows of the edge it kept, read as it is drawn
+/// (`HERO` its selector): its edge's three properties, and what the
+/// page's CSP refused meanwhile.
+const HERO_EDGE_WATCH: &str = r#"(() => {
+  const was = document.querySelector(HERO), seen = { refused: [], drawn: null };
+  window.__heroEdge = seen;
+  document.addEventListener("securitypolicyviolation", (e) => seen.refused.push(`${e.violatedDirective} ${e.sourceFile}:${e.lineNumber}`), true);
+  // lit as the pointer lights it (chat-list.js `lightEdge`)
+  for (const [prop, value] of [["--edge-x", "12px"], ["--edge-y", "7px"], ["--edge-light", "0.5"]]) was.style.setProperty(prop, value);
+  new MutationObserver((_, watch) => {
+    const now = document.querySelector(HERO);
+    if (!now || now === was || !now.querySelector(".pin-mark")) return;
+    seen.drawn = ["--edge-x", "--edge-y", "--edge-light"].map((prop) => now.style.getPropertyValue(prop));
+    watch.disconnect();
+  }).observe(document.getElementById("chats"), { childList: true });
+  return true;
+})()"#;
+
+/// An agent's hero drawn again keeps the edge its pointer lit
+/// (chat-list.js `hero`), copied by the CSSOM: the shell's CSP refuses a
+/// style attribute set from a string, so a copy by `setAttribute` never
+/// applied and was a violation in the console at every drawing (Paul's
+/// preview console, 2026-11-19). Method: the Reader's hero lit as the
+/// pointer lights it, then pinned by the API (the list's watch draws it
+/// again: a new node, with its pin mark), the new node read as it is
+/// drawn; unpinned after.
+fn hero_edge_kept_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, reader: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
+    let pin = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{reader}/pinned"), Some(&json!({ "pinned": on })), &[]);
+    anyhow::ensure!(b.eval(page, &HERO_EDGE_WATCH.replace("HERO", &js(&hero)))? == true, "the Reader's hero is drawn");
+    let r = pin(true)?;
+    anyhow::ensure!(r.status == 200, "pinning the Reader: {r}");
+    let drawn = b.until(page, "window.__heroEdge.drawn !== null", wait);
+    let seen = b.eval(page, "window.__heroEdge")?;
+    s.ok(
+        "an agent's hero drawn again (pinned elsewhere) keeps the edge its pointer lit, and the shell's CSP refuses nothing as it is drawn",
+        drawn && seen["drawn"] == json!(["12px", "7px", "0.5"]) && seen["refused"] == json!([]),
+        &seen,
+    );
+    let r = pin(false)?;
+    anyhow::ensure!(r.status == 200 && b.until(page, &format!("!document.querySelector({})", js(&format!("{hero} .pin-mark"))), wait), "unpinning the Reader: {r}");
+    Ok(())
 }
 
 /// Their agents' order in the sidebar (FIN-404; Paul, 2026-11-07: a

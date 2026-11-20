@@ -64,6 +64,16 @@ an image may rely on this:
   again; after `computers.unsaved_max_ms` (30 minutes unless the
   deployment says otherwise) of failed tries it sleeps unsaved, and its
   next wake is a rollback.
+- **A wake cancels an idle sleep until its stop begins.** A wake of any
+  kind during an idle sleep's hold or save keeps it awake on the
+  container it has: nothing is restored or started, and the message
+  that woke it runs there. A hold not yet answered is let go at once,
+  and the save it was for is due when work settles. A save under way
+  goes on as an awake save, holding the guest to its end (a backup cut
+  short could be neither kept nor safely forgotten), and is kept or
+  failed as one: its failure opens no unsaved window. Its owner's sleep
+  or restart is never cancelled, nor a sleep whose stop began: a wake
+  then starts it again once it is asleep.
 - **A restart** (its owner's) is a sleep that saves if it can and stops
   whether or not it did, then a fresh start: from the image and the
   newest good save, never the snapshot, which could carry what broke it
@@ -118,9 +128,9 @@ an image may rely on this:
   2026-11-02), so its nine minutes and 25 seconds hold about 22 GB, more
   than a computer's 20 GB disk. Any restore that fits the disk fits the
   deadline; one that does not fit is set aside, not waited for.
-- **A start owed after its container goes** (a sleep's end with a wake
-  or a restart asked, a crash while wanted, a start that fell back past a
-  bad save) is due at once, told as `starting`: the request that saw it go
+- **A start owed after its container goes** (a sleep's end with a
+  restart asked or a wake it did not cancel, a crash while wanted, a
+  start that fell back past a bad save) is due at once, told as `starting`: the request that saw it go
   (a restart's aside) makes it, and each
   one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
   an alarm, the alarm it asks for, never the rest of the alarm that ran
@@ -747,6 +757,17 @@ provider's own hosts.
   deployment, or given by its owner, and not narrowed from it), and
   `credentialEnv`, every variable of the catalog, held or not, so an image
   can pass them all through once.
+- **An own key is its person's Vault's** (M16; docs/secrets.md, "A
+  person's Vault"), its own kind, used by each agent not narrowed from
+  it. The computer asks the Vault for it at each request it swaps, beside
+  its ask of the agent's fragment (so it waits on no hop more), and for
+  which keys the person holds at each read of a view. A computer from
+  before the move held them (`own_keys`, `own_signins`): it hands its keys
+  to the Vault at its owner's next read of it or of their connections, or
+  its agent's next call through one (never a start, an exit, a takeover or
+  its guest's request), and the Vault takes one only where its person said
+  nothing since. Until then its views list the keys it still owes. A
+  sign-in begun there finishes from there.
 - **The intercept** catches the catalog's hosts on HTTPS and HTTP, sends
   on over HTTPS, and swaps each placeholder where its row says it goes
   (`swap::Plan`). It refuses the request, reaching no provider, for a
@@ -780,8 +801,13 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
-- Each call a provider answered is counted in the computer's `uses`; an
-  operator key's is charged to its agent's owner (docs/ledger.md).
+- Each call a provider answered is counted as its agent's in the owner's
+  ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
+  is charged to its agent's owner too. A computer from before kept its
+  own `uses`; its step 7 keeps the months it held as owed (`meta`
+  `uses_owed:<month>`), each handed to the owner's ledger as the owner
+  reads the computer's view (never from a start, an exit or a takeover),
+  taken once, then forgotten.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
@@ -789,7 +815,7 @@ provider's own hosts.
   its guest reads its view). The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
-  Vault makes. A Vault's calls are not counted in `uses`.
+  Vault makes. A Vault's calls are not counted in usage.
 
 ### An agent's own model
 

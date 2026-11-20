@@ -270,24 +270,28 @@ mod tests {
 
     /// Goal (#1020's review): an idle sleep's hold, save and stop take most
     /// of the alarm that asked for them (a Durable Object's runs 15 minutes
-    /// at most), so the start a wake during it owes is never made in what
-    /// is left: the sleep's end asks for an alarm at once, an invocation of
-    /// its own, and that alarm makes it. Valid (owed and made once), the bound (its save as
-    /// long as its backups' bound, 11 minutes and more), replay (a second
-    /// alarm makes no second start). Method: the lifecycle's steps, each
-    /// what one invocation of the DO performs.
+    /// at most), so the start a wake during its stop owes is never made in
+    /// what is left: the sleep's end asks for an alarm at once, an
+    /// invocation of its own, and that alarm makes it, though the wake's
+    /// own hold ran out during the stop. Valid (owed and made once), the
+    /// bound (its save as long as its backups' bound, 11 minutes and more,
+    /// its stop asked again at its deadline), replay (a second alarm makes
+    /// no second start). Method: the lifecycle's steps, each what one
+    /// invocation of the DO performs.
     #[test]
     fn a_start_owed_after_a_long_sleep_comes_from_an_alarm_of_its_own() {
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
         let slept = T + IDLE_MS;
         assert!(l.apply(Event::Alarm, slept).actions.contains(&Action::Sleep { generation: g }), "the idle sleep, in an alarm");
-        // a wake as it holds (a port tab's)
-        assert!(l.apply(Event::Wake { why: Wake::Tab }, slept + 1_000).actions.is_empty());
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
         let saved = slept + 2_000 + 11 * 60_000;
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, saved).actions, vec![Action::Stop { generation: g, saved: true }]);
-        let asleep = saved + 10_000;
+        // a wake as it stops (a port tab's): its hold runs out before the stop ends
+        assert!(l.apply(Event::Wake { why: Wake::Tab }, saved + 1_000).actions.is_empty());
+        assert_eq!(l.apply(Event::Alarm, saved + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: g, saved: true }], "its stop, asked again");
+        let asleep = saved + 1_000 + IDLE_MS + 10_000;
+        assert!(asleep > saved + 1_000 + IDLE_MS, "the wake's hold ran out during the stop");
         let s = l.apply(Event::Asleep { generation: g }, asleep);
         assert!(s.ended.is_some_and(|e| e.by == LifeEnd::Sleep));
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "no start in what is left of the sleep's alarm: {s:?}");
@@ -309,7 +313,7 @@ mod tests {
     }
 
     /// Goal (#1020's review): its owner's sleep is the newest ask, asleep
-    /// too: a start owed after a sleep a wake came during, not made yet,
+    /// too: a start owed after a sleep a wake came during its stop, not made yet,
     /// is let go, so neither the sleep's own request nor the alarm the
     /// sleep's end asked for (replayed) starts it; a failed start's retry
     /// goes the same way. (One always on keeps its start, as after a sleep
@@ -321,9 +325,10 @@ mod tests {
         let g = started(&mut l, T);
         let slept = T + IDLE_MS;
         l.apply(Event::Alarm, slept);
-        l.apply(Event::Wake { why: Wake::Record }, slept + 1_000);
         let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 2_000));
         l.apply(Event::Saved { generation: g, seq }, slept + 3_000);
+        // a wake as it stops (one before would have cancelled it)
+        l.apply(Event::Wake { why: Wake::Record }, slept + 3_500);
         l.apply(Event::Asleep { generation: g }, slept + 4_000);
         assert!(l.start_due(slept + 4_000), "the wake owes a start");
         let s = l.apply(Event::Sleep, slept + 4_100);

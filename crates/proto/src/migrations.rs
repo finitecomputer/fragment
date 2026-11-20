@@ -666,6 +666,19 @@ pub struct StageOpened {
     pub manifest: Manifest,
 }
 
+/// `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one
+/// range of the stage's zip (a file's bytes, or a part of them) copied into
+/// a fragment's blobs on the platform, never through the agent's computer:
+/// the blob it is, by its bytes' SHA-256 (hex), their length, and their
+/// CRC-32, which the caller checks against the zip entry's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageCopied {
+    pub sha256: String,
+    pub bytes: u64,
+    pub crc32: u32,
+}
+
 /// `POST /api/migrations/stages/{stage}/done`: the import ended, well or
 /// not. The same `ok` again changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

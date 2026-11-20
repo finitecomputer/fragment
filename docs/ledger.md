@@ -100,6 +100,36 @@ bills them); a computer's time kept for its failed saves (the platform's:
 docs/computers.md); a computer's saves, an app facet's database and git
 storage (the debt ledger).
 
+## Usage
+
+What a person's agents used of each provider (M16; Paul, 2026-11-18:
+"one place for what my agents used this month") is the ledger's too: each
+agent's calls a provider answered through a computer's swap, by month,
+and what they cost. A connection's and an own key's are counted at $0
+(their provider bills the person); an operator key's at its charge as
+the swap priced it. It is a display, not money: what charges is the
+meter, above. `fragment_core::ledger::uses` is its state machine, the
+ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
+(Settings' Connections) its read.
+
+- **Off the path, best effort.** A swap sends its count (`/used`) to its
+  agent's owner's ledger after its answer, in `wait_until`, one for every
+  provider it named; nothing waits on it, and a count lost is lost (Paul:
+  "accounting should be best effort, not sprawl into interfering and
+  delaying everything that happens"). A count writes only the `uses`
+  table, never the head, so the gate's answers never wait on it.
+- **Bounded.** Thirteen months are kept (`MONTHS_KEPT`; an older one is
+  never read back, and a count, a hand-over or the ledger's daily sweep
+  forgets it), and a month takes at most `ROWS_MAX` agent and provider
+  pairs (a person's agents at each provider); a pair past that is logged
+  (`ledger.uses-full`), and one held counts on.
+- **Moved, never dropped.** A computer counted its agents' uses itself
+  before. Its step 7 keeps each month it held as owed, and it hands each
+  to its owner's ledger as its owner reads its view (`/take-uses`, under
+  `<computer>:<month>`). The ledger takes a month once by that id,
+  adding it to what it counted since: the same body again adds nothing,
+  another under it is refused. The debt ledger says when this goes.
+
 ## The price book
 
 The book is the core's defaults (`price/defaults.rs`, each price with its

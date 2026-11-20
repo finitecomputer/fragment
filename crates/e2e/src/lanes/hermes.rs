@@ -254,6 +254,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         ],
     );
     s.deploy(&agent);
+    super::computers::members_only(api, &owner, &agent_name)?;
     // its owner has no skills fragment yet (one is made below, as settings'
     // "Add the managed skills" makes it): the agent still knows its platform
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
@@ -792,6 +793,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let maple = s.create(api, &owner, &maple_name)?;
     s.commit(&maple, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"You are Maple, who tends the trees.\n")), ("agent.json", Some(br#"{"tier":"medium"}"#))]);
     s.deploy(&maple);
+    super::computers::members_only(api, &owner, &maple_name)?;
     let grove_name = s.named(api, &owner, "grove")?;
     let grove = s.create(api, &owner, &grove_name)?;
     s.commit(&grove, &[("fragment.json", Some(CHAT_JSON))]);

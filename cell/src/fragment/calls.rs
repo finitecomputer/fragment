@@ -88,8 +88,8 @@ impl Call for FaceOf {
     type Answer = Named;
 }
 
-/// Its reach, and whether its link opens it, for an operator's census
-/// (reach.rs): no names.
+/// Its reach, whether its link opens it, and whether it is an agent
+/// fragment shared past its owner, for an operator's census (reach.rs).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReachOf {}
 
@@ -98,6 +98,10 @@ pub(crate) struct Reach {
     pub kind: FragmentKind,
     pub reach: bool,
     pub beyond: bool,
+    /// An agent fragment shared past its owner and their own agents, as
+    /// one from before FIN-544 is (alone.rs); none in an older answer.
+    #[serde(default)]
+    pub shared: bool,
 }
 
 impl Call for ReachOf {

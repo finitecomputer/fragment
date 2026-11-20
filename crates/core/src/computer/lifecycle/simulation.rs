@@ -22,7 +22,9 @@ use crate::computer::*;
 /// no start unless always on. A port tab holds it only by its use: open
 /// or not, the tabs it counts never change whether it is wanted or when
 /// it would sleep, and while a tab is used a save is due within
-/// `SAVE_EVERY_MS` of its first use since the last save asked. Its saves ride along as the DO keeps them, so
+/// `SAVE_EVERY_MS` of its first use since the last save asked. A wake as an
+/// idle sleep holds or saves it keeps its container, awake: nothing
+/// started, stopped or saved again, and a save under way goes on. Its saves ride along as the DO keeps them, so
 /// their own assertions run too. Method: the DO's reports for the
 /// actions it was handed are delivered in any order, late, twice, or
 /// never, among events of any kind.
@@ -37,7 +39,7 @@ fn simulated_interleavings_keep_the_invariants() {
     }
     // the sim's bound is shorter than the default, so it is reached
     let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-    let mut reached = [0u32; 20];
+    let mut reached = [0u32; 22];
     // the images deploys pin, one after another and back
     let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
     for seed0 in 1..=8u64 {
@@ -156,6 +158,9 @@ fn simulated_interleavings_keep_the_invariants() {
             // tabs closed as it began), which changes nothing of the sleep
             let late_use = matches!(&event, Event::TabUsed) && l.tabs > 0 && l.ready && matches!(l.phase, Phase::Sleeping { .. });
             let sleep_before = (l.phase.clone(), l.saving);
+            // a wake as an idle sleep holds or saves it, before its stop
+            let wake_cancels = matches!(&event, Event::Wake { .. }) && l.cancels_sleep();
+            let saving_before = l.saving;
             let free_before = l.unmetered;
             let running_before = l.running();
             if matches!(l.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) && now > l.shown_up_ms() + ALARM_LATE_MS {
@@ -188,6 +193,19 @@ fn simulated_interleavings_keep_the_invariants() {
             if late_use {
                 assert_eq!((s.actions.len(), (l.phase.clone(), l.saving)), (0, sleep_before), "a use heard as it sleeps neither cancels nor moves its sleep (seed {seed0}, step {step})");
                 reached[18] += 1;
+            }
+            if wake_cancels {
+                // awake on the container it had: nothing started, stopped or saved again
+                assert!(matches!(l.phase, Phase::Awake { generation, .. } if Some(generation) == running_before), "a cancel keeps its container (seed {seed0}, step {step}): {l:?}");
+                assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. } | Action::Stop { .. } | Action::Save { .. } | Action::Sleep { .. })), "a cancel starts, stops and saves nothing (seed {seed0}): {s:?}");
+                if let Some(Saving::Save { .. }) = saving_before {
+                    // its save goes on, held to its end
+                    assert!(l.saving == saving_before && s.actions.is_empty(), "its save goes on (seed {seed0}): {s:?}");
+                    reached[21] += 1;
+                } else {
+                    assert!(l.saving.is_none() && s.actions.contains(&Action::Unhold { generation: l.generation() }), "its hold let go (seed {seed0}): {s:?}");
+                    reached[20] += 1;
+                }
             }
             if let Some(e) = s.ended {
                 assert!(came_up.contains(&e.generation), "only a start that came up ends a life (seed {seed0})");
@@ -279,6 +297,10 @@ fn simulated_interleavings_keep_the_invariants() {
                         if matches!(a, Action::Sleep { .. }) && l.tabs > 0 {
                             reached[16] += 1;
                         }
+                        // and a message, a page or its owner comes as an idle one holds
+                        if matches!(a, Action::Sleep { .. }) && matches!(l.phase, Phase::Sleeping { owner: false, .. }) && rng(&mut seed).is_multiple_of(3) {
+                            pending.push(Event::Wake { why: [Wake::Record, Wake::Tab, Wake::Owner][(rng(&mut seed) % 3) as usize] });
+                        }
                     }
                     Action::Save { generation: g, held, seq } => {
                         assert!(taken.insert(*seq, (*g, now, *held)).is_none(), "a save's number is asked for once");
@@ -287,6 +309,10 @@ fn simulated_interleavings_keep_the_invariants() {
                         // tab's close's)
                         if matches!(l.phase, Phase::Sleeping { .. }) && l.ready && l.tabs > 0 && rng(&mut seed).is_multiple_of(2) {
                             pending.push(Event::TabUsed);
+                        }
+                        // a message comes as an idle sleep saves (or stops, or after)
+                        if matches!(l.phase, Phase::Sleeping { owner: false, .. }) && rng(&mut seed).is_multiple_of(3) {
+                            pending.push(Event::Wake { why: Wake::Record });
                         }
                         if rng(&mut seed).is_multiple_of(fails_one_in) {
                             pending.push(Event::SaveFailed { generation: *g, seq: *seq, why: "sim".into() });
@@ -413,5 +439,5 @@ fn simulated_interleavings_keep_the_invariants() {
         assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
     }
     // every kind of save the lifecycle has was reached, across the seeds
-    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, tab uses heard as it slept, starts held up: {reached:?}");
+    assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed, silences passed over, idle exits slept, tab work due, slept under an open tab, tab use saves due, tab uses heard as it slept, starts held up, sleeps a wake cancelled at the hold and at the save: {reached:?}");
 }
