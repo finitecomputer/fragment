@@ -27,6 +27,7 @@ pub mod runtime;
 pub mod scratch;
 pub mod screen;
 pub mod screens;
+pub mod seen;
 pub mod simplex;
 pub mod store;
 pub mod transfer;

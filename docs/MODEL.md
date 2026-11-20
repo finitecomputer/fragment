@@ -13,11 +13,9 @@ the wire contract; docs/cloudflare-v1.md holds the decisions.
   process writes as it goes, or reads to decide what to do (a name, a
   setting, an index, a live transcript, a log), is state: it belongs in
   the fragment's `meta` or its app's SQL, not a file, and its history on
-  a channel. Some has not moved yet, each in a change of its own: a
-  fragment's title, an agent's role and picture (`fragment.json`,
-  `avatar.png` at live), an agent's settings (its `agent.json`) and a
-  session archive's indexes are still files, and the table below says
-  where each lives today. The test: would anyone ever open it in an editor,
+  a channel. Some has not moved yet, each in a change of its own: an
+  agent's settings (its `agent.json`) and a session archive's indexes are
+  still files, and the table below says where each lives today. The test: would anyone ever open it in an editor,
   diff it or revert it? If not, it is not a file. For a file-based app
   (a vault, a wiki, a brain) the files are the state, because people
   author them. A file of `fragment_core::blob::BLOB_MIN_BYTES` or more is
@@ -89,7 +87,7 @@ Every change is checked against this table.
 | Tree index (path, size, SHA per pinned commit) | derived from git | the cell's copy names its pinned SHA; moved by the platform's own moves, a writer's refresh after its push, or the poll backstop |
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one keeps the last good and says why (`status.code.error`) |
 | Members, roles, invites | the fragment's supervisor | grants and revokes transactional, each in `events`; the registry's copy of an invite waiting on an email (decision 63) is a pointer the fragment overrules |
-| How far a fragment's making has got (claimed, made, its template's repo, commit, deploy, install, landed) | its supervisor's `meta` rows and its template's commit key, read by `fragment_core::seed::stage` | none: never stored, so a restart, or an older release, reads the same stage |
+| How far a fragment's making has got (claimed, made, its template's repo, commit, deploy, install, landed) | its supervisor's `meta` rows and its template's commit key, read by `fragment_core::seed::stage`; a blessed fragment's repo is made at its first file | none: never stored, so a restart, or an older release, reads the same stage |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A fragment's search index | what its app writes (`…/search/upsert`), held in a `SearchIndex` object of the life's own (docs/api.md, A fragment's search) | a projection its app writes again whole when asked (a new embeddings space empties it); the supervisor holds who reads it, the forgets still to send, and whether the life wrote one (`MetaKey::Search`) |
 | The wire's shapes: what each route a client calls takes and answers, and its socket frames | `crates/proto`'s types and `src/routes.rs` | `docs/wire` (OpenAPI 3.1 and its reference) and `crates/proto/wire.lock`, which `cargo xtask wire` writes and `cargo xtask check` holds to proto and to master's facts; docs/api.md says what they mean |
@@ -111,8 +109,8 @@ Every change is checked against this table.
 | What is sold, at what price, and a seat's included credit | core's constants (`fragment_core::stripe`, `ledger::SEAT_INCLUDED`) | Stripe's Prices, refused at any other amount; pages read `GET /api/seat`'s `offer` |
 | A subscription, and an org's Stripe customer | Stripe | the registry's `orgs`, written only from a subscription fetched from Stripe, never from an event's own copy |
 | The image a computer's next start runs | each image name's reference in the Worker version; a computer's pin names one | the Computer DO's last look, recorded as the image each life runs |
-| An agent's name and picture | its fragment at live: `meta.title` and `avatar.png` (docs/api.md, "An agent's name and picture") | its cell's face, and everything read from it; its computer's profile and SimpleX profile follow a rename; no chat title or `SOUL.md` copies it; its label never changes |
-| An agent's role | its fragment at live: `meta.role` | its status's `agentRole`, which its runtime tells it at each turn |
+| A fragment's name, an agent's role | its supervisor's `meta` `face`, set at its making and through its face route (docs/api.md, "An agent's name and picture"); each change a `face.changed` event | everything read from it (lists, `__people`, status's `title` and `agentRole`, a page's Open Graph title); its computer's profile and SimpleX profile follow a rename; no chat title copies it; an agent's `SOUL.md` says each new name where it said the old, in the rename's own request; a `fragment.json`'s `meta.title` is a default a face with none takes, and written back by an older CLI with the mark `GET manifest` gave, its rename (`meta` `title_read`; the debt ledger); an agent's rename whose answer was lost is kept in `meta` `renaming` until the next; its label never changes |
+| An agent's picture | its fragment's `avatar.png` at main, read as main moves and at an agent's install (`meta` `picture`) | its face's address (`/api/identities/{npub}/picture?v=`); no deploy needed |
 | An agent's self: its `SOUL.md`, `memories/` and `skills/` | the agent fragment's git, authored by the agent and its owner | a Hermes agent's computer's checkout, synced both ways (docs/computers.md); another runtime's computer syncs none |
 | An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; `claude.model` and `claude.effort` for Claude Code; docs/computers.md, docs/bridge.md) | its computer's bridge and profile config; Settings and the agent's page read it |
 | An agent's home | its `agent.json` `home` in git (docs/api.md, "An agent's home") | read by the shell, its computer's profile and the bridge; none kept |
@@ -134,7 +132,7 @@ Every change is checked against this table.
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md`, naming no host | compiled into the CLI and the release's files (`/llms.txt`), each filled with its host |
 | The release's files: templates, the shell's, the agent docs | the repo | the cell's index and its Static Assets, by hash, from one build; the CLI embeds the templates |
 | A fragment's icon | its meta, naming one of its blobs (cell/src/icon.rs) | members' list rows carry its address |
-| A person's session archive | its conversations' files, `sessions/<key>.json`, in a fragment of theirs of kind `sessions` (templates/sessions/README.md) | its indexes (`index/<kind>.json`), a projection rewritten by each import; its search, a projection of `sessions/` each import writes (a source a file, its revision the file's sha256) and reconciles against the indexes; the store an import read is never written |
+| A person's session archive | its conversations' files, `sessions/<key>.json`, in a fragment of theirs of kind `sessions` (templates/sessions/README.md) | its indexes (`index/<kind>.json`), a cache each import writes again, each entry naming the commit of the file it describes and trusted only while that is the file's last commit; its search, a projection of `sessions/` each import writes (a source a file, its revision the file's sha256) and reconciles against the archive; the store an import read is never written |
 | A fragment's preview card | its own storage (`fragment_core::card::Cards`) | status's `page`; errors also an `events` row |
 | What members are doing: each one's newest listed record | the channel's records | the fragment's `listed`, and each member's list row (docs/api.md, Listed records) |
 | Native iPhone drafts and pending sends | protected, backup-excluded Application Support files, scoped to platform and person (`ios/Sources/ChatDraftStore.swift`) | bounded to 32 saved chats, 16 pending sends each; a send is saved before HTTP, retried only with the same id and body, never once refused; editing, saving and loading hold one set of bounds (`SavedChat`), and no saved file stops a chat; device keys live only in Keychain |

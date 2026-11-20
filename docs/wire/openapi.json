@@ -546,7 +546,7 @@
           "kind": {
             "$ref": "#/components/schemas/FragmentKind",
             "default": "app",
-            "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
+            "description": "What it is, as its live `fragment.json` last said (an app until it\nhas), and its title, its face's (`PUT /api/f/{name}/face`)."
           },
           "name": {
             "type": "string"
@@ -782,7 +782,7 @@
         "properties": {
           "agentRole": {
             "default": null,
-            "description": "An agent fragment's role (its live `fragment.json`'s `meta.role`,\ntrimmed; none when it says nothing), as its last install said: the\ntag the shell shows beside its name. Never any other fragment's.",
+            "description": "An agent fragment's role, as its face says it (trimmed; none when\nit says nothing): the tag the shell shows beside its name. Never\nany other fragment's.",
             "type": [
               "string",
               "null"
@@ -809,7 +809,7 @@
           "kind": {
             "$ref": "#/components/schemas/FragmentKind",
             "default": "app",
-            "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
+            "description": "What it is, as its live `fragment.json` last said (an app until it\nhas), and its title, its face's (`PUT /api/f/{name}/face`)."
           },
           "listed": {
             "default": [],
@@ -829,7 +829,7 @@
           },
           "picture": {
             "default": null,
-            "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at live (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
+            "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at main (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
             "type": [
               "string",
               "null"

@@ -108,6 +108,42 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
+## An older CLI renames by its fragment.json
+
+- **Shortcut:** a fragment's name is its cell's own (docs/api.md, "An
+  agent's name and picture"), set by `PUT /api/f/{name}/face`. The CLI
+  before it, which a computer's image carries and which can lag for days
+  (an agent runs `fragment rename` and `fragment agent --name`), renames
+  by reading `GET manifest`, writing `fragment.json` back with a new
+  `meta.title` and deploying. So that it still does, `GET manifest`
+  answers the face's title and, to an editor, a mark of the read (plane.rs
+  `manifest`, `title_read`; `MetaKey::TitleRead`), and a files write of
+  `fragment.json` naming it renames it once (`title_from_read`).
+- **Risk:** such a client writes the mark into its `fragment.json`, where
+  it stays, read by nothing once taken.
+- **Delete when:** the computer image pinned in production carries a CLI
+  from this release or later, and a week of production logs shows no
+  `face.changed` event from `fragment.json`. Then a Fragment step deletes
+  the `title_read` rows, and the manifest route's title and mark,
+  `title_read` and `title_from_read` go.
+
+## A repo whose create's answer is lost can outlive its life
+
+- **Shortcut:** a blessed fragment's repo is made at its first file, by
+  its first writer's seed (`seed::Making::SeedsLater`), named by its
+  life's key (`codestorage::repo_name`). A seed that sees its life ended
+  once the repo is made records it for deletion (`end_repo_of_no_life`).
+  But when code.storage makes the repo and its answer is lost (or the
+  lookup after it fails), the seed fails with nothing recorded; a later
+  writer finds the repo by its name, while a delete or wipe before one
+  records no repo, and the repo stays (as on master since repos were
+  named by their life's key, for a chat's).
+- **Risk:** an empty repo (no commit landed in it) outlives its fragment
+  at code.storage; nothing of the person's is in it.
+- **Delete when:** a life's end reconciles its repo by its name (the
+  life's key gives it) whatever its rows say, or the seed records its
+  intent before asking code.storage.
+
 ## A computer keeps its owner's own keys from before the move
 
 - **Shortcut:** a person's own keys and their sign-ins moved from their
@@ -1156,14 +1192,13 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment session import` commits each batch of
   conversations as upserts on whatever head main has
-  (cli/src/session/mod.rs `commit`); only the indexes' commit is made
-  again from main when it loses its race.
+  (cli/src/session/mod.rs `commit`).
 - **Risk:** two imports of one conversation at once keep the last one's
-  file, and its index entry may name the other's copy, so the next
-  import skips a newer copy once or writes one again. Nothing is lost.
-- **Delete when:** each batch's commit is made again from main as the
-  indexes' is (keeping the newer entry), or the archive moves to an app
-  whose mutation writes both.
+  file, which may be the older copy; the indexes describe whichever file
+  stands (each entry names its file's commit). Nothing is lost:
+  importing the newer copy again replaces it.
+- **Delete when:** each batch's commit compares and swaps each file it
+  replaces, made again from main when it loses (keeping the newer).
 
 ## The computer's view carries two fixed routes beside the list
 
