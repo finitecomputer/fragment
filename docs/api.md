@@ -149,8 +149,10 @@ frame (Which cookies count).
 but whose agent is, reads the fragment as a `viewer`, and acts through it
 never (a write needs their own membership: 403).
 
-**An agent acts for whoever asked, capped** (R17). A request signed by an
-agent may name `for=<npub>` in its signed URL's query: it acts with the
+**An agent acts for its owner, capped** (R17). A request signed by an
+agent may name `for=<its owner's npub>` in its signed URL's query, and no
+one else (403: an app trusts `call.principal`, and nothing binds anyone
+else to the request): it acts with the
 lower of that identity's role (its membership, an agent of its own that is
 a member, or the visibility floor; never a share link) and the agent's cap
 (its own role, or its owner's membership role if higher; never above
@@ -162,7 +164,7 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 `/api/models/v1/…`, and on a move's `POST
 /api/migrations/stages/{stage}/copy` (the fragment it copies into decides
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
-identity, 400. A site request's query is its app's.
+identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
 **An agent shares for its owner** (`fragment_core::access::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -761,7 +763,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/visibility` | the same | `{visibility}` → `{ok, visibility}`. Leaving `members` makes a new share link |
 | `POST /api/f/{name}/rotate` | the same | `{scopes?: [inbox, view]}` → `Rotated {inboxToken, viewToken, rotated}`; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/cap` | the owner (never an agent) | Ledger |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host. `{fromVault, hosts}` in place of `value`: a secret of the caller's own Vault moved here (FIN-466), by a Vault name's form alone (400 otherwise, before any Vault route), a person's alone (an agent 403), never a Nostr key's (400); claimed for this `{KEY}` as it is read, kept here, then removed from the Vault (none there: 404; claimed by a move elsewhere: 409, until that move is made again or the secret is set again) |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host. `{fromVault, hosts}` in place of `value`: a secret of the caller's own Vault moved here (FIN-466), by a Vault name's form alone (400 otherwise, before any Vault route), a person's alone (an agent 403), from the platform's own pages or their own key, never a fragment's page (`__secrets`, 403 for any name), never a Nostr key's (400), toward hosts within the ones its Vault names, when it names any (400 otherwise); claimed for this `{KEY}` as it is read, kept here, then removed from the Vault (none there: 404; claimed by a move elsewhere: 409, until that move is made again or the secret is set again) |
 | `GET /api/f/{name}/secrets` | editor | → `SecretList {secrets: [{name, hosts}]}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
@@ -1002,6 +1004,8 @@ the platform that changes the template installs again at each such
 fragment's next request (`code.installed`). Its repo holds only its face
 and data: a live commit declaring operations, channels, triggers or an
 agent, or carrying code, keeps the last good code and says to fork it.
+None of its own files is a page of its site: a path the release's site
+does not ship is never answered from its repo (Serving).
 
 ```json
 {
@@ -1795,7 +1799,7 @@ fragment's, `/api/…` included.
 
 | path | |
 | --- | --- |
-| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view |
+| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view. On a blessed template, the release's `site/` alone: a path it does not ship goes to its code's routes, else 404, never to the fragment's own files (those are read at `__file`) |
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
 | `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public; a blob's, or a file the size of a pointer, `no-cache`), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
@@ -1806,7 +1810,7 @@ fragment's, `/api/…` included.
 | `GET __channel/{channel}/newest` | the channel's readers: as `GET /api/f/{name}/channels/{channel}/newest` |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser calls as its person, an unsigned one gets an anonymous principal cookie; `public` callers get `PUBLIC_CALLS_PER_MIN` calls a minute each, `PUBLIC_CALLS_PER_MIN_FRAGMENT` a fragment |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`): `{id, input}`, the record's body as `input` → `{result: record, replayed}`; it spends a public call as a call does |
-| `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer, `application/json` only (so no cross-site form sets one), from the fragment's own page; written, never read back (`secret.set` logs it) |
+| `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer, `application/json` only (so no cross-site form sets one), from the fragment's own page; written, never read back (`secret.set` logs it). Never `{fromVault}` (403): a page runs its authors' code, so a Vault secret moves only on its person's word (docs/secrets.md) |
 | `GET __door`, `POST __door` | its owner's session: `/api/f/{name}/door`'s, from a connector's own page (a `POST` as `application/json`) |
 | `__signin`, `__signout` | this origin's session (Sign-in) |
 | `__fragment.js` | the browser library (below) |

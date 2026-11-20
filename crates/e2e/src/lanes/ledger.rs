@@ -886,15 +886,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a call names only a fragment its agent is in", r.status == 403, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", fragment_core::npub::encode(hand.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c4", "micros": 1_000 })))?;
-    let for_visitor = || api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)));
-    forget_gate(api, &owner_id)?;
-    let first = for_visitor()?;
-    let taught = gate_hears(s, api, &owner_id, "refused");
-    let r = for_visitor()?;
+    // `for` names only the agent's own owner (access::may_act_for): a turn
+    // naming anyone else is refused as it is signed, before any fragment
+    let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)))?;
     s.ok(
-        "an agent turn for someone else in a fragment past its cap: the first, its gate cold, goes on; the next is refused, 402",
-        first.status == 200 && taught && r.status == 402 && r.message().contains("cap this month"),
-        json!({ "first": first.status, "taught": taught, "next": r.body }),
+        "an agent turn naming someone other than its owner (`for`) is refused, 403",
+        r.status == 403 && r.message().contains("its own owner"),
+        &r,
     );
     let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&owner_id)), Some(&chat(false)))?;
     s.ok("and one for its owner goes on", r.status == 200, &r);
