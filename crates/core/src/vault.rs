@@ -330,11 +330,11 @@ pub fn ask_notice(id: &str, ask: &AskSecret, agent: &str, picture: Option<String
         (format!("You keep a {} already, and an ask never replaces one: decline it, and ask {agent} to name it otherwise.", ask.name), None, vec![decline])
     } else {
         let goes = match ask.hosts.is_empty() {
-            true => "It goes nowhere until you say where.".to_string(),
-            false => format!("Only {} would receive it.", ask.hosts.join(", ")),
+            true => format!("It goes nowhere until you say where, and {agent} never sees it."),
+            false => format!("Only {} would receive it. {agent} gets a stand-in to send there, never the secret itself.", ask.hosts.join(", ")),
         };
         (
-            format!("{goes} {agent} gets a stand-in to send there, never the secret itself."),
+            goes,
             Some(NoticeField { placeholder: "Paste it here".into() }),
             vec![NoticeAction::post_field("Save", route, serde_json::json!({})), decline],
         )
@@ -669,7 +669,7 @@ mod tests {
         assert!(n.field.is_some() && n.actions[0].field && n.actions[0].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef"));
         assert!(!n.actions[1].field && n.actions[1].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef/decline"));
         let parked = ask_notice(id, &ask("github", "Kept for later", &[]), "Juniper", None, 9, false);
-        assert_eq!(parked.detail.as_deref(), Some("It goes nowhere until you say where. Juniper gets a stand-in to send there, never the secret itself."));
+        assert_eq!(parked.detail.as_deref(), Some("It goes nowhere until you say where, and Juniper never sees it."));
         let held = ask_notice(id, &ask("github", "Rotate", &[]), "Juniper", None, 9, true);
         assert!(held.field.is_none() && held.actions.len() == 1 && held.actions[0].label == "Decline", "{held:?}");
         assert!(held.detail.as_deref().is_some_and(|d| d.contains("never replaces")), "{:?}", held.detail);

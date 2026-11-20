@@ -330,7 +330,7 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
     }
     let person = signed.identity.id.as_str();
     let answer = match (method, rest) {
-        (Method::Get, []) => ask(env, person, "vault/list", None).await?,
+        (Method::Get, []) => return json_bytes(ask(env, person, "vault/list", None).await?),
         (Method::Put, [name]) => {
             let raw: Box<RawValue> = crate::json_body(body)?;
             put(env, person, name, &raw).await?
@@ -338,7 +338,7 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
         (Method::Delete, [name]) => delete(env, person, name).await?,
         (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
     };
-    // a waiting ask's card may change with it (Save, or Decline alone)
+    // set or removed: a waiting ask's card may change with it (Save, or Decline alone)
     tell(env, person).await;
     json_bytes(answer)
 }
