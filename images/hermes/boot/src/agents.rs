@@ -113,9 +113,6 @@ pub fn runtime_of(a: &Agent) -> &str {
 /// files were restored for it (`places`).
 pub type Restored = BTreeSet<(String, String)>;
 
-/// The gateway's served profiles the boot reads, at most: one an agent of
-/// the computer's (at most `AGENTS_MAX`), and its default.
-pub const SERVED_MAX: usize = fragment_bridge::limits::AGENTS_MAX + 1;
 
 pub fn restored_key(a: &Agent) -> (String, String) {
     (a.fragment.clone(), runtime_of(a).to_string())

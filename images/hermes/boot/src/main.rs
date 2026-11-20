@@ -717,16 +717,32 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     }
 }
 
-/// The profiles the running gateway serves, as it last stamped them in its
-/// runtime status (`gateway_state.json`'s `served_profiles`, written as it
-/// starts and at each rescan of its profiles); none if it says none.
-fn gateway_served(home: &Path) -> BTreeSet<String> {
-    #[derive(serde::Deserialize)]
-    struct Status {
-        #[serde(default)]
-        served_profiles: Vec<String>,
+/// A Hermes agent whose profile was written while the gateway runs (one
+/// assigned, or switched back to Hermes) is ready for Hermes once the
+/// running gateway serves it: a turn relayed before is refused
+/// (`profile_mismatch`) and acknowledged, so lost. The gateway is asked
+/// (`rescan-profiles`, whose answer, pending or not, lists the profiles it
+/// serves now, never a past launch's), one ask at a time, again at each
+/// read of the computer's agents while one waits; a start's profiles,
+/// written before it starts, are ready at once.
+fn serve_check(home: &Path, agents: &[Agent], restoring: &Restoring) {
+    let mut r = restoring.lock().expect("the restores are never poisoned");
+    let waiting: Vec<(String, String)> = agents::hermes(agents).iter().map(agents::restored_key).filter(|k| !r.done.contains(k)).collect();
+    if r.serving || waiting.is_empty() {
+        return;
     }
-    std::fs::read(home.join("gateway_state.json")).ok().and_then(|b| serde_json::from_slice::<Status>(&b).ok()).map(|s| s.served_profiles.into_iter().take(agents::SERVED_MAX).collect()).unwrap_or_default()
+    r.serving = true;
+    let (home, restoring) = (home.to_path_buf(), restoring.clone());
+    tokio::spawn(async move {
+        let answer = ask_gateway(&home, "rescan-profiles").await;
+        let mut r = restoring.lock().expect("the restores are never poisoned");
+        r.serving = false;
+        let served: Vec<String> = answer.as_ref().ok().and_then(|a| a["served_profiles"].as_array()).map(|l| l.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        for key in waiting.into_iter().filter(|(f, _)| served.contains(&wire::profile(f))) {
+            ev!("profile.served", { "agent": key.0 });
+            r.done.insert(key);
+        }
+    });
 }
 
 /// One sync of an agent's own files with its agent fragment, where its
@@ -757,6 +773,9 @@ async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync
 struct Restores {
     done: agents::Restored,
     running: BTreeMap<String, Running>,
+    /// An ask of the gateway for the profiles it serves under way
+    /// (`serve_check`).
+    serving: bool,
 }
 
 /// A restore under way: for which runtime, and whether its assignment
@@ -1730,21 +1749,13 @@ async fn boot_main() {
                         // one switched back to Hermes while a restore of its
                         // files runs waits alone (agents.rs, `until_restored`)
                         let now = agents::until_restored(&agents, read, &running);
-                        // a Hermes agent whose profile was written while the
-                        // gateway runs is ready for Hermes once the gateway
-                        // serves it: a turn relayed before is refused
-                        // (`profile_mismatch`), and lost
-                        let restored = {
-                            let mut r = restoring.lock().expect("the restores are never poisoned");
-                            let served = gateway_served(&home);
-                            r.done.extend(agents::hermes(&now).iter().filter(|a| served.contains(&wire::profile(&a.fragment))).map(agents::restored_key));
-                            r.done.clone()
-                        };
+                        let restored = restoring.lock().expect("the restores are never poisoned").done.clone();
                         let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&now));
                         if !change.is_empty() || agents::ready_file(&now, &restored) != ready_now {
                             ready_now = follow_agents(&api, &change, &now, &restored, &home, ids, &route, &credential_env, &team).await;
                         }
                         published = restored;
+                        serve_check(&home, &now, &restoring);
                         agents = now;
                     }
                     // once per outage: the next read that answers ends it
