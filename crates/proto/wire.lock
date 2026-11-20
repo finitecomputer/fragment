@@ -71,6 +71,7 @@ bound Manifest.left_more default null
 bound Manifest.left_more range u64
 bound Manifest.zip_bytes range u64
 bound Member.addedAt range i64
+bound Member.door default null
 bound Member.email default null
 bound Member.kind default null
 bound Member.owner default null
@@ -133,6 +134,8 @@ bound Sizes.move range u64
 bound Sizes.total range u64
 bound Sizes.work range u64
 bound StageCompleted.zip_bytes range u64
+bound StageCopied.bytes range u64
+bound StageCopied.crc32 range u32
 bound StageDone.report_sha256 default null
 bound StageDone.why default null
 bound StagePart.bytes range u64
@@ -144,6 +147,8 @@ bound Urls.platform default ""
 bound channels.read.query.after range i64
 bound channels.read.query.before range i64
 bound channels.read.query.limit range u64
+bound migrations.copy.query.bytes range u64
+bound migrations.copy.query.offset range u64
 bound migrations.part.path.n range u32
 branches LiveIn.subscribe oneOf
 branches LiveOut.result oneOf
@@ -337,6 +342,7 @@ field Manifest.zip_bytes required integer
 field Manifest.zip_sha256 required string
 field Member.addedAt required integer
 field Member.addedBy required string
+field Member.door optional string|null
 field Member.email optional string|null
 field Member.kind optional IdentityKind|null
 field Member.owner optional string|null
@@ -468,6 +474,9 @@ field Sizes.work required integer
 field StageComplete.manifest required Manifest
 field StageCompleted.manifest_sha256 required string
 field StageCompleted.zip_bytes required integer
+field StageCopied.bytes required integer
+field StageCopied.crc32 required integer
+field StageCopied.sha256 required string
 field StageDone.ok required boolean
 field StageDone.report_sha256 optional string|null
 field StageDone.why optional string|null
@@ -505,6 +514,10 @@ field live.open.path.name required string
 field members.list.path.name required string
 field migrations.again.path.old required string
 field migrations.complete.path.stage required string
+field migrations.copy.path.stage required string
+field migrations.copy.query.bytes required integer
+field migrations.copy.query.into required string
+field migrations.copy.query.offset required integer
 field migrations.done.path.stage required string
 field migrations.later.path.old required string
 field migrations.never.path.old required string
@@ -620,6 +633,11 @@ route migrations.complete path migrations.complete.path
 route migrations.complete query migrations.complete.query
 route migrations.complete request StageComplete
 route migrations.complete response StageCompleted
+route migrations.copy POST /api/migrations/stages/{stage}/copy
+route migrations.copy accepts nip98
+route migrations.copy path migrations.copy.path
+route migrations.copy query migrations.copy.query
+route migrations.copy response StageCopied
 route migrations.done POST /api/migrations/stages/{stage}/done
 route migrations.done accepts nip98
 route migrations.done path migrations.done.path
@@ -857,6 +875,7 @@ type Sharing out object
 type Sizes in object
 type StageComplete in object
 type StageCompleted out object
+type StageCopied out object
 type StageDone in object
 type StageOpened out object
 type StagePart out object
@@ -895,6 +914,8 @@ type migrations.again.path in object
 type migrations.again.query in object
 type migrations.complete.path in object
 type migrations.complete.query in object
+type migrations.copy.path in object
+type migrations.copy.query in object
 type migrations.done.path in object
 type migrations.done.query in object
 type migrations.later.path in object

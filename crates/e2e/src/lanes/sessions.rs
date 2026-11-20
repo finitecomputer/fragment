@@ -104,6 +104,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &keys, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(super::computers::AGENT_JSON))]);
     s.deploy(&agent);
+    super::computers::members_only(api, &keys, &agent_name)?;
     let r = api.signed(&keys, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(fragment_core::npub::is_identity(&identity), "the agent on its computer: {r}");
