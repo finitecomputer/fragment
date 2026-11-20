@@ -488,6 +488,10 @@ pub(crate) enum TestHook {
     /// itself (`{ends}`, each null when it never does), which no route
     /// shows.
     CompEnds(String),
+    /// The glance's kept answers read this many ms earlier (at most
+    /// `glance::OLDER_MAX_MS`): a test sees them past their life
+    /// (`{older}`: how many parts).
+    GlanceOlder(i64),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the

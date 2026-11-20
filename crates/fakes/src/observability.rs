@@ -206,7 +206,8 @@ mod tests {
         let day = T - 5 * 3_600_000;
         let ask = |q: Question| answer(&lines(), &q.body("fragment", T, day)).unwrap();
         assert_eq!(uniq_of(&ask(Question::AwakeNow)), Ok(1), "a, twice; b an hour ago");
-        assert_eq!(by_computer_of(&ask(Question::AwakeToday)), Ok(vec![("computer:a".into(), 2), ("computer:b".into(), 1)]));
+        assert_eq!(uniq_of(&ask(Question::AwakeToday)), Ok(2));
+        assert_eq!(by_computer_of(&ask(Question::ComputersToday)), Ok(vec![("computer:a".into(), 2), ("computer:b".into(), 1)]));
         assert_eq!(by_computer_of(&ask(Question::AwakeWeek)), Ok(vec![("computer:a".into(), 2), ("computer:b".into(), 1)]));
         assert_eq!(uniq_of(&ask(Question::FragmentsNow)), Ok(2));
         assert_eq!(by_computer_of(&ask(Question::WontWake)), Ok(vec![("computer:c".into(), 1)]));

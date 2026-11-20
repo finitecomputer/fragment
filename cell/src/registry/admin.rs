@@ -63,12 +63,12 @@ impl Call for Health {
 }
 
 /// `POST /admin/glance-take`: what the registry keeps of each part of the
-/// glance's logs (`fragment_core::glance::Part`, `glance_parts`), and which
-/// parts the load at `now_ms`, of the day starting at `day_start`, reads
-/// again: those due, each held for it until `now_ms + REFRESH_LEASE_MS`.
+/// glance's logs (`fragment_core::glance::Part`, `glance_parts`) that a
+/// load of the day starting at `day_start` shows, and which parts the load
+/// reads again: those due, each held for it until `REFRESH_LEASE_MS` from
+/// now, by the registry's own clock (one clock for every load's hold).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct GlanceTake {
-    pub now_ms: i64,
     pub day_start: i64,
 }
 
@@ -80,10 +80,12 @@ pub(crate) struct Taken {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct TakenPart {
-    /// When its kept answer was read, and it (the cell's JSON), if one was.
+    /// When its kept answer was read, and it (the cell's JSON), if one is
+    /// kept that this load shows (`Part::shows`).
     pub kept: Option<(i64, String)>,
-    /// Whether this load reads it again.
-    pub read: bool,
+    /// When this load reads it again: until when it holds it, which ends
+    /// the hold (`Glance::read`).
+    pub held: Option<i64>,
 }
 
 impl Call for GlanceTake {
@@ -96,16 +98,17 @@ impl Call for GlanceTake {
 /// starting at `day_start` (both checked by the router:
 /// `fragment_core::glance::day_start`), and whose each of `computers` is
 /// (at most `glance::TROUBLE_MAX`: those in trouble). First it keeps the
-/// parts the same load read again (`GlanceTake`), by key: each answer read
-/// (the cell's JSON, at most `glance::KEPT_MAX_BYTES`), or none when its
-/// read failed. Either way the load's hold on the part ends.
+/// parts the same load read again (`GlanceTake`), by key, with the hold it
+/// was given: each answer read (the cell's JSON, at most
+/// `glance::KEPT_MAX_BYTES`, read at `now_ms`), or none when its read
+/// failed. Either way that hold ends.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Glance {
     pub now_ms: i64,
     pub day_start: i64,
     pub computers: Vec<String>,
     #[serde(default)]
-    pub read: Vec<(String, Option<String>)>,
+    pub read: Vec<(String, i64, Option<String>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -341,39 +344,43 @@ impl RegistryCell {
             day_start: Option<i64>,
             answer: Option<String>,
         }
+        let now = js::now_ms();
         let mut parts = Vec::with_capacity(Part::ALL.len());
         for part in Part::ALL {
             let row = self.row::<Row>("SELECT busy_until, at, day_start, answer FROM glance_parts WHERE part = ?", vec![part.key().into()])?;
-            let read = part.due(row.as_ref().map_or(0, |r| r.busy_until), row.as_ref().and_then(|r| r.at.zip(r.day_start)), b.now_ms, b.day_start);
-            if read {
+            let read = row.as_ref().and_then(|r| r.at.zip(r.day_start));
+            let held = part.due(row.as_ref().map_or(0, |r| r.busy_until), read, now, b.day_start).then_some(now + REFRESH_LEASE_MS);
+            if let Some(until) = held {
                 self.exec(
                     "INSERT INTO glance_parts (part, busy_until) VALUES (?, ?) ON CONFLICT (part) DO UPDATE SET busy_until = excluded.busy_until",
-                    vec![part.key().into(), SqlStorageValue::Integer(b.now_ms + REFRESH_LEASE_MS)],
+                    vec![part.key().into(), SqlStorageValue::Integer(until)],
                 )?;
             }
-            parts.push(TakenPart { kept: row.and_then(|r| r.at.zip(r.answer)), read });
+            let kept = row.filter(|r| r.day_start.is_some_and(|day| part.shows(day, b.day_start))).and_then(|r| r.at.zip(r.answer));
+            parts.push(TakenPart { kept, held });
         }
         Ok(Taken { parts })
     }
 
     fn glance(&self, b: Glance) -> CellResult<Glanced> {
-        use fragment_core::glance::{Part, DAY_MS, KEPT_MAX_BYTES, NEW_PEOPLE_MAX, REFRESH_LEASE_MS, TROUBLE_MAX, WEEK_MS};
+        use fragment_core::glance::{Part, DAY_MS, KEPT_MAX_BYTES, NEW_PEOPLE_MAX, TROUBLE_MAX, WEEK_MS};
         if b.computers.len() > TROUBLE_MAX {
             return Err(CellError::invalid(format!("a glance names at most {TROUBLE_MAX} computers")));
         }
         if b.read.len() > Part::ALL.len() {
             return Err(CellError::invalid(format!("a glance reads at most {} parts", Part::ALL.len())));
         }
-        if let Some((key, _)) = b.read.iter().find(|(k, _)| !Part::ALL.iter().any(|p| p.key() == k)) {
+        if let Some((key, _, _)) = b.read.iter().find(|(k, _, _)| !Part::ALL.iter().any(|p| p.key() == k)) {
             return Err(CellError::invalid(format!("no part of the glance is {key:?}")));
         }
-        if b.read.iter().any(|(_, a)| a.as_ref().is_some_and(|a| a.len() > KEPT_MAX_BYTES)) {
+        if b.read.iter().any(|(_, _, a)| a.as_ref().is_some_and(|a| a.len() > KEPT_MAX_BYTES)) {
             return Err(CellError::invalid(format!("a part of the glance is at most {KEPT_MAX_BYTES} bytes")));
         }
-        for (key, answer) in &b.read {
-            // this load's hold ends, then its answer is kept unless a newer one is
+        for (key, held, answer) in &b.read {
+            // this load's hold ends (another's, taken since, stands), then
+            // its answer is kept unless a newer one is
             let key = SqlStorageValue::from(key.as_str());
-            self.exec("UPDATE glance_parts SET busy_until = 0 WHERE part = ? AND busy_until = ?", vec![key.clone(), SqlStorageValue::Integer(b.now_ms + REFRESH_LEASE_MS)])?;
+            self.exec("UPDATE glance_parts SET busy_until = 0 WHERE part = ? AND busy_until = ?", vec![key.clone(), SqlStorageValue::Integer(*held)])?;
             if let Some(answer) = answer {
                 self.exec(
                     "UPDATE glance_parts SET at = ?, day_start = ?, answer = ? WHERE part = ? AND (at IS NULL OR at < ?)",

@@ -297,19 +297,22 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
         reread(&mut b)?;
         let kept = b.until(&page, "/^Updated .* · logs as of just now · this week's as of /.test(document.getElementById('glance-at').textContent)", wait);
         s.ok("read again within its life, the page shows the numbers kept, and how old they are", kept && tile(&mut b)? == json!(awake.to_string()), json!({ "tile": tile(&mut b)?, "lines": lines(&mut b)? }));
-        // another day's read counts it; then the page's own day, refused
-        // (429): the last numbers stand, with how old, and why
-        let day = day.as_i64().unwrap_or_default();
-        let other = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={}", day - 1), None)?;
-        let counted = other.body["logs"]["computersAwakeNow"] == awake + 1;
+        // past its life (made older by the registry's lever) a read counts
+        // it; then, older again, refused (429): the last numbers stand,
+        // with how old, and why
+        let older = || api.unsigned("POST", "/api/test/registry", Some(&json!({ "glanceOlder": fragment_core::glance::NOW_LIFE_MS })));
+        older()?;
+        let again = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={day}"), None)?;
+        let counted = again.body["logs"]["computersAwakeNow"] == awake + 1;
+        older()?;
         s.observability.fail_next(429, "Too many requests");
         reread(&mut b)?;
         let refused = b.until(
             &page,
-            &format!("/^Newer numbers couldn't be read: .*Too many requests$/.test(document.getElementById('glance-logs').textContent) && /logs as of/.test(document.getElementById('glance-at').textContent) && [...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now').querySelector('.big').textContent === '{}'", awake + 1),
+            &format!("/^Newer numbers couldn't be read: .*Too many requests$/.test(document.getElementById('glance-logs').textContent) && /logs as of 2 minutes ago/.test(document.getElementById('glance-at').textContent) && [...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now').querySelector('.big').textContent === '{}'", awake + 1),
             wait,
         );
-        s.ok("when the logs answer 429, the page keeps the last numbers read, says how old, and why newer ones couldn't be read", counted && refused, json!({ "tile": tile(&mut b)?, "lines": lines(&mut b)? }));
+        s.ok("read again past its life, a computer awake since counts; when the logs then answer 429, the page keeps the last numbers read, says how old, and why newer ones couldn't be read", counted && refused, json!({ "tile": tile(&mut b)?, "lines": lines(&mut b)?, "read": again.body["logs"]["computersAwakeNow"] }));
         for (width, height, mobile, name) in [(1280, 900, false, "glance-kept-1280.png"), (390, 844, true, "glance-kept-390.png")] {
             b.viewport(&page, width, height, mobile)?;
             let _ = b.screenshot(&page, &shots.join(name));
@@ -496,21 +499,22 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     let logs = &partial.body["logs"];
     let rows = logs["trouble"].as_array().cloned().unwrap_or_default();
     s.ok(
-        "a read of another day reads the now part again, not the week's; when only why saves failed can't be read, the logs' numbers and trouble stand, no row says why, and the glance says why not",
+        "a read of another day reads the now part again, not the week's, whose count takes in today's computers since; when only why saves failed can't be read, the logs' numbers and trouble stand, no row says why, and the glance says why not",
         partial.status == 200
             && asked(s).len() - before == now_part
             && logs["state"] == "read"
             && logs["at"] == partial.body["at"]
             && logs["weekAt"] == read["weekAt"]
             && logs["computersAwakeNow"] == 2
-            && logs["computersAwakeWeek"] == read["computersAwakeWeek"]
+            && logs["computersAwakeWeek"] == 3
             && rows.iter().map(|t| (&t["computer"], &t["kind"])).eq(trouble.iter().map(|t| (&t["computer"], &t["kind"])))
             && rows.iter().all(|t| t.get("why").is_none())
             && logs["whyUnread"].as_str().is_some_and(|w| w.contains("SaveWhys") && w.contains("too many events to answer")),
         json!({ "asked": asked(s).len() - before, "logs": logs }),
     );
-    // two loads at once of a day not kept: one reads, the other shows
-    // what was kept (or, done after, what the first read)
+    // two loads at once of a day not kept: one reads; the other, while it
+    // does, has nothing of that day to show and says so (or, after it,
+    // shows what it read)
     let before = asked(s).len();
     let (one, two) = std::thread::scope(|scope| {
         let one = scope.spawn(|| ask(operator, day - 2));
@@ -518,24 +522,32 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         (one.join(), two.join())
     });
     let both = [one.map_err(|_| anyhow::anyhow!("a load panicked"))??, two.map_err(|_| anyhow::anyhow!("a load panicked"))??];
+    let reading = |l: &Value| l["state"] == "failed" && l["why"] == fragment_core::glance::BEING_READ;
     s.ok(
-        "two loads at once read the logs once between them",
-        both.iter().all(|r| r.status == 200 && r.body["logs"]["state"] == "read") && asked(s).len() - before == now_part,
-        json!({ "asked": asked(s).len() - before, "at": [&both[0].body["logs"]["at"], &both[1].body["logs"]["at"]] }),
+        "two loads at once read the logs once between them: the other shows what was read, or says it is being read, never another day's today",
+        both.iter().all(|r| r.status == 200 && (r.body["logs"]["state"] == "read" || reading(&r.body["logs"])))
+            && both.iter().any(|r| r.body["logs"]["state"] == "read")
+            && asked(s).len() - before == now_part,
+        json!({ "asked": asked(s).len() - before, "logs": [&both[0].body["logs"]["state"], &both[1].body["logs"]["state"]] }),
     );
-    let kept = both.iter().map(|r| &r.body["logs"]).max_by_key(|l| l["at"].as_i64()).cloned().unwrap_or_default();
-    // Cloudflare limits the query API per account: refused (429), the
-    // last numbers stand, with when and why, and nothing more is asked
+    let kept = both.iter().map(|r| &r.body["logs"]).filter(|l| l["state"] == "read").max_by_key(|l| l["at"].as_i64()).cloned().unwrap_or_default();
+    // Cloudflare limits the query API per account: past its life (the
+    // kept answers made older by the registry's lever), a read refused
+    // (429) leaves the last numbers standing, with when and why, and asks
+    // nothing more
+    let older = |api: &Api| api.unsigned("POST", "/api/test/registry", Some(&json!({ "glanceOlder": fragment_core::glance::NOW_LIFE_MS })));
+    let made = older(api)?;
     s.observability.fail_next(429, "Too many requests");
     let before = asked(s).len();
-    let refused = ask(operator, day - 3)?;
+    let refused = ask(operator, day - 2)?;
     let logs = &refused.body["logs"];
     s.ok(
         "when the logs answer 429 (Too many requests), the glance shows the last numbers read, when they were, and why newer ones weren't; it asks nothing after the refusal",
-        refused.status == 200
+        made.body["older"] == 2
+            && refused.status == 200
             && logs["state"] == "read"
             && logs["whyKept"].as_str().is_some_and(|w| w.contains("Too many requests"))
-            && logs["at"] == kept["at"]
+            && logs["at"].as_i64() == kept["at"].as_i64().map(|at| at - fragment_core::glance::NOW_LIFE_MS)
             && logs["computersAwakeNow"] == kept["computersAwakeNow"]
             && logs["trouble"] == kept["trouble"]
             && asked(s).len() - before < fragment_core::glance::ASKED_AT_ONCE - 1
@@ -545,7 +557,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     );
     // the refusal let go of its hold: the next load reads again
     let before = asked(s).len();
-    let after = ask(operator, day - 3)?;
+    let after = ask(operator, day - 2)?;
     let logs = &after.body["logs"];
     s.ok(
         "the read after a refusal reads the logs again: new numbers, no why",

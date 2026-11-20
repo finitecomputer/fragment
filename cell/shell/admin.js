@@ -244,7 +244,7 @@ async function glance() {
   const read = logs.state === "read";
   $("tiles").replaceChildren(
     tile("Signups today", v.signups.today, `${v.signups.hour} in the last hour · ${v.signups.week} this week · ${v.signups.total} in all`),
-    tile("Computers awake now", read ? logs.computersAwakeNow : "–", read ? `${logs.computersAwakeToday} today · ${logs.computersAwakeWeek} this week` : "from the logs"),
+    tile("Computers awake now", read ? logs.computersAwakeNow : "–", read ? `${logs.computersAwakeToday} today · ${logs.computersAwakeWeek ?? "–"} this week` : "from the logs"),
     tile("Fragments awake now", read ? logs.fragmentsAwakeNow : "–", read ? `${logs.fragmentsAwakeToday} today` : "from the logs"),
     tile("Seats paid", h.seatsPaid, `${h.seatsComped} comped · ${h.orgsPaying} orgs paying`),
     tile("Signed in, last 24 hours", v.signedIn.day, `${v.signedIn.week} in the last 7 days`),
@@ -260,7 +260,7 @@ async function glance() {
   $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), troubleCell(t), String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));
   const up = (p) => (p.computerUp == null ? "–" : p.computerUp ? "yes" : "not yet");
   $("new-rows").replaceChildren(...v.newPeople.map((p) => row([p.email || p.npub, when(p.joinedAt), seatText(p.seat) || "none", p.agentAt ? when(p.agentAt) : "none", up(p)], openFromGlance(p.npub))));
-  $("glance-at").textContent = [`Updated ${new Date(v.at).toLocaleTimeString()}`, ...(read ? [`logs as of ${ago(logs.at, v.at)}`, `this week's as of ${ago(logs.weekAt, v.at)}`] : [])].join(" · ");
+  $("glance-at").textContent = [`Updated ${new Date(v.at).toLocaleTimeString()}`, ...(read ? [`logs as of ${ago(logs.at, v.at)}`] : []), ...(read && logs.weekAt != null ? [`this week's as of ${ago(logs.weekAt, v.at)}`] : [])].join(" · ");
   say("");
 }
 
