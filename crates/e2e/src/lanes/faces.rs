@@ -340,6 +340,36 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         kept_icon && given && removed,
         json!({ "row": row(api, &paul, &agent), "events": super::site::event_kinds(api, &paul, &agent) }),
     );
+    // an old client renaming it back to the title git holds ("Gus"), after
+    // a rename through its face ("Frank"): its write names the mark its
+    // manifest read gave, so it renames it, each time; a deploy that writes
+    // no fresh mark, and its fragment.json written again as git holds it
+    // (its mark taken), rename nothing
+    let old_rename = |title: &str| -> Result<bool> {
+        let m = api.signed(&paul, "GET", &format!("/api/f/{agent}/manifest"), None)?;
+        let mut body = m.body.clone();
+        body["meta"]["title"] = json!(title);
+        let files = json!({ "message": "Rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&body)?) }] });
+        let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&files))?.status == 200;
+        Ok(m.status == 200 && m.body["meta"]["title"] == "Frank" && wrote && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200)
+    };
+    let title_now = || row(api, &paul, &agent)["title"].clone();
+    let git_title = || api.signed(&paul, "GET", &format!("/api/f/{agent}/file?path=fragment.json"), None).ok().and_then(|r| serde_json::from_str::<Value>(&r.text).ok()).map(|m| m["meta"]["title"].clone()).unwrap_or(Value::Null);
+    let first_back = git_title() == "Gus" && title_now() == "Frank" && old_rename("Gus")? && title_now() == "Gus";
+    let reface = || api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" }))).map(|r| r.status == 200);
+    let again = reface()? && old_rename("Gus")? && title_now() == "Gus";
+    let other = json!({ "message": "something else", "files": [{ "path": "notes.md", "text": "another note\n" }] });
+    let unrelated = reface()? && api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&other))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && title_now() == "Frank";
+    let raw = api.signed(&paul, "GET", &format!("/api/f/{agent}/file?path=fragment.json"), None)?.text;
+    let mut rewritten: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    rewritten["meta"]["description"] = json!("an agent");
+    let files = json!({ "message": "its manifest, as git holds it", "files": [{ "path": "fragment.json", "text": rewritten.to_string() }] });
+    let raw_kept = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&files))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && title_now() == "Frank";
+    s.ok(
+        "an old client renaming it back to the title git holds, after a rename through its face, renames it, and again after another; a deploy writing no fresh mark, and its fragment.json written again as git holds it, rename nothing",
+        first_back && again && unrelated && raw_kept,
+        json!({ "first": first_back, "again": again, "unrelated": unrelated, "raw": raw_kept, "row": row(api, &paul, &agent), "events": super::site::event_kinds(api, &paul, &agent) }),
+    );
     // iOS from before the face titles a chat from its first message:
     // `GET manifest`, only while it says the title it expects, then
     // `fragment.json` written and deployed

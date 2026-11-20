@@ -389,6 +389,11 @@ pub(crate) enum MetaKey {
     /// renaming it (plane.rs `face_from_git`; the debt ledger).
     TitleSeen,
     PictureSeen,
+    /// The marks `GET manifest` gave its editors with the title it showed
+    /// (a JSON array of `[mark, title]`, at most `TITLE_READS_MAX`, newest
+    /// last): a write of `fragment.json` naming one is a client from before
+    /// the face renaming it (plane.rs `title_from_read`; the debt ledger).
+    TitleRead,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -552,6 +557,7 @@ impl MetaKey {
             MetaKey::Renaming => "renaming",
             MetaKey::TitleSeen => "title_seen",
             MetaKey::PictureSeen => "picture_seen",
+            MetaKey::TitleRead => "title_read",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",

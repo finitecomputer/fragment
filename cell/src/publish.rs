@@ -350,7 +350,14 @@ impl FragmentCell {
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
-            Wrote::Commit(sha) => json_response(&json!({ "commit": sha })),
+            Wrote::Commit(sha) => {
+                // a client from before the face renaming it (plane.rs `title_from_read`)
+                let manifest = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.as_deref());
+                if self.title_from_read(manifest, &who)? {
+                    self.flush_index().await;
+                }
+                json_response(&json!({ "commit": sha }))
+            }
             // nothing was expected, so nothing can conflict
             Wrote::Conflict(why) => Err(CellError::host(why)),
         }

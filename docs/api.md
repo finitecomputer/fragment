@@ -251,9 +251,13 @@ is left as it is.
 **A client from before the face** renamed a fragment by its
 `fragment.json`'s `meta.title`, and set an agent's picture by its
 `avatar.png`, then deployed. Until those are gone (the debt ledger),
-`GET manifest` answers its title as the face's, and an install takes, from
+`GET manifest` answers its title as the face's, and to an editor a mark of
+that read (`meta.titleRead`): a files write of `fragment.json` naming the
+mark, its title another than the one shown, is its title at once, while
+its face is still that one (each mark taken once; a title git holds
+already included). And an install takes, from
 its own `fragment.json` and `avatar.png` at live: a title that its last
-install's did not say, as its title (`face.changed`, `by` `fragment.json`);
+install's did not say, as its title (`face.changed`, `from` `fragment.json`);
 an agent's `avatar.png` changed since, checked as an icon is, as its
 picture (`picture.changed`), and one removed since, while its picture is
 still that one, as none. Nothing else of them names a face or refuses an install.
