@@ -337,8 +337,8 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
 /// offers no further paid seat, so no one is granted a seat's included
 /// credit on a trial's place they did not redeem. An offer made before
 /// the org trialed waits for it to be paid; the same seat asked again is
-/// answered as it is, and an admin's place is offered as ever
-/// (`fragment_core::org::seating`). Valid, invalid, replay.
+/// answered as it is, and an admin's place and an operator's comp are
+/// given as ever (`fragment_core::org::seating`). Valid, invalid, replay.
 pub fn trial_seats(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("trial-seats", &[Need::Fakes, Need::Deployment]) {
         return Ok(());
@@ -410,6 +410,31 @@ pub fn trial_seats(s: &mut Suite, api: &Api) -> Result<()> {
         "while it trials, an admin's place is offered as ever (200), but a seat to join that offer is refused (400 trial_seat_of_one): the offer stays an admin's place alone, and Stripe one seat",
         place.status == 200 && joined.status == 400 && joined.body["reason"] == "trial_seat_of_one" && waiting["admin"] == true && waiting["seat"].is_null() && seats(s) == Some(("trialing".to_string(), 1)),
         json!({ "place": place.status, "joined": [joined.status, joined.body.clone()], "offer": waiting, "stripe": format!("{:?}", seats(s)) }),
+    );
+
+    // ---- an operator's comp is no paid seat: given in a trialing org as
+    // ever, to a person at once, and to an email by an offer accepted there
+    let kim_org = seat(api, &kim)["seat"]["org"]["id"].as_str().unwrap_or("").to_string();
+    let comp = |body: Value| api.signed(&operator, "POST", "/api/admin/seats", Some(&body));
+    let mo = api.person()?;
+    let given = comp(json!({ "email": Api::email_of(&mo), "kind": "seat", "org": kim_org }))?;
+    let held = seat(api, &mo)["seat"].clone();
+    s.ok(
+        "while it trials, an operator comps a seat in it for a person as ever (200): theirs at once, comped, and Stripe stays one seat, trialing",
+        given.status == 200 && held["comped"] == true && held["good"] == true && held["org"]["id"] == kim_org.as_str() && seats(s) == Some(("trialing".to_string(), 1)),
+        json!({ "comp": [given.status, given.body.clone()], "seat": held, "stripe": format!("{:?}", seats(s)) }),
+    );
+    let nia_email = format!("trial-seats-nia-{}@e2e.test", &fragment_nip98::Keys::generate().pubkey_hex()[..10]);
+    let offered = comp(json!({ "email": nia_email, "kind": "seat", "org": kim_org }))?;
+    let nia = fragment_nip98::Keys::generate();
+    let session = api.sign_in(&nia_email)?;
+    api.approve(&session, &nia)?;
+    let took = api.signed(&nia, "POST", &format!("/api/seat/offers/{}/accept", offered.body["seat"]["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    let held = seat(api, &nia)["seat"].clone();
+    s.ok(
+        "and a comp offered to an email no one signed in with is accepted while it trials (a comp is not the trial's seat): they hold it, comped, and Stripe stays one seat",
+        offered.status == 200 && took.status == 200 && held["comped"] == true && held["org"]["id"] == kim_org.as_str() && seats(s) == Some(("trialing".to_string(), 1)),
+        json!({ "comp": [offered.status, offered.body.clone()], "accept": [took.status, took.body.clone()], "seat": held, "stripe": format!("{:?}", seats(s)) }),
     );
 
     // ---- an offer of a seat made before its org trialed waits until it is paid
