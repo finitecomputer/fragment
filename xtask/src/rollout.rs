@@ -21,8 +21,13 @@
 //! 1. The release live now is read from the Worker's deployments (its
 //!    version at 100%, and that version's `FRAGMENT_DEPLOY_ID` and
 //!    `FRAGMENT_SCHEMA`): the one a failure goes back to.
-//! 2. `wrangler deploy`, again only for an image's push that timed out
-//!    (the hand deploys' 4 GB layer did), which is before any upload.
+//! 2. `wrangler deploy`, again for an image's push that timed out (the
+//!    hand deploys' 4 GB layer did), which is before any upload, and once
+//!    more when it could not apply the container settings after its upload,
+//!    as wrangler says to (preview's master deploys at 96b82b38e and
+//!    78439b1be, 2026-11-20). Nothing is read between runs: the release
+//!    before stays 1's, so a first run that made the Worker live changes
+//!    no rollback.
 //! 3. Whether the Worker changed is read from its deployments, never from
 //!    wrangler's words (one that could not even run to its end included),
 //!    asked again with backoff for `OBSERVE_LIMIT` while they cannot be
@@ -58,10 +63,10 @@ use serde_json::Value;
 
 use crate::prepare::Clock;
 
-/// How many times `wrangler deploy` runs at most: again only after a push
-/// that timed out.
+/// How many times `wrangler deploy` runs at most while an image's push
+/// times out: again only after one that did.
 pub(crate) const DEPLOY_TRIES: u32 = 3;
-/// The pause before each of its tries after the first.
+/// The pause before each run after the first.
 pub(crate) const DEPLOY_PAUSE: Duration = Duration::from_secs(10);
 /// How long a deploy whose Worker is live is asked to finish, its pauses
 /// doubling from `FINISH_PAUSE_FIRST` to `FINISH_PAUSE_MAX`.
@@ -99,6 +104,10 @@ pub(crate) enum Wrangled {
     Done,
     /// An image's push timed out (before any upload): worth running again.
     PushTimedOut,
+    /// Wrangler could not finish applying the Durable Object-managed
+    /// Container application settings after its upload, and says to run
+    /// the same `wrangler deploy` again (its words): run once more.
+    SettingsUnapplied(String),
     /// Anything else, as wrangler said it: whether the Worker changed is
     /// read from its deployments.
     Failed(String),
@@ -210,21 +219,36 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
 }
 
 /// `wrangler deploy` until it is done, fails other than by a push that
-/// timed out, or has run `DEPLOY_TRIES` times. One that could not run to
-/// its end (it could not start, or its output could not be read) is a
-/// failure like any other: whether it changed the Worker is read after.
+/// timed out (`DEPLOY_TRIES` of those at most) or by settings it could not
+/// apply (once), each run again after `DEPLOY_PAUSE`. Nothing is read
+/// between runs: the release before stays the one read before the first.
+/// One that could not run to its end (it could not start, or its output
+/// could not be read) is a failure like any other: whether it changed the
+/// Worker is read after. A run once more that fails otherwise keeps the
+/// first's words (they say the Worker was deployed).
 fn deployed(p: &mut impl Platform, clock: &mut impl Clock) -> Wrangled {
-    for tries in 1..=DEPLOY_TRIES {
-        match p.deploy() {
-            Ok(Wrangled::PushTimedOut) if tries < DEPLOY_TRIES => {
-                eprintln!("deploy: an image's push timed out (try {tries} of {DEPLOY_TRIES}); running wrangler deploy again in {}", minutes(DEPLOY_PAUSE));
-                clock.sleep(DEPLOY_PAUSE);
+    let (mut pushes, mut unapplied) = (0, None);
+    loop {
+        let ended = match p.deploy() {
+            Ok(Wrangled::PushTimedOut) if pushes + 1 < DEPLOY_TRIES => {
+                pushes += 1;
+                eprintln!("deploy: an image's push timed out (try {pushes} of {DEPLOY_TRIES}); running wrangler deploy again in {}", minutes(DEPLOY_PAUSE));
+                None
             }
-            Ok(wrangled) => return wrangled,
-            Err(e) => return Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}")),
+            Ok(Wrangled::SettingsUnapplied(said)) if unapplied.is_none() => {
+                eprintln!("deploy: wrangler could not apply the container settings; running wrangler deploy once more in {}, as it says to", minutes(DEPLOY_PAUSE));
+                unapplied = Some(said);
+                None
+            }
+            Ok(wrangled) => Some(wrangled),
+            Err(e) => Some(Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}"))),
+        };
+        match (ended, &unapplied) {
+            (None, _) => clock.sleep(DEPLOY_PAUSE),
+            (Some(w @ (Wrangled::Done | Wrangled::SettingsUnapplied(_))), _) | (Some(w), None) => return w,
+            (Some(other), Some(first)) => return Wrangled::Failed(format!("{first} Run once more: {}", said(&other))),
         }
     }
-    unreachable!("the last try returns")
 }
 
 /// Whether a failed deploy changed the Worker, as its deployments say.
@@ -356,7 +380,7 @@ fn said(w: &Wrangled) -> String {
     match w {
         Wrangled::Done => "done".into(),
         Wrangled::PushTimedOut => "an image's push to the registry timed out, three times".into(),
-        Wrangled::Failed(why) => why.clone(),
+        Wrangled::SettingsUnapplied(why) | Wrangled::Failed(why) => why.clone(),
     }
 }
 
@@ -483,7 +507,7 @@ mod tests {
             let next = if self.deploys.len() > 1 { self.deploys.remove(0) } else { self.deploys[0].clone() };
             match &next {
                 Wrangled::Done => self.upload(),
-                Wrangled::Failed(_) if self.uploads_before_failing => self.upload(),
+                Wrangled::Failed(_) | Wrangled::SettingsUnapplied(_) if self.uploads_before_failing => self.upload(),
                 _ => {}
             }
             Ok(next)
@@ -534,10 +558,19 @@ mod tests {
         w.calls.iter().filter(|c| c.starts_with(call)).count()
     }
 
-    /// A Worker left live by a deploy that failed after its upload.
+    /// wrangler's words when the Worker deployed and its container
+    /// settings could not be applied (preview, 2026-11-20).
+    const UNAPPLIED: &str = "The Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings. Re-run the same `wrangler deploy` command to retry and finish deployment.";
+
+    fn unapplied() -> Wrangled {
+        Wrangled::SettingsUnapplied(UNAPPLIED.into())
+    }
+
+    /// A Worker left live by a deploy that failed after its upload (its
+    /// triggers' deploy refused).
     fn live_unfinished() -> World {
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
-        w.deploys = vec![Wrangled::Failed("could not finish applying its Durable Object-managed Container application settings".into())];
+        w.deploys = vec![Wrangled::Failed("A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/subdomain) failed.".into())];
         w.uploads_before_failing = true;
         w
     }
@@ -640,18 +673,88 @@ mod tests {
         assert_eq!((count(&w, "deploy"), w.ends()), (DEPLOY_TRIES as usize, (OLD.into(), OLD.into())));
     }
 
+    /// Preview's master deploys at 96b82b38e and 78439b1be (2026-11-20):
+    /// wrangler could not finish applying the container settings, and the
+    /// deployments, read at once, named the version before (`uploads`
+    /// false), though the next deploy found 96b82b38e's live. Run once
+    /// more, as wrangler says, after the pause a push's retry takes; then
+    /// verified as any deploy is.
     #[test]
-    fn a_worker_live_whose_settings_were_not_applied_is_finished_not_uploaded_again() {
-        // 2026-10-24: "The Worker version was deployed, but Wrangler could
-        // not finish applying its Durable Object-managed Container
-        // application settings", for minutes
+    fn settings_not_applied_are_run_once_more_as_wrangler_says() {
+        for uploads in [false, true] {
+            let mut w = World::new(OLD, NEW, Some(SCHEMA));
+            w.deploys = vec![unapplied(), Wrangled::Done];
+            w.uploads_before_failing = uploads;
+            let clock = Fake::default();
+            let out = run(&mut w, &mut clock.clone(), NEW, SCHEMA, Ok(())).unwrap();
+            assert_eq!(out, Outcome::Deployed, "uploads: {uploads}");
+            assert_eq!(w.ends(), (NEW.into(), NEW.into()));
+            assert_eq!((count(&w, "deploy"), count(&w, "live"), count(&w, "version"), count(&w, "finish"), count(&w, "rollback")), (2, 1, 0, 0, 0));
+            assert!(count(&w, "probe") > 0, "verified");
+            assert_eq!(clock.0.get(), DEPLOY_PAUSE);
+        }
+    }
+
+    #[test]
+    fn settings_not_applied_twice_fail_as_they_did() {
+        // the deployments name the version before: nothing changed, in
+        // wrangler's words, as before; never a third run
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
-        w.deploys = vec![Wrangled::Failed("could not finish applying its Durable Object-managed Container application settings".into())];
+        w.deploys = vec![unapplied()];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(UNAPPLIED.into()));
+        assert_eq!(out.result().unwrap_err().to_string(), format!("deploy: nothing changed: {UNAPPLIED}"));
+        assert_eq!((count(&w, "deploy"), w.ends()), (2, (OLD.into(), OLD.into())));
+        // 2026-10-24: the Worker live, the version not ready to read back
+        // for minutes: finished, not uploaded a third time
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![unapplied()];
         w.uploads_before_failing = true;
         w.finish_fails = 4;
         assert_eq!(deploy(&mut w), Outcome::Deployed);
         assert_eq!(w.ends(), (NEW.into(), NEW.into()));
-        assert_eq!((count(&w, "deploy"), count(&w, "finish v-new"), count(&w, "rollback")), (1, 5, 0), "one upload; finished on its fifth ask");
+        assert_eq!((count(&w, "deploy"), count(&w, "finish v-new"), count(&w, "rollback")), (2, 5, 0), "two uploads; finished on its fifth ask");
+        // review of #1411: a second run that fails otherwise keeps the
+        // first's words, which say the Worker was deployed
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        let preparing = "Timed out while preparing the container image on Cloudflare's network.";
+        w.deploys = vec![unapplied(), Wrangled::Failed(preparing.into())];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(format!("{UNAPPLIED} Run once more: {preparing}")));
+        assert_eq!(count(&w, "deploy"), 2);
+    }
+
+    /// A first run that made the new Worker live changes nothing a failure
+    /// reads after the second: the release before is the one read before
+    /// the first, never re-read between runs, so a rollback goes back to
+    /// it and is held to its schema.
+    #[test]
+    fn a_second_run_after_a_live_first_still_goes_back_to_the_release_before() {
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![unapplied(), Wrangled::Done];
+        w.uploads_before_failing = true;
+        w.lag = None;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::RolledBack { to, .. } if to == OLD), "{out:?}");
+        assert_eq!(w.ends(), (OLD.into(), OLD.into()));
+        assert_eq!((count(&w, "deploy"), count(&w, "live"), count(&w, "rollback v-old")), (2, 1, 1));
+
+        let mut w = World::new(OLD, NEW, Some("0000000000000000"));
+        w.deploys = vec![unapplied(), Wrangled::Done];
+        w.uploads_before_failing = true;
+        w.lag = None;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("forward only")), "{out:?}");
+        assert_eq!((count(&w, "deploy"), count(&w, "rollback")), (2, 0));
+    }
+
+    #[test]
+    fn the_settings_one_more_run_is_apart_from_a_push_s_tries() {
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![unapplied(), Wrangled::PushTimedOut];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(format!("{UNAPPLIED} Run once more: an image's push to the registry timed out, three times")));
+        assert_eq!(count(&w, "deploy"), 1 + DEPLOY_TRIES as usize, "bounded");
     }
 
     #[test]
