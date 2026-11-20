@@ -428,6 +428,9 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         (190, "http://api.elevenlabs.io/v1/workspaces/api-keys/disable?api_key_name=self", "ELEVENLABS_API_KEY", "xi-api-key", true, "POST /v1/workspaces/api-keys/disable"),
         (191, "http://rest.fal.ai/tokens/", "FAL_KEY", "authorization", true, "* /tokens/**"),
         (192, "http://api.firecrawl.dev/v2/team/activity", "FIRECRAWL_API_KEY", "authorization", false, "* /*/team/**"),
+        // the same lists under their other names (Firecrawl's routes)
+        (186, "http://api.firecrawl.dev/v2/crawl/ongoing", "FIRECRAWL_API_KEY", "authorization", false, "GET /*/crawl/ongoing"),
+        (187, "http://api.firecrawl.dev/v2/browser", "FIRECRAWL_API_KEY", "authorization", false, "GET /v2/browser"),
         (193, "http://api.browser-use.com/api/v3/browsers", "BROWSER_USE_API_KEY", "x-browser-use-api-key", false, "GET /api/*/browsers"),
         (194, "http://api.perplexity.ai/generate_auth_token", "PERPLEXITY_API_KEY", "authorization", true, "* /generate_auth_token"),
         (195, "http://api.x.com/2/usage/tweets", "X_API_BEARER_TOKEN", "authorization", false, "* /2/usage/**"),
