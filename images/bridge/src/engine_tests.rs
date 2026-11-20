@@ -594,6 +594,9 @@ fn an_agent_is_told_its_disk_is_filling_once_per_read() {
     for room in [0, 1, 999_999, 1_000_000_000, 2_999_999_999, u64::MAX] {
         assert!(crate::note::disk(room).len() <= limits::DISK_NOTE_MAX_BYTES, "{room}");
     }
+    // the room as its owner's notice says it: rounded to a tenth of a GB (2,389,566,592 bytes: 2.4 GB), whole MB under one
+    let said = |room: u64| crate::note::disk(room).split(" of room").next().unwrap_or_default().rsplit("only ").next().unwrap_or_default().to_string();
+    assert_eq!([said(2_389_566_592), said(2_349_999_999), said(999_499_999), said(999_500_000), said(400_000)], ["2.4 GB", "2.3 GB", "999 MB", "1000 MB", "1 MB"]);
 }
 
 /// Goal: a person's message to the lead starts exactly one turn, which is

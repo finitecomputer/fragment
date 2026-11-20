@@ -398,7 +398,14 @@ pub fn disk(room: u64) -> String {
     let state = if room == 0 {
         "Your computer is full: it may not start again from its save after it sleeps.".to_string()
     } else {
-        let left = if room >= GB { format!("{}.{} GB", room / GB, room % GB / (GB / 10)) } else { format!("{} MB", (room / MB).max(1)) };
+        // as its owner's notice says it (fragment_core's `notice::size`):
+        // GB to the nearest tenth, under one in whole MB, at least 1
+        let left = if room >= GB {
+            let tenths = room.saturating_mul(10).saturating_add(GB / 2) / GB;
+            format!("{}.{} GB", tenths / 10, tenths % 10)
+        } else {
+            format!("{} MB", ((room + MB / 2) / MB).max(1))
+        };
         format!("Your computer is almost full: only {left} of room is left before it can no longer start again from its save.")
     };
     let line = format!("{state} Before anything else, load the disk-space-finite skill and make room: move big files you are not using to storage, then tell your owner what you moved.");
