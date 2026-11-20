@@ -301,6 +301,8 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
+  // The exits seen of the running start's container (`#watch`).
+  #exits = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -338,10 +340,7 @@ class ContainerHost {
   adopt(generation) {
     if (!this.#c.running) return false;
     this.#generation = generation;
-    this.#c.monitor().then(
-      () => this.#report("computer/exited", { generation }),
-      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
-    );
+    this.#watch(generation);
     return true;
   }
 
@@ -366,10 +365,7 @@ class ContainerHost {
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
     if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage, () => !overtaken()), overtaken))) return false;
-    this.#c.monitor().then(
-      () => this.#report("computer/exited", { generation }),
-      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
-    );
+    this.#watch(generation);
     try {
       await settled(() => this.#c.setInactivityTimeout(idleMs));
     } catch (e) {
@@ -394,6 +390,28 @@ class ContainerHost {
     return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, live);
   }
 
+  // Watches start `generation`'s container: its exit, for any reason, is
+  // reported as `computer/exited` for it, and counted while it is the
+  // running start (`#live`).
+  #watch(generation) {
+    const exited = (why) => {
+      if (generation === this.#generation) this.#exits++;
+      this.#report("computer/exited", why === undefined ? { generation } : { generation, why });
+    };
+    this.#c.monitor().then(() => exited(), (e) => exited(String((e && e.message) || e)));
+  }
+
+  // Whether running start `generation`'s container is still the one it
+  // armed for: not superseded, destroyed or exited since. A registration
+  // asked after it is (a retry, intercepts.mjs `landed`) is never sent:
+  // registrations land before a start too, so it would spend the next
+  // start's room (Sol on #1427).
+  #live(generation) {
+    const destroys = this.#destroys;
+    const exits = this.#exits;
+    return () => generation === this.#generation && destroys === this.#destroys && exits === this.#exits;
+  }
+
   #egress(computer) {
     return (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
   }
@@ -405,7 +423,7 @@ class ContainerHost {
   // running one, nothing asked; false when it was superseded meanwhile.
   async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return null;
-    const live = () => generation === this.#generation;
+    const live = this.#live(generation);
     let full;
     try {
       full = await this.#intercept(computer, swapHosts, codestorage, live);
@@ -424,7 +442,7 @@ class ContainerHost {
   // false when it was superseded while they registered.
   async armSwap(generation, computer, hosts) {
     if (generation !== this.#generation) return null;
-    const live = () => generation === this.#generation;
+    const live = this.#live(generation);
     try {
       const full = await interceptSwap(this.#c, this.#egress(computer), hosts, live);
       return live() && full;
