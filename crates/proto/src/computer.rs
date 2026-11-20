@@ -680,6 +680,10 @@ pub struct RestartAsk {
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeen {
     pub life: u64,
+    /// The notice read is the one that says its newest save did not fit
+    /// its disk (its OK says so): another of that life hides only itself.
+    #[serde(default, rename = "tooBig", skip_serializing_if = "std::ops::Not::not")]
+    pub too_big: bool,
 }
 
 /// `POST /api/computers/{id}/key-caps/{provider}`: its owner's hourly cap on

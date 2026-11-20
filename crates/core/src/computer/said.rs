@@ -33,6 +33,15 @@ fn body(key: &str, value: impl Into<Value>) -> Value {
     Value::Object(m)
 }
 
+/// The OK of a notice that its newest save did not fit its disk:
+/// `{life, tooBig}` (`NoticeSeen`).
+fn seen_too_big(life: u64) -> Value {
+    let mut m = Map::new();
+    m.insert("life".into(), life.into());
+    m.insert("tooBig".into(), true.into());
+    Value::Object(m)
+}
+
 fn notice(id: String, kind: &str, level: NoticeLevel, title: String) -> Notice {
     Notice { id, kind: kind.into(), level, title, text: None, detail: None, until: None, actions: vec![], must_answer: false, image: None }
 }
@@ -102,7 +111,8 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             };
             Notice {
                 text: Some(said),
-                actions: vec![NoticeAction::post("OK", at("notices/seen"), body("life", *life))],
+                // its OK names which notice of that life it is (`saw_notice`)
+                actions: vec![NoticeAction::post("OK", at("notices/seen"), if *too_big && !*pending && save.is_some() { seen_too_big(*life) } else { body("life", *life) })],
                 ..notice(format!("went_back:{life}"), "went_back", NoticeLevel::Info, title.into())
             }
         }
@@ -223,7 +233,7 @@ mod tests {
         let told = too_big(Some(20 * MIN + 8 * 60 * MIN));
         assert_eq!((told.level, told.title.as_str(), told.id.as_str()), (NoticeLevel::Info, "Your computer's newest save didn't fit its disk", "went_back:6"));
         assert_eq!(told.text.as_deref(), Some("It went back to its save from 8 hours before it stopped. The newer files are kept for 30 days: you can still export them in Settings."));
-        assert_eq!(post(&told), vec![("OK".into(), format!("{at}/notices/seen"), json!({ "life": 6 }))]);
+        assert_eq!(post(&told), vec![("OK".into(), format!("{at}/notices/seen"), json!({ "life": 6, "tooBig": true }))]);
         assert_eq!(too_big(None).text.as_deref(), Some("It went back to an older save. The newer files are kept for 30 days: you can still export them in Settings."));
 
         let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &f)[0];

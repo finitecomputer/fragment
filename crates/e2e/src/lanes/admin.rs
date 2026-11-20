@@ -258,7 +258,7 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     let view = || api.signed(&una, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
     let choose = |keys: &Keys, body: Value| api.signed(keys, "POST", &format!("/api/admin/people/{una_id}/computer/start-from"), Some(&body));
-    let wake = || api.impatient(Duration::from_secs(60)).signed(&una, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let wake = || api.signed(&una, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
     let awake = |s: &Suite| s.eventually(WAKE, || view()["phase"] == "awake");
     let asleep = |s: &Suite| {
         std::thread::sleep(QUEUE_DRAIN);

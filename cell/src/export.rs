@@ -1752,14 +1752,14 @@ impl PrincipalCell {
                             .collect(),
                     }
                 };
-                let (save, set_aside) = match crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await {
-                    Ok(v) if v["save"].is_object() => (Some(exported(&v["save"], core::save_path)), v["setAside"].is_object().then(|| exported(&v["setAside"], core::set_aside_path))),
-                    Ok(_) => {
-                        skipped.push(core::Skipped { part: "save".into(), why: "it was never saved".into() });
-                        (None, None)
-                    }
-                    Err(e) => return Err(e.into()),
-                };
+                // either may be missing: a save set aside is exported though
+                // none it may restore is usable (Codex on the no-room PR)
+                let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await?;
+                let save = v["save"].is_object().then(|| exported(&v["save"], core::save_path));
+                let set_aside = v["setAside"].is_object().then(|| exported(&v["setAside"], core::set_aside_path));
+                if save.is_none() && set_aside.is_none() {
+                    skipped.push(core::Skipped { part: "save".into(), why: "it was never saved".into() });
+                }
                 run.job.comp = Some(Comp { id: id.clone(), view, save, set_aside, skipped });
                 run.job.at = At::Computer { i, step: CompStep::Records { record: 0 } };
             }

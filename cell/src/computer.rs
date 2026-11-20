@@ -3580,7 +3580,7 @@ impl ComputerCell {
             (Method::Put, ["image"]) => json_response(&self.pin(&image_named(&req.bytes().await?)?).await?),
             (Method::Post, ["notices", "seen"]) => {
                 let b: NoticeSeen = body_json(&mut req).await?;
-                if !self.update_saves(|s| s.saw(b.life))? {
+                if !self.update_saves(|s| s.saw_notice(b.life, b.too_big))? {
                     return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
                 }
                 // its owner's other pages read it again, and tell it no more

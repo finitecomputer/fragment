@@ -3328,7 +3328,7 @@ pub fn computer_room(s: &mut Suite, api: &Api) -> Result<()> {
     let life = newest["generation"].clone();
     let failing = lever_with(api, &id, json!({ "op": "fail-restore", "save": 2 }))?;
     let view = || api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
-    let _ = api.impatient(Duration::from_secs(60)).signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
     let mut v = Value::Null;
     let up = s.eventually(WAKE + WAKE, || {
         v = view();
@@ -3377,7 +3377,7 @@ pub fn computer_room(s: &mut Suite, api: &Api) -> Result<()> {
     let alone = api.person()?;
     let (lone, ok) = computer_saved(s, api, &alone, 1)?;
     let failing = lever_with(api, &lone, json!({ "op": "fail-restore", "save": 1 }))?;
-    let _ = api.impatient(Duration::from_secs(60)).signed(&alone, "POST", &format!("/api/computers/{lone}/wake"), Some(&json!({})));
+    let _ = api.signed(&alone, "POST", &format!("/api/computers/{lone}/wake"), Some(&json!({})));
     let mut gave_up = Value::Null;
     let stuck = s.eventually(Duration::from_secs(180), || {
         gave_up = api.signed(&alone, "GET", &format!("/api/computers/{lone}"), None).map(|r| r.body).unwrap_or(Value::Null);
@@ -3400,7 +3400,7 @@ fn computer_saved(s: &Suite, api: &Api, owner: &crate::Keys, lives: u32) -> Resu
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     let mut ok = made.status == 200;
     for _ in 0..lives {
-        let _ = api.impatient(Duration::from_secs(60)).signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+        let _ = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
         ok &= s.eventually(WAKE, || phase(api, owner, &id) == "awake");
         let (slept, _) = put_to_sleep(s, api, owner, &id);
         ok &= slept;

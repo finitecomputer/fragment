@@ -262,7 +262,7 @@ impl Saves {
     /// lists and its owner's export reads.
     pub fn every_save(&self) -> Vec<&Save> {
         let mut all: Vec<&Save> = self.saves.iter().chain(&self.aside).collect();
-        all.sort_by(|a, b| b.number.cmp(&a.number));
+        all.sort_by_key(|s| std::cmp::Reverse(s.number));
         all
     }
 
@@ -392,10 +392,20 @@ impl Saves {
     /// the newest loss told, or 0, is no notice they could have read, and is
     /// refused (`false`). Again, the same.
     pub fn saw(&mut self, life: u64) -> bool {
+        self.saw_notice(life, false)
+    }
+
+    /// `saw`, of the notice its owner read: `too_big`, the one that says
+    /// its newest save did not fit its disk (its OK says so). Any other of
+    /// that life (the one told while it was pending, whose OK may come just
+    /// as a start goes farther for want of room) hides only itself: the
+    /// farther rollback is still told (Codex on the no-room PR).
+    pub fn saw_notice(&mut self, life: u64, too_big: bool) -> bool {
         let told = self.went_back.as_ref().map(|w| w.life).max(self.pending_loss().map(|e| e.generation));
         let read = life >= 1 && told.is_some_and(|t| life <= t);
         if read {
-            self.seen = self.seen.max(life);
+            let farther = !too_big && self.went_back.as_ref().is_some_and(|w| w.life == life && w.too_big);
+            self.seen = self.seen.max(if farther { life - 1 } else { life });
         }
         read
     }
@@ -591,13 +601,13 @@ impl Saves {
                 self.aside.push(s);
             }
         }
-        restorable.sort_by(|a, b| b.number.cmp(&a.number));
+        restorable.sort_by_key(|s| std::cmp::Reverse(s.number));
         for mut s in restorable.split_off(restorable.len().min(SAVES_KEPT + 1)) {
             s.set_aside_ms = Some(now_ms);
             self.aside.push(s);
         }
         self.saves = restorable;
-        self.aside.sort_by(|a, b| b.number.cmp(&a.number));
+        self.aside.sort_by_key(|s| std::cmp::Reverse(s.number));
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
         }
@@ -1376,6 +1386,12 @@ mod tests {
         assert_eq!(c.come_up(generation).save.as_deref(), Some("b1"));
         let told = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
         assert!(matches!(told, Some(ComputerNotice::WentBack { life: l, pending: false, save: Some(1), too_big: true, .. }) if l == life), "{told:?}");
+        // the pending notice's OK, heard only now: the farther one stays told
+        assert!(c.saves.saw(life));
+        let still = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert_eq!(still, told, "its own OK alone hides it");
+        assert!(c.saves.saw_notice(life, true));
+        assert!(notices(&c.life, &c.saves, &c.images, &rules).into_iter().all(|n| !matches!(n, ComputerNotice::WentBack { .. })));
     }
 
     /// Goal (Codex on this PR): a life's work is in the save it ended with,
