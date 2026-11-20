@@ -378,8 +378,8 @@ pub struct AdminHealth {
 
 /// The operators' glance (`GET /api/admin/glance`): who joined and signed
 /// in, from the registry, as it is asked, and what ran, from the
-/// deployment's Workers Logs, as the registry kept it
-/// (`fragment_core::glance::Part`: read again past its life). Never a
+/// deployment's Workers Logs, as the registry kept it (`glance_kept`:
+/// read again past its life, `fragment_core::glance`). Never a
 /// person's own objects: no number here calls a computer, a fragment or a
 /// ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,7 +446,7 @@ pub enum GlanceLogs {
     Read {
         /// When the numbers were read (ms), and the week's count (none: it
         /// is unknown, and `whyKept` says why): each is kept, and read again
-        /// past its life (two minutes, and an hour or the day's start).
+        /// two minutes on (the week's scan an hour on, or once the day starts).
         at: i64,
         #[serde(default)]
         week_at: Option<i64>,

@@ -793,7 +793,7 @@ impl RegistryCell {
                 if !(0..=fragment_core::glance::OLDER_MAX_MS).contains(&ms) {
                     return Err(CellError::invalid(format!("older by 0 to {} ms", fragment_core::glance::OLDER_MAX_MS)));
                 }
-                let older = self.rows::<Value>("UPDATE glance_parts SET at = at - ? WHERE at IS NOT NULL RETURNING part", vec![SqlStorageValue::Integer(ms)])?;
+                let older = self.rows::<Value>("UPDATE glance_kept SET at = at - ? WHERE at IS NOT NULL RETURNING shape", vec![SqlStorageValue::Integer(ms)])?;
                 Ok(json!({ "older": older.len() }))
             }
             TestHook::CompEnds(email) => {

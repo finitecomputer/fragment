@@ -488,9 +488,9 @@ pub(crate) enum TestHook {
     /// itself (`{ends}`, each null when it never does), which no route
     /// shows.
     CompEnds(String),
-    /// The glance's kept answers read this many ms earlier (at most
-    /// `glance::OLDER_MAX_MS`): a test sees them past their life
-    /// (`{older}`: how many parts).
+    /// The glance's kept answer read this many ms earlier (at most
+    /// `glance::OLDER_MAX_MS`): a test sees it past its life (`{older}`:
+    /// how many answers, one at most).
     GlanceOlder(i64),
 }
 

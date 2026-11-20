@@ -26,7 +26,7 @@ step Registry 9 key_sessions 68cfc8333a9ff162
 step Registry 10 comp_until 192cf4964b4e7e5c
 step Registry 11 connection_signin_access dd677fc210bb157d
 step Registry 12 move_comps_open 2965dccf5375484f
-step Registry 13 glance_parts 5b6f7c95649ff85d
+step Registry 13 glance_kept a9330ac021801f3b
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -134,7 +134,7 @@ Registry index connection_signins_session: CREATE INDEX connection_signins_sessi
 Registry table consents: CREATE TABLE consents ( identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment))
 Registry index consents_at: CREATE INDEX consents_at ON consents (identity, at)
 Registry table e2e_days: CREATE TABLE e2e_days ( day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL)
-Registry table glance_parts: CREATE TABLE glance_parts ( part TEXT PRIMARY KEY, busy_until INTEGER NOT NULL, at INTEGER, day_start INTEGER, answer TEXT )
+Registry table glance_kept: CREATE TABLE glance_kept ( shape TEXT PRIMARY KEY, busy_until INTEGER NOT NULL, at INTEGER, day_start INTEGER, answer TEXT, computers TEXT )
 Registry table identities: CREATE TABLE identities ( id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT)
 Registry index identities_owner: CREATE INDEX identities_owner ON identities (owner) WHERE owner IS NOT NULL
 Registry table invite_claims: CREATE TABLE invite_claims ( email TEXT NOT NULL, fragment TEXT NOT NULL, due INTEGER NOT NULL, failed INTEGER NOT NULL, PRIMARY KEY (email, fragment))

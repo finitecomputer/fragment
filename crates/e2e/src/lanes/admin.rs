@@ -17,7 +17,7 @@ use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use fragment_core::glance::{Part, QUERY_ID};
+use fragment_core::glance::{Question, QUERY_ID};
 
 use super::computers::{lever, lever_with, notice, QUEUE_DRAIN};
 
@@ -596,7 +596,8 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     // a day not kept: the now part read, and the week's when it is due
     // (none kept in a fresh run, or older than its hour)
     let first = asked(s).split_off(before);
-    let now_part = Part::Now.questions().len();
+    // every question but the week's, which is asked only hourly
+    let now_part = Question::ALL.len() - 1;
     let week_read = read["weekAt"] == read["at"];
     s.ok(
         "a read of a day not kept asks each of the now part's questions once, and the week's when due, with the account's read-only key, each of this deployment's Worker, and says when it read them",
@@ -682,14 +683,14 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     let logs = &refused.body["logs"];
     s.ok(
         "when the logs answer 429 (Too many requests), the glance shows the last numbers read, when they were, and why newer ones weren't; it asks nothing after the refusal",
-        made.body["older"] == 2
+        made.body["older"] == 1
             && refused.status == 200
             && logs["state"] == "read"
             && logs["whyKept"].as_str().is_some_and(|w| w.contains("Too many requests"))
             && logs["at"].as_i64() == kept["at"].as_i64().map(|at| at - fragment_core::glance::NOW_LIFE_MS)
             && logs["computersAwakeNow"] == kept["computersAwakeNow"]
             && logs["trouble"] == kept["trouble"]
-            && asked(s).len() - before < fragment_core::glance::ASKED_AT_ONCE - 1
+            && asked(s).len() - before < fragment_core::glance::ASKED_AT_ONCE
             && refused.body["signups"] == b["signups"]
             && refused.body["newPeople"].as_array().into_iter().flatten().any(|p| p["npub"] == ivy_id && p["computerUp"] == true),
         json!({ "asked": asked(s).len() - before, "logs": logs }),
