@@ -470,6 +470,31 @@ pub struct ComputerView {
     /// is filling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskRoom>,
+    /// What takes its disk, as the platform read it after its newest awake
+    /// save (docs/computers.md, "Room to restore"): its biggest folders
+    /// and files. Its owner's view only; absent before the first read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<ComputerSizes>,
+}
+
+/// What takes a computer's disk (docs/computers.md, "Room to
+/// restore"): the biggest folders its saves keep, to a few levels below
+/// `/data`, and its biggest files, each the biggest first, their paths
+/// below `/data`, read after a save at `at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSizes {
+    pub at: i64,
+    pub folders: Vec<SizeEntry>,
+    pub files: Vec<SizeEntry>,
+}
+
+/// One folder or file of `ComputerSizes`: its path below `/data` and the
+/// bytes it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizeEntry {
+    pub path: String,
+    pub bytes: u64,
 }
 
 /// A computer's disk as the platform last read it (`df` of its container,

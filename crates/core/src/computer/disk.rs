@@ -4,7 +4,7 @@
 //! can restore it, and a restore needs more of the disk than the running
 //! computer used.
 
-use fragment_proto::computer::DiskRoom;
+use fragment_proto::computer::{ComputerSizes, DiskRoom, SizeEntry};
 use serde::{Deserialize, Serialize};
 
 use crate::computer::held::LEFT_OUT_PATTERN_MAX_BYTES;
@@ -118,14 +118,87 @@ pub const DISK_READ: &str = "df -P -B1 /";
 /// also cross a `/`: what it names counts as left out); one outside the
 /// patterns' alphabet or with a `..` is not used, and what it names counts
 /// as restored.
+///
+/// With them, what its owner's Storage shows (`sizes_of`): the folders it
+/// keeps to `SIZES_DEPTH` below `/data`, allocated (KiB), biggest first
+/// (the first is `/data`'s own, its total kept), and its files of at least
+/// `SIZES_FILE_MIN_KIB` wherever they are (a cache's too), biggest first,
+/// each at most as many as a summary holds and a line each. Three walks of
+/// `/data`, after its save's backups read it all.
 pub fn sizes_read(left_out: &[String]) -> String {
     let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
     let exclude: String = left_out.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" --exclude='./{p}'")).collect();
-    let all = "printf 'alloc ' && du -sxk . && printf 'apparent ' && du -sxb .";
+    let read = |ex: &str| {
+        format!(
+            "printf 'apparent ' && du -sxb{ex} . && echo folders && du -xk -d {SIZES_DEPTH}{ex} . | awk 'length < {line}' | sort -rn | head -n {} && echo files && find . -xdev -type f -size +{SIZES_FILE_MIN_KIB}k -exec du -k {{}} + 2>/dev/null | awk 'length < {line}' | sort -rn | head -n {SIZES_FILES_MAX}",
+            SIZES_FOLDERS_MAX + 1,
+            line = SIZE_LINE_MAX_BYTES
+        )
+    };
     if exclude.is_empty() {
-        return format!("{DISK_READ} && cd /data && {all}");
+        return format!("{DISK_READ} && cd /data && {}", read(""));
     }
-    format!("{DISK_READ} && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then printf 'alloc ' && du -sxk{exclude} . && printf 'apparent ' && du -sxb{exclude} .; else {all}; fi")
+    format!("{DISK_READ} && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then {}; else {}; fi", read(&exclude), read(""))
+}
+
+/// How deep below `/data` a size summary lists its folders: an agent's
+/// work (`work/<agent>`), its home and browser profile, and their caches
+/// (`work/<agent>/home/.cache`).
+pub const SIZES_DEPTH: u32 = 4;
+/// The folders and the files a size summary lists at most, the biggest
+/// first, and the least a file it lists holds (10 MiB, in KiB).
+pub const SIZES_FOLDERS_MAX: usize = 64;
+pub const SIZES_FILES_MAX: usize = 32;
+pub const SIZES_FILE_MIN_KIB: u64 = 10 * 1024;
+/// A path a size summary lists is at most this long (one longer is left
+/// out), and its paths together at most this (the rest left out, smallest
+/// first): its owner's view carries it whole.
+pub const SIZE_PATH_MAX_BYTES: usize = 400;
+pub const SIZES_PATHS_MAX_BYTES: usize = 16 * 1024;
+/// A listing's line the container drops past (`awk`), its count, a tab
+/// and `./` beside a path at most `SIZE_PATH_MAX_BYTES`; so `sizes_read`'s
+/// whole answer is at most `SIZES_READ_MAX_BYTES`, which the cell keeps
+/// of it (an exec keeps its answer's tail).
+pub const SIZE_LINE_MAX_BYTES: usize = SIZE_PATH_MAX_BYTES + 24;
+pub const SIZES_READ_MAX_BYTES: usize = 64 * 1024;
+const _: () = assert!(512 + (SIZES_FOLDERS_MAX + 1 + SIZES_FILES_MAX) * SIZE_LINE_MAX_BYTES <= SIZES_READ_MAX_BYTES, "a summary's whole answer is kept");
+
+/// The `N\t./path` lines of `sizes_read`'s answer after `section`'s line,
+/// up to the next section's: KiB and the path below `/data` (`.` its own).
+fn listed<'a>(out: &'a str, section: &'static str) -> impl Iterator<Item = (u64, &'a str)> {
+    out.lines().skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files")).filter_map(|l| {
+        let (n, path) = l.split_once('\t')?;
+        Some((n.trim().parse::<u64>().ok()?, path))
+    })
+}
+
+/// What its owner's Storage shows, from `sizes_read`'s answer read at
+/// `at_ms`: its biggest folders below `/data` (its own total left out:
+/// `disk_of_sizes`) and its biggest files, each in bytes allocated, a path
+/// below `/data` a line, printable and at most `SIZE_PATH_MAX_BYTES`, as
+/// many as `SIZES_FOLDERS_MAX` and `SIZES_FILES_MAX`, their paths
+/// together at most `SIZES_PATHS_MAX_BYTES`. None for an answer with no
+/// folders.
+pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
+    if !out.lines().any(|l| l.trim() == "folders") {
+        return None;
+    }
+    let mut room = SIZES_PATHS_MAX_BYTES;
+    let mut take = |section: &'static str, max: usize| -> Vec<SizeEntry> {
+        let mut got = Vec::new();
+        for (kib, path) in listed(out, section) {
+            let path = path.strip_prefix("./").unwrap_or(path);
+            if path == "." || path.is_empty() || path.len() > SIZE_PATH_MAX_BYTES || path.chars().any(char::is_control) || got.len() == max || path.len() > room {
+                continue;
+            }
+            room -= path.len();
+            got.push(SizeEntry { path: path.to_string(), bytes: kib.saturating_mul(1024) });
+        }
+        got
+    };
+    let folders = take("folders", SIZES_FOLDERS_MAX);
+    let files = take("files", SIZES_FILES_MAX);
+    Some(ComputerSizes { at: at_ms, folders, files })
 }
 
 /// A computer's disk from `DISK_READ`'s answer, read at `at_ms` in start
@@ -147,8 +220,10 @@ pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk
 /// `du` it reads, the `df` alone; with no `df`, none.
 pub fn disk_of_sizes(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
     let disk = disk_of_df(out, at_ms, generation)?;
-    let named = |name: &str| out.lines().find_map(|l| l.strip_prefix(name)?.split_whitespace().next()?.parse::<u64>().ok());
-    let (Some(alloc_kib), Some(apparent)) = (named("alloc "), named("apparent ")) else { return Some(disk) };
+    let apparent = out.lines().find_map(|l| l.strip_prefix("apparent ")?.split_whitespace().next()?.parse::<u64>().ok());
+    // `/data`'s own allocated total: the `.` of its folders
+    let alloc_kib = listed(out, "folders").find(|(_, path)| *path == ".").map(|(kib, _)| kib);
+    let (Some(alloc_kib), Some(apparent)) = (alloc_kib, apparent) else { return Some(disk) };
     Some(ComputerDisk { data: Some(alloc_kib.saturating_mul(1024).max(apparent)), ..disk })
 }
 
@@ -334,39 +409,62 @@ mod tests {
         }
     }
 
-    /// Goal: what a restore of `/data` writes, read after a save as the
-    /// Hermes image's GNU `du` and the stub's BusyBox `du` print it (both
-    /// answers taken from the images, 2026-11-20): the larger of allocated
-    /// and apparent (a sparse file's holes are written), of what the save
-    /// keeps: GNU's `du --exclude` of what it left out, so a file
-    /// hard-linked between a cache left out and the work kept counts where
-    /// it restores (Alex's review of #1421; on the Hermes image, an 8 MiB
-    /// file in a uv cache linked into a venv read 8,192 KiB so, and 0 by the
-    /// cache's own `du` subtracted); with no `--exclude` (BusyBox), all.
-    /// Valid, a sparse file, small files, invalid (no `du`, no `df`, an
-    /// unsafe pattern, which is never used).
+    /// Goal: what a restore of `/data` writes, and what takes the disk,
+    /// read after a save as the Hermes image's GNU `du` and the stub's
+    /// BusyBox `du` answer `sizes_read` (both answers the images' own,
+    /// 2026-11-20: a 20 MiB video, a 12 MiB file in a uv cache left out and
+    /// linked into a venv, a 4 MiB file in that cache alone): the larger of
+    /// allocated and apparent of what the save keeps, GNU's `--exclude`
+    /// counting the venv's link and not the cache (Alex's review of
+    /// #1421), BusyBox counting all; the biggest folders and files, paths
+    /// below `/data`. Valid, small files, invalid (no `du`, no `df`, an
+    /// unsafe pattern, which is never used, a path past its bound, a
+    /// control character, too many).
     #[test]
     fn data_is_read_from_du() {
-        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1685805481984 290545090560      86% /\nalloc 3912\t.\napparent 9000000\t.\n";
-        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1685711613952 290657275904  85% /\nalloc 3912\t.\napparent 9000064\t.\n";
-        // a 5 MB sparse file among 4 MB written: the apparent size
-        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some(9_000_000));
-        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(9_000_064));
-        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 290_545_090_560, 2)));
+        let gnu = GNU_ANSWER;
+        let busybox = BUSYBOX_ANSWER;
+        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some(32_772 * 1024), "the venv's 12 MiB and the video, not the cache");
+        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(36_868 * 1024), "all of it");
+        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 237_187_936_256, 2)));
+        let sizes = sizes_of(gnu, T).expect("a summary");
+        let named = |l: &[SizeEntry]| l.iter().map(|e| (e.path.clone(), e.bytes)).collect::<Vec<_>>();
+        assert_eq!(sizes.at, T);
+        assert_eq!(named(&sizes.folders)[..4], [("work/juniper".to_string(), 32_768 * 1024), ("work".to_string(), 32_768 * 1024), ("work/juniper/proj/.venv".to_string(), 12_288 * 1024), ("work/juniper/proj".to_string(), 12_288 * 1024)]);
+        assert_eq!(sizes.folders.len(), 7, "/data's own total is the disk's, not a folder");
+        assert_eq!(named(&sizes.files), [("work/juniper/talk.mp4".to_string(), 20_480 * 1024), ("work/juniper/home/.cache/uv/pkg.bin".to_string(), 12_288 * 1024)], "a cache's big file is listed too");
         // small files: allocated is more than apparent
-        let small = "Filesystem x\noverlay 100 50 50 50% /\nalloc 100\t.\napparent 1000\t.\n";
+        let small = "Filesystem x\noverlay 100 50 50 50% /\napparent 1000\t.\nfolders\n100\t.\nfiles\n";
         assert_eq!(disk_of_sizes(small, T, 2).and_then(|d| d.data), Some(102_400));
-        // no du: the df alone; no df: none
+        assert_eq!(sizes_of(small, T).map(|s| (s.folders.len(), s.files.len())), Some((0, 0)));
+        // no du: the df alone, and no summary; no df: none
         assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\n", T, 2).map(|d| d.data), Some(None));
-        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\nalloc x\t.\napparent 10\t.\n", T, 2).map(|d| d.data), Some(None));
-        assert_eq!(disk_of_sizes("alloc 1\t.\napparent 10\t.\n", T, 2), None);
+        assert_eq!(sizes_of("Filesystem x\noverlay 100 50 50 50% /\n", T), None);
+        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\napparent 10\t.\nfolders\nx\t.\nfiles\n", T, 2).map(|d| d.data), Some(None));
+        assert_eq!(disk_of_sizes("apparent 10\t.\nfolders\n1\t.\n", T, 2), None);
+        // bounds: a path too long, a control character, too many, all paths together
+        let long = "a".repeat(SIZE_PATH_MAX_BYTES + 1);
+        let odd = format!("Filesystem x\noverlay 100 50 50 50% /\napparent 1\t.\nfolders\n9\t./{long}\n8\t./a\u{7}b\n7\t./ok\nfiles\n");
+        assert_eq!(sizes_of(&odd, T).map(|s| named(&s.folders)), Some(vec![("ok".to_string(), 7 * 1024)]));
+        let many: String = (0..SIZES_FOLDERS_MAX + 10).map(|i| format!("{}\t./f{i}\n", 1000 - i)).collect();
+        let many = sizes_of(&format!("folders\n{many}files\n"), T).expect("a summary");
+        assert_eq!((many.folders.len(), many.folders[0].path.as_str()), (SIZES_FOLDERS_MAX, "f0"), "the biggest, as many as it holds");
+        let wide: String = (0..60).map(|i| format!("{}\t./{}{i:02}\n", 1000 - i, "d".repeat(SIZE_PATH_MAX_BYTES - 2))).collect();
+        let wide = sizes_of(&format!("folders\n{wide}files\n"), T).expect("a summary");
+        assert!(wide.folders.iter().map(|e| e.path.len()).sum::<usize>() <= SIZES_PATHS_MAX_BYTES && wide.folders.len() == SIZES_PATHS_MAX_BYTES / SIZE_PATH_MAX_BYTES, "its paths within their bound: {}", wide.folders.len());
         // the read itself: nothing left out, all of /data
-        let all = "printf 'alloc ' && du -sxk . && printf 'apparent ' && du -sxb .";
+        let all = "printf 'apparent ' && du -sxb . && echo folders && du -xk -d 4 . | awk 'length < 424' | sort -rn | head -n 65 && echo files && find . -xdev -type f -size +10240k -exec du -k {} + 2>/dev/null | awk 'length < 424' | sort -rn | head -n 32";
         assert_eq!(sizes_read(&[]), format!("df -P -B1 / && cd /data && {all}"));
         // the save's patterns as du's excludes, anchored, quoted; never an unsafe one; BusyBox's du counts all
         let read = sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), "/".into(), String::new()]);
         let ex = " --exclude='./work/*/home/.cache/uv' --exclude='./hermes/state.db'";
-        assert_eq!(read, format!("df -P -B1 / && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then printf 'alloc ' && du -sxk{ex} . && printf 'apparent ' && du -sxb{ex} .; else {all}; fi"));
+        let kept = format!("printf 'apparent ' && du -sxb{ex} . && echo folders && du -xk -d 4{ex} . | awk 'length < 424' | sort -rn | head -n 65 && echo files && find . -xdev -type f -size +10240k -exec du -k {{}} + 2>/dev/null | awk 'length < 424' | sort -rn | head -n 32");
+        assert_eq!(read, format!("df -P -B1 / && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then {kept}; else {all}; fi"));
         assert_eq!(sizes_read(&["/../etc/".into(), "/".into()]), format!("df -P -B1 / && cd /data && {all}"), "no pattern it uses: all");
     }
+
+    /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20.
+    const GNU_ANSWER: &str = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1739559915520 237187936256      89% /\napparent 33554435\t.\nfolders\n32772\t.\n32768\t./work/juniper\n32768\t./work\n12288\t./work/juniper/proj/.venv\n12288\t./work/juniper/proj\n4\t./hermes\n0\t./work/juniper/home/.cache\n0\t./work/juniper/home\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n";
+    /// The same from the stub (BusyBox).
+    const BUSYBOX_ANSWER: &str = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1739560046592 237187936256  88% /\napparent 37748903\t.\nfolders\n36868\t.\n36864\t./work/juniper\n36864\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n";
 }

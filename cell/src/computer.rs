@@ -413,6 +413,10 @@ enum MetaKey {
     /// The test lever's save whose restore stops for want of room
     /// (`fail-restore`): its number.
     FailRestore,
+    /// What takes its disk, as the read after its newest awake save found
+    /// it (`fragment_core::computer::sizes_of`, `ComputerSizes`): a cache
+    /// its owner's view shows, its own row so its saves' stay small.
+    Sizes,
 }
 
 impl MetaKey {
@@ -446,6 +450,7 @@ impl MetaKey {
             MetaKey::HoldSaves => "hold_saves",
             MetaKey::StallUnhold => "stall_unhold",
             MetaKey::FailRestore => "fail_restore",
+            MetaKey::Sizes => "sizes",
         }
     }
 }
@@ -1969,9 +1974,9 @@ impl ComputerCell {
     /// logged and changes nothing.
     async fn read_disk(&self, generation: u64, sizes: bool) -> Option<fragment_core::computer::ComputerDisk> {
         let at = js::now_ms();
-        let (read, bound) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS) } else { (DISK_READ.to_string(), DISK_READ_MS) };
+        let (read, bound, keep) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS, fragment_core::computer::SIZES_READ_MAX_BYTES) } else { (DISK_READ.to_string(), DISK_READ_MS, 4096) };
         let argv = js::to_js(&json!(["sh", "-c", read]));
-        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64), JsValue::from_f64(keep as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
         let out = match read {
             Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
             Ok(o) => format!("exit {}", o["exitCode"]),
@@ -1979,6 +1984,15 @@ impl ComputerCell {
         };
         let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
+        // what takes its disk, its owner's Storage: a cache of its own (paths
+        // of a person's files: kept, never logged)
+        if let Some(found) = sizes.then(|| fragment_core::computer::sizes_of(&out, at)).flatten() {
+            let stored = serde_json::to_string(&found).map_err(|e| CellError::host(e.to_string())).and_then(|j| self.set_meta(MetaKey::Sizes, &j));
+            match stored {
+                Ok(()) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "sizes": { "folders": found.folders.len(), "files": found.files.len() }, "generation": generation })),
+                Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "sizes": "unkept", "error": e.message })),
+            }
+        }
         match (disk, kept) {
             // one line per read (lesson 14): its size, what is free, what its
             // /data restores to, and the room that leaves (as kept)
@@ -1986,7 +2000,8 @@ impl ComputerCell {
                 let room = self.saves().ok().and_then(|s| s.disk()).map(|k| fragment_core::computer::room(&k));
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
             }
-            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() })),
+            // its df's lines alone: the rest names a person's files
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.lines().take(2).collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>() })),
         }
         disk
     }
@@ -2619,6 +2634,8 @@ impl ComputerCell {
         let mut view = self.view().await?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
+        // what takes its disk names its owner's files: theirs to see
+        view.sizes = None;
         // what its XFTP relay carries: its bridge sends its core's files through it
         let targets = self.relay_targets()?;
         view.relay = Some(fragment_proto::computer::RelayOffer { hosts: targets.iter().filter(|t| t.port == fragment_core::relay::PORT).map(|t| t.host.clone()).collect(), port: fragment_core::relay::PORT });
@@ -2851,6 +2868,7 @@ impl ComputerCell {
             relay: None,
             relay_targets: None,
             disk: saves.disk_view(),
+            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| serde_json::from_str(&j).ok()),
         }))
     }
 

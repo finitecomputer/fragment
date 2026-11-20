@@ -201,7 +201,7 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
-    "and its disk is read again after that awake save, with what its /data restores to, and its owner's view shows the room that leaves",
+    "and its disk is read again after that awake save, with what its /data restores to, and its owner's view shows the room that leaves, and what takes its disk (its biggest folders, paths below /data)",
     "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
@@ -253,8 +253,15 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let room = &shown["disk"];
     s.ok(
         SAVE_CHECKS[1],
-        read && disk["total"].as_u64().is_some_and(|t| t > 0) && disk["data"].as_u64().is_some_and(|d| d > 0) && room["data"] == disk["data"] && room["room"].as_u64().is_some() && shown["restored"]["generation"] == v["restored"]["generation"],
-        json!({ "save": newest, "disk": disk, "view": room }),
+        read && disk["total"].as_u64().is_some_and(|t| t > 0)
+            && disk["data"].as_u64().is_some_and(|d| d > 0)
+            && room["data"] == disk["data"]
+            && room["room"].as_u64().is_some()
+            && shown["restored"]["generation"] == v["restored"]["generation"]
+            && shown["sizes"]["at"].as_i64().is_some_and(|at| at >= saved_at)
+            && shown["sizes"]["folders"].as_array().is_some_and(|f| !f.is_empty() && f.iter().all(|e| e["path"].as_str().is_some_and(|p| !p.starts_with('/') && !p.starts_with("./")) && e["bytes"].as_u64().is_some()))
+            && shown["sizes"]["files"].is_array(),
+        json!({ "save": newest, "disk": disk, "view": room, "sizes": shown["sizes"] }),
     );
     let all = lever(api, c.id, "saves")?.body["saves"].clone();
     let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();

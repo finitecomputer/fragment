@@ -569,6 +569,12 @@ stopped in its restore of `/data/work` with about 200 MB free).
   restore writes a little more than it, so 1% more is counted
   (`restore_writes`). A hard link between `/data` and its work is counted
   once. A start's read is `df` alone and keeps the last `du`.
+- **What takes the disk** is read with it (`sizes_of`): the folders the
+  save keeps, to `SIZES_DEPTH` (4) below `/data`, and its files of at
+  least 10 MiB anywhere (a cache's too), each the biggest first, at most
+  64 and 32, a path at most 400 bytes, 16 KiB of paths in all. Kept in a
+  row of its own (`sizes`), shown on its owner's view (`sizes`) and never
+  on its guest's, never logged: it names a person's files.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,
