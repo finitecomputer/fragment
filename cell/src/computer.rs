@@ -2868,7 +2868,7 @@ impl ComputerCell {
             relay: None,
             relay_targets: None,
             disk: saves.disk_view(),
-            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| serde_json::from_str(&j).ok()),
+            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| crate::json_text(&j).ok()),
         }))
     }
 
