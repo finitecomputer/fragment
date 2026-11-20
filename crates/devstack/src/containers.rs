@@ -266,6 +266,26 @@ pub fn public_dns_asked(sidecars: &[String]) -> Result<u64> {
     Ok(asked)
 }
 
+/// What the guest of `computer` (named by its `FRAGMENT_COMPUTER`) wrote
+/// to its stdout and stderr since its container started, as Docker keeps
+/// it: its container among the project's that are up, or None when none
+/// of them is its (asleep, or another node's).
+pub fn guest_log(project: &Path, computer: &str) -> Result<Option<String>> {
+    let label = project_label(project)?;
+    let up = docker(&["ps", "--no-trunc", "--filter", &format!("label={PROJECT_LABEL}={label}"), "--format", "{{.Names}}"])?;
+    let wanted = format!("FRAGMENT_COMPUTER={computer}");
+    for name in up.lines() {
+        let env: Vec<String> = serde_json::from_str(&docker(&["inspect", "--format", "{{json .Config.Env}}", name])?).with_context(|| format!("{name}'s environment, as docker inspect lists it"))?;
+        if env.iter().any(|e| *e == wanted) {
+            // `docker logs` writes the container's stderr to its own
+            let out = Command::new("docker").args(["logs", name]).output().context("run docker logs (is Docker running?)")?;
+            ensure!(out.status.success(), "docker logs {name} failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+            return Ok(Some(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))));
+        }
+    }
+    Ok(None)
+}
+
 /// The packets `PUBLIC_DNS_DROP`'s rule counted, from `iptables -L OUTPUT
 /// -v -x -n`: its line's first field. None when no line is the rule's.
 fn dropped_packets(listing: &str) -> Option<u64> {

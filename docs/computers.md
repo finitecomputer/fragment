@@ -395,7 +395,9 @@ What every image may rely on, and must do.
 The guest holds no credential. Every request to those hosts, and to a
 provider's host (below, "Connections and operator keys"), goes through
 the Computer DO's intercepts, which add what the platform holds; other
-traffic goes out as it is (decision 43). HTTPS to an intercepted host is
+traffic goes out as it is (decision 43). Each start registers them all
+before the container starts, at once, so the guest's first request never
+races them (`cell/intercepts.mjs`). HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,

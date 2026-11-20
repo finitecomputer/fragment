@@ -9,6 +9,7 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
+import { intercept, settled, startIntercepted } from "./intercepts.mjs";
 import * as rs from "./build/index.js";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
@@ -297,6 +298,9 @@ class ContainerHost {
   // Until when the lever's `slow-snapshot` holds the container, as the
   // runtime's own snapshot does: a signal or a destroy lands once it ends.
   #heldUntil = 0;
+  // The destroys begun of whatever runs or of the start that runs: a start
+  // that sees one begin while it registers its intercepts starts nothing.
+  #destroys = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -341,10 +345,18 @@ class ContainerHost {
     return true;
   }
 
-  // Starts `image` (or a snapshot of it), then watches it: its exit, for
-  // any reason, is reported as `computer/exited` for this generation.
-  start(generation, image, snapshot, env, instance) {
+  // Starts `image` (or a snapshot of it) for `computer` once every egress
+  // intercept of its guest is registered (`startIntercepted`), so the
+  // guest's first call never races them; then watches it (its exit, for
+  // any reason, is reported as `computer/exited` for this generation) and
+  // sets the runtime's idle stop. Its call to the runtime's start comes
+  // after its registrations, never in the same turn as this call: one
+  // overtaken meanwhile (a start after it, or a destroy begun: a wipe's)
+  // starts nothing, answering false, as does one overtaken by the time
+  // its idle stop is set.
+  async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs) {
     this.#generation = generation;
+    const destroys = this.#destroys;
     // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
     // depend on public DNS, which local workerd's sidecar asks first for
     // the intercepted hosts while the internet is on (devstack::Fleet)
@@ -352,49 +364,32 @@ class ContainerHost {
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
-    this.#c.start(opts);
+    const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
+    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage), overtaken))) return false;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
+    await settled(() => this.#c.setInactivityTimeout(idleMs));
+    return generation === this.#generation;
   }
 
-  // A start from a snapshot answers "temporarily unavailable" for a while
-  // (spike S3b): the calls right after it are tried again for up to two
-  // minutes.
-  async #settled(f) {
-    const t0 = Date.now();
-    for (;;) {
-      try {
-        return await f();
-      } catch (e) {
-        if (!/temporarily unavailable/.test(String(e)) || Date.now() - t0 > 120_000) throw e;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
+  // Every egress intercept of `computer`'s guest, all at once (one entry
+  // per host: `ComputerEgress` with the route as props; intercepts.mjs),
+  // and the backups' own. `swapHosts` are the connections', operator
+  // keys' and its agents' Vault secrets' hosts.
+  #intercept(computer, swapHosts, codestorage) {
+    const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
+    return intercept(this.#c, egress, swapHosts, codestorage, [() => this.#backups.intercept()]);
   }
 
-  // The egress intercepts (one entry per host: `ComputerEgress` with the
-  // route as props) and the runtime's idle stop, the safety net under the
-  // Computer DO's own sleep. Neither survives a stop, so each start sets
-  // them again. `swapHosts` are the connections' and operator keys' hosts,
-  // caught on HTTPS and on plain HTTP alike: the swap always sends on over
-  // HTTPS, so a credential never crosses the internet in the clear.
-  // `codestorage`: a local fleet's code.storage, at a loopback address the
-  // container cannot reach, is reached through the egress too.
+  // Its running start `generation`'s intercepts again (a new isolate's,
+  // or a Vault host set since it started), and the runtime's idle stop,
+  // the safety net under the Computer DO's own sleep.
   async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return false;
-    const c = this.#c;
-    const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
-    await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
-    await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
-    if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
-    for (const host of swapHosts) {
-      await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
-      await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
-    }
-    await this.#settled(() => this.#backups.intercept());
-    await this.#settled(() => c.setInactivityTimeout(idleMs));
+    await this.#intercept(computer, swapHosts, codestorage);
+    await settled(() => this.#c.setInactivityTimeout(idleMs));
     return true;
   }
 
@@ -517,6 +512,7 @@ class ContainerHost {
   async destroy(generation, reason, ms) {
     if (generation !== 0 && generation !== this.#generation) return false;
     if (!(ms > 0)) throw new Error("a destroy is bounded");
+    this.#destroys++;
     const t0 = Date.now();
     if (this.#c.running) await bounded("the destroy", ms, () => this.#unheld().then(() => this.#c.destroy(reason))).catch(() => {});
     while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));

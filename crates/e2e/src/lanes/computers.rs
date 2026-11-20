@@ -195,6 +195,26 @@ const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::com
 const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 5 + 10);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
+const FIRST_CALL: &str = "its guest's first call as it boots (the bridge's read of its view) is answered: no read failed and waited out a retry";
+
+/// The first start of a computer (`id`, awake) had every egress intercept
+/// in place before its container started (cell/intercepts.mjs): the stub's
+/// bridge reads its view through one at once as it boots, and logs each
+/// read that fails (`computer.unread`) before its backoff. Its container's
+/// log, from Docker: only a local run's computers are Docker's.
+fn first_call_answered(s: &mut Suite, id: &str) -> Result<()> {
+    if s.hosted() || s.on_celld() {
+        s.skip(FIRST_CALL, "it reads the guest's own log, which only a local run's Docker keeps");
+        return Ok(());
+    }
+    let log = s.guest_log(id)?.unwrap_or_default();
+    let started = log.find(r#""event":"bridge.start""#);
+    let unread = log.find(r#""event":"computer.unread""#);
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains(r#""event":"computer."#) || l.contains(r#""event":"bridge.start""#)).take(8).collect();
+    s.ok(FIRST_CALL, started.is_some() && unread.is_none_or(|u| started.is_some_and(|b| b < u)), json!(lines));
+    Ok(())
+}
+
 const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
 
 /// The save checks (docs/computers.md, "Saves and what a wake restores"), each skipped off
@@ -2410,6 +2430,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));
     println!("      (awake in {:.1?})", t0.elapsed());
+    first_call_answered(s, &id)?;
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.ok("its owner's wake of it awake answers awake", r.status == 200 && r.body["phase"] == "awake", &r);
     let subscribed = s.eventually(wake, || {
