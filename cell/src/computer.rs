@@ -1599,15 +1599,27 @@ impl ComputerCell {
     }
 
     /// The hosts the swap intercepts: the catalog's, and each its agents'
-    /// Vault secrets go to (`vault_usable`).
+    /// Vault secrets go to (`vault_hosts`).
     async fn swap_hosts(&self) -> CellResult<Vec<String>> {
-        let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
-        let usable = self.vault_usable(&fragments).await.0;
         let mut hosts = self.catalog_hosts();
-        hosts.extend(usable.into_iter().flat_map(|u| u.2));
+        hosts.extend(self.vault_hosts().await);
         hosts.sort_unstable();
         hosts.dedup();
         Ok(hosts)
+    }
+
+    /// The hosts its agents' Vault secrets go to, as its owner's Vault
+    /// answers (`vault_usable`): none, logged, when its agents or its Vault
+    /// cannot be read, so a start never fails for them.
+    async fn vault_hosts(&self) -> Vec<String> {
+        let fragments: Vec<String> = match self.agents() {
+            Ok(agents) => agents.into_iter().map(|a| a.fragment).collect(),
+            Err(e) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "agents", "error": e.message }));
+                return vec![];
+            }
+        };
+        self.vault_usable(&fragments).await.0.into_iter().flat_map(|u| u.2).collect()
     }
 
     /// Sets its running start `generation`'s egress intercepts again
@@ -1626,12 +1638,10 @@ impl ComputerCell {
 
     /// Has its running start's swap catch each of `vault_hosts` it does
     /// not catch yet (entry.mjs `armSwap`: those alone), so a guest that
-    /// reads a placeholder reaches the swap with it. Its guest's view
-    /// answers only after (`guest_view`), and a guest learns a Vault
-    /// secret's placeholder only from its view: a start asks no Vault
-    /// (`try_start`), and its guest's first read, made at once as it
-    /// boots, catches them. A failure is logged: the placeholder then goes
-    /// out uncaught, and fills nothing.
+    /// reads a placeholder reaches the swap with it: those its start asked
+    /// for beside the container's start (`try_start`), and any set since
+    /// (its guest's view answers only after, `guest_view`). A failure is
+    /// logged: the placeholder then goes out uncaught, and fills nothing.
     async fn arm_more(&self, vault_hosts: Vec<String>) {
         let Ok(life) = self.lifecycle() else { return };
         let Some(generation) = life.running() else { return };
@@ -1647,9 +1657,12 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         match self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await {
             Ok(done) if done.as_bool() == Some(true) => {
-                let mut hosts = armed;
+                // added to what is armed now, which another read's or its
+                // start's may have changed meanwhile
+                let mut hosts = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
                 hosts.extend(more);
                 hosts.sort_unstable();
+                hosts.dedup();
                 *self.armed.borrow_mut() = Some((generation, hosts));
             }
             // superseded: the start after it arms its own
@@ -1936,9 +1949,8 @@ impl ComputerCell {
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
-        // what its egress catches from its start: the catalog's, asking
-        // nothing; its agents' Vault secrets' hosts its guest's first read
-        // of its view catches, before it can know one (`arm_more`)
+        // what its egress catches before it starts: the platform's hosts and
+        // the catalog's, asking nothing
         let hosts = self.catalog_hosts();
         // a wipe that began while this start awaited starts nothing: one
         // begun before the host's start is seen here, and one begun while
@@ -1951,10 +1963,17 @@ impl ComputerCell {
         // every intercept registered before the container starts, all at
         // once: its guest's first call never races them (entry.mjs `start`)
         let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
-        if self.call("start", &args).await?.as_bool() != Some(true) {
+        // as armed from its start, for a read of its view during it to add to
+        *self.armed.borrow_mut() = Some((generation, hosts));
+        // its agents' Vault secrets' hosts asked beside the start, never
+        // before it, and caught as they answer, as its guest boots (its
+        // view's read catches any still uncaught before it answers: a guest
+        // learns their placeholders there; `arm_more`)
+        let (started, vault) = futures_util::future::join(self.call("start", &args), self.vault_hosts()).await;
+        if started?.as_bool() != Some(true) {
             return Err(Unstarted::Overtaken);
         }
-        *self.armed.borrow_mut() = Some((generation, hosts));
+        self.arm_more(vault).await;
         if self.lever_take(MetaKey::FailStarts) {
             // the lever's `fail-starts`: a start that fails with its container up
             return Err(CellError::host(format!("start {generation} failed (the test lever)")).into());

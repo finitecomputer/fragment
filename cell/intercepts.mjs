@@ -69,9 +69,15 @@ async function landed(each) {
 // retry. Cloudflare's own word: "Call it before or after starting the
 // container". A registration that fails starts nothing. Nor does a start
 // `overtaken()` while they registered (a start after it, or a destroy of
-// whatever runs: a wipe's), answering false.
+// whatever runs: a sleep's, a wipe's), answering false, whether or not one
+// failed meanwhile: an overtaken start's failure is no one's to report.
 export async function startIntercepted(c, opts, intercepted, overtaken) {
-  await intercepted();
+  try {
+    await intercepted();
+  } catch (e) {
+    if (overtaken()) return false;
+    throw e;
+  }
   if (overtaken()) return false;
   c.start(opts);
   return true;

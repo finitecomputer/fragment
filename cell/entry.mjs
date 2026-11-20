@@ -370,7 +370,13 @@ class ContainerHost {
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
-    await settled(() => this.#c.setInactivityTimeout(idleMs));
+    try {
+      await settled(() => this.#c.setInactivityTimeout(idleMs));
+    } catch (e) {
+      // overtaken meanwhile, its failure is no one's: the destroy ends it
+      if (overtaken()) return false;
+      throw e;
+    }
     return !overtaken();
   }
 
@@ -399,16 +405,16 @@ class ContainerHost {
     if (generation !== this.#generation) return false;
     await this.#intercept(computer, swapHosts, codestorage);
     await settled(() => this.#c.setInactivityTimeout(idleMs));
-    return true;
+    return generation === this.#generation;
   }
 
   // `hosts` more for its running start `generation`'s swap (its agents'
   // Vault secrets'), those alone (`interceptSwap`). False: that start was
-  // superseded.
+  // superseded, before or while they registered.
   async armSwap(generation, computer, hosts) {
     if (generation !== this.#generation) return false;
     await interceptSwap(this.#c, this.#egress(computer), hosts);
-    return true;
+    return generation === this.#generation;
   }
 
   // Waits until the container takes an exec (it is up), for at most `ms`.
