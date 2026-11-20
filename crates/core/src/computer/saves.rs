@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::computer::disk::{disk_clear, disk_filling, ComputerDisk};
 use crate::computer::lifecycle::Ended;
-use crate::computer::limits::SAVES_KEPT;
+use crate::computer::limits::{SAVES_KEPT, SET_ASIDE_KEPT_MS, SET_ASIDE_MAX};
 use crate::computer::start_line::Full;
 
 /// Records one save holds at most: one per directory it saves.
@@ -51,12 +51,27 @@ pub struct Save {
     /// the image's check of what it restored did: no start uses it again.
     #[serde(default)]
     pub unusable: bool,
+    /// When it was set aside (ms; `Saves::choose`): kept, and its owner's
+    /// export reads it, but no start restores it, and it is let go of
+    /// `SET_ASIDE_KEPT_MS` after this. Set on the saves set aside alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_aside_ms: Option<i64>,
 }
 
 impl Save {
     pub fn view(&self) -> ComputerSave {
-        ComputerSave { number: self.number, id: self.id.clone(), at: self.at_ms, generation: self.generation, held: self.held, unusable: self.unusable }
+        ComputerSave { number: self.number, id: self.id.clone(), at: self.at_ms, generation: self.generation, held: self.held, unusable: self.unusable, set_aside: self.set_aside_ms }
     }
+}
+
+/// Why an operator's choice of a save (`Saves::choose`) was refused:
+/// nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotChosen {
+    /// No save of that number is kept: these are, newest first.
+    NotKept { kept: Vec<u64> },
+    /// It was found unusable: no start restores it.
+    Unusable,
 }
 
 /// A container snapshot: a cache of one save, for one image (docs/computers.md,
@@ -111,9 +126,18 @@ pub struct Starting {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Saves {
-    /// The saves kept, newest first, at most `SAVES_KEPT`.
+    /// The saves kept that a start may restore, newest first: at most
+    /// `SAVES_KEPT` and the one its running life came up from.
     #[serde(default)]
     saves: Vec<Save>,
+    /// The saves set aside (`choose`), newest first, at most
+    /// `SET_ASIDE_MAX`: kept apart from `saves`, so no start restores one
+    /// and no rotation of them lets one go, a release from before them
+    /// included (it reads none, and restores the save chosen: Codex on
+    /// this field's PR). Each until `SET_ASIDE_KEPT_MS` after it was set
+    /// aside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    aside: Vec<Save>,
     /// The last save's number.
     #[serde(default)]
     numbered: u64,
@@ -213,9 +237,22 @@ pub struct Running {
 }
 
 impl Saves {
-    /// The saves kept, newest first.
+    /// The saves kept that a start may restore, newest first.
     pub fn all(&self) -> &[Save] {
         &self.saves
+    }
+
+    /// The saves set aside (`choose`), newest first.
+    pub fn aside(&self) -> &[Save] {
+        &self.aside
+    }
+
+    /// Every save kept, set aside or not, newest first: what its view
+    /// lists and its owner's export reads.
+    pub fn every_save(&self) -> Vec<&Save> {
+        let mut all: Vec<&Save> = self.saves.iter().chain(&self.aside).collect();
+        all.sort_by_key(|s| std::cmp::Reverse(s.number));
+        all
     }
 
     /// The save a start restores: the newest one not found unusable (or,
@@ -248,6 +285,7 @@ impl Saves {
         Some(match (&self.snapshot, image) {
             (_, None) => Full::Off,
             _ if self.fresh => Full::Restart,
+            _ if self.aside.first().is_some_and(|a| self.saves.first().is_none_or(|s| a.number > s.number)) => Full::Aside,
             _ if self.current().map(|s| s.id.as_str()) != newest => Full::Unusable,
             (Some(s), Some(image)) if s.image != image => Full::Image,
             (Some(_), _) => Full::Other,
@@ -327,10 +365,11 @@ impl Saves {
     }
 
     /// The save that holds what life `generation` did up to its newest save
-    /// that worked, as the saves kept now say: that save, or, with none of
-    /// its own kept, the one it came up from (none: not known).
+    /// that worked, as the saves kept now say, set aside or not: that save,
+    /// or, with none of its own kept, the one it came up from (none: not
+    /// known).
     fn kept_in(&self, generation: u64) -> Option<Option<&str>> {
-        match self.saves.iter().find(|s| s.generation == generation) {
+        match self.every_save().into_iter().find(|s| s.generation == generation) {
             Some(own) => Some(Some(own.id.as_str())),
             None => self.restored.as_ref().filter(|r| r.generation == generation).map(|r| r.save.as_deref()),
         }
@@ -413,7 +452,13 @@ impl Saves {
             None => false,
             Some(Ended { by: LifeEnd::Exit, .. }) => true,
             Some(Ended { by: LifeEnd::Sleep, generation: life, saved, .. }) => {
-                let newest_of_life = self.saves.iter().find(|s| s.generation == life).map(|s| s.id.as_str());
+                // its newest save as it ended, when that was read then
+                // (`ended_in`): one let go of since (set aside, then past its
+                // time) still held its work (Codex on this PR)
+                let newest_of_life = match self.ended_in.as_ref().filter(|k| k.life == life) {
+                    Some(k) => k.save.as_deref(),
+                    None => self.kept_in(life).flatten(),
+                };
                 !(saved && restored_save.is_some_and(|s| s.generation == life) && newest_of_life == save)
             }
         };
@@ -446,21 +491,22 @@ impl Saves {
     /// done at `at_ms` (`held`: its guest answered the hold), and not
     /// `overtaken`: the newest save, and the
     /// current one. A snapshot of any other save caches nothing a wake
-    /// would use. The saves it pushed out of the newest `SAVES_KEPT` are
-    /// let go of (`let_go`): answers what that pushed out unforgotten.
+    /// would use. The saves it pushed out of the newest `SAVES_KEPT`, and
+    /// those set aside past their time (`trim_aside`), are let go of
+    /// (`let_go`): answers what that pushed out unforgotten.
     pub fn saved(&mut self, generation: u64, records: Vec<Value>, seq: u64, at_ms: i64, held: bool) -> Vec<Value> {
         assert!(!records.is_empty() && records.len() <= SAVE_RECORDS_MAX, "a save is one record per directory, at most {SAVE_RECORDS_MAX}");
         let id = records[0]["id"].as_str().unwrap_or_default().to_string();
         assert!(!id.is_empty(), "a save has an id");
         let depth = |r: &Value| r["dir"].as_str().map_or(0, |d| d.matches('/').count());
         assert!(records.windows(2).all(|w| depth(&w[0]) <= depth(&w[1])), "a directory's record before any inside it: {records:?}");
-        assert!(!self.saves.iter().any(|s| s.id == id), "a save is kept once");
+        assert!(!self.every_save().iter().any(|s| s.id == id), "a save is kept once");
         assert!(!self.overtaken(generation, seq), "never kept ahead of a newer save of its start");
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
         }
         self.numbered += 1;
-        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false });
+        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false, set_aside_ms: None });
         let mut dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         // the save its running life came up from is kept past the newest: one
         // a start restored and came up from, the last to fall back to
@@ -468,6 +514,8 @@ impl Saves {
         if let Some(at) = dropped.iter().position(|s| Some(s.id.as_str()) == booted && !s.unusable) {
             self.saves.push(dropped.remove(at));
         }
+        // those set aside are kept for their time, apart from the rotation
+        dropped.extend(self.trim_aside(at_ms));
         assert!(self.saves.len() <= SAVES_KEPT + 1, "the newest, and the one it came up from");
         assert!(self.saves.windows(2).all(|w| w[0].number > w[1].number), "newest first");
         assert!(self.snapshot.as_ref().is_none_or(|s| self.saves[0].id == s.save), "a snapshot kept is of the current save");
@@ -480,12 +528,75 @@ impl Saves {
     /// pushed past `FORGETTING_MAX`, oldest first, which no one will delete.
     pub fn let_go(&mut self, records: Vec<Value>) -> Vec<Value> {
         assert!(records.iter().all(|r| r["id"].as_str().is_some_and(|id| !id.is_empty())), "a record has an id: {records:?}");
-        assert!(!records.iter().any(|r| self.saves.iter().any(|s| s.records.contains(r))), "a record let go of is no kept save's");
+        assert!(!records.iter().any(|r| self.every_save().iter().any(|s| s.records.contains(r))), "a record let go of is no kept save's");
         self.forgetting.extend(records);
         let over = self.forgetting.len().saturating_sub(FORGETTING_MAX);
         let lost: Vec<Value> = self.forgetting.drain(..over).collect();
         assert!(self.forgetting.len() <= FORGETTING_MAX, "at most FORGETTING_MAX records to delete");
         lost
+    }
+
+    /// An operator's choice of save `number` for its next start (docs/api.md,
+    /// Operators; docs/computers.md, "Saves and what a wake restores"),
+    /// made while no container runs: each save newer than it is set aside
+    /// (`aside`, at `now_ms`), and so is each older one past the newest
+    /// `SAVES_KEPT` of them, so every save a start may fall back to is
+    /// reached within its fallbacks (`STARTS_OWED_MAX`; Codex on this PR).
+    /// It may be one set aside before, then restorable again; what an
+    /// earlier choice set aside stays so for its time. One set aside is
+    /// kept, and its owner's export reads it, but no start restores it,
+    /// whatever fails. The snapshot goes unless it caches the save chosen.
+    /// Answers what letting go of those set aside past their time or bound
+    /// (`trim_aside`) pushed out unforgotten. Again, the same. Refused, with
+    /// nothing changed, when no save of that number is kept or it was found
+    /// unusable.
+    pub fn choose(&mut self, number: u64, now_ms: i64) -> Result<Vec<Value>, NotChosen> {
+        let Some(chosen) = self.every_save().into_iter().find(|s| s.number == number) else {
+            return Err(NotChosen::NotKept { kept: self.every_save().iter().map(|s| s.number).collect() });
+        };
+        if chosen.unusable {
+            return Err(NotChosen::Unusable);
+        }
+        let id = chosen.id.clone();
+        let mut restorable: Vec<Save> = vec![];
+        for mut s in std::mem::take(&mut self.saves).into_iter().chain(std::mem::take(&mut self.aside)) {
+            let restored = match s.number.cmp(&number) {
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => true,
+                std::cmp::Ordering::Less => s.set_aside_ms.is_none(),
+            };
+            if restored {
+                s.set_aside_ms = None;
+                restorable.push(s);
+            } else {
+                s.set_aside_ms.get_or_insert(now_ms);
+                self.aside.push(s);
+            }
+        }
+        restorable.sort_by_key(|s| std::cmp::Reverse(s.number));
+        for mut s in restorable.split_off(restorable.len().min(SAVES_KEPT + 1)) {
+            s.set_aside_ms = Some(now_ms);
+            self.aside.push(s);
+        }
+        self.saves = restorable;
+        self.aside.sort_by_key(|s| std::cmp::Reverse(s.number));
+        if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
+            self.snapshot = None;
+        }
+        let dropped = self.trim_aside(now_ms);
+        assert_eq!(self.current().map(|s| s.id.as_str()), Some(id.as_str()), "its next start restores the save chosen");
+        assert!(self.saves.len() <= SAVES_KEPT + 1 && self.aside.len() <= SET_ASIDE_MAX, "bounded");
+        Ok(self.let_go(dropped.into_iter().flat_map(|s| s.records).collect()))
+    }
+
+    /// Takes out the saves set aside that are let go of at `now_ms`: each
+    /// set aside `SET_ASIDE_KEPT_MS` ago or more, and the oldest past
+    /// `SET_ASIDE_MAX`. Answers them.
+    fn trim_aside(&mut self, now_ms: i64) -> Vec<Save> {
+        let (mut kept, mut dropped): (Vec<Save>, Vec<Save>) = std::mem::take(&mut self.aside).into_iter().partition(|s| s.set_aside_ms.is_some_and(|at| now_ms < at.saturating_add(SET_ASIDE_KEPT_MS)));
+        dropped.extend(kept.split_off(kept.len().min(SET_ASIDE_MAX)));
+        self.aside = kept;
+        dropped
     }
 
     /// The records let go of and not deleted yet, oldest first.
@@ -503,17 +614,22 @@ impl Saves {
     /// kept until a newer one is (Codex on #1378). So saves of one start
     /// are kept in the order they were asked, whichever ends first: by
     /// their numbers, never their clocks, which two may share (Codex).
+    /// That start's newest kept save, set aside or not: one set aside since
+    /// (an operator's choice of an older save as it ran) still overtakes
+    /// it, so it never becomes the current save ahead of that choice (Codex
+    /// on this PR).
     pub fn overtaken(&self, generation: u64, seq: u64) -> bool {
-        self.saves.first().is_some_and(|s| s.generation == generation && s.seq.is_some_and(|newest| newest > seq))
+        let newest = self.every_save().into_iter().find(|s| s.generation == generation);
+        newest.is_some_and(|s| s.seq.is_some_and(|newest| newest > seq))
     }
 
     /// Every record a wipe deletes (docs/api.md, Operators): each kept
     /// save's, newest first, then each let go of and not deleted yet. A
     /// record is a save's or waits to be deleted, never both.
     pub fn every_record(&self) -> Vec<Value> {
-        let kept = self.saves.iter().flat_map(|s| s.records.iter());
+        let kept = self.every_save().into_iter().flat_map(|s| s.records.iter());
         let out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
-        assert!(out.len() <= (SAVES_KEPT + 1) * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
+        assert!(out.len() <= (SAVES_KEPT + 1 + SET_ASIDE_MAX) * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
         out
     }
 
@@ -580,19 +696,20 @@ impl Saves {
         self.rollbacks
     }
 
-    /// The saves, as the computer's view shows them.
+    /// The saves, as the computer's view shows them: set aside or not,
+    /// newest first.
     pub fn views(&self) -> Vec<ComputerSave> {
-        self.saves.iter().map(Save::view).collect()
+        self.every_save().into_iter().map(Save::view).collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use fragment_proto::computer::{ComputerSave, LifeEnd, RestoreSource};
+    use fragment_proto::computer::{ComputerNotice, ComputerSave, LifeEnd, RestoreSource};
     use serde_json::json;
 
     use super::*;
-    use crate::computer::testing::{rec, Computer, IMAGE, T};
+    use crate::computer::testing::{bare, rec, Computer, IMAGE, T};
     use crate::computer::*;
 
     /// Goal (the lifecycle's simulation, 2026-11-18): a life that ended
@@ -863,7 +980,7 @@ mod tests {
         assert_eq!(s.all().iter().map(|s| (s.number, s.id.as_str())).collect::<Vec<_>>(), vec![(4, "d"), (3, "c"), (2, "b")]);
         assert_eq!(s.current().map(|c| c.records.len()), Some(2));
         let views = s.views();
-        assert_eq!(views[2], ComputerSave { number: 2, id: "b".into(), at: T + 1, generation: 1, held: false, unusable: false });
+        assert_eq!(views[2], ComputerSave { number: 2, id: "b".into(), at: T + 1, generation: 1, held: false, unusable: false, set_aside: None });
         let v = serde_json::to_value(&views[0]).unwrap();
         assert_eq!(v, json!({ "number": 4, "id": "d", "at": T + 3, "generation": 2, "held": true }));
         // a record stored before it kept several saves is not read: a hard cut
@@ -945,12 +1062,199 @@ mod tests {
         assert!(!old.overtaken(1, 1) && old.all()[0].seq.is_none(), "a save stored before it overtakes nothing");
     }
 
+    /// Goal (Codex on this PR): a save set aside still overtakes an older
+    /// save of its start that lands after it. A life's awake save waits on
+    /// its upload while its sleep's save, asked after it, is kept and its
+    /// container stops; an operator then chooses an older save, setting
+    /// the sleep's aside. The awake save that lands then is overtaken, so
+    /// it never becomes the current save ahead of the operator's choice.
+    /// Another start's, or one asked after it, is not.
+    #[test]
+    fn a_save_set_aside_still_overtakes_an_older_one_of_its_start() {
+        let mut s = Saves::default();
+        s.saved(1, rec("b1"), 1, T, true);
+        s.saved(2, rec("b3"), 3, T + 20, true);
+        assert!(s.overtaken(2, 2), "its sleep's save was asked after it");
+        assert_eq!(s.choose(1, T + 30), Ok(vec![]));
+        assert!(s.overtaken(2, 2), "set aside, it is still that start's newest");
+        assert!(!s.overtaken(2, 4) && !s.overtaken(3, 2), "one asked after it, or another start's");
+        assert_eq!(s.current().map(|c| c.id.as_str()), Some("b1"));
+    }
+
     #[test]
     #[should_panic(expected = "never kept ahead of a newer save of its start")]
     fn an_overtaken_save_is_never_kept() {
         let mut s = Saves::default();
         s.saved(1, rec("b"), 2, T, true);
         s.saved(1, rec("a"), 1, T + 10, true);
+    }
+
+    /// The numbers of every save kept, newest first, and whether each is
+    /// set aside.
+    fn numbers(s: &Saves) -> Vec<(u64, bool)> {
+        s.every_save().iter().map(|s| (s.number, s.set_aside_ms.is_some())).collect()
+    }
+
+    /// Goal (production, 2026-11-20: a computer whose newest save no longer
+    /// fit its disk sat in `wont_wake`, each start failing its restore for
+    /// room, a strike each, with an older save that fit and no way to it):
+    /// an operator's choice of an older save makes it the one its next
+    /// start restores. The newer are set aside: kept through the saves
+    /// after it, outside the rotation, for `SET_ASIDE_KEPT_MS`, and never
+    /// restored, even past a chosen save that will not restore. The start
+    /// that comes up is a rollback its owner is told of, with where it went
+    /// back to. Valid; invalid (no such save, one found unusable: nothing
+    /// changed); replay (the same choice twice, its time kept; one set
+    /// aside chosen in turn); restart (stored and read back; a release from
+    /// before reads none set aside and restores the save chosen). Method:
+    /// the lifecycle and its saves, as the DO drives them.
+    #[test]
+    fn an_operators_choice_starts_it_from_an_older_save() {
+        let rules = Rules::default();
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        let r = c.wake();
+        assert_eq!(r.save.as_deref(), Some("b1"), "its last good life came up from b1");
+        c.turn_saved("b2");
+        c.turn_saved("b3");
+        c.sleep(Some("b4"));
+        let life = c.life.generation();
+        // b4 no longer fits its disk: each start fails its restore, a strike
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let mut next = s.actions.first().cloned();
+        while let Some(Action::Start { generation }) = next {
+            let s = c.apply(Event::StartFailed { generation, why: "restore stopped with ~203 MB free, below the 268435456 byte floor".into() });
+            next = s.alarm_ms.and_then(|at| {
+                c.now = at - 1_000;
+                c.apply(Event::Alarm).actions.first().cloned()
+            });
+        }
+        assert!(matches!(c.life.phase, Phase::Failed { .. }), "{:?}", c.life.phase);
+        assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some("b4"), "every start tries b4 again");
+        assert_eq!(numbers(&c.saves), [(4, false), (3, false), (2, false), (1, false)], "b1 kept, the one its last life came up from");
+        // invalid: refused, nothing changed
+        let before = c.saves.clone();
+        assert_eq!(c.saves.choose(9, c.now), Err(NotChosen::NotKept { kept: vec![4, 3, 2, 1] }));
+        let mut found_bad = c.saves.clone();
+        assert!(found_bad.unusable("b1"));
+        let unusable = found_bad.clone();
+        assert_eq!(found_bad.choose(1, c.now), Err(NotChosen::Unusable));
+        assert_eq!((&c.saves, &found_bad), (&before, &unusable), "a refused choice changes nothing");
+        // valid: b1 chosen; the newer set aside, the snapshot of b4 gone
+        assert!(c.saves.snapshotted("b4", "s4", IMAGE), "its sleep's snapshot, of b4");
+        let chose_at = c.now;
+        assert_eq!(c.saves.choose(1, chose_at), Ok(vec![]));
+        assert_eq!(numbers(&c.saves), [(4, true), (3, true), (2, true), (1, false)]);
+        assert!(c.saves.views().iter().all(|v| v.set_aside == (v.number > 1).then_some(chose_at)), "its view says which, and when");
+        assert_eq!((c.saves.current().map(|s| s.id.as_str()), c.saves.plan(Some(IMAGE)), c.saves.has_snapshot()), (Some("b1"), Plan::Backup, false));
+        assert_eq!(c.saves.full_why(Some(IMAGE), false), Some(Full::Aside));
+        assert_eq!(c.saves.every_record().len(), 4, "a wipe still finds them");
+        // replay: the same, its time kept
+        let once = c.saves.clone();
+        assert_eq!(c.saves.choose(1, chose_at + 60_000), Ok(vec![]));
+        assert_eq!(c.saves, once);
+        // restart: read back the same; a release from before reads the
+        // saves alone, none set aside, and restores the save chosen
+        let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        assert_eq!(back, c.saves);
+        let mut stored = serde_json::to_value(&c.saves).unwrap();
+        assert_eq!(stored["aside"][0]["setAsideMs"], chose_at);
+        assert_eq!(stored["saves"].as_array().map(Vec::len), Some(1));
+        assert!(stored.as_object_mut().unwrap().remove("aside").is_some());
+        let before_it: Saves = serde_json::from_value(stored).unwrap();
+        assert_eq!((before_it.current().map(|s| s.id.as_str()), before_it.aside().len()), (Some("b1"), 0));
+        // one set aside may be chosen in turn; the older stay set aside
+        let mut undone = c.saves.clone();
+        assert_eq!(undone.choose(4, chose_at + 1), Ok(vec![]));
+        assert_eq!(undone.current().map(|s| s.id.as_str()), Some("b4"));
+        assert_eq!(numbers(&undone), [(4, false), (3, true), (2, true), (1, false)]);
+        // the chosen save would not restore: no save set aside is ever
+        // tried, and it is a strike, as with no older save
+        let mut failing = c.saves.clone();
+        assert!(!failing.unusable("b1"), "nothing older to fall back to");
+        assert_eq!(failing.current().map(|s| s.id.as_str()), Some("b1"), "tried again, never b4");
+        // its strikes counted anew, a record's wake starts it, from b1
+        c.apply(Event::SaveChosen);
+        assert_eq!((bare(&c.life.phase), c.life.failures()), (Phase::ASLEEP, 0));
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("a record wakes it: {s:?}") };
+        let r = c.come_up(generation);
+        assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), true), "{r:?}");
+        let told = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        let b1_at = c.saves.all().iter().find(|s| s.id == "b1").map(|s| s.at_ms);
+        assert!(
+            matches!(told, Some(ComputerNotice::WentBack { life: l, pending: false, save: Some(1), saved_at, unchanged: false, .. }) if l == life && saved_at == b1_at),
+            "its owner is told where it went back to: {told:?}"
+        );
+        // its saves after it: those set aside stay outside the rotation
+        for id in ["c1", "c2", "c3", "c4"] {
+            c.turn_saved(id);
+        }
+        assert_eq!(numbers(&c.saves), [(8, false), (7, false), (6, false), (4, true), (3, true), (2, true), (1, false)]);
+        assert!(c.saves.forgetting().iter().any(|r| r["id"] == "c1") && !c.saves.forgetting().iter().any(|r| r["id"] == "b4"));
+        // until their time: the first save after it lets them go
+        let g = c.life.generation();
+        c.saves.saved(g, rec("c5"), 0, chose_at + SET_ASIDE_KEPT_MS - 1, true);
+        assert_eq!(c.saves.aside().len(), 3, "kept to the last ms");
+        c.saves.saved(g, rec("c6"), 0, chose_at + SET_ASIDE_KEPT_MS, true);
+        assert!(c.saves.aside().is_empty(), "{:?}", numbers(&c.saves));
+        assert!(["b4", "b3", "b2"].iter().all(|id| c.saves.forgetting().iter().any(|r| r["id"] == *id)), "let go of, to delete");
+    }
+
+    /// Goal (Codex on this PR): a life's work is in the save it ended with,
+    /// even once that save, set aside, is let go of before a start comes
+    /// up (the same choice made again past its time): the start from an
+    /// older save is a rollback its owner is told of, never taken for one
+    /// that lost nothing. On the first cut the newest save of that life
+    /// still kept (its awake save) was taken for its last.
+    #[test]
+    fn a_save_set_aside_and_let_go_of_still_held_its_lifes_work() {
+        let mut c = Computer::new();
+        c.wake();
+        c.turn_saved("b1");
+        c.sleep(Some("b2"));
+        let life = c.life.generation();
+        assert_eq!(c.saves.choose(1, c.now), Ok(vec![]));
+        let lost = c.saves.choose(1, c.now + SET_ASIDE_KEPT_MS).expect("b1 kept");
+        assert!(lost.is_empty() && c.saves.aside().is_empty() && c.saves.forgetting().iter().any(|r| r["id"] == "b2"), "b2 let go of");
+        let r = c.wake();
+        assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), true), "{r:?}");
+        assert!(c.saves.went_back().is_some_and(|w| w.life == life && w.save == Some(1) && !w.unchanged), "{:?}", c.saves.went_back());
+    }
+
+    /// Goal: a later choice keeps what an earlier one set aside; saves set
+    /// aside are bounded, `SET_ASIDE_MAX` at most (two choices' worth),
+    /// past it the oldest let go of; and however choices run (Codex on
+    /// this PR: each of six set aside chosen in turn, oldest first), the
+    /// saves a start may restore stay within what its fallbacks reach (the
+    /// one chosen, and `SAVES_KEPT` before it), the rest set aside. A
+    /// computer's records stay bounded (`every_record`). Method: four rounds
+    /// of three saves, each followed by a choice of the oldest of them, so
+    /// each sets two more aside; then each set aside chosen, oldest first.
+    #[test]
+    fn saves_set_aside_are_bounded() {
+        let mut s = Saves::default();
+        let mut lost = vec![];
+        for round in 0..4u64 {
+            for i in 1..=3 {
+                let n = round * 3 + i;
+                s.saved(round + 1, rec(&format!("n{n}")), 0, T + n as i64, true);
+            }
+            lost.extend(s.choose(round * 3 + 1, T + 100 + round as i64).expect("a save kept"));
+        }
+        let aside: Vec<u64> = s.aside().iter().map(|s| s.number).collect();
+        assert_eq!(aside, [12, 11, 9, 8, 6, 5], "the newest SET_ASIDE_MAX");
+        assert_eq!(aside.len(), SET_ASIDE_MAX);
+        assert!(lost.is_empty() && ["n3", "n2"].iter().all(|id| s.forgetting().iter().any(|r| r["id"] == *id)), "the oldest let go of, to delete");
+        assert_eq!(s.current().map(|s| s.number), Some(10));
+        for n in [5, 6, 8, 9, 11, 12] {
+            assert!(s.choose(n, T + 200).is_ok());
+            assert_eq!(s.current().map(|s| s.number), Some(n));
+            assert!(s.all().len() <= SAVES_KEPT + 1, "chose {n}: {:?}", numbers(&s));
+            assert!(s.every_record().len() <= (SAVES_KEPT + 1 + SET_ASIDE_MAX) * SAVE_RECORDS_MAX + FORGETTING_MAX);
+        }
+        assert_eq!(s.all().iter().map(|s| s.number).collect::<Vec<_>>(), [12, 11, 9, 8], "the one chosen, and SAVES_KEPT before it");
     }
 
     #[test]

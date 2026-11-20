@@ -496,6 +496,58 @@ mod tests {
         assert_eq!(old.apply(Event::Wake { why: Wake::Tab }, T).actions, vec![Action::Start { generation: 1 }]);
     }
 
+    /// Goal (production, 2026-11-20): an operator's choice of the save its
+    /// next start restores (`Event::SaveChosen`) counts its strikes anew:
+    /// one that won't wake is asleep, so any wake starts it at once, not
+    /// only its owner's, and one asleep keeps its retry due, its count
+    /// clean. Running, nothing changes (the DO refuses a choice then, and a
+    /// start begun since restores the save chosen already). Valid, invalid
+    /// (running), replay (twice, the same), restart (stored and read back).
+    #[test]
+    fn an_operators_choice_of_a_save_counts_its_strikes_anew() {
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Record }, T);
+        let (mut at, mut next) = (T, s.actions.first().cloned());
+        while let Some(Action::Start { generation }) = next {
+            at += 1_000;
+            let s = l.apply(Event::StartFailed { generation, why: "restore stopped with ~203 MB free, below the 268435456 byte floor".into() }, at);
+            next = s.alarm_ms.and_then(|retry| {
+                at = retry;
+                l.apply(Event::Alarm, at).actions.first().cloned()
+            });
+        }
+        assert!(matches!(l.phase, Phase::Failed { .. }) && l.failures == STARTS_FAILED_MAX, "{l:?}");
+        let s = l.apply(Event::SaveChosen, at + 1);
+        assert!(s.actions.is_empty() && s.alarm_ms.is_none() && s.refused.is_none(), "it starts nothing by itself: {s:?}");
+        assert_eq!((l.phase.clone(), l.failures), (Phase::ASLEEP, 0));
+        // replay, and restart
+        let once = l.clone();
+        l.apply(Event::SaveChosen, at + 2);
+        assert_eq!(l, once);
+        let (back, _) = Lifecycle::read(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back, l);
+        // a record wakes it at once, well within the pause it would have waited
+        let g = l.generation();
+        let s = l.apply(Event::Wake { why: Wake::Record }, at + 3);
+        assert_eq!((s.actions, s.refused), (vec![Action::Start { generation: g + 1 }], None));
+        // asleep with a strike: its retry stays due, its count clean
+        let s = l.apply(Event::StartFailed { generation: g + 1, why: "pull".into() }, at + 4);
+        let retry = s.alarm_ms.expect("its retry");
+        assert_eq!(l.failures, 1);
+        let s = l.apply(Event::SaveChosen, at + 5);
+        assert_eq!((l.failures, s.alarm_ms, matches!(l.phase, Phase::Asleep { retry: Some(_) })), (0, Some(retry), true));
+        // running: nothing
+        let s = l.apply(Event::Alarm, retry);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 2 }]);
+        let starting = l.clone();
+        l.apply(Event::SaveChosen, retry + 1);
+        assert_eq!(l, starting, "a start under way restores the save chosen already");
+        l.apply(Event::Ready { generation: g + 2 }, retry + 2);
+        let awake = l.clone();
+        l.apply(Event::SaveChosen, retry + 3);
+        assert_eq!(l, awake);
+    }
+
     /// Goal (big-disk snapshot wakes on preview, 2026-11-18: 4 of 14 wakes
     /// on master failed so): a sleep's snapshot the runtime still takes
     /// holds its container past the sleep's destroy, so the start after it

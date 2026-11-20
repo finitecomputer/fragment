@@ -94,6 +94,15 @@ pub const SAVE_DEADLINE_MS: i64 = 13 * 60_000;
 /// every 15 minutes, and its three newest would otherwise all be its own,
 /// none a start ever came up from.
 pub const SAVES_KEPT: usize = 3;
+/// How long a save an operator set aside (`Saves::choose`) is kept past
+/// the `SAVES_KEPT` rotation, from when it was set aside: time for its owner
+/// to export it, or an operator to choose it again, once its computer starts
+/// from an older one. Let go of at the first save or choice after it.
+pub const SET_ASIDE_KEPT_MS: i64 = 30 * 24 * 60 * 60_000;
+/// Saves set aside kept at most: two operators' choices' worth (each sets
+/// aside at most `SAVES_KEPT`, the saves newer than the one chosen). Past
+/// it, the oldest set aside are let go of.
+pub const SET_ASIDE_MAX: usize = 2 * SAVES_KEPT;
 /// Starts owed one after another at most (`Lifecycle::gone`, each due at
 /// once): the one after its container went, one past a snapshot that
 /// would not start, and one past each kept save that would not restore
@@ -123,6 +132,7 @@ const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_M
 const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its deadline");
 const _: () = assert!(STOP_LOOK_MS < SLEEP_DEADLINE_MS, "a stop is looked at before its deadline");
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
+const _: () = assert!(SET_ASIDE_MAX >= SAVES_KEPT, "a choice's newer saves are all set aside");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");
 const _: () = assert!(WONT_WAKE_RETRY_MS > START_DEADLINE_MS, "a computer that won't wake tries one start at a time");

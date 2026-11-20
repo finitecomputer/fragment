@@ -275,6 +275,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         // FIN-352's census: reach open by link or public, counted (reach.rs)
         (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
+        (Method::Post, ["people", person, "computer", "start-from"]) => json_answer(&start_from(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
         (Method::Get, ["glance"]) => json_answer(&crate::glance::glance(env, cfg, url).await?),
         // the finite.computer move's moves, and staff's acts on one
@@ -370,6 +371,31 @@ async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serd
         _ => e,
     })?;
     ask_registry(env, &admin::Note { by: by.to_string(), action: "pin".into(), target: person.to_string(), detail: image, request: None }).await?;
+    Ok(view)
+}
+
+/// An operator starts a person's computer from one of the saves it keeps
+/// (docs/computers.md, "Saves and what a wake restores"), while it runs no
+/// container: its next start restores that save, and the newer are set
+/// aside, kept and exportable but never restored by a start. One that
+/// won't wake is asleep after it, so its next wake starts it. Logged as
+/// `start-from`, with the saves then set aside.
+async fn start_from(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serde_json::Value> {
+    if !fragment_core::npub::is_identity(person) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
+    }
+    let save = crate::computer::save_named(bytes)?;
+    let id = fragment_core::computer::default_computer_of(person);
+    let view = crate::computer::ask(env, &id, "computer/start-from", &serde_json::json!({ "save": save })).await.map_err(|e| match e.code {
+        ErrorCode::NotFound => CellError::new(ErrorCode::NotFound, format!("{person} has no computer yet")),
+        _ => e,
+    })?;
+    let aside: Vec<String> = view["saves"].as_array().into_iter().flatten().filter(|s| s["setAside"].is_i64()).filter_map(|s| s["number"].as_u64()).map(|n| n.to_string()).collect();
+    let detail = match aside.is_empty() {
+        true => format!("save {save}"),
+        false => format!("save {save}; set aside {}", aside.join(", ")),
+    };
+    ask_registry(env, &admin::Note { by: by.to_string(), action: "start-from".into(), target: person.to_string(), detail, request: None }).await?;
     Ok(view)
 }
 

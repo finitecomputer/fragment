@@ -550,6 +550,15 @@ impl Lifecycle {
                     }
                 }
             }
+            (Phase::Asleep { .. } | Phase::Failed { .. }, Event::SaveChosen) => {
+                self.failures = 0;
+                self.restore_fallbacks = 0;
+                self.blocked_since_ms = None;
+                if matches!(self.phase, Phase::Failed { .. }) {
+                    self.phase = Phase::ASLEEP;
+                }
+            }
+            (_, Event::SaveChosen) => {}
             (Phase::Starting { generation, .. }, Event::Ready { generation: g }) if g == generation => {
                 self.failures = 0;
                 self.blocked_since_ms = None;
