@@ -2890,7 +2890,7 @@ impl ComputerCell {
     /// since the export looked) is 404, as is a range past its end.
     async fn export_read(&self, b: &ExportRead) -> CellResult<Response> {
         let saves = self.saves()?;
-        let record = saves.all().iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter()).find(|r| r["id"].as_str() == Some(b.record.as_str()));
+        let record = saves.every_save().into_iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter()).find(|r| r["id"].as_str() == Some(b.record.as_str()));
         let Some(record) = record else {
             return Err(CellError::new(ErrorCode::NotFound, format!("no save keeps the record {}: the computer saved again since", b.record)));
         };
@@ -2921,7 +2921,7 @@ impl ComputerCell {
         };
         let saves = self.saves()?;
         let (keys, more) = js::blob_list(&self.env, js::BLOBS, &self.backups_prefix()).await?;
-        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.all().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
+        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.every_save().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
     }
 
     /// A test fleet's lever on this computer (`POST /api/test/computer`,
@@ -3291,7 +3291,8 @@ impl ComputerCell {
                 let b: ExportAsk = body_json(&mut req).await?;
                 self.owned_by(&b.owner)?;
                 let saves = self.saves()?;
-                let save = saves.all().iter().find(|s| !s.unusable);
+                // set aside or not: a save set aside holds its newest work
+                let save = saves.every_save().into_iter().find(|s| !s.unusable);
                 json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
             }
             "computer/export-read" => {
@@ -3742,7 +3743,8 @@ impl ComputerCell {
     /// awaits between), so no start planned before the choice restores
     /// another save. The newer saves are set aside (`Saves::choose`), and
     /// its strikes counted anew (`Event::SaveChosen`): its next wake or
-    /// restart starts it from that save. Again, the same. Answers its view.
+    /// restart starts it from that save, and no start is made here. Again,
+    /// the same. Answers its view.
     async fn choose_save(&self, number: u64) -> CellResult<ComputerView> {
         let id = self.must(MetaKey::Id)?;
         if self.lifecycle()?.running().is_some() {
@@ -3756,9 +3758,11 @@ impl ComputerCell {
         for record in &lost {
             console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
         }
-        let aside: Vec<u64> = self.saves()?.all().iter().filter(|s| s.set_aside_ms.is_some()).map(|s| s.number).collect();
+        let aside: Vec<u64> = self.saves()?.aside().iter().map(|s| s.number).collect();
         console_log!("{}", json!({ "computer": id, "chosen": number, "aside": aside }));
-        self.drive(Event::SaveChosen).await?;
+        // unasked: a start due meanwhile (a retry's) is its alarm's, never
+        // this call's, which answers at once (Codex on this PR)
+        self.drive_with(Some(Event::SaveChosen), false).await?;
         self.view().await
     }
 

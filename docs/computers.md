@@ -499,10 +499,15 @@ the DO removes them from one started from a snapshot.
   start falls back past it (2026-11-20: a computer whose agent filled its
   20 GB disk saved, slept, and never started again). While it runs no
   container, an operator names a save it keeps; its next start restores
-  it, and each newer save is **set aside** (`setAside`, when). One set
+  it, and each newer save is **set aside** (`setAside`, when), and so is
+  each older one past the three newest before it, so a start's fallbacks
+  reach every save it may restore. One set
   aside is kept 30 days (`SET_ASIDE_KEPT_MS`) from then, outside the
   three kept, then let go of at the next save or choice; at most six are
-  (`SET_ASIDE_MAX`, two choices' worth: past it the oldest go). Its
+  (`SET_ASIDE_MAX`, two choices' worth: past it the oldest go). They are
+  kept apart from the saves a start may restore, so a release from
+  before them restores the save chosen and lets none of them go (it
+  forgets them: their archives stay in R2 until a wipe). Its
   owner's export copies the newest save that restores, set aside or not
   (their newest work); no start restores one, whatever fails after, and
   nothing sets one aside by itself. A later choice may name one set
