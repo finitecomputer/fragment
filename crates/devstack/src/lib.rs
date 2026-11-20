@@ -116,7 +116,7 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
 /// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
 /// it imports from beside it (a deploy runs it from the source tree, so
 /// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
+pub const SHIM_FILES: [&str; 3] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its

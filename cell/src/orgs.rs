@@ -349,7 +349,7 @@ async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
     let ledger = crate::ledger::ask(env, person, &crate::ledger::Status {}).await.map_err(|e| CellError::new(e.code, e.message))?;
     let id = fragment_core::computer::default_computer_of(person);
     let (computer, references) = match crate::computer::ask(env, &id, "computer/view", &serde_json::json!({})).await {
-        Ok(v) => (v, crate::computer::ask(env, &id, "computer/references", &serde_json::json!({})).await?),
+        Ok(v) => (for_operators(v), crate::computer::ask(env, &id, "computer/references", &serde_json::json!({})).await?),
         Err(e) if e.code == ErrorCode::NotFound => (serde_json::Value::Null, serde_json::Value::Null),
         Err(e) => return Err(e),
     };
@@ -371,7 +371,7 @@ async fn pin(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResult<serd
         _ => e,
     })?;
     ask_registry(env, &admin::Note { by: by.to_string(), action: "pin".into(), target: person.to_string(), detail: image, request: None }).await?;
-    Ok(view)
+    Ok(for_operators(view))
 }
 
 /// An operator starts a person's computer from one of the saves it keeps
@@ -396,7 +396,17 @@ async fn start_from(env: &Env, by: &str, person: &str, bytes: &[u8]) -> CellResu
         false => format!("save {save}; set aside {}", aside.join(", ")),
     };
     ask_registry(env, &admin::Note { by: by.to_string(), action: "start-from".into(), target: person.to_string(), detail, request: None }).await?;
-    Ok(view)
+    Ok(for_operators(view))
+}
+
+/// A person's computer's view as its operators read it: its owner's, but
+/// never what takes its disk (`sizes`: the paths of a person's files, its
+/// owner's alone; Codex on #1426). Its size and room stay (`disk`).
+fn for_operators(mut view: serde_json::Value) -> serde_json::Value {
+    if let Some(v) = view.as_object_mut() {
+        v.remove("sizes");
+    }
+    view
 }
 
 /// What an org's row gives, as a mail says it.

@@ -25,8 +25,9 @@ between a runtime and the platform is the bridge (docs/bridge.md).
   starts and stops it, saves and restores `/data`, runs its egress
   intercepts, proxies its ports, and wakes it. It never reads what the
   image runs.
-- Its owner's export holds its view and its newest save that restores,
-  one an operator set aside included (docs/api.md, Export). It is deleted only with its owner, by an
+- Its owner's export holds its view, its newest save that restores, and,
+  beside it, the newest save set aside, if it keeps one (docs/api.md,
+  Export). It is deleted only with its owner, by an
   operator's wipe (docs/api.md, "Operators: wiping a person"), saves
   included. Cloudflare has no delete for a container snapshot: a wiped
   computer's is forgotten, never restored, and expires within 30 days.
@@ -268,7 +269,9 @@ steps; its "no reply yet" waits until it is up):
   start, told until its owner says they saw it. None when nothing was
   done on the lost life after that save (Paul, 2026-10-23). When nothing
   that may change its files ran after it (no turn, no port tab used:
-  `unchanged`), it says where it went back to and no loss.
+  `unchanged`), it says where it went back to and no loss. When its
+  newest save didn't fit its disk (`tooBig`), it says so, where it went
+  back to, and that the newer files are kept and can still be exported.
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
 - `key_paused`: a shared key's charges this last hour reached its owner's
@@ -396,7 +399,15 @@ What every image may rely on, and must do.
 The guest holds no credential. Every request to those hosts, and to a
 provider's host (below, "Connections and operator keys"), goes through
 the Computer DO's intercepts, which add what the platform holds; other
-traffic goes out as it is (decision 43). HTTPS to an intercepted host is
+traffic goes out as it is (decision 43). Each start registers them
+before the container starts, at once, so the guest's first request never
+races them (`cell/intercepts.mjs`): the platform's hosts and the catalog's
+providers', asking nothing. Its agents' Vault secrets' hosts are asked of
+its owner's Vault: beside the container's start when the start holds its
+guest until it lets it go (a restore's gate; a snapshot's hold, when its
+save was held), and caught before that; before the start when its guest
+runs at once (a fresh start, or a snapshot whose sleep's hold failed), so
+no guest runs with one uncaught. HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,
@@ -494,13 +505,26 @@ the DO removes them from one started from a snapshot.
   (R2 answered an error) is asked again a few times within the restore
   (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
   start on one.
+- **A save too big for its disk is set aside** (Paul, 2026-11-20:
+  "rollback is preferred to being stuck"). A restore can need a little
+  more room than the life that saved it used: the sandbox runtime stops
+  one that would leave less than its floor free (2026-11-20: a computer
+  whose agent filled its 20 GB disk saved, slept, and never started
+  again, each start "restore stopped with ~203 MB free, below the
+  268435456 byte floor"). A restore that found no room
+  (`fragment_core::computer::restore_found_no_room`: the runtime's guard
+  in its own words, or the disk filling, `ENOSPC`, which the cell's host
+  names a restore's `SandboxFileError` by, and nothing else) sets its
+  save aside (`too_big`), as an operator's choice of the save before it
+  would (below), and starts again at once from that one, with no strike.
+  With no save before it, nothing is set aside: the failure is a strike
+  as any, so a computer none of whose saves fit ends `wont_wake`, never
+  started with nothing. Its owner is told it went back because its
+  newest save didn't fit its disk, where to, and that the newer files
+  are kept and can still be exported (`went_back`'s `tooBig`).
 - **An operator's start from a save** (`fragment operator start-from`;
   docs/api.md, Operators) is the way back when a save restores but fails
-  every start, as one that no longer fits its disk does: the sandbox
-  runtime stops a restore that would leave less than its floor free, a
-  failed start like any, a strike, never a save found unusable, so no
-  start falls back past it (2026-11-20: a computer whose agent filled its
-  20 GB disk saved, slept, and never started again). While it runs no
+  every start for some other reason. While it runs no
   container, an operator names a save it keeps; its next start restores
   it, and each newer save is **set aside** (`setAside`, when), and so is
   each older one past the three newest before it, so a start's fallbacks
@@ -511,9 +535,9 @@ the DO removes them from one started from a snapshot.
   kept apart from the saves a start may restore, so a release from
   before them restores the save chosen and lets none of them go (it
   forgets them: their archives stay in R2 until a wipe). Its
-  owner's export copies the newest save that restores, set aside or not
-  (their newest work); no start restores one, whatever fails after, and
-  nothing sets one aside by itself. A later choice may name one set
+  owner's export copies the newest save it may restore and, beside it,
+  the newest set aside (`set-aside/`: its files may be newer), however
+  many saves it took since; no start restores one, whatever fails after. A later choice may name one set
   aside, which is then restored; what an earlier choice set aside stays
   so for its time. One that won't wake is asleep after the choice, its
   strikes counted anew, so its next wake of any kind, or a restart,
@@ -558,31 +582,41 @@ stopped in its restore of `/data/work` with about 200 MB free).
   the larger is counted).
 - **What a restore writes** is read after each awake save, in the alarm
   that saved it (`sizes_read`, within `SIZES_READ_MS`, 30 s): `du` of
-  what that save keeps of `/data`, the larger of its allocated and its
-  apparent size: GNU's `du --exclude` of what it left out (its held
-  guest's patterns), so a file hard-linked between a cache left out and
+  each record as its save takes it, `/data` but its work less what its
+  held guest named, and `/data/work` less what it named under its work,
+  each the larger of its allocated and its apparent size, summed. Apart,
+  a file hard-linked between the two counts in each, as each record
+  restores its copy; GNU's `du --exclude` leaves out what the save does
+  without walking it, so a file hard-linked between a cache left out and
   the work kept (uv's and pnpm's caches link into projects) counts where
   it restores. A `du` with no `--exclude` (BusyBox's, the stub's) counts
-  all of `/data`. On ext4 the
-  allocated size is exactly what a restore writes; on btrfs it is a
+  all of `/data`, once. A record not read leaves the last read's size in
+  place, and a walk that failed part-way still gives its `df`. On ext4
+  the allocated size is exactly what a restore writes; on btrfs it is a
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
-  (`restore_writes`). A hard link between `/data` and its work is counted
-  once. A start's read is `df` alone and keeps the last `du`.
-- **What takes the disk** is read with it (`sizes_of`): the folders the
-  save keeps, to `SIZES_DEPTH` (4) below `/data`, and its files of at
-  least 10 MiB anywhere (a cache's too), each the biggest first, at most
-  64 and 32, a path at most 400 bytes, 16 KiB of paths in all. Kept in a
-  row of its own (`sizes`), shown on its owner's view (`sizes`) and never
-  on its guest's, never logged: it names a person's files. Its view adds
-  its folders by kind (`kinds`, `storage_kinds`): its agents' own (`/data`
-  but its work), and in its work caches, browser data and downloads by
-  their folders' names, projects the rest.
+  (`restore_writes`). A start's read is `df` alone and keeps the last
+  `du`.
+- **What takes the disk** is read with it (`sizes_of`): the folders of
+  all of `/data` (its caches too), to `SIZES_DEPTH` (4) below it, and its
+  files of at least 10 MiB anywhere, each the biggest first, at most 64
+  and 32, a path at most 400 bytes, 16 KiB of paths in all, and `/data`'s
+  own total. Each walk is bounded (`timeout`), each line framed by GNU's
+  `du -0` with a newline in a name read as `?` (a name can forge no line;
+  BusyBox's, the stub's, frames none, so its total is its `all` record),
+  and the whole answer within what the cell keeps of it. A read it cannot
+  use logs its exit and its length alone. Kept in a row of
+  its own (`sizes`), shown on its owner's view (`sizes`) and never on its
+  guest's or an operator's, never logged: it names a person's files. Its
+  view adds its folders by kind (`kinds`, `storage_kinds`): its agents'
+  own (all of `/data` but its work), and in its work caches, browser data
+  and downloads by their folders' names, projects the rest.
 - **Settings → Computer → Storage** (cell/shell/computer.js) draws it
   from its owner's view, so asleep, awake and not waking alike: a bar of
-  what its save keeps by kind, the room left (red while it is told
-  filling), its five biggest files by name, and when it was measured;
-  before its first read, that it is measured after its next save.
+  what takes its disk by kind, the room left (red while it is told
+  filling, "Full" at none), its five biggest files by name, and when it
+  was measured; before its first read, that it is measured after its next
+  save. A view that lands while Settings is open redraws it.
 - **Delete** (`POST /api/computers/{id}/files/delete`), on an awake
   computer, asked once in Storage: the platform removes one regular file
   of its work in its container, no agent asked (so it works when its
@@ -645,7 +679,8 @@ minute), or its life ends, whichever is first.
 - `failed`: `start` (its own steps), `snapshot` (the snapshot would not
   start), `dead` (its guest never read its view within its wait: a
   snapshot that came up dead, or the `alive-check` lever),
-  `unusable` (its save would not restore), `exit` (its container stopped
+  `unusable` (its save would not restore), `no_room` (its save's restore
+  found no room on its disk: set aside), `exit` (its container stopped
   first), `deadline`, `blocked` (the container before it still ran: it
   started nothing, and the start made again counts from the same wake),
   `other`.
@@ -656,7 +691,8 @@ minute), or its life ends, whichever is first.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
   (no save yet).
 - `why`, for a restore, the first that holds: `off` (no snapshots here),
-  `restart`, `aside` (an operator set its newer saves aside), `unusable`
+  `restart`, `aside` (its newer saves were set aside: an operator's
+  choice, or too big for its disk), `unusable`
   (a newer save would not restore), `image` (the
   snapshot is of another image), `dead_snapshot` (this wake's snapshot
   start failed), `crash`, `unsaved` (its last sleep could not save),
@@ -909,6 +945,22 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **Calls an operator key never goes on.** Every agent shares an operator
+  key, so a call that reaches the vendor's whole account (everyone's
+  history or live browsers, a key minted from it, its own disable) would
+  reach other people's data. Each key is locked at its vendor first; its
+  row's `deny` names what the vendor can't scope away (`catalog::Deny`:
+  `METHOD /path`, a `*` segment any one, a last `**` the rest). The
+  intercept refuses such a call (403 `forbidden`, naming it), reaching no
+  provider and charging nothing. It reads the path case aside, decoded,
+  doubled and trailing `/` dropped, a `.json`-like suffix as the path,
+  and refuses one it can't read plainly (an encoded `/`, a `;`, a `.`
+  segment). A GET covers HEAD, and a method override header
+  (`X-HTTP-Method-Override`) counts as the method too. It is not an
+  allowlist: every other call goes as before, an own key's and a
+  connection's are never denied, and an empty list denies nothing. It
+  can't catch an account-wide call a vendor adds later; the vendor's own
+  scoping is the main lock.
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's
@@ -942,8 +994,12 @@ provider's own hosts.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
-  catalog's in the egress's intercepts (the computer arms them again as
-  its guest reads its view). The intercept asks the Vault for it per
+  catalog's in the egress's intercepts: a start catches them before its
+  guest runs (asked beside the container's start when its guest is held,
+  before it when not; above), and its guest's read of its view catches
+  any not caught yet (one set since), those alone, before it answers. A Vault that does not answer lends none
+  until a read of the view finds it answering.
+  The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
   Vault makes. A Vault's calls are not counted in usage.
@@ -1162,6 +1218,13 @@ own Bot Mode protocol is off in every profile
 - An agent's own skills win over managed ones, and managed over the
   platform's and Hermes' bundled ones of the same name. A managed skill an
   agent edits is first copied into its own, which then shadows it.
+- **Hermes' optional skills** (the image's `/opt/hermes/optional-skills`,
+  141 at v0.23.2) are off until the owner switches one on from the shell's
+  Skills page: an `optional/hermes/<id>.on` file in their skills fragment.
+  Each install reads the switches with the managed set, and the boot
+  copies each skill read-only beside the bundled ones; switched off, it
+  goes at the next install. One the image lacks, or whose name a managed
+  or bundled skill takes, is left out and logged (`skills.optional`).
 - **The `fragment` CLI** in an agent's terminal acts as that agent
   (cli/GUIDE.md, "As an agent"): it signs nothing; the egress signs.
 - **Its credentials** are each agent's placeholders in its profile's

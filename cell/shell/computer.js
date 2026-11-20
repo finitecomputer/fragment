@@ -38,22 +38,28 @@ export function storageSize(n) {
 export const STORAGE_KINDS = { projects: "Projects", downloads: "Downloads", browser: "Browser data", agents: "Agents", caches: "Caches" };
 
 // Settings → Computer → Storage (docs/computers.md, "Room to restore"), as
-// its owner's view last said it: what its save keeps at full size (`used`),
+// its owner's view last said it: what takes its disk (`used`: all of
+// `/data` as its summary read it, else what its save keeps at full size),
 // the room left before it may not start again from that save, each kind's
 // share (what the kinds leave out of `used` as Other), its biggest files,
-// and when it was measured. Null before its first read after a save.
+// and when it was measured. Null before its first read after a save; what
+// a view carries that is not as its wire says is left out.
 export function storageParts(c) {
   const d = c?.disk;
-  if (!d || typeof d.data !== "number" || typeof d.room !== "number") return null;
-  const kinds = (c.sizes?.kinds ?? []).filter((k) => STORAGE_KINDS[k.kind] && k.bytes > 0).map((k) => ({ kind: k.kind, label: STORAGE_KINDS[k.kind], bytes: k.bytes }));
+  const bytes = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!d || !bytes(d.data) || !bytes(d.room)) return null;
+  const sizes = c.sizes && typeof c.sizes === "object" ? c.sizes : {};
+  const list = (l) => (Array.isArray(l) ? l : []);
+  const kinds = list(sizes.kinds).filter((k) => Object.hasOwn(STORAGE_KINDS, k?.kind) && bytes(k.bytes) && k.bytes > 0).map((k) => ({ kind: k.kind, label: STORAGE_KINDS[k.kind], bytes: k.bytes }));
   const listed = kinds.reduce((a, k) => a + k.bytes, 0);
-  const other = d.data - listed;
+  const whole = bytes(sizes.total) ? sizes.total : d.data;
+  const other = whole - listed;
   if (other >= 1e6) kinds.push({ kind: "other", label: "Other", bytes: other });
-  const files = (c.sizes?.files ?? []).slice(0, 5).map((f) => {
+  const files = list(sizes.files).filter((f) => typeof f?.path === "string" && f.path && bytes(f.bytes)).slice(0, 5).map((f) => {
     const at = f.path.lastIndexOf("/");
     return { path: f.path, name: f.path.slice(at + 1), folder: at > 0 ? f.path.slice(0, at) : "", bytes: f.bytes };
   });
-  return { used: Math.max(d.data, listed), left: d.room, filling: !!d.filling, kinds, files, at: c.sizes?.at ?? d.at };
+  return { used: Math.max(whole, listed), left: d.room, full: d.room === 0, filling: !!d.filling, kinds, files, at: Number.isFinite(sizes.at) ? sizes.at : d.at };
 }
 
 export function platformImage(img, path) {
@@ -144,7 +150,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // buttons, painted again as the computer changes (`paintSettings`); its
   // buttons only when the restart's step changed, so a Restart now asked
   // stays until pressed or cancelled.
-  const shown = { section: null, state: null, asks: null, said: null, painted: null };
+  const shown = { section: null, state: null, asks: null, said: null, painted: null, storage: null, storageDrawn: null };
   // a button with its icon before its words; `words`, the span its words
   // are in (a named one: renderNames rewrites only its text)
   const iconed = (name, words, cls = "quiet") => {
@@ -546,17 +552,28 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   }
   // Storage: a bar of what takes its disk by kind, the room left, the
   // biggest files; asleep, awake or not waking alike (its view keeps it)
+  // (drawn again by `paintSettings` once a view that says otherwise lands)
   function storageBlock(c) {
     const parts = storageParts(c);
-    if (!parts) return line("Storage", "Measured after your computer next saves.");
+    shown.storageDrawn = storageKey(c);
+    shown.storage = parts ? storageDrawn(c, parts) : line("Storage", "Measured after your computer next saves.");
+    return shown.storage;
+  }
+  // what its Storage is drawn from: its parts, and whether it is awake
+  // (its Delete buttons)
+  function storageKey(c) {
+    return JSON.stringify([storageParts(c), c?.phase === "awake"]);
+  }
+  function storageDrawn(c, parts) {
     const block = el("div", "settings-line storage");
     block.dataset.storage = "";
     const head = el("div", "storage-head");
-    head.append(el("span", "settings-key", "Storage"), el("span", parts.filling ? "storage-left storage-low" : "storage-left", `${storageSize(parts.left)} left`));
+    const left = parts.full ? "Full" : `${storageSize(parts.left)} left`;
+    head.append(el("span", "settings-key", "Storage"), el("span", parts.filling || parts.full ? "storage-left storage-low" : "storage-left", left));
     const whole = parts.used + parts.left || 1;
     const bar = el("div", "storage-bar");
     bar.setAttribute("role", "img");
-    bar.setAttribute("aria-label", `${storageSize(parts.used)} used, ${storageSize(parts.left)} left`);
+    bar.setAttribute("aria-label", `${storageSize(parts.used)} used, ${parts.full ? "full" : `${storageSize(parts.left)} left`}`);
     const legend = el("div", "storage-legend");
     for (const k of parts.kinds) {
       const piece = el("span", `storage-piece storage-${k.kind}`);
@@ -603,12 +620,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       sure.onclick = () => {
         sure.disabled = cancel.disabled = true;
         sure.textContent = "Deleting…";
-        // its view, and Settings' Computer drawn again from it, in place
+        // its view, its Storage drawn again from it (`paintSettings`)
         api("POST", `/api/computers/${seg(c.computer)}/files/delete`, { path: f.path })
-          .then((v) => {
-            computerIs(v);
-            redrawSection();
-          })
+          .then(computerIs)
           .catch((e) => box.replaceChildren(ask, el("span", "form-error", `Couldn't delete it: ${e?.message ?? e}`)));
       };
       box.replaceChildren(cancel, sure);
@@ -625,6 +639,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const c = computer();
     if (shown.state?.isConnected && c) shown.state.textContent = stateSaid(c, active(follow.op()));
     if (shown.asks?.isConnected && restartSaid() !== shown.painted) paintAsks(shown.asks);
+    // its Storage, as the view that landed says it (Codex on #1428)
+    if (shown.storage?.isConnected && c && storageKey(c) !== shown.storageDrawn) shown.storage.replaceWith(storageBlock(c));
   }
   // what settings' Restart says now: nothing but its button, the restart's
   // step, or why its ask failed

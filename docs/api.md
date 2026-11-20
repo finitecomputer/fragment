@@ -149,8 +149,10 @@ frame (Which cookies count).
 but whose agent is, reads the fragment as a `viewer`, and acts through it
 never (a write needs their own membership: 403).
 
-**An agent acts for whoever asked, capped** (R17). A request signed by an
-agent may name `for=<npub>` in its signed URL's query: it acts with the
+**An agent acts for its owner, capped** (R17). A request signed by an
+agent may name `for=<its owner's npub>` in its signed URL's query, and no
+one else (403: an app trusts `call.principal`, and nothing binds anyone
+else to the request): it acts with the
 lower of that identity's role (its membership, an agent of its own that is
 a member, or the visibility floor; never a share link) and the agent's cap
 (its own role, or its owner's membership role if higher; never above
@@ -162,7 +164,7 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 `/api/models/v1/…`, and on a move's `POST
 /api/migrations/stages/{stage}/copy` (the fragment it copies into decides
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
-identity, 400. A site request's query is its app's.
+identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
 **An agent shares for its owner** (`fragment_core::access::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -442,7 +444,8 @@ It reads as its person, through the routes their own requests take (each
 fragment decides their role and meters the request to its owner): who
 they are, their and their agents' lists, each fragment they or their
 agents own (a fragment shared with them is only named, `sharedWithMe`),
-and their computer's newest save. What a fragment refuses or lacks is
+and their computer's newest save, with the newest one set aside beside it
+(docs/computers.md, "Saves and what a wake restores"). What a fragment refuses or lacks is
 named in its `meta.json` (`skipped`). The archive is one uncompressed tar
 whose layout and formats its own README states
 (`fragment_core::export::README`); its bounds are
@@ -467,7 +470,7 @@ the registry keeps the SHA-256.
 | `GET /auth/login?return=&login_hint=&screen_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`); `screen_hint` `sign-up` or `sign-in` (others ignored); its state bound by `fragment_login` |
 | `GET /auth/callback?code=&state=` | the state must be the browser's cookie's (400); the code exchanged server-side; → `fragment_session` and back to `return`. A WorkOS `error`, a sign-in finished or past ten minutes, or a code WorkOS refuses: 400. A registry of another release refuses it unspent (503 `deploying`), so the same callback again signs in |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and answers a page (200) that goes on to WorkOS's logout (`session_id` its `sid`, `return_to` `<platform>/`). No session: home. Another origin: 403 |
-| `POST /auth/switch?return=` | "Use another account": ends this browser's session, then signs in as `/auth/login`, bound by `fragment_switch`. Where WorkOS answers from a session it already held (`auth_time` before the switch, or absent), no one is signed in and the browser goes through WorkOS's logout, so the next sign-in asks. Another origin: 403 |
+| `POST /auth/switch?return=` | "Use another account": ends this browser's session, then signs in as `/auth/login`, bound by `fragment_switch`. Where WorkOS answers from a session it already held (`auth_time` before the switch, or absent), no one is signed in and the browser goes through WorkOS's logout, so the next sign-in asks; that answer leaves the switch unspent and bound, so its page's Continue, pressed while the browser was already on its way, is answered the same (or, once WorkOS ended that session, asks who signs in, which spends it). Another origin: 403 |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<redemption>` (single-use, 60 s, that fragment only; a session holds at most `REDEMPTIONS_PER_SESSION_MAX` unspent), at once for a fragment of theirs, shared with them, or one they said yes to; while an invite to it waits on their emails and they are not in it, a page with the invite first ("You're invited": who shared it, to view or edit, Accept and open, Decline), whatever they said yes to before (FIN-502); for any other, a page asking first (Asking first). Signed out: sign-in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`): the yes, remembered, → the fragment's `__signin?token=` (303). Another origin, or a missing or stale token, 403 |
 | `POST /auth/fragment/invite?name=&return=` | the invite page's form (`form`, `answer`: `accept` or `decline`, else 400): its yes, as `POST /api/invites/{fragment}/accept`, → the fragment's `__signin?token=` as a member (303), on to `return`; its no, as `decline`, → `/` (303). None waiting: a page saying so (404) with the way on to the fragment; the fragment's refusal keeps it, a page with its status and words. Another origin, or a missing or stale token, 403 |
@@ -761,7 +764,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/visibility` | the same | `{visibility}` → `{ok, visibility}`. Leaving `members` makes a new share link |
 | `POST /api/f/{name}/rotate` | the same | `{scopes?: [inbox, view]}` → `Rotated {inboxToken, viewToken, rotated}`; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/cap` | the owner (never an agent) | Ledger |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host. `{fromVault, hosts}` in place of `value`: a secret of the caller's own Vault moved here (FIN-466), by a Vault name's form alone (400 otherwise, before any Vault route), a person's alone (an agent 403), never a Nostr key's (400); claimed for this `{KEY}` as it is read, kept here, then removed from the Vault (none there: 404; claimed by a move elsewhere: 409, until that move is made again or the secret is set again) |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host. `{fromVault, hosts}` in place of `value`: a secret of the caller's own Vault moved here (FIN-466), by a Vault name's form alone (400 otherwise, before any Vault route), a person's alone (an agent 403), from the platform's own pages or their own key, never a fragment's page (`__secrets`, 403 for any name), never a Nostr key's (400), toward hosts within the ones its Vault names, when it names any (400 otherwise); claimed for this `{KEY}` as it is read, kept here, then removed from the Vault (none there: 404; claimed by a move elsewhere: 409, until that move is made again or the secret is set again) |
 | `GET /api/f/{name}/secrets` | editor | → `SecretList {secrets: [{name, hosts}]}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
@@ -1002,6 +1005,8 @@ the platform that changes the template installs again at each such
 fragment's next request (`code.installed`). Its repo holds only its face
 and data: a live commit declaring operations, channels, triggers or an
 agent, or carrying code, keeps the last good code and says to fork it.
+None of its own files is a page of its site: a path the release's site
+does not ship is never answered from its repo (Serving).
 
 ```json
 {
@@ -1603,11 +1608,11 @@ and seat, pushed to their ledger and computer.
 | --- | --- | --- |
 | `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org?, admin, pays, offered: [OfferedSeat {id, org, kind?, admin, comped, from?, email}], guest, offer?: {kind, seatMicros, includedMicros, packMicros}}`: `guest` whether they are one (`fragment_core::org::guest`); `offer`, what is sold (`fragment_core::stripe::offer`), null where nothing is (no Stripe) |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their always-on computer may sleep; no seat 400 |
-| `POST /api/seat/offers/{id}/accept` | whom the offer names (anyone else 404) | `{}` or none → `MySeat`, the offer theirs. From another org, a move: 409 for that org's last admin while others are in it, or its payer while its subscription lives; alone there, it ends. An admin's offer of an org that pays for nothing is 400. Again: the same answer |
+| `POST /api/seat/offers/{id}/accept` | whom the offer names (anyone else 404) | `{}` or none → `MySeat`, the offer theirs. From another org, a move: 409 for that org's last admin while others are in it, or its payer while its subscription lives; alone there, it ends. An admin's offer of an org that pays for nothing is 400; of a seat while its org is a trial, 400 `trial_seat_of_one` (it waits until the org pays). Again: the same answer |
 | `POST /api/seat/offers/{id}/decline` | the same | `{}` or none → `MySeat`; answered already 404 |
 | `POST /api/seat/leave` | a holder who is no admin | `{}` or none → `MySeat`: their seat canceled. The payer 409; an admin 400 (step down first); in no org 400 |
 | `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}], payer?}`; anyone else 403 |
-| `POST /api/org/seats` | an org's admin, while it pays (else 400) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid seat offered to the email, billed from the offer. A member holding a seat 409; a person being wiped 404; an email `org::OFFERS_PER_EMAIL_MAX` orgs offer to 400; past 50 offers mailed by the org that UTC day 429. Again: `created: false` |
+| `POST /api/org/seats` | an org's admin, while it pays (else 400) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid seat offered to the email, billed from the offer. A member holding a seat 409; a person being wiped 404; an email `org::OFFERS_PER_EMAIL_MAX` orgs offer to 400; past 50 offers mailed by the org that UTC day 429; a further paid seat while its subscription is a trial (a seat of one) 400 `trial_seat_of_one`. Again: `created: false` |
 | `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat or its offer gone. The payer's own seat 403 to others; the last paid seat 400 (cancel in the portal) |
 | `POST /api/org/admins` | the same, while it pays | `{email}` → `{admin, created, mailed}`: an admin's place offered (theirs only by their yes); at most 10, offers counted |
 | `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was. The last admin who said yes 409; the payer 403 to others, and 409 to themselves while it lives |
@@ -1795,7 +1800,7 @@ fragment's, `/api/…` included.
 
 | path | |
 | --- | --- |
-| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view |
+| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view. On a blessed template, the release's `site/` alone: a path it does not ship goes to its code's routes, else 404, never to the fragment's own files (those are read at `__file`) |
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
 | `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public; a blob's, or a file the size of a pointer, `no-cache`), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
@@ -1806,7 +1811,7 @@ fragment's, `/api/…` included.
 | `GET __channel/{channel}/newest` | the channel's readers: as `GET /api/f/{name}/channels/{channel}/newest` |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser calls as its person, an unsigned one gets an anonymous principal cookie; `public` callers get `PUBLIC_CALLS_PER_MIN` calls a minute each, `PUBLIC_CALLS_PER_MIN_FRAGMENT` a fragment |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`): `{id, input}`, the record's body as `input` → `{result: record, replayed}`; it spends a public call as a call does |
-| `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer, `application/json` only (so no cross-site form sets one), from the fragment's own page; written, never read back (`secret.set` logs it) |
+| `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer, `application/json` only (so no cross-site form sets one), from the fragment's own page; written, never read back (`secret.set` logs it). Never `{fromVault}` (403): a page runs its authors' code, so a Vault secret moves only on its person's word (docs/secrets.md) |
 | `GET __door`, `POST __door` | its owner's session: `/api/f/{name}/door`'s, from a connector's own page (a `POST` as `application/json`) |
 | `__signin`, `__signout` | this origin's session (Sign-in) |
 | `__fragment.js` | the browser library (below) |
@@ -2012,7 +2017,7 @@ is what other parties rely on.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `/settings`, `/apps`, `/brains`, `/history`, `/schedules`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
+| `GET /`, `/settings`, `/apps`, `/brains`, `/history`, `/schedules`, `/skills`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
 | `GET /about`, `/privacy`, `/terms` | static pages, for anyone |
 | `GET /admin` | the operators' page (Operators: the admin) |
 | `GET /share/<name>` | the share sheet (Sharing) |
@@ -2189,7 +2194,9 @@ A guest's request to a provider's host has its placeholders swapped
 platform's, reaching no provider: 400 `invalid_request` (a malformed
 placeholder, a provider not offered or in a place it does not take, more
 than 4, or two agents' in one request), 403 `forbidden` (another host than
-its provider's, a tag naming no agent here, an agent narrowed from it), 403
+its provider's, a tag naming no agent here, an agent narrowed from it, an
+operator key on a call its row denies or on a path that row can't read
+plainly: docs/computers.md, "Calls an operator key never goes on"), 403
 `not_connected`, the ledger's 402 or 403, or 429 `rate_limited` (reason
 `key_paused`, with `retry_after_ms`) for a shared key whose charges this
 last hour reached its owner's cap (docs/computers.md, `key_paused`).
