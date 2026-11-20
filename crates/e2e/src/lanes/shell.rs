@@ -3457,6 +3457,34 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
         asked && confirm && restarted && settled && v["restored"]["rollback"] == false && v["notices"].as_array().is_none_or(|l| l.is_empty()),
         &v,
     );
+    // a stop that lost no change (2026-11-18: a tab left open overnight was
+    // told as 11 hours of changes lost): a port tab opened on it since that
+    // save, its page silent, no turn, then its container killed. It goes
+    // back, and says where to, and that no work is lost
+    s.eventually(std::time::Duration::from_secs(15), || super::computers::lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+    let ticket = shell(api, session, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})), &[])?;
+    let url = ticket.body["url"].as_str().unwrap_or("").to_string();
+    let origin = url.split("/__ticket").next().unwrap_or("").to_string();
+    let landed = api.call(Call { method: "GET", url, ..Call::default() })?;
+    let cookie = landed.cookies().into_iter().find(|c| c.starts_with("fragment_computer=")).map(|c| c.split(';').next().unwrap_or("").to_string());
+    let agent = v["agents"][0]["fragment"].as_str().unwrap_or("").to_string();
+    let tab = Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e&agent={agent}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket).and_then(|mut c| c.next().map(|_| c));
+    let killed = super::computers::lever(api, &id, "kill")?;
+    let told = b.until(page, &format!("{n}?.innerText.includes('Your computer restarted') && !!{ok}", n = shown("went_back"), ok = button("went_back", "OK")), std::time::Duration::from_secs(90));
+    let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
+    let _ = b.screenshot(page, &shots.join("computer-went-back-unchanged.png"));
+    b.viewport(page, 390, 844, true)?;
+    let _ = b.screenshot(page, &shots.join("computer-went-back-unchanged-390.png"));
+    b.viewport(page, 1280, 800, false)?;
+    s.ok(
+        "a crash with only a port tab opened since its save (its page silent, no turn): the notice says where it went back to, and that its agents' work and chats are all here, no loss",
+        tab.is_ok() && killed.status == 200 && told && said.as_str().is_some_and(|t| t.contains("It went back to its save from") && t.contains("Your agents' work and chats are all here.") && !t.contains("weren't kept")),
+        json!({ "said": said, "view": view(), "tab": tab.as_ref().err().map(|e| format!("{e:#}")) }),
+    );
+    drop(tab);
+    b.eval(page, &format!("({}.click(), true)", button("went_back", "OK")))?;
+    let seen = b.until(page, "document.getElementById('computer-notices').hidden", wait);
+    s.ok("OK: told no more", seen && view()["notices"].as_array().is_none_or(|l| l.is_empty()), view());
     Ok(())
 }
 

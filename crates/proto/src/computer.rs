@@ -621,6 +621,11 @@ pub enum ComputerNotice {
         /// When the start that went back came up (none while `pending`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<i64>,
+        /// No turn ran and no port tab was used on that life after the save
+        /// it went back to: nothing the platform ran since may have changed
+        /// its files (false when it may have, or is not known).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unchanged: bool,
     },
     /// An update is ready: it is awake on another image than its next
     /// start runs (`version`, its view's `latest`), with no turn running.
@@ -798,12 +803,14 @@ mod tests {
     fn a_computers_notices_on_the_wire() {
         let unsaved = ComputerNotice::Unsaved { since: 10, save: Some(3), failing_since: 20, failures: 2, why: "R2".into(), stops_at: None };
         assert_eq!(serde_json::to_value(&unsaved).unwrap(), serde_json::json!({ "kind": "unsaved", "since": 10, "save": 3, "failingSince": 20, "failures": 2, "why": "R2" }));
-        let back = ComputerNotice::WentBack { life: 4, cause: LossCause::Unsaved, ended_at: Some(30), pending: true, save: None, saved_at: None, at: None };
+        let back = ComputerNotice::WentBack { life: 4, cause: LossCause::Unsaved, ended_at: Some(30), pending: true, save: None, saved_at: None, at: None, unchanged: false };
         assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::json!({ "kind": "went_back", "life": 4, "cause": "unsaved", "endedAt": 30, "pending": true }));
+        let quiet = ComputerNotice::WentBack { life: 4, cause: LossCause::Crash, ended_at: Some(30), pending: false, save: Some(2), saved_at: Some(20), at: Some(40), unchanged: true };
+        assert_eq!(serde_json::to_value(&quiet).unwrap()["unchanged"], true, "told only when so");
         assert_eq!(serde_json::to_value(ComputerNotice::WontWake { why: "x".into() }).unwrap(), serde_json::json!({ "kind": "wont_wake", "why": "x" }));
         let update = ComputerNotice::Update { version: "0123456789ab".into() };
         assert_eq!(serde_json::to_value(&update).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab" }));
-        for n in [unsaved, back, update] {
+        for n in [unsaved, back, quiet, update] {
             assert_eq!(serde_json::from_value::<ComputerNotice>(serde_json::to_value(&n).unwrap()).unwrap(), n);
         }
         // a view from before notices reads as none, at no start
