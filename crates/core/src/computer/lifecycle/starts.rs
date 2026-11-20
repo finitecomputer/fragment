@@ -1022,7 +1022,7 @@ mod tests {
         let s = c.apply(Event::Wake { why: Wake::Record });
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
         let plan = c.saves.plan(Some(IMAGE));
-        assert_eq!(plan, Plan::Snapshot { id: "s1".into() });
+        assert_eq!(plan, Plan::Snapshot { id: "s1".into(), image: IMAGE.into() });
         c.saves.starting(generation, plan.source());
         assert_eq!(c.saves.start_from(generation), Some(RestoreSource::Snapshot), "its exit now is the start's own failure");
         assert_eq!(c.saves.snapshot_failed().map(|s| s.id), Some("s1".into()));

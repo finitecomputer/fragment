@@ -245,6 +245,73 @@ async fn the_stub_image() {
     eprintln!("stub: marker to following: {} ms", opened.elapsed().as_millis());
 }
 
+/// The image a disk's share is measured with: Alpine, pinned, with
+/// btrfs-progs added as it runs.
+const DISK_HELPER: &str = "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+/// A `pub const NAME: u64 = …;` of fragment_core, read from its source:
+/// the image is held to the platform's own number, never a copy of it.
+fn core_const(source: &str, name: &str) -> u64 {
+    let line = source.lines().find(|l| l.trim_start().starts_with(&format!("pub const {name}: u"))).unwrap_or_else(|| panic!("fragment_core has no {name}"));
+    let value = line.split_once('=').expect("a value").1.trim().trim_end_matches(';').replace('_', "");
+    value.parse().unwrap_or_else(|_| panic!("{name} is a number: {value}"))
+}
+
+/// The share of a computer's disk `tag` takes as a fresh computer reads it
+/// (docs/computers.md, "An image's share of the disk"): its files (`docker
+/// export`), written to a fresh btrfs disk of `disk_bytes` with zstd, as a
+/// computer's is, in a privileged container; its size less what is
+/// available, by `stat -f` (as `df` reads it). Bytes.
+fn disk_share(tag: &str, disk_bytes: u64) -> u64 {
+    let created = Command::new(docker()).args(["create", "--platform", "linux/amd64", tag]).output().expect("docker runs");
+    assert!(created.status.success(), "docker create {tag}: {}", String::from_utf8_lossy(&created.stderr));
+    let id = String::from_utf8(created.stdout).expect("an id").trim().to_string();
+    let mut export = Command::new(docker()).args(["export", &id]).stdout(std::process::Stdio::piped()).spawn().expect("docker export");
+    // a loop device of its own (its node made when the host has none yet),
+    // the disk a fresh computer's, the image's files on it, then its stat
+    let script = format!(
+        "set -e; apk add --no-cache btrfs-progs > /dev/null; truncate -s {disk_bytes} /disk.img; mkfs.btrfs -q -f /disk.img > /dev/null; \
+         dev=$(losetup -f); [ -e \"$dev\" ] || mknod \"$dev\" b 7 \"${{dev#/dev/loop}}\"; losetup \"$dev\" /disk.img; mkdir -p /m; mount -o compress=zstd:3 \"$dev\" /m; \
+         mkdir -p /m/image /m/data; tar -x -C /m/image -f -; sync; btrfs filesystem sync /m > /dev/null; stat -f -c '%b %a %S' /m; umount /m; losetup -d \"$dev\""
+    );
+    let measured = Command::new(docker()).args(["run", "--rm", "-i", "--privileged", DISK_HELPER, "sh", "-c", &script]).stdin(export.stdout.take().expect("its tar")).output().expect("docker run");
+    let _ = export.wait();
+    let _ = Command::new(docker()).args(["rm", &id]).output();
+    assert!(measured.status.success(), "the disk's measure: {}", String::from_utf8_lossy(&measured.stderr));
+    let out = String::from_utf8_lossy(&measured.stdout);
+    let n: Vec<u64> = out.split_whitespace().map(|w| w.parse().expect("a count")).collect();
+    let [blocks, available, unit] = n[..] else { panic!("stat -f said {out:?}") };
+    (blocks - available) * unit
+}
+
+/// Goal (Paul, 2026-11-20: "our image update either never goes up in size,
+/// or that it's safe for all existing users somehow"): the Hermes image's
+/// share of a computer's disk, as a fresh computer reads it, is within the
+/// budget every computer's room counts (fragment_core's `IMAGE_DISK_MAX`,
+/// read from its source, on a disk of `DISK_MB`), so no update leaves a
+/// save that restored before unable to restore. Valid: today's image;
+/// invalid is any image past it, which fails here. Raising the budget is
+/// Paul's word, recorded beside it.
+#[test]
+#[ignore = "needs Docker (privileged, loop devices): cargo test -p fragment-bridge --test docker -- --ignored"]
+fn the_hermes_image_fits_its_disk_budget() {
+    let budget = core_const(include_str!("../../../crates/core/src/computer/disk.rs"), "IMAGE_DISK_MAX");
+    let disk_mb = core_const(include_str!("../../../crates/core/src/price/instance.rs"), "DISK_MB");
+    // the disk's size as a computer's `df` reads it: its megabytes, in whole 4 KiB blocks
+    let disk = (disk_mb * 1_000_000).div_ceil(4096) * 4096;
+    assert_eq!(disk, 20_000_002_048, "a computer's disk, as production's `df` reads it");
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let share = disk_share(&tag, disk);
+    eprintln!("hermes: {share} bytes of a fresh computer's disk ({:.2} GB; budget {budget} bytes, IMAGE_DISK_MAX; remaining bytes: {})", share as f64 / 1e9, budget as i64 - share as i64);
+    assert!(share > 1_000_000_000 && share < disk, "a measure of the image: {share}");
+    assert!(
+        share <= budget,
+        "the Hermes image takes {share} bytes of a fresh computer's disk, over its budget of {budget} bytes (excess bytes: {}; crates/core/src/computer/disk.rs, IMAGE_DISK_MAX): every computer's save must still restore beside it. Shrink the image, or ask Paul to raise the budget, recorded beside it",
+        share - budget
+    );
+}
+
 /// Goal: the real Hermes image answers a chat message through its bridge
 /// with the scripted model, as the agent's profile, with every model call
 /// naming its agent; it holds at its restore gate; and SIGTERM ends it in

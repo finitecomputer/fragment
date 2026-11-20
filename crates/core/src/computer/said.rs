@@ -95,7 +95,16 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
                 ..notice(format!("went_back:{life}"), "went_back", NoticeLevel::Info, title.into())
             }
         }
-        ComputerNotice::Update { version } => Notice {
+        // its save may not restore beside the new image: it stays on the
+        // one it has, and a restart (which would take the new one) is not
+        // offered until there is room (docs/computers.md, "An image's share
+        // of the disk")
+        ComputerNotice::Update { version, room_first: true } => Notice {
+            text: Some("Make room first: ask your agent to move big files to storage. Until then your computer stays as it is.".into()),
+            actions: vec![NoticeAction::post("Later", at("notices/later"), body("version", version.as_str()))],
+            ..notice(format!("update:{version}:room"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
+        },
+        ComputerNotice::Update { version, room_first: false } => Notice {
             // never restarted behind their agents' backs; an always-on
             // computer never sleeps, so never updates by itself
             text: Some(format!("Restart to get it; your chats and work are kept.{}", if f.always_on { "" } else { " It also updates by itself the next time your computer sleeps." })),
@@ -207,11 +216,16 @@ mod tests {
         let fresh = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: None, pending: false, save: None, saved_at: None, at: None, unchanged: true }], &f);
         assert_eq!(fresh[0].text.as_deref(), Some("Nothing on it was saved yet, so it started fresh. Your chats are all here."), "no save: as ever");
 
-        let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &f)[0];
+        let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: false }], &f)[0];
         assert_eq!(update.text.as_deref(), Some("Restart to get it; your chats and work are kept. It also updates by itself the next time your computer sleeps."));
         assert_eq!(post(update)[1], ("Later".into(), format!("{at}/notices/later"), json!({ "version": "0123456789ab" })));
-        let always = said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &Facts { always_on: true, ..facts() });
+        let always = said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: false }], &Facts { always_on: true, ..facts() });
         assert_eq!(always[0].text.as_deref(), Some("Restart to get it; your chats and work are kept."), "an always-on computer never sleeps");
+        // its save may not restore beside the new image: room first, no restart
+        let waits = &said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: true }], &f)[0];
+        assert_eq!(waits.text.as_deref(), Some("Make room first: ask your agent to move big files to storage. Until then your computer stays as it is."));
+        assert_eq!(post(waits), vec![("Later".into(), format!("{at}/notices/later"), json!({ "version": "0123456789ab" }))], "Later alone: no Restart");
+        assert_ne!(waits.id, update.id, "another thing told: another id");
 
         // its room, never df's free (2026-11-20: 2.1 GB free, and no room to restore)
         let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 9_000_000_000, room: 2_972_226_560 }], &f)[0];
@@ -237,7 +251,8 @@ mod tests {
     fn ids_are_unique_and_stable() {
         let told = vec![
             ComputerNotice::WontWake { why: "x".into() },
-            ComputerNotice::Update { version: "0123456789ab".into() },
+            ComputerNotice::Update { version: "0123456789ab".into(), room_first: false },
+            ComputerNotice::Update { version: "0123456789ab".into(), room_first: true },
             ComputerNotice::DiskFilling { total: 2, free: 1, room: 0 },
             ComputerNotice::KeyPaused { provider: "xai".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
             ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },

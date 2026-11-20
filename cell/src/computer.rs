@@ -1815,7 +1815,12 @@ impl ComputerCell {
         let (plan, save, facts) = self.update_saves(|s| {
             let plan = s.plan(snapshots);
             // its line's: why a whole restore, and whether it runs another image
-            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != reference.as_deref()));
+            // (what it runs: a snapshot's own image, `Saves::plan`)
+            let runs = match &plan {
+                Restore::Snapshot { image, .. } => Some(image.as_str()),
+                Restore::Backup | Restore::Nothing => reference.as_deref(),
+            };
+            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != runs));
             s.starting(generation, plan.source());
             let save = s.current().cloned().filter(|_| plan != Restore::Nothing);
             let bytes = save.as_ref().map(|s| s.records.iter().filter_map(|r| r["size"].as_u64()).sum());
@@ -1823,6 +1828,12 @@ impl ComputerCell {
             (plan, save, facts)
         })?;
         assert_eq!(plan == Restore::Nothing, save.is_none(), "a start restores the save there is");
+        // a snapshot runs the image it was taken of: the pinned one, or the
+        // one it ran while its update waits for room (`Saves::plan`)
+        let reference = match &plan {
+            Restore::Snapshot { image, .. } => Some(image.clone()),
+            Restore::Backup | Restore::Nothing => reference,
+        };
         // a start from a snapshot waits for its guest (#362); the lever's
         // `alive-check` makes its next start wait so, whatever it restores
         let lever = self.take_alive_check()?;
@@ -1856,7 +1867,7 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
         let snapshot_js = match &planned.plan {
-            Restore::Snapshot { id } => JsValue::from_str(id),
+            Restore::Snapshot { id, .. } => JsValue::from_str(id),
             Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)

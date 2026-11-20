@@ -99,7 +99,7 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
     let awake = matches!(life.phase, Phase::Awake { .. });
     if let (true, Some(running), Some(latest)) = (awake, version_running(life, saves), images.latest()) {
         if running != latest && life.keepalives() == 0 && images.later.as_deref() != Some(latest.as_str()) {
-            out.push(ComputerNotice::Update { version: latest });
+            out.push(ComputerNotice::Update { version: latest, room_first: saves.update_waits() });
         }
     }
     if let Some(d) = saves.disk.filter(|_| saves.disk_told) {

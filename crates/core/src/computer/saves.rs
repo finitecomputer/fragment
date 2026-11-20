@@ -6,7 +6,7 @@ use fragment_proto::computer::{ComputerRestore, ComputerSave, LifeEnd, LossCause
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::computer::disk::{disk_clear, disk_filling, ComputerDisk};
+use crate::computer::disk::{disk_clear, disk_filling, fits_any_image, ComputerDisk};
 use crate::computer::lifecycle::Ended;
 use crate::computer::limits::SAVES_KEPT;
 use crate::computer::start_line::Full;
@@ -77,8 +77,9 @@ pub struct Snapshot {
 /// What a start restores, chosen as it begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
-    /// The snapshot `id`, of the current save.
-    Snapshot { id: String },
+    /// The snapshot `id`, of the current save, and the image's reference
+    /// it was taken of: what the start runs.
+    Snapshot { id: String, image: String },
     /// The image, then the current save.
     Backup,
     /// The image, with an empty `/data`: there is no save.
@@ -224,16 +225,27 @@ impl Saves {
         self.saves.iter().find(|s| !s.unusable).or(self.saves.first())
     }
 
-    /// What a start restores: the snapshot only when it caches the current
-    /// save for the pinned image (`image`, its reference: `None` with
-    /// snapshots off); otherwise the image and the current save, or
-    /// nothing when there is no save.
+    /// What a start restores: the snapshot when it caches the current save
+    /// for the pinned image (`image`, its reference: `None` with snapshots
+    /// off), or for the image it ran when that save may not restore beside
+    /// the largest image (`fits_any_image`: it stays on the image it has
+    /// until there is room; docs/computers.md, "An image's share of the
+    /// disk"); otherwise the image and the current save, or nothing when
+    /// there is no save.
     pub fn plan(&self, image: Option<&str>) -> Plan {
         let Some(save) = self.current() else { return Plan::Nothing };
         match (&self.snapshot, image) {
-            (Some(s), Some(image)) if s.save == save.id && s.image == image && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone() },
+            (Some(s), Some(image)) if s.save == save.id && (s.image == image || self.update_waits()) && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone(), image: s.image.clone() },
             _ => Plan::Backup,
         }
+    }
+
+    /// Whether its save may not restore beside the largest image the
+    /// deployment may move it to (`fits_any_image`, as its disk was last
+    /// read): its update waits for room, a wake that can stays on the image
+    /// it has, and its owner is told to make room first.
+    pub fn update_waits(&self) -> bool {
+        self.disk.is_some_and(|d| !fits_any_image(&d))
     }
 
     /// Why `plan(image)` restores the save whole, when it does (a start's
@@ -647,7 +659,7 @@ mod tests {
         s.saved(1, rec("b0"), 0, T - 1, true);
         s.saved(1, rec("b1"), 0, T, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into() });
         assert_eq!(s.plan(Some("registry/stub@sha256:2")), Plan::Backup, "another image's");
         assert_eq!(s.plan(None), Plan::Backup, "snapshots off");
         let mut other = s.clone();
@@ -751,8 +763,60 @@ mod tests {
         assert_eq!(of, IMAGE);
         assert!(s.snapshotted("b1", "s1", &of));
         assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "the new image, and the save");
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() }, "pinned back, the snapshot serves again");
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into() }, "pinned back, the snapshot serves again");
         assert_eq!(s.image_of(2), None, "a start that has not come up runs nothing yet");
+    }
+
+    /// Goal (Paul, 2026-11-20: an update must be safe for every computer):
+    /// a computer whose save may not restore beside the largest image
+    /// (`fits_any_image`, its disk as last read) stays on the image it has:
+    /// a wake starts its snapshot of that save, on the image it was taken
+    /// of, while the pinned image is another; one with room takes the new
+    /// image; one never read is as before. Never a snapshot of an older
+    /// save, a save found unusable, nor after its owner's restart: those
+    /// restore the save (no rollback). Method: a start on one image, a pin,
+    /// its sleep, a disk read, the next plan.
+    #[test]
+    fn an_update_waits_for_room_on_its_snapshot() {
+        use crate::computer::disk::{restore_floor, restore_writes, ComputerDisk, IMAGE_DISK_MAX};
+        const NEXT: &str = "registry/stub@sha256:2";
+        const DISK: u64 = 20_000_002_048;
+        let mut s = Saves::default();
+        s.starting(1, RestoreSource::Nothing);
+        assert!(s.came_up(1, RestoreSource::Nothing, None, Some(IMAGE), T).is_some());
+        s.saved(1, rec("b1"), 0, T + 10, true);
+        assert!(s.snapshotted("b1", "s1", IMAGE));
+        assert!(!s.update_waits(), "never read: as before");
+        assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "the new image, and the save");
+        // its /data at full size fills the disk but the largest image and the floor, exactly: room
+        let fits = DISK - IMAGE_DISK_MAX - restore_floor(DISK);
+        let edge = (fits * 100 / 101..fits * 100 / 101 + 200).filter(|d| restore_writes(*d) <= fits).last().expect("a size that fits exactly");
+        assert!(restore_writes(edge + 1) > fits, "the most that fits");
+        assert!(s.measured(ComputerDisk { total: DISK, free: 9_000_000_000, at: T + 20, generation: 1, data: Some(edge) }));
+        assert!(!s.update_waits());
+        assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "it fits beside any image: the update is taken");
+        // a byte past it: it stays on the image it has
+        assert!(s.measured(ComputerDisk { total: DISK, free: 9_000_000_000, at: T + 30, generation: 1, data: Some(edge + 1) }));
+        assert!(s.update_waits());
+        assert_eq!(s.plan(Some(NEXT)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into() }, "its snapshot, on its own image");
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into() }, "the pinned image's own snapshot, as ever");
+        assert_eq!(s.full_why(Some(NEXT), false), None, "no whole restore to explain");
+        // never an older save's snapshot: a newer save restores (its sleep took no snapshot)
+        let mut newer = s.clone();
+        newer.saved(1, rec("b2"), 0, T + 40, true);
+        assert_eq!(newer.plan(Some(NEXT)), Plan::Backup);
+        // never an unusable save's, nor after its owner's restart
+        let mut unusable = s.clone();
+        unusable.saves[0].unusable = true;
+        assert_eq!(unusable.plan(Some(NEXT)), Plan::Backup);
+        let mut restarted = s.clone();
+        restarted.fresh = true;
+        assert_eq!(restarted.plan(Some(NEXT)), Plan::Backup);
+        // snapshots off: the save
+        assert_eq!(s.plan(None), Plan::Backup);
+        // room made, read after a save: the update is taken
+        assert!(s.measured(ComputerDisk { total: DISK, free: 12_000_000_000, at: T + 50, generation: 1, data: Some(edge - 5_000_000_000) }));
+        assert_eq!(s.plan(Some(NEXT)), Plan::Backup);
     }
 
     /// Goal (docs/computers.md, Lifecycle): the second ask of a
@@ -772,7 +836,7 @@ mod tests {
         // container, so it takes no snapshot, and that is not news
         assert!(!s.save_failed(4), "the first ask saved this start");
         assert!(s.save_failed(5), "a start whose sleep saved nothing is news");
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into() });
         // the other order: the second's save lands while the first snapshots
         let mut s = Saves::default();
         s.saved(4, rec("b1"), 0, T, true);
@@ -780,7 +844,7 @@ mod tests {
         assert!(!s.snapshotted("b1", "s1", IMAGE), "the first's snapshot caches a save that is no longer current");
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert!(s.snapshotted("b2", "s2", IMAGE));
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s2".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s2".into(), image: IMAGE.into() });
     }
 
     /// Goal (P7): each start that comes up says what it restored, how old
@@ -840,7 +904,7 @@ mod tests {
         c.wake();
         c.sleep(Some("b1"));
         assert!(c.saves.snapshotted("b1", "s1", IMAGE));
-        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into() });
         c.saves.restart_fresh();
         c.saves.restart_fresh();
         assert!(c.saves.fresh() && !c.saves.has_snapshot(), "forgotten; again, the same");
@@ -852,7 +916,7 @@ mod tests {
         assert_eq!((r.from, r.save.as_deref()), (RestoreSource::Backup, Some("b2")));
         assert!(!c.saves.fresh());
         c.sleep(Some("b3"));
-        assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into() }, "snapshots again");
+        assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into(), image: IMAGE.into() }, "snapshots again");
     }
 
     /// Goal: three saves are kept, newest first, each numbered; a fourth
