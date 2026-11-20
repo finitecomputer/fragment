@@ -119,6 +119,16 @@ test("a start overtaken while it registered (a wipe's destroy, a later start) st
   assert.equal(seen.caught.size, 7, "what it registered stays: the next start registers the same again");
 });
 
+test("a start overtaken while it registered answers overtaken, not the failure of a registration refused meanwhile", async () => {
+  const { c, seen } = container({ fail: "https://api.example.com → swap" });
+  let slept = false;
+  const registering = start(c, () => slept);
+  // a sleep's destroy, while the registrations are on their way
+  slept = true;
+  assert.equal(await registering, false);
+  assert.equal(seen.started, 0);
+});
+
 test("a registration answered temporarily unavailable is asked again, and the start waits for it", async () => {
   const { c, seen } = container({ busy: `http://${MODEL} → model` });
   assert.equal(await start(c), true);

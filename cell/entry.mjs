@@ -370,7 +370,13 @@ class ContainerHost {
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
-    await settled(() => this.#c.setInactivityTimeout(idleMs));
+    try {
+      await settled(() => this.#c.setInactivityTimeout(idleMs));
+    } catch (e) {
+      // overtaken meanwhile, its failure is no one's: the destroy ends it
+      if (overtaken()) return false;
+      throw e;
+    }
     return !overtaken();
   }
 
