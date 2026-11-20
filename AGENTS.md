@@ -21,9 +21,9 @@ platform concept.
 - `docs/published-fragments.md`: primitives that must stay expressible.
 - `docs/technical-debt-ledger.md`: the only place shortcuts may live;
   include the condition for removing each one.
-- Engineering style: `/Users/futurepaul/dev/finite/engineering-style/engineering-style.md`
-  on the Mac: hard cuts, limits, release assertions, typed errors, and
-  valid/invalid/replay/restart tests. Tooling is Rust.
+- Engineering style: `docs/engineering-style.md`: hard cuts, limits,
+  release assertions, typed errors, and valid/invalid/replay/restart tests.
+  Tooling is Rust.
 
 ## Where things live
 
@@ -162,6 +162,10 @@ one large one.
   library when it simplifies the stack. Bespoke code needs its reason
   beside it (comment, decision or debt entry). A build step is welcome
   when it buys significant simplification or safety.
+- Shell, templates and platform pages load no script, stylesheet or font
+  from another domain (a security hole and a privacy leak): serve it
+  ourselves in the release's files, async if it helps. `cargo xtask
+  check` enforces it (`xtask/src/remote_loads.rs`).
 - Each runtime offers what it supports: the UI shows only what an agent's
   runtime can do (`cell/shell/agent-runtimes.js`), and we don't build
   parity across runtimes.

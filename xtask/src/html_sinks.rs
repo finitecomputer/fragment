@@ -20,7 +20,10 @@
 //!
 //! Besides the names, a few shapes are sinks only by what follows them
 //! (`SHAPED`): an `on…` attribute set by `setAttribute`, a `<script>` the
-//! page makes. `srcdoc` is found in any case.
+//! page makes, and a `style` attribute set from a string, which the
+//! shell's CSP refuses (`style-src` has no 'unsafe-inline': the style
+//! never applies, and each try is a violation in the console), where the
+//! CSSOM (`el.style.setProperty`) is allowed. `srcdoc` is found in any case.
 //!
 //! An exception is a place that must turn a string into markup:
 //! `ALLOWED`, each with why. Like `js_syntax`'s lists, an entry that no
@@ -57,8 +60,9 @@ pub const REFUSED: [(&str, &str); 10] = [
 pub type Follows = fn(&str) -> bool;
 
 /// The shapes that are sinks by what follows a name: `(name, after, what)`.
-pub const SHAPED: [(&str, Follows, &str); 2] = [
+pub const SHAPED: [(&str, Follows, &str); 3] = [
     ("setAttribute", event_attribute, "sets an event handler (on…) from a string"),
+    ("setAttribute", style_attribute, "sets an inline style from a string, which the shell's CSP refuses: set it by the CSSOM (el.style.setProperty)"),
     ("createElement", script_element, "makes a <script>, whose text runs"),
 ];
 
@@ -68,10 +72,20 @@ fn event_attribute(after: &str) -> bool {
     matches!(chars.next(), Some('"' | '\'' | '`')) && chars.as_str().get(..2).is_some_and(|on| on.eq_ignore_ascii_case("on"))
 }
 
+// `"style"`, in any case and quote
+fn style_attribute(after: &str) -> bool {
+    quoted_word(after, "style")
+}
+
 // `"script"`, in any case and quote
 fn script_element(after: &str) -> bool {
+    quoted_word(after, "script")
+}
+
+// `word` whole in quotes, in any case: `"style"`, `'STYLE'`, never `"styles"`
+fn quoted_word(after: &str, word: &str) -> bool {
     let mut chars = after.chars();
-    matches!(chars.next(), Some('"' | '\'' | '`')) && chars.as_str().get(..7).is_some_and(|s| s[..6].eq_ignore_ascii_case("script") && s[6..].starts_with(['"', '\'', '`']))
+    matches!(chars.next(), Some('"' | '\'' | '`')) && chars.as_str().get(..word.len()).is_some_and(|w| w.eq_ignore_ascii_case(word)) && chars.as_str()[word.len()..].starts_with(['"', '\'', '`'])
 }
 
 /// The places that must, each `(path, name, why)`.
@@ -85,12 +99,13 @@ pub const ALLOWED: [(&str, &str, &str); 1] = [(
 /// something that is not one.
 const SCRIPTS_PER_PAGE_MAX: usize = 64;
 
-/// A refused name found: where, and which.
+/// A refused name found: where, which, and what it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sink {
     pub path: String,
     pub line: usize,
     pub name: &'static str,
+    pub why: &'static str,
 }
 
 /// A piece of first-party JavaScript: a file, or a page's inline script,
@@ -154,20 +169,20 @@ pub fn sinks(source: &Source) -> Vec<Sink> {
     let mut found = vec![];
     for (n, line) in source.text.lines().enumerate() {
         let lower = line.to_ascii_lowercase();
-        for (name, _) in REFUSED {
+        for (name, why) in REFUSED {
             // a lower-case name is an attribute's, which HTML reads in any case
             let hay = if name.bytes().all(|b| !b.is_ascii_uppercase()) { lower.as_str() } else { line };
             if words(hay, name).next().is_some() {
-                found.push(Sink { path: source.path.clone(), line: source.first_line + n, name });
+                found.push(Sink { path: source.path.clone(), line: source.first_line + n, name, why });
             }
         }
-        for (name, follows, _) in SHAPED {
+        for (name, follows, why) in SHAPED {
             let shaped = words(line, name).any(|i| {
                 let rest = after_space(&line[i + name.len()..]);
                 rest.strip_prefix('(').is_some_and(|args| follows(after_space(args)))
             });
             if shaped {
-                found.push(Sink { path: source.path.clone(), line: source.first_line + n, name });
+                found.push(Sink { path: source.path.clone(), line: source.first_line + n, name, why });
             }
         }
     }
@@ -201,11 +216,10 @@ pub fn check(sources: &[Source], allowed: &[(&str, &str, &str)]) -> Result<()> {
             None => refused.push(sink),
         }
     }
-    let why = |name: &str| REFUSED.iter().find(|(n, _)| *n == name).map(|(_, why)| *why).or_else(|| SHAPED.iter().find(|(n, _, _)| *n == name).map(|(_, _, why)| *why)).unwrap_or("");
-    let listed: Vec<String> = refused.iter().map(|s| format!("{}:{}: {} ({})", s.path, s.line, s.name, why(s.name))).collect();
+    let listed: Vec<String> = refused.iter().map(|s| format!("{}:{}: {} ({})", s.path, s.line, s.name, s.why)).collect();
     ensure!(
         listed.is_empty(),
-        "first-party JavaScript turns a string into markup (xtask/src/html_sinks.rs), {} place(s); build the DOM instead (cell/markdown.mjs for markdown, an icon's shapes for an icon):\n{}",
+        "first-party JavaScript turns a string into markup or an inline style (xtask/src/html_sinks.rs), {} place(s); build the DOM instead (cell/markdown.mjs for markdown, an icon's shapes for an icon, el.style for a style):\n{}",
         listed.len(),
         listed.join("\n")
     );
@@ -224,14 +238,20 @@ mod tests {
         Source { path: path.to_string(), text: text.to_string(), first_line: 1 }
     }
 
+    /// Where each sink found is, and its name.
+    fn places(found: &[Sink]) -> Vec<(String, usize, &'static str)> {
+        found.iter().map(|s| (s.path.clone(), s.line, s.name)).collect()
+    }
+
     /// Goal: a planted sink fails the check, named by its file, line and
-    /// name. Method: each refused name in code, in a string and in a
-    /// comment, beside clean code and names that only contain one.
+    /// name, and what it does. Method: each refused name and shape in code,
+    /// in a string and in a comment, beside clean code and names that only
+    /// contain one.
     #[test]
     fn a_planted_sink_fails_the_check_naming_its_line() {
         let clean = source(
             "site/clean.js",
-            "const p = document.createElement(\"p\");\np.textContent = text;\nconst innerHTMLish = 1;\np.setAttribute(\"aria-label\", text);\ndocument.createElement(\"scripts-list\");\n",
+            "const p = document.createElement(\"p\");\np.textContent = text;\nconst innerHTMLish = 1;\np.setAttribute(\"aria-label\", text);\ndocument.createElement(\"scripts-list\");\np.setAttribute(\"styles\", x);\np.style.setProperty(\"--x\", \"1px\");\nif (p.hasAttribute(\"style\")) p.getAttribute(\"style\");\n",
         );
         check(&[source("site/clean.js", &clean.text)], &[]).expect("clean code passes");
         assert!(sinks(&clean).is_empty(), "{:?}", sinks(&clean));
@@ -251,14 +271,21 @@ mod tests {
             ("p.js", "el.setAttribute(\"onclick\", code);\n", 1, "setAttribute"),
             ("q.js", "el.setAttribute( 'OnLoad', code);\n", 1, "setAttribute"),
             ("t.js", "const s = document.createElement(\"SCRIPT\");\n", 1, "createElement"),
+            ("u.js", "row.setAttribute(\"style\", was.getAttribute(\"style\"));\n", 1, "setAttribute"),
+            ("v.js", "el.setAttribute( 'Style', css);\n", 1, "setAttribute"),
         ];
         for (path, text, line, name) in planted {
             let s = source(path, text);
-            assert_eq!(sinks(&s), [Sink { path: path.into(), line, name }], "{path}");
+            assert_eq!(places(&sinks(&s)), [(path.to_string(), line, name)], "{path}");
             let err = check(&[source("site/clean.js", &clean.text), s], &[]).expect_err(path).to_string();
             assert!(err.contains(&format!("{path}:{line}: {name}")), "{err}");
             assert!(!err.contains("site/clean.js"), "only the planted file is named: {err}");
         }
+        // each shape of one name says its own why: a style is not an event handler
+        let style = check(&[source("u.js", "row.setAttribute(\"style\", s);\n")], &[]).expect_err("a style attribute").to_string();
+        assert!(style.contains("u.js:1: setAttribute (sets an inline style from a string, which the shell's CSP refuses: set it by the CSSOM (el.style.setProperty))"), "{style}");
+        let handler = check(&[source("p.js", "el.setAttribute(\"onclick\", code);\n")], &[]).expect_err("a handler").to_string();
+        assert!(handler.contains("p.js:1: setAttribute (sets an event handler (on…) from a string)"), "{handler}");
     }
 
     /// Goal: a page's inline scripts are scanned, at their own lines, and
@@ -270,7 +297,7 @@ mod tests {
         let scripts = inline_scripts("site/index.html", page).expect("the page's scripts");
         assert_eq!(scripts.len(), 1, "the inline one alone");
         assert_eq!(scripts[0].first_line, 4);
-        assert_eq!(sinks(&scripts[0]), [Sink { path: "site/index.html".into(), line: 6, name: "innerHTML" }]);
+        assert_eq!(places(&sinks(&scripts[0])), [("site/index.html".to_string(), 6, "innerHTML")]);
         assert!(inline_scripts("x.html", "<script>never closed").is_err(), "a script with no end is an error, not a pass");
         let data_src = inline_scripts("y.html", "<script data-src=\"x.js\">a.innerHTML = b;</script><script defer src=x.js></script>").expect("scripts");
         assert_eq!(data_src.len(), 1, "a data-src is no src: its body is scanned, and a real src's is not");

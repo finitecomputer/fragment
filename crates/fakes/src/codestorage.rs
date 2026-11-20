@@ -161,6 +161,14 @@ struct State {
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
+    /// A path whose reads fail (`read_failing`) once a commit's answer is
+    /// dropped (`fail_read_after_lost_answer`).
+    #[serde(skip)]
+    fail_after_lost: Option<String>,
+    /// The next repo create is made, this many repos made after it, and
+    /// its answer dropped (`lose_repo_create_answer`).
+    #[serde(skip)]
+    create_unanswered: Option<usize>,
     #[serde(skip)]
     commit_packs: u32,
     #[serde(skip)]
@@ -227,6 +235,22 @@ struct State {
     /// and kind, else members and app.
     #[serde(skip)]
     described: BTreeMap<String, (String, String)>,
+    /// Moves' stages, by id (`seed_stage`, with `host_routes`): `open`
+    /// answers each one's manifest, and `zip` its bytes by a range alone,
+    /// as the platform's do for the agent a move is bound to.
+    #[serde(skip)]
+    stages: BTreeMap<String, Vec<u8>>,
+    /// The ranges a stage's zip answered, and their bytes in all.
+    #[serde(skip)]
+    stage_reads: (u64, u64),
+    /// The ranges copied from a stage into a fragment's blobs, and their
+    /// bytes in all (`POST …/copy`).
+    #[serde(skip)]
+    stage_copies: (u64, u64),
+    /// Copies still to answer 503 once this many more have worked
+    /// (`fail_stage_copies`): (worked first, then failing).
+    #[serde(skip)]
+    stage_copies_failing: (u32, u32),
 }
 
 struct Inner {
@@ -446,6 +470,19 @@ impl State {
         self.repo_by(name_or_url).map(|r| r.url.clone())
     }
 
+    /// `n` empty repos made after every existing one (`seed_filler`).
+    fn fill(&mut self, n: usize) {
+        let base = self.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
+        for i in 0..n {
+            let id = fresh_sha(&mut self.counter, "filler");
+            let name = format!("filler-{}", &id[..12]);
+            let url = uuid_like(&id);
+            let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
+            repo.created_at_ms = base + 1 + i as i64;
+            self.repos.insert(url, repo);
+        }
+    }
+
     /// Writes a commit; returns (old, new).
     fn commit(&mut self, url: &str, w: Write<'_>) -> (String, String) {
         let Write { branch, message, author, changes, from } = w;
@@ -553,6 +590,9 @@ impl Inner {
             if let Some(answer) = self.host_blob_route(st, req) {
                 return answer;
             }
+            if let Some(answer) = stage_route(st, req) {
+                return answer;
+            }
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
                 // an unknown name is a fresh repo with no branches yet
                 let url = match st.url_of(name) {
@@ -651,6 +691,10 @@ impl Inner {
             let repo_id = format!("repo_{}", &fresh_sha(&mut st.counter, name)[..20]);
             let url = uuid_like(&fresh_sha(&mut st.counter, &repo_id));
             st.repos.insert(url.clone(), Repo::new(name, &url, &repo_id));
+            if let Some(after) = st.create_unanswered.take() {
+                st.fill(after);
+                return Response::unanswered();
+            }
             return Response::json(
                 201,
                 &json!({ "repo_id": repo_id, "repo_name": name, "http_url": format!("{}/{url}", self.url), "message": "repository created" }),
@@ -847,6 +891,9 @@ impl Inner {
         let (old, new) = st.commit(url, Write { branch, message, author, changes: &changes, from: None });
         if let Some(left @ 1..) = st.unanswered.get_mut(url) {
             *left -= 1;
+            if let Some(path) = st.fail_after_lost.take() {
+                st.read_failing = Some(path);
+            }
             return Response::unanswered();
         }
         Response::json(
@@ -930,6 +977,63 @@ impl Inner {
             _ => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
         })
     }
+}
+
+/// A move's stage, as the platform answers its bound agent
+/// (docs/migrations.md, "A new agent's stage"): `open` its manifest, and
+/// `zip` one range of its bytes (206), never the whole without one. None
+/// for any other request.
+fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
+    let (stage, op) = req.path.strip_prefix("/api/migrations/stages/")?.split_once('/')?;
+    let Some(zip) = st.stages.get(stage) else { return Some(Response::json(404, &json!({ "error": "not_found", "message": format!("no stage {stage}") }))) };
+    Some(match (req.method.as_str(), op) {
+        ("POST", "open") => {
+            use sha2::Digest;
+            let manifest = json!({
+                "format": "finite-stage/1", "old": stage.split('.').next().unwrap_or(stage), "phase": "p1", "attempt": 1, "layout": "finite-computer",
+                "zip_bytes": zip.len(), "zip_sha256": hex::encode(sha2::Sha256::digest(zip)), "bytes": zip.len(), "files": 0,
+            });
+            Response::json(200, &json!({ "stage": stage, "manifest": manifest }))
+        }
+        // a range into a fragment's blobs, as the platform copies it (with
+        // `keep_blobs`): never through the caller
+        ("POST", "copy") => {
+            let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
+            let (into, offset, len) = (q("into"), q("offset").parse::<u64>().ok(), q("bytes").parse::<u64>().ok());
+            let (Some(offset), Some(len)) = (offset, len) else { return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "offset and bytes are numbers" }))) };
+            if len == 0 || offset.checked_add(len).is_none_or(|end| end > zip.len() as u64) {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "past the zip's end" })));
+            }
+            if st.upload_max.is_some_and(|max| len > max) {
+                return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
+            }
+            if st.stage_copies_failing.1 > 0 {
+                if st.stage_copies_failing.0 > 0 {
+                    st.stage_copies_failing.0 -= 1;
+                } else {
+                    st.stage_copies_failing.1 -= 1;
+                    return Some(problem(503, "the stage's copy is unavailable (the fake's lever)"));
+                }
+            }
+            let bytes = zip[offset as usize..(offset + len) as usize].to_vec();
+            let (sha, crc32) = (fragment_core::blob::sha256_hex(&bytes), crc32fast::hash(&bytes));
+            let Some(blobs) = st.host_blobs.as_mut() else { return Some(Response::json(404, &json!({ "error": "not_found", "message": "this host keeps no blobs" }))) };
+            blobs.insert((into, sha.clone()), bytes);
+            st.stage_copies = (st.stage_copies.0 + 1, st.stage_copies.1 + len);
+            Response::json(200, &json!({ "sha256": sha, "bytes": len, "crc32": crc32 }))
+        }
+        ("GET", "zip") => {
+            let range = req.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            let Some((first, last)) = range.filter(|(a, b)| a <= b && *b < zip.len() as u64) else {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "the fake's stage answers a range within its zip alone" })));
+            };
+            let bytes = zip[first as usize..=last as usize].to_vec();
+            st.stage_reads = (st.stage_reads.0 + 1, st.stage_reads.1 + bytes.len() as u64);
+            let total = zip.len();
+            Response::bytes(206, "application/zip", bytes).with_header("content-range", &format!("bytes {first}-{last}/{total}"))
+        }
+        _ => Response::json(404, &json!({ "error": "not_found", "message": format!("no route {} {}", req.method, req.path) })),
+    })
 }
 
 trait PemString {
@@ -1230,17 +1334,14 @@ impl CodeStorage {
     /// `n` empty repos made after every existing one (a busy org, so a
     /// lookup by name must page).
     pub fn seed_filler(&self, n: usize) {
-        self.with(|st| {
-            let base = st.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
-            for i in 0..n {
-                let id = fresh_sha(&mut st.counter, "filler");
-                let name = format!("filler-{}", &id[..12]);
-                let url = uuid_like(&id);
-                let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
-                repo.created_at_ms = base + 1 + i as i64;
-                st.repos.insert(url, repo);
-            }
-        });
+        self.with(|st| st.fill(n));
+    }
+
+    /// The next repo create is made, then `fillers` repos after it (a busy
+    /// org, so a lookup of it by name must page), and its answer is lost:
+    /// the connection closes without a response.
+    pub fn lose_repo_create_answer(&self, fillers: usize) {
+        self.with(|st| st.create_unanswered = Some(fillers));
     }
 
     /// The url-form identity of a repo named `name`.
@@ -1268,6 +1369,11 @@ impl CodeStorage {
     /// Whether the repo `url` was deleted (`DELETE /api/repos/{repo}`).
     pub fn repo_deleted(&self, url: &str) -> bool {
         self.with(|st| st.deleted.contains_key(url))
+    }
+
+    /// Whether a repo named `name` was made and then deleted.
+    pub fn repo_named_deleted(&self, name: &str) -> bool {
+        self.with(|st| st.deleted.values().any(|n| n == name))
     }
 
     pub fn branch(&self, repo: &str, branch: &str) -> Option<String> {
@@ -1409,8 +1515,24 @@ impl CodeStorage {
         });
     }
 
+    /// Once the next commit's answer is dropped (`drop_commit_answers`),
+    /// reads of `path` answer 503 (`fail_file_read`, cleared by it): a
+    /// writer that lost its answer and cannot read back what it wrote.
+    pub fn fail_read_after_lost_answer(&self, path: &str) {
+        self.with(|st| st.fail_after_lost = Some(path.to_string()));
+    }
+
     pub fn commit_pack_count(&self) -> u32 {
         self.with(|st| st.commit_packs)
+    }
+
+    /// Every request to `repo` (a name or url), on any route, from every
+    /// caller: what code.storage was asked about it.
+    pub fn repo_requests(&self, repo: &str) -> u32 {
+        self.with(|st| {
+            let Some(url) = st.url_of(repo) else { return 0 };
+            st.requests.iter().filter(|((_, r, _), _)| *r == url).map(|(_, n)| n).sum()
+        })
     }
 
     /// Requests to `repo` (a name or url) on one route, as `"<method>
@@ -1461,6 +1583,28 @@ impl CodeStorage {
                 st.blobs_corrupt.remove(sha);
             }
         });
+    }
+
+    /// A move's stage `stage`, its zip `zip` (with `host_routes`).
+    pub fn seed_stage(&self, stage: &str, zip: Vec<u8>) {
+        self.with(|st| st.stages.insert(stage.to_string(), zip));
+    }
+
+    /// The ranges the stages' zips answered so far, and their bytes in all.
+    pub fn stage_reads(&self) -> (u64, u64) {
+        self.with(|st| st.stage_reads)
+    }
+
+    /// After `worked` more copies from a stage, the next `n` answer 503
+    /// and keep nothing: an import cut off partway.
+    pub fn fail_stage_copies(&self, worked: u32, n: u32) {
+        self.with(|st| st.stage_copies_failing = (worked, n));
+    }
+
+    /// The ranges copied from stages into fragments' blobs so far, and
+    /// their bytes in all.
+    pub fn stage_copies(&self) -> (u64, u64) {
+        self.with(|st| st.stage_copies)
     }
 
     /// What `name`'s status says it is: its visibility and its kind.
@@ -1671,6 +1815,24 @@ mod tests {
         assert!(listed["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "todo--paul--abc"), "{listed}");
         let remade = send("POST", &format!("{}/api/repos", cs.url), &cs.token("todo--paul--abc", &["repo:write"]), Some(r#"{"repo_name":"todo--paul--abc"}"#));
         assert_eq!((remade.0, remade.1["code"].as_str()), (409, Some("repository_deleted")), "its name is never made again");
+    }
+
+    /// Goal: a repo create whose answer is lost (`lose_repo_create_answer`)
+    /// made the repo all the same, behind the repos made after it, so its
+    /// maker's try again is a 409 and its lookup by name must page; the
+    /// create after it is answered as ever. Method: the lever, a create,
+    /// the org's first page, the same create again, and another.
+    #[test]
+    fn a_lost_repo_create_answer_made_the_repo() {
+        let cs = CodeStorage::start(Options::default()).unwrap();
+        cs.lose_repo_create_answer(150);
+        let make = |name: &str| send("POST", &format!("{}/api/repos", cs.url), &cs.token(name, &["repo:write"]), Some(&format!(r#"{{"repo_name":"{name}"}}"#)));
+        assert_eq!(make("chat--lost--abc").0, 0, "no answer");
+        assert!(cs.repo_url("chat--lost--abc").is_some(), "made all the same");
+        let first = get(&format!("{}/api/repos?limit=100", cs.url), &cs.token("fragment-dev", &["org:read"])).1;
+        assert!(first["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "chat--lost--abc") && first["has_more"] == true, "behind a full page of newer ones: {first}");
+        assert_eq!(make("chat--lost--abc").0, 409, "made again: it exists");
+        assert_eq!(make("chat--next--abc").0, 201, "the next create is answered");
     }
 
     /// Goal: a commit pack that changes nothing is refused as the real

@@ -14,7 +14,7 @@ import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
-import { createAppsPage } from "./apps-page.js";
+import { createAppsPage, shoots } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
 import { createSchedulesPage } from "./schedules-page.js";
 import { createSkillsPage } from "./skills-page.js";
@@ -42,6 +42,7 @@ import { answerTo } from "./computer-answer.js";
 import { standIns } from "./frame-standin.js";
 import * as making from "./making.js";
 import { createAsks } from "./asks.js";
+import { screenActive } from "./screen-active.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -194,7 +195,7 @@ const originAt = (name) => ORIGIN.replace("{name}", name);
 const originOf = (name) => Promise.resolve(originAt(name));
 // An agent's face: its colour, by its identity (agent-color.js, the one
 // its own page and its chats' pages choose by), and its picture (its agent
-// fragment's avatar.png, as the person's list last said: an address on this
+// fragment's icon, as the person's list last said: an address on this
 // platform), shown instead of its tinted image when it has one.
 const agentFace = (fragment, id) => ({ color: colorOf(id), picture: byName(fragment)?.picture ?? null });
 const faceOf = (id) => agentFace(state.agents.get(id)?.fragment, id);
@@ -719,7 +720,7 @@ async function dropAlerts() {
 navigator.serviceWorker?.addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment === KIND.openChat && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
-    openChat(d.name);
+    pickChat(d.name);
     leaveSidebar();
   }
 });
@@ -913,7 +914,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
     onScreen: () => making.shownChat(state.making, state.current, state.page),
     reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
-  navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
+  navigation: { newChat, rename: (name) => rename(name), openChat: pickChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load,
 });
 // Continue: a conversation (an import, an archived chat) as a new chat with
@@ -921,7 +922,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
 const continuing = createContinue({
   api, ui: { el, notice },
   data: { allFragments: () => state.fragments, agents: () => state.agents, primaryAgent: () => primaryAgent(), titleOf, seg, chatBase: (agent) => chatBase(agent) },
-  navigation: { openChat, leaveSidebar }, load: () => load(), store,
+  navigation: { openChat: pickChat, leaveSidebar }, load: () => load(), store,
 });
 const sessionArchive = createSessionArchive({
   api, ui: { renderHeading: () => renderHeading() },
@@ -935,7 +936,7 @@ const sessionArchive = createSessionArchive({
 const threads = createThreads({
   $, el, patch, api, seg, avatar,
   data: { byName, own, chats, titleOf, labelOf, agentFace, ownAgents, current: () => state.current, page: () => state.page },
-  navigation: { openChat, leaveSidebar },
+  navigation: { openChat: pickChat, leaveSidebar },
   rendered: () => renderChats(),
 });
 
@@ -956,7 +957,7 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
-  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title, "rename"), load, nameScreen, renderNames,
+  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title), load, nameScreen, renderNames,
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
   primaryAgent: () => primaryAgent(), chats, own, me: () => state.me,
 });
@@ -1012,10 +1013,19 @@ function openChat(name, push = true, path = null) {
   renderDesktopEmpty();
   for (const lede of document.querySelectorAll(".app-prompts-lede")) namePromptsLede(lede);
   markSeen();
-  prewake();
   navigated();
   // home: a first run a failed read put off goes on from here too
   if (onboarding.putOff()) resumeFirstRun();
+}
+
+// A chat the person picked (its row, a thread's, History's, an alert's, a
+// notice's action): opened, and a sign they mean to use their agent, so
+// their computer's start is raced (computer.js `prewake`). A chat the page
+// opens on its own (as it loads, after an archive), or a framed page asks
+// to open, is no sign.
+function pickChat(name) {
+  openChat(name);
+  prewake();
 }
 
 // A chat's frame let go (the launcher's, to load it again), its stand-in
@@ -1065,21 +1075,32 @@ async function loadCard(name) {
 // none yet is asked again, waiting longer each time (2 s to a minute), and
 // the rest when the page comes back after a minute away. `only` (a set of
 // names, after a change to the list): those, and the apps still without one.
+// One whose card no shot makes (`shoots`: a members-only one of theirs) and
+// that has none is asked once while its row is the same (`cardless`, its row
+// as it was asked: only its 404 keeps it there), and again with the rest when
+// the page comes back (an upload shows then).
 const cardsLoad = { wait: 0, timer: null, at: 0 };
+const cardless = new Map();
 async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
-  const listed = docked().map((f) => f.name);
-  for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
-  const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
-  const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));
-  if (got.includes("new")) renderApps();
-  if (got.includes("none") && cardsLoad.wait < 60_000) {
+  const listed = docked();
+  for (const [name, card] of cards) if (!listed.some((f) => f.name === name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
+  const asked = listed.filter((f) => (!only || only.has(f.name) || !cards.has(f.name)) && cardless.get(f.name) !== JSON.stringify(f));
+  for (const f of asked) if (!shoots(f) && !cards.has(f.name)) cardless.set(f.name, JSON.stringify(f));
+  const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name).catch(() => "same")]));
+  for (const [f, result] of got) if (result !== "none" && cardless.get(f.name) === JSON.stringify(f)) cardless.delete(f.name);
+  if (got.some(([, result]) => result === "new")) renderApps();
+  if (got.some(([f, result]) => result === "none" && shoots(f)) && cardsLoad.wait < 60_000) {
     cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
     cardsLoad.timer = setTimeout(() => loadCards().catch(() => {}), cardsLoad.wait);
   }
 }
-addEventListener("focus", () => { if (Date.now() - cardsLoad.at > 60_000) loadCards().catch(() => {}); });
+addEventListener("focus", () => {
+  if (Date.now() - cardsLoad.at <= 60_000) return;
+  cardless.clear();
+  loadCards().catch(() => {});
+});
 // a pointer over an app's icon in the dock shows its card larger, above it
 const peek = el("div", "card-peek");
 peek.hidden = true;
@@ -1285,6 +1306,7 @@ addEventListener("message", async (e) => {
   if (e.origin !== origin || from.contentWindow !== e.source) return;
   const name = fragmentAt(url, sender, origin);
   if (!name) return;
+  // a page's ask, which it may send on its own: no sign of the person's
   if (isChat(name)) openChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
@@ -1306,7 +1328,7 @@ function openPage(href) {
   const name = url.origin.startsWith(before) && url.origin.endsWith(after) ? url.origin.slice(before.length, url.origin.length - after.length) : null;
   if (!name || !FRAGMENT_NAME.test(name)) return location.assign(url.href);
   if (!byName(name)) return;
-  if (isChat(name)) openChat(name);
+  if (isChat(name)) pickChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 }
 // A fragment's name, when `url` is a page of one on this deployment: its
@@ -1412,6 +1434,16 @@ function nameScreen(frame) {
     frame.contentWindow?.postMessage({ fragment: KIND.screen, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
   } catch {}
 }
+
+// The person at the shell, told to the agents' screens on view, so one
+// beside what they work in keeps streaming (screen-active.js): a key, a
+// press, the pointer or a touch while the page is in sight.
+const screensActive = screenActive({
+  now: () => Date.now(),
+  frames: () => [...document.querySelectorAll("iframe[data-screen]")].filter((f) => f.checkVisibility()),
+  tell: (frame) => frame.contentWindow?.postMessage({ fragment: KIND.screen, agent: frame.dataset.screen, active: true }, new URL(frame.dataset.src).origin),
+});
+for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) addEventListener(type, () => document.hidden || screensActive(), { capture: true, passive: true });
 
 const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
 const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
@@ -1640,9 +1672,8 @@ async function titleFromFirst(name) {
     if (!said) return asks.letGo(title);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
     const titled = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
-    const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
-    if (manifest.meta?.title !== UNTITLED) return;
-    await retitle(name, titled, "its title, from its first message");
+    // only while it is still untitled: a rename meanwhile keeps its name (409)
+    await retitle(name, titled, UNTITLED);
   } catch {
     asks.letGo(title);
   }
@@ -1751,7 +1782,7 @@ function composeIn(name, text) {
 }
 
 // The same display-name editor for chats, agents and Apps.
-const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load(), heard: (r) => heard(r), ApiError });
+const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load() });
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
@@ -1883,7 +1914,7 @@ const historyPage = createHistoryPage($("history-page"), {
   agentsOf, agents: () => state.agents, titleOf,
   archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
-  openChat, leaveSidebar,
+  openChat: pickChat, leaveSidebar,
 });
 function openHistory(push = true) {
   if (push) at(HISTORY);
@@ -1978,7 +2009,7 @@ function leaveSkills() {
 // finite.computer agents, which to bring over, and where each move is, in
 // the work area as the Apps page is; reached from its offer's Yes ----
 const movePage = createMovePage($("move-page"), {
-  api, el, setGuest, reload: () => load(),
+  api, el, setGuest, named, reload: () => load(),
   addAgent: (spec) => onboarding.addAgent(spec),
   ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
   identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
@@ -2018,7 +2049,7 @@ function leaveMove() {
 }
 
 const settings = createSettings({
-  api, $, seg, asks,
+  api, $, asks,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
     setSeat: (seat) => { state.seat = seat; }, support: () => state.support, seatIs,
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },
@@ -2286,6 +2317,10 @@ async function start(open) {
   else if (settings && location.pathname === SKILLS) openSkills(false);
   else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
+  // a chat an alert's click opened with no shell open (`?chat=`) too:
+  // `?chat=` is an address any page may send its tab to, so its load is
+  // no sign. An alert comes as its agent replies, so its computer is
+  // awake then, and for the idle wait after (computer.js `prewake`).
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
@@ -2295,7 +2330,6 @@ async function start(open) {
   // where it is answered, shows over the page
   // after a reload for a new release, its windows where they were
   reopenWindows(settings);
-  prewake();
 }
 
 // ---- a guest (`GET /api/seat`'s `guest`: no seat, and no plan of their

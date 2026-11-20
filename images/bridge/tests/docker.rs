@@ -1313,6 +1313,98 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
 }
 
+/// A host server that sends one body of `bytes` at about `per_s` bytes a
+/// second, to every request: a slow download for the computer.
+async fn slow_download(bytes: usize, per_s: usize) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("it listens");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        // bounded by the test: it ends with the runtime
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = [0u8; 4096];
+                let _ = s.read(&mut head).await;
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-length: {bytes}\r\nconnection: close\r\n\r\n").as_bytes()).await;
+                let chunk = vec![7u8; per_s / 10];
+                // bounded: the body, a tenth of a second's worth at a time
+                for _ in 0..bytes / chunk.len() {
+                    if s.write_all(&chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        }
+    });
+    port
+}
+
+/// Goal (the plan to a sandbox per agent, P6; docs/bridge.md, "Work left
+/// running"): work an agent leaves running holds its computer while it
+/// works, and lets go once it idles, as the computer's own counters show.
+/// Invalid: an idle server the agent started, beside idle Hermes and its
+/// bridge, never holds it: the keepalive closes after the turn and stays
+/// closed for a whole window. Valid: a background command that computes
+/// for 50 s, then downloads for 30 s at 200 KB/s (its CPU under the floor,
+/// its network over it), holds the computer through both, from the first
+/// slice after its turn; once it idles, still running, it lets go within
+/// the window and a slice.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn work_left_running_holds_the_computer_while_it_works() {
+    use fragment_bridge::limits::{LOAD_SLICES, LOAD_SLICE_MS};
+    let (fake, _model, chat, c) = hermes_running().await;
+    let window = LOAD_SLICES as u64 * LOAD_SLICE_MS;
+    let open = |w: &support::fake::World| w.keepalive_open > 0;
+    // invalid: an idle server left running
+    tool_said(&fake, &chat, &c, "start: python3 -m http.server 8123").await;
+    within(&fake, &chat, &c, window + 3 * LOAD_SLICE_MS, "the keepalive to close under an idle server", |w| !open(w)).await;
+    assert!(c.exec(&["pgrep", "-f", "http.server 8123"]), "the server still runs");
+    let t = Instant::now();
+    // bounded: a window
+    while t.elapsed() < Duration::from_millis(window) {
+        assert!(!fake.with(|w| open(w)), "an idle server held the computer after {:?}", t.elapsed());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // valid: work, then a download, then idle, the process still running
+    let port = slow_download(6_000_000, 200_000).await;
+    let dir = "/data/work/juniper--k3x9";
+    let command = format!("start: sh -c 'timeout 50 python3 -c \"while True: pass\"; touch {dir}/computed; curl -s http://api.fragment.internal:{port}/big -o {dir}/big; touch {dir}/downloaded; sleep 900'");
+    let left = |c: &Container| c.logs().lines().filter(|l| l.contains("\"keepalive.left\"")).map(|l| l.contains("\"hold\":true")).collect::<Vec<bool>>();
+    let before = left(&c).len();
+    tool_said(&fake, &chat, &c, &command).await;
+    let started = Instant::now();
+    // bounded: the turn's end and the first slice after it
+    while left(&c).len() == before {
+        assert!(started.elapsed() < Duration::from_millis(3 * LOAD_SLICE_MS), "the work never held the computer");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let first = started.elapsed();
+    let mut gaps = vec![];
+    // bounded: the work's 80 s and a margin
+    while !c.exec(&["test", "-f", &format!("{dir}/downloaded")]) {
+        assert!(started.elapsed() < Duration::from_secs(180), "the work did not finish");
+        if !fake.with(|w| open(w)) {
+            gaps.push((started.elapsed(), c.exec(&["test", "-f", &format!("{dir}/computed")])));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let worked = started.elapsed();
+    let downloaded = c.exec_out(&["stat", "-c", "%s", &format!("{dir}/big")]);
+    let said = left(&c);
+    eprintln!("work left running: held from {first:?}, gaps {gaps:?}, done at {worked:?}, downloaded {downloaded}, said {said:?}");
+    assert_eq!(downloaded.trim(), "6000000", "the download finished whole");
+    assert_eq!(said[before..], [true], "one hold, from the first slice after its turn: {said:?}");
+    assert!(gaps.is_empty(), "held throughout the work, the download's too: {gaps:?}");
+    // idle, still running: it lets go within the window and a slice
+    within(&fake, &chat, &c, window + 2 * LOAD_SLICE_MS, "the keepalive to close once the work idles", |w| !open(w)).await;
+    assert!(c.exec(&["pgrep", "-f", "sleep 900"]), "the idle command still runs");
+    assert_eq!(left(&c)[before..], [true, false], "let go once");
+    let log = c.logs();
+    assert!(log.contains("\"load.counters\"") && log.contains("\"read\":true"), "the container's own cgroup is read");
+}
+
 /// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
 /// Two background tasks of one group, independent completions on: both
 /// helpers start under the parent's turn; the fast one, finished, stays in
@@ -3923,6 +4015,87 @@ async fn a_computer_blown_away_tells_its_agent_the_chat() {
     let (asked_after, _) = asked_with(&calls, "and after that?").expect("a request for the message after");
     assert!(!asked_after.contains("[Recent channel messages]"), "the turn after is told nothing: {asked_after:?}");
     eprintln!("blown away: the model was sent {} bytes: {last}", last.len());
+}
+
+/// What Hermes sent the model for `said` (the request whose last user
+/// message holds it): told the chat (`[Recent channel messages]` with the
+/// recap's head, holding each of `chat`), or told nothing.
+fn told_chat(calls: &[support::model::Call], said: &str, chat: &[&str]) -> Result<(), String> {
+    let (last, _) = asked_with(calls, said).ok_or_else(|| format!("no model request for {said:?}"))?;
+    let told = last.starts_with("[Recent channel messages]\nYour memory of this chat is behind") && chat.iter().all(|s| last.contains(s));
+    if told { Ok(()) } else { Err(last) }
+}
+
+/// Goal (FIN-543), with real Hermes: an agent's profile lost alone (its
+/// `state.db` with it), the bridge's state kept, is noticed at the next
+/// start. The marker of what Hermes was handed in each chat is beside the
+/// profile (the bridge's seen.rs), and went with it: the agent's next turn
+/// in the chat is told the chat, and the turn after is told nothing.
+/// Before, nothing noticed (no claim of the bridge's was refused), and
+/// Hermes answered from a new profile with no word of the chat.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_profile_lost_alone_is_told_the_chat() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let code = x.say("remember the codeword: zebra-42");
+    within(fake, chat, &c, 180_000, "the codeword's turn to end", |w| !x.ends(w, &code).is_empty()).await;
+    // its profile lost alone (its sessions with it), then a start
+    assert!(c.exec(&["rm", "-rf", "/data/hermes/profiles/juniper--k3x9"]));
+    assert!(c.exec(&["test", "-s", "/data/bridge/state.json"]) || c.exec(&["test", "-s", "/data/bridge/state.log"]), "the bridge's state is kept");
+    c.restart();
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let asked = x.say("what was the codeword?");
+    within(fake, chat, &c, 240_000, "the question's turn to end", |w| !x.ends(w, &asked).is_empty()).await;
+    let after = x.say("and after that?");
+    within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    told_chat(&calls, "what was the codeword?", &["\nYour owner: remember the codeword: zebra-42\nYou: ", "\n\n[New message]\n[paul] what was the codeword?"]).unwrap_or_else(|last| panic!("the chat is told: {last:?}"));
+    let (asked_after, _) = asked_with(&calls, "and after that?").expect("a request for the message after");
+    assert!(!asked_after.contains("[Recent channel messages]"), "the turn after is told nothing: {asked_after:?}");
+    fake.with(|w| assert_eq!(w.bodies(chat, "work", "turn.start").iter().filter(|s| s["turn"] == code.as_str()).count(), 1, "the codeword's turn ran once"));
+    assert_eq!(c.exec_out(&["cat", &format!("/data/hermes/profiles/juniper--k3x9/fragment-seen/{chat}")]).trim(), after, "the marker beside the profile names the turn Hermes was handed last");
+}
+
+/// Goal (FIN-530), with real Hermes: a computer that comes back with
+/// nothing of its `/data` reads every chat again, and a chat no one writes
+/// in before it sleeps is still told at its next turn, a life later: what
+/// Hermes was handed there is a marker on the disk (none, here), not a
+/// mark in the life that read the chat. Before, that mark was lost with
+/// the life, and the turn was told nothing.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_chat_read_again_is_told_after_a_sleep() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let other = fake.chat("other", &["juniper"]);
+    let x = Expiry { fake, model, chat };
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let c = x.container(&[]);
+    within(fake, chat, &c, 120_000, "Hermes' bridge to follow both chats", |w| w.live_sockets() >= 3).await;
+    let hello = x.say("hello");
+    within(fake, chat, &c, 180_000, "Hermes' first reply", |w| !x.ends(w, &hello).is_empty()).await;
+    let say_other = |text: &str| fragment_bridge::records::turn_id("juniper--k3x9", &other, "chat", fake.say(&other, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&other, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let colour = say_other("remember the colour: teal-7");
+    within(fake, chat, &c, 180_000, "the other chat's turn to end", |w| ended(w, &colour)).await;
+    // blown away: a computer with an empty disk reads both chats again
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let c = x.container(&[]);
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let here = x.say("what did I say first here?");
+    within(fake, chat, &c, 240_000, "this chat's turn to end", |w| !x.ends(w, &here).is_empty()).await;
+    // and it sleeps before anyone writes in the other chat
+    c.restart();
+    let asked = say_other("what was the colour?");
+    within(fake, chat, &c, 240_000, "the other chat's question to end", |w| ended(w, &asked)).await;
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    told_chat(&calls, "what did I say first here?", &["\nYour owner: hello\nYou: "]).unwrap_or_else(|last| panic!("the chat written to first is told: {last:?}"));
+    told_chat(&calls, "what was the colour?", &["\nYour owner: remember the colour: teal-7\nYou: "]).unwrap_or_else(|last| panic!("a sleep later, the other chat is told too: {last:?}"));
+    fake.with(|w| assert_eq!(w.bodies(&other, "work", "turn.start").iter().filter(|s| s["turn"] == colour.as_str()).count(), 1, "the colour's turn ran once"));
 }
 
 /// Goal (Codex on #1305): a chat Hermes compressed answers on after a

@@ -127,6 +127,10 @@ pub struct RelayConfig {
     /// A file sent by URL may come over plain http from a local address (a
     /// test's fake server; `BRIDGE_MEDIA_LOCAL=allow`).
     pub media_local: bool,
+    /// Hermes' home (`HERMES_HOME`): each agent's profile there is its
+    /// memory of its chats (`Runtime::memory`). None: a test's Hermes that
+    /// keeps none.
+    pub home: Option<PathBuf>,
 }
 
 pub struct Relay {
@@ -331,6 +335,11 @@ impl Runtime for Relay {
 
     fn menu(&self) -> &'static [crate::runtime::MenuItem] {
         menu::MENU
+    }
+
+    fn memory(&self) -> Option<crate::runtime::Memory> {
+        let home = self.config.home.clone()?;
+        Some(std::sync::Arc::new(move |agent: &str| wire::profile_dir(&home, agent)))
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
@@ -914,6 +923,7 @@ impl Loop {
                             let _ = self.send(frame);
                         }
                         crate::ev!("relay.acked", { "turn": buffer_id });
+                        self.emit(Event::Taken { turn: buffer_id.clone() }).await;
                     }
                 } else {
                     self.answers.retain(|a| a.buffer != buffer_id);

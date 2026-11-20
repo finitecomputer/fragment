@@ -201,7 +201,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // versions, which a browser keeps: opening the sheet again waits on no
     // round trip for them (shell.rs `versioned`); none is inline
     let linked = |prefix: &str| r.text.split(['"', '\'']).find(|u| u.starts_with(prefix)).unwrap_or("").to_string();
-    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v=")];
+    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v="), linked("/__shell/fonts.css?v=")];
     let kept = files.iter().map(|f| api.unsigned("GET", f, None)).collect::<Result<Vec<_>>>()?;
     let other = api.unsigned("GET", "/__shell/platform-pages.css?v=0000", None)?;
     let named = api.unsigned("GET", "/__shell/platform-pages.css", None)?;

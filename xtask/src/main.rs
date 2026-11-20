@@ -137,6 +137,7 @@ mod image;
 mod inputs;
 mod js_syntax;
 mod prepare;
+mod remote_loads;
 #[cfg(test)]
 mod markdown_dom;
 #[cfg(test)]
@@ -775,11 +776,22 @@ fn no_eval_sinks(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No page of this repo loads a script, stylesheet or font from another
+/// domain (xtask/src/remote_loads.rs): a security hole and a privacy leak.
+/// We serve our own, from the release, on the page's own origin.
+fn no_remote_loads(root: &Path) -> Result<()> {
+    let files = remote_loads::sources(root)?;
+    remote_loads::check(&files, &remote_loads::ALLOWED)?;
+    println!("remote loads: none in {} pages, stylesheets and scripts ({} allowed, each with why)", files.len(), remote_loads::ALLOWED.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
+    no_remote_loads(&root)?;
     schema_lock::holds(&root)?;
     wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));

@@ -145,7 +145,13 @@ weekday at 8") is a schedule on itself: a scheduled record on its own
 agent fragment's `tasks` (Scheduled records, below), which the platform
 keeps and fires through every restart and sleep of its computer. Never
 a background loop, `sleep`, crontab or `hermes cron` on the computer:
-they die with it. The agent is an editor of its own fragment, so it adds
+they die with it. The computer sleeps a while after nothing holds it
+awake (a turn, a port tab open on it), and a sleep or a restart ends
+every process an agent started: a server, a background command, a
+download. Nothing starts those again. One still working (a build, a
+download) keeps the computer awake up to 2 hours after the agent's last
+turn; an idle server does not. What must outlive that is a routine, or
+an app (its crons and triggers run on the platform). The agent is an editor of its own fragment, so it adds
 one as any editor does; on a computer `fragment schedule` acts on the
 agent's own fragment unless another is named, and `--routine` builds the
 routine record:
@@ -235,8 +241,8 @@ folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`board`,
 `notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
 `skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
-`fragment.json`. Either way `--title` gives it its own title, its
-`fragment.json`'s `meta.title`, over the template's. Any other is
+`fragment.json`. Either way `--title` gives it its own title, over the
+template's: its name, set by `fragment rename` after. Any other is
 refused, naming them.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -307,7 +313,7 @@ Without `--title`, scaffolded apps and copied templates use a name derived
 from their label instead of a template placeholder such as "Blank".
 
 ```
-fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
+fragment rename meal-planner "Meals this week"     # its name, at once, deploying nothing; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
 fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
@@ -1021,7 +1027,9 @@ A file a message held is under `~/archive/media/`, named in its
 ## Bringing an agent's home
 
 `fragment home` reads an agent's home from wherever it ran: its folder,
-or a zip of it, read in place and never changed. A layout says where
+a zip of it, or a move's stage (`stage:<the stage>`, as its routine names
+it: read where the platform keeps it, never downloaded), each read in
+place and never changed. A layout says where
 that home keeps things: `hermes` (a bare Hermes home, the default), or a
 layout file a platform's import skill carries.
 
@@ -1031,6 +1039,7 @@ fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read thr
 fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+fragment home files stage:o1.p1.1 --layout ./layouts/x.json --into old-files--k3x9 --store juniper-storage--b2c3 --notes ~/old-agent/home   # and the rest, kept in storage
 ```
 
 The survey lists the chats' database (`fragment session import` brings
@@ -1051,6 +1060,24 @@ more as a blob, and writes `left-behind.md` beside them: every file or
 folder left out, its size, and why. A fragment with no `fragment.json`
 gets one whose page is the files view (`fragment deploy` shows it).
 Running it again sends only what is missing.
+
+With `--store`, nothing stays behind: every other file of the home (its
+own self, its brains' files, what the files' pick leaves) is kept whole
+in a members-only storage fragment, as it was in the home, under the
+notes folder's name (`home/` for `--notes ~/old-agent/home`), a file past
+one upload in parts, but a file whose name says it may hold a password
+or key, never read. From a move's stage each large file is
+copied there on the platform, never through your disk. Each folder or
+file kept gets a note under `--notes`, laid out as the home, as
+`fragment offload` leaves one (`<name>.offloaded.md`, a folder's at most
+10,000 files and 1 GB): `fragment offload --back <note>` brings it back,
+checked against the old file's CRC-32. A storage fragment holds at most
+19,984 files: one that fills says what is left; run it again with
+`--store` naming another, and it goes on. Cut off, run it again: it
+keeps only what no note names yet. A file its notes keep counts only as
+the same bytes; a home that differs from them (another copy of it) is
+refused before anything is written: keep it beside, with `--notes`
+naming a new folder.
 
 ## Moving files off a disk
 
@@ -1100,11 +1127,11 @@ read whatever it can read (as a viewer), but you never act through it.
 fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
 
-An agent's name and picture are its agent fragment's: its title
-(`fragment.json`'s `meta.title`) and its `avatar.png` (a PNG, JPEG, WebP
-or GIF of at most 256 KiB), as live has them. Every page shows the agent
-by them (your shell, its chats, the share sheet, push notifications),
-and so does its runtime (its teammates are told it), within seconds of a change:
+An agent's name is its agent fragment's own title, and its picture that
+fragment's `avatar.png` (a PNG, JPEG, WebP or GIF of at most 256 KiB) on
+main. Every page shows the agent by them (your shell, its chats, the
+share sheet, push notifications), and so does its runtime (its teammates
+are told it), within seconds of a change:
 
 ```
 fragment agent juniper--k3x9 --name Frank          # its name
@@ -1112,13 +1139,12 @@ fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture t
 fragment agent juniper--k3x9                       # what they are now
 ```
 
-`fragment agent` checks the picture, writes both in one commit and puts
-it live; an agent on a computer leaves its own name out. A new name is
-said in its job too (`SOUL.md`), in the same commit, wherever the job
-said its old one as a word. A picture too
-large or that is no picture is refused before anything is written; one
-committed by hand is refused when it is deployed (`fragment deploy` and
-`fragment status` say why), and the last good name and picture stay.
+`fragment agent` sets them at once, deploying nothing: its name, and its
+picture as a commit to main; an agent on a computer leaves its own name
+out. A new name is said in its job too (`SOUL.md`), in a commit beside
+it, wherever the job said its old one as a word. A picture too large or
+that is no picture is refused before anything is written; one committed
+by hand is shown as none, and `fragment events` says why.
 Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
@@ -1213,7 +1239,7 @@ fragment export [--out FILE]             fragment channel <name> [<channel>] [--
 fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
-fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
+fragment home files <source> --into <name> [--plan] [--layout L] [--store <name> --notes <dir>]   # its files, into a fragment of files (and the rest, in storage)
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

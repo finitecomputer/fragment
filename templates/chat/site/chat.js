@@ -81,8 +81,11 @@ const WINDOW_MAX = 600;
 // window reaches the end (each counted when it comes); the newest kept.
 const ASIDE_MAX = 1000;
 // After a message of one's own, wait for the agent's turn. Past this long
-// the line says plainly that no reply has started; a wake can be slow.
+// the line says plainly that no reply has started; a wake can be slow, so
+// while its computer starts (or owes a start) it doesn't count, and once
+// it is up it counts from then.
 const PENDING_MS = 90000;
+const GETTING_READY = new Set(["starting", "sleeping"]);
 // Typing shows to others until this long after the last keystroke.
 const TYPING_MS = 4000;
 // A draft no word came for in this long is let go (its writer went away).
@@ -418,6 +421,7 @@ export function mount(root) {
     toComputer: new Map(), // a nonce -> the `cardKey` whose answer it handed the shell, until the shell says
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
+    readyAt: 0, // when this page last heard its agents' computer come up
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> true, once someone opened it whole
     openSteps: new Set(), // turn:step, a step someone opened to its arguments and result
@@ -2163,13 +2167,12 @@ export function mount(root) {
     const name = agent ? who(agent).name : "The agent";
     const phase = inRoster(agent)?.phase;
     const present = state.here.some((p) => p.principal === agent);
-    const starting = phase === "starting" || phase === "asleep";
-    const late = !t && !starting && state.pending && Date.now() - state.pending.since >= PENDING_MS;
+    const readying = GETTING_READY.has(phase);
+    const late = !t && !readying && state.pending && Date.now() - Math.max(state.pending.since, state.readyAt) >= PENDING_MS;
     const said = t ? `${name} is working${forWhom}`
       : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
       : late ? `${name} has not started a reply yet.`
-      : starting ? `${name} is starting up…`
-      : phase === "sleeping" ? `${name}'s computer is going to sleep…`
+      : readying || phase === "asleep" ? `${name} is getting ready…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.key : "pending"}`;
     return [
@@ -2945,10 +2948,16 @@ export function mount(root) {
     }
     if (d?.fragment === KIND.agents && Array.isArray(d.agents)) {
       rosterOrigin = event.origin;
+      const was = new Map(state.roster.map((a) => [a.identity, a.phase]));
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
         .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+      // its computer came up: a message waiting on it is late only PENDING_MS from now
+      if (state.roster.some((a) => a.phase === "awake" && was.get(a.identity) && was.get(a.identity) !== "awake")) {
+        state.readyAt = Date.now();
+        if (state.pending) setTimeout(schedule, PENDING_MS + 50);
+      }
       if (d.setup && typeof d.setup === "object" && Array.isArray(d.setup.steps)) {
         setup = {
           steps: d.setup.steps

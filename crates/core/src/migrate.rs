@@ -118,6 +118,7 @@ pub const FRAGMENT: Class = Class {
         step!("making", "fragment/0007_making.sql"),
         step!("newest", "fragment/0008_newest.sql"),
         step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
+        step!("face_forward_only", "fragment/0010_face_forward_only.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -142,6 +143,7 @@ pub const REGISTRY: Class = Class {
         step!("key_sessions", "registry/0009_key_sessions.sql"),
         step!("comp_until", "registry/0010_comp_until.sql"),
         step!("connection_signin_access", "registry/0011_connection_signin_access.sql"),
+        step!("move_comps_open", "registry/0012_move_comps_open.sql"),
     ],
     variants: &[],
     kept: &[],
@@ -154,9 +156,9 @@ pub const PRINCIPAL: Class = Class {
     kept: &["wiped"],
 };
 
-pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql"), step!("uses", "ledger/0002_uses.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql"), step!("uses_owed", "computer/0007_uses_owed.sql")], variants: &[], kept: &["wiped"] };
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.
@@ -164,7 +166,7 @@ pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("bas
 
 /// A person's Vault (FIN-466): its secrets; a wipe empties it and keeps
 /// the row that says so.
-pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql"), step!("claims", "vault/0002_claims.sql"), step!("receipts", "vault/0003_receipts.sql")], variants: &[], kept: &["wiped"] };
+pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql"), step!("claims", "vault/0002_claims.sql"), step!("receipts", "vault/0003_receipts.sql"), step!("own_keys", "vault/0004_own_keys.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
 /// The finite.computer move's one object (docs/migrations.md): removable
@@ -877,6 +879,91 @@ mod tests {
         assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('org_members_org_email')"), 0, "the old index went");
         assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('org_payers', 'org_members_offer_email')"), 2);
         assert_eq!(db.count("SELECT COUNT(*) FROM org_members"), 1);
+    }
+
+    /// Goal: the move's comps last until staff end them (FIN-463, Paul
+    /// 2026-11-19): a Registry holding comps the move gave with an end
+    /// (step 10's `until_ms`, 30 days on) loses those ends at its next
+    /// start, however the comp was made (a new org of one, or a seat in
+    /// the org its person was in); an operator's comp keeps its own end,
+    /// even on a row the move comped before (ended, then comped again or
+    /// given an offer's end by a merge). A log that forgot entries since
+    /// the move began (its oldest after 2026-11-10) leaves rows Migrations
+    /// added the move's. Method: the Registry as it stood before, its rows
+    /// as that release wrote them, then the class as declared, twice; once
+    /// with its log whole, once with its oldest entries gone.
+    #[test]
+    fn the_moves_comps_lose_their_end() {
+        const MOVE_BEGAN: i64 = 1_794_268_800_000;
+        let before = REGISTRY.steps.iter().position(|s| s.name == "connection_signin_access").expect("step 11") + 1;
+        let steps: &'static [Step] = REGISTRY.steps;
+        let old = Class { name: REGISTRY.name, steps: &steps[..before], variants: REGISTRY.variants, kept: REGISTRY.kept };
+        let members = "INSERT INTO org_members (id, org, person, email, admin, seat, comped, sleeps, added_at, added_by, until_ms) VALUES
+               ('mem-new', 'org-a', 'npub1ada', 'ada@x.test', 1, 'seat', 1, 0, 1, 'migrations', 2000),
+               ('mem-in', 'org-b', 'npub1bea', 'bea@x.test', 0, 'seat', 1, 0, 1, 'npub1admin', 2000),
+               ('mem-unlogged', 'org-c', 'npub1cy', 'cy@x.test', 1, 'seat', 1, 0, 1, 'migrations', 2000),
+               ('mem-op', 'org-d', 'npub1dee', 'dee@x.test', 1, 'seat', 1, 0, 1, 'npub1op', 3000),
+               ('mem-again', 'org-e', 'npub1eve', 'eve@x.test', 1, 'seat', 1, 0, 1, 'migrations', 4000),
+               ('mem-merged', 'org-h', 'npub1hal', 'hal@x.test', 1, 'seat', 1, 0, 1, 'migrations', 5000),
+               ('mem-paid', 'org-f', 'npub1fay', 'fay@x.test', 1, 'seat_always_on', 0, 0, 1, 'npub1fay', NULL),
+               ('mem-open', 'org-g', 'npub1gus', 'gus@x.test', 1, 'seat', 1, 0, 1, 'npub1op', NULL);";
+        // each the move's comp, or an operator's after it: `at` is a day's
+        // offset from the move's start (negative: before it)
+        let log = |day: i64| {
+            let at = |d: i64| MOVE_BEGAN + (day + d) * 86_400_000;
+            format!(
+                "INSERT INTO admin_log (at, operator, action, target, detail) VALUES
+                   ({}, 'npub1op', 'trial-new', 'trial-1', 'a trial before the move'),
+                   ({}, 'migrations', 'comp', 'mem-new', 'seat for ada@x.test in ada@x.test'),
+                   ({}, 'migrations', 'comp', 'mem-in', 'seat for bea@x.test in Bea''s'),
+                   ({}, 'npub1op', 'comp', 'mem-op', 'seat for dee@x.test in dee@x.test'),
+                   ({}, 'migrations', 'comp', 'mem-again', 'seat for eve@x.test in eve@x.test'),
+                   ({}, 'npub1op', 'comp-end', 'mem-again', 'seat of eve@x.test'),
+                   ({}, 'npub1op', 'comp', 'mem-again', 'seat for eve@x.test in eve@x.test'),
+                   ({}, 'migrations', 'comp', 'mem-merged', 'seat for hal@x.test in hal@x.test'),
+                   ({}, 'npub1op', 'comp-end', 'mem-merged', 'seat of hal@x.test'),
+                   ({}, 'npub1op', 'comp', 'mem-offered', 'seat for hal@y.test in hal@x.test'),
+                   ({}, 'npub1op', 'comp', 'mem-open', 'seat for gus@x.test in gus@x.test');",
+                at(-1), at(0), at(0), at(0), at(0), at(1), at(2), at(0), at(1), at(2), at(0)
+            )
+        };
+        let ends = |db: &Lite| -> Vec<(String, Option<i64>)> {
+            let rows = db.rows("SELECT id, until_ms FROM org_members ORDER BY id").expect("the members");
+            rows.iter().map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r["until_ms"].as_i64())).collect()
+        };
+        let want = |unlogged: Option<i64>| -> Vec<(String, Option<i64>)> {
+            [
+                ("mem-again", Some(4000)),
+                ("mem-in", None),
+                ("mem-merged", Some(5000)),
+                ("mem-new", None),
+                ("mem-op", Some(3000)),
+                ("mem-open", None),
+                ("mem-paid", None),
+                ("mem-unlogged", unlogged),
+            ]
+            .into_iter()
+            .map(|(id, end)| (id.to_string(), end))
+            .collect()
+        };
+        // its log whole (its oldest entry before the move): only what it
+        // logged as the move's comp is the move's
+        let whole = Lite::new();
+        assert_eq!(migrated(&whole, &old, 1), Ok(Ran::Made { version: before as u32 }));
+        whole.exec(&format!("{members}\n{}", log(0))).expect("the rows the move's release wrote");
+        let ran = migrated(&whole, &REGISTRY, 2);
+        assert_eq!(ends(&whole), want(Some(2000)), "the move's comps have no end; an operator's keep theirs");
+        assert_eq!(ran, Ok(Ran::Migrated { from: before as u32, version: REGISTRY.steps.len() as u32 }));
+        assert_eq!(whole.count("SELECT COUNT(*) FROM admin_log"), 11, "the log as it was");
+        assert_eq!(migrated(&whole, &REGISTRY, 3), Ok(Ran::Current { version: REGISTRY.steps.len() as u32 }));
+        assert_eq!(ends(&whole), want(Some(2000)), "a restart changes nothing");
+        // its oldest entries forgotten (its oldest after the move began): a
+        // row Migrations added with nothing logged is the move's too
+        let forgot = Lite::new();
+        assert_eq!(migrated(&forgot, &old, 1), Ok(Ran::Made { version: before as u32 }));
+        forgot.exec(&format!("{members}\n{}\nDELETE FROM admin_log WHERE action = 'trial-new';", log(1))).expect("the rows, the log's oldest gone");
+        migrated(&forgot, &REGISTRY, 2).expect("migrated");
+        assert_eq!(ends(&forgot), want(None), "a row Migrations added, its log forgotten, is the move's");
     }
 
     /// Goal: every object a deployment holds is adopted: each class's

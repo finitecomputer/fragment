@@ -65,6 +65,7 @@ const SHELL: &str = "cell/shell/shell.js";
 const TEST_SUFFIX: &str = ".test.mjs";
 /// The shell's tests, which a walk must find (each named in its file).
 const SHELL_TESTS: &[&str] = &[
+    "cell/shell-tests/admin-glance.test.mjs",
     "cell/shell-tests/agent-claude.test.mjs",
     "cell/shell-tests/agent-home-read.test.mjs",
     "cell/shell-tests/agent-remove.test.mjs",
@@ -79,6 +80,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/chat-pages.test.mjs",
     "cell/shell-tests/chat-speakers.test.mjs",
     "cell/shell-tests/computer-answer.test.mjs",
+    "cell/shell-tests/computer-prewake.test.mjs",
     "cell/shell-tests/computer-state.test.mjs",
     "cell/shell-tests/connections-names.test.mjs",
     "cell/shell-tests/frame-messages.test.mjs",
@@ -91,8 +93,10 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/move-page.test.mjs",
     "cell/shell-tests/notices-band.test.mjs",
     "cell/shell-tests/onboarding.test.mjs",
+    "cell/shell-tests/port-bridge.test.mjs",
     "cell/shell-tests/restart-follow.test.mjs",
     "cell/shell-tests/schedules-page.test.mjs",
+    "cell/shell-tests/screen-attend.test.mjs",
     "cell/shell-tests/session-archive.test.mjs",
     "cell/shell-tests/session-text.test.mjs",
     "cell/shell-tests/simplex-settings.test.mjs",

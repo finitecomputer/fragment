@@ -59,6 +59,13 @@ export const shelfOf = (f) => (f.kind === "brain" ? "brains" : "apps");
 const kindWord = (f) => (f.kind === "app" || f.kind === "brain" ? "" : "Other");
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
+// Whether the platform shoots its card (docs/api.md, Cards): one the dock
+// shows, unless its row says it is members only (its owner's row alone
+// says), whose page no shot opens. Such a card comes only of an upload, or
+// stays from before it was restricted: asked once, it is not asked again
+// until its row changes (Paul's preview console, 2026-11-19: a members-only
+// brain's card asked 65 times in a session, each a 404).
+export const shoots = (f) => dockable(f) && !(owns(f) && f.sharing?.visibility === "members");
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const SHELL = { "x-fragment-shell": "1" };
 // how long a preview is waited for here, asked every second
@@ -71,7 +78,10 @@ const NAMES_SHOWN = 2;
 // The Apps page's cards (`GET /api/f/<name>/card`), read with the page's
 // session as the dock's are: every one on a visit's open; afterwards a new
 // or changed row's, and one whose card is not there yet, asked again with
-// bounded backoff and retries. `visit()` is the page's visit now (a read
+// bounded backoff and retries. A row whose card no shot makes (`shoots`)
+// and that has none is asked once a visit (an upload shows on the next),
+// never again within it while the row is the same. `visit()` is the
+// page's visit now (a read
 // made in an earlier one, or one a newer read of its row superseded,
 // changes nothing), `shown()` whether the page is open, `rows()` the apps
 // it may show a card for, `draw()` draws the page again. Its own function
@@ -83,9 +93,15 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
   const reads = new Map();
   const attempts = new Map();
   const drawn = new Map();
+  // a row no shot makes a card of and with none, as it was when it was
+  // asked: no other read of the visit asks it again while its row is the
+  // same, and only its 404 keeps it here (a card, a failure or a read of a
+  // visit gone lets it go)
+  const cardless = new Map();
   const load = { wait: 0, timer: null, batch: 0 };
 
-  // its card: "new", "same", "none" or "stale" (a newer read or visit owns the row)
+  // its card: "new", "same", "none" (there is none), "failed" or "stale"
+  // (a newer read or visit owns the row)
   async function read(name, mine) {
     const request = (reads.get(name) ?? 0) + 1;
     reads.set(name, request);
@@ -95,7 +111,8 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
     const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
     if (!current()) return "stale";
     if (r.status === 304) return "same";
-    if (!r.ok) return "none";
+    if (r.status === 404) return "none";
+    if (!r.ok) return "failed";
     const body = await r.blob();
     if (!current()) return "stale";
     const url = urls.createObjectURL(body);
@@ -113,6 +130,7 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
     const asked = [];
     for (const f of rows()) {
       const fingerprint = JSON.stringify(f);
+      if (!all && cardless.get(f.name) === fingerprint) continue;
       if (!all && cards.has(f.name) && drawn.get(f.name) === fingerprint) continue;
       if (all || attempts.get(f.name)?.fingerprint !== fingerprint) {
         attempts.set(f.name, { fingerprint, count: 0 });
@@ -122,17 +140,19 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
       if (attempt.count < CARD_READS_MAX) {
         ++attempt.count;
         asked.push(f);
+        if (!shoots(f) && !cards.has(f.name)) cardless.set(f.name, fingerprint);
       }
     }
     if (fresh) load.wait = 0;
-    const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "none")]));
+    const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "failed")]));
+    for (const [f, result] of got) if (result !== "none" && cardless.get(f.name) === JSON.stringify(f)) cardless.delete(f.name);
     if (mine !== visit()) return;
     // a card its read set is drawn, though a newer batch began: that one's
     // read asks with this card's etag and, told it is the same, draws nothing
     if (got.some(([, result]) => result === "new")) draw();
     if (batch !== load.batch) return;
     for (const [f, result] of got) if (result === "new" || result === "same") drawn.set(f.name, JSON.stringify(f));
-    if (got.some(([, result]) => result === "none") && load.wait < 60_000) {
+    if (got.some(([f, result]) => (result === "none" && shoots(f)) || result === "failed") && load.wait < 60_000) {
       load.wait = Math.min(60_000, load.wait ? load.wait * 2 : 2_000);
       load.timer = timers.setTimeout(() => { if (mine === visit()) loadAll().catch(() => {}); }, load.wait);
     }
@@ -450,7 +470,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       say(name, "");
       render();
       try {
-        await h.retitle(name, edit.draft.trim(), "rename app");
+        await h.retitle(name, edit.draft.trim());
         editing.delete(name);
         await h.reload();
       } catch (error) { say(name, error.message); }
@@ -545,7 +565,7 @@ export function createAppsPage(page, h, shelf = "apps") {
         const editor = h.el("div");
         editor.dataset.iconEditor = name;
         panel.append(editor);
-        if (dockable(f) && !(owns(f) && f.sharing?.visibility === "members")) {
+        if (shoots(f)) {
           const preview = h.el("section", "app-preview-editor");
           preview.append(h.el("h2", null, "Preview"));
           if (card) { const img = h.el("img", "app-preview-image"); img.alt = ""; img.src = card.url; preview.append(img); }

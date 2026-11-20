@@ -848,6 +848,9 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
         .env("BRIDGE_RELAY_SECRET_FILE", format!("{RUN}/relay.secret"))
         .env("GATEWAY_RELAY_ID", GATEWAY_ID)
         .env("BRIDGE_STATE_DIR", "/data/bridge")
+        // each agent's profile is its memory of its chats, where the bridge
+        // keeps what it last handed it in each (the bridge's seen.rs)
+        .env("BRIDGE_RELAY_HOME", home())
         // its answer to a hold is this image's to wait for: the platform's
         // `held` comes once Hermes' databases are copied too (held.rs)
         .env("BRIDGE_HELD", held::BRIDGE_HELD)

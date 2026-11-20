@@ -16,6 +16,8 @@ use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use support::fake::{person, Fake, World};
 
 const WAIT: u64 = 8_000;
+/// The scripted agent's pace between drafts, as `support::script`'s.
+const PACE: Duration = Duration::from_millis(15);
 
 /// New modes are optional on the wire; when present, every model id and
 /// effort must be safe before the boot writes a profile from the view.
@@ -700,6 +702,57 @@ async fn catch_up_after_a_restart_without_a_duplicate() {
     bridge.stop().await;
 }
 
+/// Goal (security; valid, invalid and restart): a record relaying the
+/// agent's owner, carried by a key that is none of the chat's members, is
+/// its owner's only in a chat whose members mark the agent's row as that
+/// door (`door`, a connector's binding while open): a hosted connector's,
+/// its row marked only after the bridge read one of its records with no
+/// door marked (an unlink, and a link again moments later, the agent a
+/// member throughout), read live or caught up by a new life, is asked as
+/// its owner.
+/// The same record in a chat that is no door of its (a record an editor
+/// scheduled, fired as the chat's own key before the bridge read it), or
+/// from a connector whose platform marks no row (one before `door`), is
+/// asked by its carrier, never as its owner.
+#[tokio::test]
+async fn a_relayed_record_is_its_owners_only_through_its_door() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let door = fake.connector("tgdoor", "juniper", None);
+    let old = fake.connector("olddoor", "juniper", None);
+    let relayed = |text: &str| json!({ "text": text, "to": ["npub1juniper"], "relayed": { "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" } });
+    let asker = |w: &World, chat: &str, said: &Value| w.bodies(chat, "work", "turn.start").into_iter().find(|t| t["turn"] == turn_of("juniper", chat, seq(said))).map(|t| t["asker"].clone());
+    // appended before the bridge reads the chat: a forgery its cursor is behind
+    let forged = fake.say(&chat, "npub1talkk3x9", relayed("forged"));
+    let dir = support::dir("relayed-door");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start(cfg.clone(), support::script());
+    following(&fake, 4).await;
+    // read while no door is marked (unlinked: what came before its unlink,
+    // read after): its carrier's, and the chat's view knows its key now
+    let stale = fake.say(&door, "npub1tgdoor", relayed("said before the unlink"));
+    fake.until(WAIT, "the stale relay's turn", |w| asker(w, &door, &stale).is_some()).await;
+    fake.with(|w| assert_eq!(asker(w, &door, &stale), Some(json!("npub1tgdoor")), "no door marked: its carrier's"));
+    // its owner links it again at once, the agent a member throughout: its row says so
+    fake.with(|w| w.fragments.get_mut(&door).unwrap().members.iter_mut().find(|m| m.principal == "npub1juniper").unwrap().door = Some("telegram".into()));
+    let live = fake.say(&door, "npub1tgdoor", relayed("from telegram"));
+    let unmarked = fake.say(&old, "npub1olddoor", relayed("from an older platform"));
+    fake.until(WAIT, "the three turns", |w| asker(w, &chat, &forged).is_some() && asker(w, &door, &live).is_some() && asker(w, &old, &unmarked).is_some()).await;
+    fake.with(|w| {
+        assert_eq!(asker(w, &chat, &forged), Some(json!("npub1talkk3x9")), "the chat's own key: its own message, never its owner's");
+        assert_eq!(asker(w, &door, &live), Some(json!("npub1paul")), "its door's, bound since the chat was read: its owner's");
+        assert_eq!(asker(w, &old, &unmarked), Some(json!("npub1olddoor")), "no row says a door: its carrier's");
+    });
+    // a new life, one more said through the door meanwhile
+    bridge.stop().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let later = fake.say(&door, "npub1tgdoor", relayed("while it slept"));
+    let bridge = support::start(cfg, support::script());
+    fake.until(WAIT, "its turn", |w| asker(w, &door, &later).is_some()).await;
+    fake.with(|w| assert_eq!(asker(w, &door, &later), Some(json!("npub1paul")), "a new life reads its door again"));
+    bridge.stop().await;
+}
+
 /// Goal (lesson 5): when the API drops every socket (a deploy) or goes
 /// down a while, the bridge comes back on its own and answers what was
 /// said meanwhile, once.
@@ -772,7 +825,7 @@ async fn agents_the_image_makes_ready() {
     let mut cfg = support::config(&fake.url(), &dir, support::settings());
     cfg.agents_file = Some(file.clone());
     // a pace that makes `slow` take five seconds: a turn that runs through the change
-    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } });
+    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data"), memory: None } });
     let bridge = support::start(cfg, script);
     following(&fake, 2).await;
     let slow = fake.say(&talk, &person("paul"), json!({ "text": "slow, while maple arrives" }));
@@ -1024,7 +1077,7 @@ async fn names_hold_past_one_people_call() {
     fake.with(|w| {
         let f = w.fragments.get_mut(&crowd).expect("the chat");
         for i in 0..63 {
-            f.members.push(support::fake::Member { principal: person(&format!("p{i}")), role: "editor".into(), kind: "person".into(), added_at: 100 + i });
+            f.members.push(support::fake::Member { principal: person(&format!("p{i}")), role: "editor".into(), kind: "person".into(), added_at: 100 + i, door: None });
             w.names.insert(person(&format!("p{i}")), format!("p{i}@example.test"));
         }
     });
@@ -1703,7 +1756,7 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let runs = support::Runs::default();
 
-    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script_remembering(&dir, PACE), &runs));
     following(&fake, 2).await;
     let t1 = said_and_ended(&fake, &chat, "one").await;
     // the save: /data as it is after turn one (its end was written to the
@@ -1719,7 +1772,7 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     } else {
         support::restore_state(&dir, &saved);
     }
-    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg, support::counting(support::script_remembering(&dir, PACE), &runs));
     let t3 = said_and_ended(&fake, &chat, "three").await;
     assert_eq!(runs.all(), vec![t1.clone(), t2.clone(), t3.clone()], "each turn ran once");
     fake.with(|w| {
@@ -1750,6 +1803,256 @@ async fn a_rollback_runs_nothing_twice() {
 #[tokio::test]
 async fn a_lost_state_runs_nothing_twice() {
     rollback_case("lost-state", true).await;
+}
+
+/// The reply a turn was answered with (its first), or none.
+fn reply_text(w: &World, chat: &str, turn: &str) -> String {
+    replies(w, chat).into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default()
+}
+
+/// Whether `told` is `asked`'s echo told the chat, ending with `chat_said`.
+fn told_the_chat(told: &str, asked: &str, chat_said: &str) -> bool {
+    told.starts_with(&format!("echo: [paul] {asked}\n\n(told: Your memory of this chat is behind")) && told.ends_with(&format!("{chat_said})"))
+}
+
+/// Goal (FIN-543): a runtime's memory lost alone, the bridge's state kept
+/// (a Hermes profile gone, and its `state.db` with it), is noticed: the
+/// marker went with it (crate::seen), so the agent's next turn in a chat
+/// it took turns in is told the chat, and the turn after is told nothing.
+/// A chat it never took a turn in is told nothing; a memory lost after a
+/// `/new` it ran has nothing since to be told; nothing runs twice. Before
+/// the marker, only a bridge state gone back beside the memory noticed
+/// (its claims answered 409), and this turn was told nothing.
+#[tokio::test]
+async fn a_memory_lost_alone_is_told_the_chat() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let quiet = fake.chat("quiet", &["juniper"]);
+    let dir = support::dir("memory-lost");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    // its menu its own (`/new`), so no counting wrapper: each turn's
+    // records say it ran once
+    let start = |cfg: &fragment_bridge::driver::Config| support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
+    let lose = |bridge: support::Running| async {
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        support::lose_memory(&dir);
+    };
+
+    let bridge = start(&cfg);
+    following(&fake, 3).await;
+    let t1 = said_and_ended(&fake, &chat, "one").await;
+    let t2 = said_and_ended(&fake, &chat, "two").await;
+    lose(bridge).await;
+    let bridge = start(&cfg);
+    following(&fake, 3).await;
+    let t3 = said_and_ended(&fake, &chat, "three").await;
+    let t4 = said_and_ended(&fake, &chat, "four").await;
+    let q = said_and_ended(&fake, &quiet, "first here").await;
+    // a `/new` it ran, then its memory lost again: nothing since to tell
+    let new = fake.say(&chat, &person("paul"), json!({ "kind": "command", "command": "new" }));
+    let new = turn_of("juniper", &chat, seq(&new));
+    fake.until(WAIT, "the /new's end", |w| !ends_of(w, &chat, &new).is_empty()).await;
+    lose(bridge).await;
+    let bridge = start(&cfg);
+    following(&fake, 3).await;
+    let t5 = said_and_ended(&fake, &chat, "five").await;
+    fake.with(|w| {
+        for (c, t) in [(&chat, &t1), (&chat, &t2), (&chat, &t3), (&chat, &t4), (&quiet, &q), (&chat, &new), (&chat, &t5)] {
+            let starts = w.bodies(c, "work", "turn.start").into_iter().filter(|s| s["turn"] == t.as_str()).count();
+            assert_eq!((starts, ends_of(w, c, t).len()), (1, 1), "{t}: ran once");
+        }
+        let told = reply_text(w, &chat, &t3);
+        assert!(told_the_chat(&told, "three", "\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two"), "{told}");
+        assert_eq!(reply_text(w, &chat, &t4), "echo: [paul] four", "told once");
+        assert_eq!(reply_text(w, &quiet, &q), "echo: [paul] first here", "a chat it never took a turn in");
+        assert_eq!(reply_text(w, &chat, &t5), "echo: [paul] five", "nothing since its /new");
+    });
+    bridge.stop().await;
+}
+
+/// What the scripted runtime's memory's marker names in `chat` (the
+/// bridge's seen.rs), if anything.
+fn marker(dir: &std::path::Path, chat: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join("memory/juniper--k3x9/fragment-seen").join(chat)).ok()
+}
+
+/// Goal (M17; Codex on #1358): a runtime behind whose recap did not read
+/// (the chat answered too slowly) keeps its marker, so the turn after is
+/// told the chat once the chat answers; one told moves it.
+#[tokio::test]
+async fn a_recap_that_did_not_read_is_told_at_the_next_turn() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("recap-unread");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "one").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(one.as_str()), "handed: the marker names it");
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    // the recap's pages answer past the note's time
+    fake.with(|w| w.recap_page_delay_ms = fragment_bridge::limits::NOTE_READ_MS_MAX + 1_000);
+    let two = said_and_ended(&fake, &chat, "two").await;
+    assert_eq!(marker(&dir, &chat), None, "not told: its marker stays as it was");
+    fake.with(|w| w.recap_page_delay_ms = 0);
+    let three = said_and_ended(&fake, &chat, "three").await;
+    fake.with(|w| {
+        assert_eq!(reply_text(w, &chat, &two), "echo: [paul] two", "the recap did not read in time");
+        let told = reply_text(w, &chat, &three);
+        assert!(told_the_chat(&told, "three", "\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two"), "{told}");
+    });
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(three.as_str()), "told: the marker moves");
+    bridge.stop().await;
+}
+
+/// Goal (M17; Alex's bot on #1358): a turn that was to tell a runtime
+/// behind the chat, ended by its runtime without taking it, keeps the
+/// marker, so the next turn it takes is told the chat; one ended untaken
+/// while its memory was current moves it (the turn never reached it).
+#[tokio::test]
+async fn a_recap_its_runtime_never_took_is_told_again() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("recap-untaken");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let start = |cfg: &fragment_bridge::driver::Config| support::start_killable(cfg.clone(), support::refusing(support::script_remembering(&dir, PACE)));
+    let bridge = start(&cfg);
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "remember the codeword zebra").await;
+    let refused = said_and_ended(&fake, &chat, "refuse this one").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(refused.as_str()), "untaken, its memory current: it never reached it");
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    let bridge = start(&cfg);
+    following(&fake, 2).await;
+    let untaken = said_and_ended(&fake, &chat, "refuse again").await;
+    assert_eq!(marker(&dir, &chat), None, "the recap was never heard: no marker");
+    let asked = said_and_ended(&fake, &chat, "what was the codeword?").await;
+    fake.with(|w| {
+        assert!(ends_of(w, &chat, &untaken)[0]["outcome"] == "error", "it ended untaken");
+        let told = reply_text(w, &chat, &asked);
+        assert!(told_the_chat(&told, "what was the codeword?", "\nYour owner: refuse again"), "{told}");
+        assert!(told.contains("\nYour owner: remember the codeword zebra\nYou: echo: [paul] remember the codeword zebra\n"), "{told}");
+    });
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(asked.as_str()));
+    let _ = one;
+    bridge.stop().await;
+}
+
+/// Goal (M17; Codex on #1358, round 2): a runtime whose journal reads
+/// back too far to say whether it is behind (another agent's records fill
+/// `work`) keeps its marker, so the turn after, nearer, is told the chat.
+#[tokio::test]
+async fn a_marker_stays_when_the_journal_cannot_say() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("marker-unknown");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "one").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    // more of another's records on `work` than a note reads back
+    fake.with(|w| {
+        for i in 0..fragment_bridge::limits::NOTE_SCAN_RECORDS_MAX + 50 {
+            w.append(&chat, "work", "npub1rowan", json!({ "kind": "rowan.busy", "n": i }));
+        }
+    });
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let two = said_and_ended(&fake, &chat, "two").await;
+    assert_eq!(marker(&dir, &chat), None, "it could not say: its marker stays");
+    let three = said_and_ended(&fake, &chat, "three").await;
+    fake.with(|w| {
+        assert_eq!(reply_text(w, &chat, &two), "echo: [paul] two");
+        let told = reply_text(w, &chat, &three);
+        assert!(told_the_chat(&told, "three", "\nYour owner: two\nYou: echo: [paul] two"), "{told}");
+    });
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(three.as_str()));
+    let _ = one;
+    bridge.stop().await;
+}
+
+/// Goal (M17; Codex on #1358): a turn handed while the computer is held
+/// (claimed as the hold came) moves its runtime's marker only once the hold
+/// is gone, so a save never holds a marker newer than the runtime's own
+/// copies, which the hold took first (docs/computers.md, "The hold").
+#[tokio::test]
+async fn a_marker_waits_for_the_hold_to_go() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("marker-held");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let one = said_and_ended(&fake, &chat, "one").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(one.as_str()));
+    // a claim in flight as the hold comes: the turn is handed under it
+    fake.with(|w| w.work_post_delay_ms = 1_500);
+    let route = format!("POST /api/f/{chat}/channels/work");
+    let posts = fake.with(|w| w.calls.iter().filter(|c| **c == route).count());
+    let two = fake.say(&chat, &person("paul"), json!({ "text": "two" }));
+    let two = turn_of("juniper", &chat, seq(&two));
+    fake.until(WAIT, "its claim's post, in flight", |w| w.calls.iter().filter(|c| **c == route).count() > posts).await;
+    support::hold(&dir);
+    fake.with(|w| w.work_post_delay_ms = 0);
+    fake.until(WAIT, "the turn handed under the hold, ended", |w| !ends_of(w, &chat, &two).is_empty()).await;
+    support::until(WAIT, "its answer to the hold", || support::held(&dir)).await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(one.as_str()), "held: the marker waits");
+    support::unhold(&dir);
+    support::until(WAIT, "the marker, once the hold is gone", || marker(&dir, &chat).as_deref() == Some(two.as_str())).await;
+    bridge.stop().await;
+}
+
+/// Goal (FIN-530): a computer that lost its `/data` reads its chats again,
+/// and each chat the agent took turns in is told the chat at its next turn
+/// there, even one no one wrote in before the computer slept: its marker
+/// is on the disk (none there), not in the life that read the chat. Before
+/// the marker, which chats were owed it lived in that life alone, and a
+/// sleep lost it.
+#[tokio::test]
+async fn a_chat_read_again_is_told_after_a_sleep() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let talk = fake.chat("talk", &["juniper"]);
+    let other = fake.chat("other", &["juniper"]);
+    let dir = support::dir("read-again-sleep");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+    let start = |cfg: &fragment_bridge::driver::Config| support::start_killable(cfg.clone(), support::counting(support::script_remembering(&dir, PACE), &runs));
+
+    let bridge = start(&cfg);
+    following(&fake, 3).await;
+    let a1 = said_and_ended(&fake, &talk, "one in talk").await;
+    let b1 = said_and_ended(&fake, &other, "one in other").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    // a new computer: no state, no memory; it reads both chats again
+    support::lose_state(&dir);
+    let bridge = start(&cfg);
+    following(&fake, 3).await;
+    let a2 = said_and_ended(&fake, &talk, "two in talk").await;
+    // it sleeps before anyone writes in the other chat
+    bridge.stop().await;
+    let bridge = start(&cfg);
+    following(&fake, 3).await;
+    let b2 = said_and_ended(&fake, &other, "two in other").await;
+    let a3 = said_and_ended(&fake, &talk, "three in talk").await;
+    assert_eq!(runs.all(), vec![a1, b1, a2.clone(), b2.clone(), a3.clone()], "each turn ran once");
+    fake.with(|w| {
+        let told = reply_text(w, &talk, &a2);
+        assert!(told_the_chat(&told, "two in talk", "\nYour owner: one in talk\nYou: echo: [paul] one in talk"), "{told}");
+        let told = reply_text(w, &other, &b2);
+        assert!(told_the_chat(&told, "two in other", "\nYour owner: one in other\nYou: echo: [paul] one in other"), "a sleep later: {told}");
+        assert_eq!(reply_text(w, &talk, &a3), "echo: [paul] three in talk", "told once");
+    });
+    bridge.stop().await;
 }
 
 /// Goal : a turn a crash cut short ends once, as an error, and is
@@ -1813,9 +2116,10 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
 /// asked, and the step it had recorded; the turn after that is told nothing.
 /// The cut's note is the same whether the next life wakes with the state
 /// the crash left (the turn running), one from before the cut turn, or
-/// none; with none, the turn it ran before the cut is in no state either,
-/// and is told after it, as forgotten (never the cut turn twice). The
-/// scripted agent echoes what it is told, so the stub's lanes see it.
+/// none; with a save from before it, or none, its runtime's memory went
+/// back too (crate::seen), and the chat before the cut turn is told after
+/// it (never the cut turn twice). The scripted agent echoes what it is
+/// told, so the stub's lanes see it.
 #[tokio::test]
 async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
     let mut told: Vec<String> = Vec::new();
@@ -1827,7 +2131,7 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
         let runs = support::Runs::default();
         let pace = Duration::from_millis(100);
 
-        let bridge = support::start_killable(cfg.clone(), support::counting(support::script_paced(pace), &runs));
+        let bridge = support::start_killable(cfg.clone(), support::counting(support::script_remembering(&dir, pace), &runs));
         following(&fake, 2).await;
         let one = said_and_ended(&fake, &chat, "one").await;
         let before = support::save_state(&dir);
@@ -1842,7 +2146,7 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             _ => support::lose_state(&dir),
         }
 
-        let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
+        let bridge = support::start_killable(cfg, support::counting(support::script_remembering(&dir, pace), &runs));
         // phase 4: the cut turn's continuation is the turn after it
         let cont = records::continuation_id(&cut);
         fake.until(WAIT, "its continuation's end", |w| !ends_of(w, &chat, &cont).is_empty()).await;
@@ -1861,13 +2165,13 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");
             note
         });
-        // what a lost state forgot follows the cut's note: the chat before
-        // the cut turn's request ("one", which the life the crash ended
-        // ran, and no state woke with), never that request again
+        // a runtime's memory that went back with the save, or was lost: the
+        // chat before the cut turn's request follows the cut's note ("one"),
+        // never that request again
         let (cut_note, forgot) = note.split_once("\n\nYour memory of this chat is behind").map_or((note.clone(), None), |(c, f)| (c.to_string(), Some(f.to_string())));
         match wakes {
-            "none" => assert!(forgot.as_deref().is_some_and(|f| f.ends_with("\nYour owner: one\nYou: echo: [paul] one") && !f.contains("a slow tool please")), "{wakes}: {note}"),
-            _ => assert_eq!(forgot, None, "{wakes}: the state remembered the rest: {note}"),
+            "none" | "before" => assert!(forgot.as_deref().is_some_and(|f| f.ends_with("\nYour owner: one\nYou: echo: [paul] one") && !f.contains("a slow tool please")), "{wakes}: {note}"),
+            _ => assert_eq!(forgot, None, "{wakes}: its memory holds the rest: {note}"),
         }
         told.push(cut_note);
         bridge.stop().await;
@@ -1972,7 +2276,7 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let runs = support::Runs::default();
 
-    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script_remembering(&dir, PACE), &runs));
     following(&fake, 2).await;
     let t1 = said_and_ended(&fake, &chat, "one").await;
     let saved = support::save_state(&dir);
@@ -1984,12 +2288,12 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let three = fake.say(&chat, &person("paul"), json!({ "text": "three" }));
     let t3 = turn_of("juniper", &chat, seq(&three));
     support::restore_state(&dir, &saved);
-    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg, support::counting(support::script_remembering(&dir, PACE), &runs));
     fake.until(WAIT, "three's end", |w| !ends_of(w, &chat, &t3).is_empty()).await;
     assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
     fake.with(|w| {
         let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t3.as_str()).collect();
-        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, or lost it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two)";
+        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind, or may be: your computer may have gone back to an earlier save, lost what you remembered, or never had it. Here is the chat as it keeps it, its newest messages oldest first, with the tools each of your turns used. It is history, not new messages; what your turns did may have had effects, so check before you do any of it again.\nYour owner: one\nYou: echo: [paul] one\nYour owner: two\nYou: echo: [paul] two)";
         assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told the chat before it");
         assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle", "two's end stands");
     });
@@ -2013,7 +2317,7 @@ async fn a_chat_of_long_messages_is_told_its_newest() {
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("recap-long");
     let cfg = support::config(&fake.url(), &dir, support::settings());
-    let bridge = support::start_killable(cfg.clone(), support::script());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
     following(&fake, 2).await;
     said_and_ended(&fake, &chat, "one").await;
     for i in 0..80 {
@@ -2026,7 +2330,7 @@ async fn a_chat_of_long_messages_is_told_its_newest() {
     bridge.kill().await;
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
     support::restore_state(&dir, &saved);
-    let bridge = support::start_killable(cfg, support::script());
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
     let t3 = said_and_ended(&fake, &chat, "three").await;
     let told = fake.with(|w| replies(w, &chat).into_iter().find(|r| r["turn"] == t3.as_str()).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default());
     let note = told.strip_prefix("echo: [paul] three\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("three is told the chat: {:?}", &told[..told.len().min(300)]));
@@ -2052,7 +2356,7 @@ async fn a_recap_is_told_when_names_answer_slowly() {
     fake.add_member(&chat, &person("skyler"), "editor");
     let dir = support::dir("recap-names");
     let cfg = support::config(&fake.url(), &dir, support::settings());
-    let bridge = support::start_killable(cfg.clone(), support::script());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
     following(&fake, 2).await;
     said_and_ended(&fake, &chat, "one").await;
     let said = fake.say(&chat, &person("skyler"), json!({ "text": "skyler here" }));
@@ -2062,7 +2366,7 @@ async fn a_recap_is_told_when_names_answer_slowly() {
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
     support::lose_state(&dir);
     let posted = fake.with(|w| work_posts(w, &chat));
-    let bridge = support::start_killable(cfg, support::script());
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
     // the new life has read both turns again (each claim and lost end a 409)
     fake.until(WAIT, "both turns read again", |w| work_posts(w, &chat) >= posted + 4).await;
     let note_ms = fragment_bridge::limits::NOTE_READ_MS_MAX;

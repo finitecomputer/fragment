@@ -136,6 +136,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>, origin: &str
 #[cfg(feature = "platform")]
 const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // the operators' admin page (`/admin`)
+    ("admin-glance.js", "text/javascript; charset=utf-8"),
     ("admin.css", "text/css; charset=utf-8"),
     ("admin.js", "text/javascript; charset=utf-8"),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
@@ -149,6 +150,10 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     ("apple-touch-icon.png", "image/png"),
     // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
     ("finite-logo.svg", "image/svg+xml"),
+    // the platform's type: its @font-face rules, for the fonts beside it,
+    // which every fragment's origin serves too, as __fonts/ (cell/src/shell.rs
+    // `fragment_font`): no page of ours loads a font from another domain
+    ("fonts.css", "text/css; charset=utf-8"),
     // Funnel Sans (vendor/funnel-sans-OFL.txt): the platform's pages' type,
     // which the shell loads too
     ("funnel-sans-400.ttf", "font/ttf"),
@@ -158,6 +163,10 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
     // it): Finite's mark full-bleed, black, or white in a dark scheme
     ("icon.svg", "image/svg+xml"),
+    // JetBrains Mono (vendor/jetbrains-mono-OFL.txt): the platform's code type
+    ("jetbrains-mono-400.woff2", "font/woff2"),
+    ("jetbrains-mono-500.woff2", "font/woff2"),
+    ("jetbrains-mono-600.woff2", "font/woff2"),
     // the look of Finite's about page, privacy policy and terms (`/about`,
     // `/privacy`, `/terms`): a sheet of paper, its edges bowed by paper-edge.svg
     ("legal.css", "text/css; charset=utf-8"),
@@ -194,6 +203,15 @@ pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
     }
     let (_, content_type) = SHELL_PUBLISHED.iter().find(|(n, _)| *n == name)?;
     Some((shell(name).expect("every file the shell publishes is indexed (a test)"), content_type))
+}
+
+/// Whether a fragment's origin serves the shell's file `name` too, under
+/// `__fonts/` (cell/src/shell.rs `fragment_font`): the platform's type,
+/// fonts.css and the fonts it names beside it, so a page there loads its
+/// fonts from its own origin, never another domain's. Nothing else.
+#[cfg(feature = "platform")]
+pub fn fragment_font(name: &str) -> bool {
+    shell_published(name).is_some_and(|(_, content_type)| name == "fonts.css" || content_type.starts_with("font/"))
 }
 
 /// Whether `path` of `at` (`shell`, or a template) is a file a page's build
@@ -371,7 +389,7 @@ pub(crate) mod tests {
         // sorted by name, each once, so two changes conflict only where they
         // add beside each other (no count to bump)
         assert!(SHELL_PUBLISHED.windows(2).all(|w| w[0].0 < w[1].0), "SHELL_PUBLISHED is sorted by name, each once");
-        for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt", "vendor/funnel-sans-OFL.txt"] {
+        for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt", "vendor/funnel-sans-OFL.txt", "vendor/jetbrains-mono-OFL.txt"] {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
@@ -383,6 +401,26 @@ pub(crate) mod tests {
         let hashed: Vec<&str> = SHELL.iter().map(|f| f.path).filter(|p| fragment_core::site::hashed(p)).collect();
         assert_eq!(hashed, made, "a hashed name in the shell is its build's alone");
         assert!(shell_published("index.html").is_none() && shell_published("shell.js").is_none());
+    }
+
+    /// Goal: a fragment's origin serves the platform's type and nothing
+    /// else of the shell's. Valid: fonts.css, and each font it names
+    /// beside it. Invalid: the shell's other files (a stylesheet, a page,
+    /// a license, a hashed bundle), a path, and a name it never publishes.
+    #[test]
+    fn a_fragments_origin_serves_the_platforms_type_alone() {
+        assert!(shell("fonts.css").is_some(), "the shell holds fonts.css");
+        let css = std::fs::read_to_string(repo().join("cell/shell/fonts.css")).unwrap();
+        let named: Vec<&str> = css.split("url(\"").skip(1).filter_map(|rest| rest.split_once('"')).map(|(n, _)| n).collect();
+        assert_eq!(named.len(), 7, "Funnel Sans' four weights and JetBrains Mono's three: {named:?}");
+        assert!(fragment_font("fonts.css") && named.iter().all(|n| fragment_font(n)), "{named:?}");
+        assert!(!css.contains("://"), "it names no font of another domain");
+        let fonts = SHELL_PUBLISHED.iter().filter(|(_, t)| t.starts_with("font/")).count();
+        assert_eq!(fonts, named.len(), "it names every font the shell publishes");
+        let bundle = BUILT.iter().find(|(at, p)| *at == "shell" && p.ends_with(".css")).map(|(_, p)| *p).expect("a hashed stylesheet");
+        for other in ["shell.css", "platform-pages.css", "sheet.css", "legal.css", "index.html", "CREDITS.md", "vendor/jetbrains-mono-OFL.txt", "agent.png", bundle, "fonts.css/x", "../shell/fonts.css", "nope.woff2", ""] {
+            assert!(!fragment_font(other), "{other}");
+        }
     }
 
     /// Goal: the shell's page names the release that answered it, and when

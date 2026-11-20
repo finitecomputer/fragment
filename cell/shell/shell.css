@@ -635,6 +635,9 @@ input.check { position: relative; flex: none; width: 18px; height: 18px; margin:
 input.check::before { content: ""; position: absolute; left: 50%; top: 45%; width: 4px; height: 9px; border: solid var(--primary-foreground); border-width: 0 2px 2px 0; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; }
 input.check:checked { border-color: var(--primary); background: var(--primary); }
 input.check:checked::before { opacity: 1; }
+/* the same, one of a group: a dot in place of the tick */
+input.check[type="radio"] { border-radius: 50%; }
+input.check[type="radio"]::before { top: 50%; width: 8px; height: 8px; border: 0; border-radius: 50%; background: var(--primary-foreground); transform: translate(-50%, -50%); }
 input.check:hover:not(:disabled):not(:checked) { border-color: var(--text-tertiary); }
 input.check:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
 input.check:disabled { opacity: .55; cursor: default; }
@@ -1025,6 +1028,10 @@ label.settings-line { cursor: pointer; }
 .move-copy strong { display: block; margin-bottom: 2px; color: var(--text-primary); font-size: 15px; }
 .move-copy p { margin: 0; }
 .move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 14px; }
+/* into what: a new one, or an agent they have already (move-page.js `question`) */
+.move-into { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.move-into p { color: var(--text-secondary); }
+.move-into .move-pick { margin-top: 0; }
 .move-row > button { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/28px var(--font-sans); }
 .move-layout .form-error { margin: 0 0 12px; }
 @media (max-width: 640px) { .move-layout { padding: 18px 16px 60px; } }

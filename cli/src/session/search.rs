@@ -6,8 +6,8 @@
 //! After an import's writes, the archive's search is reconciled with the
 //! archive **as it stands then**, not as this import left it: another
 //! import may have written since (newer copies, conversations of its own).
-//! Its indexes at main's head say each conversation's sha256, and its files
-//! changed since them are read (`held`, `found`); each conversation whose
+//! Its indexes at main's head say each conversation's sha256, and the files
+//! no entry of theirs describes are read (`held`, `found`); each conversation whose
 //! sha256 is not the revision search holds for its file is written, its
 //! bytes read at that head and its revision theirs. Search is read before
 //! the archive, so a revision it holds is never of a newer copy than the
@@ -135,8 +135,8 @@ pub(super) enum Wrote {
 /// or, where they may not, as its file is (`found`).
 fn archive_now(c: &Client, name: &str, storage: &CodeStorage, blobs: &Blobs) -> Result<(Option<String>, BTreeMap<String, Entry>)> {
     let h = super::held(storage, blobs)?;
-    let found: BTreeMap<String, Entry> = super::found(c, name, storage, &h, &BTreeMap::new())?.into_iter().map(|e| (e.key.clone(), e)).collect();
-    let entries = h.stored.keys().filter_map(|k| found.get(k).or_else(|| h.indexed.get(k)).map(|e| (k.clone(), e.clone()))).collect();
+    let mut entries = super::found(c, name, storage, &h)?.into_iter().map(|e| (e.key.clone(), e)).collect::<BTreeMap<_, _>>();
+    entries.extend(h.indexed);
     Ok((h.head, entries))
 }
 
