@@ -36,6 +36,9 @@ pub enum Full {
     Restart,
     /// A newer save would not restore: it falls back to an older one.
     Unusable,
+    /// An operator set its newer saves aside, choosing an older one for its
+    /// next start (`Saves::choose`).
+    Aside,
     /// Its snapshot is of another image (a deploy, or a pin).
     Image,
     /// Its start from the snapshot, in this wake, failed or came up dead.
@@ -58,6 +61,7 @@ impl Full {
             Full::Off => "off",
             Full::Restart => "restart",
             Full::Unusable => "unusable",
+            Full::Aside => "aside",
             Full::Image => "image",
             Full::DeadSnapshot => "dead_snapshot",
             Full::Crash => "crash",

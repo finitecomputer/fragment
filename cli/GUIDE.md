@@ -1292,6 +1292,7 @@ fragment operator people [--q Q] [--after A] [--key-file F]
 fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many open by link or public (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
+fragment operator start-from <npub> <save> [--key-file F]   # asleep or won't wake: its next start restores that save; the newer are set aside
 fragment operator orgs [--after A] [--key-file F]
 fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]

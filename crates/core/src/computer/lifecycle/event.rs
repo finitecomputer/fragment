@@ -133,6 +133,13 @@ pub enum Event {
     Restart { generation: u64 },
     /// The owner's plan changed: an always-on computer never sleeps.
     AlwaysOn { on: bool },
+    /// An operator chose the save its next start restores, setting the
+    /// newer ones aside (`Saves::choose`), while no container ran: the
+    /// saves were at fault, not the computer, so its strikes are counted
+    /// anew, and one that won't wake is asleep, so its next wake or restart
+    /// starts it. Nothing else: no start is made, and one begun since (a
+    /// wake as it was chosen) restores the save chosen already.
+    SaveChosen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -410,6 +410,9 @@ enum MetaKey {
     /// The test lever's wait in its next let-go of a hold (`stall-unhold`),
     /// between its look and its command, in ms.
     StallUnhold,
+    /// The test lever's save whose restore stops for want of room
+    /// (`fail-restore`): its number.
+    FailRestore,
 }
 
 impl MetaKey {
@@ -442,6 +445,7 @@ impl MetaKey {
             MetaKey::GrantsOwed => "grants_owed",
             MetaKey::HoldSaves => "hold_saves",
             MetaKey::StallUnhold => "stall_unhold",
+            MetaKey::FailRestore => "fail_restore",
         }
     }
 }
@@ -750,6 +754,14 @@ struct Pin {
     image: String,
 }
 
+/// An operator's start from a save (`computer/start-from`; docs/api.md,
+/// Operators): the number of the save, as its view lists it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SaveChosen {
+    pub(crate) save: u64,
+}
+
 #[derive(Deserialize)]
 struct Redeem {
     ticket: String,
@@ -829,6 +841,9 @@ struct TestLever {
     free: Option<u64>,
     #[serde(default)]
     data: Option<u64>,
+    /// `fail-restore`'s: the number of the save whose restores fail.
+    #[serde(default)]
+    save: Option<u64>,
 }
 
 /// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
@@ -1901,6 +1916,12 @@ impl ComputerCell {
                 self.exec_ready(&g).await?;
                 self.starts.borrow_mut().up(generation, js::now_ms());
                 let save = planned.save.as_ref().expect("a start from the save has its records");
+                // the lever's `fail-restore`: a restore of this save stops for
+                // want of room, as the sandbox runtime's guard stops one on a
+                // disk it no longer fits (2026-11-20), a failure that may pass
+                if self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string()) {
+                    return Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number)).into());
+                }
                 // a directory's record before any inside it, as it was taken;
                 // together within `RESTORE_MS`, each given what is left
                 let until = js::now_ms() + RESTORE_MS;
@@ -2903,7 +2924,7 @@ impl ComputerCell {
     /// since the export looked) is 404, as is a range past its end.
     async fn export_read(&self, b: &ExportRead) -> CellResult<Response> {
         let saves = self.saves()?;
-        let record = saves.all().iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter()).find(|r| r["id"].as_str() == Some(b.record.as_str()));
+        let record = saves.every_save().into_iter().filter(|s| !s.unusable).flat_map(|s| s.records.iter()).find(|r| r["id"].as_str() == Some(b.record.as_str()));
         let Some(record) = record else {
             return Err(CellError::new(ErrorCode::NotFound, format!("no save keeps the record {}: the computer saved again since", b.record)));
         };
@@ -2934,7 +2955,7 @@ impl ComputerCell {
         };
         let saves = self.saves()?;
         let (keys, more) = js::blob_list(&self.env, js::BLOBS, &self.backups_prefix()).await?;
-        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.all().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
+        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.every_save().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
     }
 
     /// A test fleet's lever on this computer (`POST /api/test/computer`,
@@ -2961,6 +2982,9 @@ impl ComputerCell {
     /// `legacy-uses {month?, row?}` makes a month of uses owed as step 7
     /// keeps one (`row`: its `[{agent, provider, calls, micros}]`), handed
     /// over at its owner's next look, then reads every month owed;
+    /// `fail-restore {save}` stops the restore of each start from save
+    /// `save` (its number; 0: none) for want of room, a failed start as
+    /// the sandbox runtime's guard makes one on a disk too small for it;
     /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
     /// `ms` (0: none), taken whether or not the deployment takes snapshots,
     /// holding its container meanwhile as the runtime's does;
@@ -3169,6 +3193,17 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
             }
+            "fail-restore" => {
+                // each start that restores save `save` stops its restore for
+                // want of room, as on a disk that save no longer fits (0: none)
+                let save = b.save.ok_or_else(|| CellError::invalid("fail-restore names its save's number (0: none)"))?;
+                match save {
+                    0 => self.delete_meta(MetaKey::FailRestore)?,
+                    n => self.set_meta(MetaKey::FailRestore, &n.to_string())?,
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "fail-restore", "save": save }));
+                Ok(json!({ "computer": id, "failRestore": save }))
+            }
             "disk" => {
                 // a read of its disk as `DISK_READ`'s answer would give it,
                 // kept and told as one is (`read_disk`): a test fleet's
@@ -3239,7 +3274,7 @@ impl ComputerCell {
                 }
                 Ok(json!({ "computer": id, "owed": months }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
         }
     }
 
@@ -3290,7 +3325,8 @@ impl ComputerCell {
                 let b: ExportAsk = body_json(&mut req).await?;
                 self.owned_by(&b.owner)?;
                 let saves = self.saves()?;
-                let save = saves.all().iter().find(|s| !s.unusable);
+                // set aside or not: a save set aside holds its newest work
+                let save = saves.every_save().into_iter().find(|s| !s.unusable);
                 json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
             }
             "computer/export-read" => {
@@ -3324,6 +3360,11 @@ impl ComputerCell {
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
                 json_response(&self.pin(&b.image).await?)
+            }
+            // an operator's start from a save it keeps (orgs.rs)
+            "computer/start-from" => {
+                let b: SaveChosen = body_json(&mut req).await?;
+                json_response(&self.choose_save(b.save).await?)
             }
             "computer/unassign" => {
                 let b: Unassign = body_json(&mut req).await?;
@@ -3729,6 +3770,36 @@ impl ComputerCell {
         identity.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{fragment} does not run on this computer")))
     }
 
+    /// An operator's choice of save `number` for its next start (orgs.rs
+    /// `start_from`; docs/api.md, Operators), only while it runs no
+    /// container (409 once a start, a life or a sleep runs: its saves are
+    /// that life's to change). Looked at and chosen in one turn (nothing
+    /// awaits between), so no start planned before the choice restores
+    /// another save. The newer saves are set aside (`Saves::choose`), and
+    /// its strikes counted anew (`Event::SaveChosen`): its next wake or
+    /// restart starts it from that save, and no start is made here. Again,
+    /// the same. Answers its view.
+    async fn choose_save(&self, number: u64) -> CellResult<ComputerView> {
+        let id = self.must(MetaKey::Id)?;
+        if self.lifecycle()?.running().is_some() {
+            return Err(CellError::new(ErrorCode::Conflict, "it is running: a save is chosen only while it is asleep or won't wake"));
+        }
+        let chosen = self.update_saves(|s| s.choose(number, js::now_ms()))?;
+        let lost = chosen.map_err(|e| match e {
+            NotChosen::NotKept { kept } => CellError::invalid(format!("it keeps no save {number}: it keeps {kept:?}")),
+            NotChosen::Unusable => CellError::invalid(format!("save {number} was found unusable: no start restores it")),
+        })?;
+        for record in &lost {
+            console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
+        }
+        let aside: Vec<u64> = self.saves()?.aside().iter().map(|s| s.number).collect();
+        console_log!("{}", json!({ "computer": id, "chosen": number, "aside": aside }));
+        // unasked: a start due meanwhile (a retry's) is its alarm's, never
+        // this call's, which answers at once (Codex on this PR)
+        self.drive_with(Some(Event::SaveChosen), false).await?;
+        self.view().await
+    }
+
     /// Pins `image`, its owner's or an operator's: the next start takes it.
     async fn pin(&self, image: &str) -> CellResult<ComputerView> {
         // a computer made, never one a pin would leave half made
@@ -4035,6 +4106,11 @@ pub(crate) async fn signed_in(env: &Env, computer: &str, provider: &str, nonce: 
     let body = serde_json::to_value(SignedInAsk { provider: provider.to_string(), nonce: nonce.to_string() }).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
     let answer = ask(env, computer, "computer/signed-in", &body).await?;
     Ok(answer["verifier"].as_str().unwrap_or_default().to_string())
+}
+
+/// `{save}` from a body: a save's number.
+pub(crate) fn save_named(body: &[u8]) -> CellResult<u64> {
+    crate::json_body::<SaveChosen>(body).map(|b| b.save)
 }
 
 /// `{image}` from a body.

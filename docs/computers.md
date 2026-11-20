@@ -25,8 +25,8 @@ between a runtime and the platform is the bridge (docs/bridge.md).
   starts and stops it, saves and restores `/data`, runs its egress
   intercepts, proxies its ports, and wakes it. It never reads what the
   image runs.
-- Its owner's export holds its view and its newest save that restores
-  (docs/api.md, Export). It is deleted only with its owner, by an
+- Its owner's export holds its view and its newest save that restores,
+  one an operator set aside included (docs/api.md, Export). It is deleted only with its owner, by an
   operator's wipe (docs/api.md, "Operators: wiping a person"), saves
   included. Cloudflare has no delete for a container snapshot: a wiped
   computer's is forgotten, never restored, and expires within 30 days.
@@ -486,13 +486,39 @@ the DO removes them from one started from a snapshot.
   save a start proved, the last a start falls back to), each taken
   under the hold; its view lists them (`saves`), newest first, each
   saying whether its guest answered (`held`).
-- **A wake restores the current save**, the newest not found unusable. A
+- **A wake restores the current save**, the newest not set aside nor found
+  unusable. A
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no
   strike against the computer. A read of its archive that storage failed
   (R2 answered an error) is asked again a few times within the restore
   (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
   start on one.
+- **An operator's start from a save** (`fragment operator start-from`;
+  docs/api.md, Operators) is the way back when a save restores but fails
+  every start, as one that no longer fits its disk does: the sandbox
+  runtime stops a restore that would leave less than its floor free, a
+  failed start like any, a strike, never a save found unusable, so no
+  start falls back past it (2026-11-20: a computer whose agent filled its
+  20 GB disk saved, slept, and never started again). While it runs no
+  container, an operator names a save it keeps; its next start restores
+  it, and each newer save is **set aside** (`setAside`, when), and so is
+  each older one past the three newest before it, so a start's fallbacks
+  reach every save it may restore. One set
+  aside is kept 30 days (`SET_ASIDE_KEPT_MS`) from then, outside the
+  three kept, then let go of at the next save or choice; at most six are
+  (`SET_ASIDE_MAX`, two choices' worth: past it the oldest go). They are
+  kept apart from the saves a start may restore, so a release from
+  before them restores the save chosen and lets none of them go (it
+  forgets them: their archives stay in R2 until a wipe). Its
+  owner's export copies the newest save that restores, set aside or not
+  (their newest work); no start restores one, whatever fails after, and
+  nothing sets one aside by itself. A later choice may name one set
+  aside, which is then restored; what an earlier choice set aside stays
+  so for its time. One that won't wake is asleep after the choice, its
+  strikes counted anew, so its next wake of any kind, or a restart,
+  starts it; the start that comes up went back in time, and its owner is
+  told so (`went_back`, naming the save it went back to).
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
   `image` the pinned image's reference, and one that fails or comes up
@@ -604,7 +630,8 @@ minute), or its life ends, whichever is first.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
   (no save yet).
 - `why`, for a restore, the first that holds: `off` (no snapshots here),
-  `restart`, `unusable` (a newer save would not restore), `image` (the
+  `restart`, `aside` (an operator set its newer saves aside), `unusable`
+  (a newer save would not restore), `image` (the
   snapshot is of another image), `dead_snapshot` (this wake's snapshot
   start failed), `crash`, `unsaved` (its last sleep could not save),
   `no_snapshot` (its last life ended saved and no snapshot was kept: a host
