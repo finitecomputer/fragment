@@ -489,7 +489,7 @@ impl RegistryCell {
             .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
         let claims = signed_in.access_token.as_deref().and_then(claims_of).unwrap_or_default();
         if let Some(sid) = claims.sid.as_deref().filter(|_| b.switching) {
-            if self.spent_if_held(&b.state, claims.auth_time)? {
+            if self.answered_from_held(&b.state, claims.auth_time)? {
                 return Ok(Exchanged::Held { workos_sid: sid.to_string() });
             }
         }
@@ -506,12 +506,19 @@ impl RegistryCell {
         Ok(done)
     }
 
-    /// A switch's sign-in, spent when WorkOS answered it from the session
-    /// it already held in the browser: one whose person last actively
+    /// Whether WorkOS answered a switch's sign-in from the session it
+    /// already held in the browser: one whose person last actively
     /// authenticated (`auth_time`) before this sign-in began, or that does
     /// not say when. No one signed in during it, so that session is the one
     /// to end. One a person signed in to meanwhile is left to finish.
-    fn spent_if_held(&self, state: &str, auth_time_s: Option<i64>) -> CellResult<bool> {
+    ///
+    /// Such an answer signs no one in, so it leaves the switch unspent: the
+    /// same browser may come back with it again within its ten minutes. Its
+    /// page's Continue, pressed while the page's `Refresh` already had the
+    /// browser on its way, does: answered from the same session, it ends that
+    /// one too; once WorkOS ended it, WorkOS asks, and that sign-in spends
+    /// the switch (`finish`). Spending it here made that press an error.
+    fn answered_from_held(&self, state: &str, auth_time_s: Option<i64>) -> CellResult<bool> {
         #[derive(Deserialize)]
         struct Started {
             created_at: i64,
@@ -520,11 +527,7 @@ impl RegistryCell {
             .row::<Started>("SELECT created_at FROM logins WHERE state = ? AND created_at > ?", vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)])?
             .ok_or_else(stale_login)?
             .created_at;
-        if auth_time_s.is_some_and(|t| t >= started.div_euclid(1000)) {
-            return Ok(false);
-        }
-        self.exec("DELETE FROM logins WHERE state = ?", vec![sha(state).into()])?;
-        Ok(true)
+        Ok(!auth_time_s.is_some_and(|t| t >= started.div_euclid(1000)))
     }
 
     fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>, key: PersonKey) -> CellResult<Exchanged> {

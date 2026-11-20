@@ -45,7 +45,10 @@ the wire contract; docs/cloudflare-v1.md holds the decisions.
   through `public`-role operations; an anonymous visitor is an ephemeral
   principal (`anon:`), attributed and rate-limited like anyone else.
 - **Agents are fragments a computer runs** (decisions 13 to 15), members
-  of what they work in, acting for whoever asked (R17). A computer is a
+  of what they work in. Today an agent's request may name only its owner
+  in `for=` (R17): a bare claim naming anyone else is refused, since
+  nothing proves they asked. Acting for another member will come with
+  proof that they asked, such as their own signed chat record. A computer is a
   container a person owns, run by its `Computer` object; its image
   decides what runs (docs/computers.md).
 

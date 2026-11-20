@@ -5,7 +5,8 @@
 // 1. the bot: its token, from its owner's Vault when Settings found one
 //    there for this agent (`?vault=<name>`: a bot moved from
 //    finite.computer, FIN-463 F11), moved into this fragment as its secret
-//    (`fromVault`: gone from the Vault, kept here), or pasted (from
+//    by Settings itself (`vault-move`: a page may not move a Vault secret,
+//    docs/secrets.md; gone from the Vault, kept here), or pasted (from
 //    @BotFather); and, the first time, a
 //    webhook secret this browser makes, each set as this fragment's secret
 //    toward api.telegram.org (`__secrets`: written, never read back, never
@@ -57,11 +58,14 @@ async function platformJson(path, init) {
   return body;
 }
 
-// one of this fragment's secrets, its value never read back; or one of
-// its owner's Vault, moved here (`{fromVault}`)
+// one of this fragment's secrets, its value never read back
 const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "PUT", headers: JSON_TYPE, body: JSON.stringify({ ...value, hosts: [TELEGRAM_HOST] }) });
-// the bot token in its owner's Vault that Settings found for this agent
-const VAULT = new URLSearchParams(location.search).get("vault");
+// the bot token in its owner's Vault that Settings found for this agent,
+// which only Settings moves: offered in its frame alone (in a tab of its
+// own there is no Settings to ask, so a token is pasted)
+const VAULT = framed ? new URLSearchParams(location.search).get("vault") : null;
+// how long Use it waits for Settings to move the Vault's bot
+const MOVE_WAIT_MS = 30_000;
 const randomHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -141,6 +145,28 @@ export async function setup(root) {
     return;
   }
 
+  // the Vault's bot moved here by Settings, which framed this page with
+  // its offer (`vault-move`, frame-messages.js): the page asks, naming
+  // nothing, and hears its answer from its parent at the platform's origin
+  function fromVault() {
+    const nonce = randomHex(16);
+    return new Promise((resolve, reject) => {
+      const done = (fn, v) => {
+        clearTimeout(timer);
+        removeEventListener("message", heard);
+        fn(v);
+      };
+      const heard = (e) => {
+        if (e.source !== window.parent || e.origin !== platform || e.data?.fragment !== KIND.vaultMove || e.data.nonce !== nonce) return;
+        if (e.data.ok) done(resolve);
+        else done(reject, Object.assign(new Error(e.data.error || "Settings couldn't move the bot."), { status: e.data.status }));
+      };
+      const timer = setTimeout(() => done(reject, new Error("Settings didn't answer. Try again.")), MOVE_WAIT_MS);
+      addEventListener("message", heard);
+      window.parent.postMessage({ fragment: KIND.vaultMove, nonce }, platform);
+    });
+  }
+
   // the token set, and checked: drawn once `known` has this attempt's
   // answer, a bot or why not (an attempt of its own: another dialog's
   // connect, answered meanwhile, is not this one's)
@@ -180,7 +206,7 @@ export async function setup(root) {
         await connect(async () => {
           if (!VAULT) return;
           // none in the Vault: moved here already (its answer lost)
-          await secret("TELEGRAM_BOT_TOKEN", { fromVault: VAULT }).catch((e) => {
+          await fromVault().catch((e) => {
             if (e.status !== 404) throw e;
           });
         });
