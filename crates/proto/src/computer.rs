@@ -530,6 +530,12 @@ pub struct ComputerSave {
     /// no wake restores it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unusable: bool,
+    /// When an operator set it aside, choosing an older save for its next
+    /// start (docs/computers.md, "Saves and what a wake restores"): kept
+    /// for a while, and its owner's export reads it, but no wake restores
+    /// it. None for every other save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_aside: Option<i64>,
 }
 
 /// Where a start's `/data` came from.
