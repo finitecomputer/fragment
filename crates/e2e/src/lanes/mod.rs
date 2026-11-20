@@ -26,6 +26,7 @@ mod export;
 mod faces;
 mod deliver;
 mod doc;
+mod doc_for;
 mod door;
 mod finite_private;
 mod search;
@@ -96,6 +97,7 @@ const LANES: &[Lane] = &[
     vault::vault,
     levers::levers,
     members::secrets,
+    members::secrets_page,
     members::reach,
     delegation::delegation,
     plane::files,
@@ -145,6 +147,7 @@ const LANES: &[Lane] = &[
     brain::brain,
     brain::brain_release,
     doc::doc,
+    doc_for::doc_for,
     slides::slides,
     board::board,
     deliver::push,
@@ -214,12 +217,12 @@ pub const SHARDS: [&[&str]; 5] = [
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "agent-sharing", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
-        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
+        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "doc-for", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "trial-seats", "transcribe",
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "identities", "signin", "door", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
+        "identities", "signin", "door", "native", "connections", "vault", "secrets", "secrets-page", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
         "members", "billing", "governance", "billing-page", "move", "move-import", "move-big", "move-ui", "move-comp",
     ],
 ];

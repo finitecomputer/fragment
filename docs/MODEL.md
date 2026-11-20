@@ -45,7 +45,10 @@ the wire contract; docs/cloudflare-v1.md holds the decisions.
   through `public`-role operations; an anonymous visitor is an ephemeral
   principal (`anon:`), attributed and rate-limited like anyone else.
 - **Agents are fragments a computer runs** (decisions 13 to 15), members
-  of what they work in, acting for whoever asked (R17). A computer is a
+  of what they work in. Today an agent's request may name only its owner
+  in `for=` (R17): a bare claim naming anyone else is refused, since
+  nothing proves they asked. Acting for another member will come with
+  proof that they asked, such as their own signed chat record. A computer is a
   container a person owns, run by its `Computer` object; its image
   decides what runs (docs/computers.md).
 
@@ -111,7 +114,7 @@ Every change is checked against this table.
 | The image a computer's next start runs | each image name's reference in the Worker version; a computer's pin names one | the Computer DO's last look, recorded as the image each life runs |
 | A fragment's name, an agent's role | its supervisor's `meta` `face`, set at its making and through its face route (docs/api.md, "An agent's name and picture"); each change a `face.changed` event | everything read from it (lists, `__people`, status's `title` and `agentRole`, a page's Open Graph title); its computer's profile and SimpleX profile follow a rename; no chat title copies it; an agent's `SOUL.md` says each new name where it said the old, in the rename's own request; a `fragment.json`'s `meta.title` is a default a face with none takes, and written back by an older CLI with the mark `GET manifest` gave, its rename (`meta` `title_read`; the debt ledger); an agent's rename whose answer was lost is kept in `meta` `renaming` until the next; its label never changes |
 | An agent's picture | its fragment's `avatar.png` at main, read as main moves and at an agent's install (`meta` `picture`) | its face's address (`/api/identities/{npub}/picture?v=`); no deploy needed |
-| An agent's self: its `SOUL.md`, `memories/` and `skills/` | the agent fragment's git, authored by the agent and its owner | a Hermes agent's computer's checkout, synced both ways (docs/computers.md); another runtime's computer syncs none |
+| An agent's self: its `SOUL.md`, `memories/` and `skills/`; a Claude agent's `CLAUDE.md` and Claude Code's memory (`memories/claude/`) | the agent fragment's git, authored by the agent and its owner | its computer's copies, synced three ways (docs/computers.md): a Hermes agent's profile; a Claude agent's work directory and Claude Code's memory folder; each lost copy brought back. Another runtime's computer syncs none |
 | An agent's runtime, tier, or its own models and efforts | its `agent.json` in git (`runtime`, `hermes` unless named; `claude.model` and `claude.effort` for Claude Code; docs/computers.md, docs/bridge.md) | its computer's bridge and profile config; Settings and the agent's page read it |
 | An agent's home | its `agent.json` `home` in git (docs/api.md, "An agent's home") | read by the shell, its computer's profile and the bridge; none kept |
 | An agent's SimpleX chat | its owner's chat `<agent label>-simplex`, the agent in it | its name in the link's file, chosen once, before the chat is made |

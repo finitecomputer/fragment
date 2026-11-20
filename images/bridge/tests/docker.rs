@@ -158,6 +158,18 @@ impl Container {
         (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
     }
 
+    /// `save` (a tar of `/data`'s contents) restored as the platform's
+    /// restore does before the gate opens: into a `/data` it makes, as the
+    /// platform's does. The image has none (a directory of an image layer
+    /// cannot be swapped for a restored one, EXDEV under overlayfs), and a
+    /// started image's boot makes one only once its pre-init runs, so a
+    /// copy that counted on it raced the start.
+    fn restore(&self, save: &std::path::Path) {
+        assert!(self.exec(&["mkdir", "-p", "/data"]), "the restore's target");
+        let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", self.id)]).stdin(std::fs::File::open(save).expect("the save")).output().expect("docker runs");
+        assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    }
+
     /// A container of `tag` that runs nothing but a sleep: a disk to restore
     /// into and check, as a fresh start's is before its gate opens.
     fn idle(tag: &str) -> Container {
@@ -711,10 +723,7 @@ fn save_data(c: &Container, left_out: &[String], to: &std::path::Path) -> u64 {
 /// `quick_check`, as the hermes user.
 fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<serde_json::Value>) {
     let c = Container::idle(tag);
-    assert!(c.exec(&["mkdir", "/data"]), "the restore's target");
-    let tar = std::fs::File::open(save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(save);
     let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
     let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
     let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
@@ -1064,6 +1073,177 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
     let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", first["seq"].as_u64().unwrap());
     fake.until(180_000, "Hermes' first reply", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     (fake, model, chat, c)
+}
+
+/// Goal (M17, FIN-542): nothing of a Claude agent's self is the computer's
+/// alone. Its `SOUL.md` reaches its working folder, which its `AGENTS.md`
+/// imports, and what it writes of itself (Claude Code's auto memory, its
+/// own `CLAUDE.md`) is committed to its agent fragment, the memory as
+/// `memories/claude/`. Restart on a new computer, `/data` empty: before
+/// the bridge runs its first turn, all of it is back, the agent's own (the
+/// user Claude Code runs as). No model call, and no Claude Code: the boot
+/// syncs the folders Claude Code keeps them in.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_claude_agents_self_outlasts_its_computer() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &[]).await;
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    fake.with(|w| w.fragments.get_mut("rowan--k3x9").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Rowan, a builder.\n")));
+    let model = Model::start("0.0.0.0:0").await;
+    let (work, memory) = ("/data/work/rowan--k3x9", "/data/hermes/.claude/projects/-data-work-rowan--k3x9/memory");
+    let run = || Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SYNC_MS", "2000")]);
+    let ready = |c: &Container| c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains(r#""rowan--k3x9":"claude""#);
+    let owner = |c: &Container, p: &str| c.exec_out(&["stat", "-c", "%U", p]).trim().to_string();
+
+    let c = run();
+    let t = Instant::now();
+    while !ready(&c) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the ready file never named rowan");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(c.exec_out(&["cat", &format!("{work}/SOUL.md")]), "You are Rowan, a builder.\n", "its soul in its folder before its first turn");
+    assert!(!c.exec(&["test", "-d", "/data/hermes/profiles/rowan--k3x9"]), "no Hermes profile");
+    // Claude Code writes a memory, and the agent its own notes, as the agents' user
+    let wrote = format!("mkdir -p {memory} && printf -- '- [Tomatoes](tomatoes.md)\\n' > {memory}/MEMORY.md && printf 'Paul likes tomatoes.\\n' > {memory}/tomatoes.md && printf '@AGENTS.md\\nMy own notes.\\n' > {work}/CLAUDE.md");
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &wrote]));
+    let main = |path: &str| fake.with(|w| w.fragments["rowan--k3x9"].files.get(path).map(|b| String::from_utf8_lossy(b).into_owned()));
+    let t = Instant::now();
+    while main("memories/claude/tomatoes.md").is_none() || main("CLAUDE.md").is_none() {
+        assert!(t.elapsed() < Duration::from_secs(60), "never committed: {}", c.logs().lines().filter(|l| l.contains("\"sync.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(main("memories/claude/MEMORY.md").as_deref(), Some("- [Tomatoes](tomatoes.md)\n"));
+    assert_eq!(main("CLAUDE.md").as_deref(), Some("@AGENTS.md\nMy own notes.\n"));
+    assert!(main("memories/MEMORY.md").is_none(), "its own folder, not Hermes' index");
+    drop(c);
+
+    // a new computer, its /data empty
+    let c = run();
+    let t = Instant::now();
+    while !ready(&c) {
+        assert!(t.elapsed() < Duration::from_secs(120), "the ready file never named rowan again");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(c.exec_out(&["cat", &format!("{memory}/MEMORY.md")]), "- [Tomatoes](tomatoes.md)\n", "its memory back before its first turn");
+    assert_eq!(c.exec_out(&["cat", &format!("{memory}/tomatoes.md")]), "Paul likes tomatoes.\n");
+    assert_eq!(c.exec_out(&["cat", &format!("{work}/CLAUDE.md")]), "@AGENTS.md\nMy own notes.\n");
+    assert_eq!(c.exec_out(&["cat", &format!("{work}/SOUL.md")]), "You are Rowan, a builder.\n");
+    for p in [format!("{memory}/MEMORY.md"), memory.into(), "/data/hermes/.claude".into(), format!("{work}/CLAUDE.md"), work.into()] {
+        assert_eq!(owner(&c, &p), "hermes", "the agents' own, as Claude Code runs: {p}");
+    }
+    // another Claude agent assigned while it runs: its soul is in its
+    // folder by the time the ready file names it
+    fake.add_agent_with("hazel", r#"{"tier":"cheap","runtime":"claude"}"#);
+    fake.with(|w| w.fragments.get_mut("hazel--k3x9").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Hazel.\n")));
+    let t = Instant::now();
+    while !c.exec_out(&["cat", "/var/lib/fragment-run/agents.json"]).contains(r#""hazel--k3x9":"claude""#) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the ready file never named hazel");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(c.exec_out(&["cat", "/data/work/hazel--k3x9/SOUL.md"]), "You are Hazel.\n", "its soul before the bridge runs it");
+    let kept: Vec<String> = fake.with(|w| w.fragments["rowan--k3x9"].files.keys().cloned().collect());
+    assert_eq!(kept, ["CLAUDE.md", "SOUL.md", "agent.json", "memories/claude/MEMORY.md", "memories/claude/tomatoes.md"], "main whole: nothing deleted by the empty disk");
+}
+
+/// `turn`'s first Claude turn (Claude Code's install card, none being
+/// installed here): by then `label`'s soul is in its folder.
+async fn claude_turn_after_its_soul(fake: &Fake, c: &Container, chat: &str, turn: &str, label: &str) {
+    let t = Instant::now();
+    while !fake.with(|w| w.bodies(chat, "work", "turn.prompt").iter().any(|p| p["turn"] == turn && p["prompt"] == "install")) {
+        assert!(t.elapsed() < Duration::from_secs(120), "{label}'s Claude turn never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(c.exec(&["test", "-f", &format!("/data/work/{label}--k3x9/SOUL.md")]), "a Claude turn of {label}'s ran before its files were restored");
+}
+
+/// Goal: a restore never counts on the boot having made `/data`. The image
+/// has none (a directory of an image layer cannot be swapped for a restored
+/// one), and a started image's pre-init makes it only as it runs, so the
+/// platform's restore makes it, as `Container::restore` does: a restore that
+/// counted on the boot raced the start (master's images run 44766391835,
+/// `teammates_ask_each_other`: `destination "…:/data" must be a
+/// directory`). Method: the window held open, a container whose pre-init
+/// never runs, restored into.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_restore_never_counts_on_the_boot_making_data() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let c = Container::idle(&hermes_tag());
+    assert!(!c.exec(&["test", "-e", "/data"]), "the image has no /data: only its pre-init makes one");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("restore-makes-data");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data/hermes")).unwrap();
+    std::fs::write(dir.join("data/hermes/probe"), "restored\n").unwrap();
+    let save = dir.join("save.tar");
+    assert!(Command::new("tar").args(["-C", &dir.join("data").display().to_string(), "-cf", &save.display().to_string(), "."]).status().expect("tar runs").success());
+    c.restore(&save);
+    assert_eq!(c.exec_out(&["cat", "/data/hermes/probe"]), "restored\n");
+}
+
+/// Goal (FIN-542): a Claude agent's first turn waits for its own files:
+/// the ready file says it is ready for Claude only once a sync restored
+/// them, and until then the bridge holds its turns, never dropping them.
+/// Invalid, then restart: its files' listing failing at a start keeps its
+/// turn waiting, the sync tried again until it answers; the same for one
+/// assigned while the computer runs. Valid: a Hermes agent switched to
+/// Claude while its files cannot be read gets no Claude turn until its
+/// soul is in its folder. A Claude turn here is Claude Code's install card.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_claude_agent_waits_for_its_files() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let soul = |label: &str, text: &'static str| fake.with(|w| w.fragments.get_mut(&format!("{label}--k3x9")).unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(text.as_bytes())));
+    let ask = |chat: &str, label: &str| {
+        let asked = fake.say(chat, &person("paul"), json!({ "text": format!("hello {label}") }));
+        fragment_bridge::records::turn_id(&format!("{label}--k3x9"), chat, "chat", asked["seq"].as_u64().unwrap())
+    };
+    let workshop = fake.chat("workshop", &["rowan"]);
+    fake.add_agent_with("rowan", r#"{"tier":"cheap","runtime":"claude"}"#);
+    soul("rowan", "You are Rowan.\n");
+    soul("juniper", "You are Juniper.\n");
+    // rowan's files don't list for its start's sync and the next tries,
+    // and a message waits for it
+    fake.with(|w| w.fail_files.insert("rowan--k3x9".into(), 3));
+    let rowan_turn = ask(&workshop, "rowan");
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    let failed = |c: &Container, label: &str| c.logs().lines().any(|l| l.contains("\"sync.failed\"") && l.contains(&format!("{label}--k3x9")));
+    let read_as_claude = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "agent.runtime" && e["agent"] == "juniper--k3x9" && e["runtime"] == "claude").count();
+
+    // a start whose first reads of rowan's files fail
+    claude_turn_after_its_soul(&fake, &c, &workshop, &rowan_turn, "rowan").await;
+    assert!(failed(&c, "rowan"), "its start's sync failed");
+    assert_eq!(fake.with(|w| w.fail_files["rowan--k3x9"]), 0, "tried again until it answered");
+
+    // one assigned while the computer runs, its files failing too
+    let grove = fake.chat("grove", &["hazel"]);
+    fake.with(|w| w.fail_files.insert("hazel--k3x9".into(), 3));
+    fake.add_agent_with("hazel", r#"{"tier":"cheap","runtime":"claude"}"#);
+    soul("hazel", "You are Hazel.\n");
+    let hazel_turn = ask(&grove, "hazel");
+    claude_turn_after_its_soul(&fake, &c, &grove, &hazel_turn, "hazel").await;
+    assert!(failed(&c, "hazel"), "its first syncs failed");
+
+    // juniper, of Hermes', switched to Claude while its files can't be read:
+    // a message to it gets no Claude turn before its soul is in its folder
+    assert!(!c.exec(&["test", "-f", "/data/work/juniper--k3x9/SOUL.md"]), "a Hermes agent's soul is in its profile");
+    fake.with(|w| {
+        w.fail_files.insert("juniper--k3x9".into(), 6);
+        w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","runtime":"claude"}"#));
+    });
+    // the boot and the bridge each read it as Claude's (the boot's change of
+    // the ready file has the bridge read the computer again at once)
+    let t = Instant::now();
+    while read_as_claude(&c) < 2 {
+        assert!(t.elapsed() < Duration::from_secs(120), "juniper never read as Claude's by both: {}", read_as_claude(&c));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let juniper_turn = ask(&chat, "juniper");
+    claude_turn_after_its_soul(&fake, &c, &chat, &juniper_turn, "juniper").await;
+    assert!(failed(&c, "juniper"), "its first syncs for Claude failed");
 }
 
 /// Goal (FIN-258): an agent whose `agent.json` names another runtime
@@ -3577,9 +3757,7 @@ async fn an_expired_card_ends_its_turn() {
         // the next message wakes it from the save
         let next = x.say("good morning");
         let c = x.container(&[("RESTORE_PENDING", "1")]);
-        let tar = std::fs::File::open(&save).expect("the save");
-        let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-        assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+        c.restore(&save);
         let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
         assert_eq!(code, 0, "the save checks: {said}");
         assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -3787,9 +3965,7 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     // the next message wakes it from the save
     let next = x.say("good morning");
     let c = x.container(&[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {said}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -3926,9 +4102,7 @@ async fn a_turn_cut_while_its_tool_runs_is_continued_once() {
 
     // woken from that save, nothing said
     let c = x.container(&[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {said}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -4203,8 +4377,7 @@ async fn a_card_answered_after_a_sleep_starts_one_fresh_turn() {
     let fresh = fragment_bridge::records::turn_id("juniper--k3x9", &x.chat, "chat", answer["seq"].as_u64().unwrap());
     x.fake.with(|w| w.fail_history_reads = 2);
     let c = x.container(&[("RESTORE_PENDING", "1")]);
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().unwrap();
-    assert!(cp.status.success(), "restored");
+    c.restore(&save);
     assert!(c.exec(&["touch", "/run/computer/restored"]));
     within(&x.fake, &x.chat, &c, 180_000, "the fresh turn's end", |w| !x.ends(w, &fresh).is_empty()).await;
     x.fake.with(|w| {
@@ -4280,8 +4453,7 @@ async fn a_card_answered_live_runs_once_after_a_rollback() {
     };
     // a new computer woken from `save`
     let restore = |save: &std::path::Path, c: Container| {
-        let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(save).unwrap()).output().unwrap();
-        assert!(cp.status.success(), "restored");
+        c.restore(save);
         assert!(c.exec(&["touch", "/run/computer/restored"]));
         c
     };
@@ -4558,9 +4730,7 @@ async fn a_catalog_refresh_forced_under_the_hold_writes_nothing() {
     fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
     let next = x.say("good morning");
     let c = x.container(&[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {said}");
     assert_eq!(c.exec_out(&["sh", "-c", "cd /data/hermes/cache && sha256sum model_catalog.json openrouter_curated_catalog.json nous_recommended_cache.json reasoning_caps.json .model_catalog_torn.tmp"]), torn, "the wake has the torn caches");
@@ -5034,9 +5204,7 @@ async fn teammates_ask_each_other() {
     drop(c);
     fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
     let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {checked}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -5099,9 +5267,7 @@ async fn an_old_bot_chat_is_rebuilt_without_bot_mode() {
 
     // this image, from that save
     let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {checked}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -5182,9 +5348,7 @@ async fn a_computer_upgrades_hermes_in_place() {
 
     // this image, from that save
     let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks on this image: {checked}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -5393,9 +5557,7 @@ sys.exit(subprocess.run([env.get("SHELL", "/bin/sh"), "-c", sys.argv[2]], env=en
     drop(c);
     fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
     let c = Container::run(&next, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {checked}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));
@@ -5774,9 +5936,7 @@ async fn simplex_on_the_hermes_image() {
         w.computer["restored"] = json!({ "generation": 3, "rollback": true, "from": "backup", "at": 1 });
     });
     let c = Container::run_with(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &[servers[0], servers[1], ("RESTORE_PENDING", "1")], &["--network", &net]);
-    let tar = std::fs::File::open(&save).expect("the save");
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {said}");
     let t0 = Instant::now();
@@ -5934,8 +6094,7 @@ async fn the_computers_python_keeps_what_its_agents_install() {
     drop(c);
     fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
     let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
-    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(std::fs::File::open(&save).unwrap()).output().expect("docker runs");
-    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    c.restore(&save);
     let (code, checked) = c.exec_code(&["/usr/local/bin/computer-check"]);
     assert_eq!(code, 0, "the save checks: {checked}");
     assert!(c.exec(&["touch", "/run/computer/restored"]));

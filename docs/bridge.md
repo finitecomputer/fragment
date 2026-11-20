@@ -78,7 +78,10 @@ with its default. What an image sets:
   Hermes is given too, and `BRIDGE_RELAY_HOME`, Hermes' home, whose
   profiles hold each agent's memory) or `script` (`BRIDGE_SCRIPT_MEMORY`
   its stand-in for that memory). See "What a runtime forgot".
-- `BRIDGE_AGENTS_FILE`: the agents the image has made ready (`ready.rs`).
+- `BRIDGE_AGENTS_FILE`: the agents the image has made ready, each with
+  the runtime it is ready for (`ready.rs`; one named with none is ready for
+  none): the turns of one whose `agent.json` names another wait, a claim
+  answered meanwhile included, until the file names it for that one.
   Unset, every agent the platform lists runs.
 - `BRIDGE_SCREEN_LISTEN`, `BRIDGE_SCREENS_FILE` and `BRIDGE_SCREEN_START`:
   each agent's screen (`screen.rs`, `screens.rs`, `lease.rs`).
@@ -675,8 +678,10 @@ reaches it (`withheld`).
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,
-  written only when the agent has none. Claude's auto memory is on, kept
-  per agent under the person's `.claude`.
+  written only when the agent has none. `AGENTS.md` imports its
+  `SOUL.md`. Claude's auto memory is on, kept per agent under the
+  person's `.claude`. The boot syncs `SOUL.md`, `CLAUDE.md` and that
+  memory with its agent fragment (docs/computers.md, "Claude Code").
 - **A session per agent and chat**, its id derived from the two and the
   chat's `/new` count, so every life names the same one. It resumes when
   its transcript is on disk, and its process stops once idle.

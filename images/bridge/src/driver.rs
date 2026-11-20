@@ -342,6 +342,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         Some(r) => crate::ready::gate(agents, r.agents()),
         None => agents,
     };
+    // those of them not ready for the runtime they name now: their turns wait
+    let unready = |agents: &[Agent], ready: &Option<Ready>| ready.as_ref().map(|r| crate::ready::unready(agents, r.agents())).unwrap_or_default();
     // each agent's runtime as its `agent.json` named it last (`with_runtimes`)
     let runtime_names: RuntimeNames = Arc::new(Mutex::new(HashMap::new()));
     let computer = tokio::select! {
@@ -446,6 +448,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
+    let s = engine.step(Input::Unready(unready(&computer.agents, &ready)), crate::log::now_ms());
+    act(&engine, s)?;
     // the agents whose SimpleX link is bound, and their chats, as their files
     // say, before any record: a relayed record a cut life posted and never
     // ran is honored, and what is said in their chat goes to the phone
@@ -503,7 +507,13 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                         }
                         let now = Some(named(&agents));
                         screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
+                        // the roster first, then who of it is not ready: a turn
+                        // starts on the runtime its agent names now
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
+                        if let Err(e) = act(&engine, s) {
+                            break Err(e);
+                        }
+                        let s = engine.step(Input::Unready(unready(&agents, &ready)), crate::log::now_ms());
                         // An agent that left this computer (or is not ready) is followed no more.
                         follows.keep_only(&agents);
                         follows.rediscover_due(&agents);

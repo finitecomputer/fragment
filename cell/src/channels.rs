@@ -515,6 +515,8 @@ impl FragmentCell {
         // a post is a write: past its owner's overdraft the fragment takes none
         self.writable().await?;
         laps.lap("writable");
+        // after the last await: the life it is appended to is the one read
+        self.relayed_into_owners(caller, body)?;
         let key = post_key(principal, id);
         // the append and the look for an earlier one are one step (no await between)
         let (record, appended) = match self.append(channel, principal, POST_KIND, body, Some((&key, POST_INDEX)))? {
@@ -557,6 +559,24 @@ impl FragmentCell {
             Err(e) if e.code == ErrorCode::NotFound => Err(refused("names an agent fragment there is not")),
             other => other,
         }
+    }
+
+    /// A relayed record (`door_checked` took its door's signature) is
+    /// appended only to a fragment its agent's owner owns
+    /// (`door::lands_in_owners`): a door signs a name, and a name its owner
+    /// deleted may be a stranger's public fragment now. Read with no await
+    /// before its append: a name's lives share this object, so a life made
+    /// again while the door was asked is the one whose owner is read.
+    fn relayed_into_owners(&self, caller: &Caller, body: &Value) -> CellResult<()> {
+        if !door::relays(body) {
+            return Ok(());
+        }
+        let owner = self.must(MetaKey::Owner)?;
+        let agent_owner = caller.signed.as_ref().and_then(|s| s.owner.as_deref()).unwrap_or_default();
+        if !door::lands_in_owners(&owner, agent_owner) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a relayed record is posted only into a fragment its agent's owner owns"));
+        }
+        Ok(())
     }
 
     /// Whether the caller may write to `channel`, for both of its writers:
