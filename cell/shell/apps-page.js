@@ -79,8 +79,9 @@ const NAMES_SHOWN = 2;
 // session as the dock's are: every one on a visit's open; afterwards a new
 // or changed row's, and one whose card is not there yet, asked again with
 // bounded backoff and retries. A row whose card no shot makes (`shoots`)
-// and that has none is asked once, never again until the row changes, on
-// any visit. `visit()` is the page's visit now (a read
+// and that has none is asked once a visit (an upload shows on the next),
+// never again within it while the row is the same. `visit()` is the
+// page's visit now (a read
 // made in an earlier one, or one a newer read of its row superseded,
 // changes nothing), `shown()` whether the page is open, `rows()` the apps
 // it may show a card for, `draw()` draws the page again. Its own function
@@ -93,9 +94,9 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
   const attempts = new Map();
   const drawn = new Map();
   // a row no shot makes a card of and with none, as it was when it was
-  // asked: no other read asks it again while its row is the same, and only
-  // its 404 keeps it here (a card, a failure or a read of a visit gone lets
-  // it go)
+  // asked: no other read of the visit asks it again while its row is the
+  // same, and only its 404 keeps it here (a card, a failure or a read of a
+  // visit gone lets it go)
   const cardless = new Map();
   const load = { wait: 0, timer: null, batch: 0 };
 
@@ -129,7 +130,7 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
     const asked = [];
     for (const f of rows()) {
       const fingerprint = JSON.stringify(f);
-      if (cardless.get(f.name) === fingerprint) continue;
+      if (!all && cardless.get(f.name) === fingerprint) continue;
       if (!all && cards.has(f.name) && drawn.get(f.name) === fingerprint) continue;
       if (all || attempts.get(f.name)?.fingerprint !== fingerprint) {
         attempts.set(f.name, { fingerprint, count: 0 });

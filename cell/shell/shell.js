@@ -1065,7 +1065,8 @@ async function loadCard(name) {
 // names, after a change to the list): those, and the apps still without one.
 // One whose card no shot makes (`shoots`: a members-only one of theirs) and
 // that has none is asked once while its row is the same (`cardless`, its row
-// as it was asked: only its 404 keeps it there).
+// as it was asked: only its 404 keeps it there), and again with the rest when
+// the page comes back (an upload shows then).
 const cardsLoad = { wait: 0, timer: null, at: 0 };
 const cardless = new Map();
 async function loadCards(only = null) {
@@ -1083,7 +1084,11 @@ async function loadCards(only = null) {
     cardsLoad.timer = setTimeout(() => loadCards().catch(() => {}), cardsLoad.wait);
   }
 }
-addEventListener("focus", () => { if (Date.now() - cardsLoad.at > 60_000) loadCards().catch(() => {}); });
+addEventListener("focus", () => {
+  if (Date.now() - cardsLoad.at <= 60_000) return;
+  cardless.clear();
+  loadCards().catch(() => {});
+});
 // a pointer over an app's icon in the dock shows its card larger, above it
 const peek = el("div", "card-peek");
 peek.hidden = true;

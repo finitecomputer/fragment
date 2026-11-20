@@ -70,7 +70,7 @@ test("a card a superseded batch's read set is drawn, though the newer batch foun
 // Paul's preview console, 2026-11-19: a members-only brain's card, which no
 // shot ever makes, was asked 65 times in a session. One uploaded, or kept
 // from before the app was restricted, still shows (Codex and Alex on #1407).
-test("their members-only app with no card is asked once, never retried nor asked on a later visit, and again when its row changes; one with a card shows it", async () => {
+test("their members-only app with no card is asked once a visit, never retried within it, and again when its row changes; one with a card shows it, an upload on the next visit", async () => {
   const s = server();
   const timers = { waits: 0, setTimeout() { this.waits++; return 1; }, clearTimeout() {} };
   const members = { role: "owner", kind: "app", sharing: { visibility: "members" } };
@@ -94,22 +94,33 @@ test("their members-only app with no card is asked once, never retried nor asked
   assert.equal(cards.get("groceries--q84t")?.etag, '"uploaded"', "a members-only app's uploaded card shows");
   assert.equal(timers.waits, 0, "no retry waits on a card no shot makes");
 
-  // the list changes elsewhere, and the page is visited again: potluck is
-  // not asked, groceries' card is asked again with its etag
+  // the list changes elsewhere: neither is asked
   loading = cards.load();
   assert.deepEqual(s.waiting(), []);
   await loading;
+  // potluck is given a card meanwhile (its row unchanged); the next visit
+  // asks again for both, groceries' with its etag, and shows potluck's
   loading = cards.load(true);
-  assert.deepEqual(s.waiting(), [GROCERIES]);
+  assert.deepEqual(s.waiting(), [POTLUCK, GROCERIES]);
+  s.answer(POTLUCK, 200, '"uploaded later"');
   assert.equal(s.answer(GROCERIES, 304).etag, '"uploaded"');
   await loading;
+  assert.equal(cards.get("potluck--57sb")?.etag, '"uploaded later"', "a card uploaded after its 404 shows on the next visit");
+  assert.equal(timers.waits, 0, "no retry waits on a card no shot makes");
 
-  // potluck's row changes (opened to its link, so a shot may come): asked
-  // again, and retried while it has none
-  rows = [{ ...rows[0], sharing: { visibility: "link" } }, rows[1]];
+  // a third app with none, whose row changes (opened to its link, so a shot
+  // may come): asked again, and retried while it has none
+  const third = { name: "shared--x9k2", ...members };
+  const THIRD = "/api/f/shared--x9k2/card";
+  rows = [...rows, third];
   loading = cards.load();
-  assert.deepEqual(s.waiting(), [POTLUCK]);
-  s.answer(POTLUCK, 404);
+  assert.deepEqual(s.waiting(), [THIRD]);
+  s.answer(THIRD, 404);
+  await loading;
+  rows = [rows[0], rows[1], { ...third, sharing: { visibility: "link" } }];
+  loading = cards.load();
+  assert.deepEqual(s.waiting(), [THIRD]);
+  s.answer(THIRD, 404);
   await loading;
   assert.equal(timers.waits, 1, "a card a shot may make is asked again later");
 });
@@ -131,9 +142,9 @@ test("their members-only app with no card is not asked again by a batch that beg
   assert.deepEqual(s.waiting(), [POTLUCK], "asked once");
   s.answer(POTLUCK, 404);
   await Promise.all([opened, listed]);
-  const visited = cards.load(true);
-  assert.deepEqual(s.waiting(), [], "nor on the next visit");
-  await visited;
+  const later = cards.load();
+  assert.deepEqual(s.waiting(), [], "nor at a later change to the list");
+  await later;
 });
 
 test("a read of an earlier visit, or one a newer read of its row superseded, sets nothing", async () => {

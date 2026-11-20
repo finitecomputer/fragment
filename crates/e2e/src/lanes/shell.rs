@@ -8284,16 +8284,19 @@ const CARD_READS_WATCH: &str = r#"(() => {
 
 /// Goal: the shell asks for a card no shot makes (docs/api.md, Cards: a
 /// members-only page is never shot) once, not at every change to the list
-/// and every visit (Paul's preview console, 2026-11-19: one brain's card
-/// 404 65 times in a session), and still shows one such a fragment has
-/// (Codex and Alex on #1407). Valid: a link brain made beside it is asked
-/// at each change to its row and each visit; made members only, it keeps
-/// its card on Brains and in the dock. Invalid: their own members-only
-/// brain, which has none, asked more than once per version of its row by
-/// the dock, or by Brains. Method: card reads counted by name, and the
-/// versions of each row the shell read (`CARD_READS_WATCH`); the dock
-/// first, then Brains with both brains off the dock, so every read there
-/// is the page's. Apps is open again at the end, both brains gone.
+/// (Paul's preview console, 2026-11-19: one brain's card 404 65 times in a
+/// session), and still shows one such a fragment has or is given (Codex
+/// and Alex on #1407). Valid: a link brain made beside it is asked at each
+/// change to its row; made members only, it keeps its card on Brains and in
+/// the dock; a card uploaded to the members-only brain after its 404 shows
+/// in the dock when the page comes back after a minute, and on Brains at
+/// its next visit, its row unchanged. Invalid: their own members-only
+/// brain, which has none, asked by the dock more than once per version of
+/// its row, or by Brains more than once a visit. Method: card reads counted
+/// by name, and the versions of each row the shell read
+/// (`CARD_READS_WATCH`); the dock first, then Brains with both brains off
+/// the dock, so every read there is the page's. Apps is open again at the
+/// end, both brains gone.
 fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     let wait = std::time::Duration::from_secs(60);
     b.eval(page, CARD_READS_WATCH)?;
@@ -8308,16 +8311,22 @@ fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Resul
         anyhow::ensure!(made["status"] == 200 && !name.is_empty(), "a brain was not made: {made}");
         Ok(name)
     };
-    let dock = |b: &mut Browser, name: &str, on: bool| -> Result<()> {
-        let r = in_page(b, "PUT", &format!("/api/fragments/{name}/dock"), json!({ "dock": on }))?;
-        anyhow::ensure!(r["status"] == 200, "{name}'s dock: {r}");
+    let own = |b: &mut Browser, name: &str, what: &str, on: bool| -> Result<()> {
+        let r = in_page(b, "PUT", &format!("/api/fragments/{name}/{what}"), json!({ what: on }))?;
+        anyhow::ensure!(r["status"] == 200, "{name}'s {what}: {r}");
         Ok(())
     };
     let count = |b: &mut Browser, what: &str, name: &str| -> u64 { b.eval(page, &format!("window.__cardsSeen.{what}[{}] ?? 0", js(name))).ok().and_then(|v| v.as_u64()).unwrap_or(0) };
     let reads = |name: &str| format!("(window.__cardsSeen.reads[{}] ?? 0)", js(name));
     let docked = |name: &str| format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{name}\"]")));
     let on_brains = |name: &str| format!("!!document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{name}\"]")));
+    let carded = |name: &str| format!("!!document.querySelector({})?.src.startsWith('blob:')", js(&format!("#brains-page .app-row[data-fragment=\"{name}\"] .app-row-card")));
+    let peeked = |name: &str| format!("(() => {{ const icon = document.querySelector({}); icon?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const i = document.querySelector('.card-peek:not([hidden]) img'); const shown = !!i && i.src.startsWith('blob:'); icon?.dispatchEvent(new PointerEvent('pointerleave', {{ pointerType: 'mouse' }})); return shown; }})()", js(&format!("#apps [data-key=\"app:{name}\"]")));
     let seen = |b: &mut Browser| b.eval(page, "({ reads: window.__cardsSeen.reads, versions: window.__cardsSeen.versions })");
+    let go = |b: &mut Browser, to: &str| -> Result<bool> {
+        b.eval(page, &format!("(document.getElementById({}).click(), true)", js(&format!("{to}-link"))))?;
+        Ok(b.until(page, &format!("location.pathname === '/{to}'"), wait))
+    };
     let private = make(b, json!({ "label": "private-brain", "template": "brain", "visibility": "members" }))?;
     let linked = make(b, json!({ "label": "linked-brain", "template": "brain" }))?;
 
@@ -8325,9 +8334,9 @@ fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Resul
     // twice (off the dock, and back), and its card is asked again
     let arrived = b.until(page, &format!("{} && {} && {} >= 1 && {} >= 1", docked(&private), docked(&linked), reads(&private), reads(&linked)), wait);
     let before = count(b, "reads", &linked);
-    dock(b, &linked, false)?;
+    own(b, &linked, "dock", false)?;
     let off = b.until(page, &format!("!{}", docked(&linked)), wait);
-    dock(b, &linked, true)?;
+    own(b, &linked, "dock", true)?;
     let again = b.until(page, &format!("{} && {} > {before}", docked(&linked), reads(&linked)), wait);
     let (asked, versions) = (count(b, "reads", &private), count(b, "versions", &private));
     s.ok(
@@ -8336,50 +8345,58 @@ fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Resul
         json!({ "private": private, "linked": linked, "seen": seen(b)? }),
     );
 
-    // Brains, both off the dock: visited, left and visited again
-    dock(b, &private, false)?;
-    dock(b, &linked, false)?;
+    // Brains, both off the dock: a visit in which the link brain's row
+    // changes twice (pinned, unpinned), each change asking for its card
+    own(b, &private, "dock", false)?;
+    own(b, &linked, "dock", false)?;
     let undocked = b.until(page, &format!("!{} && !{}", docked(&private), docked(&linked)), wait);
-    let (asked, versions, linked_reads) = (count(b, "reads", &private), count(b, "versions", &private), count(b, "reads", &linked));
-    b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
-    let first = b.until(page, &format!("location.pathname === '/brains' && {} && {} && {} > {linked_reads}", on_brains(&private), on_brains(&linked), reads(&linked)), wait);
-    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
-    let left = b.until(page, "location.pathname === '/apps'", wait);
-    let linked_reads = count(b, "reads", &linked);
-    b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
-    let second = b.until(page, &format!("location.pathname === '/brains' && {} > {linked_reads}", reads(&linked)), wait);
-    let (asked_now, versions_now) = (count(b, "reads", &private), count(b, "versions", &private));
-    let by_page = asked_now.saturating_sub(asked);
+    let (asked, versions, mut linked_reads) = (count(b, "reads", &private), count(b, "versions", &private), count(b, "reads", &linked));
+    let mut visited = go(b, "brains")? && b.until(page, &format!("{} && {} && {} > {linked_reads}", on_brains(&private), on_brains(&linked), reads(&linked)), wait);
+    for pinned in [true, false] {
+        linked_reads = count(b, "reads", &linked);
+        own(b, &linked, "pinned", pinned)?;
+        visited = visited && b.until(page, &format!("{} > {linked_reads}", reads(&linked)), wait);
+    }
+    let by_page = count(b, "reads", &private).saturating_sub(asked);
+    let changed = count(b, "versions", &private).saturating_sub(versions);
     s.ok(
-        "Brains asks for their members-only brain's card (it has none) on its first visit, and not on the next but for a new version of its row, where a link brain's is asked on every visit",
-        undocked && first && left && second && by_page >= 1 && by_page <= 1 + versions_now.saturating_sub(versions),
-        json!({ "by_page": by_page, "seen": seen(b)? }),
+        "Brains asks for their members-only brain's card (it has none) once a visit, not at each change to their list, where a link brain's is asked again",
+        undocked && visited && by_page >= 1 && by_page <= 1 + changed,
+        json!({ "by_page": by_page, "changed": changed, "seen": seen(b)? }),
     );
+    go(b, "apps")?;
 
-    // the link brain's card, once shot, made members only: still shown
-    let label = "a brain made members only keeps the card it has: Brains and the dock still show it";
+    let label = "a brain made members only keeps the card it has, and one uploaded to their members-only brain after its 404 shows in the dock when the page comes back and on Brains at the next visit";
     if s.shoots_cards() {
-        let row = format!("document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{linked}\"]")));
-        let carded = format!("!!{row}?.querySelector('.app-row-card')?.src.startsWith('blob:')");
-        // a visit asks again: one while its shot was being taken may have ended first
+        // the link brain's card, once shot, made members only: still shown
+        // (a visit asks again: one while its shot was being taken may have ended first)
         let shown = s.eventually(super::site::CARD_WAIT, || {
-            if b.until(page, &carded, std::time::Duration::from_secs(10)) {
+            if go(b, "brains").unwrap_or(false) && b.until(page, &carded(&linked), std::time::Duration::from_secs(10)) {
                 return true;
             }
-            let _ = b.eval(page, "(document.getElementById('apps-link').click(), true)");
-            b.until(page, "location.pathname === '/apps'", wait);
-            let _ = b.eval(page, "(document.getElementById('brains-link').click(), true)");
-            b.until(page, "location.pathname === '/brains'", wait) && b.until(page, &carded, std::time::Duration::from_secs(10))
+            let _ = go(b, "apps");
+            false
         });
         let before = count(b, "reads", &linked);
-        let r = in_page(b, "PUT", &format!("/api/f/{linked}/visibility"), json!({ "visibility": "members" }))?;
-        let asked = r["status"] == 200 && b.until(page, &format!("{} > {before}", reads(&linked)), wait);
-        let kept = b.eval(page, &carded)? == true;
-        dock(b, &linked, true)?;
-        let icon = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{linked}\"]")));
-        let peeked = b.until(page, &format!("(() => {{ {icon}?.dispatchEvent(new PointerEvent('pointerenter', {{ pointerType: 'mouse' }})); const i = document.querySelector('.card-peek:not([hidden]) img'); return !!i && i.src.startsWith('blob:'); }})()"), wait);
-        let _ = b.eval(page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave', {{ pointerType: 'mouse' }})), true)"));
-        s.ok(label, shown && asked && kept && peeked, json!({ "shown": shown, "visibility": r, "asked": asked, "kept": kept, "peeked": peeked, "seen": seen(b)? }));
+        let restricted = in_page(b, "PUT", &format!("/api/f/{linked}/visibility"), json!({ "visibility": "members" }))?;
+        let kept = restricted["status"] == 200 && b.until(page, &format!("{} > {before}", reads(&linked)), wait) && b.eval(page, &carded(&linked))? == true;
+        own(b, &linked, "dock", true)?;
+        let in_dock = b.until(page, &peeked(&linked), wait);
+        // the members-only brain back on the dock (a new version of its row,
+        // asked once, 404), then given the link brain's card, its row unchanged
+        let before = count(b, "reads", &private);
+        own(b, &private, "dock", true)?;
+        let asked = b.until(page, &format!("{} && {} > {before}", docked(&private), reads(&private)), wait);
+        let put = b.eval(page, &format!("(async () => {{ const card = await fetch('/api/f/{linked}/card', {{ headers: {{ 'x-fragment-shell': '1' }} }}).then((r) => r.blob()); const r = await fetch('/api/f/{private}/card', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'image/jpeg' }}, body: card, credentials: 'same-origin' }}); return r.status; }})()"))?;
+        // the page coming back after a minute away (its clock a minute on, for the focus alone)
+        b.eval(page, "(() => { const real = Date.now; Date.now = () => real() + 61_000; try { window.dispatchEvent(new Event('focus')); } finally { Date.now = real; } return true; })()")?;
+        let in_dock_after = b.until(page, &peeked(&private), wait);
+        let on_visit = go(b, "brains")? && b.until(page, &carded(&private), wait);
+        s.ok(
+            label,
+            shown && kept && in_dock && asked && put == 200 && in_dock_after && on_visit,
+            json!({ "shown": shown, "restricted": restricted, "kept": kept, "in_dock": in_dock, "asked": asked, "put": put, "in_dock_after": in_dock_after, "on_visit": on_visit, "seen": seen(b)? }),
+        );
     } else {
         s.skip_card(label);
     }
@@ -8389,8 +8406,7 @@ fn members_only_no_card_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Resul
         let gone = in_page(b, "DELETE", &format!("/api/f/{name}"), Value::Null)?;
         anyhow::ensure!(gone["status"] == 200, "{name} was not deleted: {gone}");
     }
-    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
-    anyhow::ensure!(b.until(page, &format!("location.pathname === '/apps' && !{} && !{}", docked(&private), docked(&linked)), wait), "Apps did not open again with both brains gone");
+    anyhow::ensure!(go(b, "apps")? && b.until(page, &format!("!{} && !{}", docked(&private), docked(&linked)), wait), "Apps did not open again with both brains gone");
     Ok(())
 }
 
