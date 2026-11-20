@@ -399,8 +399,10 @@ traffic goes out as it is (decision 43). Each start registers them
 before the container starts, at once, so the guest's first request never
 races them (`cell/intercepts.mjs`): the platform's hosts and the catalog's
 providers', asking nothing. Its agents' Vault secrets' hosts are asked of
-its owner's Vault beside the start, never before it, and caught as the
-Vault answers. HTTPS to an intercepted host is
+its owner's Vault: beside the container's start when the start holds its
+guest until it lets it go (a restore's gate, a snapshot's hold), and
+caught before that; before the start when its guest runs at once (a
+fresh start), so no guest runs with one uncaught. HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,
@@ -849,10 +851,10 @@ provider's own hosts.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
-  catalog's in the egress's intercepts: a start asks the Vault for them
-  beside the container's start and catches them as it answers, and its
-  guest's read of its view catches any not caught yet (one set since),
-  those alone, before it answers. A Vault that does not answer lends none
+  catalog's in the egress's intercepts: a start catches them before its
+  guest runs (asked beside the container's start when its guest is held,
+  before it when not; above), and its guest's read of its view catches
+  any not caught yet (one set since), those alone, before it answers. A Vault that does not answer lends none
   until a read of the view finds it answering.
   The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it

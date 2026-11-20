@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -1911,8 +1911,17 @@ impl ComputerCell {
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
         // what its egress catches before it starts: the platform's hosts and
-        // the catalog's, asking nothing
-        let hosts = self.catalog_hosts();
+        // the catalog's, asking nothing; its agents' Vault secrets' hosts
+        // too when its guest runs at once (nothing restored), asked first
+        // as before, so no guest ever runs with one uncaught
+        // (`Plan::vault_asked`)
+        let asked = planned.plan.vault_asked();
+        let mut hosts = self.catalog_hosts();
+        if asked == VaultAsked::Before {
+            hosts.extend(self.vault_hosts().await);
+            hosts.sort_unstable();
+            hosts.dedup();
+        }
         // a wipe that began while this start awaited starts nothing: one
         // begun before the host's start is seen here, and one begun while
         // the host registers the intercepts is the host's to see (its
@@ -1926,11 +1935,17 @@ impl ComputerCell {
         let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
         // as armed from its start, for a read of its view during it to add to
         *self.armed.borrow_mut() = Some((generation, hosts));
-        // its agents' Vault secrets' hosts asked beside the start, never
-        // before it, and caught as they answer, as its guest boots (its
-        // view's read catches any still uncaught before it answers: a guest
-        // learns their placeholders there; `arm_more`)
-        let (started, vault) = futures_util::future::join(self.call("start", &args), self.vault_hosts()).await;
+        // a guest held until the start lets it go (a restore's gate, a
+        // snapshot's hold): its Vault hosts asked beside the start, never
+        // before it, and caught before the start lets it go (any set since,
+        // its view's read catches before it answers; `arm_more`)
+        let beside = async {
+            match asked {
+                VaultAsked::Beside => self.vault_hosts().await,
+                VaultAsked::Before => vec![],
+            }
+        };
+        let (started, vault) = futures_util::future::join(self.call("start", &args), beside).await;
         if started?.as_bool() != Some(true) {
             return Err(Unstarted::Overtaken);
         }

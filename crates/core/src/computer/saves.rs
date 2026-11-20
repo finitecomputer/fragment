@@ -108,6 +108,28 @@ impl Plan {
             Plan::Nothing => RestoreSource::Nothing,
         }
     }
+
+    /// When its start asks its owner's Vault for the hosts its agents'
+    /// secrets go to, so its egress catches them before its guest can send
+    /// a placeholder there (FIN-466).
+    pub fn vault_asked(&self) -> VaultAsked {
+        match self {
+            Plan::Snapshot { .. } | Plan::Backup => VaultAsked::Beside,
+            Plan::Nothing => VaultAsked::Before,
+        }
+    }
+}
+
+/// When a start asks the Vault (`Plan::vault_asked`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultAsked {
+    /// Before the container starts: its guest runs at once, nothing holding
+    /// it, so nothing it sends may find a host uncaught (no window).
+    Before,
+    /// Beside the container's start, never in its way: the start holds its
+    /// guest until it lets it go (a restore's gate; a snapshot's hold, which
+    /// the sleep put on before the snapshot), and catches the hosts first.
+    Beside,
 }
 
 /// The start under way, and what it restores.
@@ -705,6 +727,18 @@ impl Saves {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: no wake leaves a Vault host uncaught while its guest runs.
+    /// Method: each plan's answer. A start that restores (a save behind its
+    /// gate, a snapshot behind its hold) holds its guest while it asks
+    /// beside the container's start; a fresh one (nothing restored) holds
+    /// nothing, so it asks before, as every start once did.
+    #[test]
+    fn a_start_asks_the_vault_beside_it_only_while_its_guest_is_held() {
+        assert_eq!(Plan::Nothing.vault_asked(), VaultAsked::Before, "a fresh guest runs at once: its hosts are caught before it starts");
+        assert_eq!(Plan::Backup.vault_asked(), VaultAsked::Beside, "a restore's gate holds its guest");
+        assert_eq!(Plan::Snapshot { id: "snap".into() }.vault_asked(), VaultAsked::Beside, "a snapshot's hold holds its guest");
+    }
+
     use fragment_proto::computer::{ComputerNotice, ComputerSave, LifeEnd, RestoreSource};
     use serde_json::json;
 
