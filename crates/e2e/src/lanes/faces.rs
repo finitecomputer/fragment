@@ -357,6 +357,34 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         first && again && replayed && unrelated && app_first && app_back && raw_kept,
         json!({ "read": read, "first": first, "again": again, "replayed": replayed, "unrelated": unrelated, "app": [app_first, app_back, raw_kept], "row": row(api, &paul, &app), "events": super::site::event_kinds(api, &paul, &agent) }),
     );
+    // a stale one: its manifest read before a rename since (another older
+    // CLI's, or one through its face), then its fragment.json and its job
+    // written: refused whole (409), nothing of it committed, so its job and
+    // its name still agree
+    let read_manifest = || api.signed(&paul, "GET", &format!("/api/f/{agent}/manifest"), None).map(|r| r.body);
+    let old_write = |m: &Value, title: &str| -> Result<Reply> {
+        let mut body = m.clone();
+        body["meta"]["title"] = json!(title);
+        let files = json!({ "message": "its name", "files": [
+            { "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&body)?) },
+            { "path": "SOUL.md", "text": format!("{title} keeps notes.\n") },
+        ] });
+        api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&files))
+    };
+    let job_text = || api.signed(&paul, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None).map(|r| r.text).unwrap_or_default();
+    let (one, two) = (read_manifest()?, read_manifest()?);
+    let fresh = old_write(&one, "Gus")?;
+    let after_other = old_write(&two, "Hal")?;
+    let three = read_manifest()?;
+    let refaced = reface(&agent, "Ivy")?;
+    let after_face = old_write(&three, "Jo")?;
+    let state = (title_of(&agent), job_text());
+    s.ok(
+        "an older CLI's stale rename (its read before another older CLI's, or a rename through its face) is refused whole (409): its job is not written, and its job and name still agree",
+        fresh.status == 200 && after_other.status == 409 && refaced && after_face.status == 409 && state == (json!("Ivy"), "Ivy keeps notes.\n".to_string()),
+        json!({ "fresh": fresh.status, "other": after_other.to_string(), "face": after_face.to_string(), "state": state }),
+    );
+    anyhow::ensure!(reface(&agent, "Frank")?, "renamed Frank after the stale ones");
 
     // its rename says its name in its job in the same request, before its
     // face: a job commit refused changes neither; one whose answer is lost
@@ -411,6 +439,26 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?;
     anyhow::ensure!(back.status == 200 && job_at(s) == "Frank helps with research.\n", "renamed Frank once more: {back}");
+    // a lost rename to a name its old title holds ("Dr. Scout" to "Scout"),
+    // its read lost too: asked again, it is done, its job written once
+    // (never "Use Scout's card")
+    let dr = reface(&agent, "Dr. Scout")?;
+    let first_job = "You are Nova, paul@example.com's default agent: research.\nUse Dr. Nova's card.\n";
+    let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job", "files": [{ "path": "SOUL.md", "text": first_job }] })))?.status == 200;
+    s.fake.drop_commit_answers(&repo, 1);
+    s.fake.fail_read_after_lost_answer("SOUL.md");
+    let lost = rename("Scout", "Dr. Scout");
+    s.fake.fail_file_read(None);
+    let lost = lost?;
+    let between = job_at(s);
+    let again = rename("Scout", "Dr. Scout")?;
+    let renamed_once = "You are Scout, paul@example.com's default agent: research.\nUse Dr. Scout's card.\n";
+    s.ok(
+        "a rename to a name its old title holds (\"Dr. Scout\" to \"Scout\"), its commit landed and its answer and the read after it lost: asked again, it is done, its job written once",
+        dr && wrote && lost.status >= 500 && between == renamed_once && again.status == 200 && job_at(s) == renamed_once && title_of(&agent) == "Scout",
+        json!({ "lost": lost.to_string(), "between": between, "again": again.to_string(), "job": job_at(s) }),
+    );
+    anyhow::ensure!(reface(&agent, "Frank")?, "renamed Frank after the overlapping rename");
 
     // the CLI, as its person uses it (cli/GUIDE.md): `fragment agent
     // --name` renames it and says its new name; every reader follows, its

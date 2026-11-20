@@ -845,6 +845,18 @@ impl FragmentCell {
         Ok(mark)
     }
 
+    /// Whether a write of `fragment.json` names a mark `GET manifest` gave
+    /// (`title_read`) whose read is stale: its face renamed since it
+    /// showed. Such an older CLI's rename is refused before anything of it
+    /// is committed (its job too: publish.rs `write_files_api`).
+    pub(crate) fn title_read_stale(&self, bytes: &[u8]) -> CellResult<bool> {
+        let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Ok(false) };
+        let Some(mark) = v["meta"][TITLE_READ].as_str() else { return Ok(false) };
+        let reads: Vec<Value> = self.meta(MetaKey::TitleRead)?.and_then(|r| crate::json_text::<Value>(&r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let Some(read) = reads.iter().find(|r| r[0] == mark) else { return Ok(false) };
+        Ok(self.face_now()?.title.as_deref().unwrap_or_default() != read[1].as_str().unwrap_or_default())
+    }
+
     /// A write of `fragment.json` naming a mark `GET manifest` gave
     /// (`title_read`), its title another than the one that read showed: an
     /// older CLI renaming it (`fragment rename`, `fragment agent --name`;
