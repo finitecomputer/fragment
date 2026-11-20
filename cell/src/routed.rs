@@ -165,8 +165,8 @@ impl Routed {
                 if !npub::is_identity(&signed.id) || signed.key.as_deref().is_some_and(|k| !npub::is_hex_key(k)) {
                     return Err(CellError::host("the router named a malformed signer"));
                 }
-                // the router honors `for` for an agent only, naming an identity
-                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || signed.kind != IdentityKind::Agent || signed.owner.is_none()) {
+                // the router honors `for` for an agent only, naming its owner
+                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || fragment_core::access::may_act_for(signed.kind, signed.owner.as_deref(), f).is_err()) {
                     return Err(CellError::host("the router named a malformed `for`"));
                 }
                 Some(signed)

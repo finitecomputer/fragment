@@ -351,9 +351,9 @@ class ContainerHost {
   // any reason, is reported as `computer/exited` for this generation) and
   // sets the runtime's idle stop. Its call to the runtime's start comes
   // after its registrations, never in the same turn as this call: one
-  // overtaken meanwhile (a start after it, or a destroy begun: a wipe's)
-  // starts nothing, answering false, as does one overtaken by the time
-  // its idle stop is set.
+  // overtaken meanwhile (a start after it, or a destroy begun: a sleep's
+  // or a wipe's) starts nothing, answering false, and one overtaken by the
+  // time its idle stop is set answers false too (that destroy ends it).
   async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs) {
     this.#generation = generation;
     const destroys = this.#destroys;
@@ -371,15 +371,21 @@ class ContainerHost {
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
     await settled(() => this.#c.setInactivityTimeout(idleMs));
-    return generation === this.#generation;
+    return !overtaken();
   }
 
   // Every egress intercept of `computer`'s guest, all at once (one entry
-  // per host: `ComputerEgress` with the route as props; intercepts.mjs),
-  // and the backups' own. `swapHosts` are the connections' and operator
-  // keys' hosts, and on a takeover its agents' Vault secrets' too.
+  // per host: `ComputerEgress` with the route as props; intercepts.mjs).
+  // `swapHosts` are the connections' and operator keys' hosts, and on a
+  // takeover its agents' Vault secrets' too. Not the backups' host: each
+  // save and restore registers its own grant there and puts its refusal
+  // back after (the Sandbox SDK's `DirectoryBackup`), and its
+  // `intercept()`, a refusal registered again, is for beside a catch-all
+  // intercept, which a computer has none of. One registered late (a
+  // start's that was overtaken) would replace the grant of a restore under
+  // way.
   #intercept(computer, swapHosts, codestorage) {
-    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, [() => this.#backups.intercept()]);
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage);
   }
 
   #egress(computer) {

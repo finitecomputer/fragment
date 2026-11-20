@@ -207,6 +207,10 @@ fn first_call_answered(s: &mut Suite, id: &str) -> Result<()> {
         s.skip(FIRST_CALL, "it reads the guest's own log, which only a local run's Docker keeps");
         return Ok(());
     }
+    // its boot read answered by now, or never (a start can be ready before
+    // its bridge logs it)
+    let booted = |s: &Suite| s.guest_log(id).ok().flatten().is_some_and(|l| l.contains(r#""event":"bridge.start""#));
+    s.eventually(Duration::from_secs(30), || booted(s));
     let log = s.guest_log(id)?.unwrap_or_default();
     let started = log.find(r#""event":"bridge.start""#);
     let unread = log.find(r#""event":"computer.unread""#);

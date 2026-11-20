@@ -472,6 +472,13 @@ enum Unstarted {
     /// container Cloudflare restored from a snapshot dead (#362), answered
     /// as a snapshot that would not start.
     Dead(String),
+    /// Overtaken as it started (entry.mjs `start`: a start after it, or a
+    /// destroy begun meanwhile, a sleep's or a wipe's): nothing of it ran
+    /// but what that destroy ends, and nothing it would restore is at
+    /// fault. Answered as a start held up (`StartBlocked`: made again, no
+    /// strike, when its lifecycle still wants it; nothing once it moved on),
+    /// its snapshot kept.
+    Overtaken,
 }
 
 impl From<CellError> for Unstarted {
@@ -1758,7 +1765,8 @@ impl ComputerCell {
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
         let started = self.try_start(generation, &planned).await;
-        if started.is_err() {
+        // overtaken, nothing of it is this start's to destroy or report failed
+        if started.as_ref().is_err_and(|e| !matches!(e, Unstarted::Overtaken)) {
             // what it destroys below ends as this start's failure, reported
             // by the event this answers, so the end is not a crash too: it
             // would count a second strike, and start again with no pause
@@ -1784,6 +1792,11 @@ impl ComputerCell {
                     console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
                 }
                 Event::Ready { generation }
+            }
+            Err(Unstarted::Overtaken) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Blocked);
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "overtaken": "as it started" }));
+                Event::StartBlocked { generation }
             }
             Err(Unstarted::Unusable(why)) => {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Unusable);
@@ -1895,7 +1908,7 @@ impl ComputerCell {
         // once: its guest's first call never races them (entry.mjs `start`)
         let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
         if self.call("start", &args).await?.as_bool() != Some(true) {
-            return Err(CellError::host(format!("start {generation} was overtaken as it started")).into());
+            return Err(Unstarted::Overtaken);
         }
         *self.armed.borrow_mut() = Some((generation, hosts));
         if self.lever_take(MetaKey::FailStarts) {
