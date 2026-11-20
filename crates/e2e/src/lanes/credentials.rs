@@ -6,8 +6,9 @@
 //! fake. Each placement (a header, a query parameter, basic auth), each
 //! kind (a connection through the WorkOS fake, the operator's keys, an own
 //! key), and each refusal (a forged tag, another computer's, the wrong
-//! host, the wrong place), then the charges and the counts, and a key's
-//! call its owner's ledger's gate refuses.
+//! host, the wrong place, a call an operator key's row denies), then the
+//! charges and the counts, and a key's call its owner's ledger's gate
+//! refuses.
 
 use std::time::Duration;
 
@@ -85,6 +86,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
     "an account whose Pipes metadata names no host under the suffix, or another host, has its calls there refused, reaching no one",
     "connected through its callback as one org, then again as another: the account is made again with the new org's host, never updated beside the old one's, so the token goes to the new org's host and the old org's is refused, reaching no one",
+    "an operator key on a call its row denies (each vendor's: an account-wide read, a key minted or disabled) is refused 403, naming the call, and reaches no provider",
+    "spelled otherwise (upper case, a doubled and a trailing /, a format suffix, an encoded letter) it is refused the same, and a path the row can't read plainly (a ;) is refused too, reaching no provider",
+    "on the same keys, the calls their rows do not deny go on: Browser Use's start on the very path whose list is denied, ElevenLabs' speech, Firecrawl's scrape",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -415,6 +419,35 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let elsewhere = fragment_core::computer::default_computer_of(&api.identity(w.stranger)?);
     let other = say(s, 113, &format!("fetch http://api.perplexity.ai/search with {}", placeholder(s, &elsewhere, w.agent, "perplexity")))?;
     s.ok(SWAP_CHECKS[13], other.starts_with("fetched 403") && other.contains("names no agent on this computer") && s.upstream.seen().len() == seen_before, &other);
+
+    // a key every agent shares never goes on a call its row denies
+    // (deploy/e2e.jsonc's `deny`, as deploy/example.jsonc's), refused
+    // before the gate or any provider, so neither charged nor counted below
+    let mut denied = vec![];
+    for (n, url, env, header, posting, call) in [
+        (190, "http://api.elevenlabs.io/v1/workspaces/api-keys/disable?api_key_name=self", "ELEVENLABS_API_KEY", "xi-api-key", true, "POST /v1/workspaces/api-keys/disable"),
+        (191, "http://rest.fal.ai/tokens/", "FAL_KEY", "authorization", true, "* /tokens/**"),
+        (192, "http://api.firecrawl.dev/v2/team/activity", "FIRECRAWL_API_KEY", "authorization", false, "* /*/team/**"),
+        // the same lists under their other names (Firecrawl's routes)
+        (186, "http://api.firecrawl.dev/v2/crawl/ongoing", "FIRECRAWL_API_KEY", "authorization", false, "GET /*/crawl/ongoing"),
+        (187, "http://api.firecrawl.dev/v2/browser", "FIRECRAWL_API_KEY", "authorization", false, "GET /v2/browser"),
+        (193, "http://api.browser-use.com/api/v3/browsers", "BROWSER_USE_API_KEY", "x-browser-use-api-key", false, "GET /api/*/browsers"),
+        (194, "http://api.perplexity.ai/generate_auth_token", "PERPLEXITY_API_KEY", "authorization", true, "* /generate_auth_token"),
+        (195, "http://api.x.com/2/usage/tweets", "X_API_BEARER_TOKEN", "authorization", false, "* /2/usage/**"),
+    ] {
+        let said = say(s, n, &format!("fetch {url} with ${env} in {header}{}", if posting { " posting {}" } else { "" }))?;
+        denied.push((said.starts_with("fetched 403") && said.contains(&format!("never sent on {call}")), said));
+    }
+    s.ok(SWAP_CHECKS[50], denied.iter().all(|(ok, _)| *ok) && s.upstream.seen().len() == seen_before, json!(denied));
+    let mut spelled = vec![];
+    for (n, path) in [(196, "/API/V3//Browsers/"), (197, "/api/v3/browsers.json"), (198, "/api/v3/%62rowsers")] {
+        let said = say(s, n, &format!("fetch http://api.browser-use.com{path} with $BROWSER_USE_API_KEY in x-browser-use-api-key"))?;
+        spelled.push((said.starts_with("fetched 403") && said.contains("never sent on GET /api/*/browsers"), said));
+    }
+    let unplain = say(s, 199, "fetch http://api.browser-use.com/api/v3/browsers;x with $BROWSER_USE_API_KEY in x-browser-use-api-key")?;
+    spelled.push((unplain.starts_with("fetched 403") && unplain.contains("goes only on a path read plainly"), unplain));
+    s.ok(SWAP_CHECKS[51], spelled.iter().all(|(ok, _)| *ok) && s.upstream.seen().len() == seen_before, json!(spelled));
+    s.ok(SWAP_CHECKS[52], session_sent && spoken_sent && scrape_sent, json!({ "session": session_sent, "spoken": spoken_sent, "scrape": scrape_sent }));
 
     // an own key, behind basic auth
     let own = SWAP_OWN_KEY;

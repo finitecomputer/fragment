@@ -2188,7 +2188,9 @@ A guest's request to a provider's host has its placeholders swapped
 platform's, reaching no provider: 400 `invalid_request` (a malformed
 placeholder, a provider not offered or in a place it does not take, more
 than 4, or two agents' in one request), 403 `forbidden` (another host than
-its provider's, a tag naming no agent here, an agent narrowed from it), 403
+its provider's, a tag naming no agent here, an agent narrowed from it, an
+operator key on a call its row denies or on a path that row can't read
+plainly: docs/computers.md, "Calls an operator key never goes on"), 403
 `not_connected`, the ledger's 402 or 403, or 429 `rate_limited` (reason
 `key_paused`, with `retry_after_ms`) for a shared key whose charges this
 last hour reached its owner's cap (docs/computers.md, `key_paused`).
