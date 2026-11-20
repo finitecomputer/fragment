@@ -276,7 +276,7 @@ pub fn guest_log(project: &Path, computer: &str) -> Result<Option<String>> {
     let wanted = format!("FRAGMENT_COMPUTER={computer}");
     for name in up.lines() {
         let env: Vec<String> = serde_json::from_str(&docker(&["inspect", "--format", "{{json .Config.Env}}", name])?).with_context(|| format!("{name}'s environment, as docker inspect lists it"))?;
-        if env.iter().any(|e| *e == wanted) {
+        if env.contains(&wanted) {
             // `docker logs` writes the container's stderr to its own
             let out = Command::new("docker").args(["logs", name]).output().context("run docker logs (is Docker running?)")?;
             ensure!(out.status.success(), "docker logs {name} failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
