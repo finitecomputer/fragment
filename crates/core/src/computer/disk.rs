@@ -121,21 +121,26 @@ pub const DISK_READ: &str = "df -P -B1 /";
 /// awake save, run in its container (`disk_of_sizes` reads its answer):
 /// `DISK_READ`, then a line for each record its save takes, measured as
 /// that save takes it (cell/src/computer.rs, `save`): `home` (`/data` but
-/// its work, less what its held guest named: `left_out`, anchored to
-/// `/data`) and `work` (`/data/work`, less what it named under its work:
-/// `work_left_out`), each allocated (KiB) and apparent (bytes). Measured
-/// apart, a file hard-linked between the two counts in each, as each record
-/// restores its own copy, and a guest that names its whole work leaves out
-/// nothing of it, as its work's record does (Codex on #1421). A left-out
-/// path is left out of the walk as GNU's `du --exclude` does, so a file
-/// linked from a cache into the work kept counts where it restores (Alex's
-/// review of #1421). A `du` with no `--exclude` (BusyBox's: the stub) gives
-/// `all`, every byte of `/data`. A step that fails prints its line with no
-/// number, never another's (`disk_of_sizes` reads none then). A pattern
-/// is a `du` pattern, anchored at `./`, `*` and `?` as in the save's (a `*`
-/// may also cross a `/`: what it names counts as left out); one outside the
-/// patterns' alphabet or with a `..` is not used, and what it names counts
-/// as restored.
+/// its work, less what its held guest named outside it: `left_out`,
+/// anchored to `/data`) and `work` (`/data/work`, less what it named under
+/// its work: `work_left_out`), each allocated (KiB) and apparent (bytes).
+/// Measured apart, a file hard-linked between the two counts in each, as
+/// each record restores its own copy, and a guest that names its whole
+/// work leaves out nothing of it, as its work's record does (Codex on
+/// #1421). What a pattern names is left out of the walk (GNU's `du
+/// --exclude`, each path that exists), so a file linked from a cache into
+/// the work kept counts where it restores (Alex's review of #1421). The
+/// shell finds those paths (`m`), where a `*` or a `?` never crosses a `/`
+/// nor matches a name's leading `.`: the save's patterns are gitignore's,
+/// whose `*` is one name too (GNU's own `--exclude` would let a `*` cross
+/// a `/`, leaving out a folder the save keeps: Codex on #1421), and every
+/// way the two differ leaves out less, counting more. Each pattern is in
+/// the command once, so a guest's largest answer fits one exec's argument
+/// (`EXEC_ARG_MAX_BYTES`). A `du` with no `--exclude` (BusyBox's: the stub)
+/// gives `all`, every byte of `/data`. A step that fails prints its line
+/// with no number, never another's (`disk_of_sizes` reads none then). A
+/// pattern outside the patterns' alphabet or with a `..` is not used, and
+/// what it names counts as restored.
 ///
 /// Before them, what its owner's Storage shows (`sizes_of`): the folders
 /// of all of `/data`, its caches too, to `SIZES_DEPTH` below it, allocated
@@ -149,15 +154,16 @@ pub const DISK_READ: &str = "df -P -B1 /";
 /// `end`).
 pub fn sizes_read(left_out: &[String]) -> String {
     let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
-    let exclude = |patterns: Vec<String>| -> String { patterns.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" --exclude='./{p}'")).collect() };
-    let home = exclude(std::iter::once("/work/".to_string()).chain(left_out.iter().cloned()).collect());
-    let work = exclude(crate::computer::held::work_left_out(left_out));
-    let measured = |ex: &str| format!("$(du -sxk{ex} . 2>/dev/null | cut -f1) $(du -sxb{ex} . 2>/dev/null | cut -f1)");
+    // each a word the shell expands as a glob (the alphabet holds no space,
+    // quote or `$`), relative to the record's folder
+    let globs = |patterns: Vec<String>| -> String { patterns.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" ./{p}")).collect() };
+    // the home's record leaves out its work whole: a pattern under it is the work's
+    let home = globs(std::iter::once("/work/".to_string()).chain(left_out.iter().filter(|p| !p.starts_with("/work/")).cloned()).collect());
+    let work = globs(crate::computer::held::work_left_out(left_out));
+    // `m <paths>`: the folder's measure less each path that exists
+    let m = "m() { n=$#; for p; do [ -e \"$p\" ] && set -- \"$@\" \"--exclude=$p\"; done; shift $n; echo \"$(du -sxk \"$@\" . 2>/dev/null | cut -f1) $(du -sxb \"$@\" . 2>/dev/null | cut -f1)\"; }";
     let records = format!(
-        "{DISK_READ}; if du -s --exclude=x /dev/null > /dev/null 2>&1; then cd /data && echo \"home {}\"; {{ cd /data/work && echo \"work {}\"; }} || echo work; else cd /data && echo \"all {}\"; fi",
-        measured(&home),
-        measured(&work),
-        measured("")
+        "{DISK_READ}; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi"
     );
     // what takes the disk: all of /data, its caches too; each record a line
     // (GNU's du -0, a newline in a name read as `?`: a name forges no line),
@@ -320,6 +326,13 @@ pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
     kinds.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.kind.cmp(&b.kind)));
     kinds
 }
+
+/// The most one argument of an exec may hold on Linux (`MAX_ARG_STRLEN`,
+/// 32 pages of 4 KiB): `sizes_read` is one (`sh -c`), and a guest's largest
+/// answer, each pattern once with `./` and a space, fits it with room to
+/// spare (a command past it is never run, its `df` lost: Codex on #1421).
+pub const EXEC_ARG_MAX_BYTES: usize = 128 * 1024;
+const _: () = assert!(crate::computer::held::HELD_ANSWER_MAX_BYTES + crate::computer::held::LEFT_OUT_MAX * 3 + 4096 <= EXEC_ARG_MAX_BYTES, "a guest's largest answer fits sizes_read's one argument");
 
 /// A computer's disk from `DISK_READ`'s answer, read at `at_ms` in start
 /// `generation`'s container: the line
@@ -541,21 +554,26 @@ mod tests {
     /// Hermes image's GNU `du` and the stub's BusyBox `du` answer it (both
     /// answers the images' own, 2026-11-20, for an 8 MiB file hard-linked
     /// between /data/hermes and the work, a uv cache left out holding a
-    /// 4 MiB file linked into a venv and a 2 MiB file of its own, and a
-    /// copied state.db left out): each record as its save takes it, so the
-    /// link across the records counts in each (each restores its copy) and
-    /// the venv's link counts though its cache is left out (Codex and Alex
-    /// on #1421), BusyBox all of it once. Valid, a sparse file and small
-    /// files, a record unread (none of data, never a part), invalid (no
-    /// `df`, an unsafe pattern, which is never used, a guest naming its
-    /// whole work, which its work's record keeps).
+    /// 4 MiB file linked into a venv and a 2 MiB file of its own, a 3 MiB
+    /// file in a project's own `home/.cache/uv` (kept: the pattern's `*` is
+    /// one name), a 1 MiB one in a dot-folder's (left out by the save,
+    /// counted: the shell's `*` skips a leading `.`), and a copied state.db
+    /// left out): each record as its save takes it, so the link across the
+    /// records counts in each (each restores its copy) and the venv's link
+    /// counts though its cache is left out (Codex and Alex on #1421), the
+    /// project's cache counts (GNU's own `--exclude` read 12,288 KiB for the
+    /// work, missing it: Codex on #1421), BusyBox all of it once. Valid, a
+    /// sparse file and small files, a record unread (none of data, never a
+    /// part), invalid (no `df`, an unsafe pattern, which is never used, a
+    /// guest naming its whole work, which its work's record keeps), and a
+    /// guest's largest answer, within one exec's argument.
     #[test]
     fn data_is_read_from_du() {
-        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1771345412096 205765574656      90% /\nhome 8192 8388608\nwork 12288 12582912\n";
-        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1771345223680 205765894144  90% /\nall 14340 14680254\n";
-        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some((8192 + 12288) * 1024), "the link in each record, the venv's link, not the cache");
-        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(14340 * 1024), "all of it, once: allocated, past apparent");
-        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 205_765_574_656, 2)));
+        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1788574265344 188868038656      91% /\nhome 8192 8388608\nwork 16384 16777216\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1788574343168 188867993600  90% /\nall 18436 18874656\n";
+        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some((8192 + 16384) * 1024), "the link in each record, the venv's link and the project's cache, not the agent's cache");
+        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(18436 * 1024), "all of it, once: allocated, past apparent");
+        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 188_868_038_656, 2)));
         // a sparse file: apparent past allocated; small files: allocated past apparent
         let df = "Filesystem x\noverlay 100 50 50 50% /\n";
         assert_eq!(disk_of_sizes(&format!("{df}home 4 9000000\nwork 100 1000\n"), T, 2).and_then(|d| d.data), Some(9_000_000 + 102_400));
@@ -565,18 +583,25 @@ mod tests {
         }
         assert_eq!(disk_of_sizes("home 4 10\nwork 4 10\n", T, 2), None);
         assert_eq!(disk_of_sizes(&format!("noise\n{df}all 1 1\n"), T, 2).map(|d| d.data), Some(Some(1024)), "df's header anywhere");
-        // the read itself: each record measured as its save takes it, BusyBox's all
+        // the read itself: each record measured as its save takes it (each
+        // pattern a glob of the shell's, once), BusyBox's all
         let read = |home: &str, work: &str| {
-            let m = |ex: &str| format!("$(du -sxk{ex} . 2>/dev/null | cut -f1) $(du -sxb{ex} . 2>/dev/null | cut -f1)");
-            format!("{LISTING}; echo end; df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then cd /data && echo \"home {}\"; {{ cd /data/work && echo \"work {}\"; }} || echo work; else cd /data && echo \"all {}\"; fi", m(home), m(work), m(""))
+            let m = "m() { n=$#; for p; do [ -e \"$p\" ] && set -- \"$@\" \"--exclude=$p\"; done; shift $n; echo \"$(du -sxk \"$@\" . 2>/dev/null | cut -f1) $(du -sxb \"$@\" . 2>/dev/null | cut -f1)\"; }";
+            format!("{LISTING}; echo end; df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi")
         };
-        assert_eq!(sizes_read(&[]), read(" --exclude='./work'", ""));
+        assert_eq!(sizes_read(&[]), read(" ./work", ""));
         assert_eq!(
-            sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), String::new()]),
-            read(" --exclude='./work' --exclude='./work/*/home/.cache/uv' --exclude='./hermes/state.db'", " --exclude='./*/home/.cache/uv'"),
-            "the home leaves out its work and all named; the work what was named under it; never an unsafe pattern"
+            sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), "/x$(id)/".into(), String::new()]),
+            read(" ./work ./hermes/state.db", " ./*/home/.cache/uv"),
+            "the home leaves out its work and what was named outside it; the work what was named under it; never an unsafe pattern"
         );
-        assert_eq!(sizes_read(&["/work/".into()]), read(" --exclude='./work' --exclude='./work'", ""), "a guest naming its whole work: its work's record keeps it all, and so does its measure");
+        assert_eq!(sizes_read(&["/work/".into()]), read(" ./work", ""), "a guest naming its whole work: its work's record keeps it all, and so does its measure");
+        // a guest's largest answer: within one exec's argument, each pattern once (Codex on #1421)
+        let most: Vec<String> = (0..crate::computer::held::LEFT_OUT_MAX).map(|i| format!("/work/{i:03}{}", "a".repeat(crate::computer::held::HELD_ANSWER_MAX_BYTES / crate::computer::held::LEFT_OUT_MAX - 11))).collect();
+        assert!(most.iter().map(|p| p.len() + 1).sum::<usize>() <= crate::computer::held::HELD_ANSWER_MAX_BYTES && most.iter().all(|p| p.len() <= LEFT_OUT_PATTERN_MAX_BYTES), "a valid answer");
+        let read = sizes_read(&most);
+        assert!(read.len() <= EXEC_ARG_MAX_BYTES, "{} bytes", read.len());
+        assert_eq!(read.matches("/000aaa").count(), 1, "each pattern once");
     }
 
     /// The listing `sizes_read` begins with: all of `/data`, framed, bounded.
@@ -692,10 +717,11 @@ mod tests {
         assert_eq!(DELETE_REFUSED, 3);
     }
 
-    /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20.
-    const GNU_ANSWER: &str = "folders\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd?999999\t./forged\n11264\t./work/juniper/odd?999999\t.\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd?999999\t./forged/clip.bin\nend\nFilesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1775996006400 201177927680      90% /\nhome 4 3\nwork 44032 45088768\n";
+    /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20 (its
+    /// records the shell's globs: Codex on #1421).
+    const GNU_ANSWER: &str = "folders\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd?999999\t./forged\n11264\t./work/juniper/odd?999999\t.\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd?999999\t./forged/clip.bin\nend\nFilesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1788770738176 188673794048      91% /\nhome 4 3\nwork 44032 45088768\n";
     /// The same from the stub (BusyBox).
-    const BUSYBOX_ANSWER: &str = "folders\n999999\t./forged\n999999\t.\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd\n11264\t./work/juniper/odd\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n999999\t./forged/clip.bin\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd\nend\nFilesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1776016068608 201159012352  90% /\nall 48132 49283285\n";
+    const BUSYBOX_ANSWER: &str = "folders\n999999\t./forged\n999999\t.\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd\n11264\t./work/juniper/odd\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n999999\t./forged/clip.bin\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd\nend\nFilesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1788767727616 188675657728  90% /\nall 48132 49283285\n";
 
     /// Goal (production, 2026-11-20): a restore that stopped for want of
     /// room is told from every other failure by its words alone, narrowly:
