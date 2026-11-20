@@ -249,8 +249,9 @@ the new name kept whole where the job says it already. A rename that
 fails there changes neither its job nor its name; one whose commit lands
 with its answer lost is looked for at main, and goes on when it is there,
 and one not found there is kept (`meta` `renaming`, with the job it
-wrote) so the next rename, whatever it asks, says its name for it while
-the job is that one. A job past `face::JOB_RENAME_MAX_BYTES` is left as it
+wrote): while the job is that one, the next rename to the same name is
+done with no rewrite, and one to another name takes that name, not the
+title, for the job's. A job past `face::JOB_RENAME_MAX_BYTES` is left as it
 is.
 
 **Changing a picture** is writing `avatar.png` (`POST
@@ -270,9 +271,11 @@ answers its title as its face's and, to an editor, a mark of that read
 (`meta.titleRead`): a files write of `fragment.json` naming the mark, its
 title another than the one shown, is its title at once while its face is
 still that one (`face.changed`, `from` `fragment.json`; a title git holds
-already included). Each mark is taken once, so the same write again, a
-deploy, or the file written as git holds it renames nothing; one at a
-time with the face route's renames. Older iOS builds are not served.
+already included); one whose read was before a rename since is refused
+whole (409), nothing of it (its job included) committed. Each mark is
+taken once, so the same write again, a deploy, or the file written as git
+holds it renames nothing; one at a time with the face route's renames.
+Older iOS builds are not served.
 
 ## Names (docs/cloudflare-v1.md, decision 47)
 

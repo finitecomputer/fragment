@@ -373,6 +373,11 @@ impl FragmentCell {
             Some(_) => Some(self.renaming.lock().await),
             None => None,
         };
+        // one whose read was before a rename since is refused whole, its job
+        // and all, rather than half done
+        if manifest.as_deref().map(|m| self.title_read_stale(m)).transpose()? == Some(true) {
+            return Err(CellError::new(ErrorCode::Conflict, "it was renamed since its manifest was read: nothing was written; read it again"));
+        }
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
             Wrote::Commit(sha) => {
                 // in the life it was let in to: one ended meanwhile renames no other

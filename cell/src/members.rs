@@ -305,8 +305,16 @@ impl FragmentCell {
         let mut tried: Vec<Value> = kept.as_deref().and_then(|r| crate::json_text::<Value>(r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
         let said = sha256(&job);
         tried.retain(|t| t[1] == said.as_str());
-        let olds: Vec<&str> = title.into_iter().chain(tried.iter().filter_map(|t| t[0].as_str())).chain(fragment_core::face::job_first_name(&job)).collect();
-        let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked) else {
+        // its job is the one a lost rename wrote: that rename landed, so its
+        // name is the job's, never the title its face still says; one to
+        // the name asked is done already
+        let landed: Vec<&str> = tried.iter().filter_map(|t| t[0].as_str()).collect();
+        let olds: Vec<&str> = match landed.is_empty() {
+            true => title.into_iter().chain(fragment_core::face::job_first_name(&job)).collect(),
+            false => landed.iter().copied().chain(fragment_core::face::job_first_name(&job)).collect(),
+        };
+        let done = landed.contains(&asked);
+        let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked).filter(|_| !done) else {
             // nothing to say (a retry's job says it already): served as main
             // has it, its pin following a commit whose answer was lost
             if self.pin("main")?.as_deref() != Some(head.as_str()) {
