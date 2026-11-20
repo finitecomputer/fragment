@@ -127,6 +127,23 @@ unfinished design, not debt.
   the `title_read` rows, and the manifest route's title and mark,
   `title_read` and `title_from_read` go.
 
+## A repo whose create's answer is lost can outlive its life
+
+- **Shortcut:** a blessed fragment's repo is made at its first file, by
+  its first writer's seed (`seed::Making::SeedsLater`), named by its
+  life's key (`codestorage::repo_name`). A seed that sees its life ended
+  once the repo is made records it for deletion (`end_repo_of_no_life`).
+  But when code.storage makes the repo and its answer is lost (or the
+  lookup after it fails), the seed fails with nothing recorded; a later
+  writer finds the repo by its name, while a delete or wipe before one
+  records no repo, and the repo stays (as on master since repos were
+  named by their life's key, for a chat's).
+- **Risk:** an empty repo (no commit landed in it) outlives its fragment
+  at code.storage; nothing of the person's is in it.
+- **Delete when:** a life's end reconciles its repo by its name (the
+  life's key gives it) whatever its rows say, or the seed records its
+  intent before asking code.storage.
+
 ## A computer keeps its owner's own keys from before the move
 
 - **Shortcut:** a person's own keys and their sign-ins moved from their

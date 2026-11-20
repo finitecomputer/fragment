@@ -625,8 +625,8 @@ pub(crate) struct Facts {
     pub name: String,
     pub visibility: Visibility,
     pub view_token: String,
-    /// Its repo at code.storage: `None` until its template's seed makes
-    /// it, when its create answered first (publish.rs `seeds_later`).
+    /// Its repo at code.storage: `None` until its first writer's seed makes
+    /// it, a blessed template's (`seed::Making::SeedsLater`).
     pub repo: Option<String>,
     pub pin_main: Option<String>,
     pub pin_live: Option<String>,
@@ -1369,7 +1369,8 @@ impl FragmentCell {
         let cs_cfg = self.cfg.codestorage();
         let making = match body.template.as_deref() {
             None => seed::Making::Plain,
-            Some(t) if crate::publish::seeds_later(t) => seed::Making::SeedsLater,
+            // the release's code: its repo comes at its first file
+            Some(t) if blessed::template(t).is_some() => seed::Making::SeedsLater,
             Some(_) => seed::Making::SeedsNow,
         };
         // Claim the name before the first await: a concurrent create for the
@@ -1534,7 +1535,7 @@ impl FragmentCell {
                 // did not land is retried by the alarm, and whichever seed
                 // lands it tells its agents they joined
                 seed::Effect::Commit => {
-                    if let Err(e) = self.seed().await {
+                    if let Err(e) = self.seed(seed::Event::Write, None).await {
                         self.event("template.failed", &e.message, json!({ "code": e.code }));
                     }
                     laps.lap("seed");
@@ -1565,7 +1566,7 @@ impl FragmentCell {
             visibility,
             view_token,
             inbox_token,
-            // empty until its seed makes it (publish.rs `seeds_later`)
+            // a blessed template's: empty until its first file makes it
             repo: repo.unwrap_or_default(),
             canonical: self.cfg.canonical(&caller.url, &body.name),
         })?;
@@ -1611,7 +1612,7 @@ impl FragmentCell {
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,
             visibility: facts.visibility,
-            // empty until its repo is made (publish.rs `seeds_later`)
+            // empty until its repo is made (`seed::Making::SeedsLater`)
             repo: facts.repo.unwrap_or_default(),
             pins: Pins { main: facts.pin_main, live: facts.pin_live },
             counts: Counts {
@@ -1693,10 +1694,10 @@ impl FragmentCell {
         }
         self.flush_search().await;
         self.search_forget_due().await;
-        // a template still to land takes its next step (publish.rs `seed`);
-        // a chat made a moment ago takes its first here, its create having
-        // armed this pass at once
-        if let Err(e) = self.seed().await {
+        // a template still to land that the release does not run takes its
+        // next step (publish.rs `seed`); one it runs waits for its first
+        // writer, and asks code.storage nothing here
+        if let Err(e) = self.seed(seed::Event::Alarm, None).await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         // after its seed: an agent's notice waits until its template is in

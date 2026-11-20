@@ -342,12 +342,17 @@ impl FragmentCell {
     /// push): while its template is still to land (`Stage::waits_template`),
     /// the same seed the create and the alarm run (one at a time:
     /// `seeding`) lands it first, its repo, commit, deploy and install, so a
-    /// write lands on top of its template, never under it. A seed that
-    /// cannot land fails the writer as code.storage failed it.
+    /// write lands on top of its template, never under it. A blessed
+    /// fragment's repo is made here, at its first file. A seed that cannot
+    /// land fails the writer as code.storage failed it.
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
+        // the life this writer was let in to: one ended while it waited
+        // (deleted, and made again) is none of its to write
+        let life = self.life()?;
         if self.stage()?.waits_template() {
-            self.seed().await?;
+            self.seed(fragment_core::seed::Event::Write, Some(life)).await?;
         }
+        self.same_life(life, "while its repo was made")?;
         self.must(MetaKey::Repo)
     }
 
@@ -373,8 +378,8 @@ impl FragmentCell {
     /// (main) or the code (live) follow. Callers hold `self.plane`.
     async fn refresh_pin(&self, which: &str) -> CellResult<PinMove> {
         let [repo, from] = self.metas([MetaKey::Repo, MetaKey::pin(which)])?;
-        // no repo yet (its template seeds after its create's answer,
-        // publish.rs `seeds_later`): no branch, so nothing pinned moved
+        // no repo yet (a blessed fragment's, made at its first file): no
+        // branch, so nothing pinned moved
         let Some(repo) = repo else {
             assert!(from.is_none(), "a pin is a commit of a repo made");
             return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
@@ -533,9 +538,9 @@ impl FragmentCell {
         self.install(manifest, Some((&cs, repo.as_str())), sha).await
     }
 
-    /// A fragment whose template seeds after its create's answer
-    /// (publish.rs `seeds_later`) runs that template from the release
-    /// until its first commit lands: installed as live's will be, from the
+    /// A blessed fragment (`seed::Making::SeedsLater`) runs its template
+    /// from the release until its first writer's seed lands its first
+    /// commit: installed as live's will be, from the
     /// same `fragment.json` its seed commits (`blessed_manifest_bytes`),
     /// with no commit (`""`, as the code's sha and the status's repo say).
     /// The seed's own install, from live, replaces it.
@@ -562,7 +567,15 @@ impl FragmentCell {
             worker::Delay::from(std::time::Duration::from_millis(TEST_HOLD_INSTALL_POLL_MS)).await;
         }
         self.test_hold_install.set((self.test_hold_install.get().0, false));
-        self.install(manifest, None, "").await
+        self.install(manifest, None, "").await?;
+        // its page, the release's, wants its card as a deploy's live does
+        // (`interpret`): a brain's is shot before its first file
+        if let Some(version) = self.page_version()? {
+            if let Err(e) = self.card_wanted(&version) {
+                self.event("card.want-failed", &e.message, json!({ "code": e.code }));
+            }
+        }
+        Ok(())
     }
 
     /// Installs `manifest`'s app, read at `sha` of `repo` (`None`: a
@@ -917,7 +930,7 @@ impl FragmentCell {
             }
             match self.meta(MetaKey::PinLive)? {
                 Some(live) => self.install_code(Some(&live)).await?,
-                // before its first deploy (publish.rs `seeds_later`): its template from the release again
+                // before its first file's deploy (`seed::Making::SeedsLater`): its template from the release again
                 None if self.stage()?.waits_template() => self.install_pending().await?,
                 None => self.install_code(None).await?,
             }
@@ -1034,13 +1047,14 @@ impl FragmentCell {
     /// Whether the fragment's next pass (its housekeeping, and the poll
     /// backstop) comes within the poll interval rather than a day after the
     /// last: the pins may lag the repo (`pins_may_lag`), a run is in flight
-    /// (each pass checks it against its Workflow), or a template is still to
-    /// land (each pass tries again). The rest of the alarm's work has due times of its own.
-    /// A fragment nothing touches (a chat, from its second day) is woken
-    /// once a day, and asks code.storage nothing.
+    /// (each pass checks it against its Workflow), or a template the
+    /// release does not run is still to land (each pass tries again:
+    /// `Stage::alarm_seeds`). The rest of the alarm's work has due times of
+    /// its own. A fragment nothing touches (a chat, from its first day) is
+    /// woken once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
         let running = self.count("SELECT EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS n")? != 0;
-        Ok(self.pins_may_lag()? || self.stage()?.waits_template() || running)
+        Ok(self.pins_may_lag()? || self.stage()?.alarm_seeds() || running)
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token
@@ -1096,10 +1110,13 @@ impl FragmentCell {
         if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
             return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
         }
+        let life = self.life()?;
         if write {
             // its token writes the repo: a deploy's first step
             self.writable().await?;
         }
+        // let in to this life: one ended while its ledger was asked is not its
+        self.same_life(life, "while its ledger was asked")?;
 
         let who = self.caller_id(caller)?;
         // its template still to land: its seed lands it first (`repo_ready`),
@@ -1122,11 +1139,19 @@ impl FragmentCell {
     /// `GET manifest`: main's `fragment.json`, its `meta.title` its face's
     /// (when it has one), and to an editor a mark of the read
     /// (`title_read`): what an older CLI reads, changes and writes back to
-    /// rename it (`title_from_read`; the debt ledger).
+    /// rename it (`title_from_read`; the debt ledger). A blessed fragment
+    /// before its first file answers the one its seed will commit
+    /// (`blessed_manifest_bytes`), so such a write is that first file.
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
         let role = self.require(caller, false, Role::Viewer)?;
-        let Some(text) = self.meta(MetaKey::ManifestMain)? else { return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")) };
-        let mut manifest = crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?;
+        let mut manifest = match (self.meta(MetaKey::ManifestMain)?, self.meta(MetaKey::TemplatePending)?) {
+            (Some(text), _) => crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?,
+            // a blessed template's alone: a copied one's first commit is its own files
+            (None, Some(which)) if self.pin("main")?.is_none() && blessed::template(&which).is_some() => {
+                serde_json::from_slice(&crate::publish::blessed_manifest_bytes(&which)).map_err(|e| CellError::host(e.to_string()))?
+            }
+            _ => return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
+        };
         let title = self.face_now()?.title;
         let mark = match role >= Role::Editor {
             true => Some(self.title_read(title.as_deref().unwrap_or_default())?),
