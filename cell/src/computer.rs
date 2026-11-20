@@ -1977,10 +1977,12 @@ impl ComputerCell {
         let (read, bound, keep) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS, fragment_core::computer::SIZES_READ_MAX_BYTES) } else { (DISK_READ.to_string(), DISK_READ_MS, 4096) };
         let argv = js::to_js(&json!(["sh", "-c", read]));
         let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64), JsValue::from_f64(keep as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
-        let out = match read {
-            Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
-            Ok(o) => format!("exit {}", o["exitCode"]),
-            Err(e) => e.message,
+        // a sizes read's answer is read whatever its exit (a walk that a
+        // file vanished from still printed its df: Codex on #1421)
+        let (out, exit, failed) = match read {
+            Ok(o) if sizes || o["exitCode"] == 0 => (o["output"].as_str().unwrap_or_default().to_string(), o["exitCode"].clone(), None),
+            Ok(o) => (String::new(), o["exitCode"].clone(), None),
+            Err(e) => (String::new(), Value::Null, Some(e.message)),
         };
         let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
@@ -2000,8 +2002,9 @@ impl ComputerCell {
                 let room = self.saves().ok().and_then(|s| s.disk()).map(|k| fragment_core::computer::room(&k));
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
             }
-            // its df's lines alone: the rest names a person's files
-            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.lines().take(2).collect::<Vec<_>>().join(" ").chars().take(200).collect::<String>() })),
+            // its exit and its answer's length alone: its answer names a
+            // person's files (Codex on #1426); the exec's own error, if any
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "exit": exit, "answerBytes": out.len(), "error": failed })),
         }
         disk
     }

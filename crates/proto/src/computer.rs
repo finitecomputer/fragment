@@ -478,13 +478,16 @@ pub struct ComputerView {
 }
 
 /// What takes a computer's disk (docs/computers.md, "Room to
-/// restore"): the biggest folders its saves keep, to a few levels below
-/// `/data`, and its biggest files, each the biggest first, their paths
+/// restore"): all of `/data` (`total`, allocated bytes; absent in one read
+/// before it was kept), its biggest folders to a few levels below it, its
+/// caches too, and its biggest files, each the biggest first, their paths
 /// below `/data`, read after a save at `at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerSizes {
     pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
     pub folders: Vec<SizeEntry>,
     pub files: Vec<SizeEntry>,
 }

@@ -558,23 +558,32 @@ stopped in its restore of `/data/work` with about 200 MB free).
   the larger is counted).
 - **What a restore writes** is read after each awake save, in the alarm
   that saved it (`sizes_read`, within `SIZES_READ_MS`, 30 s): `du` of
-  what that save keeps of `/data`, the larger of its allocated and its
-  apparent size: GNU's `du --exclude` of what it left out (its held
-  guest's patterns), so a file hard-linked between a cache left out and
+  each record as its save takes it, `/data` but its work less what its
+  held guest named, and `/data/work` less what it named under its work,
+  each the larger of its allocated and its apparent size, summed. Apart,
+  a file hard-linked between the two counts in each, as each record
+  restores its copy; GNU's `du --exclude` leaves out what the save does
+  without walking it, so a file hard-linked between a cache left out and
   the work kept (uv's and pnpm's caches link into projects) counts where
   it restores. A `du` with no `--exclude` (BusyBox's, the stub's) counts
-  all of `/data`. On ext4 the
-  allocated size is exactly what a restore writes; on btrfs it is a
+  all of `/data`, once. A record not read leaves the last read's size in
+  place, and a walk that failed part-way still gives its `df`. On ext4
+  the allocated size is exactly what a restore writes; on btrfs it is a
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
-  (`restore_writes`). A hard link between `/data` and its work is counted
-  once. A start's read is `df` alone and keeps the last `du`.
-- **What takes the disk** is read with it (`sizes_of`): the folders the
-  save keeps, to `SIZES_DEPTH` (4) below `/data`, and its files of at
-  least 10 MiB anywhere (a cache's too), each the biggest first, at most
-  64 and 32, a path at most 400 bytes, 16 KiB of paths in all. Kept in a
-  row of its own (`sizes`), shown on its owner's view (`sizes`) and never
-  on its guest's, never logged: it names a person's files.
+  (`restore_writes`). A start's read is `df` alone and keeps the last
+  `du`.
+- **What takes the disk** is read with it (`sizes_of`): the folders of
+  all of `/data` (its caches too), to `SIZES_DEPTH` (4) below it, and its
+  files of at least 10 MiB anywhere, each the biggest first, at most 64
+  and 32, a path at most 400 bytes, 16 KiB of paths in all, and `/data`'s
+  own total. Each walk is bounded (`timeout`), each line framed by GNU's
+  `du -0` with a newline in a name read as `?` (a name can forge no line;
+  BusyBox's, the stub's, frames none, so its total is its `all` record),
+  and the whole answer within what the cell keeps of it. A read it cannot
+  use logs its exit and its length alone. Kept in a row of
+  its own (`sizes`), shown on its owner's view (`sizes`) and never on its
+  guest's or an operator's, never logged: it names a person's files.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,
