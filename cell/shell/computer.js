@@ -603,8 +603,12 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       sure.onclick = () => {
         sure.disabled = cancel.disabled = true;
         sure.textContent = "Deleting…";
+        // its view, and Settings' Computer drawn again from it, in place
         api("POST", `/api/computers/${seg(c.computer)}/files/delete`, { path: f.path })
-          .then(computerIs)
+          .then((v) => {
+            computerIs(v);
+            redrawSection();
+          })
           .catch((e) => box.replaceChildren(ask, el("span", "form-error", `Couldn't delete it: ${e?.message ?? e}`)));
       };
       box.replaceChildren(cancel, sure);
