@@ -161,6 +161,7 @@ branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
 extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
+field AnswerAsk.held required string
 field AnswerAsk.value optional string|null
 field Archived.archived required boolean
 field Archived.name required string

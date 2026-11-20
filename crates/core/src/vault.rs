@@ -319,6 +319,9 @@ pub fn ask_ok(ask: &AskSecret, agent: &str, held: Option<&Secret>, catalog: &Cat
 /// held with `agent`. So an answer never takes a host or an agent from a
 /// secret, and the `PutSecret` is held to the Vault's own rules (`check`).
 pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, value: Option<String>) -> Result<PutSecret, VaultError> {
+    if ask.keep_value && !held.is_some_and(|h| h.agents.iter().any(|a| a == agent)) {
+        return Err(VaultError::Ask(format!("{} is no longer given to this agent: it asks again for its value", ask.name)));
+    }
     let value = match (ask.keep_value, value) {
         (true, None) => None,
         (true, Some(_)) => return Err(VaultError::Ask("this ask is Allow or Don't allow: it takes no value".into())),
@@ -347,12 +350,14 @@ fn joined(ask: &AskSecret, held: Option<&Secret>) -> Vec<String> {
 /// An ask of `by` (its fragment) on its person's card (`GET
 /// /api/notices`): `agent` is what they call it (its title, else its
 /// label), `picture` its face, and `held` the secret they keep under its
-/// name, if any. The field and Save for a value; Allow for one held, sent
+/// name, if any, which `revision` names (its Save or Allow carries it, so
+/// an answer grants what the card said). The field and Save for a value; Allow for one held, sent
 /// somewhere new. Its words say everything Save or Allow grants: every
 /// host it then works with (the held's too), a replacement, other agents
 /// that use it, and that the agent never sees it.
-pub fn ask_notice(id: &str, ask: &AskSecret, by: &str, agent: &str, picture: Option<String>, expires_at: i64, held: Option<&Secret>) -> Notice {
+pub fn ask_notice(id: &str, ask: &AskSecret, by: &str, agent: &str, picture: Option<String>, expires_at: i64, (held, revision): (Option<&Secret>, &str)) -> Notice {
     let route = format!("/api/vault/asks/{id}");
+    let shown = serde_json::json!({ "held": revision });
     let all = joined(ask, held).join(", ");
     let others = match held.is_some_and(|h| h.agents.iter().any(|a| a != by)) {
         true => " Your other agents that use it can too.",
@@ -363,7 +368,7 @@ pub fn ask_notice(id: &str, ask: &AskSecret, by: &str, agent: &str, picture: Opt
             format!("{agent} asks to use {} somewhere new", ask.name),
             format!("Sends the {} you keep to {} too: it then works with {all}.{others} {agent} never sees it.", ask.name, ask.hosts.join(", ")),
             None,
-            vec![NoticeAction::post("Allow", route.clone(), serde_json::json!({})), NoticeAction::post("Don't allow", format!("{route}/decline"), serde_json::json!({}))],
+            vec![NoticeAction::post("Allow", route.clone(), shown), NoticeAction::post("Don't allow", format!("{route}/decline"), serde_json::json!({}))],
         )
     } else {
         let goes = match all.is_empty() {
@@ -378,7 +383,7 @@ pub fn ask_notice(id: &str, ask: &AskSecret, by: &str, agent: &str, picture: Opt
             format!("{agent} asks for {}", ask.name),
             format!("{goes}{replaces} {agent} gets a stand-in, never what you paste."),
             Some(NoticeField { placeholder: "Paste it here".into() }),
-            vec![NoticeAction::post_field("Save", route.clone(), serde_json::json!({})), NoticeAction::post("Decline", format!("{route}/decline"), serde_json::json!({}))],
+            vec![NoticeAction::post_field("Save", route.clone(), shown), NoticeAction::post("Decline", format!("{route}/decline"), serde_json::json!({}))],
         )
     };
     Notice {
@@ -718,7 +723,8 @@ mod tests {
         assert_eq!(replaced.agents, [AGENT, "bea--k3x9"]);
         assert_eq!(replaced.place, h.place, "where it goes stays the person's");
 
-        let allowed = answered(&ask("github", "upload", &["uploads.github.com"], true), AGENT, Some(&h), None).expect("allowed");
+        let mine = held(&["api.github.com"], h.place.clone(), &[AGENT, "bea--k3x9"]);
+        let allowed = answered(&ask("github", "upload", &["uploads.github.com"], true), AGENT, Some(&mine), None).expect("allowed");
         assert_eq!(allowed.value, None, "Allow keeps the value held");
         assert_eq!(allowed.hosts, ["api.github.com", "uploads.github.com"]);
         assert!(check("github", &allowed, Some(&h.place), &catalog()).is_ok());
@@ -733,6 +739,9 @@ mod tests {
         }
         let h = held(&["api.github.com"], Place::default(), &[AGENT]);
         assert!(matches!(answered(&ask("github", "upload", &["uploads.github.com"], true), AGENT, Some(&h), Some("v".into())), Err(VaultError::Ask(_))));
+        // an Allow never gives back what its person took away since it asked
+        let taken = held(&["api.github.com"], Place::default(), &["bea--k3x9"]);
+        assert!(matches!(answered(&ask("github", "upload", &["uploads.github.com"], true), AGENT, Some(&taken), None), Err(VaultError::Ask(_))));
     }
 
     /// Goal: the card says who asks, why, where it goes, and that the
@@ -741,21 +750,22 @@ mod tests {
     #[test]
     fn the_card_says_who_why_where_and_carries_the_field() {
         let id = "0123456789abcdef0123456789abcdef";
-        let n = ask_notice(id, &ask("github", "To push your shop's code", &["api.github.com"], false), AGENT, "Juniper", Some("/p".into()), 9, None);
+        let n = ask_notice(id, &ask("github", "To push your shop's code", &["api.github.com"], false), AGENT, "Juniper", Some("/p".into()), 9, (None, "none"));
         assert_eq!(n.title, "Juniper asks for github");
         assert_eq!(n.text.as_deref(), Some("To push your shop's code"));
         assert_eq!(n.detail.as_deref(), Some("It only works with api.github.com. Juniper gets a stand-in, never what you paste."));
         assert_eq!(n.until, Some(Until { at: 9, said: "Expires".into() }));
+        assert_eq!(n.actions[0].body, Some(serde_json::json!({ "held": "none" })), "Save carries what the card showed held");
         assert!(n.field.is_some() && n.actions[0].field && n.actions[0].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef"));
         assert!(!n.actions[1].field && n.actions[1].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef/decline"));
         let parked = held(&[], Place::default(), &[AGENT]);
-        let again = ask_notice(id, &ask("github", "Rotate", &[], false), AGENT, "Juniper", None, 9, Some(&parked));
+        let again = ask_notice(id, &ask("github", "Rotate", &[], false), AGENT, "Juniper", None, 9, (Some(&parked), "r1"));
         assert_eq!(again.detail.as_deref(), Some("It goes nowhere until you say where. It replaces the github you keep. Juniper gets a stand-in, never what you paste."));
         // a replacement says every host it keeps, and the other agents that use it
         let shared = held(&["api.github.com"], Place::default(), &[AGENT, "bea--k3x9"]);
-        let replace = ask_notice(id, &ask("github", "Rotate", &[], false), AGENT, "Juniper", None, 9, Some(&shared));
+        let replace = ask_notice(id, &ask("github", "Rotate", &[], false), AGENT, "Juniper", None, 9, (Some(&shared), "r2"));
         assert_eq!(replace.detail.as_deref(), Some("It only works with api.github.com. It replaces the github you keep. Your other agents that use it can too. Juniper gets a stand-in, never what you paste."));
-        let allow = ask_notice(id, &ask("github", "Upload", &["uploads.github.com"], true), AGENT, "Juniper", None, 9, Some(&shared));
+        let allow = ask_notice(id, &ask("github", "Upload", &["uploads.github.com"], true), AGENT, "Juniper", None, 9, (Some(&shared), "r2"));
         assert_eq!(allow.title, "Juniper asks to use github somewhere new");
         assert_eq!(allow.detail.as_deref(), Some("Sends the github you keep to uploads.github.com too: it then works with api.github.com, uploads.github.com. Your other agents that use it can too. Juniper never sees it."));
         assert!(allow.field.is_none() && allow.actions.iter().all(|a| !a.field) && allow.actions[0].label == "Allow");

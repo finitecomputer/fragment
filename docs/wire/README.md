@@ -389,6 +389,7 @@ in, closed. `POST /api/vault/asks/{id}`: the person's answer. `value` is what th
 
 | field | type | | |
 | --- | --- | --- | --- |
+| `held` | `string` | required | Which secret its card showed held under the ask's name (its revision, `none` for none), as the card's action carries it: the answer grants what the card said, or nothing (409). |
 | `value` | `string` or `null` | optional |  |
 
 ### `Archived`

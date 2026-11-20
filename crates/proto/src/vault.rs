@@ -168,4 +168,8 @@ pub struct AnswerAsk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub value: Option<String>,
+    /// Which secret its card showed held under the ask's name (its
+    /// revision, `none` for none), as the card's action carries it: the
+    /// answer grants what the card said, or nothing (409).
+    pub held: String,
 }

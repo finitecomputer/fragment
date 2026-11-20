@@ -162,9 +162,11 @@ way T3 Code's secret prompt does: the agent never sees what they give.
 - **An answer adds, never takes away.** It is a put under the Vault's own
   rules: the hosts asked joined to any held, the asking agent to its
   agents, the place held kept. A secret held already is replaced only by
-  a paste its card says it replaces. Their answer is checked again in the
-  turn that writes it (the seal may wait): one declined, expired or
-  answered meanwhile, or a secret changed meanwhile, writes nothing.
+  a paste its card says it replaces. Their answer carries which secret its
+  card showed held (its revision) and grants only what the card said: a
+  secret set or changed since, or a card declined, expired or answered
+  meanwhile (checked again after the seal's wait), writes nothing. An
+  Allow never gives back an agent its person took off the secret since.
 - **Somewhere new** (`--keep-value`): an agent asks to send a secret its
   person keeps to more hosts, one it is given already (asked of any other,
   or of none, it is refused the same way: it learns nothing of secrets it

@@ -904,6 +904,16 @@ impl VaultCell {
         self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?.first().map(stored).transpose()
     }
 
+    /// The secret held under `name` and which one it is: its revision, the
+    /// SHA-256 of its seal and what it says together (a new value or a
+    /// change to where it goes changes it), `none` for none.
+    fn held_at(&self, name: &str) -> CellResult<(Option<Secret>, String)> {
+        let rows = self.rows("SELECT sealed, secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        let Some(row) = rows.first() else { return Ok((None, "none".into())) };
+        let revision = revision_of(&format!("{}\n{}", row["sealed"].as_str().unwrap_or_default(), row["secret"].as_str().unwrap_or_default()));
+        Ok((Some(stored(row)?), revision))
+    }
+
     /// The ask `id`, if one is kept: its agent, what it asks, its expiry
     /// and its state, read after `expire`.
     fn ask_row(&self, id: &str) -> CellResult<Option<(Asked, i64, AskState)>> {
@@ -979,7 +989,11 @@ impl VaultCell {
         if state != AskState::Waiting {
             return Err(ended(state));
         }
-        let held = self.held(&ask.name)?;
+        let changed = || CellError::new(ErrorCode::Conflict, format!("{} changed since its card showed it: look at the card again", ask.name));
+        let (held, revision) = self.held_at(&ask.name)?;
+        if a.held != revision {
+            return Err(changed());
+        }
         let put = rules::answered(&ask, &agent, held.as_ref(), a.value).map_err(|e| CellError::invalid(e.to_string()))?;
         let still = || -> CellResult<()> {
             match self.ask_row(id)? {
@@ -987,9 +1001,9 @@ impl VaultCell {
                 Some((_, _, state)) => return Err(ended(state)),
                 None => return Err(CellError::new(ErrorCode::NotFound, format!("no ask {id}"))),
             }
-            match self.held(&ask.name)? == held {
+            match self.held_at(&ask.name)?.1 == revision {
                 true => Ok(()),
-                false => Err(CellError::new(ErrorCode::Conflict, format!("{} changed as you answered: answer again", ask.name))),
+                false => Err(changed()),
             }
         };
         self.put(&ask.name, &put, None, Some(&still)).await?;
@@ -1016,8 +1030,8 @@ impl VaultCell {
         let mut notices = Vec::with_capacity(rows.len());
         for row in rows {
             let Asked(by, title, picture, ask) = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
-            let held = self.held(&ask.name)?;
-            notices.push(rules::ask_notice(row["id"].as_str().unwrap_or_default(), &ask, &by, &title, picture, row["expires"].as_i64().unwrap_or(0), held.as_ref()));
+            let (held, revision) = self.held_at(&ask.name)?;
+            notices.push(rules::ask_notice(row["id"].as_str().unwrap_or_default(), &ask, &by, &title, picture, row["expires"].as_i64().unwrap_or(0), (held.as_ref(), &revision)));
         }
         serde_json::to_string(&fragment_proto::notice::NoticeList { notices }).map_err(|e| CellError::host(e.to_string()))
     }

@@ -5,6 +5,10 @@
         "additionalProperties": false,
         "description": "`POST /api/vault/asks/{id}`: the person's answer. `value` is what they\npasted (an ask with `keepValue` takes none: its answer is Allow).",
         "properties": {
+          "held": {
+            "description": "Which secret its card showed held under the ask's name (its\nrevision, `none` for none), as the card's action carries it: the\nanswer grants what the card said, or nothing (409).",
+            "type": "string"
+          },
           "value": {
             "default": null,
             "type": [
@@ -13,6 +17,9 @@
             ]
           }
         },
+        "required": [
+          "held"
+        ],
         "type": "object",
         "x-fragment-direction": "in"
       },
