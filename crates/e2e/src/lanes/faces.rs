@@ -359,7 +359,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // is finished by the next rename, whatever it asks; asked again after
     // its answer was lost, its `was` is no longer its title, and it is the
     // one asked: done (replay)
-    let repo = created["repo"].as_str().unwrap_or("").to_string();
+    let repo = api.status(&paul, &agent)?.body["repo"].as_str().unwrap_or("").to_string();
     let rename = |title: &str, was: &str| api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": title, "was": was })));
     // its job as code.storage holds it at main (the cell's pin may lag a
     // commit whose answer was lost)
