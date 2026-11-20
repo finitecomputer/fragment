@@ -460,7 +460,7 @@ mod tests {
         let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1771345412096 205765574656      90% /\nhome 8192 8388608\nwork 12288 12582912\n";
         let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1771345223680 205765894144  90% /\nall 14340 14680254\n";
         assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some((8192 + 12288) * 1024), "the link in each record, the venv's link, not the cache");
-        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(14_680_254.max(14340 * 1024)), "all of it, once");
+        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(14340 * 1024), "all of it, once: allocated, past apparent");
         assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 205_765_574_656, 2)));
         // a sparse file: apparent past allocated; small files: allocated past apparent
         let df = "Filesystem x\noverlay 100 50 50 50% /\n";
