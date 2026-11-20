@@ -901,9 +901,10 @@ What our Hermes image guarantees beyond the contract:
   own fragment, so a viewer's read-only sync is not this one's. A fragment
   shared with the agent's owner it syncs with the `fragment` CLI, as its
   owner would, at the lower of their roles (cli/GUIDE.md, Sync in depth). An agent whose `agent.json` names another runtime (Claude) has no
-  profile, desktop, route or sync: the boot reads `runtime` as the bridge
-  does (`with_runtimes`), and the ready file names it at once, for the
-  bridge to run on its runtime. A start reads every agent's before it
+  profile, desktop or route: the boot reads `runtime` as the bridge
+  does (`with_runtimes`), and the ready file names it, for the bridge to
+  run on its runtime, once its own files are restored for that runtime
+  (below, "Claude Code"). A start reads every agent's before it
   writes or retires a profile, asking again until each answers, so a
   failed read never retires a Hermes agent's profile. One switched to another runtime while
   the computer runs loses its desktop within 10 s, its profile retired at
@@ -1149,6 +1150,23 @@ gates it.
 - **A Claude agent has no Hermes profile or desktop** (above, "One
   profile per agent of Hermes'"): its person installs and signs in from
   its chat.
+- **Its self is its fragment's, as a Hermes agent's is** (M17, FIN-542):
+  the same sync, every 60 s and at each start before the bridge runs it,
+  keeps its `SOUL.md` and its own `CLAUDE.md` in its work directory (its
+  `AGENTS.md` imports the soul), and Claude Code's auto memory for it as
+  the fragment's `memories/claude/`. Each folder keeps what was agreed
+  beside its files, so one lost alone deletes nothing, and a file deleted
+  from its work directory comes back rather than leaving the fragment. A
+  computer whose `/data` is lost or new, or an agent newly assigned to
+  it or switched to Claude, has all of it back before the bridge runs the
+  agent: the ready file names each agent with the runtime it was made
+  ready for, a Claude agent's only once a sync restored its files (a
+  failed one is tried again at each read of the computer's agents, every
+  3 s), a Hermes agent's whose profile was written while the gateway runs
+  only once the running gateway says it serves it (asked with
+  `rescan-profiles`: a turn relayed before is refused, and lost), and the
+  bridge holds the turns of an agent not ready for the runtime it names,
+  never dropping them.
 
 ## Billing
 

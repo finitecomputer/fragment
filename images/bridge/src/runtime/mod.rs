@@ -55,10 +55,13 @@ pub fn named(agent_json: Option<&[u8]>) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(agent_json?).ok()?;
     match &v["runtime"] {
         serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(crate::records::cut_bytes(s, 64)),
-        other => Some(crate::records::cut_bytes(&other.to_string(), 64)),
+        serde_json::Value::String(s) => Some(crate::records::cut_bytes(s, RUNTIME_NAMED_MAX_BYTES)),
+        other => Some(crate::records::cut_bytes(&other.to_string(), RUNTIME_NAMED_MAX_BYTES)),
     }
 }
+
+/// What `named` keeps of an `agent.json`'s `runtime`, at most.
+pub const RUNTIME_NAMED_MAX_BYTES: usize = 64;
 
 /// What an agent's `agent.json` asks of Claude Code (`"claude": {"model",
 /// "effort"}`; Paul, 2026-11-02): each none, Claude Code's own, and each
