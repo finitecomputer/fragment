@@ -470,6 +470,11 @@ pub struct ComputerView {
     /// is filling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskRoom>,
+    /// Whether its update waits for room (docs/computers.md, "An image's
+    /// share of the disk"): its save may not restore beside a newer image,
+    /// or its disk is told filling. Its owner makes room first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub room_first: bool,
 }
 
 /// A computer's disk as the platform last read it (`df` of its container,

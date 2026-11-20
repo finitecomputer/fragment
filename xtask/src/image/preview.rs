@@ -70,7 +70,11 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     let needs_build = found.is_none();
     let mut reference = found;
     if reference.is_none() && build {
-        reference = Some(push(&inputs, &tools)?);
+        // held to the disk budget before its preview deploy pins it (disk.rs;
+        // an input-keyed image reused was, when it was built)
+        let built = push(&inputs, &tools)?;
+        super::disk::check(&built)?;
+        reference = Some(built);
     }
     if build {
         let reference = reference.as_deref().expect("reused or built the input-keyed image");

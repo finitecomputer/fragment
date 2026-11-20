@@ -1243,3 +1243,21 @@ unfinished design, not debt.
   the snapshot is in the format it wrote.
 - **Delete when:** no computer can be pinned to an image whose bridge
   predates the log.
+
+## A Telegram setup in a tab of its own offers no Vault bot
+
+- **Shortcut:** a Vault secret moves into a fragment only on its person's
+  word: from the platform's own pages or their key, never a fragment's
+  page (docs/secrets.md). The Telegram connector's setup page asks
+  Settings, which framed it, to move the bot it offered (`vault-move`,
+  frame-messages.js). Where that frame cannot sign in (Safari's cookie
+  rule), the page opens in a tab of its own, with no Settings to ask
+  (`noopener`), so it does not offer the Vault's bot there and asks for
+  a token instead (`templates/telegram/site/setup.js` `VAULT`).
+- **Risk:** a person whose browser cannot sign in the frame, with a bot
+  moved from finite.computer, pastes its token (from @BotFather) instead
+  of reusing the one in their Vault; the Vault keeps it until they remove
+  it. Nothing is lost or exposed.
+- **Delete when:** Settings itself offers the move where no frame can ask
+  (a Use it of its own in the setup dialog's note, or a move token a tab
+  carries), or every supported browser signs in the frame.

@@ -115,10 +115,12 @@ jobs:
               - cli/GUIDE.md
               - templates/skills/**
               - crates/e2e/fixtures/chat-preview.pdf
-              # the image's disk budget and a computer's disk, which the
-              # Docker lane holds the Hermes image to
+              # the image's disk budget, a computer's disk and the measure
+              # (cargo xtask image disk) the Docker lane holds the Hermes
+              # image to
               - crates/core/src/computer/disk.rs
               - crates/core/src/price/instance.rs
+              - xtask/src/image/disk.rs
             docker:
               - images/hermes/**
               - images/bridge/**

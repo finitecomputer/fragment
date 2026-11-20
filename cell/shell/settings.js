@@ -44,7 +44,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
+export function createSettings({ api, $, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, openSkills, markOffer }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -526,22 +526,38 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   // (the platform's release, which their computers install for every agent),
   // opened from one row (Paul, 2026-11-04). Each agent's own are its
   // fragment's skills/, opened from its item in Agents. ----
-  const skillsFragmentOf = () => allFragments().find((f) => f.kind === "skills" && own(f));
+  // one labelled `skills` first, else the first by name, as the computers
+  // pick (hermes-boot's skills.rs `pick`)
+  const skillsFragmentOf = () => {
+    const theirs = allFragments().filter((f) => f.kind === "skills" && own(f)).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+    return theirs.find((f) => f.name.slice(0, f.name.lastIndexOf("--")) === "skills") ?? theirs[0];
+  };
   // The person's skills fragment, made from the blessed template when they
   // have none: at setup, as their default agent is, or from settings' Skills
   // for a person without one (deleted, or set up before 2026-10-03).
+  // One made at a time, whoever asks meanwhile waiting for it; and then
+  // the one the computers pick, should there be two.
+  let makingSkills = null;
   async function skillsFragment() {
     const have = skillsFragmentOf();
     if (have) return have.name;
-    const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
-    await load();
-    return made.name;
+    makingSkills ??= (async () => {
+      try {
+        const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
+        await load();
+        return skillsFragmentOf()?.name ?? made.name;
+      } finally {
+        makingSkills = null;
+      }
+    })();
+    return makingSkills;
   }
   // Skills: one row as Computer's are (its label, a short line under it,
-  // Open with an icon). Open is the person's skills fragment, made first
-  // from the blessed template when they have none. The line says nothing
-  // of which agents get them: only our Hermes image installs the set
-  // (docs/computers.md, "Skills and the CLI")
+  // Open with an icon). Open is the Skills page (skills-page.js), which
+  // makes the person's skills fragment from the blessed template when they
+  // have none: what their agents know, and the optional skills they switch
+  // on. Only our Hermes image installs them (docs/computers.md, "Skills and
+  // the CLI")
   function skillsSection() {
     const s = section("Skills");
     s.id = "settings-skills";
@@ -552,19 +568,10 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     open.type = "button";
     open.dataset.action = "open-skills";
     open.append(icon("folder"), words);
-    open.onclick = async () => {
-      open.disabled = true;
-      try {
-        openApp(await skillsFragment());
-      } catch (e) {
-        words.textContent = e.message;
-      } finally {
-        open.disabled = false;
-      }
-    };
+    open.onclick = () => openSkills();
     const row = el("div", "settings-line settings-line-with-action");
     const info = el("div", "settings-info");
-    info.append(el("span", "settings-key", "Skills"), el("span", "settings-value settings-sub", "What your agents know how to do, kept in one place."));
+    info.append(el("span", "settings-key", "Skills"), el("span", "settings-value settings-sub", "What your agents know how to do, and more to turn on."));
     const control = el("div", "settings-control");
     control.append(open);
     row.append(info, control);
