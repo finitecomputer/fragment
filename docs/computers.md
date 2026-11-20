@@ -39,14 +39,24 @@ an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
   to with `wake: true`, one of its agents added to a fragment, an open
-  port tab, a page's presence on a subscribed fragment (a pre-wake, held
-  a minute), or its owner. Never by its own guest's traffic.
-- **It stays awake** while a port tab is open or the guest holds its
-  keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
-  always-on seat's computer never sleeps (decision 25; docs/billing.md).
+  port tab, or its owner, also as they begin to use it in their shell: a
+  chat picked, or the launcher opened by its button or ⌘K (their own
+  wake). Never by a page acting on its own (a framed page's ask, or
+  anything a page's presence says, typing included: a page sets its
+  own), its own guest's traffic, a page loading, a tab shown again, a
+  socket reconnecting, or a timer.
+- **It stays awake** while the guest holds its keepalive socket, and
+  `IDLE_MS` (20 minutes) after what last held it: a keepalive's close, a
+  wake, or a port tab's opening, close or use (a message from its page).
+  A port tab merely open holds nothing (Paul, 2026-11-18: "an open tab,
+  without any action touching the agent, should not keep the agent awake
+  indefinitely"). An always-on seat's computer never sleeps (decision 25;
+  docs/billing.md).
 - **It is saved** when its work ends (its last keepalive or its last
-  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
-  open, and at every sleep (below, "Saves and what a wake restores").
+  port tab closes, and 30 s pass with no keepalive opened again), every
+  15 minutes while a keepalive stays open or a port tab is in use
+  (counted from its first use since the last save), and at every sleep
+  (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
   exit, destroy. A keepalive opened during an idle sleep's hold cancels
@@ -72,8 +82,9 @@ an image may rely on this:
   every path, and its owner's page follows it to awake.
 - **A stop nothing asked for, while idle, is a sleep.** A host may stop
   a container for its own reasons (its maintenance, a host short of
-  memory). One that stops while its computer is awake with nothing open
-  (no keepalive, no port tab), no save under way, all this life did in a
+  memory). One that stops while its computer is awake with no keepalive
+  open (a port tab open holds nothing; its use is work), no save under
+  way, all this life did in a
   save it made since it came up, and no message or join it was woken for
   that its guest has not taken up, has slept: no strike, no rollback,
   nothing told, and nothing starts it again, though the hold after its
@@ -251,7 +262,9 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   the bound stops it.
 - `went_back`: a start went back to an older save, or will at its next
   start, told until its owner says they saw it. None when nothing was
-  done on the lost life after that save (Paul, 2026-10-23).
+  done on the lost life after that save (Paul, 2026-10-23). When nothing
+  that may change its files ran after it (no turn, no port tab used:
+  `unchanged`), it says where it went back to and no loss.
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
 - `key_paused`: a shared key's charges this last hour reached its owner's
@@ -506,8 +519,8 @@ minute), or its life ends, whichever is first.
   first), `deadline`, `blocked` (the container before it still ran: it
   started nothing, and the start made again counts from the same wake),
   `other`.
-- `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
-  `owner`, `joined`, `restart`; `itself` when nothing did (a start after a
+- `woke`: what asked for the wake it answers: `record`, `tab`, `owner`,
+  `joined`, `restart`; `itself` when nothing did (a start after a
   crash, an always-on start, or an ask an earlier isolate heard). A wake's
   fallback and retries carry its first ask.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
@@ -838,8 +851,16 @@ agent; their account pays.
 - Only the platform's page may frame a port, so an image's page may not
   frame its own ports either: a screen is one page, its sockets relative
   to it.
-- A WebSocket on a port holds the computer awake while open. The
-  container may speak first. A close at either end closes the other.
+- A WebSocket on a port holds the computer awake only while its page
+  speaks: its opening, and each message from the page's end (heard a
+  minute at a time), hold it `IDLE_MS`; one whose page says nothing lets
+  it sleep, and a page that stops speaking when no one is at it lets it
+  sleep under an open tab. The container may speak first; its words hold
+  nothing. A close at either end closes the other. A sleep (a restart's
+  too) closes each as it begins, before its hold, with 4000 and `asleep`
+  or `restarting` (one whose upgrade was still on its way too), so nothing
+  a page sends after reaches the container its save holds; a request to a
+  port while it sleeps wakes it after, and is answered 503.
 - **The screen** (decision 11) is a page on port 6080, one for each
   agent, at `/p/6080/?agent=<agent fragment>`. The platform carries the
   query and reads nothing in it: which desktop is the agent's, and
@@ -849,6 +870,13 @@ agent; their account pays.
   `postMessage({fragment: "screen", agent, name})`; a page takes it only
   from its parent and only for its own agent. Opened in a tab of its own,
   it names none: the computer knows an agent by its label, never its name.
+  The shell also tells the screens on view that its person is at it
+  (`{fragment: "screen", agent, active: true}`, every 30 s at most).
+  Our screen backs off to silence (`images/hermes/screen/attend.js`): no
+  key, press, pointer or touch on it or the shell for five minutes
+  pauses its stream, its last frame kept; the next one resumes it. Once
+  its sockets close (a sleep, a restart, the network), only a press or a
+  key opens them again, once each, and a computer asleep wakes for them.
 
 ## Our images
 
