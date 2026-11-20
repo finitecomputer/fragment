@@ -1592,39 +1592,44 @@ impl ComputerCell {
         Ok(done)
     }
 
+    /// `arm_vault` for its guest's read of its view (a Vault secret set
+    /// since its start), its failure logged: the read goes on, and the
+    /// placeholder then goes out uncaught, and fills nothing.
+    async fn arm_more(&self, vault_hosts: Vec<String>) {
+        if let Err(e) = self.arm_vault(vault_hosts).await {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "error": e.message }));
+        }
+    }
+
     /// Has its running start's swap catch each of `vault_hosts` it does
     /// not catch yet (entry.mjs `armSwap`: those alone), so a guest that
     /// reads a placeholder reaches the swap with it: those its start asked
-    /// for beside the container's start (`try_start`), and any set since
-    /// (its guest's view answers only after, `guest_view`). A failure is
-    /// logged: the placeholder then goes out uncaught, and fills nothing.
-    async fn arm_more(&self, vault_hosts: Vec<String>) {
-        let Ok(life) = self.lifecycle() else { return };
-        let Some(generation) = life.running() else { return };
+    /// for beside the container's start (`try_start`, whose failure this
+    /// is), and any set since (its guest's view answers only after,
+    /// `guest_view`). False: its start was superseded meanwhile.
+    async fn arm_vault(&self, vault_hosts: Vec<String>) -> CellResult<bool> {
+        let Some(generation) = self.lifecycle()?.running() else { return Ok(true) };
         // the start's own or a takeover's, as armed: the catalog's at least
         let armed = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
         let mut more: Vec<String> = vault_hosts.into_iter().filter(|h| !armed.contains(h)).collect();
         more.sort_unstable();
         more.dedup();
         if more.is_empty() {
-            return;
+            return Ok(true);
         }
-        let Ok(Some(id)) = self.meta(MetaKey::Id) else { return };
+        let id = self.must(MetaKey::Id)?;
         let g = JsValue::from_f64(generation as f64);
-        match self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await {
-            Ok(done) if done.as_bool() == Some(true) => {
-                // added to what is armed now, which another read's or its
-                // start's may have changed meanwhile
-                let mut hosts = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-                hosts.extend(more);
-                hosts.sort_unstable();
-                hosts.dedup();
-                *self.armed.borrow_mut() = Some((generation, hosts));
-            }
-            // superseded: the start after it arms its own
-            Ok(_) => {}
-            Err(e) => console_error!("{}", json!({ "computer": id, "arm": "vault", "error": e.message })),
+        if self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?.as_bool() != Some(true) {
+            return Ok(false);
         }
+        // added to what is armed now, which another read's or its start's
+        // may have changed meanwhile
+        let mut hosts = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        hosts.extend(more);
+        hosts.sort_unstable();
+        hosts.dedup();
+        *self.armed.borrow_mut() = Some((generation, hosts));
+        Ok(true)
     }
 
     /// The Vault secrets each of its agents (`fragments`) may use, and its
@@ -1929,7 +1934,11 @@ impl ComputerCell {
         if started?.as_bool() != Some(true) {
             return Err(Unstarted::Overtaken);
         }
-        self.arm_more(vault).await;
+        // before its guest is let go (a restore's gate, a snapshot's hold): a
+        // host that will not register fails the start, as any intercept does
+        if !self.arm_vault(vault).await? {
+            return Err(Unstarted::Overtaken);
+        }
         if self.lever_take(MetaKey::FailStarts) {
             // the lever's `fail-starts`: a start that fails with its container up
             return Err(CellError::host(format!("start {generation} failed (the test lever)")).into());
