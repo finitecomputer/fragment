@@ -1002,6 +1002,8 @@ the platform that changes the template installs again at each such
 fragment's next request (`code.installed`). Its repo holds only its face
 and data: a live commit declaring operations, channels, triggers or an
 agent, or carrying code, keeps the last good code and says to fork it.
+None of its own files is a page of its site: a path the release's site
+does not ship is never answered from its repo (Serving).
 
 ```json
 {
@@ -1795,7 +1797,7 @@ fragment's, `/api/…` included.
 
 | path | |
 | --- | --- |
-| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view |
+| `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view. On a blessed template, the release's `site/` alone: a path it does not ship goes to its code's routes, else 404, never to the fragment's own files (those are read at `__file`) |
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
 | `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public; a blob's, or a file the size of a pointer, `no-cache`), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
