@@ -455,14 +455,10 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let blobs = Blobs::new(c, name);
     let author = Author::writer(&c.writer_id());
     let h = held(&storage, &blobs)?;
-    let found = found(c, name, &storage, &h)?;
     let incoming: Vec<(Entry, PathBuf)> = spool.entries.values().map(|e| (e.clone(), spool.path(&e.key))).collect();
-    let mut merge = session::merge(&h.indexed, &h.keys(), found, incoming).map_err(too_much)?;
+    let mut merge = session::merge(&h.indexed, &h.keys(), found(c, name, &storage, &h)?, incoming).map_err(too_much)?;
     let (added, updated, unchanged) = (merge.added, merge.updated, merge.unchanged);
     let mut head = h.head.clone();
-    // whether each commit landed on the head before it (no other writer
-    // between): only then do the entries describe main as it is
-    let mut alone = true;
 
     // the files the conversations hold that the archive lacks, then the
     // conversations, a batch a commit: a file is there before what names it
@@ -481,9 +477,8 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
         batch.push(Change::Upsert { path: RepoPath::parse(&repo_path).map_err(|e| anyhow!("{e}"))?, bytes: stored });
         if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES || i + 1 == total {
             sent += batch.len();
-            let (tip, first);
-            (head, tip, first) = commit(&storage, &author, head, &format!("session import: {sent} of {total} files"), &batch)?;
-            alone &= first;
+            let tip;
+            (head, tip) = commit(&storage, &author, head, &format!("session import: {sent} of {total} files"), &batch)?;
             landed.push((std::mem::take(&mut keys), tip));
             (batch, batch_bytes) = (Vec::new(), 0);
         }
@@ -495,40 +490,58 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
             merge.entries.get_mut(&key).expect("a write is an entry").commit = tip.clone();
         }
     }
-    // the indexes whose bytes change, one try on the head this import left,
-    // and only while no other writer came between: else they stay older
-    // than that writer's files, whose entries the next import reads again
-    let kinds: BTreeSet<Kind> = merge.entries.values().map(|e| e.kind.clone()).chain(h.indexes.keys().cloned()).collect();
-    let mut changes = Vec::new();
-    for kind in kinds {
-        let file = Index::of(kind.clone(), &merge.entries).file();
-        if h.indexes.get(&kind) != Some(&file) {
-            changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(&kind)).map_err(|e| anyhow!("{e}"))?, bytes: blobs.store(file)? });
+    // the indexes whose bytes change, made from main as it is once this
+    // import has written (another writer may have come between its
+    // commits) and again whenever their commit is beaten: each entry kept
+    // while it names its file's last commit, the rest read, so they never
+    // describe a file another copy
+    let (mut entries, mut indexes, mut base) = (merge.entries, h.indexes, h.head.clone());
+    let mut wrote = total > 0;
+    let mut now = wrote;
+    for attempt in 1..=COMMIT_TRIES {
+        if now {
+            let mut main = held(&storage, &blobs)?;
+            main.indexed.extend(entries.into_iter().filter(|(k, e)| main.stored.get(k) == e.commit.as_ref()));
+            let read = found(c, name, &storage, &main)?;
+            main.indexed.extend(read.into_iter().map(|e| (e.key.clone(), e)));
+            (entries, indexes, base) = (main.indexed, main.indexes, main.head);
         }
-    }
-    if alone && !changes.is_empty() {
-        match storage.commit(head.as_deref(), "session import: the indexes", &author, &changes) {
-            Ok(_) | Err(CsError::Precondition(_) | CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) => {}
+        let kinds: BTreeSet<Kind> = entries.values().map(|e| e.kind.clone()).chain(indexes.keys().cloned()).collect();
+        let mut changes = Vec::new();
+        for kind in kinds {
+            let file = Index::of(kind.clone(), &entries).file();
+            if indexes.get(&kind) != Some(&file) {
+                changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(&kind)).map_err(|e| anyhow!("{e}"))?, bytes: blobs.store(file)? });
+            }
+        }
+        if changes.is_empty() {
+            break;
+        }
+        match storage.commit(base.as_deref(), "session import: the indexes", &author, &changes) {
+            Ok(_) | Err(CsError::Precondition(_)) => {
+                wrote = true;
+                break;
+            }
+            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => now = true,
             Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's indexes")),
         }
     }
-    if total > 0 || !changes.is_empty() {
+    if wrote {
         crate::sync::refresh_pins(c, name, crate::codestorage::MAIN);
     }
-    Ok(Written { added, updated, unchanged, entries: merge.entries })
+    Ok(Written { added, updated, unchanged, entries })
 }
 
 /// One commit of `changes` on `head`: on another head when another writer
 /// moved main meanwhile (the conversations are upserts: any head takes
-/// them), and once more when its answer was lost. Main's new head, the
-/// commit made when it is known to be this one's, and whether it landed on
-/// `head` at its first try.
-fn commit(storage: &CodeStorage, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<(Option<String>, Option<String>, bool)> {
+/// them), and once more when its answer was lost. Main's new head, and the
+/// commit made when it is known to be this one's.
+fn commit(storage: &CodeStorage, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<(Option<String>, Option<String>)> {
     for attempt in 1..=COMMIT_TRIES {
         match storage.commit(head.as_deref(), message, author, changes) {
-            Ok(tip) => return Ok((Some(tip.clone()), Some(tip), attempt == 1)),
+            Ok(tip) => return Ok((Some(tip.clone()), Some(tip))),
             // main holds them already (a try whose answer was lost landed)
-            Err(CsError::Precondition(_)) => return Ok((storage.branch_head(MAIN)?, None, false)),
+            Err(CsError::Precondition(_)) => return Ok((storage.branch_head(MAIN)?, None)),
             Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => head = storage.branch_head(MAIN)?,
             Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's conversations")),
         }
@@ -722,9 +735,8 @@ mod tests {
     /// from the run before) puts the indexes right, the new conversation
     /// and the updated one, and an older copy imported after never replaces
     /// the newer. Method: through the writer, a chat; then an update of the
-    /// same length and a new chat, the indexes' commit beaten (the fake's
-    /// sabotage: the import stands, its indexes left); an empty import; then
-    /// a copy between the two.
+    /// same length and a new chat, the indexes' commit beaten every try (the
+    /// fake's sabotage); an empty import; then a copy between the two.
     #[test]
     fn an_import_cut_off_before_its_indexes_is_put_right_whatever_the_sizes() {
         let (mock, c) = archive();
@@ -737,8 +749,8 @@ mod tests {
         let a_path = session::session_path("hermes-a");
         write(&c, NAME, &spooled(vec![first()])).unwrap();
 
-        mock.sabotage_commit_packs_after(1, 1);
-        write(&c, NAME, &spooled(vec![third(), new()])).unwrap();
+        mock.sabotage_commit_packs_after(1, COMMIT_TRIES);
+        assert!(write(&c, NAME, &spooled(vec![third(), new()])).is_err(), "cut off before its indexes");
         assert_eq!(mock.file_at(NAME, "main", &a_path), Some(file_of(third())), "its conversations landed");
         assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&file_of(first())))], "its indexes did not");
 
@@ -775,6 +787,27 @@ mod tests {
         assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&later))], "and the index describes it again");
     }
 
+    /// Goal: imports that race leave the indexes listing every conversation
+    /// main holds when each returns, never one newer than a file it
+    /// misdescribes. Method: another import's chat lands during this one's
+    /// conversations' commit (made again on the new head), and another
+    /// writer's chat lands just before its indexes' commit (made again on
+    /// main as it is then, that file read).
+    #[test]
+    fn racing_imports_both_land_in_the_indexes() {
+        let (mock, c) = archive();
+        let theirs = file_of(session("b", Kind::Chat, "2026-10-02T09:00:00Z", &["theirs"]));
+        mock.sabotage_commit_packs_with(1, vec![(session::session_path("hermes-b"), Some(theirs.clone()))]);
+        let late = file_of(session("c", Kind::Chat, "2026-10-03T09:00:00Z", &["late"]));
+        let w = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["mine"])])).unwrap();
+        assert_eq!(w.added, 1);
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"], "the other import's chat and this one's");
+        mock.land_before_next_commit(vec![(session::session_path("hermes-c"), Some(late.clone()))]);
+        write(&c, NAME, &spooled(vec![session("d", Kind::Chat, "2026-10-04T09:00:00Z", &["more"])])).unwrap();
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-d", "hermes-c", "hermes-b", "hermes-a"], "a file landed before the indexes' commit, read and listed");
+        assert_eq!(index(&mock, Kind::Chat)[1], ("hermes-c".to_string(), sha(&late)));
+    }
+
     /// Goal: a commit that loses its race, or whose answer is lost, is made
     /// again, and the indexes then list what this import wrote, not what
     /// main's indexes said. Method: the conversations' commit beaten once by
@@ -786,9 +819,7 @@ mod tests {
         let (mock, c) = archive();
         mock.sabotage_commit_packs(1);
         write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])])).unwrap();
-        assert!(mock.file_at(NAME, "main", "competitor.txt").is_some() && keys(&mock, Kind::Chat).is_empty(), "both land; with another writer between, no index yet");
-        write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"], "the next import writes it");
+        assert!(mock.file_at(NAME, "main", "competitor.txt").is_some() && keys(&mock, Kind::Chat) == ["hermes-a"], "both land");
 
         let same_size = session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"]);
         let bytes = file_of(same_size.clone());
@@ -796,17 +827,13 @@ mod tests {
         mock.sabotage_commit_packs_after(1, 1);
         let w = write(&c, NAME, &spooled(vec![same_size])).unwrap();
         assert_eq!(w.updated, 1);
-        write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&bytes))], "the indexes list what was written, its entry naming its commit");
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&bytes))], "the indexes list what was written");
 
         let repo = mock.repo_url(NAME).unwrap();
         mock.drop_commit_answers(&repo, 2);
         let w = write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
         assert_eq!(w.added, 1);
-        let reads = mock.requests(NAME, "GET file");
-        write(&c, NAME, &spooled(vec![])).unwrap();
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"]);
-        assert_eq!(mock.requests(NAME, "GET file") - reads, 2, "its commit's answer lost, b's file is read (and the index), and no other");
     }
 
     /// Goal: the files conversations hold go up with them, before them,

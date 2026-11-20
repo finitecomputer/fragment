@@ -90,9 +90,10 @@ fragment's is.
   import stopped before its indexes, another writer, a commit whose
   answer was lost, whatever the copy's size) is read, and an entry whose
   file is gone dropped, so the next import of anything puts a crash
-  right. Its indexes' commit is tried once, on the head it left, and only
-  when no other writer came between its commits: else they stay as they
-  were, older than that writer's files, and the next import writes them.
+  right. Its indexes are made from main as it is after its own commits
+  (another writer may have come between), and again whenever their commit
+  is beaten: each entry kept while it names its file's last commit, the
+  rest read, so they never describe a file another copy.
 - **Bounded as it reads.** Each conversation is filed as it is read, its
   file spooled to a folder of the import's own (gone with it), so an
   import never holds every conversation's bytes.
