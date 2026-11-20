@@ -7,6 +7,7 @@ use fragment_proto::computer::ComputerNotice;
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel, Until};
 use serde_json::{Map, Value};
 
+use crate::computer::limits::SET_ASIDE_KEPT_MS;
 use crate::notice::{provider_name, size, span, usd};
 
 /// What the words need of the computer beyond its notices.
@@ -29,6 +30,15 @@ pub fn said(told: &[ComputerNotice], f: &Facts) -> Vec<Notice> {
 fn body(key: &str, value: impl Into<Value>) -> Value {
     let mut m = Map::new();
     m.insert(key.to_string(), value.into());
+    Value::Object(m)
+}
+
+/// The OK of a notice that its newest save did not fit its disk:
+/// `{life, tooBig}` (`NoticeSeen`).
+fn seen_too_big(life: u64) -> Value {
+    let mut m = Map::new();
+    m.insert("life".into(), life.into());
+    m.insert("tooBig".into(), true.into());
     Value::Object(m)
 }
 
@@ -62,7 +72,7 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             actions: vec![restart("Restart now")],
             ..notice("unsaved".into(), "unsaved", NoticeLevel::Warn, "Your computer can't save right now".into())
         },
-        ComputerNotice::WentBack { life, pending, save, saved_at, ended_at, unchanged, .. } => {
+        ComputerNotice::WentBack { life, pending, save, saved_at, ended_at, unchanged, too_big, .. } => {
             // the span between the save it goes back to and its stop, which
             // stays true however long the notice waits
             let since = match (saved_at, ended_at) {
@@ -70,6 +80,12 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
                 _ => None,
             };
             let said = match (save, unchanged, since, pending) {
+                // its newest save did not fit its disk (Paul, 2026-11-20):
+                // where it went back to, and that the newer files are kept
+                (Some(_), _, since, false) if *too_big => {
+                    let back_to = since.map_or("an older save".to_string(), |since| format!("its save from {since} before it stopped"));
+                    format!("It went back to {back_to}. The newer files are kept for {} days: you can still export them in Settings.", SET_ASIDE_KEPT_MS / (24 * 60 * 60_000))
+                }
                 (None, _, _, true) => "Nothing on it was saved yet, so it will start fresh. Your chats are all here.".into(),
                 (None, _, _, false) => "Nothing on it was saved yet, so it started fresh. Your chats are all here.".into(),
                 // nothing ran on it after that save that may change its
@@ -88,10 +104,15 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
                     }
                 }
             };
-            let title = if *pending { "Your computer stopped" } else { "Your computer restarted" };
+            let title = match (pending, too_big, save) {
+                (true, _, _) => "Your computer stopped",
+                (false, true, Some(_)) => "Your computer's newest save didn't fit its disk",
+                (false, _, _) => "Your computer restarted",
+            };
             Notice {
                 text: Some(said),
-                actions: vec![NoticeAction::post("OK", at("notices/seen"), body("life", *life))],
+                // its OK names which notice of that life it is (`saw_notice`)
+                actions: vec![NoticeAction::post("OK", at("notices/seen"), if *too_big && !*pending && save.is_some() { seen_too_big(*life) } else { body("life", *life) })],
                 ..notice(format!("went_back:{life}"), "went_back", NoticeLevel::Info, title.into())
             }
         }
@@ -188,7 +209,7 @@ mod tests {
         assert_eq!(post(unsaved), vec![("Restart now".into(), format!("{at}/restart"), json!({ "generation": 7 }))]);
 
         let back = |pending, save: Option<u64>, ended_at: Option<i64>| {
-            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save, saved_at: save.map(|_| 20 * MIN), at: None, unchanged: false }], &f).remove(0)
+            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save, saved_at: save.map(|_| 20 * MIN), at: None, unchanged: false, too_big: false }], &f).remove(0)
         };
         let told = back(false, Some(2), Some(60 * MIN));
         assert_eq!((told.level, told.title.as_str(), told.id.as_str()), (NoticeLevel::Info, "Your computer restarted", "went_back:6"));
@@ -198,14 +219,14 @@ mod tests {
         assert_eq!(back(true, Some(2), None).text.as_deref(), Some("When it starts again, changes on it since its last save won't be there. Your chats are all here."));
         assert_eq!(back(false, None, None).text.as_deref(), Some("Nothing on it was saved yet, so it started fresh. Your chats are all here."));
         // a loss within a minute of its save reads as words too (the e2e's shot: "in the a minute")
-        let quick = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: Some(20 * MIN + 30_000), pending: false, save: Some(2), saved_at: Some(20 * MIN), at: None, unchanged: false }], &f);
+        let quick = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: Some(20 * MIN + 30_000), pending: false, save: Some(2), saved_at: Some(20 * MIN), at: None, unchanged: false, too_big: false }], &f);
         assert_eq!(quick[0].text.as_deref(), Some("Changes made in the 1 minute before it stopped weren't kept. Your chats are all here."));
         assert_eq!(back(true, None, Some(60 * MIN)).title, "Your computer stopped");
         // no turn ran and no port tab was used after its save (11-18: a
         // tab left open overnight was told as 11 hours of changes lost):
         // it says what it went back to, and no loss
         let unchanged = |pending, ended_at: Option<i64>| {
-            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save: Some(2), saved_at: Some(20 * MIN), at: None, unchanged: true }], &f).remove(0)
+            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at, pending, save: Some(2), saved_at: Some(20 * MIN), at: None, unchanged: true, too_big: false }], &f).remove(0)
         };
         let told = unchanged(false, Some(20 * MIN + 11 * 60 * MIN));
         assert_eq!((told.level, told.title.as_str()), (NoticeLevel::Info, "Your computer restarted"));
@@ -213,8 +234,18 @@ mod tests {
         assert_eq!(unchanged(true, Some(60 * MIN)).text.as_deref(), Some("When it starts again, it goes back to its save from 40 minutes before it stopped. Your agents' work and chats are all here."));
         assert_eq!(unchanged(false, None).text.as_deref(), Some("It went back to its last save. Your agents' work and chats are all here."));
         assert_eq!(unchanged(true, None).text.as_deref(), Some("When it starts again, it goes back to its last save. Your agents' work and chats are all here."));
-        let fresh = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: None, pending: false, save: None, saved_at: None, at: None, unchanged: true }], &f);
+        let fresh = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: None, pending: false, save: None, saved_at: None, at: None, unchanged: true, too_big: false }], &f);
         assert_eq!(fresh[0].text.as_deref(), Some("Nothing on it was saved yet, so it started fresh. Your chats are all here."), "no save: as ever");
+        // its newest save did not fit its disk (Paul, 2026-11-20): plainly
+        // so, where it went back to, and that the newer files are kept
+        let too_big = |ended_at: Option<i64>| {
+            said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Unusable, ended_at, pending: false, save: Some(2), saved_at: Some(20 * MIN), at: Some(90 * MIN), unchanged: false, too_big: true }], &f).remove(0)
+        };
+        let told = too_big(Some(20 * MIN + 8 * 60 * MIN));
+        assert_eq!((told.level, told.title.as_str(), told.id.as_str()), (NoticeLevel::Info, "Your computer's newest save didn't fit its disk", "went_back:6"));
+        assert_eq!(told.text.as_deref(), Some("It went back to its save from 8 hours before it stopped. The newer files are kept for 30 days: you can still export them in Settings."));
+        assert_eq!(post(&told), vec![("OK".into(), format!("{at}/notices/seen"), json!({ "life": 6, "tooBig": true }))]);
+        assert_eq!(too_big(None).text.as_deref(), Some("It went back to an older save. The newer files are kept for 30 days: you can still export them in Settings."));
 
         let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: false }], &f)[0];
         assert_eq!(update.text.as_deref(), Some("Restart to get it; your chats and work are kept. It also updates by itself the next time your computer sleeps."));

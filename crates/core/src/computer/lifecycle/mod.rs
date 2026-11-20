@@ -594,10 +594,14 @@ impl Lifecycle {
             (Phase::Starting { generation, .. }, Event::RestoreFailed { generation: g, why, older }) if g == generation => {
                 if older && (self.restore_fallbacks as usize) < SAVES_KEPT {
                     // the save was at fault, not the computer: the one
-                    // before it, at once, metering nothing (it was never up)
+                    // before it, at once, metering nothing (it was never up),
+                    // owed whether or not what woke it still holds it (a big
+                    // save's restore takes minutes, and three can outlast a
+                    // wake's hold: Codex on the no-room PR)
                     self.restore_fallbacks += 1;
                     self.metered_to_ms = now_ms;
                     self.gone(now_ms, &mut step);
+                    self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
                 } else {
                     self.failed(why, now_ms);
                 }
