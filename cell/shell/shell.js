@@ -1450,7 +1450,7 @@ const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
 });
 const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
-  connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load,
+  connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load,
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.
