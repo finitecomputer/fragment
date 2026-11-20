@@ -26,7 +26,8 @@
 //!   `SAVE_EVERY_MS` while a keepalive stays open or a port tab is used,
 //!   and at every sleep. A
 //!   save is a hold (the DO touches `/run/computer/hold` and waits for the
-//!   guest's `/run/computer/held`), the save, and, awake, the hold let go.
+//!   guest's `/run/computer/held`), the save, and, awake, the hold let go
+//!   once its home's record is taken, before its work's.
 //!   A save that fails is tried again after a growing pause.
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens

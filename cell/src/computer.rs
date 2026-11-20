@@ -306,7 +306,8 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
@@ -495,6 +496,8 @@ pub struct ComputerCell {
     /// for a let-go in flight, so a let-go never lands after a newer touch;
     /// a let-go never waits for a touch in flight, whose answer lets go
     /// again if its sleep was cancelled (`Lifecycle`'s late `Held`).
+    /// The same turn orders a start's let-go of its snapshot's hold and
+    /// an awake save's let-go past its home (#1378).
     marking: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
@@ -1906,7 +1909,12 @@ impl ComputerCell {
                 self.starts.borrow_mut().up(generation, js::now_ms());
                 // its disk, before its guest is let go (as a restore's)
                 self.read_disk(generation).await;
-                self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                // unless its owner's sleep held it meanwhile (`lets_go`), as
+                // any unhold (Codex on #1378)
+                let _marking = self.marking.lock().await;
+                if self.lifecycle()?.lets_go(generation) {
+                    self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                }
             }
             Restore::Nothing => {}
         }
@@ -2081,9 +2089,11 @@ impl ComputerCell {
             let _ = self.call("closeTabs", &[why.into()]).await;
         }
         let t0 = js::now_ms();
+        // its mark's bound counts the wait for an unhold under way (at most
+        // `UNMARK_EXEC_MS`): the hold's steps stay within `HOLD_STEPS_MS`
         let marked = {
             let _marking = self.marking.lock().await;
-            self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await
+            self.mark(&g, HOLD_MARK, (MARK_EXEC_MS - (js::now_ms() - t0)).max(1)).await
         };
         if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
@@ -2137,7 +2147,7 @@ impl ComputerCell {
         // its backups together within `BACKUPS_MS` (the lever's
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
-        let until = js::now_ms() + budget;
+        let mut until = js::now_ms() + budget;
         // the lever's `hold-saves`: held here, within its backups' budget,
         // until the lever lets it go (a test posts as a sleep saves), looked
         // at every 100 ms
@@ -2162,6 +2172,13 @@ impl ComputerCell {
                 Ok(record) => {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     records.push(record);
+                    // its home is in, the copies its guest made under the
+                    // hold with it: an awake save lets go of its hold before
+                    // it takes its work's (`Lifecycle`'s `HomeSaved`)
+                    // (its time, at most `UNMARK_EXEC_MS`, is not the backups')
+                    if dir == "/data" {
+                        until += self.home_saved(generation, seq).await;
+                    }
                 }
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
@@ -2174,17 +2191,17 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
-        // a newer save of its container was asked as this one ran: never
-        // the newest kept (`Lifecycle::superseded`)
-        if self.lifecycle().is_ok_and(|l| l.superseded(seq)) {
-            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "superseded": true, "ms": js::now_ms() - t0 }));
+        // a newer save of its start was kept as this one ran (its owner's
+        // sleep, once its guest went on): never kept ahead of it
+        if self.saves().is_ok_and(|s| s.overtaken(generation, seq)) {
+            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "overtaken": true, "ms": js::now_ms() - t0 }));
             match self.update_saves(|s| s.let_go(records)) {
                 Ok(lost) => self.forget(lost).await,
                 Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
             }
-            return Event::SaveFailed { generation, seq, why: "a newer save was asked as it ran".into() };
+            return Event::SaveFailed { generation, seq, why: "a newer save was kept as it ran".into() };
         }
-        match self.keep_save(generation, records, held).await {
+        match self.keep_save(generation, records, seq, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
@@ -2196,6 +2213,37 @@ impl ComputerCell {
                 Event::SaveFailed { generation, seq, why: e.message }
             }
         }
+    }
+
+    /// Save `seq`'s home's record is taken: told to its lifecycle as the
+    /// drive tells any event (`drive_events`: stored, one line), within the
+    /// save, and the unhold it asks for (an awake save's, once) made at once,
+    /// so its guest claims turns again while its work is copied. It asks for
+    /// nothing else: no life ends, nothing of its saves is said, and its
+    /// alarm stays the save's deadline. Answers how long its unhold took.
+    async fn home_saved(&self, generation: u64, seq: u64) -> i64 {
+        let event = Event::HomeSaved { generation, seq };
+        let logged = json!(event);
+        let applied = self.lifecycle().and_then(|mut life| {
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            // (whether it lets go, not its actions: their encoder costs the Wasm)
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "unhold": !step.actions.is_empty() }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
+            Ok(step)
+        });
+        let t = js::now_ms();
+        match applied {
+            Ok(step) => {
+                assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
+                for action in step.actions {
+                    let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone") };
+                    self.unhold(generation, true).await;
+                }
+            }
+            // held on to its end, as before: its end lets go
+            Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
+        }
+        js::now_ms() - t
     }
 
     /// What the held guest of start `g` names as left out of its save (its
@@ -2224,11 +2272,12 @@ impl ComputerCell {
         })
     }
 
-    /// A save worked: it is the newest save, and the ones it pushed out of
-    /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
-    async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
+    /// Save `seq` worked, and was not overtaken (checked just before, with
+    /// no await between): it is the newest save, and the ones it pushed out
+    /// of the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
+    async fn keep_save(&self, generation: u64, records: Vec<Value>, seq: u64, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, seq, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");
@@ -2266,16 +2315,18 @@ impl ComputerCell {
         }
     }
 
-    /// Lets go of the guest's hold: an awake save's end, or a sleep that
-    /// kept its container. A container that is gone has nothing to let go,
-    /// and one a newer hold, save or stop holds now is that one's (its
-    /// owner's sleep just after a wake cancelled one): left as it is. It
-    /// takes the marker's turn (`marking`) for its look and its command, so
-    /// a newer touch waits for it. With the turn taken it does nothing, never
-    /// waiting on a person's path (a wake's): a touch in flight hands it to
-    /// its answer's let-go. That one (`after_held`, a late hold's answer,
-    /// in an alarm: an idle sleep's or an awake save's) waits for the turn,
-    /// so it lands after a let-go in flight, whether or not that one did.
+    /// Lets go of the guest's hold, within `UNMARK_EXEC_MS` (an `rm`): an
+    /// awake save past its home or at its end, or a sleep that kept its
+    /// container. A container that is gone has nothing to let go, and one a
+    /// newer hold, save or stop holds now is that one's (`Lifecycle::lets_go`:
+    /// its owner's sleep just after a wake cancelled one, or one asked as an
+    /// awake save copied its work): left as it is. It takes the marker's turn
+    /// (`marking`) for its look and its command, so a newer touch waits for
+    /// it. With the turn taken it does nothing, never waiting on a person's
+    /// path (a wake's): a touch in flight hands it to its answer's let-go.
+    /// That one (`after_held`, a late hold's answer, or an awake save's
+    /// let-go past its home, in an alarm) waits for the turn, so it lands
+    /// after a let-go in flight, whether or not that one did.
     async fn unhold(&self, generation: u64, after_held: bool) {
         let _marking = match after_held {
             true => self.marking.lock().await,
@@ -2284,13 +2335,13 @@ impl ComputerCell {
                 None => return,
             },
         };
-        if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
+        if !self.lifecycle().is_ok_and(|l| l.lets_go(generation)) || !self.container_running().await {
             return;
         }
         // (the lever's `stall-unhold`: a let-go slow to land, after its look)
         self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
         let g = JsValue::from_f64(generation as f64);
-        if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, UNMARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }

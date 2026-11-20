@@ -431,11 +431,14 @@ touches `/run/computer/hold`, and waits up to `HOLD_WAIT_MS` (20 s) for
 the guest to touch `/run/computer/held`: its answer that it claims
 nothing now (no claim in flight, none new while the hold exists) and has
 copied what a hot copy would tear. Then the DO saves. An awake save lets
-go after (it removes the files); a sleep keeps the hold until its
-container is gone. A guest that never answers is saved anyway, the save
-recorded as not `held`. What the guest already claimed may run on. A
-fresh container never has the files: the DO removes them from one started
-from a snapshot.
+go (it removes the files) once its home's record is taken, the rest of
+`/data` with the copies in it, and takes its work's while its guest
+works: the hold never made the work whole (what the guest already claimed
+writes to it during any save, and nothing in it is copied under the
+hold). A sleep keeps the hold until its container is gone. A guest that
+never answers is saved anyway, the save recorded as not `held`. What the
+guest already claimed may run on. A fresh container never has the files:
+the DO removes them from one started from a snapshot.
 
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the

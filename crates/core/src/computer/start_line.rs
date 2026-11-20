@@ -481,7 +481,7 @@ mod tests {
             self.c.now += SAVE_SETTLE_MS;
             assert_eq!(self.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
             let (_, held, seq) = save_asked(&self.apply(Event::Held { generation: g, held: true }));
-            self.c.saves.saved(g, sized(id), self.c.now, held);
+            self.c.saves.saved(g, sized(id), 0, self.c.now, held);
             self.apply(Event::Saved { generation: g, seq });
         }
 
@@ -491,7 +491,7 @@ mod tests {
             let g = self.c.life.generation();
             self.apply(Event::Sleep);
             let (_, held, seq) = save_asked(&self.apply(Event::Held { generation: g, held: true }));
-            self.c.saves.saved(g, sized(save), self.c.now, held);
+            self.c.saves.saved(g, sized(save), 0, self.c.now, held);
             self.apply(Event::Saved { generation: g, seq });
             if let Some(id) = snapshot {
                 let ran = self.c.saves.image_of(g).expect("the image it ran").to_string();
