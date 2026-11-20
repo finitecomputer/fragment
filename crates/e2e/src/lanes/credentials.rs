@@ -1581,7 +1581,7 @@ pub(super) fn vault_ask_checks(
     s.ok(
         VAULT_ASK_CHECKS[0],
         card["text"] == "Push the shop code"
-            && card["detail"].as_str().is_some_and(|d| d.contains(host) && d.contains("never what you paste"))
+            && card["detail"].as_str().is_some_and(|d| d.contains(&format!("Only {host} would receive it")) && d.contains("never the secret itself"))
             && card["field"]["placeholder"].is_string()
             && actions.len() == 2
             && actions[0]["label"] == "Save"

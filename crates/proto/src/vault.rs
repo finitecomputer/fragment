@@ -90,8 +90,8 @@ pub struct SecretRemoved {
     pub removed: bool,
 }
 
-/// `POST /api/vault/asks`: an agent asks its person for a secret (or to
-/// send one it may use to more hosts). The person answers in a card the
+/// `POST /api/vault/asks`: an agent asks its person for a new secret. The
+/// person answers in a card the
 /// platform draws (a notice, `GET /api/notices`), never in a chat's
 /// records, so no agent, model or app ever reads what they paste.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

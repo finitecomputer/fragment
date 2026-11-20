@@ -338,6 +338,8 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
         (Method::Delete, [name]) => delete(env, person, name).await?,
         (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
     };
+    // a waiting ask's card may change with it (Save, or Decline alone)
+    tell(env, person).await;
     json_bytes(answer)
 }
 
@@ -952,8 +954,8 @@ impl VaultCell {
         let expires = now + rules::ASK_TTL_MS;
         let text = serde_json::to_string(&asked).map_err(|e| CellError::host(format!("an ask's JSON: {e}")))?;
         self.sql().exec(
-            "INSERT INTO asks (id, agent, ask, at, expires, state) VALUES (?, ?, ?, ?, ?, 'waiting')",
-            vec![id.as_str().into(), agent.as_str().into(), text.as_str().into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(expires)],
+            "INSERT INTO asks (id, ask, at, expires, state) VALUES (?, ?, ?, ?, 'waiting')",
+            vec![id.as_str().into(), text.as_str().into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(expires)],
         )?;
         Self::ask_text(&id, &a.name, AskState::Waiting, expires)
     }

@@ -149,8 +149,9 @@ way T3 Code's secret prompt does: the agent never sees what they give.
 
 - **The card is the platform's.** The ask waits in the person's Vault and
   shows as one of their notices (`vault/notices`), in the band the shell
-  draws above their chat: who asks, why, the hosts it would work with, a
-  masked field, Save and Decline. A chat, an app or a fork of either draws
+  draws above their chat: who asks, why, the hosts that would receive the
+  secret itself (the agent names them; the person judges them), a masked
+  field, Save and Decline. A chat, an app or a fork of either draws
   no part of it, so no app code ever has the field.
 - **The paste goes to the Vault alone**: from the shell's page to `POST
   /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's

@@ -34,7 +34,7 @@
       },
       "AskSecret": {
         "additionalProperties": false,
-        "description": "`POST /api/vault/asks`: an agent asks its person for a secret (or to\nsend one it may use to more hosts). The person answers in a card the\nplatform draws (a notice, `GET /api/notices`), never in a chat's\nrecords, so no agent, model or app ever reads what they paste.",
+        "description": "`POST /api/vault/asks`: an agent asks its person for a new secret. The\nperson answers in a card the\nplatform draws (a notice, `GET /api/notices`), never in a chat's\nrecords, so no agent, model or app ever reads what they paste.",
         "properties": {
           "hosts": {
             "default": [],
@@ -7362,7 +7362,7 @@
             "session": []
           }
         ],
-        "summary": "An agent asks its person for a secret, or to send one it may use somewhere new: a card on their notices, with a masked field, that waits ten minutes.",
+        "summary": "An agent asks its person for a new secret: a card on their notices, with a masked field, that waits ten minutes.",
         "tags": [
           "vault"
         ]
@@ -7606,7 +7606,7 @@
             "session": []
           }
         ],
-        "summary": "The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault for the agent toward the hosts asked (or Allow, with no value).",
+        "summary": "The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault as a new secret for the agent toward the hosts asked; never one that replaces a secret they keep.",
         "tags": [
           "vault"
         ]
@@ -7711,7 +7711,7 @@
             "session": []
           }
         ],
-        "summary": "The person's Decline (or Don't allow) of an ask; again, it answers as the ask stands.",
+        "summary": "The person's Decline of an ask; again, it answers as the ask stands.",
         "tags": [
           "vault"
         ]

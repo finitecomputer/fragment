@@ -319,7 +319,8 @@ pub fn answered(ask: &AskSecret, agent: &str, value: &str) -> Result<PutSecret, 
 
 /// An ask on its person's card (`GET /api/notices`): `agent` is what they
 /// call the agent (its title, else its label), `picture` its face. Its
-/// words say where the secret would go and that the agent never sees it,
+/// words say which hosts would receive the secret itself (the agent chose
+/// them: its person judges them) and that the agent never sees it,
 /// with the field and Save; or, where they keep one of its name already
 /// (`held`), that an ask never replaces it, with Decline alone.
 pub fn ask_notice(id: &str, ask: &AskSecret, agent: &str, picture: Option<String>, expires_at: i64, held: bool) -> Notice {
@@ -330,10 +331,10 @@ pub fn ask_notice(id: &str, ask: &AskSecret, agent: &str, picture: Option<String
     } else {
         let goes = match ask.hosts.is_empty() {
             true => "It goes nowhere until you say where.".to_string(),
-            false => format!("It only works with {}.", ask.hosts.join(", ")),
+            false => format!("Only {} would receive it.", ask.hosts.join(", ")),
         };
         (
-            format!("{goes} {agent} gets a stand-in, never what you paste."),
+            format!("{goes} {agent} gets a stand-in to send there, never the secret itself."),
             Some(NoticeField { placeholder: "Paste it here".into() }),
             vec![NoticeAction::post_field("Save", route, serde_json::json!({})), decline],
         )
@@ -663,12 +664,12 @@ mod tests {
         let n = ask_notice(id, &ask("github", "To push your shop's code", &["api.github.com"]), "Juniper", Some("/p".into()), 9, false);
         assert_eq!(n.title, "Juniper asks for github");
         assert_eq!(n.text.as_deref(), Some("To push your shop's code"));
-        assert_eq!(n.detail.as_deref(), Some("It only works with api.github.com. Juniper gets a stand-in, never what you paste."));
+        assert_eq!(n.detail.as_deref(), Some("Only api.github.com would receive it. Juniper gets a stand-in to send there, never the secret itself."));
         assert_eq!(n.until, Some(Until { at: 9, said: "Expires".into() }));
         assert!(n.field.is_some() && n.actions[0].field && n.actions[0].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef"));
         assert!(!n.actions[1].field && n.actions[1].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef/decline"));
         let parked = ask_notice(id, &ask("github", "Kept for later", &[]), "Juniper", None, 9, false);
-        assert_eq!(parked.detail.as_deref(), Some("It goes nowhere until you say where. Juniper gets a stand-in, never what you paste."));
+        assert_eq!(parked.detail.as_deref(), Some("It goes nowhere until you say where. Juniper gets a stand-in to send there, never the secret itself."));
         let held = ask_notice(id, &ask("github", "Rotate", &[]), "Juniper", None, 9, true);
         assert!(held.field.is_none() && held.actions.len() == 1 && held.actions[0].label == "Decline", "{held:?}");
         assert!(held.detail.as_deref().is_some_and(|d| d.contains("never replaces")), "{:?}", held.detail);

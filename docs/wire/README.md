@@ -320,7 +320,7 @@ A person's secrets, which their agents use without holding: set and listed by th
 
 #### `vault.answer`
 
-`POST /api/vault/asks/{ask}`: The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault for the agent toward the hosts asked (or Allow, with no value).
+`POST /api/vault/asks/{ask}`: The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault as a new secret for the agent toward the hosts asked; never one that replaces a secret they keep.
 
 - Credentials: NIP-98, the shell's session
 - Body: [`AnswerAsk`](#answerask)
@@ -329,7 +329,7 @@ A person's secrets, which their agents use without holding: set and listed by th
 
 #### `vault.ask`
 
-`POST /api/vault/asks`: An agent asks its person for a secret, or to send one it may use somewhere new: a card on their notices, with a masked field, that waits ten minutes.
+`POST /api/vault/asks`: An agent asks its person for a new secret: a card on their notices, with a masked field, that waits ten minutes.
 
 - Credentials: NIP-98, the shell's session
 - Body: [`AskSecret`](#asksecret)
@@ -346,7 +346,7 @@ A person's secrets, which their agents use without holding: set and listed by th
 
 #### `vault.decline`
 
-`POST /api/vault/asks/{ask}/decline`: The person's Decline (or Don't allow) of an ask; again, it answers as the ask stands.
+`POST /api/vault/asks/{ask}/decline`: The person's Decline of an ask; again, it answers as the ask stands.
 
 - Credentials: NIP-98, the shell's session
 - Answer: [`SecretAsk`](#secretask)
@@ -402,7 +402,7 @@ out. Its answer: the fragment, and whether it is archived now.
 
 ### `AskSecret`
 
-in, closed. `POST /api/vault/asks`: an agent asks its person for a secret (or to send one it may use to more hosts). The person answers in a card the platform draws (a notice, `GET /api/notices`), never in a chat's records, so no agent, model or app ever reads what they paste.
+in, closed. `POST /api/vault/asks`: an agent asks its person for a new secret. The person answers in a card the platform draws (a notice, `GET /api/notices`), never in a chat's records, so no agent, model or app ever reads what they paste.
 
 | field | type | | |
 | --- | --- | --- | --- |
