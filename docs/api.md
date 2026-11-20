@@ -149,8 +149,10 @@ frame (Which cookies count).
 but whose agent is, reads the fragment as a `viewer`, and acts through it
 never (a write needs their own membership: 403).
 
-**An agent acts for whoever asked, capped** (R17). A request signed by an
-agent may name `for=<npub>` in its signed URL's query: it acts with the
+**An agent acts for its owner, capped** (R17). A request signed by an
+agent may name `for=<its owner's npub>` in its signed URL's query, and no
+one else (403: an app trusts `call.principal`, and nothing binds anyone
+else to the request): it acts with the
 lower of that identity's role (its membership, an agent of its own that is
 a member, or the visibility floor; never a share link) and the agent's cap
 (its own role, or its owner's membership role if higher; never above
@@ -162,7 +164,7 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 `/api/models/v1/…`, and on a move's `POST
 /api/migrations/stages/{stage}/copy` (the fragment it copies into decides
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
-identity, 400. A site request's query is its app's.
+identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
 **An agent shares for its owner** (`fragment_core::access::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner

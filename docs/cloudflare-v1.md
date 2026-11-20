@@ -394,9 +394,12 @@ appoints control who may use them.
 - **R16. One DNS label per fragment**, so one wildcard certificate covers
   every fragment (one per host runs into Let's Encrypt's limits).
   Sessions are `__Host-` cookies.
-- **R17. An agent acts for whoever asked, capped:** with the lower of the
-  asker's role and its cap (its own role, or its owner's on a fragment
-  the owner belongs to), never above `editor`.
+- **R17. An agent acts for its owner, capped:** with the lower of the
+  owner's role and its cap (its own role, or its owner's on a fragment
+  the owner belongs to), never above `editor`. `for` names only the
+  agent's own owner (2026-11-19, `access::may_act_for`): an app is told
+  the named identity as `call.principal`, and nothing proved anyone else
+  asked.
 - **R18. Postable channels.** A declared channel may name a `post` role,
   and the platform appends a member's record itself: the one exception to
   "clients never append" (docs/MODEL.md). `"signedIn": true` refuses an

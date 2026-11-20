@@ -326,7 +326,8 @@ pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8])
 
 /// The signer for any payload: a body the router read, or one it streams
 /// through unread (a blob, whose URL names its hash). `for` is inside the
-/// signed URL, and only an agent may name it: a person acts as themselves.
+/// signed URL, and only an agent may name it, and only its own owner
+/// (`access::may_act_for`): a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
     let (identity, key) = match caller(env, req, url, payload)? {
@@ -334,8 +335,8 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
         // the shell's: a person, signed in on the platform
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
-    if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
-        return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
+    if let Some(named) = &acting_for {
+        fragment_core::access::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
     }
     Ok(Signed { identity, key, acting_for })
 }
