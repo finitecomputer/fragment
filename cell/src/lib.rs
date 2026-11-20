@@ -289,8 +289,11 @@ pub(crate) async fn registry_round_trip(env: &Env, path: &str, body: String) -> 
     }
 }
 
-/// The identity a request's signed URL names in `for`: an agent acting
-/// for whoever asked it (decision R17). At most one, an identity.
+/// The identity a request's signed URL names in `for` (decision R17). Today
+/// only the agent's owner (`access::may_act_for`, checked in `signer_of`): a
+/// bare claim naming anyone else is refused, since nothing proves they asked;
+/// acting for another member will come with that proof (such as their own
+/// signed chat record). At most one, an identity.
 pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();
@@ -621,7 +624,8 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
 pub(crate) use json_response::{json_answer, json_passed};
 
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
-/// reaches for whoever asked (docs/cloudflare-v1.md, R17): the asker's, where the
+/// reaches for whom it names (docs/cloudflare-v1.md, R17; today only its
+/// owner, see `acting_for`): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
 /// there (`access::listed_role`). A call decides again, live.
 async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
