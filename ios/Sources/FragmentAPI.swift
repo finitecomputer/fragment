@@ -111,13 +111,6 @@ struct FragmentAPI: Sendable {
         catch APIError.absent { return nil }
     }
 
-    /// A call of what may be absent (an operation a host does not have yet):
-    /// `nil` for a 404, and else as `request`.
-    func optionalPost<T: Decodable>(_ type: T.Type, _ path: String, body: JSONValue) async throws -> T? {
-        do { return try await request(path, method: "POST", body: body) as T }
-        catch APIError.absent { return nil }
-    }
-
     /// The person's list; its `limits` become what a message carries here
     /// (`ChatAttachment.limits`), an older platform's its old ones.
     func fragments() async throws -> [FragmentSummary] {

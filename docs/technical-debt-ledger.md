@@ -1158,31 +1158,11 @@ unfinished design, not debt.
   conversations as upserts on whatever head main has
   (cli/src/session/mod.rs `commit`).
 - **Risk:** two imports of one conversation at once keep the last one's
-  file, which may be the older copy; its row describes that file, so
-  the archive lists what it holds. Nothing is lost: importing the newer
-  copy again replaces it.
+  file, which may be the older copy; the indexes describe whichever file
+  stands (each entry names its file's commit). Nothing is lost:
+  importing the newer copy again replaces it.
 - **Delete when:** each batch's commit compares and swaps each file it
   replaces, made again from main when it loses (keeping the newer).
-
-## A session archive keeps its index files beside its rows
-
-- **Shortcut:** clients from before the list's rows read and write
-  `index/<kind>.json`: an iPhone build reads `index/chat.json`, and a
-  computer's CLI imports through the index files alone. So each import
-  writes them again after its rows (cli/src/session/mod.rs `write`), and
-  the page (templates/sessions/site/sessions.js `list`), the shell's
-  History (cell/shell/session-archive.js `chatsOf`) and the iPhone's
-  (ios/Sources/FragmentApp.swift `loadImported`) list the rows and any
-  conversation of an index file no row lists, or lists as a newer copy.
-- **Risk:** a commit and a read more an import; the index files stay
-  as they were when another writer came between an import's commits
-  (older than its files, so an older CLI reads them; the next import
-  writes them); a conversation deleted by hand stays in the index file,
-  listed by its key, until the next import.
-- **Delete when:** every client reads the rows: iPhone builds and every
-  computer image's CLI from this release on (an operator's check of the
-  pinned image and the iPhone build). Then the readers drop the index
-  file, the CLI stops writing it, and an import deletes it.
 
 ## The computer's view carries two fixed routes beside the list
 

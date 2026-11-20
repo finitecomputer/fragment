@@ -1,27 +1,23 @@
 //! A person's session archive (templates/sessions/README.md): the conversations
 //! they had with an agent elsewhere, brought in by `fragment session
 //! import`, kept as files in a fragment of their own of kind `sessions`.
-//! One file a conversation (`sessions/<key>.json`), and a row of its app's
-//! list each (templates/sessions/app.mjs). Pure: the format, its limits,
+//! One file a conversation (`sessions/<key>.json`) and one index a kind
+//! (`index/<kind>.json`), newest first. Pure: the format, its limits,
 //! where each conversation lives, and how an import merges into what the
 //! archive holds. The CLI reads each origin's own store into it (Hermes'
 //! `state.db`, the old Finite's export) and writes it; the shell reads it.
 //!
-//! **The conversations are files, the list is rows.** An archive's
-//! conversations outgrow the app's 16 MiB (`limits::APP_DB_MAX_BYTES`), and
-//! as files they are git's: one commit lands a batch whole or not at all, a
-//! file of 1 MiB or more is a blob, and an agent reads them with `fragment
-//! sync` and its own tools. Its list (an `Entry` a conversation, about 500
-//! bytes each) is state, rows of its app: an import writes its
-//! conversations first, then a row for each one it wrote or read, naming
-//! the commit its file was last changed in, and drops the rows whose files
-//! are gone. A row naming another commit than its file's is read again, so
-//! a crash, or another writer, is put right by the next import of
-//! anything.
+//! **Files, not the app's SQL.** An archive outgrows the app's 16 MiB
+//! (`limits::APP_DB_MAX_BYTES`), and as files it is git's: one commit lands
+//! a batch whole or not at all, a file of 1 MiB or more is a blob, and an
+//! agent reads it with `fragment sync` and its own tools.
 //!
-//! **Index files, for older clients.** Clients from before the rows read
-//! and write an index file a kind (`Index`, `index/<kind>.json`), which
-//! each import writes again after its rows (docs/technical-debt-ledger.md).
+//! **The index is a cache of `sessions/`.** Each entry names the commit its
+//! file was last changed in (`Entry::commit`), and an import trusts it only
+//! while that is still the file's last commit, reading the file otherwise.
+//! So an import that stopped before its indexes, another writer, or a race
+//! between two imports is put right by the next import of anything, with
+//! no walk through history.
 //!
 //! **Keyed by the original id.** A conversation's key is its origin and its
 //! id there (`key`), so importing the same one again (a re-run, a retry
@@ -46,29 +42,9 @@ pub const TITLE: &str = "Session Archive";
 /// that would pass either is refused whole, before it writes anything. Both
 /// sit inside what a person's export takes of one fragment (its files, and
 /// its bytes: `export::limits`), with room for the archive's other files,
-/// so an archive never fails its person's export. The count bounds its
-/// list too (at about 500 bytes an entry, 9 MB if every one is a run).
+/// so an archive never fails its person's export. The count bounds each
+/// index too (at about 500 bytes an entry, 9 MB if every one is a run).
 pub const SESSIONS_MAX: usize = 18_000;
-/// What an archive's list may take of its app's database (`list_cost`),
-/// at most: inside `limits::APP_DB_MAX_BYTES`, with its ledger beside it,
-/// so an import whose list would not fit is refused before it writes
-/// anything, never cut off as it files its rows. Every conversation of an
-/// archive fits it at entries of about 500 bytes (a title and a preview of
-/// Latin text); an archive of longer ones holds fewer.
-pub const LIST_MAX_BYTES: u64 = 13 * 1024 * 1024;
-const _: () = assert!(LIST_MAX_BYTES + 3 * 1024 * 1024 <= fragment_proto::limits::APP_DB_MAX_BYTES, "an archive's list fits its app's database");
-
-/// What an entry's row takes of its app's database, at most: SQLite's 4 KiB
-/// pages hold rows whole (one of 2 KiB is alone on its page), as many as
-/// fit, about a tenth left free, and its key again in the list's index.
-/// Measured against templates/sessions/app.mjs's schema with SQLite,
-/// 18,000 rows of 500-byte entries took 661 bytes each (this says 704);
-/// 1,200-byte ones 1,441 (1,562); 2,400-byte ones 4,181 (4,566).
-pub fn list_cost(e: &Entry) -> u64 {
-    let row = serde_json::to_vec(e).map_or(0, |j| j.len() as u64) + 40;
-    let per_page = (3_900 / row).max(1);
-    4_096 / per_page * 11 / 10 + 60
-}
 pub const ARCHIVE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const _: () = assert!(SESSIONS_MAX + 2_000 <= crate::export::limits::FILES_MAX, "an archive's files fit its person's export");
 const _: () = assert!(2 * ARCHIVE_MAX_BYTES <= crate::export::limits::FRAGMENT_MAX_BYTES, "an archive's bytes fit its person's export");
@@ -91,14 +67,15 @@ pub const FIELD_MAX_CHARS: usize = 200;
 /// Where an untitled conversation's title comes from: its first words.
 const TITLE_FROM_TEXT_CHARS: usize = 80;
 
-/// A kind's name, in bytes, at most.
+/// A kind's name, in bytes, at most: it names its index's file
+/// (`index_path`).
 pub const KIND_MAX_BYTES: usize = 32;
 
 /// What a conversation was, as its origin ran it: one of the kinds this
 /// reader files, or one a later reader files that this one does not know
 /// (`Other`, FIN-296). A kind is read as any kind's name (`Kind::parse`)
 /// and kept as it was named, so an older CLI importing into an archive a
-/// newer one wrote keeps that conversation and its row as the newer
+/// newer one wrote keeps that conversation and its index as the newer
 /// wrote them (add-only, as the wire is); readers list the kinds they
 /// know. On the wire and in files it is its name, a string.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -135,7 +112,7 @@ impl Kind {
 
     /// A kind as an archive names it: a known one, else any name a kind
     /// may have (a lower-case letter, then letters, digits, `_` and `-`,
-    /// at most `KIND_MAX_BYTES`).
+    /// at most `KIND_MAX_BYTES`), which names a file (`index_path`).
     pub fn parse(s: &str) -> Option<Kind> {
         if let Some(k) = Kind::known(s) {
             return Some(k);
@@ -359,13 +336,12 @@ pub fn key_of_path(path: &str) -> Option<&str> {
     path.strip_prefix("sessions/")?.strip_suffix(".json").filter(|k| !k.is_empty() && !k.contains('/'))
 }
 
-/// Where a kind's index file is (`index/<kind>.json`): a copy of the
-/// list for clients from before its rows (docs/technical-debt-ledger.md).
+/// Where a kind's index is.
 pub fn index_path(kind: &Kind) -> String {
     format!("index/{}.json", kind.as_str())
 }
 
-/// The kind whose index file a path is, when it is one.
+/// The kind whose index a path is (`index/<kind>.json`), when it is one.
 pub fn kind_of_index_path(path: &str) -> Option<Kind> {
     Kind::parse(path.strip_prefix("index/")?.strip_suffix(".json")?)
 }
@@ -410,7 +386,7 @@ impl Session {
         bytes
     }
 
-    /// Its key, its file and its list's entry, or why it is not imported.
+    /// Its key, its file and its index entry, or why it is not imported.
     /// It must be `normalized` first.
     pub fn filed(&self) -> Result<(Entry, Vec<u8>), Refused> {
         let key = key(&self.origin, &self.id)?;
@@ -436,12 +412,13 @@ impl Session {
             sha256: hex::encode(Sha256::digest(&bytes)),
             bytes: bytes.len() as u64,
             media: self.messages.iter().flat_map(|m| &m.attachments).map(|a| a.size).sum(),
+            commit: None,
         };
         Ok((entry, bytes))
     }
 }
 
-/// A conversation as its archive's list holds it.
+/// A conversation as its kind's index lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub key: String,
@@ -478,6 +455,12 @@ pub struct Entry {
     /// toward the archive's bytes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub media: u64,
+    /// The commit its file was last changed in, as this entry describes it:
+    /// an import trusts the entry only while that is still the file's last
+    /// commit, and reads the file otherwise. None: an import before it, or
+    /// one that could not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -485,7 +468,7 @@ fn is_zero(n: &u64) -> bool {
 }
 
 impl Entry {
-    /// When it was last said, else begun: what an index file sorts by.
+    /// When it was last said, else begun: what an index sorts by.
     fn when(&self) -> Option<&str> {
         self.ended_at.as_deref().or(self.started_at.as_deref())
     }
@@ -501,8 +484,7 @@ impl Entry {
     }
 }
 
-/// A kind's index file: its conversations, newest first, as clients from
-/// before the list's rows read and write it.
+/// A kind's index: its conversations, newest first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Index {
     pub format: String,
@@ -532,7 +514,7 @@ impl Index {
 pub struct Merge<P> {
     /// The conversations to write, by key, with their files.
     pub writes: BTreeMap<String, P>,
-    /// Every entry after the import: what the archive's list holds.
+    /// Every entry after the import: what the indexes list.
     pub entries: BTreeMap<String, Entry>,
     pub added: usize,
     pub updated: usize,
@@ -552,7 +534,6 @@ impl<P> Default for Merge<P> {
 pub enum TooMuch {
     Conversations(usize),
     Bytes(u64),
-    List(u64),
 }
 
 impl std::fmt::Display for TooMuch {
@@ -560,7 +541,6 @@ impl std::fmt::Display for TooMuch {
         match self {
             TooMuch::Conversations(n) => write!(f, "the archive would hold {n} conversations, past the {SESSIONS_MAX} it holds (`--kind chat` imports only the chats)"),
             TooMuch::Bytes(n) => write!(f, "the archive would hold {} MiB of conversations, past the {} MiB it holds (`--kind chat` imports only the chats)", n / (1024 * 1024), ARCHIVE_MAX_BYTES / (1024 * 1024)),
-            TooMuch::List(n) => write!(f, "the archive's list would take {} MiB of its database, past the {} MiB it may (`--kind chat` imports only the chats)", n / (1024 * 1024), LIST_MAX_BYTES / (1024 * 1024)),
         }
     }
 }
@@ -577,12 +557,12 @@ pub fn within(count: usize, bytes: u64) -> Result<(), TooMuch> {
     Ok(())
 }
 
-/// An import into an archive: `indexed` is what its list describes as its
-/// files are, `stored` the keys `sessions/` holds files for, `found` the
-/// entry of each of those its list does not describe (read from its file),
-/// and `incoming` the import's conversations. Every write is a conversation
-/// new or newer. One that grows the archive past its limits is refused
-/// whole.
+/// An import into an archive: `indexed` is what its indexes describe as
+/// the files are, `stored` the keys `sessions/` holds files for, `found`
+/// the entry of each of those the indexes do not describe (read from its
+/// file), and `incoming` the import's conversations. Every write is a
+/// conversation new or newer. One that grows the archive past its limits
+/// is refused whole.
 pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BTreeSet<String>, found: Vec<Entry>, incoming: Vec<(Entry, P)>) -> Result<Merge<P>, TooMuch> {
     let mut m = Merge::default();
     m.entries.extend(indexed.iter().filter(|(k, _)| stored.contains(*k)).map(|(k, e)| (k.clone(), e.clone())));
@@ -603,11 +583,6 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
     }
     if m.added > 0 || m.updated > 0 {
         within(m.entries.len(), m.entries.values().map(|e| e.bytes + e.media).sum())?;
-    }
-    // every import files its list, so every import holds it to its bound
-    let list: u64 = m.entries.values().map(list_cost).sum();
-    if list > LIST_MAX_BYTES {
-        return Err(TooMuch::List(list));
     }
     Ok(m)
 }
@@ -865,10 +840,6 @@ mod tests {
         assert!(fragment_proto::valid_repo_path(&session_path(&hashed)));
         assert_eq!(key_of_path("sessions/a/b.json"), None);
         assert_eq!(index_path(&Kind::Cron), "index/cron.json");
-        assert_eq!(kind_of_index_path("index/heartbeat.json"), Some(Kind::Other("heartbeat".into())));
-        for path in ["index/a/b.json", "index/.json", "sessions/hermes-a.json", "index/Chat.json"] {
-            assert_eq!(kind_of_index_path(path), None, "{path}");
-        }
     }
 
     /// Goal: a file a message held is kept by its hash, at a path its kind
@@ -928,6 +899,9 @@ mod tests {
         let m = merge(&indexed, &stored, vec![], vec![filed(chat("a", two)), filed(chat("b", vec![said("user", "2026-10-03T09:00:00Z", "new")]))]).unwrap();
         assert_eq!((m.added, m.updated, m.unchanged), (1, 1, 0));
         assert_eq!(m.writes.keys().collect::<Vec<_>>(), ["hermes-a", "hermes-b"]);
+        let index = Index::of(Kind::Chat, &m.entries);
+        assert_eq!(index.sessions.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["hermes-b", "hermes-a"], "newest first");
+        assert!(Index::of(Kind::Cron, &m.entries).sessions.is_empty());
 
         // as late: the export's copy that kept a duplicate never replaces a
         // copy as late, and a better read of it (or a fixed one) does
@@ -939,12 +913,12 @@ mod tests {
         assert_eq!(merge(&indexed3, &stored3, vec![], vec![better]).map(|m| m.updated), Ok(1));
     }
 
-    /// Goal: after a crash (restart), the next import puts the list
-    /// right. Method: an archive whose `sessions/` holds a file its list
-    /// lacks (an import stopped before its rows) and whose list names a
-    /// file gone; an import of nothing new fixes both.
+    /// Goal: after a crash (restart), the next import puts the indexes
+    /// right. Method: an archive whose `sessions/` holds a file its index
+    /// lacks (an import stopped before its last commit) and whose index
+    /// names a file gone; an import of nothing new fixes both.
     #[test]
-    fn an_import_repairs_a_list_a_crash_left() {
+    fn an_import_repairs_an_index_a_crash_left() {
         let (a, _) = filed(chat("a", vec![said("user", "2026-10-01T09:00:00Z", "a")]));
         let (gone, _) = filed(chat("gone", vec![said("user", "2026-10-01T09:00:00Z", "g")]));
         let (orphan, _) = filed(Session { kind: Kind::Cron, ..chat("orphan", vec![said("user", "2026-10-02T09:00:00Z", "o")]) });
@@ -954,8 +928,8 @@ mod tests {
         assert!(m.writes.is_empty());
         assert_eq!(m.entries.keys().collect::<Vec<_>>(), [&a.key, &orphan.key]);
 
-        // a file whose row names another copy (an update whose row never
-        // landed) is listed by its own entry
+        // a file whose index entry names another copy (an update whose index
+        // commit never landed) is listed by its own entry
         let (newer_a, _) = filed(chat("a", vec![said("user", "2026-10-05T09:00:00Z", "a, later")]));
         let m = merge::<Vec<u8>>(&indexed, &stored, vec![orphan, newer_a.clone()], vec![]).unwrap();
         assert_eq!(m.entries.get(&a.key), Some(&newer_a));
@@ -964,7 +938,7 @@ mod tests {
     /// Goal (FIN-296): a kind is any kind's name, kept as it was named, so
     /// an older reader reads a newer reader's kind; a name no kind may have
     /// (it names a file) is refused. Method: the known kinds, a newer one,
-    /// and names no kind has, through serde.
+    /// and names no kind has, through serde and the index paths.
     #[test]
     fn a_kind_is_any_kinds_name_kept_as_named() {
         for k in Kind::KNOWN {
@@ -977,6 +951,8 @@ mod tests {
         assert_eq!(newer, Kind::Other("heartbeat".into()));
         assert!(!newer.is_known() && Kind::known("heartbeat").is_none(), "a reader makes the kinds it knows alone");
         assert_eq!(serde_json::to_string(&newer).unwrap(), "\"heartbeat\"", "written back as it was named");
+        assert_eq!(index_path(&newer), "index/heartbeat.json");
+        assert_eq!(kind_of_index_path("index/heartbeat.json"), Some(newer));
         assert_eq!(Kind::parse("chat"), Some(Kind::Chat), "a known name is the known kind, never another");
         let long = "a".repeat(KIND_MAX_BYTES + 1);
         for bad in ["", "Heartbeat", "heart beat", "../x", "x/y", "1st", "-x", "é", long.as_str()] {
@@ -984,13 +960,16 @@ mod tests {
             assert!(serde_json::from_str::<Kind>(&serde_json::to_string(bad).unwrap()).is_err(), "{bad:?}");
         }
         assert!(Kind::parse(&"a".repeat(KIND_MAX_BYTES)).is_some());
+        for path in ["index/a/b.json", "index/.json", "sessions/hermes-a.json", "index/Chat.json"] {
+            assert_eq!(kind_of_index_path(path), None, "{path}");
+        }
     }
 
     /// Goal (FIN-296): an archive holding a conversation of a kind this
     /// reader does not know takes an import as before, keeping that
-    /// conversation as it is; one its list lacks (a newer import stopped
-    /// before its rows) is listed as the newer reader lists it; the same
-    /// import again
+    /// conversation and leaving its index as it is; one its index lacks (a
+    /// newer import stopped before its indexes) is listed in its own
+    /// kind's index, as the newer reader lists it; the same import again
     /// writes nothing. Method: merge, over a `heartbeat` conversation.
     #[test]
     fn an_archive_with_a_newer_kind_takes_an_import_and_keeps_it() {
@@ -1001,6 +980,7 @@ mod tests {
         let m = merge(&indexed, &stored, vec![], import()).unwrap();
         assert_eq!(m.added, 1);
         assert_eq!(m.entries.get(&beat.key), Some(&beat), "kept as the newer reader filed it");
+        assert_eq!(Index::of(hb.clone(), &m.entries).sessions, vec![beat.clone()]);
 
         let (again_indexed, again_stored) = held(&m.entries.values().collect::<Vec<_>>());
         let replay = merge(&again_indexed, &again_stored, vec![], import()).unwrap();
@@ -1008,7 +988,7 @@ mod tests {
 
         let stored: BTreeSet<String> = [beat.key.clone()].into();
         let repaired = merge::<Vec<u8>>(&BTreeMap::new(), &stored, vec![beat.clone()], vec![]).unwrap();
-        assert_eq!(repaired.entries.get(&beat.key), Some(&beat), "listed as its kind's");
+        assert_eq!(repaired.entries.get(&beat.key), Some(&beat));
     }
 
     /// Goal: an archive past its limits (its conversations, or their
@@ -1030,27 +1010,6 @@ mod tests {
         let past = merge(&indexed, &stored, vec![], vec![(Entry { bytes: ARCHIVE_MAX_BYTES / 2 + 1, ..light }, bytes)]);
         assert_eq!(past.err(), Some(TooMuch::Bytes(ARCHIVE_MAX_BYTES + 1)));
         assert_eq!(within(SESSIONS_MAX, ARCHIVE_MAX_BYTES), Ok(()));
-
-        // a list past its app's database (long titles and previews in a
-        // script of three bytes a character): refused before anything is
-        // written, even by an import that changes nothing, and one at the
-        // limit's edge taken
-        let wide = Entry { key: "hermes-00000".into(), title: "題".repeat(TITLE_MAX_CHARS), preview: "語".repeat(PREVIEW_MAX_CHARS), ..base.clone() };
-        let each = list_cost(&wide);
-        let latin = Entry { key: "hermes-00000".into(), title: "Planting beans in spring".into(), preview: "when do I plant beans? ".repeat(6), agent: Some("Juniper".into()), ..base.clone() };
-        assert!(SESSIONS_MAX as u64 * list_cost(&latin) <= LIST_MAX_BYTES, "a whole archive of {} bytes an entry fits", serde_json::to_vec(&latin).unwrap().len());
-        let fits = (LIST_MAX_BYTES / each) as usize;
-        let listed: BTreeMap<String, Entry> = (0..fits - 1).map(|i| (format!("hermes-{i:05}"), Entry { key: format!("hermes-{i:05}"), ..wide.clone() })).collect();
-        let stored: BTreeSet<String> = listed.keys().cloned().collect();
-        let one = |id: &str| (Entry { key: format!("hermes-{id}"), ..wide.clone() }, ());
-        let edge = merge(&listed, &stored, vec![], vec![one("zzzzz")]);
-        assert!(edge.is_ok(), "{fits} of {each} bytes fit: {:?}", edge.err());
-        let past = merge(&listed, &stored, vec![], vec![one("zzzzz"), one("zzzzy"), one("zzzzx")]);
-        assert!(matches!(past.err(), Some(TooMuch::List(n)) if n > LIST_MAX_BYTES));
-        let mut over = listed.clone();
-        over.extend(["zzzzz", "zzzzy", "zzzzx"].map(|id| (format!("hermes-{id}"), one(id).0)));
-        let over_stored: BTreeSet<String> = over.keys().cloned().collect();
-        assert!(matches!(merge::<()>(&over, &over_stored, vec![], vec![]).err(), Some(TooMuch::List(_))), "an import of nothing too");
     }
 
     /// Goal: times read as the export wrote them and Hermes kept them, and

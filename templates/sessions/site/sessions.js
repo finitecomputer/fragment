@@ -3,8 +3,7 @@
 // tasks folded away; with `?s=<key>`, that conversation, read-only, in a
 // chat's look: what the person and the agent said, and the agent's tool
 // calls, their results and its reasoning folded into steps, as a chat
-// folds them. The list is the archive's rows (app.mjs `sessions`); a
-// conversation is read from its file (`__file`).
+// folds them. Everything is read from the archive's own files (`__file`).
 // Framed by the shell, a conversation offers Continue: the shell asks with
 // which of the person's agents, and makes a chat of it with that one (or
 // opens the chat it made before).
@@ -46,48 +45,8 @@ function row(e) {
   return li;
 }
 
-// The archive's rows, every page of them; none on a host before them; null
-// when they could not be read.
-async function rows() {
-  const out = [];
-  let after = "";
-  for (let i = 0; i < 64; i++) {
-    const r = await fetch("__op/sessions", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: `list-${Date.now()}-${i}`, input: { after } }) }).catch(() => null);
-    // no list at all (a host before it); one gone after its first page failed
-    if (r?.status === 404) return i === 0 ? [] : null;
-    const page = r?.ok ? (await r.json().catch(() => null))?.result : null;
-    if (!Array.isArray(page?.sessions)) return null;
-    out.push(...page.sessions);
-    if (!page.next || page.next <= after) return out;
-    after = page.next;
-  }
-  return null;
-}
-
-// Of a conversation's copies, the newer: last said later, else as late by a
-// better read, else holding more of its files (fragment_core::session,
-// `Entry::newer`, which an import keeps to).
-const copy = (e) => [e.ended_at ?? e.started_at ?? "", e.reader ?? 0, e.media ?? 0];
-function newer(a, b) {
-  const [x, y] = [copy(a), copy(b)];
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
-  return false;
-}
-
-// When it was last said, else begun: newest first.
-const newest = (a, b) => (b.ended_at ?? b.started_at ?? "").localeCompare(a.ended_at ?? a.started_at ?? "") || (a.key < b.key ? -1 : 1);
-
 async function list(page) {
-  const listed = await rows();
-  if (!listed) throw new Error("its list was not read");
-  // its rows, and any conversation of the index files older clients keep
-  // that no row lists yet, or lists as a newer copy (an older CLI's import:
-  // docs/technical-debt-ledger.md)
-  const indexed = await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`)));
-  const by = new Map(listed.map((e) => [e.key, e]));
-  for (const v of indexed) for (const e of Array.isArray(v?.sessions) ? v.sessions : []) if (typeof e?.key === "string" && (!by.has(e.key) || newer(e, by.get(e.key)))) by.set(e.key, e);
-  const all = [...by.values()];
-  const lists = KINDS.map(([kind]) => all.filter((e) => e.kind === kind).sort(newest));
+  const lists = await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`).then((v) => (Array.isArray(v?.sessions) ? v.sessions : []))));
   const head = el("header", "archive-head");
   head.append(el("h1", null, "Session Archive"));
   if (lists.every((l) => !l.length)) {

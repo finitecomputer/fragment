@@ -6,9 +6,8 @@
 //! Hermes' own `state.db`). It writes as
 //! the archive's owner or as their agent acting for them (`FRAGMENT_FOR`),
 //! which is an editor of what its owner owns: one commit a batch of
-//! conversations, each on the head it read (a commit that lost that race is
-//! made again on the new one), then the archive's list, rows in its app
-//! (templates/sessions/app.mjs), each naming the commit it describes.
+//! conversations, then one for the indexes, each on the head it read (a
+//! commit that lost that race is made again on the new one).
 //!
 //! **Bounded as it reads.** Each conversation is filed as it is read, and
 //! its file spooled to a folder of the import's own (`Spool`), so an import
@@ -26,8 +25,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
 use fragment_core::blob;
-use fragment_core::session::{self, Entry, Kind, Session};
-use fragment_proto::{CreateFragment, Created, FragmentKind, FragmentList, OpCall, OpResult, RepoPath, Role};
+use fragment_core::session::{self, Entry, Index, Kind, Session};
+use fragment_proto::{CreateFragment, Created, FragmentKind, FragmentList, RepoPath, Role};
 use serde::Serialize;
 
 use crate::api::{Client, Code, CodedError};
@@ -65,7 +64,7 @@ const BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// Tries of one commit that lost its head to another writer, or whose
 /// answer was lost.
 const COMMIT_TRIES: u32 = 5;
-/// Conversations' files read at once when no row describes them (`found`).
+/// Conversations' files read at once when no index entry describes them.
 const READERS: usize = 8;
 /// An id said in a refusal, at most (it is refused for being odd: escaped).
 const SAID_ID_MAX_CHARS: usize = 80;
@@ -370,27 +369,18 @@ fn archive(c: &Client, list: &FragmentList) -> Result<(String, bool)> {
     Ok((made.name, true))
 }
 
-/// The archive at one head of main: the rows of its list that describe its
-/// files as they are, and each file `sessions/` holds, by key.
+/// The archive at one head of main: the entries of its indexes that
+/// describe its files as they are, and each file `sessions/` holds, by key.
 struct Held {
     head: Option<String>,
-    /// Each row whose file was last changed in the commit it names: what it
-    /// describes is that file.
+    /// Each entry whose file was last changed in the commit it names.
     indexed: BTreeMap<String, Entry>,
-    stored: BTreeMap<String, Stored>,
-    /// The rows whose files are gone.
-    gone: Vec<String>,
-    /// The files `media/` holds, by path, and the kinds of the index files
-    /// main holds (`index/<kind>.json`: a copy for older clients), and
-    /// whether they were written in main's head (nothing changed since).
+    /// The commit each file of `sessions/` was last changed in, by key.
+    stored: BTreeMap<String, String>,
+    /// The files `media/` holds, by path, and each index file's bytes, by
+    /// kind (a kind this CLI does not know too: a newer one's, FIN-296).
     media: BTreeSet<String>,
-    indexes: BTreeSet<Kind>,
-    indexes_current: bool,
-}
-
-struct Stored {
-    /// The commit it was last changed in, which a row names to describe it.
-    commit: String,
+    indexes: BTreeMap<Kind, Vec<u8>>,
 }
 
 impl Held {
@@ -399,140 +389,49 @@ impl Held {
     }
 }
 
-/// A row of the archive's list (templates/sessions/app.mjs): an entry, and
-/// the commit its file was last changed in as it describes it.
-#[derive(Serialize, serde::Deserialize)]
-struct Row {
-    #[serde(flatten)]
-    entry: Entry,
-    #[serde(default)]
-    commit: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct RowsPage {
-    /// Each read alone: one that is no row (another writer's) is as none,
-    /// its file read and its row written again.
-    sessions: Vec<serde_json::Value>,
-    next: Option<String>,
-}
-
-/// Rows one `filed` call carries at most, and their bytes (a call's input
-/// is at most `INPUT_MAX_BYTES`), and the keys it drops.
-const FILED_ROWS: usize = 200;
-const FILED_BYTES: usize = fragment_proto::limits::INPUT_MAX_BYTES / 2;
-const FILED_GONE: usize = 1000;
-
-/// `op` of the archive's app with `input`: its result. A host whose
-/// archive has no list (404: older than this CLI) is refused, before an
-/// import writes any conversation: it would be listed nowhere.
-fn op<T: serde::de::DeserializeOwned>(c: &Client, name: &str, op: &str, input: serde_json::Value) -> Result<T> {
-    let id = format!("session-{op}-{:016x}", rand::random::<u64>());
-    let resp = c.post_json_by_id(&format!("/api/f/{name}/ops/{op}"), &OpCall { id, input })?;
-    if resp.status == 404 {
-        let msg = "this host's session archive keeps no list yet: it is older than this CLI. Import with the CLI it serves (its install page)".to_string();
-        return Err(anyhow::Error::new(CodedError { code: Code::Unavailable, msg }));
-    }
-    let done: OpResult = c.call_as(resp)?;
-    serde_json::from_value(done.result).with_context(|| format!("the archive's {op} answered no list"))
-}
-
-/// Every row of the archive's list, each as it reads.
-fn rows(c: &Client, name: &str) -> Result<Vec<serde_json::Value>> {
-    let mut out = Vec::new();
-    let mut after = String::new();
-    for _ in 0..=session::SESSIONS_MAX {
-        let page: RowsPage = op(c, name, "sessions", serde_json::json!({ "after": after }))?;
-        out.extend(page.sessions);
-        match page.next {
-            None => return Ok(out),
-            Some(n) if n <= after => bail!("the archive's list stopped moving on at {}", said_id(&n)),
-            Some(n) => after = n,
-        }
-    }
-    bail!("the archive's list holds more than {} rows", session::SESSIONS_MAX)
-}
-
-/// `rows` filed in the archive's list and `gone` dropped from it, a call a
-/// batch.
-fn file_rows(c: &Client, name: &str, rows: Vec<Row>, gone: Vec<String>) -> Result<()> {
-    let mut calls: Vec<(Vec<Row>, Vec<String>)> = vec![(Vec::new(), Vec::new())];
-    let mut bytes = 0;
-    for row in rows {
-        let size = serde_json::to_vec(&row)?.len();
-        if calls.last().is_some_and(|(r, _)| r.len() == FILED_ROWS || bytes + size > FILED_BYTES) {
-            calls.push((Vec::new(), Vec::new()));
-            bytes = 0;
-        }
-        bytes += size;
-        calls.last_mut().expect("a call").0.push(row);
-    }
-    calls.extend(gone.chunks(FILED_GONE).map(|keys| (Vec::new(), keys.to_vec())));
-    for (rows, gone) in calls.into_iter().filter(|(r, g)| !r.is_empty() || !g.is_empty()) {
-        op::<serde_json::Value>(c, name, "filed", serde_json::json!({ "rows": rows, "gone": gone }))?;
-    }
-    Ok(())
-}
-
-fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
+fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
     let head = storage.branch_head(MAIN)?;
-    let listed = match head.as_deref() {
-        Some(rev) => storage.list_files(rev)?.entries,
-        None => Vec::new(),
-    };
-    let stored: BTreeMap<String, Stored> =
-        listed.iter().filter_map(|e| session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), Stored { commit: e.last_commit_sha.clone() }))).collect();
+    let Some(rev) = head.clone() else { return Ok(Held { head, indexed: BTreeMap::new(), stored: BTreeMap::new(), media: BTreeSet::new(), indexes: BTreeMap::new() }) };
+    let listed = storage.list_files(&rev)?.entries;
+    let stored: BTreeMap<String, String> = listed.iter().filter_map(|e| Some((session::key_of_path(e.path.as_str())?.to_string(), e.last_commit_sha.clone()))).collect();
     let media = listed.iter().filter(|e| e.path.as_str().starts_with("media/")).map(|e| e.path.to_string()).collect();
-    let indexes = listed.iter().filter_map(|e| session::kind_of_index_path(e.path.as_str())).collect();
-    let mut index_commits = listed.iter().filter(|e| session::kind_of_index_path(e.path.as_str()).is_some()).map(|e| e.last_commit_sha.as_str());
-    let indexes_current = index_commits.next().is_some_and(|first| head.as_deref() == Some(first)) && index_commits.all(|c| head.as_deref() == Some(c));
-    let rows = rows(c, name)?;
-    let (mut indexed, mut gone) = (BTreeMap::new(), Vec::new());
-    for row in rows {
-        let key = row["key"].as_str().map(str::to_string);
-        let Ok(Row { entry, commit }) = serde_json::from_value::<Row>(row) else {
-            // no row: its file (if any) is read, and its row written again
-            gone.extend(key.filter(|k| !stored.contains_key(k)));
-            continue;
-        };
-        match stored.get(&entry.key) {
-            None => gone.push(entry.key.clone()),
-            // a row that names its file's last commit describes it; any
-            // other is read again (`found`)
-            Some(s) if commit.as_deref() == Some(s.commit.as_str()) => {
-                indexed.insert(entry.key.clone(), entry.clone());
-            }
-            Some(_) => {}
-        }
+    let (mut indexed, mut indexes) = (BTreeMap::new(), BTreeMap::new());
+    for (path, kind) in listed.iter().filter_map(|e| Some((e.path.as_str(), session::kind_of_index_path(e.path.as_str())?))) {
+        let bytes = blobs.resolve(storage.read_file(path, &rev)?)?;
+        // an entry is trusted only while it names its file's last commit;
+        // an index that is not one (an agent edited it) is trusted for none
+        let entries = serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions).unwrap_or_default();
+        indexed.extend(entries.into_iter().filter(|e| e.kind == kind && e.commit.is_some() && stored.get(&e.key) == e.commit.as_ref()).map(|e| (e.key.clone(), e)));
+        indexes.insert(kind, bytes);
     }
-    Ok(Held { head, indexed, stored, gone, media, indexes, indexes_current })
+    Ok(Held { head, indexed, stored, media, indexes })
 }
 
-/// The entry of each conversation whose file in `sessions/` no row
-/// describes (it has none, or one naming another commit: an import that
-/// stopped before its rows, another writer, a race), read from its file,
-/// `READERS` at once, with the commit it was read at.
-fn found(c: &Client, name: &str, storage: &CodeStorage, h: &Held) -> Result<Vec<Row>> {
+/// The entry of each conversation whose file in `sessions/` no index entry
+/// describes (none does, or one names another commit: an import cut off
+/// before its indexes, another writer, a race), read from its file,
+/// `READERS` at once, naming the commit it was read at.
+fn found(c: &Client, name: &str, storage: &CodeStorage, h: &Held) -> Result<Vec<Entry>> {
     let rev = h.head.as_deref().unwrap_or(MAIN);
-    let unread: Vec<(&String, &Stored)> = h.stored.iter().filter(|(k, _)| !h.indexed.contains_key(*k)).collect();
-    let read = |keys: &[(&String, &Stored)]| -> Result<Vec<Row>> {
+    let unread: Vec<(&String, &String)> = h.stored.iter().filter(|(k, _)| !h.indexed.contains_key(*k)).collect();
+    let read = |keys: &[(&String, &String)]| -> Result<Vec<Entry>> {
         let blobs = Blobs::new(c, name);
-        let mut rows = Vec::new();
-        for (key, stored) in keys {
+        let mut entries = Vec::new();
+        for (key, commit) in keys {
             let path = session::session_path(key);
             let bytes = blobs.resolve(storage.read_file(&path, rev)?)?;
             match serde_json::from_slice::<Session>(&bytes).map_err(|e| e.to_string()).and_then(|s| s.normalized().filed().map_err(|e| e.to_string())) {
                 // described as stored, which another CLI's may have written
                 // otherwise, so that it is found described next time
-                Ok((e, _)) if e.key == **key => rows.push(Row { entry: Entry { sha256: blob::sha256_hex(&bytes), bytes: bytes.len() as u64, ..e }, commit: Some(stored.commit.clone()) }),
-                Ok((e, _)) => eprintln!("warning: {path} holds conversation {}, filed under another key: left out of the list", said_id(&e.key)),
-                Err(e) => eprintln!("warning: {path} is no conversation ({e}): left out of the list"),
+                Ok((e, _)) if e.key == **key => entries.push(Entry { sha256: blob::sha256_hex(&bytes), bytes: bytes.len() as u64, commit: Some((*commit).clone()), ..e }),
+                Ok((e, _)) => eprintln!("warning: {path} holds conversation {}, filed under another key: left out of the indexes", said_id(&e.key)),
+                Err(e) => eprintln!("warning: {path} is no conversation ({e}): left out of the indexes"),
             }
         }
-        Ok(rows)
+        Ok(entries)
     };
     let per = unread.len().div_ceil(READERS).max(1);
-    let parts: Vec<Result<Vec<Row>>> = std::thread::scope(|scope| {
+    let parts: Vec<Result<Vec<Entry>>> = std::thread::scope(|scope| {
         let readers: Vec<_> = unread.chunks(per).map(|keys| scope.spawn(move || read(keys))).collect();
         readers.into_iter().map(|r| r.join().unwrap_or_else(|_| Err(anyhow!("a reader of the archive's files panicked")))).collect()
     });
@@ -555,17 +454,15 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let storage = CodeStorage::connect(c, name, Wants::Write)?;
     let blobs = Blobs::new(c, name);
     let author = Author::writer(&c.writer_id());
-    let h = held(c, name, &storage)?;
+    let h = held(&storage, &blobs)?;
     let found = found(c, name, &storage, &h)?;
     let incoming: Vec<(Entry, PathBuf)> = spool.entries.values().map(|e| (e.clone(), spool.path(&e.key))).collect();
-    let merge = session::merge(&h.indexed, &h.keys(), found.iter().map(|r| r.entry.clone()).collect(), incoming).map_err(too_much)?;
+    let mut merge = session::merge(&h.indexed, &h.keys(), found, incoming).map_err(too_much)?;
     let (added, updated, unchanged) = (merge.added, merge.updated, merge.unchanged);
     let mut head = h.head.clone();
-    // whether every commit landed on the head this import read and left (no
-    // other writer between): only then do its entries describe main
+    // whether each commit landed on the head before it (no other writer
+    // between): only then do the entries describe main as it is
     let mut alone = true;
-    // each row to file: what was read, then what was written over it
-    let mut filed: BTreeMap<String, Row> = found.into_iter().map(|r| (r.entry.key.clone(), r)).collect();
 
     // the files the conversations hold that the archive lacks, then the
     // conversations, a batch a commit: a file is there before what names it
@@ -574,72 +471,49 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let named: BTreeSet<&String> = merge.writes.keys().filter_map(|k| spool.attached.get(k)).flatten().collect();
     let files: Vec<(String, &PathBuf)> = named.into_iter().filter(|p| !h.media.contains(*p)).filter_map(|p| spool.media.get(p).map(|at| (p.clone(), at))).collect();
     let conversations = merge.writes.iter().map(|(key, at)| (session::session_path(key), at));
-    let mut batch: Vec<Change> = Vec::new();
-    let mut keys: Vec<String> = Vec::new();
-    let mut batch_bytes = 0;
     let total = files.len() + merge.writes.len();
-    let mut sent = 0;
-    // a batch committed: its conversations' rows, naming the commit they
-    // were written in when it is known to be theirs
-    let mut landed = |keys: &mut Vec<String>, commit: Option<String>| {
-        for key in keys.drain(..) {
-            filed.insert(key.clone(), Row { entry: merge.entries[&key].clone(), commit: commit.clone() });
-        }
-    };
-    for (repo_path, path) in files.into_iter().chain(conversations) {
+    let (mut batch, mut keys, mut batch_bytes, mut sent) = (Vec::new(), Vec::new(), 0, 0);
+    let mut landed: Vec<(Vec<String>, Option<String>)> = Vec::new();
+    for (i, (repo_path, path)) in files.into_iter().chain(conversations).enumerate() {
         let stored = blobs.store(std::fs::read(path).with_context(|| format!("reading back {}", path.display()))?)?;
         batch_bytes += stored.len();
         keys.extend(session::key_of_path(&repo_path).map(str::to_string));
         batch.push(Change::Upsert { path: RepoPath::parse(&repo_path).map_err(|e| anyhow!("{e}"))?, bytes: stored });
-        if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
+        if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES || i + 1 == total {
             sent += batch.len();
             let (tip, first);
             (head, tip, first) = commit(&storage, &author, head, &format!("session import: {sent} of {total} files"), &batch)?;
             alone &= first;
-            landed(&mut keys, tip);
+            landed.push((std::mem::take(&mut keys), tip));
             (batch, batch_bytes) = (Vec::new(), 0);
         }
     }
-    if !batch.is_empty() {
-        let (tip, first);
-        (head, tip, first) = commit(&storage, &author, head, &format!("session import: {total} files"), &batch)?;
-        alone &= first;
-        landed(&mut keys, tip);
+    // each conversation written names the commit it landed in (none when
+    // its commit's answer was lost: the next import reads it again)
+    for (keys, tip) in landed {
+        for key in keys {
+            merge.entries.get_mut(&key).expect("a write is an entry").commit = tip.clone();
+        }
     }
-    if total > 0 {
+    // the indexes whose bytes change, one try on the head this import left,
+    // and only while no other writer came between: else they stay older
+    // than that writer's files, whose entries the next import reads again
+    let kinds: BTreeSet<Kind> = merge.entries.values().map(|e| e.kind.clone()).chain(h.indexes.keys().cloned()).collect();
+    let mut changes = Vec::new();
+    for kind in kinds {
+        let file = Index::of(kind.clone(), &merge.entries).file();
+        if h.indexes.get(&kind) != Some(&file) {
+            changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(&kind)).map_err(|e| anyhow!("{e}"))?, bytes: blobs.store(file)? });
+        }
+    }
+    if alone && !changes.is_empty() {
+        match storage.commit(head.as_deref(), "session import: the indexes", &author, &changes) {
+            Ok(_) | Err(CsError::Precondition(_) | CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) => {}
+            Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's indexes")),
+        }
+    }
+    if total > 0 || !changes.is_empty() {
         crate::sync::refresh_pins(c, name, crate::codestorage::MAIN);
-    }
-    // the list: each conversation read or written, and each row whose file
-    // is gone (and still gone: another import may have written it since)
-    let moved = !filed.is_empty() || !h.gone.is_empty();
-    let gone = if h.gone.is_empty() {
-        h.gone
-    } else {
-        let now = storage.branch_head(MAIN)?.map(|rev| storage.list_files(&rev)).transpose()?.map(|l| l.entries).unwrap_or_default();
-        let there: BTreeSet<&str> = now.iter().filter_map(|e| session::key_of_path(e.path.as_str())).collect();
-        h.gone.into_iter().filter(|k| !there.contains(k.as_str())).collect()
-    };
-    file_rows(c, name, filed.into_values().collect(), gone)?;
-    // then the index files older clients read and write, a copy of the list
-    // (docs/technical-debt-ledger.md): every kind held or indexed, unless
-    // they were written in the head this import read and nothing moved. Only
-    // while no other writer came between (`alone`), and one try on the head
-    // this import left: else they stay as they were, older than the files
-    // changed after them (so an older CLI reads those files), and the next
-    // import writes them, main's head no longer theirs.
-    let kinds: BTreeSet<Kind> = merge.entries.values().map(|e| e.kind.clone()).chain(h.indexes.iter().cloned()).collect();
-    let stale = moved || !h.indexes_current || kinds.iter().any(|k| !h.indexes.contains(k));
-    if stale && alone {
-        let mut changes = Vec::new();
-        for kind in kinds {
-            let bytes = blobs.store(session::Index::of(kind.clone(), &merge.entries).file())?;
-            changes.push(Change::Upsert { path: RepoPath::parse(&session::index_path(&kind)).map_err(|e| anyhow!("{e}"))?, bytes });
-        }
-        match storage.commit(head.as_deref(), "session import: the index files, for older clients", &author, &changes) {
-            Ok(_) => crate::sync::refresh_pins(c, name, crate::codestorage::MAIN),
-            Err(CsError::Precondition(_) | CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) => {}
-            Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's index files")),
-        }
     }
     Ok(Written { added, updated, unchanged, entries: merge.entries })
 }
@@ -647,10 +521,8 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
 /// One commit of `changes` on `head`: on another head when another writer
 /// moved main meanwhile (the conversations are upserts: any head takes
 /// them), and once more when its answer was lost. Main's new head, the
-/// commit made when it is known to be this one's (not when its answer was
-/// lost and main holds its changes already: a row naming no commit is read
-/// again by the next import), and whether it landed on `head` at its first
-/// try (no other writer between).
+/// commit made when it is known to be this one's, and whether it landed on
+/// `head` at its first try.
 fn commit(storage: &CodeStorage, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<(Option<String>, Option<String>, bool)> {
     for attempt in 1..=COMMIT_TRIES {
         match storage.commit(head.as_deref(), message, author, changes) {
@@ -778,80 +650,57 @@ mod tests {
     fn archive() -> (crate::mockcs::MockServer, Client) {
         let mock = crate::mockcs::start();
         mock.seed_repo(NAME, &[("fragment.json", br#"{"template":"sessions"}"#)]);
-        mock.enable_list(NAME);
         let c = Client::new(&mock.url, crate::auth::fixed(7));
         (mock, c)
     }
 
-    /// The list's rows of `kind`, by key: each one's key and sha256.
     fn index(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<(String, String)> {
-        let rows = mock.list_rows(NAME, |rows| rows.values().cloned().collect::<Vec<_>>()).unwrap_or_default();
-        rows.iter().filter(|r| r["kind"] == kind.as_str()).map(|r| (r["key"].as_str().unwrap_or("").to_string(), r["sha256"].as_str().unwrap_or("").to_string())).collect()
+        let bytes = mock.file_at(NAME, "main", &session::index_path(&kind)).unwrap_or_default();
+        serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions.into_iter().map(|e| (e.key, e.sha256)).collect()).unwrap_or_default()
     }
 
     fn keys(mock: &crate::mockcs::MockServer, kind: Kind) -> Vec<String> {
         index(mock, kind).into_iter().map(|(k, _)| k).collect()
     }
 
-    /// The commit a row names, if any.
-    fn commit_of(mock: &crate::mockcs::MockServer, key: &str) -> Option<String> {
-        mock.list_rows(NAME, |rows| rows.get(key).and_then(|r| r["commit"].as_str().map(str::to_string))).flatten()
-    }
-
-    fn filed_calls(mock: &crate::mockcs::MockServer) -> u32 {
-        mock.take_requests("").get("POST filed").copied().unwrap_or(0)
-    }
-
     fn sha(bytes: &[u8]) -> String {
         fragment_core::blob::sha256_hex(bytes)
     }
 
-    /// Goal: an import writes its conversations and then the rows that
-    /// list them, each naming the commit its file was written in, then the
-    /// index files older clients read (an iPhone or a CLI from before the
-    /// rows), each listing its kind as they read it; the same import again
-    /// (a replay) writes nothing. Method: two chats and a run into an empty
-    /// archive, its files and commits read back from the code.storage fake,
-    /// its rows from its list; then the same again.
+    /// Goal: an import writes its conversations and then the indexes that
+    /// list them, and the same import again (a replay) writes nothing.
+    /// Method: two chats and a run into an empty archive, its files and
+    /// commits read back from the code.storage fake; then the same again.
     #[test]
-    fn an_import_writes_its_conversations_then_its_rows_and_again_nothing() {
+    fn an_import_writes_its_conversations_then_its_indexes_and_again_nothing() {
         let (mock, c) = archive();
         let these = || vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["first", "hi"]), session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["second"]), session("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"])];
         let packs = mock.requests(NAME, "POST commit-pack");
         let w = write(&c, NAME, &spooled(these())).unwrap();
         assert_eq!((w.added, w.updated, w.unchanged, w.entries.len()), (3, 0, 0, 3));
-        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "one commit of conversations, one of the index files");
+        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "one commit of conversations, one of the indexes");
         for s in these() {
             let path = session::session_path(&session::key("hermes", &s.id).unwrap());
             assert_eq!(mock.file_at(NAME, "main", &path), Some(file_of(s)));
         }
-        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a", "hermes-b"]);
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"], "newest first");
         assert_eq!(keys(&mock, Kind::Cron), ["hermes-r"]);
-        let named = commit_of(&mock, "hermes-a");
-        assert!(named.is_some() && named != mock.branch(NAME, "main"), "a row names its file's commit, not the index files' after it");
-        let indexed = |kind: Kind| serde_json::from_slice::<session::Index>(&mock.file_at(NAME, "main", &session::index_path(&kind)).unwrap_or_default()).map(|i| i.sessions.into_iter().map(|e| (e.key, e.sha256)).collect::<Vec<_>>()).unwrap_or_default();
-        let mut listed = index(&mock, Kind::Chat);
-        listed.reverse();
-        assert_eq!(indexed(Kind::Chat), listed, "the chats' index file, newest first, as its rows describe them");
-        assert_eq!(indexed(Kind::Cron), index(&mock, Kind::Cron));
-        assert!(mock.file_at(NAME, "main", &session::index_path(&Kind::Subagent)).is_none(), "no index file for a kind it holds none of");
+        assert!(mock.file_at(NAME, "main", &session::index_path(&Kind::Subagent)).is_none(), "no index for a kind it holds none of");
         assert!(mock.refresh_count() >= 1, "the cell is told main moved");
 
-        filed_calls(&mock);
         let packs = mock.requests(NAME, "POST commit-pack");
         let again = write(&c, NAME, &spooled(these())).unwrap();
         assert_eq!((again.added, again.updated, again.unchanged), (0, 0, 3));
         assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "a replay commits nothing");
-        assert_eq!(filed_calls(&mock), 0, "and files no row");
     }
 
-    /// Goal: an import after a crash (restart) leaves the rows as
+    /// Goal: an import after a crash (restart) leaves the indexes as
     /// `sessions/` is, whatever it imports. Method: an archive holding a
-    /// conversation's file its list lacks, a newer copy of one under its
-    /// older row (an update whose rows never landed), and a row whose file
-    /// is gone; an import of something else.
+    /// conversation's file its index lacks, a newer copy of one under its
+    /// older entry (an update whose indexes never landed), and an entry
+    /// whose file is gone; an import of something else.
     #[test]
-    fn an_import_after_a_crash_puts_the_rows_right() {
+    fn an_import_after_a_crash_puts_the_indexes_right() {
         let (mock, c) = archive();
         write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]), session("gone", Kind::Chat, "2026-10-02T09:00:00Z", &["gone"])])).unwrap();
         let orphan = file_of(session("orphan", Kind::Subagent, "2026-10-01T09:00:00Z", &["left"]));
@@ -862,22 +711,22 @@ mod tests {
         assert_eq!((w.added, w.entries.len()), (1, 3));
         assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&newer_a))], "the newer copy's entry, the gone one dropped");
         assert_eq!(keys(&mock, Kind::Subagent), ["hermes-orphan"]);
-        filed_calls(&mock);
         let packs = mock.requests(NAME, "POST commit-pack");
         assert_eq!(write(&c, NAME, &spooled(vec![])).unwrap().entries.len(), 3);
-        assert_eq!((mock.requests(NAME, "POST commit-pack"), filed_calls(&mock)), (packs, 0), "then nothing is left to put right");
+        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "then nothing is left to put right");
     }
 
     /// Goal: an import cut off after its conversations' commit and before
-    /// its rows leaves nothing a later import trusts, whatever the copies'
-    /// sizes: an import of nothing else (a restart, nothing held from the
-    /// run before) puts the rows right, the new conversation and the
-    /// updated one, and an older copy imported after never replaces the
-    /// newer. Method: through the writer, a chat; then an update of the
-    /// same length and a new chat, their rows lost; an empty import; then a
-    /// copy between the two.
+    /// its indexes' leaves nothing a later import trusts, whatever the
+    /// copies' sizes: an import of nothing else (a restart, nothing held
+    /// from the run before) puts the indexes right, the new conversation
+    /// and the updated one, and an older copy imported after never replaces
+    /// the newer. Method: through the writer, a chat; then an update of the
+    /// same length and a new chat, the indexes' commit beaten (the fake's
+    /// sabotage: the import stands, its indexes left); an empty import; then
+    /// a copy between the two.
     #[test]
-    fn an_import_cut_off_before_its_rows_is_put_right_whatever_the_sizes() {
+    fn an_import_cut_off_before_its_indexes_is_put_right_whatever_the_sizes() {
         let (mock, c) = archive();
         let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"]);
         let third = || session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello"]);
@@ -888,58 +737,76 @@ mod tests {
         let a_path = session::session_path("hermes-a");
         write(&c, NAME, &spooled(vec![first()])).unwrap();
 
-        // cut off: its conversations land, its rows do not (the list put
-        // back as it was before them)
-        let rows = mock.list_rows(NAME, |r| r.clone()).unwrap();
+        mock.sabotage_commit_packs_after(1, 1);
         write(&c, NAME, &spooled(vec![third(), new()])).unwrap();
-        mock.list_rows(NAME, |r| *r = rows);
         assert_eq!(mock.file_at(NAME, "main", &a_path), Some(file_of(third())), "its conversations landed");
-        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&file_of(first())))], "its rows did not");
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&file_of(first())))], "its indexes did not");
 
         let repaired = write(&c, NAME, &spooled(vec![])).unwrap();
         assert_eq!((repaired.added, repaired.updated, repaired.entries.len()), (0, 0, 2));
-        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&file_of(third()))), ("hermes-b".to_string(), sha(&file_of(new())))], "an import of nothing puts them right");
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-b".to_string(), sha(&file_of(new()))), ("hermes-a".to_string(), sha(&file_of(third())))], "an import of nothing puts them right");
 
         let between = write(&c, NAME, &spooled(vec![second()])).unwrap();
         assert_eq!((between.updated, between.unchanged), (0, 1), "a copy older than the one held");
         assert_eq!(mock.file_at(NAME, "main", &a_path), Some(file_of(third())), "the newer copy stays");
-        assert_eq!(index(&mock, Kind::Chat)[0], ("hermes-a".to_string(), sha(&file_of(third()))));
+        assert_eq!(index(&mock, Kind::Chat)[1], ("hermes-a".to_string(), sha(&file_of(third()))));
+    }
+
+    /// Goal: an index entry is trusted only while it names its file's last
+    /// commit, however recent the index: an index written after a newer
+    /// copy of the same size landed (another writer's, between an import's
+    /// reads and its index commit) never lets an older copy replace it.
+    /// Invalid (the stale entry), then valid. Method: a chat; another
+    /// writer's later copy, then an index listing the first copy again;
+    /// an import of a copy between the two.
+    #[test]
+    fn an_index_entry_naming_another_commit_is_read_again() {
+        let (mock, c) = archive();
+        let first = || session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"]);
+        write(&c, NAME, &spooled(vec![first()])).unwrap();
+        let stale = mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)).unwrap();
+        let later = file_of(session("a", Kind::Chat, "2026-10-03T09:00:00Z", &["hello"]));
+        assert_eq!(later.len(), file_of(first()).len(), "the same size: only their bytes tell them apart");
+        mock.external_commit(NAME, "main", &[(session::session_path("hermes-a").as_str(), Some(&later))], "another writer's newer copy");
+        mock.external_commit(NAME, "main", &[(session::index_path(&Kind::Chat).as_str(), Some(&stale))], "an index that lost a race, newer than the file");
+        let between = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hellq"])])).unwrap();
+        assert_eq!((between.updated, between.unchanged), (0, 1), "the file read, its newer copy held");
+        assert_eq!(mock.file_at(NAME, "main", &session::session_path("hermes-a")), Some(later.clone()), "the newer copy stays");
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&later))], "and the index describes it again");
     }
 
     /// Goal: a commit that loses its race, or whose answer is lost, is made
-    /// again, and the rows then list what this import wrote; a row whose
-    /// commit's answer was lost names none, so the next import reads its
-    /// file again. Method: the conversations' commit beaten once by a
-    /// competitor; then an update of the same size beaten once; then one
-    /// whose answer is lost, and an import of nothing.
+    /// again, and the indexes then list what this import wrote, not what
+    /// main's indexes said. Method: the conversations' commit beaten once by
+    /// a competitor; then an update whose indexes' commit is beaten (its
+    /// copy the same size as the one indexed, so only what it wrote says
+    /// it); then one whose indexes' answer is lost.
     #[test]
     fn a_commit_that_loses_its_race_is_made_again() {
         let (mock, c) = archive();
         mock.sabotage_commit_packs(1);
         write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])])).unwrap();
-        assert!(mock.file_at(NAME, "main", "competitor.txt").is_some() && keys(&mock, Kind::Chat) == ["hermes-a"], "both land");
+        assert!(mock.file_at(NAME, "main", "competitor.txt").is_some() && keys(&mock, Kind::Chat).is_empty(), "both land; with another writer between, no index yet");
+        write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"], "the next import writes it");
 
         let same_size = session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"]);
         let bytes = file_of(same_size.clone());
         assert_eq!(bytes.len(), file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])).len());
-        mock.sabotage_commit_packs(1);
+        mock.sabotage_commit_packs_after(1, 1);
         let w = write(&c, NAME, &spooled(vec![same_size])).unwrap();
         assert_eq!(w.updated, 1);
-        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&bytes))], "the rows list what was written");
-        let reads = mock.requests(NAME, "GET file");
         write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(mock.requests(NAME, "GET file") - reads, 0, "naming the commit it landed in: nothing read again");
+        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&bytes))], "the indexes list what was written, its entry naming its commit");
 
         let repo = mock.repo_url(NAME).unwrap();
         mock.drop_commit_answers(&repo, 2);
         let w = write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
         assert_eq!(w.added, 1);
-        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a", "hermes-b"]);
-        assert_eq!(commit_of(&mock, "hermes-b"), None, "its commit unknown: named none");
         let reads = mock.requests(NAME, "GET file");
         write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(mock.requests(NAME, "GET file") - reads, 1, "so its file is read again, and no other");
-        assert!(commit_of(&mock, "hermes-b").is_some(), "and its row names its commit now");
+        assert_eq!(keys(&mock, Kind::Chat), ["hermes-b", "hermes-a"]);
+        assert_eq!(mock.requests(NAME, "GET file") - reads, 2, "its commit's answer lost, b's file is read (and the index), and no other");
     }
 
     /// Goal: the files conversations hold go up with them, before them,
@@ -961,12 +828,12 @@ mod tests {
         write(&c, NAME, &spool).unwrap();
         let path = session::media_path(&a.sha256, &a.name);
         assert_eq!(mock.file_at(NAME, "main", &path), Some(png.clone()));
-        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "the file and the conversations in one commit, the index files in another");
+        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "the file and the conversations in one commit, the indexes in another");
         let mut again = spooled(vec![with("c")]);
         again.add_media(&a, &png).unwrap();
         let packs = mock.requests(NAME, "POST commit-pack");
         write(&c, NAME, &again).unwrap();
-        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "a conversation and the index files, and no file again");
+        assert_eq!(mock.requests(NAME, "POST commit-pack") - packs, 2, "a conversation and its index, and no file again");
         assert_eq!(mock.paths(NAME, "main").iter().filter(|p| p.starts_with("media/")).count(), 1);
     }
 
@@ -1050,10 +917,10 @@ mod tests {
         assert_eq!(write(&c, NAME, &older).unwrap().unchanged, 1, "an older history with more files never replaces a newer");
     }
 
-    /// Goal: a conversation's file is listed as it is stored, however the
+    /// Goal: a conversation's file is indexed as it is stored, however the
     /// CLI that wrote it laid it out, so the next import reads it no more.
     /// Method: an archive holding a file laid out another way (compact) its
-    /// list lacks; an import; then another, counting the files read.
+    /// indexes lack; an import; then another, counting the files read.
     #[test]
     fn a_file_is_indexed_as_it_is_stored() {
         let (mock, c) = archive();
@@ -1067,7 +934,7 @@ mod tests {
         let reads = mock.requests(NAME, "GET file");
         let again = write(&c, NAME, &spooled(vec![left()])).unwrap();
         assert_eq!((again.added, again.updated, again.unchanged), (0, 0, 1));
-        assert_eq!(mock.requests(NAME, "GET file") - reads, 0, "no conversation read again");
+        assert_eq!(mock.requests(NAME, "GET file") - reads, 1, "the chats' index, and no conversation");
     }
 
     /// Goal: an import clears the spools imports left behind (killed, or
@@ -1195,40 +1062,45 @@ mod tests {
     }
 
     /// Goal (FIN-296): an older CLI importing into an archive a newer one
-    /// wrote keeps the newer kind's conversation and its row as written,
-    /// trusting that row as it does its own (its file not read again, and
-    /// not again on a replay); a newer kind's file its list lacks is listed
-    /// by its kind's name; a file whose kind is no kind's name is left out,
-    /// said, the import standing. Method: the archive seeded as a newer CLI
-    /// leaves it (a `heartbeat` conversation, its row titled apart from its
-    /// file's so a read of the file shows), then imports of chats.
+    /// wrote keeps the newer kind's conversation and its index as written,
+    /// trusting that index as it does its own (its file not read again,
+    /// and not again on a replay); a newer kind's file its index lacks is
+    /// listed in that kind's own index; a file whose kind is no kind's name
+    /// is left out, said, the import standing. Method: the archive seeded
+    /// as a newer CLI leaves it (a `heartbeat` conversation, its index's
+    /// entry titled apart from its file's so a read of the file shows),
+    /// then imports of chats.
     #[test]
     fn an_older_cli_keeps_a_newer_kinds_conversations() {
         let (mock, c) = archive();
         let hb = Kind::Other("heartbeat".into());
         let beat = Session { kind: hb.clone(), ..session("beat", Kind::Chat, "2026-10-01T09:00:00Z", &["ping"]) };
         let (mut listed, bytes) = beat.normalized().filed().unwrap();
-        listed.title = "as the newer CLI's row lists it".into();
-        let at = mock.external_commit(NAME, "main", &[(session::session_path(&listed.key).as_str(), Some(&bytes))], "a newer CLI's import");
-        let row = serde_json::to_value(Row { entry: listed.clone(), commit: Some(at) }).unwrap();
-        mock.list_rows(NAME, |rows| rows.insert(listed.key.clone(), row));
+        listed.title = "as the newer CLI's index lists it".into();
+        let hb_index = session::index_path(&hb);
+        // its entry names the commit its file was written in
+        listed.commit = Some(mock.external_commit(NAME, "main", &[(session::session_path(&listed.key).as_str(), Some(&bytes))], "a newer CLI's import"));
+        let seeded = Index::of(hb.clone(), &BTreeMap::from([(listed.key.clone(), listed.clone())])).file();
+        mock.external_commit(NAME, "main", &[(hb_index.as_str(), Some(&seeded))], "its indexes");
         let spool = spooled(vec![session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"])]);
         let w = write(&c, NAME, &spool).unwrap();
         assert_eq!(w.added, 1);
-        assert_eq!(w.entries.get(&listed.key), Some(&listed), "kept as its row lists it: its file not read again");
+        assert_eq!(w.entries.get(&listed.key), Some(&listed), "kept as its index lists it: its file not read again");
+        assert_eq!(mock.file_at(NAME, "main", &hb_index), Some(seeded.clone()), "its index left as the newer CLI wrote it");
         assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
         let replay = write(&c, NAME, &spool).unwrap();
         assert_eq!((replay.added, replay.updated, replay.unchanged), (0, 0, 1), "the same again writes nothing");
         assert_eq!(replay.entries.get(&listed.key), Some(&listed));
 
-        // a newer kind's file its list lacks (a newer import cut off before
-        // its rows): read, and listed by its kind's name
+        // a newer kind's file its index lacks (a newer import cut off before
+        // its indexes): read, and listed in its own kind's index
         let fresh = Session { kind: hb.clone(), ..session("beat2", Kind::Chat, "2026-10-03T09:00:00Z", &["pong"]) };
         let (fresh_entry, fresh_bytes) = fresh.normalized().filed().unwrap();
-        mock.external_commit(NAME, "main", &[(session::session_path(&fresh_entry.key).as_str(), Some(&fresh_bytes))], "a newer import cut off before its rows");
+        mock.external_commit(NAME, "main", &[(session::session_path(&fresh_entry.key).as_str(), Some(&fresh_bytes))], "a newer import cut off before its indexes");
         let w = write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(w.entries.get(&fresh_entry.key), Some(&fresh_entry));
-        assert_eq!(keys(&mock, hb), [listed.key.clone(), fresh_entry.key.clone()], "both, by their kind's name");
+        assert_eq!(w.entries.get(&fresh_entry.key).map(|e| Entry { commit: None, ..e.clone() }), Some(fresh_entry.clone()));
+        let listed_now: Index = serde_json::from_slice(&mock.file_at(NAME, "main", &hb_index).unwrap()).unwrap();
+        assert_eq!(listed_now.sessions.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), [fresh_entry.key.as_str(), listed.key.as_str()], "both, newest first, in their kind's index");
 
         // a file whose kind is no kind's name: left out, the import standing
         let mut bad: serde_json::Value = serde_json::from_slice(&file_of(session("odd", Kind::Chat, "2026-10-04T09:00:00Z", &["?"]))).unwrap();
@@ -1237,133 +1109,7 @@ mod tests {
         mock.external_commit(NAME, "main", &[(session::session_path("hermes-odd").as_str(), Some(bad.as_bytes()))], "a file no CLI wrote");
         let w = write(&c, NAME, &spooled(vec![])).unwrap();
         assert!(!w.entries.contains_key("hermes-odd"), "no kind's name: not listed");
-        assert_eq!(commit_of(&mock, "hermes-odd"), None);
-    }
-
-    /// Goal: an archive an import made before its list was rows (its
-    /// conversations' files and an index file a kind, `index/<kind>.json`,
-    /// no rows) is listed whole by the next import of anything, which reads
-    /// each conversation's file (an index file names no commit it
-    /// describes) and writes its index files again from them, for older
-    /// clients; an import after reads nothing again. Then an older CLI
-    /// imports (a conversation's file and its index files, no row): the next
-    /// import lists that one too. Valid, replay, old writer. Method: the
-    /// archive seeded as the CLI before this one leaves it; imports of
-    /// nothing. (The e2e's sessions lane does so with a blob among them.)
-    #[test]
-    fn an_archive_from_before_its_rows_is_listed_by_its_next_import() {
-        let (mock, c) = archive();
-        let chat = file_of(session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"]));
-        let run = file_of(session("r", Kind::Cron, "2026-10-02T06:00:00Z", &["digest"]));
-        let later = file_of(session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["later"]));
-        let old_index = |kind: &str, keys: &[&str]| serde_json::json!({ "format": session::FORMAT, "kind": kind, "sessions": keys.iter().map(|k| serde_json::json!({ "key": k })).collect::<Vec<_>>() }).to_string().into_bytes();
-        let (chats, runs) = (old_index("chat", &["hermes-b", "hermes-a"]), old_index("cron", &["hermes-r"]));
-        mock.external_commit(
-            NAME,
-            "main",
-            &[
-                (session::session_path("hermes-a").as_str(), Some(&chat)),
-                (session::session_path("hermes-r").as_str(), Some(&run)),
-                (session::session_path("hermes-b").as_str(), Some(&later)),
-                ("index/chat.json", Some(&chats)),
-                ("index/cron.json", Some(&runs)),
-            ],
-            "an import before the archive's rows",
-        );
-        let w = write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!((w.added, w.updated, w.entries.len()), (0, 0, 3));
-        assert_eq!(index(&mock, Kind::Chat), [("hermes-a".to_string(), sha(&chat)), ("hermes-b".to_string(), sha(&later))], "each conversation listed as its file is");
-        assert_eq!(keys(&mock, Kind::Cron), ["hermes-r"]);
-        let indexed = |kind: Kind| serde_json::from_slice::<session::Index>(&mock.file_at(NAME, "main", &session::index_path(&kind)).unwrap_or_default()).map(|i| i.sessions.into_iter().map(|e| (e.key, e.sha256)).collect::<Vec<_>>()).unwrap_or_default();
-        assert_eq!(indexed(Kind::Chat), [("hermes-b".to_string(), sha(&later)), ("hermes-a".to_string(), sha(&chat))], "its index files written again from its files, for older clients");
-        filed_calls(&mock);
-        let reads = mock.requests(NAME, "GET file");
-        let again = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).unwrap();
-        assert_eq!((again.added, again.updated, again.unchanged), (0, 0, 1));
-        assert_eq!((mock.requests(NAME, "GET file") - reads, filed_calls(&mock)), (0, 0), "then nothing is read or filed again");
-
-        // an older CLI's import: a conversation's file and its index files,
-        // no row; the next import lists it
-        let older = session("c", Kind::Chat, "2026-10-04T09:00:00Z", &["from an older CLI"]);
-        let (older_entry, older_bytes) = older.normalized().filed().unwrap();
-        let mut held: BTreeMap<String, Entry> = again.entries.clone();
-        held.insert(older_entry.key.clone(), older_entry.clone());
-        let its_index = session::Index::of(Kind::Chat, &held).file();
-        mock.external_commit(NAME, "main", &[(session::session_path(&older_entry.key).as_str(), Some(&older_bytes)), ("index/chat.json", Some(&its_index))], "an older CLI's import");
-        let w = write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(w.entries.get(&older_entry.key), Some(&Entry { sha256: sha(&older_bytes), bytes: older_bytes.len() as u64, ..older_entry }));
-        assert!(keys(&mock, Kind::Chat).contains(&"hermes-c".to_string()), "listed by its row now");
-    }
-
-    /// Goal: the index files older clients trust are never newer than a
-    /// file they misdescribe. Another writer's newer copy of a chat lands
-    /// while an import writes another chat (its commit made again on the
-    /// new head): the import leaves the index files as they were (older than
-    /// that copy, so an older CLI reads its file), and the next import of
-    /// anything writes them again as main holds it, a replay then writing
-    /// nothing. Method: the fake's competitor commit, then imports.
-    #[test]
-    fn index_files_never_describe_a_file_newer_than_them() {
-        let (mock, c) = archive();
-        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])])).unwrap();
-        let before = mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)).unwrap();
-        let newer_a = file_of(session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"]));
-        mock.sabotage_commit_packs_with(1, vec![(session::session_path("hermes-a"), Some(newer_a.clone()))]);
-        write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
-        assert_eq!(mock.file_at(NAME, "main", &session::session_path("hermes-a")), Some(newer_a.clone()), "the other writer's copy stands");
-        assert_eq!(mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)), Some(before), "the index files left as they were, older than it");
-
-        write(&c, NAME, &spooled(vec![])).unwrap();
-        let indexed = serde_json::from_slice::<session::Index>(&mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)).unwrap()).unwrap();
-        let listed: Vec<(String, String)> = indexed.sessions.into_iter().map(|e| (e.key, e.sha256)).collect();
-        assert_eq!(listed[1], ("hermes-a".to_string(), sha(&newer_a)), "written again by the next import, as main holds it");
-        assert_eq!(listed[0].0, "hermes-b");
-        let packs = mock.requests(NAME, "POST commit-pack");
-        write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "then nothing again");
-    }
-
-    /// Goal: on a host whose archive has no list yet (an older platform,
-    /// its ops 404), an import is refused before it writes a conversation,
-    /// saying so, its index files left as they are: what it wrote would be
-    /// listed nowhere. Invalid, then valid once the host has a list.
-    #[test]
-    fn a_host_before_the_list_is_refused_before_any_conversation() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo(NAME, &[("fragment.json", br#"{"template":"sessions"}"#), ("index/chat.json", b"{}")]);
-        let c = Client::new(&mock.url, crate::auth::fixed(7));
-        let packs = mock.requests(NAME, "POST commit-pack");
-        let refused = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).err().expect("refused");
-        assert!(refused.to_string().contains("keeps no list yet"), "{refused:#}");
-        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "nothing written");
-        assert!(mock.file_at(NAME, "main", "index/chat.json").is_some(), "its index file stays");
-        mock.enable_list(NAME);
-        let w = write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).unwrap();
-        assert_eq!(w.added, 1);
-        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
-        assert!(mock.file_at(NAME, "main", "index/chat.json").is_some_and(|f| f.len() > 2), "its index file written again, listing it");
-    }
-
-    /// Goal: a row that is no entry (another writer's, missing its fields)
-    /// is read as none: its file read and its row written again; one whose
-    /// file is gone is dropped. Method: rows seeded so, then an import of
-    /// nothing.
-    #[test]
-    fn a_row_that_is_no_entry_is_written_again() {
-        let (mock, c) = archive();
-        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hello"])])).unwrap();
-        mock.list_rows(NAME, |rows| {
-            rows.insert("hermes-a".into(), serde_json::json!({ "key": "hermes-a", "kind": "chat" }));
-            rows.insert("hermes-x".into(), serde_json::json!({ "key": "hermes-x" }));
-        });
-        let w = write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(w.entries.len(), 1);
-        assert_eq!(keys(&mock, Kind::Chat), ["hermes-a"]);
-        assert!(commit_of(&mock, "hermes-a").is_some(), "written again whole, naming its commit");
-        let reads = mock.requests(NAME, "GET file");
-        write(&c, NAME, &spooled(vec![])).unwrap();
-        assert_eq!(mock.requests(NAME, "GET file") - reads, 0, "its commit its file's: nothing read again");
-        assert!(mock.list_rows(NAME, |rows| !rows.contains_key("hermes-x")).unwrap(), "a row with no file dropped");
+        assert!(mock.file_at(NAME, "main", "index/Heart Beat.json").is_none());
     }
 
     /// Goal: an import that pauses between its writes and its search, while

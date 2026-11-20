@@ -7,9 +7,7 @@ kind `sessions`, titled Session Archive, private to them (`members`).
 or as their agent acting for them (the archive is then theirs, with the
 agent an editor of it), and writes it; the shell reads it. A fragment on
 it names it and holds nothing else of the template's: `{"template":
-"sessions", "meta": {"title": "Session Archive"}}`, then its data. The
-release serves the rest: its page (`site/`) and its app (`app.mjs`),
-which keeps its list.
+"sessions", "meta": {"title": "Session Archive"}}`, then its data.
 
 Its format is `session-archive/1`; its rules are
 `fragment_core::session` (crates/core/src/session.rs), and the stores an
@@ -26,7 +24,7 @@ import reads are cli/src/session/.
   | `origin` | where it came from: `hermes` |
   | `reader` | which read made it: 11 the old Finite's export (10 before it read the files messages held), 20 Hermes' own database (a later, better or fixed read takes a higher number: An import) |
   | `agent` | the agent it was with, as its origin named it (optional) |
-  | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran); a later version may file another (a name of a lower-case letter, then letters, digits, `_` and `-`, at most 32 bytes): an earlier one keeps that conversation and its row as written, and lists the kinds it knows |
+  | `kind` | `chat` (a person's conversation with the agent), `cron` (a scheduled job's run), `subagent` (a side task the agent ran); a later version may file another (a name of a lower-case letter, then letters, digits, `_` and `-`, at most 32 bytes): an earlier one keeps that conversation and its kind's index as written, and lists the kinds it knows |
   | `title` | its own, else the first line its person said (80 characters), else `Untitled` |
   | `source`, `with`, `model` | where it was said (`telegram`, `cli`), whom with, on which model, as its origin named them (optional) |
   | `started_at`, `ended_at` | when it began, and when it was last said (its last message's time, else its end) |
@@ -48,53 +46,18 @@ import reads are cli/src/session/.
   characters and a call's arguments to 1,000, saying how many more there
   were (`… [N more characters not kept]`); what a person and the agent
   said never is.
-
-## The list
-
-The archive's list is rows of its app (`app.mjs`), not files: state the
-import writes, which no one opens in an editor (docs/MODEL.md). A row is
-a conversation's entry, `{key, id, origin, reader, kind, title, agent?,
-source?, with?, started_at?, ended_at?, messages, preview, sha256,
-bytes, media?}`, and `commit`, the commit its file was last changed in
-as the entry describes it (none when its import could not say):
-`agent` is the agent it was with, as its origin named it, `messages`
-counts what was said (a person's or the agent's words, not tool calls,
-results or summaries), `preview` is the first words its person said (160
-characters), `sha256` and `bytes` are its file's, and `media` the bytes
-of the files its messages held.
-
-- `sessions` (a query, its viewers): `{kind?, after?}` → `{sessions:
-  [row], next}`, by key after `after`, of one kind or all, at most 1000
-  rows and about 768 KiB an answer; `next` the key to ask after for
-  more. A reader sorts them (newest first: by `ended_at`, else
-  `started_at`).
-- `filed` (a mutation, its editors): `{rows, gone}`, at most 200 rows
-  and 1000 keys a call: each row put in place of its key's, and each key
-  of `gone` dropped. One that is not an entry (its fields missing or of
-  another type, an entry past 8 KiB) refuses the call.
-
-The import writes the rows, as the writer holding each conversation's
-bytes: an app reads no file of 1 MiB or more (a blob), and a
-conversation may be 8 MiB. On a host whose archive has no list (older than the CLI) an import is
-refused before it writes a conversation. A list takes at most
-`LIST_MAX_BYTES` (13 MiB) of the app's 16 MiB database, each row
-counted as SQLite stores it (`list_cost`): a whole archive of entries of
-about 500 bytes fits, one of longer entries holds fewer. An import past
-it is refused whole, as one past the archive's other limits is.
-
-**The index files, for older clients.** Clients from before the list's
-rows (an iPhone build, a computer's CLI) read and write an index file a
-kind, `index/<kind>.json`, `{format, kind, sessions: [entry]}`, newest
-first. Until they are gone (docs/technical-debt-ledger.md) every import
-writes them again after its rows, from the same entries, whenever the
-list moved: one try on the head it left, so a file another writer
-changed since is newer than them, and an older CLI reads it; the next
-import writes them, main's head no longer theirs. Readers list the rows
-and, beside them, any conversation of an index file that no row lists,
-or lists as a newer copy (by the import's own rule: last said, then the
-better read, then more of its files): what an older CLI imported, or an
-archive from before its rows, whose next import of anything lists every
-conversation as rows from its files.
+- `index/<kind>.json`: `{format, kind, sessions: [entry]}`, the
+  conversations of one kind, newest first (by `ended_at`, else
+  `started_at`). An entry is `{key, id, origin, reader, kind, title,
+  agent?, source?, with?, started_at?, ended_at?, messages, preview,
+  sha256, bytes, commit?}`:
+  `agent` is the agent it was with, as its origin named it (an entry an
+  import made before it has none), `messages` counts what was said (a
+  person's or the agent's words, not tool calls, results or summaries),
+  `preview` is the first words its person said (160 characters),
+  `sha256` and `bytes` are its file's, and `commit` the commit its file
+  was last changed in as the entry describes it (none from an import
+  before it, or one that could not say).
 
 A conversation's key is its origin and its id there,
 `hermes-20261029_183012_ab12cd`; an id that is no file name's (another
@@ -118,16 +81,18 @@ fragment's is.
   archive's bytes with the conversation that keeps it, and goes up only
   with a conversation written: none of a refused conversation's, nor of a
   copy set aside for a newer one (the import's own or the archive's).
-- **Conversations first, then the rows.** An import writes its new and
+- **Conversations first, then the indexes.** An import writes its new and
   newer conversations a batch a commit (at most 256 files and 16 MiB of
-  them), each on the head it read (one another writer beat is made again
-  on main as it is then), then a row for each it wrote, naming the commit
-  it landed in. It trusts a row only while the row names its file's last
-  commit (a file's last commit, with its path, names its bytes): any file
-  without one (an import stopped before its rows, another writer, a
-  commit whose answer was lost, so its row names none) is read, and its
-  row written as it is; a row whose file is gone is dropped. So the next
-  import of anything puts a crash right, whatever the copy's size.
+  them; one another writer beat is made again on main as it is then),
+  then every index whose bytes change, in one last commit. It trusts an
+  index entry only while it names its file's last commit (a file's last
+  commit, with its path, names its bytes): a file no entry describes (an
+  import stopped before its indexes, another writer, a commit whose
+  answer was lost, whatever the copy's size) is read, and an entry whose
+  file is gone dropped, so the next import of anything puts a crash
+  right. Its indexes' commit is tried once, on the head it left, and only
+  when no other writer came between its commits: else they stay as they
+  were, older than that writer's files, and the next import writes them.
 - **Bounded as it reads.** Each conversation is filed as it is read, its
   file spooled to a folder of the import's own (gone with it), so an
   import never holds every conversation's bytes.
@@ -164,8 +129,8 @@ the question, best first, each with its best snippet.
   places of its first and last message.
 - **Reconciled, each import, with the archive as it stands then.** After
   its writes, an import reads search's sources and the archive at main's
-  head (its rows, and the files no row describes: another import may have
-  written meanwhile), and writes each conversation whose sha256 is
+  head (its indexes, and the files no entry of theirs describes: another import may
+  have written meanwhile), and writes each conversation whose sha256 is
   not the revision search holds, its bytes read at that head and its
   revision theirs. Search is read first, so what it holds is never of a
   newer copy than the archive read after. Each write names the revision
@@ -217,7 +182,7 @@ Summary: Ann plants beans in spring.
 
 It is for whoever reads search: an agent reads it as it is; a shell
 renders it for people (History: `You`, the agent's name from the
-archive's list, the markers dropped).
+archive's index, the markers dropped).
 
 ## Where they come from
 

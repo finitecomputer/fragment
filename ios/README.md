@@ -83,7 +83,7 @@ A physical phone reaches a platform over HTTPS; Release builds take nothing else
 - Existing HTTP/WebSocket streaming, Stop, same-id retry, independent cursors,
   backwards paging, reconnect and foreground resumption remain.
 - History searches message contents and lists archived chats and read-only imports
-  from the Session Archive's rows of chats (its `index/chat.json` before it has rows) and lexical search contract.
+  from the Session Archive's actual `index/chat.json` and lexical search contract.
 - Native settings categories mirror web organization: account, billing, computer,
   agents, skills, connections, developer setup, data, and this iPhone, all read
   and written through signed platform calls. Account connection enrolls or

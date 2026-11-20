@@ -432,45 +432,23 @@ final class Library {
         guard let first = scalars.firstIndex(where: { !jsSpace($0) }), let last = scalars.lastIndex(where: { !jsSpace($0) }) else { return [] }
         return Array(scalars[first...last])
     }
-    /// The person's imported chats: their session archive's rows of kind
-    /// `chat` (its app's `sessions`, templates/sessions/README.md) and any
-    /// chat of the `index/chat.json` older clients keep that no row lists,
-    /// or lists as a newer copy, as the web's History reads them, apart from the rest of the list, the
-    /// newest 2,000. A read that fails keeps what was read before, and
-    /// nothing else waits on it.
+    /// The person's imported chats: their session archive's `index/chat.json`
+    /// (templates/sessions/README.md), apart from the rest of the list. An
+    /// archive of other kinds alone (cron, subagents) has no such index:
+    /// none, as the web's History reads it. A read that fails keeps what was
+    /// read before, and nothing else waits on it.
     private func loadImported(_ api: FragmentAPI, _ requestID: UUID) async {
         struct Index: Decodable { let sessions: [ImportedSession] }
-        struct Page: Decodable { let sessions: [ImportedSession]; let next: String? }
-        struct Answer: Decodable { let result: Page }
         guard let archive = fragments.first(where: { $0.kind == "sessions" && $0.role == "owner" }) else {
             if loadID == requestID { imported = [] }
             return
         }
-        var rows: [ImportedSession] = []
-        do {
-            var after = ""
-            for page in 0..<64 {
-                let call: JSONValue = .object(["id": .string("ios-history-\(page)-\(UUID().uuidString)"), "input": .object(["kind": .string("chat"), "after": .string(after)])])
-                // no list at all (a host before it); one gone after its first page failed
-                guard let answer = try await api.optionalPost(Answer.self, "api/f/\(archive.name)/ops/sessions", body: call) else {
-                    if page > 0 { return }
-                    break
-                }
-                rows += answer.result.sessions
-                guard let next = answer.result.next, next > after else { break }
-                after = next
-            }
-            // and each chat of the index file no row holds, or holds an
-            // older copy of (an older CLI's import)
-            let index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")])
-            var byKey = Dictionary(rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
-            for entry in index?.sessions ?? [] where byKey[entry.key].map({ entry.newer(than: $0) }) ?? true { byKey[entry.key] = entry }
-            rows = Array(byKey.values)
-        } catch { return }
+        let index: Index?
+        do { index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")]) }
+        catch { return }
         guard loadID == requestID, !Task.isCancelled else { return }
-        imported = Array(rows.sorted { $0.at > $1.at }.prefix(2_000))
+        imported = Array((index?.sessions ?? []).prefix(2_000))
     }
-
     func watch(_ api: FragmentAPI) async {
         var attempt = 0
         // One foreground watcher. Cancellation closes an outstanding receive;

@@ -227,94 +227,6 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
     let beans = listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat" && f["title"] == "Beans").count();
     s.ok("Continue asked again offers the chat it made with that agent, and opens it, making none other", open && reopened && beans == 1, beans);
-
-    // its list is rows: History and the archive's page as a person sees
-    // them, wide and at a phone's width
-    let beans_row = ".history-row[data-key=\"imported:hermes-e2e_beans\"]";
-    // History (open on `pg`) and then the archive's page, each wide and at
-    // a phone's width; a page of its own for each stage, as a reload after
-    // a phone's width may leave the shell narrow
-    let listed_shots = |b: &mut Browser, pg: &Page, at: &str| -> Result<()> {
-        b.until(pg, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.checkVisibility()", wait);
-        b.click(pg, ".history-filter[data-filter=\"imported\"]")?;
-        b.until(pg, &format!("{imported}.length === 2"), wait);
-        b.screenshot(pg, &shots.join(format!("{at}-history-1280.png")))?;
-        b.viewport(pg, 390, 844, true)?;
-        b.until(pg, &format!("{imported}.length === 2 && innerWidth === 390"), wait);
-        b.screenshot(pg, &shots.join(format!("{at}-history-390.png")))?;
-        b.viewport(pg, 1280, 900, false)?;
-        b.until(pg, "innerWidth === 1280", wait);
-        Ok(())
-    };
-    let list_shots = |s: &mut Suite, b: &mut Browser, pg: &Page, at: &str, title: &str| -> Result<bool> {
-        b.click(pg, &format!("{beans_row} .history-open"))?;
-        s.eventually(wait, || b.eval_in_frame(pg, frame, "document.querySelectorAll('.msg').length === 2").is_ok_and(|v| v == true));
-        b.eval_in_frame(pg, frame, "(location.href = './', true)")?;
-        let shown = s.eventually(wait, || b.eval_in_frame(pg, &name, &format!("[...document.querySelectorAll('ul.sessions strong')].some((e) => e.textContent === {title:?})")).is_ok_and(|v| v == true));
-        b.screenshot(pg, &shots.join(format!("{at}-list-1280.png")))?;
-        b.viewport(pg, 390, 844, true)?;
-        b.until(pg, "innerWidth === 390", wait);
-        b.screenshot(pg, &shots.join(format!("{at}-list-390.png")))?;
-        b.viewport(pg, 1280, 900, false)?;
-        b.until(pg, "innerWidth === 1280", wait);
-        Ok(shown)
-    };
-    // a fresh shell at History, reading the archive's list at once
-    let history_page = |b: &mut Browser| -> Result<Page> {
-        let pg = b.open(&format!("{}/history", api.base))?;
-        b.viewport(&pg, 1280, 900, false)?;
-        Ok(pg)
-    };
-    b.click(&page, "#history-link")?;
-    listed_shots(&mut b, &page, "rows")?;
-    let rows_listed = list_shots(s, &mut b, &page, "rows", "Beans")?;
-    s.ok("the archive's page lists its conversations from its rows", rows_listed, b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default());
-
-    // an archive imported before its list was rows: its rows gone and its
-    // chats' index file as the CLI before this one left it. History and the
-    // archive's page list it from that file; the next import of anything
-    // lists it as rows again, and writes its index file again from them.
-    let nanos = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let call = |op: &str, input: Value| api.signed(&keys, "POST", &format!("/api/f/{name}/ops/{op}"), Some(&json!({ "id": format!("e2e-old-{op}-{}", nanos()), "input": input })));
-    let held = call("sessions", json!({}))?;
-    let held_keys: Vec<Value> = held.body["result"]["sessions"].as_array().into_iter().flatten().map(|e| e["key"].clone()).collect();
-    let dropped = call("filed", json!({ "gone": held_keys }))?;
-    let entry = |key: &str, title: &str, at: &str| json!({ "key": key, "id": key.trim_start_matches("hermes-"), "origin": "hermes", "reader": 11, "kind": "chat", "title": title, "ended_at": at, "messages": 2, "preview": "", "sha256": "0".repeat(64), "bytes": 1 });
-    let old = json!({ "format": archive::FORMAT, "kind": "chat", "sessions": [entry("hermes-e2e_beans", "Beans, as its index lists it", "2026-10-03T09:00:00Z"), entry("hermes-e2e_big", "A long letter", "2026-10-02T09:00:00Z")] }).to_string();
-    let made = json!({ "repo": api.status(&keys, &name)?.body["repo"], "name": name });
-    s.owned(&made, &keys);
-    s.commit(&made, &[("index/chat.json", Some(old.as_bytes()))]);
-    let left = call("sessions", json!({}))?;
-    let emptied = left.body["result"]["sessions"].as_array().is_some_and(Vec::is_empty);
-    // its frames are found by URL across the browser's tabs: the first
-    // tab goes, so the archive's frame read is this one's
-    b.close(page)?;
-    let old_page = history_page(&mut b)?;
-    listed_shots(&mut b, &old_page, "index")?;
-    let from_index = b.eval(&old_page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
-    let page_from_index = list_shots(s, &mut b, &old_page, "index", "Beans, as its index lists it")?;
-    s.ok(
-        "an archive with no rows yet, its chats' index file alone (as the CLI before the rows left it), is listed from that file by History and by its page",
-        dropped.status == 200 && emptied && from_index == json!(["Beans, as its index lists it", "A long letter"]) && page_from_index,
-        json!({ "history": from_index, "page": b.eval_in_frame(&old_page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default() }),
-    );
-    let again = s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"])?;
-    let refill = call("sessions", json!({ "kind": "chat" }))?;
-    let refilled: Vec<Value> = refill.body["result"]["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
-    // its index file written again from its files, for older clients
-    let index_now = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=index/chat.json"), None)?;
-    let index_titles: Vec<Value> = index_now.body["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
-    let index_rewritten = Value::Array(index_titles.clone()) == json!(["A long letter", "Beans"]);
-    b.close(old_page)?;
-    let fresh = history_page(&mut b)?;
-    b.until(&fresh, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.checkVisibility()", wait);
-    b.click(&fresh, ".history-filter[data-filter=\"imported\"]")?;
-    let relisted = b.until(&fresh, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent).join('|') === 'A long letter|Beans'"), wait);
-    s.ok(
-        "the next import of anything lists it as rows from its files, writes its index file again from them for older clients, and History lists them so",
-        again["added"] == 0 && again["unchanged"] == 3 && Value::Array(refilled.clone()) == json!(["Beans", "A long letter"]) && index_rewritten && relisted,
-        json!({ "import": again, "rows": refilled, "index": index_titles }),
-    );
     Ok(())
 }
 
@@ -401,10 +313,8 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "row": row, "status": status.body }),
     );
     let file = |k: &fragment_nip98::Keys, p: &str| api.signed(k, "GET", &format!("/api/f/{name}/file?path={p}"), None);
-    // the archive's list: its app's rows of one kind (templates/sessions/app.mjs)
-    let rows = |k: &fragment_nip98::Keys, kind: &str| api.signed(k, "POST", &format!("/api/f/{name}/ops/sessions"), Some(&json!({ "id": format!("e2e-{kind}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()), "input": { "kind": kind } })));
-    let index = rows(&keys, "chat")?;
-    let keys_of = |r: &crate::api::Reply| -> Vec<String> { r.body["result"]["sessions"].as_array().into_iter().flatten().filter_map(|e| e["key"].as_str().map(str::to_string)).collect() };
+    let index = file(&keys, "index/chat.json")?;
+    let keys_of = |r: &crate::api::Reply| -> Vec<String> { r.body["sessions"].as_array().into_iter().flatten().filter_map(|e| e["key"].as_str().map(str::to_string)).collect() };
     let files = api.signed(&keys, "GET", &format!("/api/f/{name}/files"), None)?;
     let big_row = files.body["files"].as_array().and_then(|l| l.iter().find(|f| f["path"] == "sessions/hermes-e2e_big.json").cloned()).unwrap_or_default();
     let big = file(&keys, "sessions/hermes-e2e_big.json")?;
@@ -412,15 +322,9 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     let picture = format!("media/{}.png", hex::encode(sha2::Sha256::digest(DOT_PNG())));
     let pic = file(&keys, &picture)?;
     s.ok("a picture a message held is kept in the archive by its hash", pic.status == 200 && pic.bytes == DOT_PNG(), pic.status);
-    let big_listed = index.body["result"]["sessions"].as_array().and_then(|l| l.iter().find(|e| e["key"] == "hermes-e2e_big").cloned()).unwrap_or_default();
     s.ok(
-        "its list holds a row each of its chats, a conversation of 1 MiB or more (a blob, which reads back whole) as its file is, and its chats' index file lists them for older clients",
-        keys_of(&index) == ["hermes-e2e_beans", "hermes-e2e_big"]
-            && file(&keys, "index/chat.json")?.body["sessions"].as_array().is_some_and(|l| l.len() == 2)
-            && big_row["sha256"].is_string()
-            && big_listed["sha256"] == big_row["sha256"]
-            && big_listed["commit"] == big_row["lastCommitSha"]
-            && big_read.is_some_and(|b| b.messages[0].text.as_ref().is_some_and(|t| t.len() > 1_500_000)),
+        "its chats' index lists them newest first, and a conversation of 1 MiB or more is a blob that reads back whole",
+        keys_of(&index) == ["hermes-e2e_big", "hermes-e2e_beans"] && big_row["sha256"].is_string() && big_read.is_some_and(|b| b.messages[0].text.as_ref().is_some_and(|t| t.len() > 1_500_000)),
         json!({ "index": index.body, "big": big_row }),
     );
 
@@ -469,7 +373,7 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a home's zip, read through its layout, holds the same conversations, and adds none twice", from_zip["added"] == 0 && from_zip["unchanged"] == 6, &from_zip);
 
     // restart: an import that stopped after its conversations, before its
-    // rows, is put right by the next
+    // indexes, is put right by the next
     let orphan = Session {
         format: String::new(),
         id: "e2e_orphan".into(),
@@ -492,8 +396,8 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     s.owned(&made, &keys);
     s.commit(&made, &[(orphan_path.as_str(), Some(&orphan.file()))]);
     let repaired = s.cli_json(api, &home, &["session", "import", &path(&root), "--json"])?;
-    let side = rows(&keys, "subagent")?;
-    s.ok("an import after one that stopped before its rows lists what that one wrote", repaired["added"] == 0 && keys_of(&side).contains(&"hermes-e2e_orphan".to_string()), json!({ "import": repaired, "rows": side.body }));
+    let side = file(&keys, "index/subagent.json")?;
+    s.ok("an import after one that stopped before its indexes lists what that one wrote", repaired["added"] == 0 && keys_of(&side).contains(&"hermes-e2e_orphan".to_string()), json!({ "import": repaired, "index": side.body }));
 
     // invalid: a path that holds nothing an import reads
     let empty = s.dir("sessions-empty");
@@ -507,7 +411,7 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
     let for_me = |p: &str| api.signed(&agent, "GET", &format!("{p}{}for={me}", if p.contains('?') { "&" } else { "?" }), None);
     let theirs = for_me("/api/fragments")?;
     let found = theirs.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == "sessions").cloned()).unwrap_or_default();
-    let read = for_me(&format!("/api/f/{name}/file?path=sessions/hermes-e2e_beans.json"))?;
+    let read = for_me(&format!("/api/f/{name}/file?path=index/chat.json"))?;
     let note = json!({ "message": "an agent's note", "files": [{ "path": "notes/agent.md", "text": "read" }] });
     let wrote = api.signed(&agent, "POST", &format!("/api/f/{name}/files?for={me}"), Some(&note))?;
     s.ok(
@@ -540,9 +444,7 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "made": made.body, "listed": theirs }),
     );
     let stranger = api.person()?;
-    let r = file(&stranger, "sessions/hermes-e2e_beans.json")?;
-    let listed = rows(&stranger, "chat")?;
-    let wrote = api.signed(&stranger, "POST", &format!("/api/f/{name}/ops/filed"), Some(&json!({ "id": "e2e-stranger", "input": { "gone": ["hermes-e2e_beans"] } })))?;
-    s.ok("anyone else reads none of it, its list neither, and writes none", matches!(r.status, 403 | 404) && matches!(listed.status, 403 | 404) && matches!(wrote.status, 403 | 404), json!([r.status, listed.status, wrote.status]));
+    let r = file(&stranger, "index/chat.json")?;
+    s.ok("anyone else reads none of it", matches!(r.status, 403 | 404), r.status);
     Ok(())
 }

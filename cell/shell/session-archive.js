@@ -1,7 +1,6 @@
 // The person's Session Archive (templates/sessions/README.md): its chats,
-// as its rows list them (its app's `sessions`, asked with this page's
-// session) and, beside them, any its `index/chat.json` lists that no row
-// does (older clients keep that file), which the History page lists with the
+// newest first, as its chats' index lists them (`index/chat.json`, read
+// with this page's session), which the History page lists with the
 // person's chats (history-page.js; Paul, 2026-10-31: in place of a
 // sidebar section of their own). One opens in the middle column,
 // read-only: the archive's own page for it (`/?s=<key>`), framed as a chat
@@ -9,11 +8,11 @@
 // folded away. The archive is the one fragment of kind `sessions` the
 // person owns; the shell makes none (`fragment session import` does).
 //
-// The list is read again as the person's list is read (each change it
+// The index is read again as the person's list is read (each change it
 // tells this page of) at most once a minute, at once when the archive is
 // new to this page, and as the page comes back into view: an import moves
 // the archive's files and not their list.
-// `changed`: the list read again, or the conversation open in it moved.
+// `changed`: the index read again, or the conversation open in it moved.
 //
 // History's search asks the archive's own search too (`search`), which
 // each import writes (templates/sessions/README.md, Search): its chats
@@ -34,24 +33,6 @@ export function foundSessions(results) {
     if (key && !found.has(key)) found.set(key, typeof r.snippet === "string" ? r.snippet : "");
   }
   return [...found].map(([key, snippet]) => ({ key, snippet }));
-}
-
-// Of a conversation's copies, the newer: last said later, else as late by a
-// better read, else holding more of its files (fragment_core::session,
-// `Entry::newer`, which an import keeps to).
-const copy = (e) => [e.ended_at ?? e.started_at ?? "", e.reader ?? 0, e.media ?? 0];
-function newer(a, b) {
-  const [x, y] = [copy(a), copy(b)];
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
-  return false;
-}
-
-// The rows, and each of `indexed` (an index file's entries) no row holds,
-// or holds an older copy of.
-export function newestOf(rows, indexed) {
-  const by = new Map(rows.map((e) => [e.key, e]));
-  for (const e of indexed) if (typeof e?.key === "string" && (!by.has(e.key) || newer(e, by.get(e.key)))) by.set(e.key, e);
-  return [...by.values()];
 }
 
 export function createSessionArchive({
@@ -75,32 +56,12 @@ export function createSessionArchive({
     const mine = ++read.asked;
     read.at = Date.now();
     // failed, what was read before stays: a failure is not "none"
-    const entries = await chatsOf(name).catch(() => null);
-    if (mine !== read.asked || !entries) return;
+    const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? { sessions: [] } : null));
+    if (mine !== read.asked || !index) return;
     read.name = name;
-    read.entries = entries;
+    read.entries = Array.isArray(index.sessions) ? index.sessions : [];
     changed();
   }
-
-  // the archive's chats: every page of its rows, and any chat of the index
-  // file older clients keep (`index/chat.json`) that no row lists yet or
-  // that it lists as a newer copy (an older CLI's import, not yet read by a
-  // newer one)
-  async function chatsOf(name) {
-    const out = [];
-    for (let after = "", i = 0; i < 64; i++) {
-      const page = await api("POST", `/api/f/${seg(name)}/ops/sessions`, { id: `history-${Date.now()}-${i}`, input: { kind: "chat", after } })
-        .then((r) => r?.result, (e) => (e.status === 404 && i === 0 ? null : Promise.reject(e)));
-      if (!page) break;
-      if (!Array.isArray(page.sessions)) throw new Error("the archive answered no list");
-      out.push(...page.sessions);
-      if (!page.next || page.next <= after) break;
-      after = page.next;
-    }
-    const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
-    return newestOf(out, Array.isArray(index?.sessions) ? index.sessions : []);
-  }
-
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) load().catch(() => {});
   });
