@@ -55,10 +55,13 @@ pub fn named(agent_json: Option<&[u8]>) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(agent_json?).ok()?;
     match &v["runtime"] {
         serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(crate::records::cut_bytes(s, 64)),
-        other => Some(crate::records::cut_bytes(&other.to_string(), 64)),
+        serde_json::Value::String(s) => Some(crate::records::cut_bytes(s, RUNTIME_NAMED_MAX_BYTES)),
+        other => Some(crate::records::cut_bytes(&other.to_string(), RUNTIME_NAMED_MAX_BYTES)),
     }
 }
+
+/// What `named` keeps of an `agent.json`'s `runtime`, at most.
+pub const RUNTIME_NAMED_MAX_BYTES: usize = 64;
 
 /// What an agent's `agent.json` asks of Claude Code (`"claude": {"model",
 /// "effort"}`; Paul, 2026-11-02): each none, Claude Code's own, and each
@@ -348,21 +351,14 @@ pub struct TurnStart {
     /// (crate::note), by the driver, before the runtime hears of the turn;
     /// `None` when that turn ended any other way. Every runtime is handed
     /// it: Relay as the inbound's read-only `context`, the scripted agent
-    /// echoes it. It also tells the chat, when the runtime forgot it
-    /// (`forgotten`).
+    /// echoes it. It also tells the chat, when the runtime's memory of it
+    /// is behind (crate::seen).
     pub note: Option<String>,
     /// How old its message is, in plain words, when it is handed long after
     /// it was said (crate::note, `age`): the driver puts it first in
     /// `note`, before a card's or a cut turn's. Its own field, as `note`
     /// set by the engine means a card's, in the cut note's place.
     pub age: Option<String>,
-    /// Another life ran a turn of the agent's in this chat after the
-    /// `/data` this life woke with was saved, or woke with none (its claim
-    /// and its lost end answered 409: a rollback or a loss sent the cursor
-    /// back): in no memory of the runtime's, so the note tells the chat
-    /// (crate::note, `recap`). Said once a life, at the agent's first turn
-    /// in the chat after it.
-    pub forgotten: bool,
     /// Its text is a command of the runtime's menu (`/<name> <args>`), said
     /// to it as it is; a message's never is.
     pub command: bool,
@@ -459,6 +455,11 @@ pub enum Event {
     /// next message in its chat, which the bridge hands it (`Command::Tell`)
     /// instead of queueing it as a turn behind this one.
     Asked { turn: String },
+    /// The runtime holds the turn in its own memory now (Relay: Hermes
+    /// acked its inbound; Claude Code: its process was given the message;
+    /// the scripted agent: at once): the marker of its memory may name it
+    /// (crate::seen; the driver's, never the engine's).
+    Taken { turn: String },
     /// The turn is over.
     End { turn: String, outcome: crate::records::Outcome },
     /// Something the runtime said with no turn running (a reminder it set):
@@ -540,10 +541,22 @@ pub trait Runtime: Send + 'static {
     fn menu(&self) -> &'static [MenuItem] {
         &[]
     }
+    /// Where it keeps an agent's memory of its chats, by the agent's
+    /// fragment: the bridge keeps what it last handed it in each chat there
+    /// (crate::seen), so a rollback or a loss of that memory takes the
+    /// marker too, and the turn after is told the chat. `None`: it keeps
+    /// none, and is never told one.
+    fn memory(&self) -> Option<Memory> {
+        None
+    }
     /// Runs until `shutdown` turns true (then returns promptly: the whole
     /// bridge has `limits::SHUTDOWN_MS_MAX`), or fails for good.
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture;
 }
+
+/// Where a runtime keeps an agent's memory of its chats, by the agent's
+/// fragment (`Runtime::memory`).
+pub type Memory = std::sync::Arc<dyn Fn(&str) -> PathBuf + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
@@ -588,7 +601,7 @@ mod tests {
     /// `RUNTIMES_MAX`; one runtime alone is the default's.
     #[test]
     fn runtimes_are_named_once() {
-        let script = || -> Box<dyn Runtime> { Box::new(script::Script { config: script::ScriptConfig { pace: std::time::Duration::ZERO, scratch: PathBuf::from("/tmp/x"), data: PathBuf::from("/tmp/y") } }) };
+        let script = || -> Box<dyn Runtime> { Box::new(script::Script { config: script::ScriptConfig { pace: std::time::Duration::ZERO, scratch: PathBuf::from("/tmp/x"), data: PathBuf::from("/tmp/y"), memory: None } }) };
         let one: Runtimes = script().into();
         assert_eq!(one.into_inner().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec![DEFAULT]);
         assert!(std::panic::catch_unwind(|| Runtimes::new().with("a", script()).with("a", script())).is_err(), "twice");

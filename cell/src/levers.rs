@@ -186,7 +186,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             /// generation?, agent?, row?, provider?, key?, month?, total?, free?}`: a lever on that computer (computer.rs, `lever`):
             /// `times` is `fail-saves`', `fail-starts`' and
             /// `fail-takeover-destroys`', `on` is `always-on`'s, `ms` is
-            /// `hang-backups`', `alive-check`'s, `slow-tell`'s,
+            /// `hang-backups`', `alive-check`'s, `slow-tell`'s, `slow-start-tell`'s,
             /// `stall-failing-start`'s and `alarm-in`'s, `freeze` is `alive-check`'s,
             /// `offsetMs` is `clock`'s, `generation` is `exit`'s, `agent`
             /// and `row` are `legacy-grants`', `provider` is `legacy-own-key`'s

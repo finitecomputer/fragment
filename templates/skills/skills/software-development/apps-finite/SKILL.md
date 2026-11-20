@@ -101,7 +101,7 @@ title. Pull any fragment into a folder later with `fragment sync <name>
 The folder:
 
 ```
-fragment.json      operations, channels, triggers, meta (its title and link preview)
+fragment.json      operations, channels, triggers, meta (its link preview; its first title, then `fragment rename`)
 app.mjs            class App: one method per operation (optional)
 applib/            modules app.mjs imports
 site/              the pages and assets, served from live
