@@ -233,7 +233,7 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
 
 const START_FROM_CHECKS: [&str; 7] = [
     "an operator's start from a save is refused while its computer runs (409)",
-    "a computer whose newest save no longer fits its disk (the lever's fail-restore) fails each start, a strike each, and won't wake",
+    "a computer whose starts keep failing, not for room (the lever's fail-starts), fails each start, a strike each, and won't wake",
     "an operator starts it from the older save it keeps: asleep, its strikes counted anew, its newer save set aside, and its owner told nothing more of a computer that won't wake",
     "a save it does not keep, or a body naming anything else, is refused (400); anyone else, 403",
     "`fragment operator start-from` with the operator key's file, again, changes nothing (its time set aside kept), and the log holds both, with the save set aside",
@@ -241,12 +241,12 @@ const START_FROM_CHECKS: [&str; 7] = [
     "its next wake comes up from the save chosen, a rollback, and its owner is told where it went back to",
 ];
 
-/// A computer that won't wake because its newest save no longer fits its
-/// disk (production, 2026-11-20), started again from an older save by an
+/// A computer that won't wake, started again from an older save by an
 /// operator (`POST /api/admin/people/{npub}/computer/start-from`;
 /// docs/computers.md, "Saves and what a wake restores"): the lever's
-/// `fail-restore` stops each restore of that save as the sandbox runtime's
-/// guard does, a strike, so it ends `wont_wake`; the choice sets the newer
+/// `fail-starts` fails its starts, a strike each, so it ends `wont_wake`
+/// (a save too big for its disk falls back by itself: `computer-room`,
+/// computers.rs); the choice sets the newer
 /// save aside (kept, exported, never restored), and the next wake comes up
 /// from the save chosen. Valid, invalid (running, a save not kept, a field
 /// it does not know, anyone else), replay (the CLI's same choice).
@@ -276,8 +276,8 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
     let saves = lever(api, &id, "saves")?.body["saves"].clone();
     let (newest, older) = (saves[0].clone(), saves[1].clone());
     anyhow::ensure!(saved && newest["number"] == 2 && older["number"] == 1, "two saves, 2 of the life that came up from 1: {saves}");
-    // save 2 no longer fits: each start fails its restore, a strike
-    let failing = lever_with(api, &id, json!({ "op": "fail-restore", "save": 2 }))?;
+    // its starts keep failing (not for room, which falls back by itself)
+    let failing = lever_with(api, &id, json!({ "op": "fail-starts", "times": fragment_core::computer::STARTS_FAILED_MAX }))?;
     let _ = wake();
     let mut gave_up = Value::Null;
     let stuck = s.eventually(Duration::from_secs(180), || {
@@ -285,7 +285,7 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
         gave_up["phase"] == "wont_wake"
     });
     let why = notice(&gave_up, "wont_wake")["why"].as_str().unwrap_or("").to_string();
-    s.ok(START_FROM_CHECKS[1], failing.status == 200 && stuck && why.contains("byte floor"), &gave_up);
+    s.ok(START_FROM_CHECKS[1], failing.status == 200 && stuck && why.contains("the test lever"), &gave_up);
     // the operator chooses save 1
     let chosen = choose(operator, json!({ "save": 1 }))?;
     let levered = lever(api, &id, "saves")?.body;
@@ -328,7 +328,7 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
         back && v["restored"]["save"] == older["id"] && v["restored"]["rollback"] == true && told["pending"] == false && told["save"] == 1 && told["savedAt"] == older["atMs"],
         &v,
     );
-    let _ = lever_with(api, &id, json!({ "op": "fail-restore", "save": 0 }));
+    let _ = lever_with(api, &id, json!({ "op": "fail-starts", "times": 0 }));
     Ok(())
 }
 
