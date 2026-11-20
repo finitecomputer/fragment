@@ -17,7 +17,7 @@ import { register } from "node:module";
 const stubs = {
   "cloudflare:workers": "export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } } export class WorkerEntrypoint {} export class WorkflowEntrypoint {}",
   "cloudflare:sockets": "export function connect() { throw new Error('no sockets in this test'); }",
-  "@cloudflare/sandbox": "export class DirectoryBackup {} export class DirectoryBackupGateway {} export class SandboxBackupError extends Error {}",
+  "@cloudflare/sandbox": "export class DirectoryBackup {} export class DirectoryBackupGateway {} export class SandboxBackupError extends Error {} export const SandboxFileError = { is: () => false };",
   "./build/index.js":
     "export default {}; export const InternalRoute = { request: (env, path, body) => ({ path, body: JSON.parse(body) }) }; export class ComputerCell { fetch(r) { globalThis.reports.push(r); return Promise.resolve({ ok: true }); } }",
 };

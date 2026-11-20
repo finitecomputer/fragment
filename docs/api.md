@@ -444,7 +444,8 @@ It reads as its person, through the routes their own requests take (each
 fragment decides their role and meters the request to its owner): who
 they are, their and their agents' lists, each fragment they or their
 agents own (a fragment shared with them is only named, `sharedWithMe`),
-and their computer's newest save. What a fragment refuses or lacks is
+and their computer's newest save, with the newest one set aside beside it
+(docs/computers.md, "Saves and what a wake restores"). What a fragment refuses or lacks is
 named in its `meta.json` (`skipped`). The archive is one uncompressed tar
 whose layout and formats its own README states
 (`fragment_core::export::README`); its bounds are
@@ -1607,11 +1608,11 @@ and seat, pushed to their ledger and computer.
 | --- | --- | --- |
 | `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org?, admin, pays, offered: [OfferedSeat {id, org, kind?, admin, comped, from?, email}], guest, offer?: {kind, seatMicros, includedMicros, packMicros}}`: `guest` whether they are one (`fragment_core::org::guest`); `offer`, what is sold (`fragment_core::stripe::offer`), null where nothing is (no Stripe) |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their always-on computer may sleep; no seat 400 |
-| `POST /api/seat/offers/{id}/accept` | whom the offer names (anyone else 404) | `{}` or none → `MySeat`, the offer theirs. From another org, a move: 409 for that org's last admin while others are in it, or its payer while its subscription lives; alone there, it ends. An admin's offer of an org that pays for nothing is 400. Again: the same answer |
+| `POST /api/seat/offers/{id}/accept` | whom the offer names (anyone else 404) | `{}` or none → `MySeat`, the offer theirs. From another org, a move: 409 for that org's last admin while others are in it, or its payer while its subscription lives; alone there, it ends. An admin's offer of an org that pays for nothing is 400; of a seat while its org is a trial, 400 `trial_seat_of_one` (it waits until the org pays). Again: the same answer |
 | `POST /api/seat/offers/{id}/decline` | the same | `{}` or none → `MySeat`; answered already 404 |
 | `POST /api/seat/leave` | a holder who is no admin | `{}` or none → `MySeat`: their seat canceled. The payer 409; an admin 400 (step down first); in no org 400 |
 | `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}], payer?}`; anyone else 403 |
-| `POST /api/org/seats` | an org's admin, while it pays (else 400) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid seat offered to the email, billed from the offer. A member holding a seat 409; a person being wiped 404; an email `org::OFFERS_PER_EMAIL_MAX` orgs offer to 400; past 50 offers mailed by the org that UTC day 429. Again: `created: false` |
+| `POST /api/org/seats` | an org's admin, while it pays (else 400) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid seat offered to the email, billed from the offer. A member holding a seat 409; a person being wiped 404; an email `org::OFFERS_PER_EMAIL_MAX` orgs offer to 400; past 50 offers mailed by the org that UTC day 429; a further paid seat while its subscription is a trial (a seat of one) 400 `trial_seat_of_one`. Again: `created: false` |
 | `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat or its offer gone. The payer's own seat 403 to others; the last paid seat 400 (cancel in the portal) |
 | `POST /api/org/admins` | the same, while it pays | `{email}` → `{admin, created, mailed}`: an admin's place offered (theirs only by their yes); at most 10, offers counted |
 | `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was. The last admin who said yes 409; the payer 403 to others, and 409 to themselves while it lives |
