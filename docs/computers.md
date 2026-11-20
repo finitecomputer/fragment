@@ -558,8 +558,12 @@ stopped in its restore of `/data/work` with about 200 MB free).
   the larger is counted).
 - **What a restore writes** is read after each awake save, in the alarm
   that saved it (`sizes_read`, within `SIZES_READ_MS`, 30 s): `du` of
-  `/data`, the larger of its allocated and its apparent size, less what
-  that save left out (its held guest's patterns, as globs). On ext4 the
+  what that save keeps of `/data`, the larger of its allocated and its
+  apparent size: GNU's `du --exclude` of what it left out (its held
+  guest's patterns), so a file hard-linked between a cache left out and
+  the work kept (uv's and pnpm's caches link into projects) counts where
+  it restores. A `du` with no `--exclude` (BusyBox's, the stub's) counts
+  all of `/data`. On ext4 the
   allocated size is exactly what a restore writes; on btrfs it is a
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
