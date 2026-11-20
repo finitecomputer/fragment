@@ -197,7 +197,7 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
         Wrangled::Done => None,
         failed => {
             let failed = said(&failed);
-            match observed(p, clock, before.as_ref()) {
+            match observed(p, clock, before.as_ref(), new) {
                 Observed::Unchanged => return Ok(Outcome::Unchanged(failed)),
                 Observed::Unknown(e) => {
                     let was = before.as_ref().map_or("none".to_string(), |b| format!("{} (version {})", b.release, b.version));
@@ -276,22 +276,25 @@ enum Observed {
 /// The Worker's deployments read, after a failed `wrangler deploy`, asked
 /// again with backoff for `OBSERVE_LIMIT` while they cannot be: never
 /// uploaded again meanwhile. Unchanged only when they name the version
-/// before for `UNCHANGED_LIMIT` (one read may be stale), and the platform
-/// then answers the release before at every object class (`unchanged`).
-fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>) -> Observed {
+/// before for `UNCHANGED_LIMIT` from the first read that did (one read
+/// may be stale), and the platform then answers the release before at
+/// every object class (`unchanged`). Each wait is bounded: unreadable for
+/// `OBSERVE_LIMIT` from the start, naming the version before for
+/// `UNCHANGED_LIMIT` from its first read.
+fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>, new: &str) -> Observed {
     let start = clock.now();
     let mut pause = FINISH_PAUSE_FIRST;
-    let mut told = false;
+    let mut named_before_since = None;
     loop {
         let read = p.version();
         match read {
             Ok(now) if now.as_deref() == before.map(|b| b.version.as_str()) => {
-                if clock.now() - start >= UNCHANGED_LIMIT {
-                    return unchanged(p, before);
-                }
-                if !told {
-                    told = true;
+                let since = *named_before_since.get_or_insert_with(|| {
                     eprintln!("deploy: the Worker's deployments name the version before; asking again for {}, as Cloudflare may list a new one late", minutes(UNCHANGED_LIMIT));
+                    clock.now()
+                });
+                if clock.now() - since >= UNCHANGED_LIMIT {
+                    return unchanged(p, before, new);
                 }
                 clock.sleep(PROBE_PAUSE);
             }
@@ -311,11 +314,19 @@ fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>
 /// believed only when the platform answers the release before at every
 /// object class (one with no probe route by `/healthz` naming it): never
 /// over its answering another release, or not answering. With no release
-/// before, nothing answers to say so.
-fn unchanged(p: &mut impl Platform, before: Option<&Live>) -> Observed {
+/// before, nothing answers to say so; with the release before `new` (a
+/// commit deployed again, its id the same), no answer tells them apart.
+fn unchanged(p: &mut impl Platform, before: Option<&Live>, new: &str) -> Observed {
     let Some(before) = before else {
         return Observed::Unknown(format!("its deployments name no Worker for {}, and there is no release before for the platform to answer", minutes(UNCHANGED_LIMIT)));
     };
+    if before.release == new {
+        return Observed::Unknown(format!(
+            "its deployments name the version before ({}) for {}, and the release before is {new} too, so the platform's answer cannot tell them apart",
+            before.version,
+            minutes(UNCHANGED_LIMIT)
+        ));
+    }
     let answered = match p.probe() {
         Ok(Probed::Release(r) | Probed::NoRoute(Some(r))) if r == before.release => return Observed::Unchanged,
         Ok(Probed::Release(r)) => format!("every object class answers {r}"),
@@ -742,6 +753,31 @@ mod tests {
         assert!(matches!(&out, Outcome::Stuck(why) if why.contains("not known") && why.contains(NEW) && why.contains(OLD) && why.contains("`wrangler rollback v-old`")), "{out:?}");
         assert_eq!((count(&w, "finish"), count(&w, "rollback"), count(&w, "probe")), (0, 0, 1), "nothing done blind");
         assert!(out.result().unwrap_err().to_string().contains("STUCK"));
+    }
+
+    /// Review of #1412: a re-run of the same commit (78439b1be's, on
+    /// 2026-11-20) deploys the release live already, so the platform's
+    /// answer cannot tell the new version from the one before.
+    #[test]
+    fn a_rerun_of_the_release_live_is_never_believed_unchanged() {
+        let mut w = World::new(NEW, NEW, Some(SCHEMA));
+        w.deploys = vec![Wrangled::Failed("A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/subdomain) failed.".into())];
+        w.uploads_before_failing = true;
+        w.stale_reads = u32::MAX;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("not known") && why.contains("cannot tell")), "{out:?}");
+        assert_eq!((count(&w, "finish"), count(&w, "rollback")), (0, 0), "nothing done blind");
+    }
+
+    /// Review of #1412: time the deployments could not be read is not
+    /// time they named the version before.
+    #[test]
+    fn unreadable_deployments_do_not_spend_the_late_listing_s_limit() {
+        let mut w = live_unfinished();
+        w.version_fails = 3; // 10 + 20 + 40 s, past UNCHANGED_LIMIT
+        w.stale_reads = 1;
+        assert_eq!(deploy(&mut w), Outcome::Deployed);
+        assert_eq!((count(&w, "version"), count(&w, "finish v-new")), (5, 1));
     }
 
     #[test]
