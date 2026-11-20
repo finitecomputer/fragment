@@ -255,8 +255,8 @@ is left as it is.
 its own `fragment.json` and `avatar.png` at live: a title that its last
 install's did not say, as its title (`face.changed`, `by` `fragment.json`);
 an agent's `avatar.png` changed since, checked as an icon is, as its
-picture (`picture.changed`), and one removed since, while its icon is still
-that one, as none. Nothing else of them names a face or refuses an install.
+picture (`picture.changed`), and one removed since, while its picture is
+still that one, as none. Nothing else of them names a face or refuses an install.
 
 **An agent's picture** is its icon, set and removed by `PUT` and `DELETE
 /api/f/{agent}/icon`: a picture (PNG, JPEG, WebP or GIF by its bytes, at

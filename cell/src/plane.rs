@@ -790,8 +790,9 @@ impl FragmentCell {
     /// says that its last install's did not (`MetaKey::TitleSeen`; before
     /// that row, live's meta) is its title, answered; an agent's changed
     /// `avatar.png` its picture (`MetaKey::Picture`, taken as an older
-    /// release's was), and one removed since none, while its icon is still
-    /// that one. A first install takes no title: its making's stands.
+    /// release's was), and one removed since none, while its picture is still
+    /// that one (taken into its icon or not yet). A first install takes no
+    /// title: its making's stands.
     fn face_from_git(&self, own_title: Option<&str>, picture: GitPicture, sha: &str) -> CellResult<Option<String>> {
         let seen = match self.meta(MetaKey::TitleSeen)? {
             Some(t) => Some(t),
@@ -819,12 +820,15 @@ impl FragmentCell {
                 self.set_meta(MetaKey::PictureSeen, &format!("{last_commit} -"))?;
                 self.event("picture.refused", &format!("its {} is not a picture it shows: its picture is as it was", face::AGENT_PICTURE), json!({ "commit": sha }));
             }
+            // its picture is that avatar's, taken into its icon or not yet:
+            // none from now (an icon it had before is not shown again)
             GitPicture::Removed(sha256) => {
                 self.del_meta(MetaKey::PictureSeen)?;
-                if self.picture_untaken()?.is_some_and(|(s, _, _)| s == sha256) {
-                    self.del_meta(MetaKey::Picture)?;
-                }
-                if self.meta(MetaKey::Icon)?.as_deref() == Some(sha256.as_str()) {
+                let untaken = self.picture_untaken()?.is_some_and(|(s, _, _)| s == sha256);
+                if untaken || self.meta(MetaKey::Icon)?.as_deref() == Some(sha256.as_str()) {
+                    if untaken {
+                        self.del_meta(MetaKey::Picture)?;
+                    }
                     self.del_meta(MetaKey::Icon)?;
                     self.event("picture.changed", "it has no picture: its avatar.png is gone from live", json!({ "commit": sha }));
                 }
