@@ -8,8 +8,9 @@
 //! - **A wake subscription** (`{channel, wake: true}` from a computer's
 //!   guest, which only its egress can ask for) is a subscription whose URL
 //!   is `computer:<id>`: each new record on the channel wakes it, and the
-//!   guest reads the channel itself. A page opening the fragment, which a
-//!   computer may be about to hear from, wakes it early (a pre-wake).
+//!   guest reads the channel itself. A page opening the fragment, or
+//!   anything its presence says, wakes none: a page acts on its own, and
+//!   only its person's shell pre-wakes their computer (docs/computers.md).
 //! - **An agent added as a member** (Paul, 2026-10-03: agents are woken
 //!   eagerly, and no template must remember a convention): the platform
 //!   tells its agent, and the agent its computer. The membership's write
@@ -37,8 +38,6 @@ use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::registry::calls::{self, By};
 
-/// At most one pre-wake a computer from one fragment this often.
-const PREWAKE_EVERY_MS: i64 = 30_000;
 /// The agent fragment's channel its computer follows for its routines and
 /// its new fragments (docs/chat-records.md, `tasks`).
 pub(crate) const TASKS: &str = "tasks";
@@ -509,7 +508,7 @@ impl FragmentCell {
     /// Sends the due notices, oldest first: each agent's own fragment (as
     /// the registry names it, one ask a flush) posts `joined` and names the
     /// computer it runs on, which is then woken on its own, so the member's
-    /// change never waits for a start (as a pre-wake does not). A row goes
+    /// change never waits for a start. A row goes
     /// once the agent answered, or for good when trying again cannot help
     /// (the agent runs nowhere, or is gone); a passing failure waits,
     /// doubling, and after its last try goes with an event (never
@@ -622,43 +621,5 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Forbidden, "this agent does not run on that computer"));
         }
         Ok(())
-    }
-
-    /// The computers `principal`'s socket on this fragment pre-wakes: those
-    /// its channels wake, but none that `principal`'s own wake subscriptions
-    /// name (`fragment_core::computer::prewoken`; at most `SUBS_MAX` rows).
-    pub(crate) fn woken_computers(&self, principal: &str) -> CellResult<Vec<String>> {
-        let rows = self.rows("SELECT principal, url FROM subs WHERE url LIKE 'computer:%' ORDER BY id", vec![])?;
-        let subs: Vec<(&str, &str)> = rows.iter().filter_map(|r| Some((r["principal"].as_str()?, r["url"].as_str()?))).collect();
-        Ok(fragment_core::computer::prewoken(&subs, principal).into_iter().map(|u| format!("computer:{}", u.trim_start_matches("computer:"))).collect())
-    }
-
-    /// A page opened this fragment (`principal`'s socket): the computers its
-    /// channels wake may hear from it soon, so each starts now (decision 39),
-    /// at most every `PREWAKE_EVERY_MS`. Each wake runs on its own, so the
-    /// page's socket never waits for a start; a failed pre-wake costs only
-    /// the wait. An agent's own socket (its guest following this fragment,
-    /// opened as it boots and again after one drops) pre-wakes no computer
-    /// it runs on: one opened as that computer goes to sleep would start it
-    /// again at once.
-    pub(crate) fn prewake(&self, principal: &str) {
-        let now = crate::js::now_ms();
-        let due = self.meta(MetaKey::PrewakeAt).ok().flatten().and_then(|v| v.parse::<i64>().ok()).is_none_or(|at| now >= at);
-        if !due {
-            return;
-        }
-        let Ok(computers) = self.woken_computers(principal) else { return };
-        if computers.is_empty() {
-            return;
-        }
-        let _ = self.set_meta(MetaKey::PrewakeAt, &(now + PREWAKE_EVERY_MS).to_string());
-        for c in computers {
-            let env = self.env.clone();
-            worker::wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = crate::computer::ask(&env, &c, "computer/wake", &json!({ "why": "presence" })).await {
-                    console_log!("{{\"fragment\":\"prewake\",\"computer\":{},\"error\":{}}}", json!(c), json!(e.message));
-                }
-            });
-        }
     }
 }
