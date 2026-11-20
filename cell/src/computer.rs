@@ -4499,7 +4499,8 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// 2026-10-04): each placeholder it carries, in a header, the query or
 /// basic auth (`swap::Plan`), is swapped for its credential when the
 /// request goes to one of its provider's own hosts, in a place its catalog
-/// row names, for the agent its tag names, and the request goes on over
+/// row names, for the agent its tag names, and never an operator key on a
+/// call its row denies (`catalog::Deny`), and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
 /// go to no provider. An operator key's call asks the gate first
@@ -4522,10 +4523,10 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // a key's name no catalog key has is its agent's person's Vault's (FIN-466):
     // its row is known once the Vault answers, and the request is planned then
     let vaulted = found.iter().any(|p| vault_s(cfg, p));
-    if !vaulted {
-        Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(refused)?;
-    }
     let method = req.method();
+    if !vaulted {
+        Plan::of(method.as_ref(), &headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(refused)?;
+    }
     let body = match method {
         Method::Get | Method::Head => vec![],
         _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
@@ -4588,7 +4589,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         payer = Some((agent, owner, identity));
     }
     let catalog = cfg.providers.with(vault_rows);
-    let plan = Plan::of(&headers_in, url.query(), url.path(), &catalog, &host).map_err(refused)?;
+    let plan = Plan::of(method.as_ref(), &headers_in, url.query(), url.path(), &catalog, &host).map_err(refused)?;
     if signed && plan.wanted.len() > 1 {
         return Err(CellError::invalid("a request a Vault signs carries no other placeholder: its signature covers the request as it is sent"));
     }

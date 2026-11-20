@@ -784,6 +784,22 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **Calls an operator key never goes on.** Every agent shares an operator
+  key, so a call that reaches the vendor's whole account (everyone's
+  history or live browsers, a key minted from it, its own disable) would
+  reach other people's data. Each key is locked at its vendor first; its
+  row's `deny` names what the vendor can't scope away (`catalog::Deny`:
+  `METHOD /path`, a `*` segment any one, a last `**` the rest). The
+  intercept refuses such a call (403 `forbidden`, naming it), reaching no
+  provider and charging nothing. It reads the path case aside, decoded,
+  doubled and trailing `/` dropped, a `.json`-like suffix as the path,
+  and refuses one it can't read plainly (an encoded `/`, a `;`, a `.`
+  segment). A GET covers HEAD, and a method override header
+  (`X-HTTP-Method-Override`) counts as the method too. It is not an
+  allowlist: every other call goes as before, an own key's and a
+  connection's are never denied, and an empty list denies nothing. It
+  can't catch an account-wide call a vendor adds later; the vendor's own
+  scoping is the main lock.
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's

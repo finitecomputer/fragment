@@ -67,7 +67,11 @@ only from that computer's egress, toward that provider.
   (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
-  and connections are swapped in at the computer's egress.
+  and connections are swapped in at the computer's egress. Each operator
+  key is locked at its vendor (scopes and a spend limit where offered),
+  and its catalog row's `deny` names the account-wide calls the vendor
+  can't scope away, which the swap never sends it on (docs/computers.md,
+  "Calls an operator key never goes on").
 
 ## A person's Vault
 
