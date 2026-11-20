@@ -148,6 +148,16 @@ impl FragmentCell {
     /// machine said as far as rows can (`Stage::durable`; a life that ended
     /// meanwhile goes no further). Answers what is left for after the lock.
     async fn seed_locked(&self, by: &Event, life: Option<i64>) -> CellResult<Vec<Effect>> {
+        // its alarm's with no step to take (the release runs it, waiting for
+        // its first writer) waits on no writer's seed for the lock: its
+        // notices, deliveries and runs go on meanwhile
+        if *by == Event::Alarm {
+            let Some(at) = life.or(self.seed_rows()?.created_at) else { return Ok(vec![]) };
+            let stage = self.stage_in(at)?;
+            if !stage.waits_template() || seed::step(&stage, by).map_err(refused)?.1.is_empty() {
+                return Ok(vec![]);
+            }
+        }
         let _seeding = self.seeding.lock().await;
         let Some(life) = life.or(self.seed_rows()?.created_at) else { return Ok(vec![]) };
         let mut stage = self.stage_in(life)?;
