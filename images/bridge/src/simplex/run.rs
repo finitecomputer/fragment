@@ -2884,6 +2884,7 @@ mod tests {
             always_on,
             generation,
             restored: restored.map(|(generation, rollback)| api::Restored { generation, rollback }),
+            disk: None,
         }
     }
 

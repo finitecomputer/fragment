@@ -1,6 +1,6 @@
 ---
 name: disk-space-finite
-description: "Your computer's disk holds 20 GB. Use this before a big download, dataset or build, when a write fails with \"No space left on device\", when df shows the disk nearly full, or when your owner says their computer is almost full: make room by moving big files you aren't using into storage (fragment offload), safely, and bring them back when needed."
+description: "Your computer's disk holds 20 GB. Use this before a big download, dataset or build, when a write fails with \"No space left on device\", when you are told your computer is almost full, or when your owner says so: make room by moving big files you aren't using into storage (fragment offload), safely, and bring them back when needed."
 ---
 
 # Room on your disk
@@ -12,12 +12,17 @@ work, so keep room on it.
 ## Check
 
 ```
-df -h /
+du -sxh /data
 du -xh --max-depth=3 /data/work 2>/dev/null | sort -h | tail -20
 ```
 
-Past about 80% used (4 GB or less left), make room before anything big.
-Your owner is told then too, and may ask you to.
+`du` counts your files at their full size, which is what your computer
+needs room for when it starts again from its save. `df -h /` shows less
+used, since the disk compresses them: don't go by it.
+
+Your files may take about 16 GB in all. Past about 13 GB, make room
+before anything big: you are told then, with the room left, and so is
+your owner, who may ask you to.
 
 ## Make room, in this order
 

@@ -502,6 +502,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c) => {
                         let agents = gated(c.agents.clone(), &ready);
+                        // its disk, filling or not (read before the view goes to SimpleX)
+                        let disk = c.disk.filter(|d| d.filling).map(|d| (d.at, d.room));
                         if let Some(h) = &simplex {
                             h.computer(c, agents.clone());
                         }
@@ -510,6 +512,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                         // the roster first, then who of it is not ready: a turn
                         // starts on the runtime its agent names now
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
+                        if let Err(e) = act(&engine, s) {
+                            break Err(e);
+                        }
+                        // its agents are told of a disk filling at their next turns
+                        let s = engine.step(Input::Disk(disk), crate::log::now_ms());
                         if let Err(e) = act(&engine, s) {
                             break Err(e);
                         }
@@ -1738,12 +1745,13 @@ impl RuntimeLane {
                     }
                     keep(&ts.turn, &files);
                     ts.files = files;
-                    // its age first (a late message's), then a late card
-                    // answer's turn's own note (engine.rs `hand`)
-                    let notes: Vec<String> = [ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
+                    // its disk first (filling: make room), its age (a late
+                    // message's), then a late card answer's turn's own note
+                    // (engine.rs `hand`)
+                    let notes: Vec<String> = [ts.disk.take(), ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
                     // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {

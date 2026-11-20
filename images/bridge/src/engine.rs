@@ -539,6 +539,9 @@ impl ChatView {
 pub enum Input {
     /// The computer's agents, as `GET /api/computer` lists them now.
     Agents(Vec<Agent>),
+    /// Its disk, as `GET /api/computer` says it now, when it is filling:
+    /// the read's time and the room left (none: not filling, or not read).
+    Disk(Option<(i64, u64)>),
     /// A record of a followed channel, read as `agent`, with the chat's view
     /// (a `chat` record's admission needs it; a `tasks` record's does not).
     /// A record from before `since` (ms; when the agent joined the chat) is
@@ -674,6 +677,13 @@ pub struct Engine {
     /// prompt (`Effect::Fence`): one not answered is posted again at a tick.
     fencing: BTreeSet<(String, String)>,
     agents: Vec<Agent>,
+    /// Its disk while it is filling (`Input::Disk`: the read's time and its
+    /// room), and the read each agent was last told of: an agent is told
+    /// at its next turn after each read that finds it filling, once
+    /// (docs/bridge.md, "An agent is told to make room"). Never saved: a
+    /// new life tells each again.
+    disk: Option<(i64, u64)>,
+    disk_told: BTreeMap<String, i64>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
     /// Its agents' work held the computer at the last step: a turn queued
@@ -812,6 +822,8 @@ impl Engine {
             claiming: BTreeSet::new(),
             fencing: BTreeSet::new(),
             agents: Vec::new(),
+            disk: None,
+            disk_told: BTreeMap::new(),
             views: HashMap::new(),
             keepalive: false,
             busy: false,
@@ -935,7 +947,12 @@ impl Engine {
     pub fn step(&mut self, input: Input, now: u64) -> Step {
         self.begin(now);
         match input {
-            Input::Agents(agents) => self.set_agents(agents),
+            Input::Agents(agents) => {
+                // what each agent was told of its disk, for agents still here
+                self.disk_told.retain(|told, _| agents.iter().any(|a| a.fragment == *told));
+                self.set_agents(agents)
+            }
+            Input::Disk(disk) => self.disk = disk,
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
             Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime { runtime, event } => self.runtime(&runtime, event),
@@ -1999,6 +2016,17 @@ impl Engine {
         // driver puts it first in the note); its own note stays a card's,
         // which takes the cut note's place (driver.rs, `note_for`)
         let age = crate::note::age(t.said_at, now, t.routine || t.command, t.continues.is_some());
+        // a disk filling is told to each agent at its next turn after each
+        // read that finds it so, first in the note; never to a command
+        let command = t.command;
+        let disk = match self.disk {
+            Some((at, room)) if !command && self.disk_told.get(&agent) != Some(&at) => {
+                self.disk_told.insert(agent.clone(), at);
+                Some(crate::note::disk(room))
+            }
+            _ => None,
+        };
+        let t = self.state.turns.get_mut(id).expect("checked");
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
@@ -2016,6 +2044,7 @@ impl Engine {
             claim_seq,
             note: t.note.clone(),
             age,
+            disk,
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
