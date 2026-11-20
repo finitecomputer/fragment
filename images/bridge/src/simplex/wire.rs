@@ -146,6 +146,10 @@ pub enum Cmd {
     /// The user's contact address deleted (`/delete_address`): no one
     /// connects through it again.
     DeleteAddress,
+    /// Its chat items expire a day after they are made (`/ttl day`): a
+    /// SimpleX door's, whose chat in Fragment is the record, so its
+    /// databases, and every save of them, stay a day's size.
+    ExpireDay,
 }
 
 /// What the link puts on its owner's message while its agent works on it
@@ -320,6 +324,7 @@ impl Cmd {
                 format!("/_delete #{group} full notify=on")
             }
             Cmd::DeleteAddress => "/delete_address".into(),
+            Cmd::ExpireDay => "/ttl day".into(),
         }
     }
 
@@ -955,6 +960,8 @@ mod tests {
         assert_eq!(Cmd::LeaveGroup { group: 2 }.line(), "/_leave #2");
         assert_eq!(Cmd::DeleteGroup { group: 2 }.line(), "/_delete #2 full notify=on");
         assert_eq!(Cmd::DeleteAddress.line(), "/delete_address");
+        // a SimpleX door's expiry (images/simplex-door)
+        assert_eq!(Cmd::ExpireDay.line(), "/ttl day");
     }
 
     /// Goal: `valid_name` is the core's `mkValidName`, by the core's own

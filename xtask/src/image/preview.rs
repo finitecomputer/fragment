@@ -17,7 +17,7 @@ pub(crate) const REPOSITORY: &str = "fragment-preview-computer-hermes-canary";
 /// members. The host test below holds this list to every local COPY.
 /// Nothing stamps a commit, clock, cell, shell or chat into the key.
 const INPUTS: &[&str] = &[
-    ".dockerignore", "images/hermes", "images/bridge", "images/Cargo.toml", "images/Cargo.lock",
+    ".dockerignore", "images/hermes", "images/bridge", "images/Cargo.toml", "images/Cargo.lock", "images/simplex-door/Cargo.toml",
     "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates",
     "templates/blank", "templates/board", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/slides", "templates/todo",
     "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/identity-door/Cargo.toml", "xtask/Cargo.toml",

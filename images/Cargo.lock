@@ -286,6 +286,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fragment-simplex-door"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "flate2",
+ "fragment-bridge",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

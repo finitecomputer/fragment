@@ -1,0 +1,28 @@
+[package]
+name = "fragment-simplex-door"
+version = "0.1.0"
+description = "A SimpleX door's runner: SimpleX's core beside it, outside any computer, its databases saved to its door (docs/computers.md, F)"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "simplex-door"
+path = "src/main.rs"
+
+[dependencies]
+bytes.workspace = true
+# SimpleX's wire, its link's rules and its core's command line, the bridge's
+# own (simplex/), so a door and a computer run one link the same way
+fragment-bridge = { path = "../bridge" }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+# SQLite's online backup, WAL and data_version (save.rs), as Hermes' boot
+# copies its databases: built in (bundled), at the lock's pin
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "backup"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true

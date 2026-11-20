@@ -121,6 +121,7 @@ jobs:
               - images/stub/**
               - images/Cargo.toml
               - images/Cargo.lock
+              - images/simplex-door/Cargo.toml
               - .github/workflows/images.yml
               # the Hermes image's other inputs, its CLI stage's (#715):
               # xtask/src/image/preview.rs `INPUTS`, which a host test
