@@ -1,4 +1,4 @@
-//! A computer's egress intercepts (cell/entry.mjs `arm`): the hosts its
+//! A computer's egress intercepts (cell/intercepts.mjs): the hosts its
 //! container's outbound requests are caught at, and their budget.
 //!
 //! A container takes at most `INTERCEPTS_MAX` entries, and a host caught
@@ -48,15 +48,15 @@ pub fn caught(intercepts: &[String], host: &str) -> bool {
 /// fill nothing, while the computer still starts.
 pub fn armed(first: Vec<String>, vault: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
     // a test node's catalog may be over its share: its Vaults get none,
-    // and what the container has no room for is left (entry.mjs `arm`)
+    // and what the container has no room for is left (intercepts.mjs `landed`)
     let room = HOSTS_MAX.saturating_sub(first.len());
     let firsts = first.len();
     let mut vault: Vec<String> = vault.into_iter().filter(|h| !caught(&first, h)).collect();
     vault.sort_unstable();
     vault.dedup();
     let left_out = vault.split_off(room.min(vault.len()));
-    // in order: `first`'s, then the Vault's, so a full container leaves a
-    // Vault host before a catalog one (entry.mjs `arm` catches in order)
+    // `first`'s, then the Vault's: the catalog's are asked of every start,
+    // and a Vault's only as far as the budget leaves room beside them
     let mut hosts = first;
     hosts.extend(vault);
     assert!(hosts.len() <= firsts.max(HOSTS_MAX));
