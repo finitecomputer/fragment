@@ -398,7 +398,15 @@ What every image may rely on, and must do.
 The guest holds no credential. Every request to those hosts, and to a
 provider's host (below, "Connections and operator keys"), goes through
 the Computer DO's intercepts, which add what the platform holds; other
-traffic goes out as it is (decision 43). HTTPS to an intercepted host is
+traffic goes out as it is (decision 43). Each start registers them
+before the container starts, at once, so the guest's first request never
+races them (`cell/intercepts.mjs`): the platform's hosts and the catalog's
+providers', asking nothing. Its agents' Vault secrets' hosts are asked of
+its owner's Vault: beside the container's start when the start holds its
+guest until it lets it go (a restore's gate; a snapshot's hold, when its
+save was held), and caught before that; before the start when its guest
+runs at once (a fresh start, or a snapshot whose sleep's hold failed), so
+no guest runs with one uncaught. HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,
@@ -560,17 +568,21 @@ stopped in its restore of `/data/work` with about 200 MB free).
   the larger is counted).
 - **What a restore writes** is read after each awake save, in the alarm
   that saved it (`sizes_read`, within `SIZES_READ_MS`, 30 s): `du` of
-  what that save keeps of `/data`, the larger of its allocated and its
-  apparent size: GNU's `du --exclude` of what it left out (its held
-  guest's patterns), so a file hard-linked between a cache left out and
+  each record as its save takes it, `/data` but its work less what its
+  held guest named, and `/data/work` less what it named under its work,
+  each the larger of its allocated and its apparent size, summed. Apart,
+  a file hard-linked between the two counts in each, as each record
+  restores its copy; GNU's `du --exclude` leaves out what the save does
+  without walking it, so a file hard-linked between a cache left out and
   the work kept (uv's and pnpm's caches link into projects) counts where
   it restores. A `du` with no `--exclude` (BusyBox's, the stub's) counts
-  all of `/data`. On ext4 the
-  allocated size is exactly what a restore writes; on btrfs it is a
+  all of `/data`, once. A record not read leaves the last read's size in
+  place, and a walk that failed part-way still gives its `df`. On ext4
+  the allocated size is exactly what a restore writes; on btrfs it is a
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
-  (`restore_writes`). A hard link between `/data` and its work is counted
-  once. A start's read is `df` alone and keeps the last `du`.
+  (`restore_writes`). A start's read is `df` alone and keeps the last
+  `du`.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,
@@ -889,6 +901,22 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **Calls an operator key never goes on.** Every agent shares an operator
+  key, so a call that reaches the vendor's whole account (everyone's
+  history or live browsers, a key minted from it, its own disable) would
+  reach other people's data. Each key is locked at its vendor first; its
+  row's `deny` names what the vendor can't scope away (`catalog::Deny`:
+  `METHOD /path`, a `*` segment any one, a last `**` the rest). The
+  intercept refuses such a call (403 `forbidden`, naming it), reaching no
+  provider and charging nothing. It reads the path case aside, decoded,
+  doubled and trailing `/` dropped, a `.json`-like suffix as the path,
+  and refuses one it can't read plainly (an encoded `/`, a `;`, a `.`
+  segment). A GET covers HEAD, and a method override header
+  (`X-HTTP-Method-Override`) counts as the method too. It is not an
+  allowlist: every other call goes as before, an own key's and a
+  connection's are never denied, and an empty list denies nothing. It
+  can't catch an account-wide call a vendor adds later; the vendor's own
+  scoping is the main lock.
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's
@@ -922,8 +950,12 @@ provider's own hosts.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
-  catalog's in the egress's intercepts (the computer arms them again as
-  its guest reads its view). The intercept asks the Vault for it per
+  catalog's in the egress's intercepts: a start catches them before its
+  guest runs (asked beside the container's start when its guest is held,
+  before it when not; above), and its guest's read of its view catches
+  any not caught yet (one set since), those alone, before it answers. A Vault that does not answer lends none
+  until a read of the view finds it answering.
+  The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
   Vault makes. A Vault's calls are not counted in usage.
@@ -1142,6 +1174,13 @@ own Bot Mode protocol is off in every profile
 - An agent's own skills win over managed ones, and managed over the
   platform's and Hermes' bundled ones of the same name. A managed skill an
   agent edits is first copied into its own, which then shadows it.
+- **Hermes' optional skills** (the image's `/opt/hermes/optional-skills`,
+  141 at v0.23.2) are off until the owner switches one on from the shell's
+  Skills page: an `optional/hermes/<id>.on` file in their skills fragment.
+  Each install reads the switches with the managed set, and the boot
+  copies each skill read-only beside the bundled ones; switched off, it
+  goes at the next install. One the image lacks, or whose name a managed
+  or bundled skill takes, is left out and logged (`skills.optional`).
 - **The `fragment` CLI** in an agent's terminal acts as that agent
   (cli/GUIDE.md, "As an agent"): it signs nothing; the egress signs.
 - **Its credentials** are each agent's placeholders in its profile's

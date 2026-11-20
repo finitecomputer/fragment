@@ -645,14 +645,14 @@ input.check:disabled { opacity: .55; cursor: default; }
 @media (forced-colors: active) { input.check { appearance: auto; -webkit-appearance: auto; } input.check::before { display: none; } }
 /* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
 label.settings-line { cursor: pointer; }
-.settings-section input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
-.settings-section input.settings-switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
-.settings-section input.settings-switch:checked { background: var(--accent-blue); }
-.settings-section input.settings-switch:checked::before { transform: translateX(16px); }
-.settings-section input.settings-switch:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
-.settings-section input.settings-switch:disabled { opacity: .55; cursor: default; }
-@media (prefers-reduced-motion: reduce) { .settings-section input.settings-switch, .settings-section input.settings-switch::before { transition: none; } }
-@media (forced-colors: active) { .settings-section input.settings-switch { border: 1px solid CanvasText; } .settings-section input.settings-switch::before { background: CanvasText; } }
+:is(.settings-section, .skills-layout) input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
+:is(.settings-section, .skills-layout) input.settings-switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+:is(.settings-section, .skills-layout) input.settings-switch:checked { background: var(--accent-blue); }
+:is(.settings-section, .skills-layout) input.settings-switch:checked::before { transform: translateX(16px); }
+:is(.settings-section, .skills-layout) input.settings-switch:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+:is(.settings-section, .skills-layout) input.settings-switch:disabled { opacity: .55; cursor: default; }
+@media (prefers-reduced-motion: reduce) { :is(.settings-section, .skills-layout) input.settings-switch, :is(.settings-section, .skills-layout) input.settings-switch::before { transition: none; } }
+@media (forced-colors: active) { :is(.settings-section, .skills-layout) input.settings-switch { border: 1px solid CanvasText; } :is(.settings-section, .skills-layout) input.settings-switch::before { background: CanvasText; } }
 /* Your data's rows, drawn again as its export changes, are the section's own */
 .settings-export { display: contents; }
 .settings-export > p { margin: 0; padding: 12px 2px; }
@@ -1094,10 +1094,59 @@ label.settings-line { cursor: pointer; }
 .schedules-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .schedules-fragment { flex: none; max-width: 45%; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .schedules-said + .schedules-fragment::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
+/* the Skills page (skills-page.js): Schedules' layout; its tabs, search and
+   category over a list of rows, each a skill's words beside its switch */
+.skills-layout { display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
+.skills-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.skills-files { cursor: pointer; }
+.skills-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.skills-lede { margin: 0 0 22px; max-width: 560px; color: var(--text-secondary); font: var(--type-body-lg); }
+.skills-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+.skills-tabs { display: inline-flex; flex: none; padding: 3px; border-radius: 999px; background: var(--surface-subtle); }
+.skills-tab { height: 30px; padding: 0 14px; border: 0; border-radius: 999px; background: none; color: var(--text-secondary); font: var(--type-control); cursor: pointer; }
+.skills-tab[aria-selected="true"] { background: var(--bg-active); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+.skills-tab:focus-visible, .skills-main:focus-visible, .skills-row-managed:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.skills-search { flex: 1 1 220px; min-width: 0; height: 36px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: var(--type-field); }
+.skills-search:focus-visible { outline: none; border-color: var(--text-tertiary); }
+.skills-category { flex: none; height: 36px; max-width: 100%; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font: var(--type-control); }
+.skills-status { margin: 8px 2px 0; color: var(--text-secondary); font: var(--type-body-sm); }
+.skills-list { display: flex; flex-direction: column; }
+.skills-heading { display: flex; align-items: baseline; gap: 8px; margin: 24px 10px 6px; color: var(--text-secondary); font: var(--type-label); letter-spacing: .04em; text-transform: uppercase; }
+.skills-count { color: var(--text-tertiary); font-weight: 500; }
+.skills-item { border-radius: 12px; }
+.skills-item:has(.skills-details, .skills-ask) { background: var(--surface-subtle); }
+.skills-row { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 4px 12px 4px 0; border-radius: 12px; }
+.skills-row:hover { background: var(--bg-hover); }
+.skills-main, .skills-row-managed { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; padding: 8px 0 8px 10px; border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px; width: 100%; padding-right: 12px; }
+.skills-row-managed .skills-main { padding: 0; cursor: inherit; }
+.skills-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.skills-name { color: var(--text-primary); font: var(--type-body-strong); }
+.skills-desc { overflow: hidden; color: var(--text-tertiary); font: var(--type-body-sm); text-overflow: ellipsis; white-space: nowrap; }
+.skills-chip { flex: none; padding: 0 8px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font: var(--type-caption); line-height: 18px; }
+.skills-chip-spends, .skills-chip-care { background: color-mix(in srgb, var(--danger-text) 16%, transparent); color: var(--danger-text); }
+.skills-always { flex: none; color: var(--text-tertiary); font: var(--type-caption); }
+.skills-details, .skills-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 2px 12px 14px 10px; }
+.skills-ask p { flex: 1 1 260px; margin: 0; color: var(--text-primary); font: var(--type-body-sm); }
+.skills-ask-actions { display: flex; gap: 8px; }
+.skills-ask .primary { height: 32px; padding: 0 16px; font: var(--type-control); cursor: pointer; }
+.skills-ask .quiet { height: 32px; cursor: pointer; }
+.skills-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 0; color: var(--text-tertiary); font: var(--type-body-sm); }
+.skills-facts code { color: var(--text-secondary); font: var(--type-mono-sm); }
+.skills-read { color: var(--accent-blue); font: var(--type-body-sm); text-decoration: none; }
+.skills-read:hover { text-decoration: underline; }
+.skills-read::after { content: " ↗"; }
+.skills-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 6px 10px 4px; }
+.skills-empty p, .skills-loading { margin: 6px 0; font: var(--type-body); }
+.skills-loading { margin: 18px 10px; }
+.skills-empty .quiet { cursor: pointer; }
+.skills-note { margin: 32px 10px 0; color: var(--text-tertiary); font: var(--type-body-sm); }
 @container settings (max-width: 620px) {
   .apps-layout { padding: 18px 16px 60px; }
   .history-layout { padding: 18px 16px 60px; }
   .schedules-layout { padding: 18px 16px 60px; }
+  .skills-layout { padding: 18px 16px 60px; }
+  .skills-desc { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   /* its schedule in words over its fragment, each whole */
   .schedules-sub { flex-direction: column; align-items: flex-start; gap: 0; }
   .schedules-said, .schedules-fragment { max-width: 100%; white-space: normal; }

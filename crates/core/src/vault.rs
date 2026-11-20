@@ -63,6 +63,7 @@ pub fn row(name: &str, hosts: Vec<String>, placement: Placement) -> catalog::Pro
         client_auth: catalog::ClientAuth::Post,
         models: None,
         note: None,
+        deny: vec![],
     }
 }
 
@@ -254,6 +255,38 @@ pub fn take(name: &str, claim: Option<&str>, to: &str) -> Result<(), Claimed> {
     match claim {
         Some(other) if other != to => Err(Claimed { name: name.to_string(), to: other.to_string() }),
         _ => Ok(()),
+    }
+}
+
+/// A move that names a host its Vault does not point the secret at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wider {
+    /// The secret's name in its Vault.
+    pub name: String,
+    /// The host named that its Vault does not list.
+    pub host: String,
+}
+
+impl std::fmt::Display for Wider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} goes only to the hosts set for it in your vault, not {}", self.name, self.host)
+    }
+}
+
+impl std::error::Error for Wider {}
+
+/// May a move of `name` keep it toward `asked`, its Vault pointing it at
+/// `held`? Only within `held`: a move narrows what its person said in
+/// their Vault, never widens it. A parked secret (no hosts) was pointed at
+/// none, so its move names them; only its person moves one (the cell's
+/// `put_secret`), so those hosts are their own word too.
+pub fn within(name: &str, held: &[String], asked: &[String]) -> Result<(), Wider> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    match asked.iter().find(|h| !held.contains(h)) {
+        Some(host) => Err(Wider { name: name.to_string(), host: host.clone() }),
+        None => Ok(()),
     }
 }
 
@@ -522,5 +555,19 @@ mod tests {
         // the first move's completion, late, removes nothing of the new
         // value, now claimed by another move
         assert!(!row.moved("one/BOT", &taken));
+    }
+
+    #[test]
+    fn a_move_keeps_a_secret_within_its_vault_hosts_and_names_a_parked_one_s() {
+        let held = |h: &[&str]| h.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let tg = held(&["api.telegram.org"]);
+        // the same hosts, or fewer
+        assert_eq!(within("bot", &tg, &tg), Ok(()));
+        assert_eq!(within("bot", &held(&["a.example.com", "b.example.com"]), &held(&["b.example.com"])), Ok(()));
+        // any other host, alone or beside one of its own, is refused, named
+        assert_eq!(within("bot", &tg, &held(&["127.0.0.1"])), Err(Wider { name: "bot".into(), host: "127.0.0.1".into() }));
+        assert_eq!(within("bot", &tg, &held(&["api.telegram.org", "evil.example.com"])), Err(Wider { name: "bot".into(), host: "evil.example.com".into() }));
+        // parked (no hosts): its person's move names them
+        assert_eq!(within("bot", &[], &tg), Ok(()));
     }
 }
