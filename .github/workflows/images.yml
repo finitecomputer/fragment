@@ -112,6 +112,7 @@ jobs:
               # what images/ compiles in from outside it, which a host test
               # (xtask/src/image/preview.rs) holds this list to
               - cli/SKILL.md
+              - cli/GUIDE.md
               - templates/skills/**
               - crates/e2e/fixtures/chat-preview.pdf
             docker:

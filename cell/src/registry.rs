@@ -789,6 +789,10 @@ impl RegistryCell {
                 let made = self.rows::<Value>("UPDATE invites_waiting SET role = NULL, title = NULL, sharer = NULL WHERE email = ? RETURNING fragment", vec![email.into()])?;
                 Ok(json!({ "before": made.len() }))
             }
+            TestHook::CompEnds(email) => {
+                let ends = self.rows::<Value>("SELECT until_ms FROM org_members WHERE email = ? AND comped = 1 ORDER BY added_at, id", vec![signin::email_of(&email).unwrap_or_default().into()])?;
+                Ok(json!({ "ends": ends.iter().map(|r| r["until_ms"].clone()).collect::<Vec<_>>() }))
+            }
         }
     }
 

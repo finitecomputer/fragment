@@ -5,6 +5,26 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A deleted fragment's owner-named repo stays at code.storage
+
+- **Shortcut:** a delete takes a fragment's code.storage repo only when
+  the repo is named by that life's own key (`fragment_core::ended::
+  repo_goes`, the `RepoOfLife` meta). Fragments made before that naming
+  have repos named by their owner's identity, and a delete leaves those,
+  as it left every repo before. A wipe takes them all.
+- **Why:** a release from before that naming, rolled back to, names a
+  repo by its owner. Its create of a deleted name, by the same owner,
+  would find that repo while its delete was still to come (held, or
+  backing off), and the delete would then take the new life's files
+  (FIN-538, a review of #1369).
+- **Risk:** a deleted fragment made before that naming keeps its files
+  at code.storage, out of everyone's reach on the platform (404), until
+  the sweep.
+- **Delete when:** no rollback can reach a release that names repos by
+  their owner (the rollout's fence past it). Then a sweep deletes the
+  repos no live fragment names (FIN-540), and `repo_goes` takes every
+  deleted life's repo.
+
 ## No mail without Email Sending
 
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,
@@ -101,27 +121,89 @@ unfinished design, not debt.
   lever `legacy-picture` writes such a row.
 - **Risk:** none lost: a row is taken whole or kept; one whose bytes are
   gone from git was unservable already.
-- **Delete when:** this release has run in production for a day (every
-  fragment's daily pass has taken its row) and a sweep finds no `picture`
-  row. Then `MetaKey::Picture`, `take_picture`, `picture_untaken`,
+- **Delete when:** the entry below is gone (it writes such rows), this
+  release has run in production for a day after (every fragment's daily
+  pass has taken its row) and a sweep finds no `picture` row. Then
+  `MetaKey::Picture`, `take_picture`, `picture_untaken`,
   `face::AGENT_PICTURE`, the lever and the pass's step go.
 
-## A blessed fragment wiped while its first writer's seed runs can keep its repo
+## A client from before the face renames by git
 
-- **Shortcut:** a blessed fragment's repo is made at its first file
-  (`seed::Making::SeedsLater`), by its first writer's seed. A life that
-  ends while that seed waits on code.storage records no repo for its wipe
-  (none was made when it ended), and the seed, seeing the life gone, stops
-  and keeps what it made, as a delete keeps a repo (`publish.rs` `seed`).
-  A wipe in that second leaves the repo holding the fragment's first
-  `fragment.json` (its template alone), or nothing; the writer's own file
-  never lands.
-- **Risk:** an empty repo outlives its owner's wipe at code.storage, when
-  the wipe lands within about a second of the fragment's first file;
-  nothing of theirs is in it.
-- **Delete when:** a wipe deletes its person's repos by their name
-  (`codestorage::repo_name`, the owner's digest), not only those its
-  fragments' lives recorded.
+- **Shortcut:** clients from before an agent's face lived in its cell
+  (CLIs, the CLI inside computer images, which can lag for days, and iOS
+  builds) rename a fragment by its `fragment.json`'s `meta.title`, and set
+  an agent's picture by its `avatar.png`, then deploy. So that they keep
+  working, `GET manifest` answers the face's title (plane.rs `manifest`),
+  and each install takes, from its own `fragment.json` and an agent's
+  `avatar.png`, what changed since its last install (plane.rs
+  `face_from_git`, `picture_in_git`; `MetaKey::TitleSeen`,
+  `MetaKey::PictureSeen`), as docs/api.md says ("A client from before the
+  face").
+- **Risk:** a rename by such a client to the title its `fragment.json`
+  already says commits nothing and changes nothing; an app's own code that
+  changes its `meta.title` renames it, as it did before the face. An
+  agent's install reads its `avatar.png` again only when it changed.
+- **Delete when:** the CLI release notice, the computer image pinned in
+  production and the iOS build in use are all from this release or later,
+  and a week of production logs shows no `face.changed` event `by`
+  `fragment.json` and no `picture.changed`. Then a Fragment step deletes
+  the two `meta` rows, and the manifest route's title, `face_from_git`,
+  `picture_in_git` and `GitPicture` go.
+
+## A computer keeps its owner's own keys from before the move
+
+- **Shortcut:** a person's own keys and their sign-ins moved from their
+  computer (`own_keys`, `own_signins`) to their Vault (M16; docs/secrets.md,
+  "A person's Vault"). The tables stay, written by nothing but the test
+  levers: a computer hands its keys over at its owner's next read of it
+  or of their connections, or its agent's next call through one
+  (`ComputerCell::hand_over_logged`; never a start, an exit, a takeover or
+  its guest's request: #1343) and deletes
+  each, taken or not; the Vault takes one only where its person set or
+  removed none since (a removal is kept, `sealed` NULL). A sign-in its
+  person's Vault holds none of is asked of their computer, found by
+  `default_computer_of` (`vault::signed_in`). The release is forward only
+  (the Vault's step 4). The test levers `legacy-own-key` and
+  `legacy-sign-in` make a computer as before the move.
+- **Risk:** no rollback across this release. A computer nothing touches
+  keeps its keys owed; a Vault that does not answer leaves them owed, and
+  its agents' calls through one refused until it does. The removals the
+  Vault keeps outlive the hand-over.
+- **Delete when:** production has run this release for ten minutes (no
+  sign-in begun on a computer is under way), and a sweep that reads every
+  computer (FIN-527's) finds none holding an own key, or production has
+  logged no `"ownKeys":"handed"` line for 14 days (the log sees only
+  computers something touched: say so when cutting). Then a Computer
+  schema step drops `own_keys` and `own_signins`; `hand_over_own`,
+  `owed_own`, `computer/signed-in` and the Vault's fallback to it,
+  `computer/own-keys`' `providers`, both levers and the Vault's
+  `own-handover` go, its removals may, and `GET /api/connections` asks
+  the computer and the Vault at once (it asks the Vault after the
+  computer's hand-over until then).
+
+## A computer owes its owner's ledger its months of uses
+
+- **Shortcut:** what a person's agents used of each provider moved from
+  each computer's `uses` to the person's ledger
+  (`fragment_core::ledger::uses`; M16). The Computer's step 7 dropped
+  `uses`, keeping each month it held in the computer's `meta`
+  `uses_owed:<month>`, as the ledger reads a hand-over's rows. As its
+  owner reads its view, once an activation and in a task of its own
+  (`ComputerCell::uses_later`), the computer hands each month to its
+  owner's ledger (`uses::TakeUses`, under `<computer>:<month>`), which
+  takes it once by that id and keeps the id in its `meta`
+  (`uses_taken:<id>`); the computer forgets each month the ledger took
+  or refused, logging how many it still owes (`uses_owed`). The test
+  lever `legacy-uses` makes a month owed.
+- **Risk:** a computer nothing touches keeps owing, and its person's
+  Settings shows those months short until it hands them over. Dropped
+  instead, up to 13 months of a person's usage would be lost.
+- **Delete when:** a sweep has asked every computer and found none owing
+  (no `uses_owed:` row; the sweep FIN-527 asks for the grants' rows can
+  ask both). Then a Computer step deletes those `meta` rows, and
+  `uses_later`, `hand_over_uses`, `TakeUses`, `/take-uses` and the lever
+  go; a Ledger step may drop its `uses_taken:` rows. The log sees only
+  computers something touched, so its silence alone is not enough.
 
 ## The bridge copies the platform's file bounds; the app, an older platform's
 
@@ -169,6 +251,19 @@ unfinished design, not debt.
   reach.rs's two refusals and their call sites, the share sheet's lock,
   the two reasons (kept on the wire as add-only names), the census route
   and command, and the `legacy-reach` lever.
+
+## Agent fragments shared before FIN-544
+
+- **Shortcut:** an agent fragment is its owner's alone from 2026-11-18
+  (`cell/src/alone.rs`): new sharing is refused, but one shared before
+  keeps its other members, invites, link or public, so no one's settings
+  change silently. Their cleanup is Paul's call; `fragment operator reach`
+  lists them by name (`shared_past_owner`, each fragment's answer).
+- **Risk:** whoever was let in before still reads its `memories/`, and an
+  editor still steers its agent.
+- **Delete when:** they are counted and narrowed. Then drop the sheet's
+  switch for an agent's link (share.rs `alone_now`) and the
+  `legacy-visibility` lever.
 
 ## An app facet's subrequests are the account's, for the facet's life
 
@@ -519,18 +614,6 @@ unfinished design, not debt.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
-
-## Own keys assume one computer per person
-
-- **Shortcut:** a person has one computer (decision 13), so own keys are
-  sealed in it (cell/src/computer.rs, `own_keys`), and an own key's
-  sign-in callback finds it by `default_computer_of`, never the URL (the
-  audit's H3).
-- **Risk:** a second computer needs the keys again; a deleted one loses
-  them.
-- **Delete when:** own keys live in the person's own cell, proven by two
-  computers swapping one key, and a sign-in's computer is found from its
-  bound state alone, never the URL, with the H3 checks run against it.
 
 ## An imported connection's refresh is unproven
 

@@ -302,8 +302,8 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = r.body["name"].as_str().unwrap_or("").to_string();
     s.ok("a skills fragment is made from the blessed skills template", r.status == 200 && !name.is_empty(), &r);
     let view = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
-    let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
-    s.ok("it has no repo until its first file (the release's code and data run it): no manifest of its own (404)", m.status == 404 && r.body["repo"] == "", &m);
+    let m = api.signed(owner, "GET", &format!("/api/f/{name}/file?path=fragment.json"), None)?;
+    s.ok("it has no repo until its first file (the release's code and data run it): no fragment.json of its own (404)", m.status == 404 && r.body["repo"] == "", &m);
     let listed = api.signed(owner, "GET", "/api/fragments", None)?;
     let kind = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str())).map(|f| f["kind"].clone());
     s.ok("its owner's list says it is their skills", kind == Some(json!("skills")), &listed);
@@ -328,9 +328,9 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
-        "the managed set contains eighteen skills, including design-finite, slides-finite, gws-docs, gws-slides and import-agent-home",
-        skill_names.len() == 18
-            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite", "gws-docs", "gws-slides", "import-agent-home"].iter().all(|n| skill_names.contains(n)),
+        "the managed set contains nineteen skills, including design-finite, slides-finite, gws-docs, gws-slides, import-agent-home and disk-space-finite",
+        skill_names.len() == 19
+            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite", "gws-docs", "gws-slides", "import-agent-home", "disk-space-finite"].iter().all(|n| skill_names.contains(n)),
         format!("{skill_names:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";

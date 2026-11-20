@@ -7,9 +7,13 @@
 //! the share sheet, the access view and its picture's own address. The same
 //! change again changes nothing (replay); a title blank or too long, a role
 //! too long or a chat's, a file that is no picture, and someone else's
-//! agent are refused, the face kept; a `fragment.json` names no face once
-//! it has one, and refuses no install; taken away, the picture is gone
-//! everywhere. A picture kept by the release before (its `avatar.png` at
+//! agent are refused, the face kept; taken away, the picture is gone
+//! everywhere. An agent's rename says its name in its job before its face:
+//! refused there, neither changes, and one whose answer was lost is
+//! finished by the next. A client from before the face, renaming by its
+//! `fragment.json` and `avatar.png` and a deploy, still renames it (the
+//! debt ledger); a deploy changing neither keeps its face, and a role there
+//! refuses no install. A picture kept by the release before (its `avatar.png` at
 //! the commit an install checked) is taken once, by its first fetch or the
 //! alarm's pass, and one git no longer holds is let go (valid, invalid,
 //! replay); a node's restart keeps it all (restart.rs).
@@ -220,17 +224,20 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         &sheet,
     );
     // who has access to what asks the members of what someone else is in:
-    // Bob, a viewer of it for a moment
+    // the agent in Paul's chat, and Bob a viewer there for a moment (its own
+    // fragment is Paul's alone: FIN-544)
     let (bob, _) = person(api)?;
     let bob_id = api.identity(&bob)?;
-    let r = api.share(&agent, &bob_id, "viewer")?;
+    let r = api.signed(&paul, "PUT", &format!("/api/f/{chat}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent in the chat: {r}");
+    let r = api.share(&chat, &bob_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Bob, a viewer: {r}");
     let access = api.signed(&paul, "GET", "/api/access", None)?;
-    let member = access.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == agent.as_str()).and_then(|f| f["members"].as_array()?.iter().find(|m| m["principal"] == agent_id.as_str()).cloned());
+    let member = access.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == chat.as_str()).and_then(|f| f["members"].as_array()?.iter().find(|m| m["principal"] == agent_id.as_str()).cloned());
     s.ok("who has access to what names it so too (its title, beside its label)", member.as_ref().is_some_and(|m| m["title"] == "Frank" && m["name"] == label.as_str()), &access);
     // a viewer is no editor: Bob renames nothing
-    let (theirs, _) = set_face(api, &bob, &agent, Some("Bobbed"), None)?;
-    let r = api.signed(&paul, "DELETE", &format!("/api/f/{agent}/members/{bob_id}"), None)?;
+    let (theirs, _) = set_face(api, &bob, &chat, Some("Bobbed"), None)?;
+    let r = api.signed(&paul, "DELETE", &format!("/api/f/{chat}/members/{bob_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
 
     // its history: each change an `events` row; the same change again
@@ -276,21 +283,124 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     let nobody = fetched(api, "/api/identities/npub1nobody/picture")?;
     s.ok("an address that names no identity serves no picture (404)", nobody.status == 404, &nobody);
 
-    // a `fragment.json` names no face once it has one, and refuses no
-    // install: a title or a role there (even one past a face's limits),
-    // and an `avatar.png`, committed and deployed, change nothing, and say
-    // nothing in `code.error`
-    let manifest = json!({ "template": "agent", "meta": { "title": "From git", "role": "r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1) } });
-    let files = json!({ "message": "a face in git", "files": [{ "path": "fragment.json", "text": manifest.to_string() }, { "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(&blue) }] });
+    // a client from before the face (a CLI, the one inside a computer's
+    // image, an iOS build): its rename reads `GET manifest` (its title the
+    // face's), writes it back with a new title, and deploys; `fragment
+    // agent --picture` writes avatar.png. Each is its face (the debt
+    // ledger); a role there, even one past a face's limits, names none and
+    // refuses no install
+    let manifest = api.signed(&paul, "GET", &format!("/api/f/{agent}/manifest"), None)?;
+    let mut old = manifest.body.clone();
+    old["meta"]["title"] = json!("Gus");
+    old["meta"]["role"] = json!("r".repeat(fragment_proto::limits::ROLE_MAX_CHARS + 1));
+    let files = json!({ "message": "a face in git", "files": [{ "path": "fragment.json", "text": old.to_string() }, { "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(&blue) }] });
     let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&files))?;
     let deployed = api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?;
+    let blue_shown = path_of(&blue);
+    let followed = s.eventually(WAIT, || {
+        let r = row(api, &paul, &agent);
+        r["title"] == "Gus" && r["picture"] == blue_shown.as_str()
+    });
     let status = api.status(&paul, &agent)?.body;
+    let got = fetched(api, &blue_shown)?;
+    s.ok(
+        "a client from before the face: `GET manifest` says its face's title; its fragment.json written back with a new title, and an avatar.png, deployed, rename it and give it that picture, served; a role there names none, and its install refuses nothing",
+        manifest.body["meta"]["title"] == "Frank"
+            && wrote.status == 200
+            && deployed.status == 200
+            && followed
+            && status["code"]["error"].is_null()
+            && status["title"] == "Gus"
+            && got.bytes == blue
+            && row(api, &paul, &agent).get("agentRole").is_none(),
+        json!({ "manifest": manifest.body, "status": status, "row": row(api, &paul, &agent), "events": super::site::event_kinds(api, &paul, &agent) }),
+    );
+    // renamed through its face since: a deploy whose fragment.json and
+    // avatar.png are as they were changes neither (FIN-541, the other way)
+    let renamed = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&orange)))?;
+    let other = json!({ "message": "something else", "files": [{ "path": "notes.md", "text": "a note\n" }] });
+    let unrelated = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&other))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200;
     let kept = row(api, &paul, &agent);
     s.ok(
-        "a fragment.json's title and role, and an avatar.png, committed and deployed, name no face: its name and picture stay, and its install refuses nothing (no code.error)",
-        wrote.status == 200 && deployed.status == 200 && status["code"]["error"].is_null() && status["title"] == "Frank" && kept["title"] == "Frank" && kept["picture"] == shown.as_str() && kept.get("agentRole").is_none(),
-        json!({ "status": status, "row": kept }),
+        "renamed and pictured through its face since, a deploy that changes neither its fragment.json nor its avatar.png keeps its face",
+        renamed.0.is_some_and(|r| r.status == 200) && unrelated && kept["title"] == "Frank" && kept["picture"] == shown.as_str(),
+        &kept,
     );
+    // `fragment agent --no-picture` from before: avatar.png deleted and
+    // deployed takes the picture away only while it is still that one
+    let gone = json!({ "message": "no picture", "files": [{ "path": "avatar.png", "delete": true }] });
+    let kept_icon = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&gone))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && row(api, &paul, &agent)["picture"] == shown.as_str();
+    let again = json!({ "message": "a picture in git", "files": [{ "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(&blue) }] });
+    let given = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&again))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == blue_shown.as_str());
+    let removed = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&gone))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && s.eventually(WAIT, || row(api, &paul, &agent).get("picture").is_none());
+    s.ok(
+        "a client from before the face removing avatar.png: a picture set through its icon since stays; one its avatar.png gave is taken away",
+        kept_icon && given && removed,
+        json!({ "row": row(api, &paul, &agent), "events": super::site::event_kinds(api, &paul, &agent) }),
+    );
+    // iOS from before the face titles a chat from its first message:
+    // `GET manifest`, only while it says the title it expects, then
+    // `fragment.json` written and deployed
+    let theirs = api.signed(&paul, "GET", &format!("/api/f/{chat}/manifest"), None)?;
+    let mut titled = theirs.body.clone();
+    titled["meta"]["title"] = json!("Garden party");
+    let files = json!({ "message": "its title, from its first message", "files": [{ "path": "fragment.json", "text": titled.to_string() }] });
+    let ios = theirs.body["meta"]["title"] == "Garden"
+        && api.signed(&paul, "POST", &format!("/api/f/{chat}/files"), Some(&files))?.status == 200
+        && api.signed(&paul, "POST", &format!("/api/f/{chat}/deploy"), Some(&json!({})))?.status == 200;
+    let followed = s.eventually(WAIT, || row(api, &paul, &chat)["title"] == "Garden party");
+    s.ok(
+        "iOS from before the face retitles a chat (its manifest read, its title checked, fragment.json written, deployed): its list follows",
+        ios && followed,
+        json!({ "manifest": theirs.body, "row": row(api, &paul, &chat) }),
+    );
+    // its rename says its name in its job in the same request, before its
+    // face: refused there, neither changes; a commit whose answer is lost
+    // is finished by the next rename, whatever it asks; asked again after
+    // its answer was lost, its `was` is no longer its title, and it is the
+    // one asked: done (replay)
+    let repo = api.status(&paul, &agent)?.body["repo"].as_str().unwrap_or("").to_string();
+    let rename = |title: &str, was: &str| api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": title, "was": was })));
+    // its job as code.storage holds it at main (the cell's pin may lag a
+    // commit whose answer was lost)
+    let job_at = |s: &Suite| s.fake.file_at(&repo, "main", "SOUL.md").map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    let wrote = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job", "files": [{ "path": "SOUL.md", "text": "Frank helps with research.\n" }] })))?.status == 200;
+    s.fake.fail_commit_packs(true);
+    let refused = rename("Gus", "Frank");
+    s.fake.fail_commit_packs(false);
+    let refused = refused?;
+    let after_refused = (row(api, &paul, &agent)["title"].clone(), job_at(s));
+    let retried = rename("Gus", "Frank")?;
+    let after_retry = (row(api, &paul, &agent)["title"].clone(), job_at(s));
+    s.ok(
+        "a rename whose job commit is refused fails (5xx), its face and its job as they were; asked again, both say the new name",
+        wrote && refused.status >= 500 && after_refused == (json!("Frank"), "Frank helps with research.\n".to_string()) && retried.status == 200 && after_retry == (json!("Gus"), "Gus helps with research.\n".to_string()),
+        json!({ "refused": refused.to_string(), "after": after_refused, "retried": retried.to_string(), "then": after_retry }),
+    );
+    s.fake.drop_commit_answers(&repo, 1);
+    let lost = rename("Hal", "Gus")?;
+    let after_lost = (row(api, &paul, &agent)["title"].clone(), job_at(s));
+    let other = rename("Ivy", "Gus")?;
+    let after_other = (row(api, &paul, &agent)["title"].clone(), job_at(s));
+    s.ok(
+        "a rename whose job commit landed and lost its answer fails, its face as it was and its job saying the name asked; a rename to another name then says that one in both",
+        lost.status >= 500 && after_lost == (json!("Gus"), "Hal helps with research.\n".to_string()) && other.status == 200 && after_other == (json!("Ivy"), "Ivy helps with research.\n".to_string()),
+        json!({ "lost": lost.to_string(), "after": after_lost, "other": other.to_string(), "then": after_other }),
+    );
+    s.fake.drop_commit_answers(&repo, 1);
+    let lost = rename("Jo", "Ivy")?;
+    let same = rename("Jo", "Ivy")?;
+    let tip = s.fake.branch(&repo, "main");
+    let replay = rename("Jo", "Ivy")?;
+    let stale = rename("Kit", "Ivy")?;
+    let after = (row(api, &paul, &agent)["title"].clone(), job_at(s), s.fake.branch(&repo, "main"));
+    s.ok(
+        "a rename that lost its answer, asked again with the same name and `was`: done; once more, done with nothing committed; another name with that `was` is 409",
+        lost.status >= 500 && same.status == 200 && replay.status == 200 && stale.status == 409 && after == (json!("Jo"), "Jo helps with research.\n".to_string(), tip.clone()) && tip.is_some(),
+        json!({ "lost": lost.to_string(), "same": same.to_string(), "replay": replay.to_string(), "stale": stale.to_string(), "after": after, "tip": tip }),
+    );
+    let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?;
+    anyhow::ensure!(back.status == 200 && job_at(s) == "Frank helps with research.\n", "renamed Frank again: {back}");
 
     // a picture past what one is kept as (256 KiB) is cropped by Images to
     // fill the icon's square (it is shown round), a JPEG, at its owner's charge
@@ -412,11 +522,12 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         said.as_ref().is_ok_and(|v| v["name"] == "Frances" && v["changed"] == true) && followed && status == "Frances" && asked["title"] == "Frances" && asked["name"] == label.as_str(),
         json!({ "cli": said.map_err(|e| e.to_string()), "status": status, "people": asked }),
     );
-    let r = api.share(&agent, &bob_id, "viewer")?;
+    // Bob a viewer of the chat it is in again (its own fragment is Paul's alone)
+    let r = api.share(&chat, &bob_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Bob, a viewer again: {r}");
     let out = s.cli(api, &home, &["access"]);
     let printed = String::from_utf8_lossy(&out.stdout).to_string();
-    let r = api.signed(&paul, "DELETE", &format!("/api/f/{agent}/members/{bob_id}"), None)?;
+    let r = api.signed(&paul, "DELETE", &format!("/api/f/{chat}/members/{bob_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
     let line = printed.lines().find(|l| l.contains("Frances") || l.split('\t').any(|w| w.trim() == label));
     s.ok("`fragment access` names it by its name, never its label", out.status.success() && line.is_some_and(|l| l.contains("Frances")), &printed);

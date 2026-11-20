@@ -98,6 +98,11 @@ pub fn agent_name<'a>(title: Option<&'a str>, fragment: &'a str) -> &'a str {
 /// An agent's job (`SOUL.md`) a rename rewrites, at most: bigger, or
 /// bigger once rewritten, and it is left as it is (a job is a few lines).
 pub const JOB_RENAME_MAX_BYTES: usize = 64 * 1024;
+/// The most names a rename keeps as ones its agent's job may say, its
+/// earlier renames' whose answers were lost or refused (the cell's
+/// `MetaKey::Renaming`): each rename rewrites them all, so the oldest
+/// matters least.
+pub const RENAMING_MAX: usize = 8;
 /// Where an agent's job lives in its fragment.
 pub const JOB: &str = "SOUL.md";
 

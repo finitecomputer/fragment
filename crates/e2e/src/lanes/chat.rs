@@ -588,6 +588,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
+    super::computers::members_only(api, &owner, &agent_name)?;
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200 && fragment_core::npub::is_identity(&identity), "assigning the agent: {r}");
@@ -1454,6 +1455,7 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     let agent = s.create(api, owner, &name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON)), ("agent.json", Some(b"{ \"runtime\": \"claude\" }\n"))]);
     s.deploy(&agent);
+    super::computers::members_only(api, owner, &name)?;
     let r = api.signed(owner, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
     let identity = r.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == name.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200 && fragment_core::npub::is_identity(&identity), "assigning the Claude agent: {r}");

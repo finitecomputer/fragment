@@ -161,6 +161,10 @@ struct State {
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
+    /// The next repo create is made, this many repos made after it, and
+    /// its answer dropped (`lose_repo_create_answer`).
+    #[serde(skip)]
+    create_unanswered: Option<usize>,
     #[serde(skip)]
     commit_packs: u32,
     #[serde(skip)]
@@ -209,6 +213,40 @@ struct State {
     /// (`advertise_upload_max`); none, as an older platform's.
     #[serde(skip)]
     upload_max: Option<u64>,
+    /// The host's blob store once a test keeps one (`keep_blobs`, with
+    /// `host_routes`): a fragment's status then answers (its threshold
+    /// 1 MiB), and `PUT`, `HEAD` and `GET /api/f/{name}/blobs/{sha}` keep
+    /// and serve bytes by fragment and hash, as the cell's do. None: no
+    /// status and no blobs, an older host's.
+    #[serde(skip)]
+    host_blobs: Option<BTreeMap<(String, String), Vec<u8>>>,
+    /// Blob uploads still to answer 503, keeping nothing (`fail_blob_puts`).
+    #[serde(skip)]
+    blob_puts_failing: u32,
+    /// Blobs served with their first byte changed (`corrupt_blob`): a store
+    /// that answers other bytes than it was given.
+    #[serde(skip)]
+    blobs_corrupt: BTreeSet<String>,
+    /// What a fragment's status says it is (`describe`): its visibility
+    /// and kind, else members and app.
+    #[serde(skip)]
+    described: BTreeMap<String, (String, String)>,
+    /// Moves' stages, by id (`seed_stage`, with `host_routes`): `open`
+    /// answers each one's manifest, and `zip` its bytes by a range alone,
+    /// as the platform's do for the agent a move is bound to.
+    #[serde(skip)]
+    stages: BTreeMap<String, Vec<u8>>,
+    /// The ranges a stage's zip answered, and their bytes in all.
+    #[serde(skip)]
+    stage_reads: (u64, u64),
+    /// The ranges copied from a stage into a fragment's blobs, and their
+    /// bytes in all (`POST …/copy`).
+    #[serde(skip)]
+    stage_copies: (u64, u64),
+    /// Copies still to answer 503 once this many more have worked
+    /// (`fail_stage_copies`): (worked first, then failing).
+    #[serde(skip)]
+    stage_copies_failing: (u32, u32),
 }
 
 struct Inner {
@@ -428,6 +466,19 @@ impl State {
         self.repo_by(name_or_url).map(|r| r.url.clone())
     }
 
+    /// `n` empty repos made after every existing one (`seed_filler`).
+    fn fill(&mut self, n: usize) {
+        let base = self.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
+        for i in 0..n {
+            let id = fresh_sha(&mut self.counter, "filler");
+            let name = format!("filler-{}", &id[..12]);
+            let url = uuid_like(&id);
+            let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
+            repo.created_at_ms = base + 1 + i as i64;
+            self.repos.insert(url, repo);
+        }
+    }
+
     /// Writes a commit; returns (old, new).
     fn commit(&mut self, url: &str, w: Write<'_>) -> (String, String) {
         let Write { branch, message, author, changes, from } = w;
@@ -532,6 +583,12 @@ impl Inner {
         let path = req.path.as_str();
         let m = req.method.as_str();
         if self.host_routes {
+            if let Some(answer) = self.host_blob_route(st, req) {
+                return answer;
+            }
+            if let Some(answer) = stage_route(st, req) {
+                return answer;
+            }
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
                 // an unknown name is a fresh repo with no branches yet
                 let url = match st.url_of(name) {
@@ -630,6 +687,10 @@ impl Inner {
             let repo_id = format!("repo_{}", &fresh_sha(&mut st.counter, name)[..20]);
             let url = uuid_like(&fresh_sha(&mut st.counter, &repo_id));
             st.repos.insert(url.clone(), Repo::new(name, &url, &repo_id));
+            if let Some(after) = st.create_unanswered.take() {
+                st.fill(after);
+                return Response::unanswered();
+            }
             return Response::json(
                 201,
                 &json!({ "repo_id": repo_id, "repo_name": name, "http_url": format!("{}/{url}", self.url), "message": "repository created" }),
@@ -850,6 +911,122 @@ impl Inner {
             }
         }
     }
+
+    /// A fragment's status and its blobs, as the host answers them, once a
+    /// test keeps blobs (`keep_blobs`); None for any other request.
+    fn host_blob_route(&self, st: &mut State, req: &Request) -> Option<Response> {
+        let (name, rest) = req.path.strip_prefix("/api/f/")?.split_once('/')?;
+        st.host_blobs.as_ref()?;
+        let m = req.method.as_str();
+        if (m, rest) == ("GET", "status") {
+            let Some(url) = st.url_of(name) else { return Some(problem(404, &format!("no fragment {name}"))) };
+            let (visibility, kind) = st.described.get(name).cloned().unwrap_or_else(|| ("members".into(), "app".into()));
+            let role = if st.viewing.contains(name) { "viewer" } else { "owner" };
+            let main = st.repos[&url].branches.get("main").cloned();
+            // the whole of fragment_proto::FragmentStatus, as the cell answers it
+            return Some(Response::json(
+                200,
+                &json!({
+                    "name": name, "kind": kind, "npub": "npub1fake", "owner": "npub1fake", "role": role, "visibility": visibility, "repo": url,
+                    "pins": { "main": main, "live": null }, "counts": { "files": 0, "events": 0, "members": 1 },
+                    "code": { "sha": null, "id": null, "operations": {}, "error": null }, "viewToken": null, "inboxToken": null,
+                    "urls": { "canonical": format!("http://{name}.fragment.localhost"), "platform": self.url }, "blobMinBytes": fragment_core::blob::BLOB_MIN_BYTES,
+                }),
+            ));
+        }
+        let sha = rest.strip_prefix("blobs/")?;
+        let key = (name.to_string(), sha.to_string());
+        let blobs = st.host_blobs.as_mut().expect("kept: checked above");
+        Some(match m {
+            "PUT" => {
+                if st.upload_max.is_some_and(|max| req.body.len() as u64 > max) {
+                    return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
+                }
+                if st.blob_puts_failing > 0 {
+                    st.blob_puts_failing -= 1;
+                    return Some(problem(503, "the blob store is unavailable (the fake's lever)"));
+                }
+                if fragment_core::blob::sha256_hex(&req.body) != sha {
+                    return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "the bytes are not that hash's" })));
+                }
+                let size = req.body.len();
+                blobs.insert(key, req.body.clone());
+                Response::json(200, &json!({ "ok": true, "sha": sha, "size": size, "stored": true }))
+            }
+            // a HEAD's answer has no body
+            "HEAD" => Response::bytes(if blobs.contains_key(&key) { 200 } else { 404 }, "application/octet-stream", Vec::new()),
+            "GET" => match blobs.get(&key) {
+                Some(bytes) => {
+                    let mut bytes = bytes.clone();
+                    if st.blobs_corrupt.contains(sha) {
+                        if let Some(b) = bytes.first_mut() {
+                            *b ^= 0xff;
+                        }
+                    }
+                    Response::bytes(200, "application/octet-stream", bytes)
+                }
+                None => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
+            },
+            _ => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
+        })
+    }
+}
+
+/// A move's stage, as the platform answers its bound agent
+/// (docs/migrations.md, "A new agent's stage"): `open` its manifest, and
+/// `zip` one range of its bytes (206), never the whole without one. None
+/// for any other request.
+fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
+    let (stage, op) = req.path.strip_prefix("/api/migrations/stages/")?.split_once('/')?;
+    let Some(zip) = st.stages.get(stage) else { return Some(Response::json(404, &json!({ "error": "not_found", "message": format!("no stage {stage}") }))) };
+    Some(match (req.method.as_str(), op) {
+        ("POST", "open") => {
+            use sha2::Digest;
+            let manifest = json!({
+                "format": "finite-stage/1", "old": stage.split('.').next().unwrap_or(stage), "phase": "p1", "attempt": 1, "layout": "finite-computer",
+                "zip_bytes": zip.len(), "zip_sha256": hex::encode(sha2::Sha256::digest(zip)), "bytes": zip.len(), "files": 0,
+            });
+            Response::json(200, &json!({ "stage": stage, "manifest": manifest }))
+        }
+        // a range into a fragment's blobs, as the platform copies it (with
+        // `keep_blobs`): never through the caller
+        ("POST", "copy") => {
+            let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
+            let (into, offset, len) = (q("into"), q("offset").parse::<u64>().ok(), q("bytes").parse::<u64>().ok());
+            let (Some(offset), Some(len)) = (offset, len) else { return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "offset and bytes are numbers" }))) };
+            if len == 0 || offset.checked_add(len).is_none_or(|end| end > zip.len() as u64) {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "past the zip's end" })));
+            }
+            if st.upload_max.is_some_and(|max| len > max) {
+                return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
+            }
+            if st.stage_copies_failing.1 > 0 {
+                if st.stage_copies_failing.0 > 0 {
+                    st.stage_copies_failing.0 -= 1;
+                } else {
+                    st.stage_copies_failing.1 -= 1;
+                    return Some(problem(503, "the stage's copy is unavailable (the fake's lever)"));
+                }
+            }
+            let bytes = zip[offset as usize..(offset + len) as usize].to_vec();
+            let (sha, crc32) = (fragment_core::blob::sha256_hex(&bytes), crc32fast::hash(&bytes));
+            let Some(blobs) = st.host_blobs.as_mut() else { return Some(Response::json(404, &json!({ "error": "not_found", "message": "this host keeps no blobs" }))) };
+            blobs.insert((into, sha.clone()), bytes);
+            st.stage_copies = (st.stage_copies.0 + 1, st.stage_copies.1 + len);
+            Response::json(200, &json!({ "sha256": sha, "bytes": len, "crc32": crc32 }))
+        }
+        ("GET", "zip") => {
+            let range = req.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            let Some((first, last)) = range.filter(|(a, b)| a <= b && *b < zip.len() as u64) else {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "the fake's stage answers a range within its zip alone" })));
+            };
+            let bytes = zip[first as usize..=last as usize].to_vec();
+            st.stage_reads = (st.stage_reads.0 + 1, st.stage_reads.1 + bytes.len() as u64);
+            let total = zip.len();
+            Response::bytes(206, "application/zip", bytes).with_header("content-range", &format!("bytes {first}-{last}/{total}"))
+        }
+        _ => Response::json(404, &json!({ "error": "not_found", "message": format!("no route {} {}", req.method, req.path) })),
+    })
 }
 
 trait PemString {
@@ -1150,17 +1327,14 @@ impl CodeStorage {
     /// `n` empty repos made after every existing one (a busy org, so a
     /// lookup by name must page).
     pub fn seed_filler(&self, n: usize) {
-        self.with(|st| {
-            let base = st.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
-            for i in 0..n {
-                let id = fresh_sha(&mut st.counter, "filler");
-                let name = format!("filler-{}", &id[..12]);
-                let url = uuid_like(&id);
-                let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
-                repo.created_at_ms = base + 1 + i as i64;
-                st.repos.insert(url, repo);
-            }
-        });
+        self.with(|st| st.fill(n));
+    }
+
+    /// The next repo create is made, then `fillers` repos after it (a busy
+    /// org, so a lookup of it by name must page), and its answer is lost:
+    /// the connection closes without a response.
+    pub fn lose_repo_create_answer(&self, fillers: usize) {
+        self.with(|st| st.create_unanswered = Some(fillers));
     }
 
     /// The url-form identity of a repo named `name`.
@@ -1188,6 +1362,11 @@ impl CodeStorage {
     /// Whether the repo `url` was deleted (`DELETE /api/repos/{repo}`).
     pub fn repo_deleted(&self, url: &str) -> bool {
         self.with(|st| st.deleted.contains_key(url))
+    }
+
+    /// Whether a repo named `name` was made and then deleted.
+    pub fn repo_named_deleted(&self, name: &str) -> bool {
+        self.with(|st| st.deleted.values().any(|n| n == name))
     }
 
     pub fn branch(&self, repo: &str, branch: &str) -> Option<String> {
@@ -1362,6 +1541,61 @@ impl CodeStorage {
     /// `host_routes`) advertises from now on; None, none.
     pub fn advertise_upload_max(&self, bytes: Option<u64>) {
         self.with(|st| st.upload_max = bytes);
+    }
+
+    /// The host routes keep a blob store from now on: a fragment's status
+    /// answers (members, an app, its threshold 1 MiB), and its blobs are
+    /// kept and served (`host_blob_route`).
+    pub fn keep_blobs(&self) {
+        self.with(|st| st.host_blobs.get_or_insert_with(BTreeMap::new).clear());
+    }
+
+    /// The bytes the host's blob store keeps for `name`'s `sha`.
+    pub fn blob(&self, name: &str, sha: &str) -> Option<Vec<u8>> {
+        self.with(|st| st.host_blobs.as_ref()?.get(&(name.to_string(), sha.to_string())).cloned())
+    }
+
+    /// The next `n` blob uploads answer 503 and keep nothing.
+    pub fn fail_blob_puts(&self, n: u32) {
+        self.with(|st| st.blob_puts_failing = n);
+    }
+
+    /// Blob `sha` is served with its first byte changed (true), or as kept.
+    pub fn corrupt_blob(&self, sha: &str, on: bool) {
+        self.with(|st| {
+            if on {
+                st.blobs_corrupt.insert(sha.to_string());
+            } else {
+                st.blobs_corrupt.remove(sha);
+            }
+        });
+    }
+
+    /// A move's stage `stage`, its zip `zip` (with `host_routes`).
+    pub fn seed_stage(&self, stage: &str, zip: Vec<u8>) {
+        self.with(|st| st.stages.insert(stage.to_string(), zip));
+    }
+
+    /// The ranges the stages' zips answered so far, and their bytes in all.
+    pub fn stage_reads(&self) -> (u64, u64) {
+        self.with(|st| st.stage_reads)
+    }
+
+    /// After `worked` more copies from a stage, the next `n` answer 503
+    /// and keep nothing: an import cut off partway.
+    pub fn fail_stage_copies(&self, worked: u32, n: u32) {
+        self.with(|st| st.stage_copies_failing = (worked, n));
+    }
+
+    /// The ranges copied from stages into fragments' blobs so far, and
+    /// their bytes in all.
+    pub fn stage_copies(&self) -> (u64, u64) {
+        self.with(|st| st.stage_copies)
+    }
+
+    /// What `name`'s status says it is: its visibility and its kind.
+    pub fn describe(&self, name: &str, visibility: &str, kind: &str) {
+        self.with(|st| st.described.insert(name.to_string(), (visibility.to_string(), kind.to_string())));
     }
 
     /// Turns on the search write API for fragment `name` (with
@@ -1567,6 +1801,24 @@ mod tests {
         assert!(listed["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "todo--paul--abc"), "{listed}");
         let remade = send("POST", &format!("{}/api/repos", cs.url), &cs.token("todo--paul--abc", &["repo:write"]), Some(r#"{"repo_name":"todo--paul--abc"}"#));
         assert_eq!((remade.0, remade.1["code"].as_str()), (409, Some("repository_deleted")), "its name is never made again");
+    }
+
+    /// Goal: a repo create whose answer is lost (`lose_repo_create_answer`)
+    /// made the repo all the same, behind the repos made after it, so its
+    /// maker's try again is a 409 and its lookup by name must page; the
+    /// create after it is answered as ever. Method: the lever, a create,
+    /// the org's first page, the same create again, and another.
+    #[test]
+    fn a_lost_repo_create_answer_made_the_repo() {
+        let cs = CodeStorage::start(Options::default()).unwrap();
+        cs.lose_repo_create_answer(150);
+        let make = |name: &str| send("POST", &format!("{}/api/repos", cs.url), &cs.token(name, &["repo:write"]), Some(&format!(r#"{{"repo_name":"{name}"}}"#)));
+        assert_eq!(make("chat--lost--abc").0, 0, "no answer");
+        assert!(cs.repo_url("chat--lost--abc").is_some(), "made all the same");
+        let first = get(&format!("{}/api/repos?limit=100", cs.url), &cs.token("fragment-dev", &["org:read"])).1;
+        assert!(first["repos"].as_array().unwrap().iter().all(|r| r["repo_name"] != "chat--lost--abc") && first["has_more"] == true, "behind a full page of newer ones: {first}");
+        assert_eq!(make("chat--lost--abc").0, 409, "made again: it exists");
+        assert_eq!(make("chat--next--abc").0, 201, "the next create is answered");
     }
 
     /// Goal: a commit pack that changes nothing is refused as the real

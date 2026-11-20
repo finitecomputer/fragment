@@ -122,6 +122,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
         email: None,
+        door: None,
     })
 }
 
@@ -232,29 +233,91 @@ impl FragmentCell {
 
     /// `PUT /api/f/{name}/face` (editors and up; a connector's owner
     /// alone): its title, an agent's role, or both (`face::change`), kept
-    /// here alone, with no commit and no deploy. Each change is an `events`
-    /// row (`face.changed`), its history; its lists follow in this request.
-    /// A write: refused while its owner's fragments are read-only.
+    /// here alone, with no deploy. Each change is an `events` row
+    /// (`face.changed`), its history; its lists follow in this request.
+    /// With `was`, only while its title is that, or is already the one
+    /// asked (a retry whose answer was lost): 409 otherwise. An agent's
+    /// new title is said in its job first (`job_says`): a rename refused
+    /// there changes neither. A write: refused while its owner's fragments
+    /// are read-only.
     pub(crate) async fn face_put(&self, caller: &Caller, body: FaceChange) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
         if body.picture.is_some() {
             return Err(CellError::invalid("a picture is its icon: PUT /api/f/{name}/icon"));
         }
+        // one at a time: each reads the job and face the last one left
+        let _renaming = self.renaming.lock().await;
+        let life = self.must(MetaKey::CreatedAt)?;
         let now = self.face_now()?;
-        if body.was.as_ref().is_some_and(|was| now.title.as_ref() != Some(was)) {
+        let (title, role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        if body.was.as_ref().is_some_and(|was| now.title.as_ref() != Some(was) && (title.is_none() || now.title.as_deref() != title)) {
             return Err(CellError::new(ErrorCode::Conflict, format!("its title is no longer {:?}: nothing was changed", body.was.unwrap_or_default())));
         }
-        let (title, role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        let by = self.caller_id(caller)?.to_string();
+        let job = now.kind == FragmentKind::Agent && title.is_some();
+        if let (true, Some(asked)) = (job, title) {
+            self.job_says(&by, now.title.as_deref(), asked).await?;
+            // a delete, or the name made again, while its job was written ends it
+            if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
+                return Err(CellError::new(ErrorCode::NotFound, format!("{} ended while it was renamed", self.name().unwrap_or_default())));
+            }
+        }
+        let now = self.face_now()?;
         let (title, role) = (title.or(now.title.as_deref()), role.unwrap_or(now.role.as_deref()));
         if (title, role) != (now.title.as_deref(), now.role.as_deref()) {
             self.face_is(now.kind, title, role)?;
-            let by = self.caller_id(caller)?.to_string();
             self.event("face.changed", &format!("its name is {:?}{}", title.unwrap_or(""), role.map(|r| format!(", its role {r:?}")).unwrap_or_default()), json!({ "title": title, "role": role, "by": by }));
             self.flush_index().await;
         }
+        if job {
+            self.del_meta(MetaKey::Renaming)?;
+        }
         let shown = self.face_now()?;
         json_response(&FaceChange { title: shown.title, role: shown.role, picture: shown.picture, was: None })
+    }
+
+    /// An agent's job (its `SOUL.md` at main, where its computer reads it)
+    /// says `asked` where it said an old name (`face::job_renamed`): its
+    /// title now, the name its first job gave it, and each name a rename
+    /// since the last one that ended wrote there (`MetaKey::Renaming`).
+    /// That name is kept before its commit, so one whose answer is lost or
+    /// refused is found by the next rename, whatever it asks; a rename
+    /// that ends lets them go. Committed only over the job it read: an
+    /// edit of it meanwhile is a 409, its job and face as they were.
+    async fn job_says(&self, by: &str, title: Option<&str>, asked: &str) -> CellResult<()> {
+        use fragment_core::face::{JOB, JOB_RENAME_MAX_BYTES, RENAMING_MAX};
+        let kept = self.meta(MetaKey::Renaming)?;
+        let mut pending: Vec<String> = kept.as_deref().and_then(|r| crate::json_text(r).ok()).unwrap_or_default();
+        // read at main's head, not its pin: a commit whose answer was lost
+        // moved main with no pin following yet. None, or one past what a
+        // rename rewrites (or not text): nothing to say
+        let Some(repo) = self.meta(MetaKey::Repo)?.filter(|r| !r.is_empty()) else { return Ok(()) };
+        let cs = self.cs()?;
+        let Some(head) = cs.branch_head(&repo, "main").await? else { return Ok(()) };
+        let Some(file) = cs.head(&repo, &head, JOB).await?.filter(|f| f.size <= JOB_RENAME_MAX_BYTES as u64) else { return Ok(()) };
+        let Some(job) = cs.read(&repo, &head, JOB, JOB_RENAME_MAX_BYTES).await?.and_then(|b| String::from_utf8(b).ok()) else { return Ok(()) };
+        let olds: Vec<&str> = title.into_iter().chain(pending.iter().map(String::as_str)).chain(fragment_core::face::job_first_name(&job)).collect();
+        let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked) else { return Ok(()) };
+        // bounded: the oldest names go first (each rename rewrites them all)
+        pending.retain(|p| p != asked);
+        pending.push(asked.to_string());
+        let from = pending.len().saturating_sub(RENAMING_MAX);
+        self.set_meta(MetaKey::Renaming, &serde_json::to_string(&pending[from..]).expect("names serialize"))?;
+        let path = fragment_proto::RepoPath::parse(JOB).expect("its job's path is a repo path");
+        let expect = std::collections::BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
+        let key = format!("face:{by}:{}", js::random_hex::<16>());
+        match self.commit(&key, &[crate::files::FileWrite { path, bytes: Some(renamed.into_bytes()) }], &expect, &format!("its job, renamed {asked}"), by, 0).await? {
+            crate::files::Wrote::Commit(_) => Ok(()),
+            // not written: the names it may say are the ones before
+            crate::files::Wrote::Conflict(why) => {
+                match &kept {
+                    Some(k) => self.set_meta(MetaKey::Renaming, k)?,
+                    None => self.del_meta(MetaKey::Renaming)?,
+                }
+                Err(CellError::new(ErrorCode::Conflict, format!("its job changed while it was renamed ({why}): nothing was renamed")))
+            }
+        }
     }
 
     /// Every list's row is sent again: its owner's and each member's.
@@ -546,10 +609,18 @@ impl FragmentCell {
     }
 
     /// Every member, the first added first (a chat's lead is its first
-    /// agent): the API's list, and a page's (`__members`, serve.rs).
+    /// agent): the API's list, and a page's (`__members`, serve.rs). On a
+    /// connector bound as an agent's door, that agent's row says which
+    /// door, while it is open (`door_member`).
     pub(crate) fn member_list(&self) -> CellResult<MemberList> {
         let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
-        Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
+        let mut members = rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?;
+        if let Some((identity, door)) = self.door_member()? {
+            if let Some(m) = members.iter_mut().find(|m| m.principal == identity) {
+                m.door = Some(door);
+            }
+        }
+        Ok(MemberList { members })
     }
 
     /// Its agent members as every list's row names them: the first added
@@ -663,7 +734,13 @@ impl FragmentCell {
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
         }
-        if current.is_none() && !lever && target.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
+        let theirs = target.owner.as_deref() == Some(self.must(MetaKey::Owner)?.as_str());
+        // on an agent's own, no one but its owner's agents comes in or is
+        // raised (alone.rs)
+        if !theirs && current.is_none_or(|was| body.role > was) {
+            self.share_while_alone()?;
+        }
+        if current.is_none() && !lever && !theirs {
             return Err(CellError::new(ErrorCode::Forbidden, match target.kind {
                 IdentityKind::Person => "a person joins by their own yes: invite them by email instead (the share sheet's Add, `fragment members add <name> <email>`), and they are in once they accept it",
                 IdentityKind::Agent => "someone else's agent joins with its owner: invite its owner by email instead (the share sheet's Add, `fragment members add <name> <email>`); once they accept, their agents act there for them",
@@ -867,6 +944,8 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
+        // none on an agent's own (alone.rs), decided in the write's turn
+        self.share_while_alone()?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
@@ -998,6 +1077,10 @@ impl FragmentCell {
         let who = claim.identity.as_str();
         let current = self.member_role(who)?;
         let kept = current.is_some_and(|c| c >= role);
+        // a yes kept waiting on an agent's own lets no one in (alone.rs)
+        if !kept {
+            self.share_while_alone()?;
+        }
         // the owner is in already, with their agents as they chose them
         let owner = current == Some(Role::Owner);
         let agents: &[String] = if owner { &[] } else { &claim.agents };
@@ -1152,8 +1235,10 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; its link or public, not with reach (reach.rs)
+        // members only narrows it; its link or public, not with reach
+        // (reach.rs) nor on an agent's own (alone.rs)
         if body.visibility != Visibility::Members {
+            self.share_while_alone()?;
             self.share_while_private()?;
         }
         let before = self.visibility()?;
@@ -1192,6 +1277,10 @@ impl FragmentCell {
         };
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
             return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view)")));
+        }
+        // a new share link that opens an agent's own is new sharing (alone.rs)
+        if want.iter().any(|w| w == "view") && self.visibility()? != Visibility::Members {
+            self.share_while_alone()?;
         }
         for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>())] {
             if want.iter().any(|w| w == scope) {

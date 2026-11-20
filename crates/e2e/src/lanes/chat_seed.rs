@@ -11,9 +11,10 @@
 //! of the repo while code.storage is down fails as code.storage does,
 //! leaving the chat as it was. Replay: the alarm's pass again changes
 //! nothing. Races: two writers, the second while the first's commit is in
-//! flight; a delete while a writer's deploy is in flight; and the name
-//! made again over its kept repo, whose old live a refresh never takes for
-//! the new life's.
+//! flight; a delete while a writer's deploy is in flight; a delete as a
+//! writer's seed makes its repo, that repo deleted with that life; and the
+//! name made again, which gets a repo of its own, never the deleted
+//! life's (with its live).
 
 use std::time::Duration;
 
@@ -38,12 +39,12 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let wait = Duration::from_secs(30);
     let owner = api.person()?;
-    let owner_id = api.identity(&owner)?;
     measure(s, api, &owner)?;
     let session = api.sign_in(&Api::email_of(&owner))?;
     let poll_now = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })));
     let status = |name: &str| api.status(&owner, name).map(|r| r.body).unwrap_or(Value::Null);
-    let repo_name = |name: &str| fragment_core::codestorage::repo_name("", name, &owner_id).unwrap_or_default();
+    // a life's repo name, from its own key (crates/core codestorage.rs)
+    let repo_name = |name: &str, life: &Value| fragment_core::codestorage::repo_name("", name, life.as_str().unwrap_or_default()).unwrap_or_default();
     let chat = |s: &Suite, label: &str| -> Result<(String, crate::api::Reply)> {
         let r = api.create_with(&owner, json!({ "label": s.name(label), "template": "chat", "title": "Seeded" }))?;
         s.owned(&r.body, &owner);
@@ -97,7 +98,7 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     let st = status(&name);
     s.ok(
         "code.storage back, its alarm's passes make no repo: a chat has none until its first file, and none of its own was ever asked of code.storage",
-        passed && st["repo"] == "" && st["pins"] == json!({ "main": null, "live": null }) && s.fake.repo_url(&repo_name(&name)).is_none(),
+        passed && st["repo"] == "" && st["pins"] == json!({ "main": null, "live": null }) && s.fake.repo_url(&repo_name(&name, &st["npub"])).is_none(),
         &st,
     );
     // its first file makes its repo, lands its template first, and commits on top
@@ -107,9 +108,9 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     let manifest: Value = s.fake.file_at(&repo, "live", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     let said = api.signed(&owner, "GET", &format!("/api/f/{name}/channels/chat?after=0&limit=10"), None)?;
     s.ok(
-        "its first file makes its repo (its owner's name) and lands its template first: live at the template's one commit, installed from it, the file on main above it, the messages said before kept",
+        "its first file makes its repo (named for its life) and lands its template first: live at the template's one commit, installed from it, the file on main above it, the messages said before kept",
         wrote.status == 200
-            && s.fake.repo_url(&repo_name(&name)).as_deref() == Some(repo.as_str())
+            && s.fake.repo_url(&repo_name(&name, &st["npub"])).as_deref() == Some(repo.as_str())
             && manifest == json!({ "template": "chat" })
             && s.fake.paths(&repo, "live") == ["fragment.json"]
             && s.fake.paths(&repo, "main") == ["fragment.json", "notes.md"]
@@ -134,7 +135,7 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
         .map(|t| {
             let r = api.create_with(&owner, json!({ "label": s.name(&format!("seed-{t}")), "template": t }))?;
             s.owned(&r.body, &owner);
-            let none = r.body["name"].as_str().is_some_and(|n| s.fake.repo_url(&repo_name(n)).is_none());
+            let none = r.body["name"].as_str().is_some_and(|n| s.fake.repo_url(&repo_name(n, &r.body["npub"])).is_none());
             Ok((t.to_string(), json!({ "status": r.status, "repo": r.body["repo"], "none": none, "waited": timing_parts(&r.header("server-timing")) })))
         })
         .collect::<Result<_>>()?;
@@ -165,13 +166,14 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{token} {st}"),
     );
 
-    // ---- a chat with a repo deleted, then the name made again: the new
-    // life has none until its first writer, which finds the repo (the same
-    // owner's, kept as a deleted life's is) and lands its own template
+    // ---- a chat with a repo deleted, then the name made again: the repo
+    // goes with its life (named by its key); the new life has none until
+    // its first writer, which makes a fresh one of its own
     let label = s.name("seed-gone");
     let first = api.create_with(&owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
     let gone = first.body["name"].as_str().unwrap_or("").to_string();
     let kept = api.signed(&owner, "GET", &format!("/api/f/{gone}/storage-token"), None)?;
+    let old_repo = status(&gone)["repo"].as_str().unwrap_or("").to_string();
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{gone}"), None)?;
     let missing = api.status(&owner, &gone)?.status;
     let again = api.create_with(&owner, json!({ "name": gone, "template": "chat", "title": "Seeded again" }))?;
@@ -179,15 +181,56 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     let fresh = status(&gone)["repo"] == "";
     let token = api.signed(&owner, "GET", &format!("/api/f/{gone}/storage-token"), None)?;
     let st = status(&gone);
-    let manifest: Value = s.fake.file_at(st["repo"].as_str().unwrap_or(""), "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let new_repo = st["repo"].as_str().unwrap_or("").to_string();
+    let manifest: Value = s.fake.file_at(&new_repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let (cleaned, last) = s.ended_cleaned(api, &gone);
     s.ok(
-        "a chat with a repo deleted is gone at once (404); the same name made again has no repo until its first writer, which lands its own template in the repo its owner's name finds",
+        "a chat with a repo deleted is gone at once (404), its repo deleted with it; the same name made again has no repo until its first writer, which lands its own template in a fresh repo of its own (named for its new life)",
         first.status == 200 && kept.status == 200 && deleted.status == 200 && missing == 404 && again.status == 200 && fresh && token.status == 200
             && st["pins"]["live"].is_string()
-            && s.fake.repo_url(&repo_name(&gone)).as_deref() == st["repo"].as_str()
-            && token.body["repo"] == kept.body["repo"]
-            && manifest == json!({ "template": "chat" }),
-        format!("{deleted} {missing} {again} {token} {st} {manifest}"),
+            && s.fake.repo_url(&repo_name(&gone, &again.body["npub"])).as_deref() == Some(new_repo.as_str())
+            && !old_repo.is_empty() && new_repo != old_repo
+            && manifest == json!({ "template": "chat" })
+            && cleaned && s.fake.repo_deleted(&old_repo) && !s.fake.repo_deleted(&new_repo),
+        format!("{deleted} {missing} {again} {token} {st} {manifest} / {last}"),
+    );
+
+    // ---- a delete as a writer's seed makes its repo, then the name made
+    // again: that repo is the deleted life's alone (named by its key) and
+    // goes with it (`ended.repo-of-no-life`); the new life makes its own
+    let label = s.name("seed-gone-making");
+    let first = api.create_with(&owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
+    let gone = first.body["name"].as_str().unwrap_or("").to_string();
+    let old_name = repo_name(&gone, &first.body["npub"]);
+    s.fake.set_latency(SLOW);
+    let (making, unrecorded, deleted, wrote) = std::thread::scope(|scope| {
+        let writer = scope.spawn(|| api.signed(&owner, "GET", &format!("/api/f/{gone}/storage-token"), None));
+        // its seed's repo made at code.storage, the seed's next call on its way
+        let making = s.eventually(wait, || s.fake.repo_url(&old_name).is_some());
+        let unrecorded = status(&gone)["repo"] == "";
+        let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{gone}"), None);
+        let wrote = writer.join().expect("the writer's thread").map(|r| r.status).unwrap_or(0);
+        (making, unrecorded, deleted, wrote)
+    });
+    s.fake.set_latency(Duration::ZERO);
+    let deleted = deleted?;
+    let missing = api.status(&owner, &gone)?.status;
+    let again = api.create_with(&owner, json!({ "name": gone, "template": "chat", "title": "Seeded again" }))?;
+    s.owned(&again.body, &owner);
+    let token = api.signed(&owner, "GET", &format!("/api/f/{gone}/storage-token"), None)?;
+    let st = status(&gone);
+    let new_repo = st["repo"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "a chat deleted as its first writer's seed makes its repo is gone at once (404), its writer answered 404; the same name made again lands its first writer's template in a fresh repo of its own",
+        first.status == 200 && making && unrecorded && deleted.status == 200 && wrote == 404 && missing == 404 && again.status == 200 && token.status == 200
+            && st["pins"]["live"].is_string() && s.fake.repo_url(&repo_name(&gone, &again.body["npub"])).as_deref() == Some(new_repo.as_str()),
+        format!("{deleted} {wrote} {missing} {again} {st}"),
+    );
+    let (cleaned, last) = s.ended_cleaned(api, &gone);
+    s.ok(
+        "the repo its seed made as its life ended is deleted with that life (ended.repo-of-no-life); the new life's stays",
+        cleaned && s.fake.repo_named_deleted(&old_name) && !s.fake.repo_deleted(&new_repo) && status(&gone)["repo"] == new_repo.as_str(),
+        format!("{last} ({old_name})"),
     );
 
     unfinished_seeds(s, api, &owner, &session)?;
@@ -199,7 +242,6 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
 /// answered, and what code.storage was asked about its repo within 10 s of
 /// it (its alarm, due at once, included). Measured, not checked.
 fn measure(s: &Suite, api: &Api, owner: &crate::Keys) -> Result<()> {
-    let owner_id = api.identity(owner)?;
     s.fake.set_latency(Duration::from_millis(150));
     for t in ["chat", "agent", "telegram"] {
         let t0 = std::time::Instant::now();
@@ -208,7 +250,7 @@ fn measure(s: &Suite, api: &Api, owner: &crate::Keys) -> Result<()> {
         s.owned(&r.body, owner);
         let name = r.body["name"].as_str().unwrap_or("").to_string();
         std::thread::sleep(Duration::from_secs(10));
-        let repo = fragment_core::codestorage::repo_name("", &name, &owner_id).unwrap_or_default();
+        let repo = fragment_core::codestorage::repo_name("", &name, r.body["npub"].as_str().unwrap_or_default()).unwrap_or_default();
         let made = s.fake.repo_url(&repo);
         println!(
             "measure {t}: create {} in {answered} ms (server-timing {}); its repo {}; code.storage requests about it within 10 s: {} (and 1 to make it, when made)",
@@ -229,9 +271,12 @@ fn measure(s: &Suite, api: &Api, owner: &crate::Keys) -> Result<()> {
 /// chat before the step it checks.
 fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str) -> Result<()> {
     let wait = Duration::from_secs(30);
-    let owner_id = api.identity(owner)?;
-    let repo_url = |s: &Suite, name: &str| s.fake.repo_url(&fragment_core::codestorage::repo_name("", name, &owner_id).unwrap_or_default());
     let status = |name: &str| api.status(owner, name).map(|r| r.body).unwrap_or(Value::Null);
+    // its life's repo at code.storage, by the name its key gives it
+    let repo_url = |s: &Suite, name: &str| {
+        let life = status(name)["npub"].as_str().unwrap_or_default().to_string();
+        s.fake.repo_url(&fragment_core::codestorage::repo_name("", name, &life).unwrap_or_default())
+    };
     let poll_now = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })));
     let events = |name: &str, kind: &str| -> Vec<i64> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
@@ -244,6 +289,23 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         Ok(r.body["name"].as_str().unwrap_or("").to_string())
     };
     let manifest_at = |s: &Suite, repo: &str| -> Value { s.fake.file_at(repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null) };
+
+    // ---- its first writer's repo made and the answer lost on the way
+    // back, behind a busy org's newer repos: that writer fails, and the
+    // next one's create of that name is a 409, finds the repo by its name
+    // (its life's alone), past the list's first page, and lands its
+    // template there
+    s.fake.lose_repo_create_answer(150);
+    let lost = chat(s, "seed-lost", "Lost")?;
+    let failed = api.signed(owner, "GET", &format!("/api/f/{lost}/storage-token"), None)?;
+    let made = repo_url(s, &lost).is_some() && status(&lost)["repo"] == "";
+    let token = api.signed(owner, "GET", &format!("/api/f/{lost}/storage-token"), None)?;
+    let url = repo_url(s, &lost).unwrap_or_default();
+    s.ok(
+        "its first writer's repo made and the answer lost, behind 150 newer repos: that writer fails (5xx); the next finds that repo by its name, past the list's first page, and lands its template there",
+        failed.status >= 500 && made && token.status == 200 && status(&lost)["pins"]["live"].is_string() && status(&lost)["repo"] == url.as_str() && manifest_at(s, &url) == json!({ "template": "chat" }),
+        format!("{failed} / {token} / {}", status(&lost)),
+    );
 
     // ---- its repo made, its first commit failed (Alex, #1042: 1 and 3)
     s.fake.fail_commit_packs(true);
@@ -367,16 +429,16 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
             && manifest == json!({ "template": "chat" }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
     );
-    // ---- a deleted chat's repo kept with its live, the name made again by
-    // its owner, its template's commit failing (#1072): a refresh lands its
-    // template first, as any writer does, and never pins the deleted life's
-    // live for this one's, so no later pass takes that live for its template
-    // landed; with commits back, the alarm's pass lands its own
+    // ---- a deleted chat's name made again by its owner, its template's
+    // commit failing (#1072, when the new life found the deleted one's repo
+    // with its live): its first writer (a refresh) makes a fresh repo of its
+    // own and fails as that commit does, and pins no live; with commits
+    // back, its next writer lands its own, and the deleted life's repo, its
+    // live with it, is deleted
     let kept = chat(s, "seed-kept", "The first life")?;
     let first_landed = api.signed(owner, "GET", &format!("/api/f/{kept}/storage-token"), None)?.status == 200 && status(&kept)["pins"]["live"].is_string();
     let old_live = status(&kept)["pins"]["live"].as_str().unwrap_or("").to_string();
     let url = repo_url(s, &kept).unwrap_or_default();
-    let packs = s.fake.requests(&url, "POST commit-pack");
     let deleted = api.signed(owner, "DELETE", &format!("/api/f/{kept}"), None)?;
     s.fake.fail_commit_packs(true);
     let again = api.create_with(owner, json!({ "name": kept, "template": "chat", "title": "The second life" }));
@@ -388,28 +450,29 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         }
     };
     s.owned(&again.body, owner);
-    // its first writer (a refresh) finds the kept repo, and its commit is refused
     let refreshed = api.signed(owner, "POST", &format!("/api/f/{kept}/refresh"), Some(&json!({})))?;
-    let tried = s.fake.requests(&url, "POST commit-pack") > packs;
+    // its writer made a repo of its own, and its commit was refused
+    let new_url = repo_url(s, &kept).unwrap_or_default();
+    let tried = !new_url.is_empty() && new_url != url && s.fake.requests(&new_url, "POST commit-pack") >= 1;
     poll_now(&kept)?;
     let pending_st = status(&kept);
     let landed_while_down = events(&kept, "template");
     s.fake.fail_commit_packs(false);
     s.ok(
-        "a deleted chat's name made again by its owner, its repo kept with its live and its own template's commit refused: a refresh, its first writer, fails as that commit does (502), and nothing (its alarm's pass neither) pins the old live as this life's or lands its template",
+        "a deleted chat's name made again by its owner, its template's commit refused: its first writer (a refresh) made a fresh repo of its own, not the deleted life's, and fails as that commit does (502); nothing (its alarm's pass neither) pins a live or lands its template",
         first_landed && deleted.status == 200 && again.status == 200 && tried && refreshed.status == 502
-            && pending_st["pins"]["live"].is_null() && landed_while_down.is_empty(),
+            && pending_st["repo"] == new_url.as_str() && pending_st["pins"]["live"].is_null() && landed_while_down.is_empty(),
         format!("{refreshed} / {pending_st} / {landed_while_down:?}"),
     );
     let healer = api.signed(owner, "GET", &format!("/api/f/{kept}/storage-token"), None)?;
     let st = status(&kept);
-    // its template's commit is the old life's bytes (`{"template":"chat"}`),
-    // so main and live stay at that commit: its landing is its own seed's
-    let healed = healer.status == 200 && st["pins"]["live"] == old_live.as_str() && st["pins"]["main"] == st["pins"]["live"] && st["code"]["sha"] == st["pins"]["live"];
+    let healed = healer.status == 200 && st["pins"]["live"].as_str().is_some_and(|live| live != old_live) && st["pins"]["main"] == st["pins"]["live"] && st["code"]["sha"] == st["pins"]["live"];
+    let (cleaned, last) = s.ended_cleaned(api, &kept);
     s.ok(
-        "commits back, its next writer lands its own template: committed (the old life's bytes, so live stays at that commit) and deployed in this life, and installed from its own deploy",
-        healed && manifest_at(s, &url) == json!({ "template": "chat" }) && events(&kept, "template").len() == 1,
-        format!("{st} {}", manifest_at(s, &url)),
+        "commits back, its next writer lands its own template in its own repo: committed and deployed in this life, installed from its live; the deleted life's repo, with its live, is deleted",
+        healed && manifest_at(s, &new_url) == json!({ "template": "chat" }) && events(&kept, "template").len() == 1
+            && cleaned && s.fake.repo_deleted(&url) && !s.fake.repo_deleted(&new_url),
+        format!("{st} {} / {last}", manifest_at(s, &new_url)),
     );
     pending_install_held(s, api, owner)
 }

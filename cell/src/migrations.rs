@@ -139,7 +139,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         return part(req, env, url, &m.mover, stage, n).await;
     }
     if let ["stages", stage, op] = rest {
-        return stage_route(req, env, url, stage, op).await;
+        return stage_route(req, env, cfg, url, stage, op).await;
     }
     if let ["offers", old, op] = rest {
         return offer_route(req, env, cfg, url, old, op).await;
@@ -241,34 +241,23 @@ pub(crate) async fn visit(env: &Env, cfg: &Config, person: &str) -> CellResult<R
         return Err(CellError::host("a WorkOS user's id is not one"));
     }
     let bound: Bound = crate::json_body(&ask(env, format!("bind/{subject}"), person.to_string()).await?)?;
-    if let Some(until_ms) = bound.until_ms {
-        comp(env, person, &subject, until_ms).await?;
+    if bound.comp {
+        comp(env, person, &subject).await?;
     }
     crate::json_answer(&bound)
 }
 
-/// The move's comp (F5), once a person: its credit granted on their ledger
-/// by its id (`comp_grant_id`: the same id again grants nothing), then a
-/// month's seat comped (one they hold already, theirs, is left as it is),
-/// then Migrations told, so no visit gives it again. Cut off anywhere, the
-/// next visit does it again, each step answering as it did: the seat asked
-/// to end at `until_ms`, fixed at the first attempt (one past it, none).
-async fn comp(env: &Env, person: &str, subject: &str, until_ms: i64) -> CellResult<()> {
-    let grant = fragment_proto::ledger::GrantCredit {
-        id: machine::comp_grant_id(person),
-        micros: machine::COMP_GRANT_MICROS,
-        by: NAME.into(),
-        why: "the finite.computer move's credit".into(),
-    };
-    crate::ledger::ask(env, person, &grant).await?;
+/// The move's comp (F5), once a person: a comped seat with no end, which
+/// lasts until staff end it or place them in an org (one they hold
+/// already, theirs, is left as it is), then Migrations told, so no visit
+/// gives it again. Cut off anywhere, the next visit does it again, the
+/// registry answering the same comp as it did. No credit: the seat
+/// includes its month's (`fragment_core::ledger::SEAT_INCLUDED`).
+async fn comp(env: &Env, person: &str, subject: &str) -> CellResult<()> {
     let profiles = crate::ask_registry(env, &crate::registry::calls::Profiles { ids: vec![person.to_string()], emails_of: vec![person.to_string()] }).await?;
     let email = profiles.profiles.get(person).and_then(|p| p.email.clone()).ok_or_else(|| CellError::host(format!("{person} has no email to comp")))?;
-    let comp = fragment_proto::org::CompSeat { email, kind: fragment_proto::org::SeatKind::Seat, org: None, until_ms: Some(until_ms) };
-    let asked = match until_ms > js::now_ms() {
-        true => crate::ask_registry(env, &crate::registry::orgs::CompSeatCall { by: NAME.into(), comp }).await.map(|_| ()),
-        false => Ok(()),
-    };
-    match asked {
+    let comp = fragment_proto::org::CompSeat { email, kind: fragment_proto::org::SeatKind::Seat, org: None, until_ms: None };
+    match crate::ask_registry(env, &crate::registry::orgs::CompSeatCall { by: NAME.into(), comp }).await.map(|_| ()) {
         // a seat of theirs already (paid, or another kind): theirs, as it is
         Err(e) if matches!(e.code, ErrorCode::Conflict | ErrorCode::AlreadyExists) => console_log!("migrations.comp: {person} holds a seat: {}", e.message),
         r => {
@@ -387,10 +376,17 @@ fn pass(env: &Env, op: String, body: String) -> Waits<'_, Response> {
 /// itself (its computer's egress signs so). The object says whether the
 /// stage is that agent's to read now: only the agent its person's Yes
 /// bound, while the move imports it. `open` answers its manifest; `zip`
-/// its bytes, whole or by a range; `done` ends the import.
-fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str, op: &'a str) -> Waits<'a, Response> {
+/// its bytes, whole or by a range; `copy` one range of them into a
+/// fragment's blobs; `done` ends the import.
+fn stage_route<'a>(mut req: Request, env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, op: &'a str) -> Waits<'a, Response> {
     Box::pin(async move {
         let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+        if (req.method(), op) == (Method::Post, "copy") {
+            // as the agent, or for its owner (`for`): the fragment it writes
+            // is often its owner's, as a fragment's own routes take it
+            let who = crate::signer_for(env, &req, url, &bytes).await?;
+            return copy(env, cfg, url, stage, who).await;
+        }
         let agent = crate::signer(env, &req, url, &bytes).await?.identity.id;
         match (req.method(), op) {
             (Method::Post, "open") => pass(env, format!("open/{stage}/{agent}"), String::new()).await,
@@ -403,6 +399,45 @@ fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str,
             (Method::Post, "done") => pass(env, format!("done/{stage}/{agent}"), text(bytes)?).await,
             _ => Err(crate::no_route(url.path())),
         }
+    })
+}
+
+/// `POST …/copy?into=&offset=&bytes=`: one range of the stage's zip (a
+/// file's bytes, or a part of them) into the blobs of `into`, on the
+/// platform: never through the agent's computer, which may hold far less
+/// than its stage (2026-11-18: a 47 GB import failed on 20 GB). Hashed as
+/// R2 reads it, with its CRC-32 (the zip's own check, which the caller
+/// compares with the entry's: a damaged one is never taken for the file),
+/// then read again into `into`'s blob upload as the agent (or for its
+/// owner): the fragment checks the caller edits it, and the hash again as
+/// the bytes arrive. Answers `StageCopied`: the blob, by its bytes'
+/// SHA-256, and their CRC-32.
+fn copy<'a>(env: &'a Env, cfg: &'a Config, url: &'a Url, stage: &'a str, who: crate::routed::Signed) -> Waits<'a, Response> {
+    Box::pin(async move {
+        let into = crate::named_fragment(&query(url, "into"))?;
+        let number = |k: &str| query(url, k).parse::<u64>().map_err(|_| CellError::invalid(format!("a copy's {k} is a number of bytes")));
+        let (offset, len) = (number("offset")?, number("bytes")?);
+        let most = cfg.uploads_for(who.identity.kind).upload_max_bytes;
+        if len == 0 {
+            return Err(CellError::invalid("a copy holds a byte at least"));
+        }
+        if len > most {
+            return Err(CellError::too_large("a copy", len as usize, most as usize));
+        }
+        let key = text(ask(env, format!("readable/{stage}/{}", who.identity.id), String::new()).await?)?;
+        let gone = || CellError::host(format!("stage {stage} imports, and its zip is gone"));
+        let size = js::object_size(env, STAGE, &key).await?.ok_or_else(gone)?;
+        let end = offset.checked_add(len).filter(|e| *e <= size).ok_or_else(|| CellError::invalid(format!("bytes {offset} to {offset}+{len} are past the zip's {size}")))?;
+        let range = format!("bytes={offset}-{}", end - 1);
+        let (sha, crc) = js::digest_and_crc(js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body).await?;
+        let body = js::blob_get(env, STAGE, &key, Some(&range)).await?.ok_or_else(gone)?.body;
+        let routed = crate::routed::Routed { name: into, url: url.clone(), signed: Some(who), credential: None };
+        let stored = crate::stream_to(env, routed, Method::Put, &format!("/api/blobs/{sha}"), body, len).await?;
+        if stored.status_code() != 200 {
+            return Ok(stored);
+        }
+        // `StageCopied`, its hash 64 hex
+        crate::json_passed(format!("{{\"sha256\":\"{sha}\",\"bytes\":{len},\"crc32\":{crc}}}").into_bytes())
     })
 }
 
@@ -562,7 +597,7 @@ fn text_ok(what: &str, s: &str) -> CellResult<()> {
 /// A refusal of the machine's, as the route answers it.
 fn refused(r: Refused) -> CellError {
     let code = match r {
-        Refused::NotNow(_) | Refused::Stale | Refused::Begun => ErrorCode::Conflict,
+        Refused::NotNow(_) | Refused::Stale | Refused::Begun | Refused::Taken | Refused::RetryTaken => ErrorCode::Conflict,
         Refused::NotYours => ErrorCode::Forbidden,
         Refused::NoStage => ErrorCode::NotFound,
         Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
@@ -599,15 +634,12 @@ struct AgentIn {
     old: String,
 }
 
-/// A bind's answer (`visit`): how many moves it offered, whether its
-/// person is owed the comp, and when its seat ends (fixed at its first
-/// attempt: `comp_due`).
+/// A bind's answer (`visit`): how many moves it offered, and whether its
+/// person is owed the comp (`comp_owed`).
 #[derive(serde::Serialize, Deserialize)]
 struct Bound {
     bound: u32,
     comp: bool,
-    #[serde(default, rename = "untilMs", skip_serializing_if = "Option::is_none")]
-    until_ms: Option<i64>,
 }
 
 /// An offer as its notice reads it (`RosterAgent`'s name and picture).
@@ -785,8 +817,7 @@ impl MigrationsCell {
             ("roster", []) => crate::json_answer(&self.roster(&body)?),
             ("bind", [workos_id]) => {
                 let bound = self.bind(workos_id, &body)?;
-                let until_ms = self.comp_due(workos_id)?;
-                crate::json_answer(&Bound { bound, comp: until_ms.is_some(), until_ms })
+                crate::json_answer(&Bound { bound, comp: self.comp_owed(workos_id)? })
             }
             // the comp given (F5): never again
             ("comped", [workos_id]) => {
@@ -1054,8 +1085,9 @@ impl MigrationsCell {
     /// A person's answer to `old`'s offer (`later`, `never`, `ask-again`,
     /// `yes` with an agent and its owner): `person` names who answers, its
     /// move theirs (404 otherwise); `None` is a lever's, for its person.
-    /// A Yes binds an agent of the person's own alone (403). The move's
-    /// state and attempt after.
+    /// A Yes binds an agent of the person's own alone (403): a new one, or
+    /// one they had already, that no other move is bound to (409,
+    /// `machine::yes_into`). The move's state and attempt after.
     fn answer(&self, old: &str, person: Option<&str>, op: &str, agent: Option<(&str, &str)>) -> CellResult<(MoveState, u32)> {
         let parts = self.parts();
         let m = match person {
@@ -1068,7 +1100,9 @@ impl MigrationsCell {
             ("later", _) => machine::later(&m, now),
             ("never", _) => machine::never(&m, now),
             ("ask-again" | "ask_again", _) => machine::ask_again(&m, now),
-            ("yes", Some((agent, owner))) if owner == theirs => machine::yes(&m, agent, now),
+            ("yes", Some((agent, owner))) if owner == theirs => {
+                machine::yes_into(&m, agent, self.bound_elsewhere(old, agent)?, now)
+            }
             ("yes", _) => return Err(CellError::new(ErrorCode::Forbidden, "yes binds an agent of the person's own")),
             (other, _) => return Err(CellError::invalid(format!("no answer {other}"))),
         };
@@ -1082,19 +1116,22 @@ impl MigrationsCell {
         }
     }
 
-    /// When the move's comp (F5) the WorkOS user's person is owed ends, if
-    /// they are owed it (an old agent the roster offers or moves, and not
-    /// comped yet): fixed at its first attempt, so a visit cut off and
-    /// tried again asks for the same end, never a later one.
-    fn comp_due(&self, workos_id: &str) -> CellResult<Option<i64>> {
-        let parts = self.parts();
-        parts.exec(
-            "UPDATE people SET comp_until_ms = COALESCE(comp_until_ms, ?) WHERE workos_id = ? AND comped_ms IS NULL AND EXISTS (SELECT 1 FROM moves m WHERE m.workos_id = people.workos_id AND m.state <> 'withdrawn')",
-            // real time, as the registry that ends it keeps (not the levers' clock)
-            vec![SqlStorageValue::Integer(js::now_ms() + machine::COMP_MS), text_value(workos_id)],
+    /// Whether a move other than `old`'s is bound to `agent`: an agent takes
+    /// in one move, ever (`machine::yes_into`, `machine::retry_into`).
+    fn bound_elsewhere(&self, old: &str, agent: &str) -> CellResult<bool> {
+        Ok(!self.parts().rows("SELECT old FROM moves WHERE agent = ? AND old <> ? LIMIT 1", vec![text_value(agent), text_value(old)])?.is_empty())
+    }
+
+    /// Whether the WorkOS user's person is owed the move's comp (F5): an
+    /// old agent the roster offers or moves, and not comped yet. (Their
+    /// `comp_until_ms`, the 30-day end a release before wrote, is read by
+    /// nothing now: the seat has no end.)
+    fn comp_owed(&self, workos_id: &str) -> CellResult<bool> {
+        let rows = self.parts().rows(
+            "SELECT 1 AS owed FROM people WHERE workos_id = ? AND comped_ms IS NULL AND EXISTS (SELECT 1 FROM moves m WHERE m.workos_id = people.workos_id AND m.state <> 'withdrawn')",
+            vec![text_value(workos_id)],
         )?;
-        let rows = parts.rows("SELECT comp_until_ms FROM people WHERE workos_id = ? AND comped_ms IS NULL", vec![text_value(workos_id)])?;
-        Ok(rows.first().and_then(|r| r["comp_until_ms"].as_i64()))
+        Ok(!rows.is_empty())
     }
 
     /// The mover's commands, oldest first.
@@ -1138,7 +1175,9 @@ impl MigrationsCell {
             (None, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move"))),
         };
         let outcome = match act {
-            "retry" => machine::retry(&m, now),
+            // a retry imports into its agent again: refused while another
+            // move is bound to that agent, as a Yes into it is
+            "retry" => machine::retry_into(&m, m.agent.as_deref().map(|a| self.bound_elsewhere(old, a)).transpose()?.unwrap_or(false), now),
             "restart-old" => machine::restart_old(&m, now),
             "retire" => machine::retire(&m, now),
             "withdraw" => machine::withdraw(&m, why, now),

@@ -145,7 +145,13 @@ weekday at 8") is a schedule on itself: a scheduled record on its own
 agent fragment's `tasks` (Scheduled records, below), which the platform
 keeps and fires through every restart and sleep of its computer. Never
 a background loop, `sleep`, crontab or `hermes cron` on the computer:
-they die with it. The agent is an editor of its own fragment, so it adds
+they die with it. The computer sleeps a while after nothing holds it
+awake (a turn, a port tab open on it), and a sleep or a restart ends
+every process an agent started: a server, a background command, a
+download. Nothing starts those again. One still working (a build, a
+download) keeps the computer awake up to 2 hours after the agent's last
+turn; an idle server does not. What must outlive that is a routine, or
+an app (its crons and triggers run on the platform). The agent is an editor of its own fragment, so it adds
 one as any editor does; on a computer `fragment schedule` acts on the
 agent's own fragment unless another is named, and `--routine` builds the
 routine record:
@@ -1021,7 +1027,9 @@ A file a message held is under `~/archive/media/`, named in its
 ## Bringing an agent's home
 
 `fragment home` reads an agent's home from wherever it ran: its folder,
-or a zip of it, read in place and never changed. A layout says where
+a zip of it, or a move's stage (`stage:<the stage>`, as its routine names
+it: read where the platform keeps it, never downloaded), each read in
+place and never changed. A layout says where
 that home keeps things: `hermes` (a bare Hermes home, the default), or a
 layout file a platform's import skill carries.
 
@@ -1031,6 +1039,7 @@ fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read thr
 fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+fragment home files stage:o1.p1.1 --layout ./layouts/x.json --into old-files--k3x9 --store juniper-storage--b2c3 --notes ~/old-agent/home   # and the rest, kept in storage
 ```
 
 The survey lists the chats' database (`fragment session import` brings
@@ -1051,6 +1060,60 @@ more as a blob, and writes `left-behind.md` beside them: every file or
 folder left out, its size, and why. A fragment with no `fragment.json`
 gets one whose page is the files view (`fragment deploy` shows it).
 Running it again sends only what is missing.
+
+With `--store`, nothing stays behind: every other file of the home (its
+own self, its brains' files, what the files' pick leaves) is kept whole
+in a members-only storage fragment, as it was in the home, under the
+notes folder's name (`home/` for `--notes ~/old-agent/home`), a file past
+one upload in parts, but a file whose name says it may hold a password
+or key, never read. From a move's stage each large file is
+copied there on the platform, never through your disk. Each folder or
+file kept gets a note under `--notes`, laid out as the home, as
+`fragment offload` leaves one (`<name>.offloaded.md`, a folder's at most
+10,000 files and 1 GB): `fragment offload --back <note>` brings it back,
+checked against the old file's CRC-32. A storage fragment holds at most
+19,984 files: one that fills says what is left; run it again with
+`--store` naming another, and it goes on. Cut off, run it again: it
+keeps only what no note names yet. A file its notes keep counts only as
+the same bytes; a home that differs from them (another copy of it) is
+refused before anything is written: keep it beside, with `--notes`
+naming a new folder.
+
+## Moving files off a disk
+
+A computer's disk holds 20 GB, and a full one stops it saving. When it
+fills, move big files you are not using (downloads, datasets, finished
+outputs) into a members-only fragment of your owner's, one per agent:
+
+```
+fragment create juniper-storage --visibility members              # once: what you move goes here
+fragment offload ~/Downloads/talk.mp4 --into juniper-storage--k3x9   # a note, talk.mp4.offloaded.md, in its place
+fragment offload ~/data/census --into juniper-storage--k3x9           # a folder, and all in it
+fragment deploy juniper-storage--k3x9                               # once, after the first: its page lists what is there
+fragment offload --back ~/Downloads/talk.mp4.offloaded.md           # back where it was
+```
+
+`offload` copies each file into the fragment, under a folder of its own
+named for when and where it was (`2026-11-18T103102Z-3fa9/data/work/…`):
+1 MiB and up as a blob, and a file larger than one upload in parts. It
+reads each back from the fragment and checks its sha256, and only then
+writes the note and removes the files. Anything that fails leaves every
+file where it was. The note says where they went, how to bring them
+back, and each file's size and sha256. `--back` brings each file into
+place, checked against the note, never over a file that is there, and a
+folder's folders, the empty ones too, with their permissions; the note
+goes last. The fragment keeps its copy, so a computer that goes
+back to an earlier save can still bring it back; remove it there only
+once nobody needs it. Either one cut off finishes when run again.
+Refused: a fragment that is not members-only, not an app's (a chat, a
+brain), or that you only view; a link, a folder holding one, a folder
+of more than 10,000 files, a file whose name says it may hold a
+password or key (`.env`, a private key) or a folder holding one, and
+anything in the runtime's own home (`$HERMES_HOME`: its memory, skills
+and sessions) or holding it. One move or back works in a folder at a
+time. A file that changes after its copy is made stays where it is. What
+is stored is paid from the fragment's owner's ledger, as any fragment's
+blobs are (Your ledger).
 
 ## Agents
 
@@ -1175,7 +1238,7 @@ fragment export [--out FILE]             fragment channel <name> [<channel>] [--
 fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
-fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
+fragment home files <source> --into <name> [--plan] [--layout L] [--store <name> --notes <dir>]   # its files, into a fragment of files (and the rest, in storage)
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
@@ -1209,6 +1272,8 @@ fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment write <name> <path>... --dir D [--message M]   # several files from D, one commit: all land or none
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
+fragment offload <path> --into <name>    # a file or folder off this disk: copied, checked, removed, a note in its place
+fragment offload --back <path>           # back from its note, checked; the fragment keeps its copy
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name> [--yes]               # for everyone in it; a terminal asks for its name typed back, unless --yes
 fragment archive|unarchive <name>        # your own lists only

@@ -97,6 +97,9 @@ pub struct FragmentCell {
     /// refused (publish.rs). Its stage is in its rows, not here
     /// (`fragment_core::seed`).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
+    /// Serializes an agent's renames: each reads its job, commits it and
+    /// sets its face (members.rs `face_put`).
+    pub(crate) renaming: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -158,6 +161,7 @@ impl DurableObject for FragmentCell {
             cfg,
             plane: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
+            renaming: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             woke: Cell::new(false),
@@ -317,6 +321,11 @@ pub(crate) enum MetaKey {
     InboxToken,
     /// Its code.storage repo.
     Repo,
+    /// Set beside `Repo` when the repo is named by this life's own key
+    /// (`fragment_core::codestorage::repo_name`): only such a repo goes
+    /// with a delete (`fragment_core::ended::repo_goes`). A life made
+    /// before that naming has none: its repo, named by its owner, stays.
+    RepoOfLife,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
     /// its own app database (`app_facet`).
     AppFacet,
@@ -369,6 +378,17 @@ pub(crate) enum MetaKey {
     /// <commit>`, its `avatar.png` there), until taken as its icon
     /// (runs_on.rs `take_picture`; the debt ledger).
     Picture,
+    /// The names an agent's job may say since its last rename that ended
+    /// (a JSON array, newest last): each one a rename was writing into it
+    /// when its answer was lost or refused (members.rs `face_put`), read as
+    /// an old name by the next.
+    Renaming,
+    /// The title its own `fragment.json` said at its last install (`""`:
+    /// none), and its `avatar.png` there (`<last commit> <sha256>`, an
+    /// agent's): how an install tells a client from before the face
+    /// renaming it (plane.rs `face_from_git`; the debt ledger).
+    TitleSeen,
+    PictureSeen,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -510,6 +530,7 @@ impl MetaKey {
             MetaKey::ViewToken => "view_token",
             MetaKey::InboxToken => "inbox_token",
             MetaKey::Repo => "repo",
+            MetaKey::RepoOfLife => "repo_of_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
@@ -528,6 +549,9 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Renaming => "renaming",
+            MetaKey::TitleSeen => "title_seen",
+            MetaKey::PictureSeen => "picture_seen",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
@@ -1382,40 +1406,46 @@ impl FragmentCell {
                 }
                 None => None,
             };
-            // its repo, unless its template's seed makes it after the answer
-            let repo = match making.repo_first() {
-                true => {
-                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &owner)?).await?;
-                    laps.lap("repo");
-                    Some(repo)
-                }
-                false => None,
-            };
-            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
-            laps.lap("key");
             // its face from the start, its own from then on (docs/api.md, "A
             // fragment's name and an agent's picture"): the title given, else
             // its blessed template's; that template's kind, so the owner's
             // list says it is a chat or an agent at once. A copied template's
             // (an app), or a blessed one whose manifest did not read, is an
             // app's until its install says, and its title, if none was given,
-            // the install's default
+            // the install's default. An agent's own is made shared with no one
+            // (alone.rs): refused before anything is made
             let face = match body.template.as_deref() {
                 Some(t) => {
                     let blessed = crate::assets::blessed_manifest(&self.env, t).await.ok().and_then(Result::ok);
+                    if blessed.as_ref().is_some_and(|m| m.kind() == FragmentKind::Agent) && body.visibility.is_some_and(|v| v != Visibility::Members) {
+                        return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
+                    }
                     laps.lap("manifest");
                     let (kind, title) = blessed.as_ref().map_or((FragmentKind::App, None), |m| (m.kind(), m.title()));
                     Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
                 }
                 None => None,
             };
-            Ok::<_, CellError>((agent, repo, pubkey, sealed, face))
+            // its own key, this life's alone, which names its repo
+            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
+            let fragment_npub = npub::encode(&pubkey);
+            laps.lap("key");
+            // its repo, unless its template's seed makes it after the answer
+            let repo = match making.repo_first() {
+                true => {
+                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &fragment_npub)?).await?;
+                    laps.lap("repo");
+                    Some(repo)
+                }
+                false => None,
+            };
+            Ok::<_, CellError>((agent, repo, fragment_npub, sealed, face))
         };
         // every await of its making is above: what follows is written in
         // one turn, its owner's row and its agent's together, so no list
         // row (this request's, `after_answer`'s, the alarm's) goes out
         // before either is in
-        let (agent, repo, fragment_pub, sealed, face) = match made.await {
+        let (agent, repo, fragment_npub, sealed, face) = match made.await {
             Ok(r) => r,
             Err(e) => {
                 self.del_meta(MetaKey::Name)?;
@@ -1424,13 +1454,14 @@ impl FragmentCell {
             }
         };
         let now = js::now_ms();
-        let fragment_npub = npub::encode(&fragment_pub);
         let visibility = body.visibility.unwrap_or_else(|| Visibility::made_from(body.template.as_deref()));
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
         if let Some(repo) = &repo {
             self.set_meta(MetaKey::Repo, repo)?;
+            // named by this life's key above: a delete takes it
+            self.set_meta(MetaKey::RepoOfLife, "1")?;
         }
         for (k, v) in [
             (MetaKey::Owner, owner.as_str()),
