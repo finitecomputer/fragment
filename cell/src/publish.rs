@@ -38,12 +38,12 @@ pub(crate) fn seeds_later(template: &str) -> bool {
     later
 }
 
-/// The name of the repo of `fragment`, made by `owner`: derived here
-/// alone, from both, so a name another identity makes later never finds
-/// it.
-pub(crate) fn repo_name(cfg: &crate::config::Config, fragment: &str, owner: &str) -> CellResult<String> {
-    fragment_core::codestorage::repo_name(&cfg.codestorage().repo_prefix, fragment, owner)
-        .ok_or_else(|| CellError::invalid("a fragment's name is <label>--<suffix>, and its owner an identity"))
+/// The name of the repo of `fragment` in the life whose own key is `life`
+/// (its npub): derived here alone, from both, so a name made again never
+/// finds an earlier life's repo (`fragment_core::codestorage::repo_name`).
+pub(crate) fn repo_name(cfg: &crate::config::Config, fragment: &str, life: &str) -> CellResult<String> {
+    fragment_core::codestorage::repo_name(&cfg.codestorage().repo_prefix, fragment, life)
+        .ok_or_else(|| CellError::invalid("a fragment's name is <label>--<suffix>, and its life's key an npub"))
 }
 
 /// A blessed template's `fragment.json` as its seed commits it: the
@@ -98,8 +98,9 @@ async fn stamped(env: &Env, t: &'static Template, name: &str, title: Option<&str
 impl FragmentCell {
     /// The rows the stage of its making is read from (`seed::Rows`): its
     /// template's commit is the one keyed by its life, asked only while a
-    /// template is to land. Not live's pin: a deleted life's repo keeps its
-    /// live, which proves nothing of this life's deploy.
+    /// template is to land. Not live's pin: a life made before each life
+    /// had a repo of its own may have found a deleted life's, with its
+    /// live (#1072), which proves nothing of this life's deploy.
     fn seed_rows(&self) -> CellResult<seed::Rows> {
         let keys = [MetaKey::ClaimedAt, MetaKey::CreatedAt, MetaKey::TemplatePending, MetaKey::Repo, MetaKey::Blessed];
         let [claimed_at, created_at, pending, repo, blessed] = self.metas(keys)?;
@@ -211,12 +212,19 @@ impl FragmentCell {
             // a template that seeds after the create's answer (`seeds_later`)
             // makes its repo here, once: a later try finds it by its name
             Effect::EnsureRepo => {
-                let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, name, owner)?).await?;
-                // its life ended while code.storage made the repo: the repo
-                // stays, as a deleted life's does (the same owner making the
-                // name again finds it), and this life's seed goes no further
-                self.same_life(life, "while its repo was made")?;
+                let life_key = self.must(MetaKey::Npub)?;
+                let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, name, &life_key)?).await?;
+                // its life ended while code.storage made the repo, which its
+                // end did not record: the repo, that life's alone (named by
+                // its key), is recorded for the alarm to delete, and this
+                // life's seed goes no further
+                if let Err(ended) = self.same_life(life, "while its repo was made") {
+                    self.end_repo_of_no_life(life, name, &repo).await?;
+                    return Err(ended);
+                }
                 self.set_meta(MetaKey::Repo, &repo)?;
+                // named by this life's key above: a delete takes it
+                self.set_meta(MetaKey::RepoOfLife, "1")?;
                 self.event("template.repo", &format!("{name}'s repo is made ({repo})"), json!({ "repo": repo }));
                 Ok(vec![Event::RepoMade])
             }

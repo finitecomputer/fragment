@@ -1934,7 +1934,7 @@ $("schedules-link").onclick = () => openSchedules();
 // finite.computer agents, which to bring over, and where each move is, in
 // the work area as the Apps page is; reached from its offer's Yes ----
 const movePage = createMovePage($("move-page"), {
-  api, el, setGuest, reload: () => load(),
+  api, el, setGuest, named, reload: () => load(),
   addAgent: (spec) => onboarding.addAgent(spec),
   ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
   identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
@@ -1973,7 +1973,7 @@ function leaveMove() {
 }
 
 const settings = createSettings({
-  api, $, seg, asks,
+  api, $, asks,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
     setSeat: (seat) => { state.seat = seat; }, support: () => state.support, seatIs,
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },

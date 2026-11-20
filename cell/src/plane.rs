@@ -837,8 +837,9 @@ impl FragmentCell {
         Ok(out)
     }
 
-    /// Pins the fragment never read (a name made again keeps its repo, and
-    /// its branches) are fetched on the first request, once: after that, a
+    /// Pins the fragment never read (a branch a writer moved at
+    /// code.storage itself, with a storage token) are fetched on the first
+    /// request, once: after that, a
     /// branch that is still absent is left to `refresh` and the poll
     /// backstop, so a fragment with nothing deployed (or with data only)
     /// asks code.storage nothing, and takes no plane lock, per request. A

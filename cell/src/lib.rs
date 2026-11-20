@@ -30,6 +30,7 @@
 mod across;
 mod ai;
 mod address;
+mod alone;
 mod assets;
 mod auth;
 mod billing;
@@ -304,7 +305,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments and the model routes (/api/models/…) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments, the model routes (/api/models/…) and a move's copy (POST /api/migrations/stages/…/copy) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -670,7 +671,8 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 }
 
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
-/// signer's (an agent's: its owner's); the deployment's operators grant
+/// signer's (an agent's: its owner's), and `GET uses` its agents' uses; the
+/// deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
 /// or identity, and grant an org's own credit and set its budget, named
 /// `org:<org id>` (orgs pay out of band: Paul, 2026-10-30). A seat's state
@@ -681,6 +683,19 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     if let (Method::Get, []) = (req.method(), rest) {
         let who = signer(env, &req, url, &body).await?;
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
+    }
+    // what the signer's agents (an agent's: its owner's) used of each
+    // provider, this month or `YYYY-MM`'s (docs/ledger.md, "Usage"),
+    // passed on as its ledger answered it
+    if let (Method::Get, ["uses", month @ ..]) = (req.method(), rest) {
+        let who = signer(env, &req, url, &body).await?;
+        let month = match month {
+            [] => None,
+            [m] => Some(fragment_core::ledger::Month::parse(m).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?),
+            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route GET {}", url.path()))),
+        };
+        let q = serde_json::to_string(&ledger::UsesOf { month }).expect("a month serializes");
+        return crate::json_response::json_bytes(ledger::asked(env, &payer_of(&who)?, <ledger::UsesOf as ledger::Route>::PATH, q).await?);
     }
     // a quote (FIN-448): a planned job priced with this release's book, as
     // its payer's ledger would charge it, beside that ledger; it reads and
@@ -946,6 +961,19 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
     }
     let inner = Request::new_with_init(&format!("https://fragment.internal{}", f.inner), &init)?;
     routed::send(env, "FRAGMENT", &f.routed.name, inner).await
+}
+
+/// `len` bytes the platform holds (a move's stage, read from R2) streamed
+/// to a fragment's route (`inner`), as `routed` says who asks: a copy's
+/// blob upload, which the fragment checks as its client's.
+pub(crate) async fn stream_to(env: &Env, routed: Routed, method: Method, inner: &str, body: worker::web_sys::ReadableStream, len: u64) -> CellResult<Response> {
+    let headers = Headers::new();
+    routed.to_headers(&headers)?;
+    headers.set("content-length", &len.to_string())?;
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers).with_body(Some(body.into()));
+    let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
+    routed::send(env, "FRAGMENT", &routed.name, req).await
 }
 
 /// Whether a request is a browser's navigation to a page (its `Accept`

@@ -657,6 +657,15 @@ impl FragmentCell {
         if decl.post.is_none() {
             return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts, nor the platform's own records")));
         }
+        // No record the platform makes relays anyone: a computer's bridge
+        // takes a relayed record from a key that is no member (as the own
+        // key is not) as its agent's owner's words. A hosted door's records
+        // are its app's (job steps and mutations, `effects::check_record`),
+        // never appended here. Each caller checks first (`schedule::fires`);
+        // this is the floor beneath them.
+        if door::relays(body) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own relays no one (`relayed`)"));
+        }
         let own = self.own_key()?;
         let (record, appended) = self.append_once(channel, &own, POST_KIND, body, key, POST_INDEX)?;
         self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
