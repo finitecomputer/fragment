@@ -7,7 +7,7 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { connect } from "cloudflare:sockets";
-import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
+import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import * as rs from "./build/index.js";
@@ -486,10 +486,11 @@ class ContainerHost {
   }
 
   // Restores `record` into its directory within `ms` (`Overdue` past it):
-  // null once it is in place, or `{unusable}` when the save itself will
-  // never restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND
-  // and BACKUP_INTEGRITY), which the Rust side tells from a failure that
-  // may pass (it throws).
+  // null once it is in place, `{unusable}` when the save itself will never
+  // restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND and
+  // BACKUP_INTEGRITY), or `{noRoom}` when it found no room on the disk (a
+  // restore's SandboxFileError ENOSPC), which the Rust side tells from a
+  // failure that may pass (it throws).
   async restore(generation, record, ms) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     try {
@@ -498,6 +499,9 @@ class ContainerHost {
     } catch (e) {
       if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
         return { unusable: `${e.code}: ${e.detail || e.message}` };
+      }
+      if (SandboxFileError.is(e) && e.operation === "restore" && e.code === "ENOSPC") {
+        return { noRoom: `${e.code}: ${e.detail || e.message}` };
       }
       throw e;
     }
