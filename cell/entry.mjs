@@ -405,16 +405,16 @@ class ContainerHost {
     if (generation !== this.#generation) return false;
     await this.#intercept(computer, swapHosts, codestorage);
     await settled(() => this.#c.setInactivityTimeout(idleMs));
-    return true;
+    return generation === this.#generation;
   }
 
   // `hosts` more for its running start `generation`'s swap (its agents'
   // Vault secrets'), those alone (`interceptSwap`). False: that start was
-  // superseded.
+  // superseded, before or while they registered.
   async armSwap(generation, computer, hosts) {
     if (generation !== this.#generation) return false;
     await interceptSwap(this.#c, this.#egress(computer), hosts);
-    return true;
+    return generation === this.#generation;
   }
 
   // Waits until the container takes an exec (it is up), for at most `ms`.

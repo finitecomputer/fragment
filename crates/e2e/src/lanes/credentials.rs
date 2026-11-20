@@ -994,10 +994,10 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
 
 /// A Vault secret bound while its computer sleeps, to a host none of its
 /// starts caught before (a local node keeps a container's intercepts from
-/// one start to the next), filled there after its wake: its start asks no
-/// Vault, and its guest's first read of its view, made at once as it
-/// boots, caught the host (`ComputerCell::arm_more`).
-pub(super) const VAULT_AFTER_WAKE: &str = "a Vault secret bound while it slept is filled at its host after its wake: its start asked no Vault, and its guest's first read of its view caught the host";
+/// one start to the next), filled there after its wake: its start asked
+/// the Vault beside the container's start and caught the host
+/// (`ComputerCell::try_start`, `arm_more`).
+pub(super) const VAULT_AFTER_WAKE: &str = "a Vault secret bound while it slept is filled at its host after its wake: its start asked the Vault beside the container's start and caught the host";
 const WAKE_VAULT_HOST: &str = "api.vault-wake.test";
 const WAKE_VAULT_SECRET: &str = "e2e-vault-wake";
 
