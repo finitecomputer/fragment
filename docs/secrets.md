@@ -67,7 +67,11 @@ only from that computer's egress, toward that provider.
   (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
-  and connections are swapped in at the computer's egress.
+  and connections are swapped in at the computer's egress. Each operator
+  key is locked at its vendor (scopes and a spend limit where offered),
+  and its catalog row's `deny` names the account-wide calls the vendor
+  can't scope away, which the swap never sends it on (docs/computers.md,
+  "Calls an operator key never goes on").
 
 ## A person's Vault
 
@@ -140,6 +144,17 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   short. A claim has no clock; setting the secret again with a value, or
   removing it, ends it (`fragment_core::vault::Claimed`); set again with
   no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
+- **A move is its person's word, never a page's**: from the platform's
+  own pages (the shell's session) or their own key, never from a
+  fragment's page (`__secrets`, a site or frame session: 403 for any
+  name, before the Vault is asked). A page runs its authors' code with its
+  visitor's session, and an author may be the visitor's own agent, so a
+  page's call says nothing of what they want. The Telegram connector's
+  setup page asks Settings instead (`vault-move`, frame-messages.js):
+  Settings moves only the bot it offered that frame, into that connector.
+  A move keeps the secret within the hosts its Vault names
+  (`fragment_core::vault::within`, 400 otherwise, before it is claimed);
+  a parked one's move names them.
 
 ## The Secrets Store
 
