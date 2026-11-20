@@ -1,15 +1,23 @@
 //! The operators' admin (docs/api.md, Operators; decision 59): people and
 //! orgs a page at a time, searched by email; a person's page with their
 //! ledger and computer; their computer pinned to another image and back
-//! (docs/computers.md, "Preview and production"); billing's health; a
-//! trial mailed; and the log of what operators did. An operator key no person holds reaches it, as a
+//! (docs/computers.md, "Preview and production"); a computer that won't
+//! wake, its newest save too big for its disk, started from an older save
+//! (docs/computers.md, "Saves and what a wake restores"); billing's health;
+//! a trial mailed; and the log of what operators did. An operator key no person holds reaches it, as a
 //! wipe's does; no one else. Its page, `/admin`, is an operator's session's
 //! alone: to anyone else it is the 404 of a path that is not there. Valid
 //! and invalid.
 
+use std::io::Read;
+use std::path::Path;
+use std::time::Duration;
+
 use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
+
+use super::computers::{lever, lever_with, notice, QUEUE_DRAIN};
 
 use crate::api::{Api, Call, Reply};
 use crate::{Need, Suite};
@@ -176,6 +184,13 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
             json!({ "cli": format!("{back:?}"), "pins": pins }),
         );
     }
+    if s.runs("admin", &[Need::Computers, Need::Levers]) {
+        start_from_checks(s, api, &operator, &home, &path)?;
+    } else {
+        for label in START_FROM_CHECKS {
+            s.skip(label, "this deployment makes no computers, or pulls no levers");
+        }
+    }
     let stranger = api.person()?;
     let refused = [
         get(&stranger, "/people")?,
@@ -213,6 +228,130 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
             && theirs.header("x-frame-options") == "DENY",
         &theirs,
     );
+    Ok(())
+}
+
+const START_FROM_CHECKS: [&str; 7] = [
+    "an operator's start from a save is refused while its computer runs (409)",
+    "a computer whose newest save no longer fits its disk (the lever's fail-restore) fails each start, a strike each, and won't wake",
+    "an operator starts it from the older save it keeps: asleep, its strikes counted anew, its newer save set aside, and its owner told nothing more of a computer that won't wake",
+    "a save it does not keep, or a body naming anything else, is refused (400); anyone else, 403",
+    "`fragment operator start-from` with the operator key's file, again, changes nothing (its time set aside kept), and the log holds both, with the save set aside",
+    "its owner's export copies the newest save, the one set aside, each record as stored",
+    "its next wake comes up from the save chosen, a rollback, and its owner is told where it went back to",
+];
+
+/// A computer that won't wake because its newest save no longer fits its
+/// disk (production, 2026-11-20), started again from an older save by an
+/// operator (`POST /api/admin/people/{npub}/computer/start-from`;
+/// docs/computers.md, "Saves and what a wake restores"): the lever's
+/// `fail-restore` stops each restore of that save as the sandbox runtime's
+/// guard does, a strike, so it ends `wont_wake`; the choice sets the newer
+/// save aside (kept, exported, never restored), and the next wake comes up
+/// from the save chosen. Valid, invalid (running, a save not kept, a field
+/// it does not know, anyone else), replay (the CLI's same choice).
+fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key_file: &str) -> Result<()> {
+    const WAKE: Duration = Duration::from_secs(90);
+    let una = api.person()?;
+    let una_id = api.identity(&una)?;
+    let made = api.signed(&una, "POST", "/api/computers", Some(&json!({})))?;
+    let id = made.body["computer"].as_str().unwrap_or("").to_string();
+    let view = || api.signed(&una, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let choose = |keys: &Keys, body: Value| api.signed(keys, "POST", &format!("/api/admin/people/{una_id}/computer/start-from"), Some(&body));
+    let wake = || api.impatient(Duration::from_secs(60)).signed(&una, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let awake = |s: &Suite| s.eventually(WAKE, || view()["phase"] == "awake");
+    let asleep = |s: &Suite| {
+        std::thread::sleep(QUEUE_DRAIN);
+        s.eventually(WAKE, || api.signed(&una, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({}))).is_ok_and(|r| r.body["phase"] == "asleep"))
+    };
+    // two lives, each saved as it slept: save 1, and save 2 of the life
+    // that came up from it
+    let _ = wake();
+    let up = made.status == 200 && awake(s);
+    let running = choose(operator, json!({ "save": 1 }))?;
+    s.ok(START_FROM_CHECKS[0], up && running.status == 409, &running);
+    let mut saved = asleep(s);
+    let _ = wake();
+    saved &= awake(s) && view()["restored"]["save"].is_string() && asleep(s);
+    let saves = lever(api, &id, "saves")?.body["saves"].clone();
+    let (newest, older) = (saves[0].clone(), saves[1].clone());
+    anyhow::ensure!(saved && newest["number"] == 2 && older["number"] == 1, "two saves, 2 of the life that came up from 1: {saves}");
+    // save 2 no longer fits: each start fails its restore, a strike
+    let failing = lever_with(api, &id, json!({ "op": "fail-restore", "save": 2 }))?;
+    let _ = wake();
+    let mut gave_up = Value::Null;
+    let stuck = s.eventually(Duration::from_secs(180), || {
+        gave_up = view();
+        gave_up["phase"] == "wont_wake"
+    });
+    let why = notice(&gave_up, "wont_wake")["why"].as_str().unwrap_or("").to_string();
+    s.ok(START_FROM_CHECKS[1], failing.status == 200 && stuck && why.contains("byte floor"), &gave_up);
+    // the operator chooses save 1
+    let chosen = choose(operator, json!({ "save": 1 }))?;
+    let levered = lever(api, &id, "saves")?.body;
+    let set_aside = chosen.body["saves"][0]["setAside"].clone();
+    s.ok(
+        START_FROM_CHECKS[2],
+        chosen.status == 200
+            && chosen.body["phase"] == "asleep"
+            && notice(&chosen.body, "wont_wake").is_null()
+            && levered["failures"] == 0
+            && chosen.body["saves"][0]["number"] == 2
+            && set_aside.is_i64()
+            && chosen.body["saves"][1]["number"] == 1
+            && chosen.body["saves"][1].get("setAside").is_none(),
+        json!({ "chosen": chosen.body, "failures": levered["failures"] }),
+    );
+    let not_kept = choose(operator, json!({ "save": 9 }))?;
+    let unknown = choose(operator, json!({ "save": 1, "image": "stub" }))?;
+    let stranger = api.person()?;
+    let theirs = choose(&stranger, json!({ "save": 1 }))?;
+    s.ok(START_FROM_CHECKS[3], not_kept.status == 400 && unknown.status == 400 && theirs.status == 403, format!("{not_kept} / {unknown} / {theirs}"));
+    let again = s.cli_json(api, home, &["operator", "start-from", &una_id, "1", "--key-file", key_file, "--json"]);
+    let log = api.signed(operator, "GET", "/api/admin/log", None)?;
+    let logged: Vec<&Value> = log.body["entries"].as_array().into_iter().flatten().filter(|e| e["action"] == "start-from" && e["target"] == una_id.as_str()).collect();
+    s.ok(
+        START_FROM_CHECKS[4],
+        again.as_ref().is_ok_and(|v| v["phase"] == "asleep" && v["saves"] == chosen.body["saves"]) && logged.len() == 2 && logged.iter().all(|e| e["detail"] == "save 1; set aside 2"),
+        json!({ "cli": format!("{again:?}"), "logged": logged }),
+    );
+    // its owner's export: the newest save, the one set aside
+    let pressed = api.signed(&una, "POST", "/api/export", None)?;
+    let mut export = Value::Null;
+    let built = s.eventually(Duration::from_secs(120), || {
+        export = api.signed(&una, "GET", "/api/export", None).map(|r| r.body["export"].clone()).unwrap_or(Value::Null);
+        export["state"] != "building"
+    });
+    let download = api.signed(&una, "GET", &format!("/api/export/{}/download", export["id"].as_str().unwrap_or("")), None)?;
+    let mut files = std::collections::BTreeMap::new();
+    for entry in tar::Archive::new(download.bytes.as_slice()).entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().to_string();
+        let mut bytes = vec![];
+        entry.read_to_end(&mut bytes)?;
+        files.insert(path, bytes);
+    }
+    let root = fragment_core::export::ROOT;
+    let hex = id.strip_prefix("computer:").unwrap_or("");
+    let meta: Value = files.get(&format!("{root}/computers/{hex}/meta.json")).and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
+    let records = newest["records"].as_array().cloned().unwrap_or_default();
+    let stored = records.iter().all(|r| files.get(&fragment_core::export::save_path(&id, r["dir"].as_str().unwrap_or("/data"))).is_some_and(|b| fragment_core::blob::sha256_hex(b) == r["sha256"].as_str().unwrap_or("-")));
+    s.ok(
+        START_FROM_CHECKS[5],
+        pressed.status == 200 && built && export["state"] == "ready" && meta["save"]["id"] == newest["id"] && !records.is_empty() && stored,
+        json!({ "export": export, "save": meta["save"], "records": records.len() }),
+    );
+    // its next wake: from save 1, a rollback, told
+    let _ = wake();
+    let back = awake(s);
+    let v = view();
+    let told = notice(&v, "went_back");
+    s.ok(
+        START_FROM_CHECKS[6],
+        back && v["restored"]["save"] == older["id"] && v["restored"]["rollback"] == true && told["pending"] == false && told["save"] == 1 && told["savedAt"] == older["atMs"],
+        &v,
+    );
+    let _ = lever_with(api, &id, json!({ "op": "fail-restore", "save": 0 }));
     Ok(())
 }
 
