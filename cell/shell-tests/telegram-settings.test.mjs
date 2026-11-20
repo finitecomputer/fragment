@@ -47,11 +47,14 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
   const server = listOf();
   const list = listOf();
   const asked = [];
+  // each body of the API's writes, in order
+  const bodies = [];
   const opened = [];
   const notices = [];
   const at = { listed, loads: 0, made: 0 };
   const api = async (method, path, body) => {
     asked.push(`${method} ${path}`);
+    if (method !== "GET") bodies.push(body);
     const door = path.match(/^\/api\/f\/([^/]+)\/door$/)?.[1];
     if (method === "GET" && door) {
       if (refuse.has(door)) throw Object.assign(new Error("refused"), { status: 500 });
@@ -73,6 +76,11 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
       if (doors[door]) server.find((f) => f.name === door).sharing = { reach: true };
       return answer;
     }
+    const key = path.match(/^\/api\/f\/([^/]+)\/secrets\/([A-Z_]+)$/);
+    if (method === "PUT" && key) {
+      if (at.moveRefused) throw Object.assign(new Error("no secret in your vault"), { status: 404 });
+      return { ok: true, name: key[2], hosts: body.hosts };
+    }
     if (method === "DELETE") {
       const name = path.split("/")[3];
       delete doors[name];
@@ -91,11 +99,26 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
     row.append(label, ...actions);
     return row;
   };
+  // the page's listeners (`message`), and each frame it made, as `frameOf` makes one
+  const listeners = [];
+  globalThis.addEventListener = (type, fn) => type === "message" && listeners.push(fn);
+  const frames = [];
+  const frameOf = (src, title, name) => {
+    const posted = [];
+    const frame = { dataset: { src, fragment: name }, title, contentWindow: { postMessage: (m, origin) => posted.push([m, origin]) }, posted };
+    frames.push(frame);
+    return frame;
+  };
+  const originAt = (name) => `http://${name}.fragment.localhost`;
+  // a message to the page, as the browser hands it to its listeners
+  const message = async (e) => {
+    for (const fn of listeners) await fn(e);
+  };
   const telegram = createTelegram({
     api, el: (tag, cls, text) => new Node(tag, cls, text), section, actionLine, named: (node, f) => Object.assign(node, { textContent: f }), seg: (s) => s,
     computer: () => ({ agents: AGENTS }), fragments: () => list, listed: () => at.listed, own: (f) => f.role === "owner",
     connectorLabel: (agent, door) => `${agent.split("--")[0]}-${door}`, markOffer: (node, agent, what) => Object.assign(node, { offer: [agent, what] }),
-    framed: (name, path) => `/auth/frame?name=${name}&return=${path}`, pressSetup: () => 1, openSetup: (o) => opened.push(o), openChat: () => {},
+    framed: (name, path) => `/auth/frame?name=${name}&return=${path}`, frameOf, originAt, pressSetup: () => 1, openSetup: (o) => opened.push(o), openChat: () => {},
     notice: (...n) => notices.push(n), load: async () => {
       at.loads++;
       if (at.listFails) {
@@ -118,7 +141,7 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
     server.push({ name, kind: "chat", role: "owner", sharing: { reach: true } });
     doors[name] = { door: "telegram", agent };
   };
-  return { telegram, asked, opened, notices, draw, rows, said, press, shown, doors, list, server, at, refuse, elsewhere };
+  return { telegram, asked, bodies, frames, message, originAt, opened, notices, draw, rows, said, press, shown, doors, list, server, at, refuse, elsewhere };
 }
 
 test("its own chats with reach are read, and an agent's bound one is Open and Set up; another's Set up alone", async () => {
@@ -165,7 +188,10 @@ test("Set up opens a bound chat's setup page, making nothing", async () => {
   w.draw();
   await w.press(0, "Set up");
   assert.equal(w.opened.length, 1);
-  assert.deepEqual({ ...w.opened[0], onClose: undefined }, { pressed: 1, src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", onClose: undefined });
+  assert.deepEqual({ ...w.opened[0], onClose: undefined, frame: undefined }, { pressed: 1, src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", onClose: undefined, frame: undefined });
+  // its frame, Settings' own, sent to its setup page
+  assert.equal(w.opened[0].frame, w.frames[0]);
+  assert.equal(w.frames[0].dataset.src, w.opened[0].src);
   assert.ok(!w.asked.some((a) => a.startsWith("POST")));
 });
 
@@ -289,4 +315,55 @@ test("a binding whose answer was lost is read: bound to its agent, it opens; to 
   assert.ok(!t.asked.some((a) => a.startsWith("DELETE")), "kept: another agent's now");
   assert.equal(t.opened.length, 0);
   assert.deepEqual(t.notices, [["Telegram was not set up", "It was linked to another agent meanwhile."]]);
+});
+
+// Use it: the page asks Settings to move the Vault's bot (`vault-move`),
+// since a page may not move one itself (members.rs `put_secret`). Settings
+// moves only what it offered that frame, into that connector, toward the
+// Vault's own hosts, and answers that frame alone.
+const OFFERED = [{ name: "telegram-maple--a1b2", hosts: ["api.telegram.org"], agents: ["maple--a1b2"] }];
+async function offered(opts = {}) {
+  const w = world({ vault: OFFERED, ...opts });
+  await w.telegram.readTelegram();
+  w.draw();
+  await w.press(0, "Set up");
+  const frame = w.frames[0];
+  const from = (data, over = {}) => w.message({ data, source: frame.contentWindow, origin: w.originAt("maple-telegram--e5f6"), ...over });
+  return { w, frame, from };
+}
+
+test("Use it: Settings moves the bot it offered that frame into its connector, toward the Vault's hosts, and answers it", async () => {
+  const { w, frame, from } = await offered();
+  await from({ fragment: "vault-move", nonce: "n1", vault: "another-secret", hosts: ["evil.example.com"], name: "elsewhere--x1y2" });
+  assert.deepEqual(w.asked.filter((a) => a.startsWith("PUT")), ["PUT /api/f/maple-telegram--e5f6/secrets/TELEGRAM_BOT_TOKEN"]);
+  assert.deepEqual(w.bodies.at(-1), { fromVault: "telegram-maple--a1b2", hosts: ["api.telegram.org"] }, "what it offered, never what the page names");
+  assert.deepEqual(frame.posted, [[{ fragment: "vault-move", nonce: "n1", ok: true }, "http://maple-telegram--e5f6.fragment.localhost"]]);
+});
+
+test("a move refused is said to that frame with its status (404: moved already)", async () => {
+  const { w, frame, from } = await offered();
+  w.at.moveRefused = true;
+  await from({ fragment: "vault-move", nonce: "n2" });
+  assert.deepEqual(frame.posted, [[{ fragment: "vault-move", nonce: "n2", ok: false, status: 404, error: "no secret in your vault" }, "http://maple-telegram--e5f6.fragment.localhost"]]);
+});
+
+test("no move for a frame at another origin, another window, a frame offered nothing, or once its dialog closed", async () => {
+  const { w, frame, from } = await offered();
+  // its frame sent elsewhere, at another origin
+  await from({ fragment: "vault-move", nonce: "a" }, { origin: "https://evil.example.com" });
+  // a window of no frame of Settings'
+  await from({ fragment: "vault-move", nonce: "b" }, { source: { postMessage: () => {} } });
+  assert.ok(!w.asked.some((a) => a.startsWith("PUT")));
+  assert.deepEqual(frame.posted, []);
+  // with no bot in the Vault for its agent, its frame is offered nothing
+  const none = world({ vault: [] });
+  await none.telegram.readTelegram();
+  none.draw();
+  await none.press(0, "Set up");
+  await none.message({ data: { fragment: "vault-move", nonce: "c" }, source: none.frames[0].contentWindow, origin: none.originAt("maple-telegram--e5f6") });
+  assert.ok(!none.asked.some((a) => a.startsWith("PUT")));
+  // its dialog closed: its offer is gone
+  w.opened[0].onClose();
+  await from({ fragment: "vault-move", nonce: "d" });
+  assert.ok(!w.asked.some((a) => a.startsWith("PUT")));
 });
