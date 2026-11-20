@@ -306,6 +306,7 @@ async fn the_hermes_image() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
+    let marker_at = fragment_bridge::log::now_ms();
     assert!(c.exec(&["touch", "/run/computer/restored"]));
     fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     eprintln!("hermes: marker to the bridge following: {} ms ({} ms since docker run)", gate.elapsed().as_millis(), t.elapsed().as_millis());
@@ -323,6 +324,7 @@ async fn the_hermes_image() {
         panic!("no reply; the fake holds\n{records}\nthe container said:\n{}", logs.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     }
     eprintln!("hermes: first message to reply: {} ms ({} ms since the marker)", asked.elapsed().as_millis(), gate.elapsed().as_millis());
+    eprintln!("hermes: cold steps since the marker: {}", cold_steps(&c.logs(), marker_at, &fake, &chat, &first, &model));
     fake.until(30_000, "the turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t1)).await;
     // No supervised service of upstream's starts over (its `profile-gateways`,
     // left in, restarted every second: images/hermes/Dockerfile): every slot
@@ -717,6 +719,107 @@ fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<ser
     let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
     let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     (code, said, files)
+}
+
+/// A cold start's steps to its first reply, each in ms since `from` (ms
+/// since the epoch): the image's own events since then, by their `at`; the
+/// message; the model's first call after it; the reply. A step not found
+/// is `-`.
+fn cold_steps(logs: &str, from: u64, fake: &Fake, chat: &str, message: &serde_json::Value, model: &Model) -> String {
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", message["seq"].as_u64().unwrap());
+    let events = events_since(logs, from);
+    let first = |name: &str, of_turn: bool| events.iter().find(|e| e["event"] == name && (!of_turn || e["turn"] == turn)).and_then(|e| e["at"].as_u64());
+    let said = message["at"].as_u64();
+    let reply = fake.with(|w| w.records(chat, "chat").iter().find(|r| r["body"]["turn"] == turn && r["body"].get("kind").is_none()).and_then(|r| r["at"].as_u64()));
+    let asked = said.and_then(|m| model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/chat/completions") && c.at >= m).map(|c| c.at).min());
+    let steps = [
+        ("message", said),
+        ("boot", first("boot.main", false)),
+        ("configured", first("boot.configured", false)),
+        ("last life ended", first("boot.cut_turns_settled", false)),
+        ("gateway told", first("boot.ready", false)),
+        ("bridge following", first("follow.live", false)),
+        ("turn claimed", first("turn.claiming", true)),
+        ("gateway up", first("relay.connected", false)),
+        ("turn handed", first("relay.inbound", true)),
+        ("model asked", asked),
+        ("first reply", reply),
+    ];
+    steps.iter().map(|(name, at)| format!("{name} {}", at.map_or("-".into(), |at| (at as i64 - from as i64).to_string()))).collect::<Vec<_>>().join(", ")
+}
+
+/// The image's events logged since `from` (ms since the epoch), in order.
+fn events_since(logs: &str, from: u64) -> Vec<serde_json::Value> {
+    logs.lines().filter_map(|l| serde_json::from_str(l.trim()).ok()).filter(|e: &serde_json::Value| e["at"].as_u64().is_some_and(|at| at >= from)).collect()
+}
+
+/// Where the first `name` event in `events` is (and of `agent`, if given).
+fn at_event(events: &[serde_json::Value], name: &str, agent: Option<&str>) -> Option<usize> {
+    events.iter().position(|e| e["event"] == name && agent.is_none_or(|a| e["agent"] == a))
+}
+
+/// Each call's hop to the platform in `a_cold_wake_by_its_steps`: a guess
+/// (the hop from a container to the cell is not measured), so the boot's
+/// calls in a row cost what calls over a network do.
+const HOP_MS: u64 = 50;
+
+/// Goal (a wake's own seconds): a cold Hermes' first reply, timed step by
+/// step: a first start (no profile on disk yet), then snapshot wakes, each
+/// a SIGTERM and a start with the disk as the last life left it and no
+/// restore pending (a container snapshot keeps files, not processes), its
+/// message waiting as it starts, as a wake's is. Each wake answers; each
+/// prints its steps since its start. Each wake ends the last life and
+/// writes each profile before its gateway starts; one whose agent left
+/// while it slept is retired, never swept.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_cold_wake_by_its_steps() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    // two agents, as many people have: the boot's work is per agent
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "rowan"]).await;
+    fake.with(|w| w.hop_ms = HOP_MS);
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let answered = |message: &serde_json::Value| {
+        let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", message["seq"].as_u64().unwrap());
+        let chat = chat.clone();
+        move |w: &support::fake::World| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)
+    };
+    let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let from = fragment_bridge::log::now_ms();
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    fake.until(180_000, "the first start's reply", answered(&first)).await;
+    eprintln!("hermes: a first start, its steps since docker run: {}", cold_steps(&c.logs(), from, &fake, &chat, &first, &model));
+    for wake in 1..=5 {
+        let (_, code) = c.sigterm();
+        assert_eq!(code, 0, "a clean stop before wake {wake}");
+        let message = fake.say(&chat, &person("paul"), json!({ "text": format!("wake {wake}") }));
+        let from = fragment_bridge::log::now_ms();
+        c.start();
+        fake.until(180_000, "a snapshot wake's reply", answered(&message)).await;
+        eprintln!("hermes: snapshot wake {wake}, its steps since its start: {}", cold_steps(&c.logs(), from, &fake, &chat, &message, &model));
+        // the last life is ended, and each profile written, before the gateway starts
+        let events = events_since(&c.logs(), from);
+        let gateway = at_event(&events, "boot.ready", None);
+        let before = |name: &str, agent: Option<&str>| at_event(&events, name, agent).is_some_and(|at| Some(at) < gateway);
+        assert!(before("boot.cut_turns_settled", None) && before("profile.written", Some("juniper--k3x9")) && before("profile.written", Some("rowan--k3x9")), "wake {wake}: the last life ended, each profile written, then the gateway");
+    }
+    // Unassigned while asleep: its profile is retired before the gateway and
+    // its database is not the last life's sweep's (the agents' only), so
+    // nothing of it can hold up juniper's; juniper answers.
+    c.sigterm();
+    fake.remove_agent("rowan");
+    let message = fake.say(&chat, &person("paul"), json!({ "text": "rowan left" }));
+    let from = fragment_bridge::log::now_ms();
+    c.start();
+    fake.until(180_000, "the wake's reply after rowan left", answered(&message)).await;
+    let events = events_since(&c.logs(), from);
+    let swept = at_event(&events, "boot.cut_turns_settled", None);
+    let retired = at_event(&events, "boot.profile_retired", Some("rowan--k3x9"));
+    let gateway = at_event(&events, "boot.ready", None);
+    assert!(swept.is_some_and(|s| Some(s) < gateway) && retired.is_some_and(|r| Some(r) < gateway), "rowan's profile retired and the last life swept, then the gateway: {swept:?} {retired:?} {gateway:?}");
+    assert_eq!(events[swept.unwrap()]["dbs"], 2, "the home's database and juniper's: {}", events[swept.unwrap()]);
+    assert_eq!(events[retired.unwrap()]["ok"], true);
 }
 
 /// The Hermes image, running against the fake API and the scripted model,
@@ -1355,6 +1458,98 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     tokio::time::sleep(Duration::from_secs(3)).await;
     let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).count());
     assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
+}
+
+/// A host server that sends one body of `bytes` at about `per_s` bytes a
+/// second, to every request: a slow download for the computer.
+async fn slow_download(bytes: usize, per_s: usize) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("it listens");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        // bounded by the test: it ends with the runtime
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = [0u8; 4096];
+                let _ = s.read(&mut head).await;
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-length: {bytes}\r\nconnection: close\r\n\r\n").as_bytes()).await;
+                let chunk = vec![7u8; per_s / 10];
+                // bounded: the body, a tenth of a second's worth at a time
+                for _ in 0..bytes / chunk.len() {
+                    if s.write_all(&chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+        }
+    });
+    port
+}
+
+/// Goal (the plan to a sandbox per agent, P6; docs/bridge.md, "Work left
+/// running"): work an agent leaves running holds its computer while it
+/// works, and lets go once it idles, as the computer's own counters show.
+/// Invalid: an idle server the agent started, beside idle Hermes and its
+/// bridge, never holds it: the keepalive closes after the turn and stays
+/// closed for a whole window. Valid: a background command that computes
+/// for 50 s, then downloads for 30 s at 200 KB/s (its CPU under the floor,
+/// its network over it), holds the computer through both, from the first
+/// slice after its turn; once it idles, still running, it lets go within
+/// the window and a slice.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn work_left_running_holds_the_computer_while_it_works() {
+    use fragment_bridge::limits::{LOAD_SLICES, LOAD_SLICE_MS};
+    let (fake, _model, chat, c) = hermes_running().await;
+    let window = LOAD_SLICES as u64 * LOAD_SLICE_MS;
+    let open = |w: &support::fake::World| w.keepalive_open > 0;
+    // invalid: an idle server left running
+    tool_said(&fake, &chat, &c, "start: python3 -m http.server 8123").await;
+    within(&fake, &chat, &c, window + 3 * LOAD_SLICE_MS, "the keepalive to close under an idle server", |w| !open(w)).await;
+    assert!(c.exec(&["pgrep", "-f", "http.server 8123"]), "the server still runs");
+    let t = Instant::now();
+    // bounded: a window
+    while t.elapsed() < Duration::from_millis(window) {
+        assert!(!fake.with(|w| open(w)), "an idle server held the computer after {:?}", t.elapsed());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // valid: work, then a download, then idle, the process still running
+    let port = slow_download(6_000_000, 200_000).await;
+    let dir = "/data/work/juniper--k3x9";
+    let command = format!("start: sh -c 'timeout 50 python3 -c \"while True: pass\"; touch {dir}/computed; curl -s http://api.fragment.internal:{port}/big -o {dir}/big; touch {dir}/downloaded; sleep 900'");
+    let left = |c: &Container| c.logs().lines().filter(|l| l.contains("\"keepalive.left\"")).map(|l| l.contains("\"hold\":true")).collect::<Vec<bool>>();
+    let before = left(&c).len();
+    tool_said(&fake, &chat, &c, &command).await;
+    let started = Instant::now();
+    // bounded: the turn's end and the first slice after it
+    while left(&c).len() == before {
+        assert!(started.elapsed() < Duration::from_millis(3 * LOAD_SLICE_MS), "the work never held the computer");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let first = started.elapsed();
+    let mut gaps = vec![];
+    // bounded: the work's 80 s and a margin
+    while !c.exec(&["test", "-f", &format!("{dir}/downloaded")]) {
+        assert!(started.elapsed() < Duration::from_secs(180), "the work did not finish");
+        if !fake.with(|w| open(w)) {
+            gaps.push((started.elapsed(), c.exec(&["test", "-f", &format!("{dir}/computed")])));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let worked = started.elapsed();
+    let downloaded = c.exec_out(&["stat", "-c", "%s", &format!("{dir}/big")]);
+    let said = left(&c);
+    eprintln!("work left running: held from {first:?}, gaps {gaps:?}, done at {worked:?}, downloaded {downloaded}, said {said:?}");
+    assert_eq!(downloaded.trim(), "6000000", "the download finished whole");
+    assert_eq!(said[before..], [true], "one hold, from the first slice after its turn: {said:?}");
+    assert!(gaps.is_empty(), "held throughout the work, the download's too: {gaps:?}");
+    // idle, still running: it lets go within the window and a slice
+    within(&fake, &chat, &c, window + 2 * LOAD_SLICE_MS, "the keepalive to close once the work idles", |w| !open(w)).await;
+    assert!(c.exec(&["pgrep", "-f", "sleep 900"]), "the idle command still runs");
+    assert_eq!(left(&c)[before..], [true, false], "let go once");
+    let log = c.logs();
+    assert!(log.contains("\"load.counters\"") && log.contains("\"read\":true"), "the container's own cgroup is read");
 }
 
 /// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
@@ -3789,19 +3984,32 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
 /// (`hermes::SETTLE_CUT_TURNS`). Method: the scripted model runs a long
 /// command, cut while it runs; then the chat's next message is answered,
 /// with no pause notice, the cut turn ends lost once, its command never
-/// runs again and the model never calls it again.
+/// runs again and the model never calls it again. A departed agent's
+/// profile whose database no longer opens (sorted before the agent's own)
+/// holds up nothing: the sweep is the agents' own databases.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_turn_cut_by_a_crash_or_a_deploy_never_wedges_its_chat() {
     let (x, c) = Expiry::start().await;
     let (fake, chat) = (&x.fake, x.chat.as_str());
-    for (how, signal) in [("crash", "KILL"), ("deploy", "TERM")] {
+    for (how, signal, broken) in [("crash", "KILL", false), ("deploy", "TERM", false), ("departed", "KILL", true)] {
         let cut = x.say(&format!("run: sleep 300 # {how}"));
         within(fake, chat, &c, 120_000, "the long command runs", |_| c.exec(&["pgrep", "-f", "^sleep 300$"])).await;
         let calls_before = x.model.calls.lock().unwrap().len();
         assert!(Command::new(docker()).args(["kill", "--signal", signal, &c.id]).output().expect("docker runs").status.success());
         let _ = Command::new(docker()).args(["wait", &c.id]).output();
         fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+        if broken {
+            // a profile the last life left of an agent since gone, its
+            // database not one: the sweep meets it before juniper's
+            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("departed-{}", &c.id[..12]));
+            let profile = dir.join("aaa--k3x9");
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join(".fragment-agent"), "aaa--k3x9").unwrap();
+            std::fs::write(profile.join("state.db"), "not a database").unwrap();
+            let cp = Command::new(docker()).args(["cp", &profile.display().to_string(), &format!("{}:/data/hermes/profiles/", c.id)]).output().expect("docker runs");
+            assert!(cp.status.success(), "{}", String::from_utf8_lossy(&cp.stderr));
+        }
         c.start();
         let next = x.say(&format!("good morning after the {how}"));
         within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
@@ -4567,6 +4775,40 @@ print(len(was))
     fake.until(180_000, "the turn after the second restart", |w| ended(w, &again)).await;
     let refreshed = c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "boot").count();
     assert_eq!(refreshed, 1, "one refresh, at the first start on the changed hint: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+}
+
+/// Goal: a boot's prompt refresh that outlives its wait runs on beside the
+/// gateway and the hold's answer, which may copy a database before the
+/// refresh's request lands in it: it leaves the stamp unwritten, so the
+/// next start asks again, rather than stamp inputs a save may not hold.
+/// Method: a wait of 1 ms (`HERMES_BOOT_REFRESH_MS`), a turn (so there are
+/// databases to ask), the stamp removed, a restart; the boot's word on
+/// its stamp.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_boot_refresh_that_outlives_its_wait_leaves_its_stamp() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_REFRESH_MS", "1")]);
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(180_000, "the first turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+    let stamp = "/data/hermes/.fragment_prompt_inputs";
+    assert!(c.exec(&["rm", "-f", stamp]), "the stamp removed: the next start's inputs read as changed");
+    let from = fragment_bridge::log::now_ms();
+    c.restart();
+    // the boot's own word on its stamp (a skills round may stamp too: its own)
+    let said = |what: &str| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|e| e["at"].as_u64().is_some_and(|at| at >= from) && e["event"] == what && e["why"] == "boot");
+    let t = Instant::now();
+    // bounded: the boot's refresh ends within a minute of the restart
+    while !(said("prompts.stamp_deferred") || said("prompts.stamped")) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the boot's refresh never ended: {}", c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let words = c.logs().lines().filter(|l| l.contains("prompts.")).collect::<Vec<_>>().join("\n");
+    assert!(said("prompts.stamp_deferred") && !said("prompts.stamped"), "a refresh past its wait leaves the stamp: {words}");
 }
 
 /// Goal (Austin, 2026-11-17: a skill's change, as a hint's, would reach

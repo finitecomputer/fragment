@@ -354,6 +354,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
     let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
+    tokio::spawn(crate::load::watch(inbox_tx.clone(), Msg::Input, Duration::from_millis(limits::LOAD_SLICE_MS), held_rx.clone(), stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     // what each agent linked to SimpleX works on in its SimpleX chat, as its
@@ -817,7 +818,8 @@ async fn list_follows(api: &Api, agent: &Agent, only: Option<Vec<String>>) -> Re
     Ok(out)
 }
 
-/// A chat's members and names, read again after `VIEW_TTL_MS`.
+/// A chat's members and names, read again after `VIEW_TTL_MS`, or for its
+/// door when a record needs one (`feed`).
 struct ViewCache {
     view: ChatView,
     since: i64,
@@ -831,6 +833,7 @@ impl ViewCache {
         self.read_at.is_some_and(|t| t.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS) && joined.is_none_or(|j| j < t))
     }
 
+
     /// Reads the chat's agents (in the order they were added), its writers'
     /// names, and when this agent joined: records from before are history.
     async fn read(&mut self, api: &Api, agent: &Agent, fragment: &str, writer: Option<&str>) -> Result<(), ApiError> {
@@ -839,6 +842,9 @@ impl ViewCache {
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.view.people = members.iter().filter(|m| m.kind != "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
+        // the door this chat is of this agent's, as its own row says (the
+        // connector's binding, while open: docs/api.md, "An agent's doors")
+        self.view.door = members.iter().find(|m| m.principal == agent.identity).and_then(|m| m.door.clone()).filter(|d| records::door_ok(d));
         // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
         // record asked first, then its people, then its other agents (an
         // agent's message, a hand-off, is told by its name: its title, as
@@ -1069,9 +1075,23 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // a writer the view has no name for (a person or another agent past
         // the last read's bound, or new): read again, with it first
         let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
-        if !view.fresh(shared.joined_at(fragment)) || unknown {
-            if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
-                crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
+        // its owner's words carried by another key: whether this chat is a
+        // door of the agent's, as its row says now (the engine takes them
+        // as its owner's only through that door: `relayed_for`), read again
+        // whenever its view names none, so a door bound since it was read
+        // (an unlink and a link again, its agent a member throughout, which
+        // no join announces) is seen at its first record. One read a
+        // record, beside the turn the record starts either way. That read
+        // failing in a way asking again may pass ends the follow, which
+        // reads the record again from the cursor, so an owner's message is
+        // never taken for its carrier's for a blip.
+        let relays = record.at >= view.since && record.principal != agent.identity && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment);
+        let door = relays && view.view.door.is_none();
+        if !view.fresh(shared.joined_at(fragment)) || unknown || door {
+            match view.read(api, agent, fragment, Some(&record.principal)).await {
+                Ok(()) => {}
+                Err(e) if door && e.retryable() => return Some(Ended::Again(format!("its members did not read for its door (seq {}): {e}", record.seq))),
+                Err(e) => crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() }),
             }
         }
         (Some(view.view.clone()), view.since)

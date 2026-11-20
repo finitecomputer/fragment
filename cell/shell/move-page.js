@@ -6,7 +6,7 @@
 // server's words say so too, promising only what comes).
 //
 // Upgrade: the person opens the move (`POST /api/migrations/offers`,
-// which binds them and gives its comp once: a month's seat, so a guest
+// which binds them and gives its comp once: a comped seat, so a guest
 // may make agents), then, one at a time, a new agent is made as Settings'
 // Add makes one (onboarding.js `addAgent`, its chat not opened) and its
 // Yes posted (`…/offers/{old}/yes {agent}`), which stops the old agent and
@@ -16,6 +16,17 @@
 // the server: each step shows while its call is out, and every line after
 // is the server's, read again while a move is under way. A refusal is the
 // server's words.
+//
+// Someone who has an agent here already (one who moved by hand, Paul
+// 11-19) is asked, for each old agent: a new one, or one of theirs
+// (`question`), with nothing chosen for them. One of theirs is taken as it
+// is: its Yes alone, nothing made, and the import adds to it (the
+// import-agent-home skill keeps its self). Nothing is written to it: until
+// its Yes lands nothing is decided, so a reload asks again; once it lands,
+// the move names it (the offer's `agent`), and no question is left. An
+// agent takes in one move, ever (the server refuses another,
+// `yes_into`). One an agent was made for already (its `from`, `madeFor`)
+// is not asked: that agent is its answer, gone on with as before.
 //
 // Once its new agent exists, a move is that agent's to tell (FIN-463: the
 // first move's agent asked its person a question in its own chat while
@@ -27,8 +38,9 @@
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `addAgent`, `setGuest`, `reload` (the list again), `ownAgents` (their
 // agent fragments' names), `identityOf` (an agent fragment's identity, once
-// its computer has it), `chatOf` (an agent identity's own chat, of
-// theirs), `openChat`, and `timers`.
+// its computer has it), `named` (a node named after an agent, following
+// its renames), `chatOf` (an agent identity's own chat, of theirs),
+// `openChat`, and `timers`.
 
 import { platformImage } from "./computer.js";
 
@@ -56,10 +68,21 @@ export function createMovePage(root, h) {
   // opening it is: a read answered after the page closed is no one's
   let importingAtOpen = null;
   let opening = 0;
-  // what the person chose, kept across drawings, and Upgrade as drawn
+  // what the person chose, kept across drawings, and Upgrade as drawn:
+  // which to upgrade, and into what ("" a new one, else an agent of theirs
+  // by its fragment's name), each question's choices as drawn
   const chosen = new Map();
+  const into = new Map();
+  const drawnInto = new Map();
   let go = null;
-  const anyChosen = () => (offers ?? []).some((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
+  // their agents as their agent.json said at this opening (`readMine`)
+  let mine = null;
+  const picked = () => (offers ?? []).filter((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
+  // Upgrade's leave: something chosen, each with its question answered
+  const ready = () => {
+    const p = picked();
+    return p.length > 0 && p.every((o) => !choices(o).length || answer(o) !== undefined);
+  };
 
   // whether it was this opening's
   async function read() {
@@ -75,6 +98,101 @@ export function createMovePage(root, h) {
       readFailed = e?.status ? e.message : "Couldn't load your agents. Try again.";
     }
     return true;
+  }
+
+  // Their agents (FIN-463, Paul 11-19): each with its identity once a
+  // computer has it (what a Yes binds), whether it runs on Hermes (the
+  // import is a Hermes skill), and the old agent it was made for (`from`);
+  // null for one whose agent.json could not be read (not missing: unread).
+  function readMine() {
+    return Promise.all(h.ownAgents().map(async (fragment) => {
+      const json = await api("GET", `/api/f/${fragment}/file?path=agent.json`).then((j) => j ?? {}, (e) => (e?.status === 404 ? {} : null));
+      if (!json) return null;
+      return { fragment, identity: h.identityOf(fragment), hermes: (typeof json.runtime === "string" ? json.runtime : "hermes") === "hermes", from: typeof json.from === "string" ? json.from : null };
+    }));
+  }
+
+  // what the page asks from, while an old agent is still to answer for:
+  // those read (Upgrade reads them again, whole)
+  async function mineAgain() {
+    const at = opening;
+    mine = null;
+    if (!offers?.some((o) => ASKABLE.has(o.state))) return;
+    const got = await readMine();
+    if (at === opening) mine = got.filter(Boolean);
+  }
+
+  // the agents some move of theirs is bound to: each takes in one, ever
+  const bound = () => new Set((offers ?? []).map((x) => x.agent).filter(Boolean));
+
+  // The agent of theirs made for `o` before (its agent.json's `from`) that
+  // no move is bound to, by its fragment's name, or null
+  function madeFor(o) {
+    const taken = bound();
+    return (mine ?? []).find((a) => a.from === o.old && !(a.identity && taken.has(a.identity)))?.fragment ?? null;
+  }
+
+  // What `o` may be upgraded into besides a new one: none once an agent was
+  // made for it (its answer, gone on with as before); else each of theirs
+  // on a computer and on Hermes that is free: no move bound to it, and not
+  // made for another old agent still to answer.
+  function choices(o) {
+    if (!mine || madeFor(o)) return [];
+    const open = new Set((offers ?? []).filter((x) => ASKABLE.has(x.state)).map((x) => x.old));
+    const taken = bound();
+    return mine.filter((a) => a.identity && a.hermes && !taken.has(a.identity) && !(a.from && open.has(a.from)));
+  }
+
+  // what the person answered for `o` while it is one of its choices: ""
+  // (a new one), an agent's fragment, or undefined (not yet)
+  function answer(o) {
+    const a = into.get(o.old);
+    return a === "" || choices(o).some((c) => c.fragment === a) ? a : undefined;
+  }
+
+  // The one question for `o`, when they have agents it may go into: a new
+  // one, or one of theirs, nothing chosen for them. Shown while `o` is to
+  // be upgraded. A choice changes Upgrade alone (the page, and the
+  // person's focus, stay put), and takes that agent from another old
+  // agent that had it: one agent takes in one upgrade at a time.
+  function question(o, theirs) {
+    const q = el("div", "move-into");
+    q.setAttribute("role", "radiogroup");
+    const ask = el("p");
+    ask.id = `move-into-${o.old}`;
+    if (theirs.length === 1) h.named(ask, theirs[0].fragment, (t) => `You already have an agent here. Make a new one for this upgrade, or use ${t}?`);
+    else ask.textContent = "You already have agents here. Make a new one for this upgrade, or use one of yours?";
+    q.setAttribute("aria-labelledby", ask.id);
+    q.append(ask);
+    const radios = [];
+    for (const a of [null, ...theirs]) {
+      const value = a?.fragment ?? "";
+      const line = el("label", "move-pick");
+      const r = el("input", "check");
+      r.type = "radio";
+      r.name = `move-into-${o.old}`;
+      r.value = value;
+      r.checked = answer(o) === value;
+      r.disabled = busy;
+      r.onchange = () => {
+        into.set(o.old, value);
+        for (const [other, rs] of drawnInto) {
+          if (other === o.old || !value || into.get(other) !== value) continue;
+          into.delete(other);
+          for (const x of rs) x.checked = false;
+        }
+        if (go) go.disabled = busy || !ready();
+      };
+      const said = el("span");
+      if (a) h.named(said, a.fragment, (t) => `Use ${t}`);
+      else said.textContent = "Make a new one";
+      line.append(r, said);
+      q.append(line);
+      radios.push(r);
+    }
+    drawnInto.set(o.old, radios);
+    q.hidden = !(chosen.get(o.old) ?? true);
+    return q;
   }
 
   function row(o) {
@@ -98,12 +216,16 @@ export function createMovePage(root, h) {
       box.type = "checkbox";
       box.checked = chosen.get(o.old) ?? true;
       box.disabled = busy;
+      const theirs = choices(o);
+      const q = theirs.length ? question(o, theirs) : null;
       box.onchange = () => {
         chosen.set(o.old, box.checked);
-        if (go) go.disabled = busy || !anyChosen();
+        if (q) q.hidden = !box.checked;
+        if (go) go.disabled = busy || !ready();
       };
       pick.append(box, el("span", null, "Upgrade"));
       copy.append(pick);
+      if (q) copy.append(q);
     } else if (o.state === "never") {
       const again = el("button", null, "Ask again");
       again.type = "button";
@@ -134,6 +256,7 @@ export function createMovePage(root, h) {
     if (!offers) return root.replaceChildren(wrap);
     if (!offers.length) wrap.append(el("p", "muted", "You have no agents to upgrade."));
     const list = el("ul", "move-list");
+    drawnInto.clear();
     list.append(...offers.map(row));
     wrap.append(list);
     if (offers.some((o) => CARRIED.has(o.state))) wrap.append(el("p", "muted move-simplex", "If you chatted with it on SimpleX, keep that chat in Settings."));
@@ -142,7 +265,7 @@ export function createMovePage(root, h) {
     if (offers.some((o) => ASKABLE.has(o.state))) {
       go = el("button", "primary", "Upgrade");
       go.type = "button";
-      go.disabled = busy || !anyChosen();
+      go.disabled = busy || !ready();
       go.onclick = () => bring();
       wrap.append(go);
     }
@@ -201,54 +324,21 @@ export function createMovePage(root, h) {
     }
   }
 
-  // The agent of theirs made for `o` before (its agent.json's `from`) that
-  // no move is bound to, by its fragment's name, or null. An agent.json that
-  // could not be read (not missing: unread) is no answer, and nothing may
-  // be made on none: it stops, to be tried again, as Settings' agent.json
-  // writes do (agent-settings.js `writeAgentJson`).
-  async function madeFor(o) {
-    const bound = new Set((offers ?? []).map((x) => x.agent).filter(Boolean));
-    for (const fragment of h.ownAgents()) {
-      const json = await api("GET", `/api/f/${fragment}/file?path=agent.json`).catch((e) => {
-        if (e?.status === 404) return null;
-        throw new Error(`Couldn't check whether ${o.name} was upgraded already, so nothing changed. Try again.`);
-      });
-      if (json?.from !== o.old) continue;
-      const id = h.identityOf(fragment);
-      if (id && bound.has(id)) continue;
-      return fragment;
-    }
-    return null;
-  }
-
   async function bring() {
-    // each new agent named as its old one (the import brings who it is;
-    // its person renames it as any agent), so a making cut short is found
-    // again by the same name whatever was typed (onboarding.js `addAgent`)
-    const picks = offers.filter((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true)).map((o) => ({ o, name: o.name.trim() || "Your agent" }));
-    if (!picks.length || busy) return;
+    if (!ready() || busy) return;
     busy = true;
     failed = null;
     draw();
     try {
-      await api("POST", "/api/migrations/offers", {});
-      await seated();
-      for (const { o, name } of picks) {
-        // one new agent an old one: one made for it before (a Yes that
-        // never arrived, a making cut short, a reload) is the one, handed
-        // back to Add, which goes on with what it lacks
-        const before = await madeFor(o);
-        doing = { old: o.old, said: `Preparing ${name}'s upgrade…` };
-        draw();
-        const made = await h.addAgent({ name, role: null, quiet: true, from: o.old, agent: before });
-        if (!made?.id) throw new Error(`${name}'s upgrade didn't start. Try again.`);
-        doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
-        draw();
-        await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id });
-        doing = null;
-        await read();
-        draw();
-      }
+      // their agents as they are now, each read: one that could not be is
+      // no answer (it may be one to ask about, or one made for it already),
+      // and nothing may be made on none: it stops, to be tried again, as
+      // Settings' agent.json writes do (agent-settings.js `writeAgentJson`).
+      // A question new since the page drew is the person's first.
+      const now = await readMine();
+      if (now.some((a) => !a)) throw new Error("Couldn't check your agents, so nothing changed. Try again.");
+      mine = now;
+      if (ready()) await upgrade();
     } catch (e) {
       failed = e?.message || "Couldn't do that. Try again.";
     }
@@ -257,8 +347,58 @@ export function createMovePage(root, h) {
     await read();
     h.reload?.();
     if (arrive()) return;
+    await mineAgain();
     draw();
     follow();
+  }
+
+  // each chosen into its answer: an agent of theirs, as it is, or a new one,
+  // named as its old one (the import brings who it is; its person renames
+  // it as any agent), so a making cut short is found again by the same name
+  // whatever was typed (onboarding.js `addAgent`)
+  async function upgrade() {
+    const picks = picked().map((o) => ({ o, name: o.name.trim() || "Your agent", theirs: mine.find((a) => a.fragment === answer(o)) ?? null }));
+    // one of theirs chosen that is no longer free (another move took it):
+    // asked again, never a new one in its place
+    const lost = picks.find(({ o, theirs }) => into.get(o.old) && !theirs);
+    if (lost) {
+      into.delete(lost.o.old);
+      throw new Error(`Choose again for ${lost.o.name}.`);
+    }
+    // the server's offers as it opens the move: one answered since the page
+    // drew (another tab), or gone (withdrawn), is gone on with no further,
+    // nothing made for it
+    let now = (await api("POST", "/api/migrations/offers", {}))?.offers ?? [];
+    await seated();
+    for (const { o, name, theirs } of picks) {
+      if (!ASKABLE.has(now.find((x) => x.old === o.old)?.state)) continue;
+      if (theirs) {
+        // one of theirs: its Yes alone, nothing made or written
+        doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
+        draw();
+        await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: theirs.identity });
+        doing = null;
+        await read();
+        now = offers ?? [];
+        draw();
+        continue;
+      }
+      // one new agent an old one: one made for it before (a Yes that
+      // never arrived, a making cut short, a reload) is the one, handed
+      // back to Add, which goes on with what it lacks
+      const before = madeFor(o);
+      doing = { old: o.old, said: `Preparing ${name}'s upgrade…` };
+      draw();
+      const made = await h.addAgent({ name, role: null, quiet: true, from: o.old, agent: before });
+      if (!made?.id) throw new Error(`${name}'s upgrade didn't start. Try again.`);
+      doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
+      draw();
+      await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id });
+      doing = null;
+      await read();
+      now = offers ?? [];
+      draw();
+    }
   }
 
   async function open() {
@@ -267,6 +407,7 @@ export function createMovePage(root, h) {
     importingAtOpen = null;
     draw();
     if (!(await read())) return;
+    await mineAgain();
     draw();
     follow();
   }

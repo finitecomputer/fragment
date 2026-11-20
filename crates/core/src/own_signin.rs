@@ -2,14 +2,15 @@
 //! "I don't want the user to need to use the cli or paste an api key
 //! though, they should be able to connect them from settings ideally";
 //! docs/computers.md, "Connections and operator keys"). Pure: the cell's
-//! connections.rs and the person's Computer DO make the calls.
+//! connections.rs and the person's Vault (cell/src/vault.rs) make the
+//! calls.
 //!
 //! The shape is OpenRouter's PKCE key exchange
 //! (openrouter.ai/docs/guides/overview/auth/oauth), named by a catalog
 //! row's `oauth` (`catalog::KeyOAuth`):
 //!
 //! 1. `POST /api/connections/{provider}/authorize`, from settings (the
-//!    shell's session: a browser to bind): the person's computer makes a
+//!    shell's session: a browser to bind): the person's Vault makes a
 //!    nonce and a verifier, keeps them for `SIGNIN_TTL_MS` (at most
 //!    `SIGNINS_PENDING_MAX` at once), the nonce is bound to the browser by
 //!    a cookie (`roundtrip::Trip::OwnKey`), and the browser is sent to the
@@ -19,13 +20,13 @@
 //!    the browser back to `GET /api/connections/{provider}/callback?code=…
 //!    &state=…`. It finishes only in the browser that began it (the
 //!    state is the one its cookie holds: `roundtrip::bind`), signed in to
-//!    the platform: the computer is the signed-in person's own, never one
-//!    a URL names, so a sign-in someone else began and sent to them seals
+//!    the platform: the Vault is the signed-in person's own, never one a
+//!    URL names, so a sign-in someone else began and sent to them seals
 //!    nothing anywhere. A state replayed, expired or made for another
 //!    provider is refused, nothing exchanged.
 //! 3. The platform exchanges the code with the verifier (`POST exchange
 //!    {code, code_verifier, code_challenge_method}` → `{key}`) and the
-//!    computer seals the key as `PUT …/key` does. Nothing gives it back.
+//!    Vault seals the key as `PUT …/key` does. Nothing gives it back.
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -36,8 +37,8 @@ use crate::catalog::KeyOAuth;
 /// A sign-in is finished within this, or not at all (OpenRouter's codes
 /// live 10 minutes too).
 pub const SIGNIN_TTL_MS: i64 = 10 * 60_000;
-/// Sign-ins one computer keeps under way at once: a person starts one or
-/// two; more are refused until the oldest end or expire.
+/// Sign-ins one person's Vault keeps under way at once: a person starts
+/// one or two; more are refused until the oldest end or expire.
 pub const SIGNINS_PENDING_MAX: usize = 8;
 /// Random bytes in a nonce (64 hex), and in a verifier (43 characters as
 /// base64url: RFC 7636's least).
@@ -59,7 +60,7 @@ pub fn challenge(verifier: &str) -> String {
     b64url(&Sha256::digest(verifier.as_bytes()))
 }
 
-/// What a computer keeps a sign-in under: the nonce's hash, so its storage
+/// What a Vault keeps a sign-in under: the nonce's hash, so its storage
 /// holds nothing a callback could be forged from.
 pub fn nonce_key(nonce: &str) -> String {
     hex::encode(Sha256::digest(nonce.as_bytes()))
@@ -135,15 +136,32 @@ pub fn key_of(status: u16, answer: &Value) -> Result<String, ExchangeError> {
         400..=499 => return Err(ExchangeError::Refused(status, said(answer))),
         _ => return Err(ExchangeError::Failed(format!("status {status}"))),
     }
-    let key = answer["key"].as_str().map(str::trim).unwrap_or_default();
-    if key.is_empty() || key.len() > OWN_KEY_MAX_BYTES || !key.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
-        return Err(ExchangeError::Failed("its answer holds no key that is a printable token".into()));
-    }
-    Ok(key.to_string())
+    given(answer["key"].as_str().unwrap_or_default()).ok_or_else(|| ExchangeError::Failed("its answer holds no key that is a printable token".into()))
 }
 
 /// An own key, at most (a provider's API key is far shorter).
 pub const OWN_KEY_MAX_BYTES: usize = 4096;
+
+/// Whether `key` is a key the swap may send: 1 to `OWN_KEY_MAX_BYTES`
+/// printable characters, with no space.
+pub fn key_ok(key: &str) -> bool {
+    (1..=OWN_KEY_MAX_BYTES).contains(&key.len()) && key.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// The own key a person gave (`PUT …/key {key}`) or a provider made, as it
+/// is kept: trimmed, and a key the swap may send (`key_ok`), else none.
+pub fn given(key: &str) -> Option<String> {
+    Some(key.trim()).filter(|k| key_ok(k)).map(str::to_string)
+}
+
+/// The own key a person's `PUT …/key` body gives (`{"key": "…"}`), kept as
+/// `given` keeps one; or why not, said to them in words that never quote
+/// the body: a parser's would quote the key itself, sent bare (Codex, #1345).
+pub fn key_put(body: &[u8]) -> Result<String, String> {
+    let refused = || format!("the body is {{\"key\": \"…\"}}, the key 1 to {OWN_KEY_MAX_BYTES} printable characters, with no space");
+    let put: Value = serde_json::from_slice(body).map_err(|_| refused())?;
+    put.get("key").and_then(Value::as_str).and_then(given).ok_or_else(refused)
+}
 
 #[cfg(test)]
 mod tests {
@@ -190,6 +208,32 @@ mod tests {
         assert!(matches!(key_of(502, &Value::Null), Err(ExchangeError::Failed(_))));
         for bad in [json!({}), json!({ "key": "" }), json!({ "key": "two words" }), json!({ "key": 5 }), json!({ "key": "k".repeat(OWN_KEY_MAX_BYTES + 1) })] {
             assert!(matches!(key_of(200, &bad), Err(ExchangeError::Failed(_))), "{bad}");
+        }
+    }
+
+    /// Valid: a printable token, trimmed, up to its bound. Invalid: none, a
+    /// space within, a control character, or past its bound.
+    #[test]
+    fn a_key_given_is_a_printable_token() {
+        assert_eq!(given("  sk-or-v1-abc\n"), Some("sk-or-v1-abc".into()));
+        assert_eq!(given(&"k".repeat(OWN_KEY_MAX_BYTES)).map(|k| k.len()), Some(OWN_KEY_MAX_BYTES));
+        for bad in ["", "   ", "two words", "tab\there", "é-key", &"k".repeat(OWN_KEY_MAX_BYTES + 1)] {
+            assert_eq!(given(bad), None, "{bad:?}");
+        }
+        assert!(key_ok("a") && !key_ok(" a") && !key_ok("a\u{7f}"));
+    }
+
+    /// Valid: `{"key": "…"}`, trimmed (another field beside it is let be).
+    /// Invalid: anything else, refused in words that never quote the body,
+    /// which may be the key itself sent bare (Codex, #1345).
+    #[test]
+    fn a_put_names_its_key_and_a_refusal_quotes_nothing() {
+        assert_eq!(key_put(br#"{"key": " sk-or-v1-abc "}"#), Ok("sk-or-v1-abc".into()));
+        assert_eq!(key_put(br#"{"key": "sk-or-v1-abc", "note": 1}"#), Ok("sk-or-v1-abc".into()));
+        let secret = "sk-or-v1-bare-7e1d";
+        for bad in [format!("{secret:?}"), format!("[{secret:?}]"), format!(r#"{{"key": 5, "also": {secret:?}}}"#), format!(r#"{{"value": {secret:?}}}"#), format!(r#"{{"key": "two {secret}"}}"#), secret.to_string(), "null".into(), String::new()] {
+            let refused = key_put(bad.as_bytes()).expect_err(&bad);
+            assert!(!refused.contains(secret) && !refused.contains("sk-or"), "{refused}");
         }
     }
 }

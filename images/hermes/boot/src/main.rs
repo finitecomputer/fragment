@@ -883,10 +883,7 @@ fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, face: &Result<
 /// `HERMES_BOOT_MODEL_MS`, so a rename, a new role or a new job reaches its
 /// teammates' next turns.
 async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragment_bridge::api::Face, ()>>, Vec<hermes::Teammate>) {
-    let mut faces = Vec::with_capacity(agents.len());
-    for a in agents {
-        faces.push(read_face(api, a).await);
-    }
+    let faces = futures_util::future::join_all(agents.iter().map(|a| read_face(api, a))).await;
     let team = agents
         .iter()
         .zip(&faces)
@@ -900,16 +897,15 @@ async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragme
     (faces, team)
 }
 
-/// Each agent's profile at a boot, and the profiles of agents that left
+/// Each agent's profile at a boot, all at once (each is a directory of its
+/// own, and its reads are its own), and the profiles of agents that left
 /// this computer retired: moved aside, never deleted. Only a boot retires
 /// one: no Hermes runs yet that could be winding down a turn in it.
 async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
-    for a in agents {
-        write_profile(api, a, home, ids, route, credential_env, team).await;
-    }
+    futures_util::future::join_all(agents.iter().map(|a| write_profile(api, a, home, ids, route, credential_env, team))).await;
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
             let marker = std::fs::read_to_string(e.path().join(".fragment-agent")).unwrap_or_default();
@@ -983,11 +979,13 @@ fn write_ready(agents: &[Agent], restored: &agents::Restored, home: &Path) -> St
 
 /// The chat each agent's route names (bots.rs, `profile_routes`): a chat
 /// it is in (`route_chat`, from its own list, as the bridge lists what it
-/// follows). Bounded: one list an agent, at most `AGENTS_MAX` of them.
+/// follows). Bounded: one list an agent, at most `AGENTS_MAX` of them,
+/// asked all at once.
 async fn route_chats(api: &Api, agents: &[Agent]) -> BTreeMap<String, String> {
+    let lists = futures_util::future::join_all(agents.iter().map(|a| api.fragments(&a.fragment))).await;
     let mut routed = BTreeMap::new();
-    for a in agents {
-        match api.fragments(&a.fragment).await {
+    for (a, list) in agents.iter().zip(lists) {
+        match list {
             Ok(list) => {
                 if let Some(chat) = bots::route_chat(&a.fragment, &list) {
                     routed.insert(a.fragment.clone(), chat);
@@ -1339,8 +1337,9 @@ fn refresh_stored_prompts(home: &Path, why: &str, overlapped: &dyn Fn() -> bool)
     if overlapped() {
         return ev!("prompts.stamp_deferred", { "why": why, "because": "held" });
     }
-    if let Err(e) = write_stamp(&stamp, &inputs) {
-        ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() });
+    match write_stamp(&stamp, &inputs) {
+        Ok(()) => ev!("prompts.stamped", { "why": why }),
+        Err(e) => ev!("prompts.stamp_failed", { "why": why, "error": e.to_string() }),
     }
 }
 
@@ -1523,8 +1522,10 @@ async fn boot_main() {
     let card_timeout_s = hermes::card_timeout_s(env("HERMES_BOOT_CARD_TIMEOUT_S").as_deref());
     // HERMES_BOOT_SCREEN_IDLE_MS: a test's shorter idle bound for desktops
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
-    // each agent's route, in the gateway's config (bots.rs, `profile_routes`)
-    let routes = bots::profile_routes(&hermes_agents, &route_chats(&api, &hermes_agents).await);
+    // each agent's route, in the gateway's config (bots.rs, `profile_routes`),
+    // and every agent as its teammates' (whatever runs it), read together
+    let (routed, (_, mut team)) = tokio::join!(route_chats(&api, &hermes_agents), team_of(&api, &agents, &home));
+    let routes = bots::profile_routes(&hermes_agents, &routed);
     let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
@@ -1540,8 +1541,6 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
-    // every agent is its teammates', whatever runs it
-    let (_, mut team) = team_of(&api, &agents, &home).await;
     profiles(&api, &hermes_agents, &home, ids, &route, &credential_env, &team).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
@@ -1554,14 +1553,23 @@ async fn boot_main() {
     }
     // the skills settled (`managed_dir`, above) and the cut turns too: a
     // chat's stored prompt rebuilt from today's inputs at its next turn
+    // One that outlives its wait runs on beside the gateway and the hold's
+    // answer, which may copy a database before its request lands there: it
+    // leaves the stamp then, and the next start asks again.
+    let late = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let refreshing = {
-        let home = home.clone();
-        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot", &|| false))
+        let (home, late) = (home.clone(), late.clone());
+        tokio::task::spawn_blocking(move || refresh_stored_prompts(&home, "boot", &|| late.load(std::sync::atomic::Ordering::SeqCst)))
     };
-    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+    // HERMES_BOOT_REFRESH_MS: a test's shorter wait for it
+    let refresh_wait = env("HERMES_BOOT_REFRESH_MS").and_then(|v| v.parse::<u64>().ok()).map_or(END_PREVIOUS_LIFE_MS_MAX, |v| v.min(END_PREVIOUS_LIFE_MS_MAX));
+    match tokio::time::timeout(Duration::from_millis(refresh_wait), refreshing).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "boot", "error": e.to_string() }),
-        Err(_) => ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+        Err(_) => {
+            late.store(true, std::sync::atomic::Ordering::SeqCst);
+            ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": refresh_wait });
+        }
     }
     // the other runtimes' agents' own files, as each Hermes agent's came
     // with its profile: back before the ready file names them
