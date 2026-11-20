@@ -25,6 +25,19 @@ unfinished design, not debt.
   repos no live fragment names (FIN-540), and `repo_goes` takes every
   deleted life's repo.
 
+## An agent's ask of its person is polled
+
+- **Shortcut:** `fragment vault ask` reads its ask every 2 s until it ends
+  (`GET /api/vault/asks/{id}`, cli/src/main.rs `vault_ask`), at most ten
+  minutes and a minute past: about 330 reads, each the registry's and the
+  person's Vault's.
+- **Why:** the first cut of an agent's ask (FIN-466) keeps to the routes
+  the Vault has; a socket the CLI follows is a route and a watch of its own.
+- **Risk:** a person slow to answer costs their agent's ask its reads; a
+  few at once are a few hundred small calls.
+- **Delete when:** the Vault tells an ask's end on a socket the agent's CLI
+  holds (as the list's watch tells a page), and the CLI waits on it.
+
 ## No mail without Email Sending
 
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,

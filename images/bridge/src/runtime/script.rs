@@ -99,6 +99,11 @@
 //!   linked`, `door said <seq>`, `door bound`, `door poked <what>` (and
 //!   `, its share link shown` when the answer holds it), or `door
 //!   refused: <why>`;
+//! - `vault-ask <name> <host|-> <why>`: its person asked for a secret
+//!   with the fragment CLI, `fragment vault ask <name> --to <host> --why
+//!   <why>` (`-`: no host), as the agent,
+//!   the turn waiting on their card: the reply is `vault-asked <state>
+//!   <placeholder, or none>`, or `vault-ask refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
 //!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
 //!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
@@ -490,6 +495,35 @@ async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest
     format!("asked {}", asked["title"].as_str().or(asked["name"].as_str()).unwrap_or(who))
 }
 
+/// A Vault ask waits on its person's card, at most ten minutes, and the
+/// CLI a minute past: this a little more.
+const VAULT_ASK_WAIT: Duration = Duration::from_secs(12 * 60);
+
+/// `vault-ask <name> <host|-> <why>`: the CLI's ask, as the agent.
+async fn vault_ask(agent: &crate::runtime::Agent, rest: &str) -> String {
+    let mut words = rest.trim().splitn(3, char::is_whitespace);
+    let (Some(name), Some(host), Some(why)) = (words.next(), words.next(), words.next()) else {
+        return "say `vault-ask <name> <host|-> <why>`".into();
+    };
+    let mut args = vec!["--json", "vault", "ask", name, "--why", why.trim()];
+    if host != "-" {
+        args.extend(["--to", host]);
+    }
+    let run = tokio::process::Command::new(CLI).args(&args).env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner).kill_on_drop(true).output();
+    let out = match tokio::time::timeout(VAULT_ASK_WAIT, run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return format!("vault-ask refused: the CLI did not run ({e})"),
+        Err(_) => return format!("vault-ask refused: no answer in {} s", VAULT_ASK_WAIT.as_secs()),
+    };
+    let said: serde_json::Value = String::from_utf8_lossy(&out.stdout).lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
+    if said["ok"] != true {
+        let why = said["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).chars().take(300).collect());
+        return format!("vault-ask refused: {why}");
+    }
+    let d = &said["data"];
+    format!("vault-asked {} {}", d["ask"]["state"].as_str().unwrap_or("?"), d["placeholder"].as_str().unwrap_or("none"))
+}
+
 /// A sync of a large file is the CLI hashing it, uploading its bytes and
 /// committing its pointer: at most this long.
 const SYNC_WAIT: Duration = Duration::from_secs(180);
@@ -879,6 +913,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("vault-ask ") {
+        reply = vault_ask(&ts.agent, rest).await;
     }
     if let Some(rest) = ts.text.strip_prefix("ask ") {
         reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;

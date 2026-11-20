@@ -1,6 +1,20 @@
 {
   "components": {
     "schemas": {
+      "AnswerAsk": {
+        "additionalProperties": false,
+        "description": "`POST /api/vault/asks/{id}`: the person's answer, what they pasted.",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
       "Archived": {
         "description": "Its answer: the fragment, and whether it is archived now.",
         "properties": {
@@ -16,6 +30,60 @@
           "archived"
         ],
         "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "AskSecret": {
+        "additionalProperties": false,
+        "description": "`POST /api/vault/asks`: an agent asks its person for a new secret. The\nperson answers in a card the\nplatform draws (a notice, `GET /api/notices`), never in a chat's\nrecords, so no agent, model or app ever reads what they paste.",
+        "properties": {
+          "hosts": {
+            "default": [],
+            "description": "The hosts it would go to (exact DNS names, at most 8); none, kept\nand sent nowhere until its person says where.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "The secret's name in its person's Vault (1 to 32 of `a-z0-9-`).",
+            "type": "string"
+          },
+          "why": {
+            "description": "Why, in the agent's words, shown on the card: 1 to 200 characters.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "why"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "AskState": {
+        "description": "Where an ask stands.",
+        "oneOf": [
+          {
+            "const": "waiting",
+            "description": "On its person's card, not answered yet.",
+            "type": "string"
+          },
+          {
+            "const": "saved",
+            "description": "Answered: the secret is in their Vault, bound to the agent.",
+            "type": "string"
+          },
+          {
+            "const": "declined",
+            "description": "Their Decline.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Not answered in time, or asked again since.",
+            "type": "string"
+          }
+        ],
         "x-fragment-direction": "out"
       },
       "ChannelNewest": {
@@ -1867,6 +1935,18 @@
               "null"
             ]
           },
+          "field": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NoticeField"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A field the person pastes a secret into (a Vault ask's, FIN-466):\nmasked, never shown again, kept nowhere but the page's own input;\nan action that takes it (`NoticeAction::field`) sends what it holds.\nA client from before it shows none, so such an action is refused."
+          },
           "id": {
             "description": "Unique among the person's notices, and the same across reads while it\ntells the same thing: what a client keys its row by.",
             "type": "string"
@@ -1933,6 +2013,11 @@
             "default": null,
             "description": "The JSON `post` sends (none: `{}`)."
           },
+          "field": {
+            "default": false,
+            "description": "A post that sends its notice's field (`Notice::field`): what the\nperson typed, as `value` beside `body`'s own fields. Empty, the\nclient posts nothing and says so.",
+            "type": "boolean"
+          },
           "label": {
             "type": "string"
           },
@@ -1955,6 +2040,19 @@
         },
         "required": [
           "label"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "NoticeField": {
+        "description": "A notice's secret field: what it says while empty.",
+        "properties": {
+          "placeholder": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "placeholder"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -2787,6 +2885,34 @@
           "place",
           "agents",
           "setAt"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "SecretAsk": {
+        "description": "An ask, as its agent and its person read it: never a value.",
+        "properties": {
+          "expiresAt": {
+            "description": "When it expires unanswered, in ms since the epoch.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "32 hex.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AskState"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state",
+          "expiresAt"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -7107,6 +7233,485 @@
           }
         ],
         "summary": "The signer's secrets, by name, each with its hosts, place and agents: never a value.",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
+    "/api/vault/asks": {
+      "post": {
+        "operationId": "vault.ask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskSecret"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretAsk"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`rate_limited`",
+            "x-fragment-codes": [
+              "rate_limited"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "An agent asks its person for a new secret: a card on their notices, with a masked field, that waits ten minutes.",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
+    "/api/vault/asks/{ask}": {
+      "get": {
+        "operationId": "vault.asked",
+        "parameters": [
+          {
+            "description": "The ask's id: 32 lower-case hex.",
+            "in": "path",
+            "name": "ask",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretAsk"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "How the signing agent's own ask stands: waiting, saved, declined or expired.",
+        "tags": [
+          "vault"
+        ]
+      },
+      "post": {
+        "operationId": "vault.answer",
+        "parameters": [
+          {
+            "description": "The ask's id: 32 lower-case hex.",
+            "in": "path",
+            "name": "ask",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretAsk"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault as a new secret for the agent toward the hosts asked; never one that replaces a secret they keep.",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
+    "/api/vault/asks/{ask}/decline": {
+      "post": {
+        "operationId": "vault.decline",
+        "parameters": [
+          {
+            "description": "The ask's id: 32 lower-case hex.",
+            "in": "path",
+            "name": "ask",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretAsk"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The person's Decline of an ask; again, it answers as the ask stands.",
         "tags": [
           "vault"
         ]

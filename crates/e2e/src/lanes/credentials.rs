@@ -1529,3 +1529,152 @@ pub(super) fn uses_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &st
     s.ok(USES_CHECKS[2], other.status == 200 && touched == 200 && taken && after == want_last, json!({ "taken": taken, "after": after }));
     Ok(())
 }
+
+/// The checks `vault_ask_checks` makes (FIN-466, an agent asks), as a run
+/// without the stub or the fakes skips them.
+pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
+    "an agent's `fragment vault ask` is a card on its person's notices: who asks for what, why, where it goes, a masked field, Save and Decline",
+    "no one else is shown it or answers it: another person's notices hold none, and their answer finds no ask",
+    "an empty answer is refused and leaves it waiting",
+    "its person's paste saves it: the agent's CLI is told so, with its stand-in, never the value; the card is gone",
+    "the stand-in works toward the host asked: the value in its place, and the agent shown only its name",
+    "an ask that ended is not answered again (409), and its decline answers it as it stands",
+    "a Decline ends an ask: the agent's CLI is told, and nothing is put in the Vault",
+    "asked for a name its person keeps already, the card says an ask never replaces it (no field, Decline alone); an answer is refused (409), and the secret stays as it was",
+    "no value pasted is in any answer, in the agent's view, or in a node log",
+    "a secret named `asks` is still its person's to set and remove: the asks' routes take only a POST or an id",
+    "a card answered after a secret of its name was set meanwhile grants nothing: 409, and the secret stays as set",
+];
+
+/// The person's waiting card for `name` (a `vault_ask` notice), once
+/// their notices show it.
+fn ask_card(s: &Suite, api: &Api, owner: &crate::Keys, name: &str) -> Result<Value> {
+    let card = || -> Option<Value> {
+        let r = api.signed(owner, "GET", "/api/notices", None).ok()?;
+        r.body["notices"].as_array()?.iter().find(|n| n["kind"] == "vault_ask" && n["title"].as_str().is_some_and(|t| t.ends_with(&format!(" {name}")))).cloned()
+    };
+    s.eventually(Duration::from_secs(60), || card().is_some());
+    Ok(card().unwrap_or(Value::Null))
+}
+
+/// A person's Vault filled by an agent's ask (FIN-466): the stub's agent
+/// runs `fragment vault ask` (its turn waits on the card), its person
+/// answers the card from their notices as the shell's band posts it, and
+/// the stand-in it is given then works through the swap. `start` posts a
+/// message and answers its turn; `replied` waits for that turn's reply.
+pub(super) fn vault_ask_checks(
+    s: &mut Suite,
+    api: &Api,
+    w: &Swapping,
+    start: &dyn Fn(u32, &str) -> Result<String>,
+    replied: &dyn Fn(&Suite, &str) -> Result<String>,
+    fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>,
+) -> Result<usize> {
+    let value = format!("asked-e2e-{}", &fragment_nip98::Keys::generate().pubkey_hex()[..24]);
+    let (name, host) = ("e2e-asked", "api.vault.test");
+    let mut said: Vec<String> = vec![];
+
+    let turn = start(701, &format!("vault-ask {name} {host} Push the shop code"))?;
+    let card = ask_card(s, api, w.owner, name)?;
+    let actions = card["actions"].as_array().cloned().unwrap_or_default();
+    let save = actions.first().and_then(|a| a["post"].as_str()).unwrap_or("").to_string();
+    s.ok(
+        VAULT_ASK_CHECKS[0],
+        card["text"] == "Push the shop code"
+            && card["detail"].as_str().is_some_and(|d| d.contains(&format!("Only {host} would receive it")) && d.contains("never the secret itself"))
+            && card["field"]["placeholder"].is_string()
+            && actions.len() == 2
+            && actions[0]["label"] == "Save"
+            && actions[0]["field"] == true
+            && actions[1]["label"] == "Decline"
+            && actions[1]["field"].is_null()
+            && save.starts_with("/api/vault/asks/"),
+        &card,
+    );
+    let theirs = api.signed(w.stranger, "GET", "/api/notices", None)?;
+    let stranger_answer = api.signed(w.stranger, "POST", &save, Some(&json!({ "value": value })))?;
+    s.ok(
+        VAULT_ASK_CHECKS[1],
+        theirs.status == 200 && !theirs.text.contains(name) && stranger_answer.status == 404,
+        json!({ "notices": theirs.body, "answer": stranger_answer.status }),
+    );
+    let empty = api.signed(w.owner, "POST", &save, Some(&json!({ "value": "  " })))?;
+    let still = ask_card(s, api, w.owner, name)?;
+    s.ok(VAULT_ASK_CHECKS[2], empty.status == 400 && still["id"] == card["id"], json!({ "empty": empty.body, "still": still }));
+
+    let saved = api.signed(w.owner, "POST", &save, Some(&json!({ "value": value })))?;
+    let reply = replied(s, &turn)?;
+    said.push(reply.clone());
+    let stand_in = placeholder(s, w.id, w.agent, name);
+    let gone = api.signed(w.owner, "GET", "/api/notices", None)?;
+    s.ok(
+        VAULT_ASK_CHECKS[3],
+        saved.status == 200 && saved.body["state"] == "saved" && !saved.text.contains(&value) && reply == format!("vault-asked saved {stand_in}") && !gone.text.contains(card["id"].as_str().unwrap_or("?")),
+        json!({ "saved": saved.body, "reply": reply, "expected": stand_in }),
+    );
+    let before = s.upstream.seen().len();
+    let r = fetched(s, 702, &format!("fetch http://{host}/v1/me with {stand_in}"))?;
+    said.push(r.clone());
+    let seen = last_seen(s, before);
+    s.ok(
+        VAULT_ASK_CHECKS[4],
+        r.starts_with("fetched 200") && seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {value}") && !r.contains(&value),
+        json!({ "said": r, "seen": seen }),
+    );
+    let again = api.signed(w.owner, "POST", &save, Some(&json!({ "value": value })))?;
+    let declined_after = api.signed(w.owner, "POST", &format!("{save}/decline"), Some(&json!({})))?;
+    s.ok(VAULT_ASK_CHECKS[5], again.status == 409 && declined_after.status == 200 && declined_after.body["state"] == "saved", json!({ "again": again.body, "decline": declined_after.body }));
+
+    let turn = start(703, "vault-ask e2e-declined - Read the calendar")?;
+    let card = ask_card(s, api, w.owner, "e2e-declined")?;
+    let made = api.signed(w.owner, "PUT", "/api/vault/e2e-declined", Some(&json!({ "value": "set-meanwhile", "hosts": [host], "agents": [w.agent] })))?;
+    let late = api.signed(w.owner, "POST", card["actions"][0]["post"].as_str().unwrap_or(""), Some(&json!({ "value": "pasted-late" })))?;
+    let kept = api.signed(w.owner, "GET", "/api/vault", None)?;
+    let gone = api.signed(w.owner, "DELETE", "/api/vault/e2e-declined", None)?;
+    let as_set = kept.body["secrets"].as_array().and_then(|l| l.iter().find(|x| x["name"] == "e2e-declined").cloned()).unwrap_or_default();
+    s.ok(
+        VAULT_ASK_CHECKS[10],
+        made.status == 200 && late.status == 409 && as_set["agents"] == json!([w.agent]) && as_set["setAt"] == made.body["setAt"] && gone.status == 200,
+        json!({ "made": made.body, "late": late.body, "kept": as_set }),
+    );
+    let decline = card["actions"][1]["post"].as_str().unwrap_or("").to_string();
+    let d = api.signed(w.owner, "POST", &decline, Some(&json!({})))?;
+    let reply = replied(s, &turn)?;
+    said.push(reply.clone());
+    let list = api.signed(w.owner, "GET", "/api/vault", None)?;
+    s.ok(VAULT_ASK_CHECKS[6], d.status == 200 && d.body["state"] == "declined" && reply == "vault-asked declined none" && !list.text.contains("e2e-declined"), json!({ "decline": d.body, "reply": reply, "vault": list.body }));
+
+    let turn = start(704, &format!("vault-ask {name} {host} Rotate the shop's token"))?;
+    let card = ask_card(s, api, w.owner, name)?;
+    let actions = card["actions"].as_array().cloned().unwrap_or_default();
+    let answer = api.signed(w.owner, "POST", &format!("/api/vault/asks/{}", card["id"].as_str().unwrap_or("").trim_start_matches("vault_ask:")), Some(&json!({ "value": "pasted-over" })))?;
+    let decline = actions.first().and_then(|a| a["post"].as_str()).unwrap_or("").to_string();
+    let d = api.signed(w.owner, "POST", &decline, Some(&json!({})))?;
+    let reply = replied(s, &turn)?;
+    said.push(reply.clone());
+    let list = api.signed(w.owner, "GET", "/api/vault", None)?;
+    let kept = list.body["secrets"].as_array().and_then(|l| l.iter().find(|x| x["name"] == name).cloned()).unwrap_or_default();
+    s.ok(
+        VAULT_ASK_CHECKS[7],
+        card["field"].is_null()
+            && actions.len() == 1
+            && actions[0]["label"] == "Decline"
+            && card["detail"].as_str().is_some_and(|d| d.contains("never replaces"))
+            && answer.status == 409
+            && d.body["state"] == "declined"
+            && reply == "vault-asked declined none"
+            && kept["hosts"] == json!([host]),
+        json!({ "card": card, "answer": answer.body, "reply": reply, "kept": kept }),
+    );
+
+    let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
+    let logs = super::vault::logs(s);
+    s.ok(VAULT_ASK_CHECKS[8], !said.iter().any(|t| t.contains(&value)) && !view.text.contains(&value) && !logs.contains(&value), json!({ "said": said }));
+    // the run's other checks find the Vault as they left it
+    api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
+
+    let set = api.signed(w.owner, "PUT", "/api/vault/asks", Some(&json!({ "value": "asks-e2e", "hosts": [], "agents": [w.agent] })))?;
+    let gone = api.signed(w.owner, "DELETE", "/api/vault/asks", None)?;
+    s.ok(VAULT_ASK_CHECKS[9], set.status == 200 && gone.status == 200 && gone.body["removed"] == true, json!({ "set": set.body, "removed": gone.body }));
+    Ok(4)
+}

@@ -167,3 +167,11 @@ searches or model calls), or anything repeated or looping, quote it
 sentence: "That's about $4.80; you have $95 left this month. Go ahead?"
 Not for small one-off calls. Refused for credit or budget? `fragment
 quote` reads what is left: don't assume.
+
+## A secret your person has
+
+Never ask your person to paste a key, token or password in the chat. On
+a computer, ask for it with `fragment vault ask <name> --why "…" --to
+<host>`: they paste it on a card only they see, and you get a stand-in
+that works only toward those hosts (GUIDE.md, "Asking your person for a
+secret").

@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{grant_checks, model_checks, own_move_checks, own_signin_moved_checks, placeholder, swap_checks, uses_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, OWN_MOVE_CHECKS, OWN_SIGNIN_MOVED_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
+use super::credentials::{grant_checks, model_checks, own_move_checks, own_signin_moved_checks, placeholder, swap_checks, uses_checks, vault_ask_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, OWN_MOVE_CHECKS, OWN_SIGNIN_MOVED_CHECKS, SWAP_CHECKS, VAULT_ASK_CHECKS, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -2564,7 +2564,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in OWN_MOVE_CHECKS.iter().chain(SWAP_CHECKS).chain(MODEL_CHECKS).chain(OWN_SIGNIN_MOVED_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in OWN_MOVE_CHECKS.iter().chain(SWAP_CHECKS).chain(MODEL_CHECKS).chain(OWN_SIGNIN_MOVED_CHECKS).chain(VAULT_CHECKS).chain(VAULT_ASK_CHECKS).chain(GRANT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -2587,6 +2587,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;
         replies_so_far += own_signin_moved_checks(s, api, &swapping, &fetched)?;
         replies_so_far += vault_checks(s, api, &swapping, &fetched)?;
+        // an agent's ask (FIN-466): its turn waits on its person's card, so
+        // its message is sent and its reply read apart
+        let start = |n: u32, text: &str| -> Result<String> {
+            let r = say(n, text)?;
+            anyhow::ensure!(r.status == 200, "a message to the chat: {r}");
+            Ok(turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0)))
+        };
+        let replied = |s: &Suite, turn: &str| -> Result<String> {
+            let reply = || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn);
+            s.eventually(wake, || reply().is_some());
+            Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+        };
+        replies_so_far += vault_ask_checks(s, api, &swapping, &start, &replied, &fetched)?;
         let r = allow(&stranger, json!([]))?;
         s.ok("no one else narrows its agents' providers", r.status == 404, &r);
         let r = allow(&owner, json!(["notion"]))?;

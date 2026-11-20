@@ -141,6 +141,39 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   removing it, ends it (`fragment_core::vault::Claimed`); set again with
   no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
 
+### An agent asks
+
+An agent that needs a secret asks its person for it (`fragment vault ask
+<name> --why "…" [--to <host>]`; docs/api.md, "A person's Vault"), the
+way T3 Code's secret prompt does: the agent never sees what they give.
+
+- **The card is the platform's.** The ask waits in the person's Vault and
+  shows as one of their notices (`vault/notices`), in the band the shell
+  draws above their chat: who asks, why, the hosts that would receive the
+  secret itself (the agent names them; the person judges them), a masked
+  field, Save and Decline. A chat, an app or a fork of either draws
+  no part of it, so no app code ever has the field.
+- **The paste goes to the Vault alone**: from the shell's page to `POST
+  /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's
+  records, a log or an answer. The page keeps it in its input only while
+  the card shows, and empties it once posted.
+- **Only the person asked answers**, from their own session; an agent,
+  theirs or another's, is refused, and anyone else finds no ask.
+- **An answer only makes a new secret**: a put under the Vault's own
+  rules, toward the hosts asked, in the default place, for the asking
+  agent alone. It never replaces or widens one the person keeps: asked for
+  a name they keep, the card says so and offers only Decline, and an
+  answer is refused (409), checked again after the seal's wait, as is a
+  card declined, expired or answered meanwhile. Pointing a secret at more
+  hosts, or giving it to more agents, stays the person's own
+  (`fragment vault set`). The agent learns nothing of secrets it is not
+  given: its ask is taken the same either way.
+- **It ends**: saved, declined, or after ten minutes unanswered (or asked
+  again by the same agent for the same name). At most 8 wait on a person,
+  and their Vault keeps at most 64, ended ones an hour.
+  The agent's CLI then reads its computer's view, which arms the egress
+  for the new hosts, and prints the stand-in (`fck_<name>_<tag>`).
+
 ## The Secrets Store
 
 The deployment's config names each secret by its store name. `cargo

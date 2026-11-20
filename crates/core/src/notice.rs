@@ -119,6 +119,7 @@ mod tests {
             actions: vec![NoticeAction::post("Accept", "/api/invites/g/accept", serde_json::json!({}))],
             must_answer: id == "b",
             image: None,
+            field: None,
         };
         let list = |n: Vec<Notice>| serde_json::to_vec(&NoticeList { notices: n }).expect("a list serializes");
         let (first, second, none) = (list(vec![notice("a", "[one]")]), list(vec![notice("b", "{two}"), notice("c", "")]), list(vec![]));
