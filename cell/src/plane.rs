@@ -1096,11 +1096,16 @@ impl FragmentCell {
     /// `GET manifest`: main's `fragment.json`, its `meta.title` its face's
     /// (when it has one): what a client from before the face reads,
     /// changes and writes back to rename it (`face_from_git`; the debt
-    /// ledger).
+    /// ledger). A blessed fragment before its first file answers the one
+    /// its seed will commit (`blessed_manifest_bytes`), so such a client's
+    /// write is that first file.
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let Some(text) = self.meta(MetaKey::ManifestMain)? else { return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")) };
-        let mut manifest = crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?;
+        let mut manifest = match (self.meta(MetaKey::ManifestMain)?, self.meta(MetaKey::TemplatePending)?) {
+            (Some(text), _) => crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?,
+            (None, Some(which)) if self.pin("main")?.is_none() => serde_json::from_slice(&crate::publish::blessed_manifest_bytes(&which)).map_err(|e| CellError::host(e.to_string()))?,
+            _ => return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
+        };
         if let (Some(title), Some(fields)) = (self.face_now()?.title, manifest.as_object_mut()) {
             if let Some(meta) = fields.entry("meta").or_insert_with(|| json!({})).as_object_mut() {
                 meta.insert("title".into(), title.into());

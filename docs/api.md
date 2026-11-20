@@ -300,7 +300,8 @@ A fragment on a blessed template (`agent`, `chat`, `brain`, `skills`,
 first file (`fragment_core::seed::Making::SeedsLater`). Its create makes
 none and asks code.storage nothing; it runs its template from the release,
 and `repo` is `""` in the create's answer and its status, with no pins:
-"not made yet". Its first writer of the repo (a file, a deploy, a storage
+"not made yet" (`GET manifest` answers the `fragment.json` its first
+commit will hold: A client from before the face). Its first writer of the repo (a file, a deploy, a storage
 token, a refresh) makes it and lands the template's first commit and
 deploy before its own write; a writer while code.storage is down fails as
 code.storage does. A chat, whose messages and attachments are its records
