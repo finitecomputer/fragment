@@ -390,6 +390,12 @@ enum MetaKey {
     /// taken when step 6 dropped them (`fragment_core::grants::Owed`): each
     /// handed over at its agent's next ask, then forgotten. None owed, no row.
     GrantsOwed,
+    /// The test lever's hold on its saves (`hold-saves`): while set, each
+    /// save waits before its backups until the lever lets it go.
+    HoldSaves,
+    /// The test lever's wait in its next let-go of a hold (`stall-unhold`),
+    /// between its look and its command, in ms.
+    StallUnhold,
 }
 
 impl MetaKey {
@@ -419,6 +425,8 @@ impl MetaKey {
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
             MetaKey::GrantsOwed => "grants_owed",
+            MetaKey::HoldSaves => "hold_saves",
+            MetaKey::StallUnhold => "stall_unhold",
         }
     }
 }
@@ -474,6 +482,11 @@ pub struct ComputerCell {
     /// #1079: a deadline's alarm applied during that destroy failed the
     /// start for good, its container left running).
     taking_over: futures_util::lock::Mutex<()>,
+    /// One hold marker command at a time (`hold`, `unhold`): a touch waits
+    /// for a let-go in flight, so a let-go never lands after a newer touch;
+    /// a let-go never waits for a touch in flight, whose answer lets go
+    /// again if its sleep was cancelled (`Lifecycle`'s late `Held`).
+    marking: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -530,6 +543,7 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
+            marking: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -760,9 +774,9 @@ struct RelayClosed {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-/// and `alive-check`'s, `freeze` is `alive-check`'s, `total` and `free`
-/// are `disk`'s.
+/// `times` is `fail-saves`', `on` is `always-on`'s and `hold-saves`', `ms`
+/// is `hang-backups`' and `alive-check`'s, `freeze` is `alive-check`'s,
+/// `total` and `free` are `disk`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -1161,7 +1175,10 @@ impl ComputerCell {
             let mut life = self.lifecycle()?;
             let logged = json!(event);
             let applied = event.clone();
-            let step = life.apply_with(event, js::now_ms(), &rules);
+            let now = js::now_ms();
+            // an owner's restart it takes asks its start as it applies
+            self.starts.borrow_mut().applying(&applied, &life, now);
+            let step = life.apply_with(event, now, &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
             if let Some(ended) = step.ended {
@@ -1191,7 +1208,7 @@ impl ComputerCell {
             }
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
-            for next in self.perform(step, until_ms).await? {
+            for next in self.perform(step, until_ms, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
             }
             // its disk, once an awake save worked (a start reads its own
@@ -1296,16 +1313,18 @@ impl ComputerCell {
     }
 
     /// Performs a step's actions: the events they report, in order, a
-    /// sleep's steps ending by `until_ms`.
-    async fn perform(&self, step: Step, until_ms: i64) -> CellResult<Vec<Event>> {
+    /// sleep's steps ending by `until_ms`. `after_held`: the step answered a
+    /// hold, so its let-go is a late answer's, which waits for the marker's
+    /// turn (`unhold`).
+    async fn perform(&self, step: Step, until_ms: i64, after_held: bool) -> CellResult<Vec<Event>> {
         let mut reported = vec![];
         for action in step.actions {
             match action {
                 Action::Start { generation } => reported.push(self.start(generation).await),
-                Action::Sleep { generation } => reported.push(self.hold(generation, true).await),
-                Action::Hold { generation } => reported.push(self.hold(generation, false).await),
+                Action::Sleep { generation } => reported.extend(self.hold(generation, true).await),
+                Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
-                Action::Unhold { generation } => self.unhold(generation).await,
+                Action::Unhold { generation } => self.unhold(generation, after_held).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
                     if !self.container_running().await {
@@ -1389,12 +1408,8 @@ impl ComputerCell {
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
-            let asked = js::now_ms();
             self.may_start(json!("restart")).await?;
             self.update_saves(|s| s.restart_fresh())?;
-            if let Ok(restarting) = self.lifecycle() {
-                self.starts.borrow_mut().asked(Woke::Restart, &restarting.phase, asked);
-            }
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
         // its answer, the view as its start was owed (`drive_events`); one
@@ -1923,8 +1938,19 @@ impl ComputerCell {
     /// `/run/computer/held` (no claim in flight, and what it keeps copied).
     /// An image that never answers is saved anyway, recorded as not held. A
     /// sleep (`sleeping`) whose container is gone already is over; an awake
-    /// save of one fails.
-    async fn hold(&self, generation: u64, sleeping: bool) -> Event {
+    /// save of one fails. What it answers is told only while the hold it was
+    /// asked for is still under way, or nothing is (a wake cancelled its
+    /// sleep: the lifecycle lets go again): never as a newer hold's answer.
+    /// One cancelled before it began does nothing.
+    async fn hold(&self, generation: u64, sleeping: bool) -> Option<Event> {
+        let asked = self.lifecycle().ok().and_then(|l| l.saving()).filter(|s| matches!(s, Saving::Hold { .. }))?;
+        let answer = self.hold_once(generation, sleeping).await;
+        let now = self.lifecycle().ok().and_then(|l| l.saving());
+        (now == Some(asked) || now.is_none()).then_some(answer)
+    }
+
+    /// `hold`'s touch, wait and answer.
+    async fn hold_once(&self, generation: u64, sleeping: bool) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if !self.container_running().await {
@@ -1935,7 +1961,11 @@ impl ComputerCell {
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
         let t0 = js::now_ms();
-        if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
+        let marked = {
+            let _marking = self.marking.lock().await;
+            self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await
+        };
+        if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
             console_error!("{}", json!({ "computer": id, "hold": "failed", "generation": generation, "error": e.message }));
             return Event::Held { generation, held: false };
@@ -1988,6 +2018,12 @@ impl ComputerCell {
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
         let until = js::now_ms() + budget;
+        // the lever's `hold-saves`: held here, within its backups' budget,
+        // until the lever lets it go (a test posts as a sleep saves), looked
+        // at every 100 ms
+        while self.meta(MetaKey::HoldSaves).ok().flatten().is_some() && js::now_ms() < until {
+            Delay::from(std::time::Duration::from_millis(100)).await;
+        }
         // each record's stored bytes and time, by what it holds
         let mut took = json!({});
         for dir in SAVED_DIRS {
@@ -2018,6 +2054,16 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
+        // a newer save of its container was asked as this one ran: never
+        // the newest kept (`Lifecycle::superseded`)
+        if self.lifecycle().is_ok_and(|l| l.superseded(seq)) {
+            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "superseded": true, "ms": js::now_ms() - t0 }));
+            match self.update_saves(|s| s.let_go(records)) {
+                Ok(lost) => self.forget(lost).await,
+                Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+            }
+            return Event::SaveFailed { generation, seq, why: "a newer save was asked as it ran".into() };
+        }
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
@@ -2101,11 +2147,28 @@ impl ComputerCell {
     }
 
     /// Lets go of the guest's hold: an awake save's end, or a sleep that
-    /// kept its container. A container that is gone has nothing to let go.
-    async fn unhold(&self, generation: u64) {
-        if !self.container_running().await {
+    /// kept its container. A container that is gone has nothing to let go,
+    /// and one a newer hold, save or stop holds now is that one's (its
+    /// owner's sleep just after a wake cancelled one): left as it is. It
+    /// takes the marker's turn (`marking`) for its look and its command, so
+    /// a newer touch waits for it. With the turn taken it does nothing, never
+    /// waiting on a person's path (a wake's): a touch in flight hands it to
+    /// its answer's let-go. That one (`after_held`, a late hold's answer,
+    /// in an alarm: an idle sleep's or an awake save's) waits for the turn,
+    /// so it lands after a let-go in flight, whether or not that one did.
+    async fn unhold(&self, generation: u64, after_held: bool) {
+        let _marking = match after_held {
+            true => self.marking.lock().await,
+            false => match self.marking.try_lock() {
+                Some(turn) => turn,
+                None => return,
+            },
+        };
+        if !self.container_running().await || self.lifecycle().is_ok_and(|l| l.saving().is_some()) {
             return;
         }
+        // (the lever's `stall-unhold`: a let-go slow to land, after its look)
+        self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
         let g = JsValue::from_f64(generation as f64);
         if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
@@ -2719,7 +2782,9 @@ impl ComputerCell {
     /// restored; `fail-saves {times}` fails its next saves (0: none more);
     /// `hang-backups {ms}` makes its container's backups never answer, as a
     /// sick one's (r4, r6), and bounds its saves' backups by `ms` (0: its
-    /// shim back); `alive-check {ms, freeze}` makes its next start wait
+    /// shim back); `hold-saves {on}` holds each save before its backups
+    /// until it is let go (`on: false`), within their budget; `alive-check
+    /// {ms, freeze}` makes its next start wait
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
@@ -2781,6 +2846,14 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
+            "hold-saves" => {
+                // its saves wait before their backups while on (off: the one
+                // waiting goes on), so a test acts as one is under way
+                let on = b.on.ok_or_else(|| CellError::invalid("hold-saves names on: true or false"))?;
+                if on { self.set_meta(MetaKey::HoldSaves, "1")? } else { self.delete_meta(MetaKey::HoldSaves)? }
+                console_log!("{}", json!({ "computer": id, "lever": "hold-saves", "on": on }));
+                Ok(json!({ "computer": id, "holdSaves": on }))
+            }
             "snapshot-bound" => {
                 // its next sleep's snapshot is given `ms`, as one after a
                 // slow save is (0: what its sleep leaves it)
@@ -2833,11 +2906,16 @@ impl ComputerCell {
                 self.alarm_at(Some(js::now_ms() + i64::from(ms))).await?;
                 Ok(json!({ "computer": id }))
             }
-            "stall-failing-start" | "stall-takeover" => {
+            "stall-failing-start" | "stall-takeover" | "stall-unhold" => {
                 // its next start that fails waits `ms` between storing that
                 // it fails and destroying its container, or its next
-                // takeover of a start destroying, before its destroy (0: none)
-                let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
+                // takeover of a start destroying, before its destroy, or its
+                // next let-go of a hold between its look and its command (0: none)
+                let key = match b.op.as_str() {
+                    "stall-takeover" => MetaKey::StallTakeOver,
+                    "stall-unhold" => MetaKey::StallUnhold,
+                    _ => MetaKey::StallFailingStart,
+                };
                 let ms = b.ms.filter(|ms| u64::from(*ms) <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid("it names its ms, 0 to 600000"))?;
                 self.set_meta(key, &ms.to_string())?;
                 Ok(json!({ "computer": id }))
@@ -2919,6 +2997,8 @@ impl ComputerCell {
                 v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
+                v["holdSaves"] = json!(self.meta(MetaKey::HoldSaves)?.is_some());
+                v["stallUnhold"] = json!(self.meta(MetaKey::StallUnhold)?.is_some());
                 Ok(v)
             }
             "legacy-grants" => {
