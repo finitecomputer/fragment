@@ -38,11 +38,13 @@
 //! someone signed in with the verified email answers it. There are no
 //! bearer invites: an unguessable link is `link` visibility.
 
+use std::collections::BTreeMap;
+
 use fragment_core::access;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
-    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
+    limits, CreateInvite, ErrorCode, FaceChange, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
     SecretList, SetRole, SetVisibility, Shared, Sharing, Visibility,
 };
 use futures_util::future::join_all;
@@ -207,10 +209,18 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// What its members' lists show of it, at each install of live: its
-    /// kind and title, an agent's role and picture (and its agents, read as
-    /// each row is sent). A change is sent to every member's list (at most
-    /// `MEMBERS_MAX`) and its owner's, as an agent's joining or leaving is.
+    /// Its face as kept (`MetaKey::Face`): an untitled app's before any.
+    pub(crate) fn face_now(&self) -> CellResult<Face> {
+        Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Face>(&f).ok()).unwrap_or_default())
+    }
+
+    /// What its members' lists show of it (and its agents, read as each
+    /// row is sent): its kind, as live's manifest last said; its title and
+    /// an agent's role, its own (its making's, its face route's: docs/api.md,
+    /// "An agent's name and picture"); an agent's picture, its `avatar.png`
+    /// at main (plane.rs `read_picture`), any other's its icon. A change is
+    /// sent to every member's list (at most `MEMBERS_MAX`) and its owner's,
+    /// as an agent's joining or leaving is.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> CellResult<()> {
         let face = face(kind, title, role, picture);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
@@ -218,6 +228,140 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::Face, &face)?;
         self.reindex()
+    }
+
+    /// `PUT /api/f/{name}/face` (editors and up; a connector's owner
+    /// alone): its title, an agent's role, or both (`face::change`), kept
+    /// here alone, with no deploy. Each change is an `events` row
+    /// (`face.changed`), its history; its lists follow in this request.
+    /// With `was`, only while its title is that, or is already the one
+    /// asked (a retry whose answer was lost, its role then left as it is):
+    /// 409 otherwise. An agent's new title is said in its job first
+    /// (`job_says`): a rename refused there changes neither. A write:
+    /// refused while its owner's fragments are read-only.
+    pub(crate) async fn face_put(&self, caller: &Caller, body: FaceChange) -> CellResult<Response> {
+        self.require(caller, false, Role::Editor)?;
+        // the life it was let in to: a delete, or the name made again,
+        // while it waits ends it (404), never renaming another life
+        let life = self.life()?;
+        self.writable().await?;
+        if body.picture.is_some() {
+            return Err(CellError::invalid("an agent's picture is its avatar.png"));
+        }
+        // one at a time: each reads the job and face the last one left
+        let _renaming = self.renaming.lock().await;
+        self.same_life(life, "while it waited to be renamed")?;
+        let now = self.face_now()?;
+        let (title, mut role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        if let Some(was) = body.was.as_ref().filter(|was| now.title.as_ref() != Some(*was)) {
+            match title.is_some() && now.title.as_deref() == title {
+                true => role = None,
+                false => return Err(CellError::new(ErrorCode::Conflict, format!("its title is no longer {was:?}: nothing was changed"))),
+            }
+        }
+        let by = self.caller_id(caller)?.to_string();
+        let job = now.kind == FragmentKind::Agent && title.is_some();
+        if let (true, Some(asked)) = (job, title) {
+            self.job_says(&by, life, now.title.as_deref(), asked).await?;
+            self.same_life(life, "while it was renamed")?;
+        }
+        let now = self.face_now()?;
+        let (title, role) = (title.or(now.title.as_deref()), role.unwrap_or(now.role.as_deref()));
+        if (title, role) != (now.title.as_deref(), now.role.as_deref()) {
+            self.face_is(now.kind, title, role, now.picture.as_deref())?;
+            self.event("face.changed", &format!("its name is {:?}{}", title.unwrap_or(""), role.map(|r| format!(", its role {r:?}")).unwrap_or_default()), json!({ "title": title, "role": role, "by": by }));
+        }
+        // its job says what its face does: no rename of it is in doubt
+        if job {
+            self.del_meta(MetaKey::Renaming)?;
+        }
+        let shown = self.face_now()?;
+        self.flush_index().await;
+        json_response(&FaceChange { title: shown.title, role: shown.role, picture: shown.picture, was: None })
+    }
+
+    /// An agent's job (its `SOUL.md` at main's head, where its computer
+    /// reads it) says `asked` where it said its title now, the name its
+    /// first job gave it, or that of a rename whose commit's answer was lost
+    /// while the job is the one that rename wrote (`MetaKey::Renaming`:
+    /// each attempt's name and its job's SHA-256, kept before its commit;
+    /// a job that is not what it wrote never says its name for it).
+    /// Committed to the repo it read, over the job it read (an edit
+    /// meanwhile: 409, nothing renamed). A commit whose answer is lost is
+    /// looked for at main's head: there, the rename goes on; not there, it
+    /// fails, its attempt kept for the next rename, whatever it asks.
+    async fn job_says(&self, by: &str, life: i64, title: Option<&str>, asked: &str) -> CellResult<()> {
+        use fragment_core::face::{JOB, JOB_RENAME_MAX_BYTES};
+        let Some(repo) = self.meta(MetaKey::Repo)?.filter(|r| !r.is_empty()) else { return Ok(()) };
+        let cs = self.cs()?;
+        let Some(head) = cs.branch_head(&repo, "main").await? else { return Ok(()) };
+        // none, or one past what a rename rewrites (or not text): nothing to say
+        let Some(file) = cs.head(&repo, &head, JOB).await?.filter(|f| f.size <= JOB_RENAME_MAX_BYTES as u64) else { return Ok(()) };
+        let Some(job) = cs.read(&repo, &head, JOB, JOB_RENAME_MAX_BYTES).await?.and_then(|b| String::from_utf8(b).ok()) else { return Ok(()) };
+        self.same_life(life, "while it was renamed")?;
+        let sha256 = |text: &str| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()));
+        let kept = self.meta(MetaKey::Renaming)?;
+        // the attempts whose job is the one here: any of them may have landed
+        let mut tried: Vec<Value> = kept.as_deref().and_then(|r| crate::json_text::<Value>(r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let said = sha256(&job);
+        tried.retain(|t| t[1] == said.as_str());
+        // its job is the one a lost rename wrote: that rename landed, so its
+        // name is the job's, never the title its face still says; one to
+        // the name asked is done already
+        let landed: Vec<&str> = tried.iter().filter_map(|t| t[0].as_str()).collect();
+        let olds: Vec<&str> = match landed.is_empty() {
+            true => title.into_iter().chain(fragment_core::face::job_first_name(&job)).collect(),
+            false => landed.iter().copied().chain(fragment_core::face::job_first_name(&job)).collect(),
+        };
+        let done = landed.contains(&asked);
+        let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked).filter(|_| !done) else {
+            // nothing to say (a retry's job says it already): served as main
+            // has it, its pin following a commit whose answer was lost
+            if self.pin("main")?.as_deref() != Some(head.as_str()) {
+                self.follow_main().await?;
+            }
+            return Ok(());
+        };
+        tried.push(json!([asked, sha256(&renamed)]));
+        self.set_meta(MetaKey::Renaming, &Value::Array(tried).to_string())?;
+        let path = fragment_proto::RepoPath::parse(JOB).expect("its job's path is a repo path");
+        let expect = BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
+        let key = format!("face:{by}:{}", js::random_hex::<16>());
+        let write = crate::files::FileWrite { path, bytes: Some(renamed.clone().into_bytes()) };
+        match self.commit_in(&repo, &key, &[write], &expect, &format!("its job, renamed {asked}"), by, 0).await {
+            Ok(crate::files::Wrote::Commit(_)) => Ok(()),
+            // not written: the attempts it may hold are the ones before
+            Ok(crate::files::Wrote::Conflict(why)) => {
+                self.same_life(life, "while it was renamed")?;
+                match &kept {
+                    Some(k) => self.set_meta(MetaKey::Renaming, k)?,
+                    None => self.del_meta(MetaKey::Renaming)?,
+                }
+                Err(CellError::new(ErrorCode::Conflict, format!("its job changed while it was renamed ({why}): nothing was renamed")))
+            }
+            Err(lost) => {
+                let head = cs.branch_head(&repo, "main").await.ok().flatten();
+                let now = match &head {
+                    Some(h) => cs.read(&repo, h, JOB, JOB_RENAME_MAX_BYTES).await.ok().flatten(),
+                    None => None,
+                };
+                if now.as_deref() != Some(renamed.as_bytes()) {
+                    return Err(lost);
+                }
+                self.same_life(life, "while it was renamed")?;
+                self.follow_main().await
+            }
+        }
+    }
+
+    /// Its `main` pin follows the branch now (a commit whose answer was
+    /// lost moved it), else the poll backstop does.
+    async fn follow_main(&self) -> CellResult<()> {
+        if let Err(e) = self.interpret(&["main"]).await {
+            self.event("files.refresh-failed", &e.message, json!({}));
+            self.may_lag().await?;
+        }
+        Ok(())
     }
 
     /// Every list's row is sent again: its owner's and each member's.
@@ -634,7 +778,13 @@ impl FragmentCell {
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
         }
-        if current.is_none() && !lever && target.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
+        let theirs = target.owner.as_deref() == Some(self.must(MetaKey::Owner)?.as_str());
+        // on an agent's own, no one but its owner's agents comes in or is
+        // raised (alone.rs)
+        if !theirs && current.is_none_or(|was| body.role > was) {
+            self.share_while_alone()?;
+        }
+        if current.is_none() && !lever && !theirs {
             return Err(CellError::new(ErrorCode::Forbidden, match target.kind {
                 IdentityKind::Person => "a person joins by their own yes: invite them by email instead (the share sheet's Add, `fragment members add <name> <email>`), and they are in once they accept it",
                 IdentityKind::Agent => "someone else's agent joins with its owner: invite its owner by email instead (the share sheet's Add, `fragment members add <name> <email>`); once they accept, their agents act there for them",
@@ -838,6 +988,8 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
+        // none on an agent's own (alone.rs), decided in the write's turn
+        self.share_while_alone()?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
@@ -969,6 +1121,10 @@ impl FragmentCell {
         let who = claim.identity.as_str();
         let current = self.member_role(who)?;
         let kept = current.is_some_and(|c| c >= role);
+        // a yes kept waiting on an agent's own lets no one in (alone.rs)
+        if !kept {
+            self.share_while_alone()?;
+        }
         // the owner is in already, with their agents as they chose them
         let owner = current == Some(Role::Owner);
         let agents: &[String] = if owner { &[] } else { &claim.agents };
@@ -1123,8 +1279,10 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; its link or public, not with reach (reach.rs)
+        // members only narrows it; its link or public, not with reach
+        // (reach.rs) nor on an agent's own (alone.rs)
         if body.visibility != Visibility::Members {
+            self.share_while_alone()?;
             self.share_while_private()?;
         }
         let before = self.visibility()?;
@@ -1163,6 +1321,10 @@ impl FragmentCell {
         };
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
             return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view)")));
+        }
+        // a new share link that opens an agent's own is new sharing (alone.rs)
+        if want.iter().any(|w| w == "view") && self.visibility()? != Visibility::Members {
+            self.share_while_alone()?;
         }
         for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>())] {
             if want.iter().any(|w| w == scope) {
@@ -1325,11 +1487,10 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
     Ok(hosts)
 }
 
-/// A fragment's face as its members' lists keep it (`MetaKey::Face`): an
-/// agent fragment's with its role and its picture's address, when it has
-/// them. Its kind is a manifest's, which names only kinds this release
-/// knows: the fallback a newer platform's kind reads as is never stored as
-/// one.
+/// A fragment's face as its members' lists keep it (`MetaKey::Face`): its
+/// picture's address when it has one, and an agent's role. Its kind is a
+/// manifest's, which names only kinds this release knows: the fallback a
+/// newer platform's kind reads as is never stored as one.
 pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     // a title of nothing but spaces is none: every reader then falls back alike

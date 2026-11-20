@@ -33,6 +33,15 @@ pub struct Save {
     /// The start it is of.
     pub generation: u64,
     pub at_ms: i64,
+    /// The number its lifecycle gave the save that took it (`Action::Save`'s
+    /// `seq`, one more for each save asked, never reset while its saves are
+    /// kept: both live in its DO alone): saves of one start that ran at once
+    /// are kept in this order (`overtaken`), the order they were asked in,
+    /// not the order they ended in, whatever their clocks. Unset in a save
+    /// kept before it was stored (before #1378): one kept before this
+    /// release's DO ran any save, so newer than none of its saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     /// Whether the guest answered the hold before it was taken.
     pub held: bool,
     /// Its `DirectoryBackup` records, a directory's before any inside it
@@ -114,6 +123,12 @@ pub struct Saves {
     starting: Option<Starting>,
     /// How the last life ended, until the next start that comes up reads it.
     ended: Option<Ended>,
+    /// The save that held all the last life did as it ended (`ended`): read
+    /// then, while its own save is still kept, since saves of starts that
+    /// never came up may push it out before a start comes up. None when
+    /// stored before it was kept, or not known: worked out as it is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ended_in: Option<EndedIn>,
     /// What the last start that came up restored.
     restored: Option<ComputerRestore>,
     /// The image the last start that came up runs: what a snapshot its
@@ -149,6 +164,15 @@ pub struct Saves {
     pub(super) disk_told: bool,
 }
 
+/// The save that held all a life did as it ended (`Saves::ended`): `save`,
+/// or none (an empty `/data`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndedIn {
+    pub life: u64,
+    #[serde(default)]
+    pub save: Option<String>,
+}
+
 /// A start that went back in time, as its owner is told of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +186,11 @@ pub struct WentBack {
     pub restored: ComputerRestore,
     /// That save's number (none: it restored nothing).
     pub save: Option<u64>,
+    /// No turn ran and no port tab was used on the lost life after the save
+    /// it went back to (`Saves::unchanged`). False when stored before this
+    /// was kept: told as a change lost.
+    #[serde(default)]
+    pub unchanged: bool,
 }
 
 /// Why a life's work since its last save is in no save, from how it ended
@@ -273,11 +302,38 @@ impl Saves {
     /// nothing of such a start (`notices`); its guest still reads it as a
     /// rollback (`restored`).
     fn lost_nothing(&self, e: &Ended, back_to: Option<&Save>) -> bool {
-        let kept_in = match self.saves.iter().find(|s| s.generation == e.generation) {
-            Some(own) => Some(Some(own.id.as_str())),
-            None => self.restored.as_ref().filter(|r| r.generation == e.generation).map(|r| r.save.as_deref()),
+        e.quiet && self.back_to_its_own(e, back_to)
+    }
+
+    /// Whether going back to `back_to` after the life `e` ended changed
+    /// nothing the platform ran since: no turn ran and no port tab was used
+    /// on that life since its newest save that worked (`Ended::unchanged`),
+    /// and `back_to` is that save (or the one it came up from), as for
+    /// `lost_nothing`. Its owner is told it went back, never that changes
+    /// were lost.
+    pub fn unchanged(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        e.unchanged && self.back_to_its_own(e, back_to)
+    }
+
+    /// Whether `back_to` (none: an empty `/data`) is the save that holds
+    /// what the life `e` did up to its newest save that worked: that save,
+    /// or, with none of its own, the one it came up from.
+    fn back_to_its_own(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        let kept_in = match self.ended_in.as_ref().filter(|k| k.life == e.generation) {
+            Some(k) => Some(k.save.as_deref()),
+            None => self.kept_in(e.generation),
         };
-        e.quiet && kept_in == Some(back_to.map(|s| s.id.as_str()))
+        kept_in == Some(back_to.map(|s| s.id.as_str()))
+    }
+
+    /// The save that holds what life `generation` did up to its newest save
+    /// that worked, as the saves kept now say: that save, or, with none of
+    /// its own kept, the one it came up from (none: not known).
+    fn kept_in(&self, generation: u64) -> Option<Option<&str>> {
+        match self.saves.iter().find(|s| s.generation == generation) {
+            Some(own) => Some(Some(own.id.as_str())),
+            None => self.restored.as_ref().filter(|r| r.generation == generation).map(|r| r.save.as_deref()),
+        }
     }
 
     /// Its owner saw the notice of the lost life `life`: it, and any loss
@@ -332,6 +388,7 @@ impl Saves {
     /// A life ended (the lifecycle's `Step::ended`).
     pub fn ended(&mut self, ended: Ended) {
         assert!(self.ended.is_none_or(|e| e.generation < ended.generation), "a life ends once, after the lives before it");
+        self.ended_in = self.kept_in(ended.generation).map(|save| EndedIn { life: ended.generation, save: save.map(str::to_string) });
         self.ended = Some(ended);
     }
 
@@ -373,11 +430,11 @@ impl Saves {
         // its owner is told of it until they say they saw it (`notices`),
         // unless it lost nothing (read before this start's `restored`
         // replaces the lost life's)
-        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save));
+        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save)));
         self.rollbacks += u64::from(rollback);
         self.restored = Some(restored.clone());
-        if let Some(e) = told {
-            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number) });
+        if let Some((e, unchanged)) = told {
+            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged });
         }
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;
@@ -385,23 +442,25 @@ impl Saves {
         Some(restored)
     }
 
-    /// The start `generation` saved `/data` as `records` at `at_ms`
-    /// (`held`: its guest answered the hold): the newest save, and the
+    /// The start `generation` saved `/data` as `records`, its save `seq`,
+    /// done at `at_ms` (`held`: its guest answered the hold), and not
+    /// `overtaken`: the newest save, and the
     /// current one. A snapshot of any other save caches nothing a wake
     /// would use. The saves it pushed out of the newest `SAVES_KEPT` are
     /// let go of (`let_go`): answers what that pushed out unforgotten.
-    pub fn saved(&mut self, generation: u64, records: Vec<Value>, at_ms: i64, held: bool) -> Vec<Value> {
+    pub fn saved(&mut self, generation: u64, records: Vec<Value>, seq: u64, at_ms: i64, held: bool) -> Vec<Value> {
         assert!(!records.is_empty() && records.len() <= SAVE_RECORDS_MAX, "a save is one record per directory, at most {SAVE_RECORDS_MAX}");
         let id = records[0]["id"].as_str().unwrap_or_default().to_string();
         assert!(!id.is_empty(), "a save has an id");
         let depth = |r: &Value| r["dir"].as_str().map_or(0, |d| d.matches('/').count());
         assert!(records.windows(2).all(|w| depth(&w[0]) <= depth(&w[1])), "a directory's record before any inside it: {records:?}");
         assert!(!self.saves.iter().any(|s| s.id == id), "a save is kept once");
+        assert!(!self.overtaken(generation, seq), "never kept ahead of a newer save of its start");
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
         }
         self.numbered += 1;
-        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, held, records, unusable: false });
+        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false });
         let mut dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         // the save its running life came up from is kept past the newest: one
         // a start restored and came up from, the last to fall back to
@@ -432,6 +491,20 @@ impl Saves {
     /// The records let go of and not deleted yet, oldest first.
     pub fn forgetting(&self) -> &[Value] {
         &self.forgetting
+    }
+
+    /// Whether save `seq` of start `generation` was overtaken as it ran:
+    /// the newest kept save is that start's and was asked after it (an
+    /// owner's sleep's or restart's, asked once an awake save let go of its
+    /// hold, ending first). The DO lets its records go: never
+    /// kept ahead of a newer capture. An older one kept as it ran (ending
+    /// first) overtakes nothing: the newer is kept ahead of it (alexlwn123
+    /// on #1378). One only asked, not kept, overtakes nothing: a capture is
+    /// kept until a newer one is (Codex on #1378). So saves of one start
+    /// are kept in the order they were asked, whichever ends first: by
+    /// their numbers, never their clocks, which two may share (Codex).
+    pub fn overtaken(&self, generation: u64, seq: u64) -> bool {
+        self.saves.first().is_some_and(|s| s.generation == generation && s.seq.is_some_and(|newest| newest > seq))
     }
 
     /// Every record a wipe deletes (docs/api.md, Operators): each kept
@@ -522,6 +595,37 @@ mod tests {
     use crate::computer::testing::{rec, Computer, IMAGE, T};
     use crate::computer::*;
 
+    /// Goal (the lifecycle's simulation, 2026-11-18): a life that ended
+    /// after a save of its own, nothing done since, is in that save. Starts
+    /// that never came up may push that save out before one comes up (one
+    /// put to sleep as it started, its save failing, stays up and saves);
+    /// going back past it, to the save the life came up from, lost its work,
+    /// and is told. Read as it ended, not after (before, it was told
+    /// nothing). Restart: the same once stored and read back.
+    #[test]
+    fn a_lifes_own_save_pushed_out_before_a_start_is_still_its_own() {
+        let mut v = Saves::default();
+        v.saved(1, rec("s0"), 0, T, true);
+        v.starting(2, RestoreSource::Backup);
+        v.came_up(2, RestoreSource::Backup, Some("s0"), Some(IMAGE), T + 1_000).expect("came up from s0");
+        v.saved(2, rec("s1"), 0, T + 2_000, true);
+        v.ended(Ended { generation: 2, by: LifeEnd::Exit, saved: false, at_ms: T + 3_000, restart: false, quiet: true, unchanged: true });
+        assert!(v.pending_loss().is_none(), "s1 holds its work: back to s1 loses nothing, while s1 is kept");
+        // three starts that never came up, each saving what will not restore
+        for g in 3..=5 {
+            v.saved(g, rec(&format!("x{g}")), 0, T + 10_000 * g as i64, false);
+            assert!(v.unusable(&format!("x{g}")) || g == 5);
+        }
+        assert!(v.all().iter().all(|s| s.id != "s1"), "s1 pushed out: {:?}", v.all().iter().map(|s| s.id.clone()).collect::<Vec<_>>());
+        assert_eq!(v.current().map(|s| s.id.as_str()), Some("s0"), "back to the save it came up from");
+        let v: Saves = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        let mut v = v;
+        v.starting(6, RestoreSource::Backup);
+        let r = v.came_up(6, RestoreSource::Backup, Some("s0"), Some(IMAGE), T + 90_000).expect("came up");
+        assert!(r.rollback);
+        assert!(v.went_back().is_some_and(|w| w.life == 2 && w.save == Some(1)), "its work since s0 is lost, and told: {:?}", v.went_back());
+    }
+
     /// Goal (P3): a wake uses the snapshot only while it caches the current
     /// save for the pinned image; any other is the image and the save, and
     /// a computer never saved starts empty. Method: each way the two can
@@ -532,8 +636,8 @@ mod tests {
     fn a_snapshot_is_used_only_for_its_save_and_image() {
         let mut s = Saves::default();
         assert_eq!(s.plan(Some(IMAGE)), Plan::Nothing);
-        s.saved(1, rec("b0"), T - 1, true);
-        s.saved(1, rec("b1"), T, true);
+        s.saved(1, rec("b0"), 0, T - 1, true);
+        s.saved(1, rec("b1"), 0, T, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
         assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
         assert_eq!(s.plan(Some("registry/stub@sha256:2")), Plan::Backup, "another image's");
@@ -542,7 +646,7 @@ mod tests {
         assert!(other.unusable("b1"), "b0 is left");
         assert_eq!((other.plan(Some(IMAGE)), other.current().map(|c| c.id.as_str())), (Plan::Backup, Some("b0")), "the current save is another than the snapshot's");
         // the next sleep saves and takes no snapshot: the old one is dropped
-        s.saved(2, rec("b2"), T + 1, true);
+        s.saved(2, rec("b2"), 0, T + 1, true);
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert_eq!(s.snapshot, None);
         // a snapshot taken with a save that is no longer current is not kept
@@ -559,7 +663,7 @@ mod tests {
         let mut s = Saves::default();
         assert!(s.every_record().is_empty() && !s.has_snapshot());
         for (n, id) in ["b0", "b1", "b2", "b3"].iter().enumerate() {
-            s.saved(1, rec(id), T + n as i64, true);
+            s.saved(1, rec(id), 0, T + n as i64, true);
         }
         // b0 was pushed out of the newest three: let go of, not deleted yet
         let ids = |s: &Saves| s.every_record().iter().map(|r| r["id"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
@@ -634,7 +738,7 @@ mod tests {
         s.starting(1, RestoreSource::Nothing);
         assert!(s.came_up(1, RestoreSource::Nothing, None, Some(IMAGE), T).is_some());
         // its owner pins NEXT while it runs; its sleep saves, then snapshots
-        s.saved(1, rec("b1"), T + 10, true);
+        s.saved(1, rec("b1"), 0, T + 10, true);
         let of = s.image_of(1).expect("the image it runs").to_string();
         assert_eq!(of, IMAGE);
         assert!(s.snapshotted("b1", "s1", &of));
@@ -652,9 +756,9 @@ mod tests {
     #[test]
     fn the_second_ask_of_a_slow_sleep_keeps_the_first_ones_snapshot() {
         let mut s = Saves::default();
-        s.saved(3, rec("b-old"), T, true);
+        s.saved(3, rec("b-old"), 0, T, true);
         // the first ask saves and snapshots
-        s.saved(4, rec("b1"), T + 70_000, true);
+        s.saved(4, rec("b1"), 0, T + 70_000, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
         // the second: its save fails once the first's destroy took the
         // container, so it takes no snapshot, and that is not news
@@ -663,8 +767,8 @@ mod tests {
         assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
         // the other order: the second's save lands while the first snapshots
         let mut s = Saves::default();
-        s.saved(4, rec("b1"), T, true);
-        s.saved(4, rec("b2"), T + 1_000, true);
+        s.saved(4, rec("b1"), 0, T, true);
+        s.saved(4, rec("b2"), 0, T + 1_000, true);
         assert!(!s.snapshotted("b1", "s1", IMAGE), "the first's snapshot caches a save that is no longer current");
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert!(s.snapshotted("b2", "s2", IMAGE));
@@ -734,7 +838,7 @@ mod tests {
         assert!(c.saves.fresh() && !c.saves.has_snapshot(), "forgotten; again, the same");
         assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Backup);
         // its own sleep's snapshot is not kept
-        c.saves.saved(1, rec("b2"), c.now, true);
+        c.saves.saved(1, rec("b2"), 0, c.now, true);
         assert!(!c.saves.snapshotted("b2", "s2", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Backup);
         let r = c.wake();
         assert_eq!((r.from, r.save.as_deref()), (RestoreSource::Backup, Some("b2")));
@@ -749,11 +853,11 @@ mod tests {
     #[test]
     fn three_saves_are_kept_newest_first() {
         let mut s = Saves::default();
-        assert!(s.saved(1, rec("a"), T, true).is_empty());
-        assert!(s.saved(1, rec("b"), T + 1, false).is_empty());
-        assert!(s.saved(2, rec("c"), T + 2, true).is_empty());
+        assert!(s.saved(1, rec("a"), 0, T, true).is_empty());
+        assert!(s.saved(1, rec("b"), 0, T + 1, false).is_empty());
+        assert!(s.saved(2, rec("c"), 0, T + 2, true).is_empty());
         assert!(s.forgetting().is_empty());
-        let lost = s.saved(2, vec![json!({ "id": "d", "dir": "/data" }), json!({ "id": "d-work", "dir": "/data/work" })], T + 3, true);
+        let lost = s.saved(2, vec![json!({ "id": "d", "dir": "/data" }), json!({ "id": "d-work", "dir": "/data/work" })], 0, T + 3, true);
         assert!(lost.is_empty());
         assert_eq!(s.forgetting(), rec("a").as_slice(), "the oldest's records, to delete");
         assert_eq!(s.all().iter().map(|s| (s.number, s.id.as_str())).collect::<Vec<_>>(), vec![(4, "d"), (3, "c"), (2, "b")]);
@@ -777,11 +881,11 @@ mod tests {
         let ids = |s: &Saves| s.forgetting().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let mut s = Saves::default();
         for (i, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
-            s.saved(1, rec(id), T + i as i64, true);
+            s.saved(1, rec(id), 0, T + i as i64, true);
         }
         assert_eq!(ids(&s), ["a"]);
         // a's delete failed: the next save's pass finds it still, beside b
-        s.saved(1, rec("e"), T + 10, true);
+        s.saved(1, rec("e"), 0, T + 10, true);
         assert_eq!(ids(&s), ["a", "b"]);
         // a restart reads them back; one stored before this field reads none
         let mut s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -812,14 +916,47 @@ mod tests {
     #[should_panic(expected = "no kept save's")]
     fn a_kept_saves_record_is_never_let_go_of() {
         let mut s = Saves::default();
-        s.saved(1, rec("a"), T, true);
+        s.saved(1, rec("a"), 0, T, true);
         s.let_go(rec("a"));
+    }
+
+    /// Goal (P9, Codex and alexlwn123 on #1378): a save that a newer save
+    /// of its start overtook (kept, and asked after it) is never kept ahead
+    /// of it; one only asked, an older one kept as it ran (asked before it,
+    /// ended first), or another start's overtakes nothing, so a completed
+    /// capture is kept. Restart: stored and read back, the same; a save
+    /// stored before `seq` overtakes nothing. Invalid: keeping one ahead of
+    /// a newer one is a bug (`an_overtaken_save_is_never_kept`).
+    #[test]
+    fn a_save_is_overtaken_only_by_a_newer_one_kept() {
+        let mut s = Saves::default();
+        assert!(!s.overtaken(1, 1), "none kept");
+        s.saved(1, rec("a"), 2, T + 30, true);
+        assert!(s.overtaken(1, 1), "a newer capture kept");
+        assert!(!s.overtaken(1, 3), "an older one, kept as it ran");
+        assert!(!s.overtaken(1, 2), "itself");
+        assert!(!s.overtaken(2, 1), "another start's");
+        let s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(s.overtaken(1, 1) && !s.overtaken(1, 3));
+        let mut v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["saves"][0]["seq"], 2, "stored: {v}");
+        v["saves"][0].as_object_mut().unwrap().remove("seq");
+        let old: Saves = serde_json::from_value(v).unwrap();
+        assert!(!old.overtaken(1, 1) && old.all()[0].seq.is_none(), "a save stored before it overtakes nothing");
+    }
+
+    #[test]
+    #[should_panic(expected = "never kept ahead of a newer save of its start")]
+    fn an_overtaken_save_is_never_kept() {
+        let mut s = Saves::default();
+        s.saved(1, rec("b"), 2, T, true);
+        s.saved(1, rec("a"), 1, T + 10, true);
     }
 
     #[test]
     #[should_panic(expected = "a directory's record before any inside it")]
     fn a_save_whose_records_are_out_of_order_is_a_bug() {
         let mut s = Saves::default();
-        s.saved(1, vec![json!({ "id": "w", "dir": "/data/work" }), json!({ "id": "d", "dir": "/data" })], T, true);
+        s.saved(1, vec![json!({ "id": "w", "dir": "/data/work" }), json!({ "id": "d", "dir": "/data" })], 0, T, true);
     }
 }

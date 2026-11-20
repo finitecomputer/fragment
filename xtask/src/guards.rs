@@ -81,11 +81,14 @@ mod tests {
         assert_eq!(uses(&files, "keys::connection_exchange("), only("registry/connection_signin.rs", 1));
         assert_eq!(uses(&files, "keys::pipes_import("), only("registry/connection_signin.rs", 1));
         assert!(uses(&files, "pipes_authorize(").is_empty(), "no legacy authorization bypass");
-        let computer = &files["computer.rs"];
-        assert!(computer.contains("#[derive(serde::Serialize)]\npub(crate) struct SignedIn {"), "SignedIn is Serialize only");
-        assert_eq!(uses(&files, "SignedIn { computer"), only("computer.rs", 1), "a SignedIn is made in SignedIn::of alone");
-        assert!(computer.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
+        // an own key's sign-in is its person's Vault's (M16): a SignedIn derives nothing
+        let vault = &files["vault.rs"];
+        assert!(vault.contains("makes one, from its `Bound`: its fields are private.\npub(crate) struct SignedIn {\n    person: String,"), "SignedIn derives nothing, its fields private");
+        assert_eq!(uses(&files, "SignedIn { person"), only("vault.rs", 1), "a SignedIn is made in SignedIn::of alone");
+        assert!(vault.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
+        // one begun before the move is its computer's, asked through vault.rs `signed_in` alone
         assert_eq!(uses(&files, "\"computer/signed-in\""), only("computer.rs", 2), "the computer's signed-in is asked through signed_in alone (and answered by the computer)");
+        assert_eq!(uses(&files, "computer::signed_in("), only("vault.rs", 1), "the computer's signed-in is asked for a sign-in its person's Vault holds none of");
         assert!(Path::new(&crate::devstack::repo_root().join("crates/core/src/roundtrip.rs")).exists());
     }
 

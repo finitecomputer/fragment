@@ -37,6 +37,11 @@ impl<'a> Blobs<'a> {
         Ok(status.blob_min_bytes)
     }
 
+    /// Whether bytes of `size` are kept as a blob here (else in git).
+    pub fn keeps(&self, size: u64) -> Result<bool> {
+        Ok(size >= blob::BLOB_MIN_BYTES as u64 && self.min_bytes()?.is_some_and(|min| size >= min))
+    }
+
     fn path(&self, sha: &str) -> String {
         format!("/api/f/{}/blobs/{sha}", self.name)
     }

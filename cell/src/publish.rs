@@ -2,7 +2,7 @@
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
-//! The shell uses the same two routes (an agent's settings, a rename).
+//! The shell uses the same two routes (an agent's settings and job).
 
 use std::collections::BTreeMap;
 
@@ -20,24 +20,6 @@ use crate::js;
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
 
-/// The blessed templates whose fragment is answered before its repo is
-/// made (`seed::Making::SeedsLater`): the create answers once its claim and
-/// its facts are written, the fragment runs its template from the release
-/// meanwhile (`install_pending`), and its repo and first commit come from
-/// its alarm, armed at once by the create, else at a later pass. Only the
-/// chat for now (Paul, 2026-11-04: what a person waits on): each other
-/// template has readers of its repo of its own (a computer syncing its
-/// agent, a brain's sync), to be measured and tested before it joins.
-const SEEDS_LATER: [&str; 1] = ["chat"];
-
-/// Whether a create of `template` answers before its repo is made
-/// (`SEEDS_LATER`): a blessed template's, whose content the release serves.
-pub(crate) fn seeds_later(template: &str) -> bool {
-    let later = SEEDS_LATER.contains(&template);
-    assert!(!later || blessed::template(template).is_some(), "only a blessed template runs from the release before its repo: {template}");
-    later
-}
-
 /// The name of the repo of `fragment` in the life whose own key is `life`
 /// (its npub): derived here alone, from both, so a name made again never
 /// finds an earlier life's repo (`fragment_core::codestorage::repo_name`).
@@ -47,14 +29,11 @@ pub(crate) fn repo_name(cfg: &crate::config::Config, fragment: &str, life: &str)
 }
 
 /// A blessed template's `fragment.json` as its seed commits it: the
-/// template named, and its title. What runs before the commit lands
-/// (`install_pending`) is read from these same bytes.
-pub(crate) fn blessed_manifest_bytes(which: &str, title: Option<&str>) -> Vec<u8> {
-    let mut manifest = json!({ "template": which });
-    if let Some(title) = title {
-        manifest["meta"] = json!({ "title": title });
-    }
-    serde_json::to_vec_pretty(&manifest).expect("a manifest serializes")
+/// template named, nothing else (its face is its cell's, from its making).
+/// What runs before the commit lands (`install_pending`) is read from
+/// these same bytes.
+pub(crate) fn blessed_manifest_bytes(which: &str) -> Vec<u8> {
+    serde_json::to_vec_pretty(&json!({ "template": which })).expect("a manifest serializes")
 }
 
 /// A template a fragment can start from (`fragment_templates::CATALOG`):
@@ -137,6 +116,11 @@ impl FragmentCell {
     /// commit, that is its deploy again (live already at main's tip, it
     /// moves nothing), for only its own deploy's install lands it.
     ///
+    /// Taken by `by` (`seed::Event`): a writer of its repo (`Write`,
+    /// `repo_ready`), or its alarm's pass (`Alarm`), which takes no step of
+    /// a template the release runs: that one's repo is made at its first
+    /// file (`seed::Making::SeedsLater`).
+    ///
     /// One at a time: the create seeds, and the alarm it arms meanwhile
     /// (its index flush) seeds too. On code.storage, a round trip away, the
     /// two met: the second commit, changing nothing, was refused (412), and
@@ -147,8 +131,12 @@ impl FragmentCell {
     /// Landed is installed: the agents that joined meanwhile are told then
     /// (`Stage::joins_wait`), by whichever seed lands it, the create's or a
     /// later one.
-    pub(crate) async fn seed(&self) -> CellResult<()> {
-        for effect in self.seed_locked().await? {
+    ///
+    /// `life`, a writer's: the life it was let in to, so a writer that
+    /// waited on the lock while its fragment was deleted and made again
+    /// seeds nothing of the next life's (`repo_ready` then answers 404).
+    pub(crate) async fn seed(&self, by: Event, life: Option<i64>) -> CellResult<()> {
+        for effect in self.seed_locked(&by, life).await? {
             assert!(effect == Effect::TellJoined, "only its agents' notice follows a seed's lock");
             self.flush_joined().await;
         }
@@ -159,14 +147,29 @@ impl FragmentCell {
     /// stepped, and the rows read back, which must say the step the
     /// machine said as far as rows can (`Stage::durable`; a life that ended
     /// meanwhile goes no further). Answers what is left for after the lock.
-    async fn seed_locked(&self) -> CellResult<Vec<Effect>> {
+    async fn seed_locked(&self, by: &Event, life: Option<i64>) -> CellResult<Vec<Effect>> {
+        // its alarm's with no step to take (the release runs it, waiting for
+        // its first writer) waits on no writer's seed for the lock: its
+        // notices, deliveries and runs go on meanwhile
+        if *by == Event::Alarm {
+            let Some(at) = life.or(self.seed_rows()?.created_at) else { return Ok(vec![]) };
+            let stage = self.stage_in(at)?;
+            if !stage.waits_template() || seed::step(&stage, by).map_err(refused)?.1.is_empty() {
+                return Ok(vec![]);
+            }
+        }
         let _seeding = self.seeding.lock().await;
-        let Some(life) = self.seed_rows()?.created_at else { return Ok(vec![]) };
+        let Some(life) = life.or(self.seed_rows()?.created_at) else { return Ok(vec![]) };
         let mut stage = self.stage_in(life)?;
         if !stage.waits_template() {
             return Ok(vec![]);
         }
-        let (_, mut effects) = seed::step(&stage, &Event::Alarm).map_err(refused)?;
+        let (_, mut effects) = seed::step(&stage, by).map_err(refused)?;
+        // no step to take (its alarm's, while the release runs it): it waits
+        // for its first writer
+        if effects.is_empty() {
+            return Ok(vec![]);
+        }
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let mut after = vec![];
         let mut steps = 0;
@@ -212,8 +215,8 @@ impl FragmentCell {
     /// Carries out one seed step in `life` (`seed::Effect`): what happened.
     async fn seed_step(&self, effect: Effect, life: i64, name: &str, owner: &str) -> CellResult<Vec<Event>> {
         match effect {
-            // a template that seeds after the create's answer (`seeds_later`)
-            // makes its repo here, once: a later try finds it by its name
+            // a blessed template's (`seed::Making::SeedsLater`), at its first
+            // writer, makes its repo here, once: a later try finds it by its name
             Effect::EnsureRepo => {
                 let life_key = self.must(MetaKey::Npub)?;
                 let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, name, &life_key)?).await?;
@@ -238,7 +241,7 @@ impl FragmentCell {
                     (Some(t), _) => stamped(&self.env, t, name, title.as_deref()).await?,
                     // a blessed template is named, not copied: the release serves it
                     (None, Some(_)) => {
-                        let bytes = blessed_manifest_bytes(&which, title.as_deref());
+                        let bytes = blessed_manifest_bytes(&which);
                         vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
                     }
                     (None, None) => return Err(CellError::host(format!("no template {which}"))),
@@ -279,7 +282,7 @@ impl FragmentCell {
     /// name made again, between its awaits leaves the next life's pending
     /// template, title and repo to that life's own seed. Asked after an
     /// await and before what the step writes or commits next.
-    fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
+    pub(crate) fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.and_then(|at| at.parse::<i64>().ok()) == Some(life) {
             return Ok(());
         }
@@ -331,7 +334,10 @@ impl FragmentCell {
     /// files and 1 MiB). A `key` makes a retry commit nothing twice.
     pub(crate) async fn write_files_api(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        let life = self.life()?;
         self.writable().await?;
+        // let in to this life: one ended while its ledger was asked is not its
+        self.same_life(life, "while its ledger was asked")?;
         let who = self.caller_id(caller)?.to_string();
         let files = body["files"].as_array().filter(|f| !f.is_empty()).ok_or_else(|| CellError::invalid("files: a list of {path, text | base64 | delete}"))?;
         let mut writes = Vec::with_capacity(files.len());
@@ -351,8 +357,8 @@ impl FragmentCell {
         if total > fragment_proto::limits::API_FILES_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, fragment_proto::limits::API_FILES_WRITE_MAX_BYTES));
         }
-        // an agent's picture is refused here, before it is committed, as its
-        // install refuses one (docs/api.md, "An agent's name and picture")
+        // an agent's picture is refused here, before it is committed, as main's
+        // read of it would refuse it (docs/api.md, "An agent's name and picture")
         if let Some(bytes) = writes.iter().find(|w| w.path == fragment_core::face::AGENT_PICTURE).and_then(|w| w.bytes.as_deref()) {
             if self.kind()? == fragment_proto::FragmentKind::Agent {
                 fragment_core::face::check_picture(bytes).map_err(|r| crate::picture_refused(r, fragment_core::face::AGENT_PICTURE))?;
@@ -360,8 +366,28 @@ impl FragmentCell {
         }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
+        // an older CLI's rename (plane.rs `title_from_read`) is one at a time
+        // with the face route's, its commit and its face together
+        let manifest = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.clone());
+        let _renaming = match manifest {
+            Some(_) => Some(self.renaming.lock().await),
+            None => None,
+        };
+        // one whose read was before a rename since is refused whole, its job
+        // and all, rather than half done
+        if manifest.as_deref().map(|m| self.title_read_stale(m)).transpose()? == Some(true) {
+            return Err(CellError::new(ErrorCode::Conflict, "it was renamed since its manifest was read: nothing was written; read it again"));
+        }
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
-            Wrote::Commit(sha) => json_response(&json!({ "commit": sha })),
+            Wrote::Commit(sha) => {
+                // in the life it was let in to: one ended meanwhile renames no other
+                if let Some(written) = manifest.as_deref().filter(|_| self.life().ok() == Some(life)) {
+                    if self.title_from_read(written, &who)? {
+                        self.flush_index().await;
+                    }
+                }
+                json_response(&json!({ "commit": sha }))
+            }
             // nothing was expected, so nothing can conflict
             Wrote::Conflict(why) => Err(CellError::host(why)),
         }
@@ -370,7 +396,9 @@ impl FragmentCell {
     /// `POST /api/deploy {note?}`: `live` to `main`'s tip, for editors.
     pub(crate) async fn deploy_api(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        let life = self.life()?;
         self.writable().await?;
+        self.same_life(life, "while its ledger was asked")?;
 
         let who = self.caller_id(caller)?.to_string();
         let name = self.name()?;

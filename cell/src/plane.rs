@@ -70,6 +70,11 @@ pub(crate) struct TreeRow {
     pub last_commit: String,
 }
 
+/// The `meta` key of a manifest's read mark (`title_read`), and how many
+/// are kept: an older CLI renames within a read or two.
+const TITLE_READ: &str = "titleRead";
+const TITLE_READS_MAX: usize = 4;
+
 /// A live commit's code as read: `app.mjs`, its `applib/` modules by path,
 /// and its identity.
 type LiveCode = (String, BTreeMap<String, String>, String);
@@ -337,13 +342,24 @@ impl FragmentCell {
     /// push): while its template is still to land (`Stage::waits_template`),
     /// the same seed the create and the alarm run (one at a time:
     /// `seeding`) lands it first, its repo, commit, deploy and install, so a
-    /// write lands on top of its template, never under it. A seed that
-    /// cannot land fails the writer as code.storage failed it.
+    /// write lands on top of its template, never under it. A blessed
+    /// fragment's repo is made here, at its first file. A seed that cannot
+    /// land fails the writer as code.storage failed it.
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
+        // the life this writer was let in to: one ended while it waited
+        // (deleted, and made again) is none of its to write
+        let life = self.life()?;
         if self.stage()?.waits_template() {
-            self.seed().await?;
+            self.seed(fragment_core::seed::Event::Write, Some(life)).await?;
         }
+        self.same_life(life, "while its repo was made")?;
         self.must(MetaKey::Repo)
+    }
+
+    /// Its life (`created_at`): a request that awaits after it is let in
+    /// asks `same_life` of it before it writes.
+    pub(crate) fn life(&self) -> CellResult<i64> {
+        self.must(MetaKey::CreatedAt)?.parse::<i64>().map_err(|_| CellError::host("its created_at is not a time"))
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
@@ -362,8 +378,8 @@ impl FragmentCell {
     /// (main) or the code (live) follow. Callers hold `self.plane`.
     async fn refresh_pin(&self, which: &str) -> CellResult<PinMove> {
         let [repo, from] = self.metas([MetaKey::Repo, MetaKey::pin(which)])?;
-        // no repo yet (its template seeds after its create's answer,
-        // publish.rs `seeds_later`): no branch, so nothing pinned moved
+        // no repo yet (a blessed fragment's, made at its first file): no
+        // branch, so nothing pinned moved
         let Some(repo) = repo else {
             assert!(from.is_none(), "a pin is a commit of a repo made");
             return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
@@ -430,8 +446,17 @@ impl FragmentCell {
             return Ok(());
         }
         match (which, pin.as_deref()) {
-            ("main", Some(sha)) => self.read_manifest(&self.must(MetaKey::Repo)?, sha).await?,
-            ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
+            ("main", Some(sha)) => {
+                let repo = self.must(MetaKey::Repo)?;
+                self.read_manifest(&repo, sha).await?;
+                self.read_picture(&repo, self.face_now()?.kind).await?;
+                self.show_picture()?;
+            }
+            ("main", None) => {
+                self.del_meta(MetaKey::ManifestMain)?;
+                self.read_picture("", self.face_now()?.kind).await?;
+                self.show_picture()?;
+            }
             (_, live) => {
                 self.install_code(live).await?;
                 self.search_fence()?;
@@ -513,9 +538,9 @@ impl FragmentCell {
         self.install(manifest, Some((&cs, repo.as_str())), sha).await
     }
 
-    /// A fragment whose template seeds after its create's answer
-    /// (publish.rs `seeds_later`) runs that template from the release
-    /// until its first commit lands: installed as live's will be, from the
+    /// A blessed fragment (`seed::Making::SeedsLater`) runs its template
+    /// from the release until its first writer's seed lands its first
+    /// commit: installed as live's will be, from the
     /// same `fragment.json` its seed commits (`blessed_manifest_bytes`),
     /// with no commit (`""`, as the code's sha and the status's repo say).
     /// The seed's own install, from live, replaces it.
@@ -529,8 +554,7 @@ impl FragmentCell {
         if self.pin("live")?.is_some() {
             return Ok(());
         }
-        let title = self.meta(MetaKey::TemplateTitle)?;
-        let bytes = crate::publish::blessed_manifest_bytes(&which, title.as_deref());
+        let bytes = crate::publish::blessed_manifest_bytes(&which);
         let manifest = manifest::parse(&bytes).map_err(|e| CellError::host(format!("the {which} template's own fragment.json: {e}")))?;
         assert_eq!(manifest.template.as_deref(), Some(which.as_str()), "a pending template's manifest names it");
         // test fleets: `hold-install` holds it here, its manifest read and
@@ -543,7 +567,15 @@ impl FragmentCell {
             worker::Delay::from(std::time::Duration::from_millis(TEST_HOLD_INSTALL_POLL_MS)).await;
         }
         self.test_hold_install.set((self.test_hold_install.get().0, false));
-        self.install(manifest, None, "").await
+        self.install(manifest, None, "").await?;
+        // its page, the release's, wants its card as a deploy's live does
+        // (`interpret`): a brain's is shot before its first file
+        if let Some(version) = self.page_version()? {
+            if let Err(e) = self.card_wanted(&version) {
+                self.event("card.want-failed", &e.message, json!({ "code": e.code }));
+            }
+        }
+        Ok(())
     }
 
     /// Installs `manifest`'s app, read at `sha` of `repo` (`None`: a
@@ -591,16 +623,11 @@ impl FragmentCell {
                 }
             }
         };
-        // an agent's picture, checked as a write of it is (docs/api.md, "An
-        // agent's name and picture"): a live commit with one that is not is refused
-        // (none before its first commit: a pending install's)
-        let picture = match (manifest.kind(), repo) {
-            (FragmentKind::Agent, Some((cs, repo))) => match self.read_picture(cs, repo, sha).await? {
-                Ok(p) => p,
-                Err(why) => return self.code_refused(sha, &why),
-            },
-            _ => None,
-        };
+        // an agent's avatar.png at main, read when it is one (one become an
+        // agent since main last moved included)
+        if let (FragmentKind::Agent, Some((_, repo))) = (manifest.kind(), repo) {
+            self.read_picture(repo, FragmentKind::Agent).await?;
+        }
         // Installed triggers start their runs in the step that installs, so
         // the owner's standing (which blocks them past the overdraft) is
         // read before it, and only when there are any.
@@ -633,18 +660,16 @@ impl FragmentCell {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,
             None => self.del_meta(MetaKey::Blessed)?,
         }
-        let shown = match &picture {
-            Some((hash, mime)) => {
-                self.set_meta(MetaKey::Picture, &format!("{hash} {mime} {sha}"))?;
-                Some(face::picture_path(&self.must(MetaKey::Npub)?, hash))
-            }
-            None => {
-                self.del_meta(MetaKey::Picture)?;
-                // any other fragment's picture is its icon (icon.rs)
-                self.icon_shown(manifest.kind())?
-            }
-        };
-        self.face_is(manifest.kind(), manifest.title(), manifest.role(), shown.as_deref())?;
+        // its kind is its code's; its title and role its own (docs/api.md, "An
+        // agent's name and picture"), a manifest's title a default taken by a
+        // face that has none; an agent's picture its avatar.png at main
+        // (`read_picture`), any other's its icon
+        if manifest.kind() != FragmentKind::Agent {
+            self.del_meta(MetaKey::Picture)?;
+        }
+        let now = self.face_now()?;
+        let shown = self.picture_shown(manifest.kind())?;
+        self.face_is(manifest.kind(), now.title.as_deref().or(manifest.title()), now.role.as_deref(), shown.as_deref())?;
         // how its inbox knows a delivery, as its code says (InboxDecl)
         match &manifest.inbox {
             Some(i) => self.set_meta(MetaKey::InboxSecret, &i.stored())?,
@@ -759,20 +784,115 @@ impl FragmentCell {
         Ok(Ok((source, modules, format!("app:{}", hex::encode(hasher.finalize())))))
     }
 
-    /// An agent fragment's picture at live (`face::AGENT_PICTURE`): none,
-    /// its SHA-256 and type, checked as a write of it is, or why it is
-    /// refused.
-    async fn read_picture(&self, cs: &Cs<'_>, repo: &str, sha: &str) -> CellResult<Result<Option<(String, &'static str)>, String>> {
-        let path = face::AGENT_PICTURE;
-        let Some(row) = self.tree_row("live", path)? else { return Ok(Ok(None)) };
-        // a blob's pointer (1 MiB and up), or a file past the limit, is too large unread
-        let pointed = self.rows("SELECT size FROM pointers WHERE ref = 'live' AND path = ?", vec![path.into()])?.first().and_then(|r| r["size"].as_u64());
-        let size = pointed.unwrap_or(row.size);
-        if pointed.is_some() || size > limits::PICTURE_MAX_BYTES as u64 {
-            return Ok(Err(face::Refused::TooLarge(size).message(path)));
+    /// An agent's picture as its lists show it (its `avatar.png` at main,
+    /// as `read_picture` kept it), any other's its icon (icon.rs).
+    pub(crate) fn picture_shown(&self, kind: FragmentKind) -> CellResult<Option<String>> {
+        if kind != FragmentKind::Agent {
+            return self.icon_shown(kind);
         }
-        let bytes = cs.read(repo, sha, path, limits::PICTURE_MAX_BYTES).await?.unwrap_or_default();
-        Ok(face::check_picture(&bytes).map(|mime| Some((hex::encode(Sha256::digest(&bytes)), mime))).map_err(|r| r.message(path)))
+        let Some(stored) = self.meta(MetaKey::Picture)? else { return Ok(None) };
+        let sha = stored.split(' ').next().unwrap_or_default();
+        Ok(Some(face::picture_path(&self.must(MetaKey::Npub)?, sha)))
+    }
+
+    /// An agent's picture: its `avatar.png` at main (`face::AGENT_PICTURE`),
+    /// checked as a write of it is (docs/api.md, "An agent's name and
+    /// picture"), read as main moves and at an agent's install, so it shows
+    /// with no deploy, and only when the file changed since it was kept
+    /// (`MetaKey::Picture`: `<sha256> <type> <commit>`, the commit that
+    /// last changed it, where its bytes are served from: runs_on.rs
+    /// `picture`). One gone, or one that is no picture (a sync's: the files
+    /// route refuses one), is none. Read only of an agent (`kind`): any
+    /// other fragment's install lets it go.
+    async fn read_picture(&self, repo: &str, kind: FragmentKind) -> CellResult<()> {
+        let path = face::AGENT_PICTURE;
+        if kind != FragmentKind::Agent {
+            return Ok(());
+        }
+        let row = self.tree_row("main", path)?;
+        let kept = self.meta(MetaKey::Picture)?;
+        if row.as_ref().map(|r| r.last_commit.as_str()) == kept.as_deref().and_then(|k| k.rsplit(' ').next()) {
+            return Ok(());
+        }
+        let picture = match row {
+            None => None,
+            Some(row) => {
+                // a blob's pointer (1 MiB and up), or a file past the limit, is too large unread
+                let pointed = self.rows("SELECT size FROM pointers WHERE ref = 'main' AND path = ?", vec![path.into()])?.first().and_then(|r| r["size"].as_u64());
+                let size = pointed.unwrap_or(row.size);
+                let bytes = match pointed.is_none() && size <= limits::PICTURE_MAX_BYTES as u64 {
+                    true => self.cs()?.read(repo, &row.last_commit, path, limits::PICTURE_MAX_BYTES).await?.unwrap_or_default(),
+                    false => vec![],
+                };
+                match face::check_picture(&bytes) {
+                    Ok(mime) => Some(format!("{} {mime} {}", hex::encode(Sha256::digest(&bytes)), row.last_commit)),
+                    Err(r) => {
+                        let why = if bytes.is_empty() { face::Refused::TooLarge(size).message(path) } else { r.message(path) };
+                        self.event("picture.refused", &format!("{why}: it has no picture"), json!({ "commit": row.last_commit }));
+                        None
+                    }
+                }
+            }
+        };
+        match &picture {
+            Some(p) => self.set_meta(MetaKey::Picture, p),
+            None => self.del_meta(MetaKey::Picture),
+        }
+    }
+
+    /// Its face shows its picture as kept now (`picture_shown`).
+    fn show_picture(&self) -> CellResult<()> {
+        let now = self.face_now()?;
+        self.face_is(now.kind, now.title.as_deref(), now.role.as_deref(), self.picture_shown(now.kind)?.as_deref())
+    }
+
+    /// A mark for an editor's read of its manifest that showed `title`
+    /// (`""`: none), kept with it (`MetaKey::TitleRead`, the newest
+    /// `TITLE_READS_MAX`).
+    fn title_read(&self, title: &str) -> CellResult<String> {
+        let mark = js::random_hex::<8>();
+        let mut reads: Vec<Value> = self.meta(MetaKey::TitleRead)?.and_then(|r| crate::json_text::<Value>(&r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        reads.push(json!([mark, title]));
+        let from = reads.len().saturating_sub(TITLE_READS_MAX);
+        self.set_meta(MetaKey::TitleRead, &Value::Array(reads[from..].to_vec()).to_string())?;
+        Ok(mark)
+    }
+
+    /// Whether a write of `fragment.json` names a mark `GET manifest` gave
+    /// (`title_read`) whose read is stale: its face renamed since it
+    /// showed. Such an older CLI's rename is refused before anything of it
+    /// is committed (its job too: publish.rs `write_files_api`).
+    pub(crate) fn title_read_stale(&self, bytes: &[u8]) -> CellResult<bool> {
+        let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Ok(false) };
+        let Some(mark) = v["meta"][TITLE_READ].as_str() else { return Ok(false) };
+        let reads: Vec<Value> = self.meta(MetaKey::TitleRead)?.and_then(|r| crate::json_text::<Value>(&r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let Some(read) = reads.iter().find(|r| r[0] == mark) else { return Ok(false) };
+        Ok(self.face_now()?.title.as_deref().unwrap_or_default() != read[1].as_str().unwrap_or_default())
+    }
+
+    /// A write of `fragment.json` naming a mark `GET manifest` gave
+    /// (`title_read`), its title another than the one that read showed: an
+    /// older CLI renaming it (`fragment rename`, `fragment agent --name`;
+    /// the debt ledger), whether or not git's bytes changed (a title git
+    /// holds already included). Taken as its title while its face is still
+    /// the one shown (a rename since wins); each mark is taken once, so the
+    /// same write again, a deploy, or the file written as git holds it
+    /// renames nothing. Whether it renamed it.
+    pub(crate) fn title_from_read(&self, bytes: &[u8], by: &str) -> CellResult<bool> {
+        let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Ok(false) };
+        let Some(mark) = v["meta"][TITLE_READ].as_str() else { return Ok(false) };
+        let mut reads: Vec<Value> = self.meta(MetaKey::TitleRead)?.and_then(|r| crate::json_text::<Value>(&r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let Some(at) = reads.iter().position(|r| r[0] == mark) else { return Ok(false) };
+        let shown = reads.remove(at)[1].as_str().unwrap_or_default().to_string();
+        self.set_meta(MetaKey::TitleRead, &Value::Array(reads).to_string())?;
+        let Some(title) = v["meta"]["title"].as_str().map(str::trim).filter(|t| face::change(Some(t), None, false).is_ok()) else { return Ok(false) };
+        let now = self.face_now()?;
+        if title == shown || now.title.as_deref().unwrap_or_default() != shown {
+            return Ok(false);
+        }
+        self.face_is(now.kind, Some(title), now.role.as_deref(), now.picture.as_deref())?;
+        self.event("face.changed", &format!("its name is {title:?}, as an older CLI wrote it"), json!({ "title": title, "by": by, "from": "fragment.json" }));
+        Ok(true)
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {
@@ -810,7 +930,7 @@ impl FragmentCell {
             }
             match self.meta(MetaKey::PinLive)? {
                 Some(live) => self.install_code(Some(&live)).await?,
-                // before its first deploy (publish.rs `seeds_later`): its template from the release again
+                // before its first file's deploy (`seed::Making::SeedsLater`): its template from the release again
                 None if self.stage()?.waits_template() => self.install_pending().await?,
                 None => self.install_code(None).await?,
             }
@@ -927,13 +1047,14 @@ impl FragmentCell {
     /// Whether the fragment's next pass (its housekeeping, and the poll
     /// backstop) comes within the poll interval rather than a day after the
     /// last: the pins may lag the repo (`pins_may_lag`), a run is in flight
-    /// (each pass checks it against its Workflow), or a template is still to
-    /// land (each pass tries again). The rest of the alarm's work has due times of its own.
-    /// A fragment nothing touches (a chat, from its second day) is woken
-    /// once a day, and asks code.storage nothing.
+    /// (each pass checks it against its Workflow), or a template the
+    /// release does not run is still to land (each pass tries again:
+    /// `Stage::alarm_seeds`). The rest of the alarm's work has due times of
+    /// its own. A fragment nothing touches (a chat, from its first day) is
+    /// woken once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
         let running = self.count("SELECT EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS n")? != 0;
-        Ok(self.pins_may_lag()? || self.stage()?.waits_template() || running)
+        Ok(self.pins_may_lag()? || self.stage()?.alarm_seeds() || running)
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token
@@ -989,10 +1110,13 @@ impl FragmentCell {
         if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
             return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
         }
+        let life = self.life()?;
         if write {
             // its token writes the repo: a deploy's first step
             self.writable().await?;
         }
+        // let in to this life: one ended while its ledger was asked is not its
+        self.same_life(life, "while its ledger was asked")?;
 
         let who = self.caller_id(caller)?;
         // its template still to land: its seed lands it first (`repo_ready`),
@@ -1012,12 +1136,40 @@ impl FragmentCell {
         json_response(&token)
     }
 
+    /// `GET manifest`: main's `fragment.json`, its `meta.title` its face's
+    /// (when it has one), and to an editor a mark of the read
+    /// (`title_read`): what an older CLI reads, changes and writes back to
+    /// rename it (`title_from_read`; the debt ledger). A blessed fragment
+    /// before its first file answers the one its seed will commit
+    /// (`blessed_manifest_bytes`), so such a write is that first file.
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
-        match self.meta(MetaKey::ManifestMain)? {
-            Some(text) => json_response(&crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?),
-            None => Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
+        let role = self.require(caller, false, Role::Viewer)?;
+        let mut manifest = match (self.meta(MetaKey::ManifestMain)?, self.meta(MetaKey::TemplatePending)?) {
+            (Some(text), _) => crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?,
+            // a blessed template's alone: a copied one's first commit is its own files
+            (None, Some(which)) if self.pin("main")?.is_none() && blessed::template(&which).is_some() => {
+                serde_json::from_slice(&crate::publish::blessed_manifest_bytes(&which)).map_err(|e| CellError::host(e.to_string()))?
+            }
+            _ => return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
+        };
+        let title = self.face_now()?.title;
+        let mark = match role >= Role::Editor {
+            true => Some(self.title_read(title.as_deref().unwrap_or_default())?),
+            false => None,
+        };
+        if let Some(fields) = manifest.as_object_mut() {
+            let meta = fields.entry("meta").or_insert_with(|| json!({}));
+            if !meta.is_object() {
+                *meta = json!({});
+            }
+            if let Some(title) = title {
+                meta["title"] = title.into();
+            }
+            if let Some(mark) = mark {
+                meta[TITLE_READ] = mark.into();
+            }
         }
+        json_response(&manifest)
     }
 
     pub(crate) async fn files(&self, caller: &Caller) -> CellResult<Response> {
