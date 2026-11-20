@@ -270,7 +270,9 @@ steps; its "no reply yet" waits until it is up):
   that may change its files ran after it (no turn, no port tab used:
   `unchanged`), it says where it went back to and no loss.
 - `update`: it is awake, with no keepalive open, on another version than
-  its next start runs, until its owner puts that version off.
+  its next start runs, until its owner puts that version off. While its
+  save may not restore beside the new image, it says to make room first,
+  with no Restart (`roomFirst`; below, "An image's share of the disk").
 - `key_paused`: a shared key's charges this last hour reached its owner's
   cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
   calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
@@ -521,9 +523,10 @@ the DO removes them from one started from a snapshot.
   told so (`went_back`, naming the save it went back to).
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
-  `image` the pinned image's reference, and one that fails or comes up
-  dead is forgotten as the same wake starts the image and the save. So a
-  snapshot makes a wake faster, never different.
+  `image` the pinned image's reference (or, while its update waits for
+  room, the image it ran: below, "An image's share of the disk"), and one
+  that fails or comes up dead is forgotten as the same wake starts the
+  image and the save. So a snapshot makes a wake faster, never different.
 - **What a wake restored.** Each start that comes up records which save
   it restored and how the life before it ended (the view's `restored`). A
   start that went back in time is a rollback, counted in `rollbacks`: the
@@ -598,6 +601,39 @@ production's did, "restore stopped with 261689344 bytes free, below the
 GB) predicted 36 MB of room: 43 MB, 0.26%, short. Counted as
 `room` counts it, it had none; it is told at 3 GB of room, which that
 disk reached with 3.2 GB less video, `df` reading about 5.3 GB free.
+
+### An image's share of the disk
+
+Paul, 2026-11-20: "our image update either never goes up in size, or
+that it's safe for all existing users somehow". An image sits on the same
+disk as `/data`, so an image that grew would leave every computer less
+room to restore, and a save that fit beside the old image might not fit
+beside the new one.
+
+- **A budget.** Every image is held to `IMAGE_DISK_MAX` (3.0 GB), the
+  share of a computer's disk it may take as a fresh computer reads it: its
+  files written to a fresh btrfs disk of a computer's size (`DISK_MB`)
+  with zstd, less what that disk has available. The Docker lane measures
+  the Hermes image so on every change to it and fails past the budget
+  (`the_hermes_image_fits_its_disk_budget`, images/bridge/tests/docker.rs,
+  which reads both numbers from their one definition in core). Today's
+  image measured MEASURED. Raising it is Paul's word alone, recorded
+  beside the constant: each GB raised is a GB less of every person's files
+  that restore.
+- **Room counts the largest image.** A computer's room (above, "Room to
+  restore") counts `IMAGE_DISK_MAX`, never the image it runs, so it is
+  told to make room while its save still restores beside any image the
+  deployment may move it to.
+- **An update waits for room.** A computer whose save may not restore
+  beside the largest image (`fits_any_image`, its disk as last read) stays
+  on the image it has: a wake starts its snapshot of that save on the image
+  it was taken of, though another is pinned (`Saves::update_waits`). Its
+  `update` notice, told as ever, says to make room first and offers no
+  Restart, which would take the new image (`roomFirst`). Once a read after
+  a save finds room, its next wake takes the new image. A start with no
+  such snapshot (after a crash, or its owner's restart: those restore the
+  save, from the pinned image) has no older image to stay on; there the
+  budget is what keeps it restorable.
 
 ### The start line
 
