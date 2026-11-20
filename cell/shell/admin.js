@@ -8,7 +8,7 @@
 // and sees only that. Every value reaches the page as text, never as
 // markup.
 
-import { troubleWhat } from "./admin-glance.js";
+import { ago, troubleWhat } from "./admin-glance.js";
 
 const $ = (id) => document.getElementById(id);
 const status = $("status");
@@ -207,8 +207,9 @@ async function trials() {
 }
 
 // ---- the glance: who joined, from the registry; what runs, from the
-// deployment's logs (`GET /api/admin/glance`). Read afresh each minute
-// while it is shown, never cached (Paul, 2026-11-04).
+// deployment's logs (`GET /api/admin/glance`). Read again each minute
+// while it is shown: the registry's numbers afresh, the logs' as the cell
+// kept them (fragment_core::glance::Part), with how old they are.
 const GLANCE_EVERY_MS = 60_000;
 let glanceTimer = null;
 
@@ -243,19 +244,23 @@ async function glance() {
   const read = logs.state === "read";
   $("tiles").replaceChildren(
     tile("Signups today", v.signups.today, `${v.signups.hour} in the last hour · ${v.signups.week} this week · ${v.signups.total} in all`),
-    tile("Computers awake now", read ? logs.computersAwakeNow : "–", read ? `${logs.computersAwakeToday} today · ${logs.computersAwakeWeek} this week` : "from the logs"),
+    tile("Computers awake now", read ? logs.computersAwakeNow : "–", read ? `${logs.computersAwakeToday} today · ${logs.computersAwakeWeek ?? "–"} this week` : "from the logs"),
     tile("Fragments awake now", read ? logs.fragmentsAwakeNow : "–", read ? `${logs.fragmentsAwakeToday} today` : "from the logs"),
     tile("Seats paid", h.seatsPaid, `${h.seatsComped} comped · ${h.orgsPaying} orgs paying`),
     tile("Signed in, last 24 hours", v.signedIn.day, `${v.signedIn.week} in the last 7 days`),
   );
   $("glance-logs").textContent =
-    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : logs.whyUnread ? `Why saves failed couldn't be read: ${logs.whyUnread}` : "";
+    logs.state === "notConfigured"
+      ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)."
+      : logs.state === "failed"
+        ? `The logs couldn't be read: ${logs.why}`
+        : [logs.whyKept && `Newer numbers couldn't be read: ${logs.whyKept}`, logs.whyUnread && `Why saves failed couldn't be read: ${logs.whyUnread}`].filter(Boolean).join(" ");
   const trouble = read ? logs.trouble : [];
   $("trouble-head").hidden = $("trouble").hidden = trouble.length === 0;
   $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), troubleCell(t), String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));
   const up = (p) => (p.computerUp == null ? "–" : p.computerUp ? "yes" : "not yet");
   $("new-rows").replaceChildren(...v.newPeople.map((p) => row([p.email || p.npub, when(p.joinedAt), seatText(p.seat) || "none", p.agentAt ? when(p.agentAt) : "none", up(p)], openFromGlance(p.npub))));
-  $("glance-at").textContent = `Updated ${new Date(v.at).toLocaleTimeString()}; again each minute.`;
+  $("glance-at").textContent = [`Updated ${new Date(v.at).toLocaleTimeString()}`, ...(read ? [`logs as of ${ago(logs.at, v.at)}`] : []), ...(read && logs.weekAt != null ? [`this week's as of ${ago(logs.weekAt, v.at)}`] : [])].join(" · ");
   say("");
 }
 

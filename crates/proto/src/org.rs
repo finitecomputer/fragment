@@ -377,10 +377,11 @@ pub struct AdminHealth {
 }
 
 /// The operators' glance (`GET /api/admin/glance`): who joined and signed
-/// in, from the registry, and what ran, from the deployment's Workers
-/// Logs, read as it is asked (no cache: the page asks again every minute).
-/// Never a person's own objects: no number here calls a computer, a
-/// fragment or a ledger.
+/// in, from the registry, as it is asked, and what ran, from the
+/// deployment's Workers Logs, as the registry kept it (`glance_kept`:
+/// read again past its life, `fragment_core::glance`). Never a
+/// person's own objects: no number here calls a computer, a fragment or a
+/// ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminGlance {
@@ -443,12 +444,25 @@ pub enum GlanceLogs {
     Failed { why: String },
     #[serde(rename_all = "camelCase")]
     Read {
+        /// When the numbers were read (ms), and the week's count (none: it
+        /// is unknown, and `whyKept` says why): each is kept, and read again
+        /// two minutes on (the week's scan an hour on, or once the day starts).
+        at: i64,
+        #[serde(default)]
+        week_at: Option<i64>,
+        /// Why a newer read failed (Cloudflare's "Too many requests"),
+        /// when it did: the numbers are the last read, or the week's
+        /// unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why_kept: Option<String>,
         /// Distinct computers whose lines say they are awake: in the last
         /// ten minutes (an awake one logs at least every five), since
-        /// `dayStart`, in the last seven days.
+        /// `dayStart`, in the last seven days (as of `weekAt`, with those
+        /// awake today since; none: unknown).
         computers_awake_now: u64,
         computers_awake_today: u64,
-        computers_awake_week: u64,
+        #[serde(default)]
+        computers_awake_week: Option<u64>,
         /// Distinct fragments' Durable Objects that ran: in the last ten
         /// minutes, and since `dayStart`.
         fragments_awake_now: u64,

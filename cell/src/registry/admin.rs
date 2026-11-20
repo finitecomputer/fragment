@@ -11,6 +11,22 @@ use serde::Serialize;
 use super::calls::Call;
 use super::*;
 
+fn at_ms(ms: i64) -> SqlStorageValue {
+    SqlStorageValue::Integer(ms)
+}
+
+/// Whether `computers` are computers' ids, at most `max` of them.
+fn computers_within<'a>(computers: impl Iterator<Item = &'a str>, max: usize) -> bool {
+    let mut n = 0;
+    for c in computers {
+        n += 1;
+        if n > max || !c.starts_with("computer:") {
+            return false;
+        }
+    }
+    true
+}
+
 /// People and orgs a page lists; the log's entries a page shows.
 pub(crate) const ADMIN_PAGE: u32 = 100;
 /// The log's entries kept (the oldest go).
@@ -65,13 +81,32 @@ impl Call for Health {
 /// `POST /admin/glance`: the operators' glance, as far as the registry
 /// answers it (signups, sign-ins, the newest people), at `now_ms`, the day
 /// starting at `day_start` (both checked by the router:
-/// `fragment_core::glance::day_start`), and whose each of `computers` is
-/// (at most `glance::TROUBLE_MAX`: those in trouble).
+/// `fragment_core::glance::day_start`), and the logs' answer as it keeps
+/// it (`glance_kept`). A load's first call holds the logs for it when
+/// they are due (`glance::due`), until `REFRESH_LEASE_MS` from now by the
+/// registry's own clock (one clock for every load's hold). Its second,
+/// when it read them, names that hold (`held`), ending it, and brings what
+/// it read: the answer (the cell's JSON, at most `glance::KEPT_MAX_BYTES`,
+/// read at `now_ms`; none when its read failed), and the computers its
+/// trouble names (at most `glance::TROUBLE_MAX`), kept unless a newer one
+/// is; and, apart, the week's computers to keep (one a line, at most
+/// `glance::GROUPS_MAX`: a scan's, or the week kept, each with every
+/// computer seen today since), as of `week_at`, kept unless a newer one
+/// is. A call that names a hold takes none.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Glance {
     pub now_ms: i64,
     pub day_start: i64,
+    #[serde(default)]
     pub computers: Vec<String>,
+    #[serde(default)]
+    pub held: Option<i64>,
+    #[serde(default)]
+    pub read: Option<String>,
+    #[serde(default)]
+    pub week: Option<String>,
+    #[serde(default)]
+    pub week_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,8 +114,19 @@ pub(crate) struct Glanced {
     pub signups: GlanceSignups,
     pub signed_in: GlanceSignedIn,
     pub new_people: Vec<GlancePerson>,
-    /// Each of the computers named that is a person's: (computer, person, their email).
+    /// Each computer in trouble in the answer kept that is a person's:
+    /// (computer, person, their email).
     pub owners: Vec<(String, String, Option<String>)>,
+    /// The answer kept, if any (the cell's JSON), when it was read and for
+    /// which day's start (the cell shows today's of its own day alone).
+    pub kept: Option<String>,
+    pub kept_at: Option<i64>,
+    pub kept_day: Option<i64>,
+    /// The week's computers kept, one a line, and as of when (any day's).
+    pub week: Option<String>,
+    pub week_at: Option<i64>,
+    /// Until when this load holds the logs, when it is to read them.
+    pub held: Option<i64>,
 }
 
 impl Call for Glance {
@@ -299,10 +345,49 @@ impl RegistryCell {
     }
 
     fn glance(&self, b: Glance) -> CellResult<Glanced> {
-        use fragment_core::glance::{DAY_MS, NEW_PEOPLE_MAX, TROUBLE_MAX, WEEK_MS};
-        if b.computers.len() > TROUBLE_MAX {
-            return Err(CellError::invalid(format!("a glance names at most {TROUBLE_MAX} computers")));
+        use fragment_core::glance::{DAY_MS, GROUPS_MAX, KEPT_MAX_BYTES, KEPT_SHAPE, NEW_PEOPLE_MAX, REFRESH_LEASE_MS, TROUBLE_MAX, WEEK_MS};
+        let valid = b.read.as_ref().is_none_or(|a| a.len() <= KEPT_MAX_BYTES)
+            && computers_within(b.computers.iter().map(String::as_str), TROUBLE_MAX)
+            && b.week.as_ref().is_none_or(|w| b.week_at.is_some() && computers_within(w.split('\n').filter(|c| !c.is_empty()), GROUPS_MAX as usize));
+        if !valid {
+            return Err(CellError::invalid(format!("a glance's answer is at most {KEPT_MAX_BYTES} bytes, naming at most {TROUBLE_MAX} computers in trouble and {GROUPS_MAX} in its week")));
         }
+        let shape = || SqlStorageValue::from(KEPT_SHAPE);
+        if let Some(held) = b.held {
+            // this load's hold ends (another's, taken since, stands), then
+            // its answer is kept unless a newer one is
+            self.exec("UPDATE glance_kept SET busy_until = 0 WHERE shape = ? AND busy_until = ?", vec![shape(), at_ms(held)])?;
+            if let Some(answer) = &b.read {
+                self.exec(
+                    "UPDATE glance_kept SET at = ?, day_start = ?, answer = ?, computers = ? WHERE shape = ? AND (at IS NULL OR at < ?)",
+                    vec![at_ms(b.now_ms), at_ms(b.day_start), answer.as_str().into(), b.computers.join("\n").into(), shape(), at_ms(b.now_ms)],
+                )?;
+            }
+            // the week apart: a scan that read is kept though the rest failed
+            if let Some((week, at)) = b.week.as_ref().zip(b.week_at) {
+                self.exec("UPDATE glance_kept SET week = ?, week_at = ? WHERE shape = ? AND (week_at IS NULL OR week_at <= ?)", vec![week.as_str().into(), at_ms(at), shape(), at_ms(at)])?;
+            }
+        }
+        #[derive(Deserialize)]
+        struct Kept {
+            busy_until: i64,
+            at: Option<i64>,
+            day_start: Option<i64>,
+            answer: Option<String>,
+            computers: Option<String>,
+            week: Option<String>,
+            week_at: Option<i64>,
+        }
+        let kept = self.row::<Kept>("SELECT busy_until, at, day_start, answer, computers, week, week_at FROM glance_kept WHERE shape = ?", vec![shape()])?;
+        // held for this load when due, on its first call (and when the
+        // deployment reads its logs)
+        let now = js::now_ms();
+        let due = || fragment_core::glance::due(kept.as_ref().map_or(0, |k| k.busy_until), kept.as_ref().and_then(|k| k.at.zip(k.day_start)), now, b.day_start);
+        let held = (b.held.is_none() && self.cfg.observability.is_some() && due()).then_some(now + REFRESH_LEASE_MS);
+        if let Some(until) = held {
+            self.exec("INSERT INTO glance_kept (shape, busy_until) VALUES (?, ?) ON CONFLICT (shape) DO UPDATE SET busy_until = excluded.busy_until", vec![shape(), at_ms(until)])?;
+        }
+        let (kept_at, kept_day, answer, computers, week, week_at) = kept.map_or((None, None, None, None, None, None), |k| (k.at, k.day_start, k.answer, k.computers, k.week, k.week_at));
         #[derive(Deserialize)]
         struct Counts {
             hour: u64,
@@ -312,7 +397,7 @@ impl RegistryCell {
             day_in: u64,
             week_in: u64,
         }
-        let at = |ms: i64| SqlStorageValue::Integer(ms);
+        let at = at_ms;
         let c = self
             .row::<Counts>(
                 "SELECT (SELECT COUNT(*) FROM identities WHERE kind = 'person' AND created_at >= ?) AS hour,
@@ -346,8 +431,11 @@ impl RegistryCell {
         // whose: a person's computer's id is its owner's hash, so each
         // person is hashed (a few thousand: microseconds each) when any
         // computer is named
+        // whose: the computers the answer kept names
+        let computers = computers.unwrap_or_default();
+        let computers: Vec<&str> = computers.split('\n').filter(|c| !c.is_empty()).take(TROUBLE_MAX).collect();
         let mut owners = Vec::new();
-        if !b.computers.is_empty() {
+        if !computers.is_empty() {
             #[derive(Deserialize)]
             struct Id {
                 id: String,
@@ -359,7 +447,7 @@ impl RegistryCell {
             )?;
             for p in people {
                 let computer = fragment_core::computer::default_computer_of(&p.id);
-                if b.computers.contains(&computer) {
+                if computers.contains(&computer.as_str()) {
                     owners.push((computer, p.id, p.email));
                 }
             }
@@ -369,6 +457,12 @@ impl RegistryCell {
             signed_in: GlanceSignedIn { day: c.day_in, week: c.week_in },
             new_people,
             owners,
+            kept: answer,
+            kept_at,
+            kept_day,
+            week,
+            week_at,
+            held,
         })
     }
 

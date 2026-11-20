@@ -789,6 +789,13 @@ impl RegistryCell {
                 let made = self.rows::<Value>("UPDATE invites_waiting SET role = NULL, title = NULL, sharer = NULL WHERE email = ? RETURNING fragment", vec![email.into()])?;
                 Ok(json!({ "before": made.len() }))
             }
+            TestHook::GlanceOlder(ms) => {
+                if !(0..=fragment_core::glance::OLDER_MAX_MS).contains(&ms) {
+                    return Err(CellError::invalid(format!("older by 0 to {} ms", fragment_core::glance::OLDER_MAX_MS)));
+                }
+                let older = self.rows::<Value>("UPDATE glance_kept SET at = at - ? WHERE at IS NOT NULL RETURNING shape", vec![SqlStorageValue::Integer(ms)])?;
+                Ok(json!({ "older": older.len() }))
+            }
             TestHook::CompEnds(email) => {
                 let ends = self.rows::<Value>("SELECT until_ms FROM org_members WHERE email = ? AND comped = 1 ORDER BY added_at, id", vec![signin::email_of(&email).unwrap_or_default().into()])?;
                 Ok(json!({ "ends": ends.iter().map(|r| r["until_ms"].clone()).collect::<Vec<_>>() }))

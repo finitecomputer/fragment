@@ -17,6 +17,8 @@ use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use fragment_core::glance::{Question, QUERY_ID};
+
 use super::computers::{lever, lever_with, notice, QUEUE_DRAIN};
 
 use crate::api::{Api, Call, Reply};
@@ -423,11 +425,41 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
             let _ = b.screenshot(&page, &shots.join(name));
         }
         b.viewport(&page, 1280, 900, false)?;
-        // no cache: a computer awake since, and the glance read again
+        // the glance read again: its line cleared first, to see it written
+        let reread = |b: &mut crate::browser::Browser| -> Result<()> {
+            b.eval(&page, "document.getElementById('glance-at').textContent = ''")?;
+            b.click(&page, "#tabs button[data-tab=glance]")
+        };
+        let lines = |b: &mut crate::browser::Browser| b.eval(&page, "[document.getElementById('glance-at').textContent, document.getElementById('glance-logs').textContent]");
+        // within its life: the numbers kept, a computer awake since not yet counted
         s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
-        b.click(&page, "#tabs button[data-tab=glance]")?;
-        let again = b.until(&page, &format!("[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now')?.querySelector('.big').textContent === '{}'", awake + 1), wait);
-        s.ok("read again, the glance asks afresh: a computer awake since counts", again, tile(&mut b)?);
+        reread(&mut b)?;
+        let kept = b.until(&page, "/^Updated .* · logs as of just now · this week's as of /.test(document.getElementById('glance-at').textContent)", wait);
+        s.ok("read again within its life, the page shows the numbers kept, and how old they are", kept && tile(&mut b)? == json!(awake.to_string()), json!({ "tile": tile(&mut b)?, "lines": lines(&mut b)? }));
+        // past its life (made older by the registry's lever) a read counts
+        // it; then, older again, refused (429): the last numbers stand,
+        // with how old, and why
+        let older = || api.unsigned("POST", "/api/test/registry", Some(&json!({ "glanceOlder": fragment_core::glance::NOW_LIFE_MS })));
+        older()?;
+        let again = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={day}"), None)?;
+        let counted = again.body["logs"]["computersAwakeNow"] == awake + 1;
+        older()?;
+        s.observability.fail_next(429, "Too many requests");
+        reread(&mut b)?;
+        let refused = b.until(
+            &page,
+            &format!("/^Newer numbers couldn't be read: .*Too many requests$/.test(document.getElementById('glance-logs').textContent) && /logs as of 2 minutes ago/.test(document.getElementById('glance-at').textContent) && [...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now').querySelector('.big').textContent === '{}'", awake + 1),
+            wait,
+        );
+        s.ok("read again past its life, a computer awake since counts; when the logs then answer 429, the page keeps the last numbers read, says how old, and why newer ones couldn't be read", counted && refused, json!({ "tile": tile(&mut b)?, "lines": lines(&mut b)?, "read": again.body["logs"]["computersAwakeNow"] }));
+        for (width, height, mobile, name) in [(1280, 900, false, "glance-kept-1280.png"), (390, 844, true, "glance-kept-390.png")] {
+            b.viewport(&page, width, height, mobile)?;
+            let _ = b.screenshot(&page, &shots.join(name));
+        }
+        b.viewport(&page, 1280, 900, false)?;
+        reread(&mut b)?;
+        let afresh = b.until(&page, "/logs as of just now/.test(document.getElementById('glance-at').textContent) && document.getElementById('glance-logs').textContent === ''", wait);
+        s.ok("the next read reads afresh, and the warning goes", afresh, lines(&mut b)?);
         b.eval(&page, &format!("[...document.querySelectorAll('#trouble-rows tr')].find(r => r.textContent.includes({glancer_email:?})).click()"))?;
         let opened = b.until(&page, &format!("!document.getElementById('people').hidden && !document.getElementById('person').hidden && document.getElementById('person').textContent.includes({glancer_email:?})"), wait);
         s.ok("a person in trouble opens their page", opened, b.eval(&page, "document.getElementById('person').textContent")?);
@@ -482,11 +514,13 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// The operators' glance (`GET /api/admin/glance`): the registry's people
-/// and the logs' numbers, read afresh each time, from lines planted in the
-/// Workers Observability fake (a local run's); an operator's alone. Valid,
-/// invalid (another caller, a day that is not today), and the logs' read
-/// failing (the registry's numbers stay). Hosted, it answers its shape.
+/// The operators' glance (`GET /api/admin/glance`): the registry's people,
+/// and the logs' numbers from lines planted in the Workers Observability
+/// fake (a local run's), as the registry kept them; an operator's alone.
+/// Valid, kept (a read within its life asks nothing; two loads at once read
+/// once), invalid (another caller, a day that is not today), the logs' read
+/// failing (only why saves failed; a 429: the last numbers stand), and the
+/// read after a refusal. Hosted, it answers its shape.
 fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, ivy_email: &str) -> Result<()> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
     let day = now - 3_600_000;
@@ -526,6 +560,8 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed", "why": "another deployment's" } })));
     s.observability.log(now - 1_000, of(foreign, json!({ "computer": saver, "event": { "event": "save_failed", "why": "another deployment's" } })));
     s.observability.log(now - 5_000, of(foreign, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "frag-elsewhere" })));
+    let asked = |s: &Suite| s.observability.asked();
+    let before = asked(s).len();
     let r = ask(operator, day)?;
     let b = &r.body;
     let listed = b["newPeople"].as_array().into_iter().flatten().find(|p| p["npub"] == ivy_id).cloned().unwrap_or(Value::Null);
@@ -557,11 +593,30 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
             && read.get("whyUnread").is_none(),
         read,
     );
-    let asked = s.observability.asked();
+    // a day not kept: the now part read, and the week's when it is due
+    // (none kept in a fresh run, or older than its hour)
+    let first = asked(s).split_off(before);
+    // every question but the week's, which is asked only hourly
+    let now_part = Question::ALL.len() - 1;
+    let week_read = read["weekAt"] == read["at"];
     s.ok(
-        "each read asks afresh: one query a question, with the account's read-only key, each of this deployment's Worker",
-        asked.len() == fragment_core::glance::Question::ALL.len() && asked.iter().all(|q| q["queryId"] == fragment_core::glance::QUERY_ID && q["parameters"]["filters"][0]["value"] == crate::OBSERVABILITY_SCRIPT),
-        json!(asked.len()),
+        "a read of a day not kept asks each of the now part's questions once, and the week's when due, with the account's read-only key, each of this deployment's Worker, and says when it read them",
+        read["at"] == b["at"]
+            && read["weekAt"].as_i64() <= read["at"].as_i64()
+            && first.len() == now_part + usize::from(week_read)
+            && first.iter().all(|q| q["queryId"] == QUERY_ID && q["parameters"]["filters"][0]["value"] == crate::OBSERVABILITY_SCRIPT),
+        json!({ "asked": first.len(), "at": read["at"], "weekAt": read["weekAt"] }),
+    );
+    // within its life: what was kept, with no query, so a computer awake
+    // since counts only once its part is read again
+    let since = "computer:000000000000000000000a12";
+    s.observability.log(now - 1_000, of(ours, json!({ "computer": since, "phase": { "phase": "awake" } })));
+    let before = asked(s).len();
+    let again = ask(operator, day)?;
+    s.ok(
+        "read again within its life (two minutes), the glance asks the logs nothing: the numbers it kept, read when they were, a computer awake since not yet counted",
+        again.status == 200 && asked(s).len() == before && again.body["logs"] == *read,
+        json!({ "asked": asked(s).len() - before, "logs": again.body["logs"] }),
     );
     let person = ask(ivy, day)?;
     let tomorrow = ask(operator, now + 3_600_000)?;
@@ -575,31 +630,79 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         json!([person.status, tomorrow.status, stale.status, least.status, most.status]),
     );
     // why saves failed is the lines themselves, which may run past the
-    // cell's bound on an answer: its read failing alone takes nothing else
+    // cell's bound on an answer: its read failing alone takes nothing else.
+    // Another day's start is not kept: its now part is read again, and the
+    // week's is not (kept for its hour).
     s.observability.fail_next_events(400, "too many events to answer");
-    let partial = ask(operator, day)?;
+    let before = asked(s).len();
+    let partial = ask(operator, day - 1)?;
     let logs = &partial.body["logs"];
     let rows = logs["trouble"].as_array().cloned().unwrap_or_default();
     s.ok(
-        "when only why saves failed can't be read, the logs' numbers and trouble stand, no row says why, and the glance says why not",
+        "a read of another day reads the now part again, not the week's, whose count takes in today's computers since; when only why saves failed can't be read, the logs' numbers and trouble stand, no row says why, and the glance says why not",
         partial.status == 200
+            && asked(s).len() - before == now_part
             && logs["state"] == "read"
-            && logs["computersAwakeWeek"] == read["computersAwakeWeek"]
+            && logs["at"] == partial.body["at"]
+            && logs["weekAt"] == read["weekAt"]
+            && logs["computersAwakeNow"] == 2
+            && logs["computersAwakeWeek"] == 3
             && rows.iter().map(|t| (&t["computer"], &t["kind"])).eq(trouble.iter().map(|t| (&t["computer"], &t["kind"])))
             && rows.iter().all(|t| t.get("why").is_none())
             && logs["whyUnread"].as_str().is_some_and(|w| w.contains("SaveWhys") && w.contains("too many events to answer")),
-        logs,
+        json!({ "asked": asked(s).len() - before, "logs": logs }),
     );
-    s.observability.fail_next(403, "Authentication error");
-    let failed = ask(operator, day)?;
+    // two loads at once of a day not kept: one reads; the other, while it
+    // does, has nothing of that day to show and says so (or, after it,
+    // shows what it read)
+    let before = asked(s).len();
+    let (one, two) = std::thread::scope(|scope| {
+        let one = scope.spawn(|| ask(operator, day - 2));
+        let two = scope.spawn(|| ask(operator, day - 2));
+        (one.join(), two.join())
+    });
+    let both = [one.map_err(|_| anyhow::anyhow!("a load panicked"))??, two.map_err(|_| anyhow::anyhow!("a load panicked"))??];
+    let reading = |l: &Value| l["state"] == "failed" && l["why"] == fragment_core::glance::BEING_READ;
     s.ok(
-        "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown",
-        failed.status == 200
-            && failed.body["logs"]["state"] == "failed"
-            && failed.body["logs"]["why"].as_str().is_some_and(|w| w.contains("Authentication error"))
-            && failed.body["signups"] == b["signups"]
-            && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null()),
-        &failed,
+        "two loads at once read the logs once between them: the other shows what was read, or says it is being read, never another day's today",
+        both.iter().all(|r| r.status == 200 && (r.body["logs"]["state"] == "read" || reading(&r.body["logs"])))
+            && both.iter().any(|r| r.body["logs"]["state"] == "read")
+            && asked(s).len() - before == now_part,
+        json!({ "asked": asked(s).len() - before, "logs": [&both[0].body["logs"]["state"], &both[1].body["logs"]["state"]] }),
+    );
+    let kept = both.iter().map(|r| &r.body["logs"]).filter(|l| l["state"] == "read").max_by_key(|l| l["at"].as_i64()).cloned().unwrap_or_default();
+    // Cloudflare limits the query API per account: past its life (the
+    // kept answers made older by the registry's lever), a read refused
+    // (429) leaves the last numbers standing, with when and why, and asks
+    // nothing more
+    let older = |api: &Api| api.unsigned("POST", "/api/test/registry", Some(&json!({ "glanceOlder": fragment_core::glance::NOW_LIFE_MS })));
+    let made = older(api)?;
+    s.observability.fail_next(429, "Too many requests");
+    let before = asked(s).len();
+    let refused = ask(operator, day - 2)?;
+    let logs = &refused.body["logs"];
+    s.ok(
+        "when the logs answer 429 (Too many requests), the glance shows the last numbers read, when they were, and why newer ones weren't; it asks nothing after the refusal",
+        made.body["older"] == 1
+            && refused.status == 200
+            && logs["state"] == "read"
+            && logs["whyKept"].as_str().is_some_and(|w| w.contains("Too many requests"))
+            && logs["at"].as_i64() == kept["at"].as_i64().map(|at| at - fragment_core::glance::NOW_LIFE_MS)
+            && logs["computersAwakeNow"] == kept["computersAwakeNow"]
+            && logs["trouble"] == kept["trouble"]
+            && asked(s).len() - before < fragment_core::glance::ASKED_AT_ONCE
+            && refused.body["signups"] == b["signups"]
+            && refused.body["newPeople"].as_array().into_iter().flatten().any(|p| p["npub"] == ivy_id && p["computerUp"] == true),
+        json!({ "asked": asked(s).len() - before, "logs": logs }),
+    );
+    // the refusal let go of its hold: the next load reads again
+    let before = asked(s).len();
+    let after = ask(operator, day - 2)?;
+    let logs = &after.body["logs"];
+    s.ok(
+        "the read after a refusal reads the logs again: new numbers, no why",
+        after.status == 200 && asked(s).len() - before == now_part && logs["at"] == after.body["at"] && logs.get("whyKept").is_none() && logs["computersAwakeNow"] == 2,
+        json!({ "asked": asked(s).len() - before, "logs": logs }),
     );
     Ok(())
 }

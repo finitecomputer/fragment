@@ -1,8 +1,8 @@
-// The glance's trouble rows in words (admin.js): what each kind of
-// trouble is, and for a failed save, why, as the glance read its newest
-// line (`GET /api/admin/glance`, `why`: the platform's words, short, a
-// person's paths left out), with when, and a short label when the words
-// are of one of a few kinds.
+// The glance in words (admin.js): how old its logs' numbers are, and its
+// trouble rows: what each kind of trouble is, and for a failed save, why,
+// as the glance read its newest line (`GET /api/admin/glance`, `why`: the
+// platform's words, short, a person's paths left out), with when, and a
+// short label when the words are of one of a few kinds.
 
 const TROUBLE = { wont_wake: "won't wake", saves_failing: "a save failed", disk_filling: "disk nearly full" };
 
@@ -25,4 +25,14 @@ export function troubleWhat(t, when) {
   if (!t.why) return { what, why: null };
   const label = KINDS.find(([words]) => words.test(t.why.text))?.[1];
   return { what, why: [label, when(t.why.at), t.why.text].filter(Boolean).join(" · ") };
+}
+
+/** How long before `now` the logs' numbers at `at` were read (both ms,
+ * the cell's clock), as the glance says it: "as of 3 minutes ago". */
+export function ago(at, now) {
+  const minutes = Math.floor(Math.max(0, now - at) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return minutes === 1 ? "a minute ago" : `${minutes} minutes ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours === 1 ? "an hour ago" : `${hours} hours ago`;
 }
