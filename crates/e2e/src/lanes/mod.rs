@@ -1,5 +1,6 @@
 //! The sections, in the order they run.
 
+mod acp;
 mod admin;
 mod agent_app;
 mod agent_ask;

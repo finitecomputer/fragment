@@ -71,7 +71,7 @@ impl Agent {
     }
 }
 
-fn label(name: &str) -> &str {
+pub(crate) fn label(name: &str) -> &str {
     fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label)
 }
 
@@ -94,7 +94,7 @@ pub fn pick<'a>(agents: &'a [Agent], who: &str) -> Result<&'a Agent, Vec<&'a Age
 }
 
 /// `s` cut to at most `max` bytes (a label is ASCII), never ending in `-`.
-fn cut_label(s: &str, max: usize) -> String {
+pub(crate) fn cut_label(s: &str, max: usize) -> String {
     let cut: String = s.chars().take(max).collect();
     cut.trim_end_matches('-').to_string()
 }
@@ -198,7 +198,7 @@ pub struct Asked {
     pub waited_s: Option<u64>,
 }
 
-fn coded(code: Code, msg: impl Into<String>) -> anyhow::Error {
+pub(crate) fn coded(code: Code, msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(CodedError { code, msg: msg.into() })
 }
 
@@ -213,7 +213,7 @@ struct Computers {
 }
 
 /// The asker (an agent; none for a person) and the agents it may ask.
-fn roster(c: &Client) -> Result<(Option<Agent>, Vec<Agent>)> {
+pub(crate) fn roster(c: &Client) -> Result<(Option<Agent>, Vec<Agent>)> {
     match c.agent() {
         Some(mode) => {
             // the computer's own route: every agent it runs, all its owner's
@@ -229,7 +229,7 @@ fn roster(c: &Client) -> Result<(Option<Agent>, Vec<Agent>)> {
 }
 
 /// The chat's members, or none when there is no such chat.
-fn members(c: &Client, chat: &str) -> Result<Option<MemberList>> {
+pub(crate) fn members(c: &Client, chat: &str) -> Result<Option<MemberList>> {
     let r = c.get(&format!("/api/f/{chat}/members"))?;
     if r.status == 404 {
         return Ok(None);
@@ -245,7 +245,7 @@ pub const UNTITLED_CHAT: &str = "New chat";
 /// Each agent's name, as the signer's list says it now: a person's own
 /// list, or an agent's of its owner's (`?for=`), where its owner's agents
 /// are. A list that does not read names them by their labels.
-fn named(c: &Client, asker: Option<&Agent>, agents: &mut [Agent]) {
+pub(crate) fn named(c: &Client, asker: Option<&Agent>, agents: &mut [Agent]) {
     let Ok(v) = c.get(&names_path(&c.signer, asker)).and_then(|r| c.call(r)) else { return };
     let listed = v["fragments"].as_array().cloned().unwrap_or_default();
     for a in agents.iter_mut() {
@@ -409,7 +409,7 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
 
 /// Records of `channel` after `after`, at most `PAGES_MAX` pages, and the
 /// cursor after them.
-fn records_after(c: &Client, chat: &str, channel: &str, after: i64) -> Result<(Vec<Value>, i64)> {
+pub(crate) fn records_after(c: &Client, chat: &str, channel: &str, after: i64) -> Result<(Vec<Value>, i64)> {
     let (mut out, mut cursor) = (Vec::new(), after);
     // bounded: PAGES_MAX pages
     for _ in 0..PAGES_MAX {

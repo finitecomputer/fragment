@@ -26,45 +26,22 @@
 //! left (docs/api.md, Ledger), the quote route's question its arguments.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 
 use anyhow::Result;
 use fragment_proto::{ErrorBody, FragmentStatus, OpCall, OpDecl, OpKind, OpResult, Role};
 use serde_json::{json, Map, Value};
 
 use crate::api::{Client, Code, CodedError, Resp};
+// a line's reading, an answer's shape and the protocol's error codes: the
+// CLI's two stdio servers share them (jsonrpc.rs)
+pub use crate::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, MESSAGE_MAX_BYTES, METHOD_NOT_FOUND, PARSE_ERROR};
+use crate::jsonrpc::{failure, read_line, success, Line, RpcError};
 
 /// The revisions this server answers in kind, newest first: it serves
 /// tools alone, whose messages they share. A client offering another is
 /// answered with the newest, and chooses whether to go on.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-/// One message, at most: an operation's input is at most 256 KiB
-/// (`limits::INPUT_MAX_BYTES`), and the rest of a call is small. A longer
-/// line is read to its end and refused, and the session goes on.
-pub const MESSAGE_MAX_BYTES: usize = 1024 * 1024;
-
-// JSON-RPC's error codes (MCP answers an unknown tool with -32602).
-pub const PARSE_ERROR: i64 = -32700;
-pub const INVALID_REQUEST: i64 = -32600;
-pub const METHOD_NOT_FOUND: i64 = -32601;
-pub const INVALID_PARAMS: i64 = -32602;
-pub const INTERNAL_ERROR: i64 = -32603;
-
-/// An error answered as JSON-RPC's `error`, with the platform's (or the
-/// CLI's) code in its `data` when there is one.
-#[derive(Debug)]
-struct RpcError {
-    code: i64,
-    message: String,
-    data: Option<Value>,
-}
-
-impl RpcError {
-    fn new(code: i64, message: impl Into<String>) -> RpcError {
-        RpcError { code, message: message.into(), data: None }
-    }
-}
-
 /// Why an operation the fragment declares is no tool of this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotTool {
@@ -224,52 +201,10 @@ pub fn serve(client: &Client, fragment: &str, write: bool, mut input: impl BufRe
             },
         };
         if let Some(answer) = answer {
-            let mut text = serde_json::to_vec(&answer).expect("a JSON value serializes");
-            assert!(!text.contains(&b'\n'), "a message is one line");
-            text.push(b'\n');
-            output.write_all(&text)?;
+            output.write_all(&crate::jsonrpc::line(&answer))?;
             output.flush()?;
         }
     }
-}
-
-enum Line {
-    Text,
-    TooLong,
-    End,
-}
-
-/// The next line into `buf`, at most `MESSAGE_MAX_BYTES` of it: a longer
-/// one is read to its end, 64 KiB at a time, and dropped.
-fn read_line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Line> {
-    buf.clear();
-    let limit = u64::try_from(MESSAGE_MAX_BYTES).expect("the limit fits") + 1;
-    if input.by_ref().take(limit).read_until(b'\n', buf)? == 0 {
-        return Ok(Line::End);
-    }
-    if buf.last() == Some(&b'\n') || buf.len() <= MESSAGE_MAX_BYTES {
-        return Ok(Line::Text);
-    }
-    let mut rest = Vec::new();
-    // bounded by the client's line: each pass reads at most 64 KiB of it
-    loop {
-        rest.clear();
-        if input.by_ref().take(64 * 1024).read_until(b'\n', &mut rest)? == 0 || rest.last() == Some(&b'\n') {
-            return Ok(Line::TooLong);
-        }
-    }
-}
-
-fn success(id: Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn failure(id: Value, e: RpcError) -> Value {
-    let mut error = json!({ "code": e.code, "message": e.message });
-    if let Some(data) = e.data {
-        error["data"] = data;
-    }
-    json!({ "jsonrpc": "2.0", "id": id, "error": error })
 }
 
 impl Server<'_> {
