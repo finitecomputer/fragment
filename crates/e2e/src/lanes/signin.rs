@@ -383,15 +383,41 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let back = api.external(&to)?;
-    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound.clone(), ..Call::default() })?;
     let ends = done.header("location");
     s.ok(
-        "WorkOS answering it from the session it holds, it signs no one in, and sends the browser to end that session at WorkOS",
-        done.status == 302 && ends == to_logout(&held) && session_set(&done).is_none() && cookie_line(&done, "fragment_switch").contains("Max-Age=0"),
+        "WorkOS answering it from the session it holds, it signs no one in, and sends the browser to end that session at WorkOS, the switch still bound to the browser",
+        done.status == 302 && ends == to_logout(&held) && session_set(&done).is_none() && cookie_line(&done, "fragment_switch").is_empty(),
         &done,
+    );
+    // The page's Continue, pressed while its Refresh had the browser on
+    // its way already: the same authorize again, after that first callback
+    // was answered (its answer lost to the second navigation, or followed)
+    let continues = r.text.contains(&format!("<a href=\"{}\">Continue</a>", to.replace('&', "&amp;")));
+    let again = api.external(&to)?;
+    let twice = api.call(Call { method: "GET", url: again.header("location"), cookie: bound.clone(), ..Call::default() })?;
+    s.ok(
+        "its page's Continue (a link to its Refresh's address), pressed while the browser was already on its way, is the same switch again: answered from the same session, it ends that one too, signing no one in",
+        continues && twice.status == 302 && twice.header("location") == to_logout(&held) && session_set(&twice).is_none(),
+        &twice,
     );
     let out = api.external(&ends)?;
     s.ok("which ends it, and comes back to the platform", out.status == 302 && out.header("location") == home && s.workos.held().is_none(), &out);
+    // pressed once WorkOS ended that session: it asks who is signing in,
+    // and that sign-in spends the switch
+    let asks = api.external(&to)?;
+    let back = api.external(&format!("{to}&login_hint=switch-c@e2e.test"))?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound.clone(), ..Call::default() })?;
+    let c = session_set(&done).context("a switch's Continue someone signed in to sets a session")?;
+    let r = who(api, &c)?;
+    s.ok(
+        "pressed after WorkOS ended that session, WorkOS asks who is signing in, and whoever signs in is signed in, back where the switch began, its binding spent",
+        asks.status == 200 && asks.text.contains("sign in as") && done.status == 302 && done.header("location").ends_with("/settings") && r["email"] == "switch-c@e2e.test" && cookie_line(&done, "fragment_switch").contains("Max-Age=0"),
+        &r,
+    );
+    let back = api.external(&format!("{to}&login_hint=switch-c@e2e.test"))?;
+    let late = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    s.ok("and once someone signed in to it, the same switch is spent: refused (400), signing no one in", late.status == 400 && session_set(&late).is_none(), &late);
 
     // with none held, WorkOS asks, and whoever signs in is signed in
     let r = switch(api, "/settings", None)?;
