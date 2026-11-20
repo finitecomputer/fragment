@@ -1095,6 +1095,7 @@ value Reason stripe_refused
 value Reason too_many_offers
 value Reason trial_ended
 value Reason trial_not_here
+value Reason trial_seat_of_one
 value Reason trial_taken
 value Reason trial_unknown
 value Reason trial_used
