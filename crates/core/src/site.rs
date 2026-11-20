@@ -343,7 +343,7 @@ fn plain_start(path: &[u8]) -> bool {
 }
 
 /// `bytes` with each `%XX` decoded; a malformed escape stays as it is.
-fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
     let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

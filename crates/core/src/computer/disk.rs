@@ -106,45 +106,67 @@ pub const DISK_READ: &str = "df -P -B1 /";
 
 /// What reads a computer's disk and what its `/data` restores to after an
 /// awake save, run in its container (`disk_of_sizes` reads its answer):
-/// `DISK_READ`, then `du` of `/data`, allocated (KiB) and apparent (bytes),
-/// each line named, leaving out what that save left out (`left_out`, the
-/// held guest's patterns, anchored to `/data`) as GNU's `du --exclude`
-/// does: what is kept is measured, so a file hard-linked between a cache
-/// left out and the work kept (uv's and pnpm's caches link into a project)
-/// counts once, where it restores (Alex's review of #1421: subtracting the
-/// caches' own `du` dropped it). A `du` with no `--exclude` (BusyBox's: the
-/// stub) counts all of `/data`, more than restores. A pattern is a `du`
-/// pattern here, anchored at `./`, `*` and `?` as in the save's (a `*` may
-/// also cross a `/`: what it names counts as left out); one outside the
+/// `DISK_READ`, then a line for each record its save takes, measured as
+/// that save takes it (cell/src/computer.rs, `save`): `home` (`/data` but
+/// its work, less what its held guest named: `left_out`, anchored to
+/// `/data`) and `work` (`/data/work`, less what it named under its work:
+/// `work_left_out`), each allocated (KiB) and apparent (bytes). Measured
+/// apart, a file hard-linked between the two counts in each, as each record
+/// restores its own copy, and a guest that names its whole work leaves out
+/// nothing of it, as its work's record does (Codex on #1421). A left-out
+/// path is left out of the walk as GNU's `du --exclude` does, so a file
+/// linked from a cache into the work kept counts where it restores (Alex's
+/// review of #1421). A `du` with no `--exclude` (BusyBox's: the stub) gives
+/// `all`, every byte of `/data`. A step that fails prints its line with no
+/// number, never another's (`disk_of_sizes` reads none then). A pattern
+/// is a `du` pattern, anchored at `./`, `*` and `?` as in the save's (a `*`
+/// may also cross a `/`: what it names counts as left out); one outside the
 /// patterns' alphabet or with a `..` is not used, and what it names counts
 /// as restored.
 ///
-/// With them, what its owner's Storage shows (`sizes_of`): the folders it
-/// keeps to `SIZES_DEPTH` below `/data`, allocated (KiB), biggest first
-/// (the first is `/data`'s own, its total kept), and its files of at least
-/// `SIZES_FILE_MIN_KIB` wherever they are (a cache's too), biggest first,
-/// each at most as many as a summary holds and a line each. Three walks of
-/// `/data`, after its save's backups read it all.
+/// Before them, what its owner's Storage shows (`sizes_of`): the folders
+/// of all of `/data`, its caches too, to `SIZES_DEPTH` below it, allocated
+/// (KiB), biggest first (`/data`'s own, `.`, among them), and its files of
+/// at least `SIZES_FILE_MIN_KIB` wherever they are, biggest first, each at
+/// most as many as a summary holds, a line each: GNU's `du -0` frames each,
+/// so a newline in a name reads as `?` and forges no line (Codex on
+/// #1426); a line past its bound is dropped, in bytes; each walk ends
+/// within `SIZES_WALK_S`; its errors are dropped. So the whole answer is
+/// within what the cell keeps of it, its df and records last (after
+/// `end`).
 pub fn sizes_read(left_out: &[String]) -> String {
     let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
-    let exclude: String = left_out.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" --exclude='./{p}'")).collect();
-    let read = |ex: &str| {
-        format!(
-            "printf 'apparent ' && du -sxb{ex} . && echo folders && du -xk -d {SIZES_DEPTH}{ex} . | awk 'length < {line}' | sort -rn | head -n {} && echo files && find . -xdev -type f -size +{SIZES_FILE_MIN_KIB}k -exec du -k {{}} + 2>/dev/null | awk 'length < {line}' | sort -rn | head -n {SIZES_FILES_MAX}",
-            SIZES_FOLDERS_MAX + 1,
-            line = SIZE_LINE_MAX_BYTES
-        )
-    };
-    if exclude.is_empty() {
-        return format!("{DISK_READ} && cd /data && {}", read(""));
-    }
-    format!("{DISK_READ} && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then {}; else {}; fi", read(&exclude), read(""))
+    let exclude = |patterns: Vec<String>| -> String { patterns.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" --exclude='./{p}'")).collect() };
+    let home = exclude(std::iter::once("/work/".to_string()).chain(left_out.iter().cloned()).collect());
+    let work = exclude(crate::computer::held::work_left_out(left_out));
+    let measured = |ex: &str| format!("$(du -sxk{ex} . 2>/dev/null | cut -f1) $(du -sxb{ex} . 2>/dev/null | cut -f1)");
+    let records = format!(
+        "{DISK_READ}; if du -s --exclude=x /dev/null > /dev/null 2>&1; then cd /data && echo \"home {}\"; {{ cd /data/work && echo \"work {}\"; }} || echo work; else cd /data && echo \"all {}\"; fi",
+        measured(&home),
+        measured(&work),
+        measured("")
+    );
+    // what takes the disk: all of /data, its caches too; each record a line
+    // (GNU's du -0, a newline in a name read as `?`: a name forges no line),
+    // a line past its bound dropped (bytes: LC_ALL=C), each walk bounded
+    let listing = format!(
+        "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() {{ tr '\\n\\0' '?\\n'; }}; else z=; framed() {{ cat; }}; fi; echo folders; timeout {t} du $z -xk -d {SIZES_DEPTH} . 2>/dev/null | framed | LC_ALL=C awk 'length < {line}' | sort -rn | head -n {}; echo files; timeout {t} find . -xdev -type f -size +{SIZES_FILE_MIN_KIB}k -exec du $z -k {{}} + 2>/dev/null | framed | LC_ALL=C awk 'length < {line}' | sort -rn | head -n {SIZES_FILES_MAX}",
+        SIZES_FOLDERS_MAX + 1,
+        t = SIZES_WALK_S,
+        line = SIZE_LINE_MAX_BYTES
+    );
+    // its df and its records last, after the listing's bounded lines
+    format!("{listing}; echo end; {records}")
 }
 
 /// How deep below `/data` a size summary lists its folders: an agent's
 /// work (`work/<agent>`), its home and browser profile, and their caches
 /// (`work/<agent>/home/.cache`).
 pub const SIZES_DEPTH: u32 = 4;
+/// Each walk of a size summary's listing ends within this many seconds
+/// (`timeout`), so its records and its df are read within the read's own
+/// bound (`SIZES_READ_MS` in the cell, 30 s) whatever the listing does.
+pub const SIZES_WALK_S: u32 = 8;
 /// The folders and the files a size summary lists at most, the biggest
 /// first, and the least a file it lists holds (10 MiB, in KiB).
 pub const SIZES_FOLDERS_MAX: usize = 64;
@@ -155,34 +177,38 @@ pub const SIZES_FILE_MIN_KIB: u64 = 10 * 1024;
 /// first): its owner's view carries it whole.
 pub const SIZE_PATH_MAX_BYTES: usize = 400;
 pub const SIZES_PATHS_MAX_BYTES: usize = 16 * 1024;
-/// A listing's line the container drops past (`awk`), its count, a tab
-/// and `./` beside a path at most `SIZE_PATH_MAX_BYTES`; so `sizes_read`'s
-/// whole answer is at most `SIZES_READ_MAX_BYTES`, which the cell keeps
-/// of it (an exec keeps its answer's tail).
+/// A listing's line the container drops past (`awk`, in bytes), its count,
+/// a tab and `./` beside a path at most `SIZE_PATH_MAX_BYTES`; so
+/// `sizes_read`'s whole answer is at most `SIZES_READ_MAX_BYTES`, which the
+/// cell keeps of it (an exec keeps its answer's tail).
 pub const SIZE_LINE_MAX_BYTES: usize = SIZE_PATH_MAX_BYTES + 24;
 pub const SIZES_READ_MAX_BYTES: usize = 64 * 1024;
-const _: () = assert!(512 + (SIZES_FOLDERS_MAX + 1 + SIZES_FILES_MAX) * SIZE_LINE_MAX_BYTES <= SIZES_READ_MAX_BYTES, "a summary's whole answer is kept");
+const _: () = assert!(1024 + (SIZES_FOLDERS_MAX + 1 + SIZES_FILES_MAX) * SIZE_LINE_MAX_BYTES <= SIZES_READ_MAX_BYTES, "a summary's whole answer is kept");
 
 /// The `N\t./path` lines of `sizes_read`'s answer after `section`'s line,
 /// up to the next section's: KiB and the path below `/data` (`.` its own).
 fn listed<'a>(out: &'a str, section: &'static str) -> impl Iterator<Item = (u64, &'a str)> {
-    out.lines().skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files")).filter_map(|l| {
+    out.lines().skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files" | "end")).filter_map(|l| {
         let (n, path) = l.split_once('\t')?;
         Some((n.trim().parse::<u64>().ok()?, path))
     })
 }
 
 /// What its owner's Storage shows, from `sizes_read`'s answer read at
-/// `at_ms`: its biggest folders below `/data` (its own total left out:
-/// `disk_of_sizes`) and its biggest files, each in bytes allocated, a path
-/// below `/data` a line, printable and at most `SIZE_PATH_MAX_BYTES`, as
-/// many as `SIZES_FOLDERS_MAX` and `SIZES_FILES_MAX`, their paths
-/// together at most `SIZES_PATHS_MAX_BYTES`. None for an answer with no
-/// folders.
+/// `at_ms`: `/data`'s own total (GNU's `.`; BusyBox's `all` record, as a
+/// name there could forge a `.`), its biggest folders below it and
+/// its biggest files, each in bytes allocated, a path below `/data` a line,
+/// printable and at most `SIZE_PATH_MAX_BYTES`, as many as
+/// `SIZES_FOLDERS_MAX` and `SIZES_FILES_MAX`, their paths together at most
+/// `SIZES_PATHS_MAX_BYTES`. None for an answer with no folders.
 pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
     if !out.lines().any(|l| l.trim() == "folders") {
         return None;
     }
+    // BusyBox frames no name, so a newline in one could forge a `.` line:
+    // its `all` record (after `end`) is its total; GNU's `.` is framed
+    let all = out.lines().skip_while(|l| l.trim() != "end").find_map(|l| l.strip_prefix("all ")?.split_whitespace().next()?.parse::<u64>().ok());
+    let total = all.or_else(|| listed(out, "folders").find(|(_, path)| *path == ".").map(|(kib, _)| kib)).map(|kib| kib.saturating_mul(1024));
     let mut room = SIZES_PATHS_MAX_BYTES;
     let mut take = |section: &'static str, max: usize| -> Vec<SizeEntry> {
         let mut got = Vec::new();
@@ -198,12 +224,14 @@ pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
     };
     let folders = take("folders", SIZES_FOLDERS_MAX);
     let files = take("files", SIZES_FILES_MAX);
-    Some(ComputerSizes { at: at_ms, folders, files, kinds: vec![] })
+    Some(ComputerSizes { at: at_ms, total, folders, files, kinds: vec![] })
 }
 
 /// What a summary's folders hold, by kind, the most first, none empty
-/// (its owner's Storage). Its agents' own: the folders of `/data` but its
-/// work (the seam: docs/computers.md, "Data and the restore gate"). In its
+/// (its owner's Storage). Its agents' own: all of `/data` (`total`) but its
+/// work (the seam: docs/computers.md, "Data and the restore gate"), or,
+/// in a summary read before its total was kept, the folders of `/data`
+/// but its work (Codex on #1428: a file of `/data`'s own counts). In its
 /// work, a folder named as a cache (`.cache`, `.npm`, `Cache`), a browser's
 /// (`browser-profile`, `chromium`, `google-chrome`) or downloads
 /// (`Downloads`, `downloads`) is of that kind, counted once at the
@@ -223,6 +251,7 @@ pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
     let mut folders: Vec<&SizeEntry> = sizes.folders.iter().collect();
     folders.sort_by_key(|e| e.path.matches('/').count());
     let mut work = 0u64;
+    let mut agents = 0u64;
     for e in folders {
         let path = e.path.as_str();
         if path == "work" {
@@ -231,7 +260,7 @@ pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
         }
         if !path.starts_with("work/") {
             if !path.contains('/') {
-                *bytes.entry(StorageKind::Agents).or_default() += e.bytes;
+                agents = agents.saturating_add(e.bytes);
             }
             continue;
         }
@@ -244,6 +273,7 @@ pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
     }
     let in_work: u64 = [StorageKind::Caches, StorageKind::Browser, StorageKind::Downloads].iter().map(|k| bytes.get(k).copied().unwrap_or(0)).sum();
     bytes.insert(StorageKind::Projects, work.saturating_sub(in_work));
+    bytes.insert(StorageKind::Agents, sizes.total.map_or(agents, |t| t.saturating_sub(work)));
     let mut kinds: Vec<KindSize> = bytes.into_iter().filter(|(_, b)| *b > 0).map(|(kind, bytes)| KindSize { kind, bytes }).collect();
     kinds.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.kind.cmp(&b.kind)));
     kinds
@@ -254,25 +284,33 @@ pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
 /// after its header, its size and what is available (to the guest's user,
 /// as a restore's floor counts it). None for an answer it cannot read.
 pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
-    let mut lines = out.lines().filter(|l| !l.trim().is_empty());
-    lines.next().filter(|h| h.starts_with("Filesystem"))?;
+    let mut lines = out.lines().filter(|l| !l.trim().is_empty()).skip_while(|l| !l.starts_with("Filesystem"));
+    lines.next()?;
     let cols: Vec<&str> = lines.next()?.split_whitespace().collect();
     let (total, free) = (cols.get(1)?.parse::<u64>().ok()?, cols.get(3)?.parse::<u64>().ok()?);
     (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation, data: None })
 }
 
 /// A computer's disk from `sizes_read`'s answer: its `df` (`disk_of_df`),
-/// and what a restore of its `/data` writes (`data`): the larger of what
-/// it keeps allocated and apparent (a restore writes each file whole, a
-/// sparse one's holes too, and a small one in blocks of its own). With no
-/// `du` it reads, the `df` alone; with no `df`, none.
+/// and what a restore of its `/data` writes (`data`): for each record, the
+/// larger of its allocated and its apparent size (a restore writes each
+/// file whole, a sparse one's holes too, and a small one in blocks of its
+/// own), summed; or `all`'s. A record whose measure is missing leaves
+/// `data` unread (the last one is kept: `Saves::measured`), never a part
+/// of it. With no `df`, none.
 pub fn disk_of_sizes(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
     let disk = disk_of_df(out, at_ms, generation)?;
-    let apparent = out.lines().find_map(|l| l.strip_prefix("apparent ")?.split_whitespace().next()?.parse::<u64>().ok());
-    // `/data`'s own allocated total: the `.` of its folders
-    let alloc_kib = listed(out, "folders").find(|(_, path)| *path == ".").map(|(kib, _)| kib);
-    let (Some(alloc_kib), Some(apparent)) = (alloc_kib, apparent) else { return Some(disk) };
-    Some(ComputerDisk { data: Some(alloc_kib.saturating_mul(1024).max(apparent)), ..disk })
+    let record = |name: &str| -> Option<u64> {
+        let line = out.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))?;
+        let mut n = line.split_whitespace().map(|w| w.parse::<u64>().ok());
+        let (kib, bytes) = (n.next()??, n.next()??);
+        Some(kib.saturating_mul(1024).max(bytes))
+    };
+    let data = match record("all") {
+        Some(all) => Some(all),
+        None => record("home").zip(record("work")).map(|(h, w)| h.saturating_add(w)),
+    };
+    Some(ComputerDisk { data, ..disk })
 }
 
 /// A computer's disk, as a read found it (`disk_of_df`, `disk_of_sizes`):
@@ -457,63 +495,98 @@ mod tests {
         }
     }
 
-    /// Goal: what a restore of `/data` writes, and what takes the disk,
-    /// read after a save as the Hermes image's GNU `du` and the stub's
-    /// BusyBox `du` answer `sizes_read` (both answers the images' own,
-    /// 2026-11-20: a 20 MiB video, a 12 MiB file in a uv cache left out and
-    /// linked into a venv, a 4 MiB file in that cache alone): the larger of
-    /// allocated and apparent of what the save keeps, GNU's `--exclude`
-    /// counting the venv's link and not the cache (Alex's review of
-    /// #1421), BusyBox counting all; the biggest folders and files, paths
-    /// below `/data`. Valid, small files, invalid (no `du`, no `df`, an
-    /// unsafe pattern, which is never used, a path past its bound, a
-    /// control character, too many).
+    /// Goal: what a restore of `/data` writes, read after a save as the
+    /// Hermes image's GNU `du` and the stub's BusyBox `du` answer it (both
+    /// answers the images' own, 2026-11-20, for an 8 MiB file hard-linked
+    /// between /data/hermes and the work, a uv cache left out holding a
+    /// 4 MiB file linked into a venv and a 2 MiB file of its own, and a
+    /// copied state.db left out): each record as its save takes it, so the
+    /// link across the records counts in each (each restores its copy) and
+    /// the venv's link counts though its cache is left out (Codex and Alex
+    /// on #1421), BusyBox all of it once. Valid, a sparse file and small
+    /// files, a record unread (none of data, never a part), invalid (no
+    /// `df`, an unsafe pattern, which is never used, a guest naming its
+    /// whole work, which its work's record keeps).
     #[test]
     fn data_is_read_from_du() {
-        let gnu = GNU_ANSWER;
-        let busybox = BUSYBOX_ANSWER;
-        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some(32_772 * 1024), "the venv's 12 MiB and the video, not the cache");
-        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(36_868 * 1024), "all of it");
-        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 237_187_936_256, 2)));
-        let sizes = sizes_of(gnu, T).expect("a summary");
+        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1771345412096 205765574656      90% /\nhome 8192 8388608\nwork 12288 12582912\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1771345223680 205765894144  90% /\nall 14340 14680254\n";
+        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some((8192 + 12288) * 1024), "the link in each record, the venv's link, not the cache");
+        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(14_680_254.max(14340 * 1024)), "all of it, once");
+        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 205_765_574_656, 2)));
+        // a sparse file: apparent past allocated; small files: allocated past apparent
+        let df = "Filesystem x\noverlay 100 50 50 50% /\n";
+        assert_eq!(disk_of_sizes(&format!("{df}home 4 9000000\nwork 100 1000\n"), T, 2).and_then(|d| d.data), Some(9_000_000 + 102_400));
+        // a record unread: no data (the last one is kept), never a part of it; no df: none
+        for unread in ["home 4 10\n", "home 4 10\nwork\n", "home 4 10\nwork 1\n", "work 4 10\n", "home x 10\nwork 1 1\n", "all \n", ""] {
+            assert_eq!(disk_of_sizes(&format!("{df}{unread}"), T, 2).map(|d| d.data), Some(None), "{unread:?}");
+        }
+        assert_eq!(disk_of_sizes("home 4 10\nwork 4 10\n", T, 2), None);
+        assert_eq!(disk_of_sizes(&format!("noise\n{df}all 1 1\n"), T, 2).map(|d| d.data), Some(Some(1024)), "df's header anywhere");
+        // the read itself: each record measured as its save takes it, BusyBox's all
+        let read = |home: &str, work: &str| {
+            let m = |ex: &str| format!("$(du -sxk{ex} . 2>/dev/null | cut -f1) $(du -sxb{ex} . 2>/dev/null | cut -f1)");
+            format!("{LISTING}; echo end; df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then cd /data && echo \"home {}\"; {{ cd /data/work && echo \"work {}\"; }} || echo work; else cd /data && echo \"all {}\"; fi", m(home), m(work), m(""))
+        };
+        assert_eq!(sizes_read(&[]), read(" --exclude='./work'", ""));
+        assert_eq!(
+            sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), String::new()]),
+            read(" --exclude='./work' --exclude='./work/*/home/.cache/uv' --exclude='./hermes/state.db'", " --exclude='./*/home/.cache/uv'"),
+            "the home leaves out its work and all named; the work what was named under it; never an unsafe pattern"
+        );
+        assert_eq!(sizes_read(&["/work/".into()]), read(" --exclude='./work' --exclude='./work'", ""), "a guest naming its whole work: its work's record keeps it all, and so does its measure");
+    }
+
+    /// The listing `sizes_read` begins with: all of `/data`, framed, bounded.
+    const LISTING: &str = "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() { tr '\\n\\0' '?\\n'; }; else z=; framed() { cat; }; fi; echo folders; timeout 8 du $z -xk -d 4 . 2>/dev/null | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 65; echo files; timeout 8 find . -xdev -type f -size +10240k -exec du $z -k {} + 2>/dev/null | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 32";
+
+    /// Goal: what takes the disk, read after a save as the Hermes image's GNU
+    /// tools and the stub's BusyBox answer `sizes_read` (both answers the
+    /// images' own, 2026-11-20: a 20 MiB video, a 12 MiB file in a uv cache
+    /// linked into a venv, a 4 MiB file in that cache alone, and a folder
+    /// whose name holds a newline and a forged line): `/data`'s total, its
+    /// biggest folders (its caches too) and files, paths below `/data`; a
+    /// newline in a name forges no line on GNU (Codex on #1426); its df and
+    /// records after `end`, read as ever. Valid, small files, invalid (no
+    /// listing, a path past its bound, a control character, too many).
+    #[test]
+    fn what_takes_the_disk_is_listed() {
         let named = |l: &[SizeEntry]| l.iter().map(|e| (e.path.clone(), e.bytes)).collect::<Vec<_>>();
-        assert_eq!(sizes.at, T);
-        assert_eq!(named(&sizes.folders)[..4], [("work/juniper".to_string(), 32_768 * 1024), ("work".to_string(), 32_768 * 1024), ("work/juniper/proj/.venv".to_string(), 12_288 * 1024), ("work/juniper/proj".to_string(), 12_288 * 1024)]);
-        assert_eq!(sizes.folders.len(), 7, "/data's own total is the disk's, not a folder");
-        assert_eq!(named(&sizes.files), [("work/juniper/talk.mp4".to_string(), 20_480 * 1024), ("work/juniper/home/.cache/uv/pkg.bin".to_string(), 12_288 * 1024)], "a cache's big file is listed too");
-        // small files: allocated is more than apparent
-        let small = "Filesystem x\noverlay 100 50 50 50% /\napparent 1000\t.\nfolders\n100\t.\nfiles\n";
-        assert_eq!(disk_of_sizes(small, T, 2).and_then(|d| d.data), Some(102_400));
-        assert_eq!(sizes_of(small, T).map(|s| (s.folders.len(), s.files.len())), Some((0, 0)));
-        // no du: the df alone, and no summary; no df: none
-        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\n", T, 2).map(|d| d.data), Some(None));
-        assert_eq!(sizes_of("Filesystem x\noverlay 100 50 50 50% /\n", T), None);
-        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\napparent 10\t.\nfolders\nx\t.\nfiles\n", T, 2).map(|d| d.data), Some(None));
-        assert_eq!(disk_of_sizes("apparent 10\t.\nfolders\n1\t.\n", T, 2), None);
+        let gnu = sizes_of(GNU_ANSWER, T).expect("a summary");
+        assert_eq!(gnu.at, T);
+        assert_eq!(gnu.total, Some(48_132 * 1024));
+        let kib = |p: &str, k: u64| (p.to_string(), k * 1024);
+        assert_eq!(named(&gnu.folders), vec![kib("work/juniper", 48_128), kib("work", 48_128), kib("work/juniper/home/.cache", 16_384), kib("work/juniper/home", 16_384), kib("hermes", 4), kib("work/juniper/proj/.venv", 0), kib("work/juniper/proj", 0)], "its caches too; the link counted once, where du found it first; the odd name (a tab in it) left out");
+        assert_eq!(named(&gnu.files), vec![kib("work/juniper/talk.mp4", 20_480), kib("work/juniper/home/.cache/uv/pkg.bin", 12_288)], "a newline forges no line");
+        assert_eq!(disk_of_sizes(GNU_ANSWER, T, 2).and_then(|d| d.data), Some(4096 + 44_032 * 1024), "its records after its listing: the work without its cache, the venv's link kept");
+        let busybox = sizes_of(BUSYBOX_ANSWER, T).expect("a summary");
+        assert_eq!(busybox.total, Some(48_132 * 1024), "its total its own record's, never a forged `.` line");
+        assert!(named(&busybox.files).starts_with(&[kib("forged/clip.bin", 999_999), kib("work/juniper/talk.mp4", 20_480), kib("work/juniper/home/.cache/uv/pkg.bin", 12_288)]), "BusyBox frames no name: a newline forges a line (the stub's only)");
+        assert_eq!(disk_of_sizes(BUSYBOX_ANSWER, T, 2).and_then(|d| d.data), Some(48_132 * 1024));
+        // its total: `.`'s, or an `all` record's after `end`, never one before it
+        assert_eq!(sizes_of("folders\n100\t.\nfiles\nend\n", T).map(|s| (s.total, s.folders.len(), s.files.len())), Some((Some(102_400), 0, 0)));
+        assert_eq!(sizes_of("folders\n100\t.\nall 7 1\nfiles\nend\nall 9 1\n", T).and_then(|s| s.total), Some(9 * 1024));
+        assert_eq!(sizes_of("folders\n5\t./a\nfiles\nend\n", T).map(|s| s.total), Some(None), "neither: none");
+        // no listing: no summary
+        assert_eq!(sizes_of("Filesystem x\noverlay 100 50 50 50% /\nall 1 1\n", T), None);
         // bounds: a path too long, a control character, too many, all paths together
         let long = "a".repeat(SIZE_PATH_MAX_BYTES + 1);
-        let odd = format!("Filesystem x\noverlay 100 50 50 50% /\napparent 1\t.\nfolders\n9\t./{long}\n8\t./a\u{7}b\n7\t./ok\nfiles\n");
+        let odd = format!("folders\n9\t./{long}\n8\t./a\u{7}b\n7\t./ok\nfiles\nend\n");
         assert_eq!(sizes_of(&odd, T).map(|s| named(&s.folders)), Some(vec![("ok".to_string(), 7 * 1024)]));
         let many: String = (0..SIZES_FOLDERS_MAX + 10).map(|i| format!("{}\t./f{i}\n", 1000 - i)).collect();
-        let many = sizes_of(&format!("folders\n{many}files\n"), T).expect("a summary");
+        let many = sizes_of(&format!("folders\n{many}files\nend\n"), T).expect("a summary");
         assert_eq!((many.folders.len(), many.folders[0].path.as_str()), (SIZES_FOLDERS_MAX, "f0"), "the biggest, as many as it holds");
         let wide: String = (0..60).map(|i| format!("{}\t./{}{i:02}\n", 1000 - i, "d".repeat(SIZE_PATH_MAX_BYTES - 2))).collect();
-        let wide = sizes_of(&format!("folders\n{wide}files\n"), T).expect("a summary");
+        let wide = sizes_of(&format!("folders\n{wide}files\nend\n"), T).expect("a summary");
         assert!(wide.folders.iter().map(|e| e.path.len()).sum::<usize>() <= SIZES_PATHS_MAX_BYTES && wide.folders.len() == SIZES_PATHS_MAX_BYTES / SIZE_PATH_MAX_BYTES, "its paths within their bound: {}", wide.folders.len());
-        // the read itself: nothing left out, all of /data
-        let all = "printf 'apparent ' && du -sxb . && echo folders && du -xk -d 4 . | awk 'length < 424' | sort -rn | head -n 65 && echo files && find . -xdev -type f -size +10240k -exec du -k {} + 2>/dev/null | awk 'length < 424' | sort -rn | head -n 32";
-        assert_eq!(sizes_read(&[]), format!("df -P -B1 / && cd /data && {all}"));
-        // the save's patterns as du's excludes, anchored, quoted; never an unsafe one; BusyBox's du counts all
-        let read = sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), "/".into(), String::new()]);
-        let ex = " --exclude='./work/*/home/.cache/uv' --exclude='./hermes/state.db'";
-        let kept = format!("printf 'apparent ' && du -sxb{ex} . && echo folders && du -xk -d 4{ex} . | awk 'length < 424' | sort -rn | head -n 65 && echo files && find . -xdev -type f -size +10240k -exec du -k {{}} + 2>/dev/null | awk 'length < 424' | sort -rn | head -n 32");
-        assert_eq!(read, format!("df -P -B1 / && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then {kept}; else {all}; fi"));
-        assert_eq!(sizes_read(&["/../etc/".into(), "/".into()]), format!("df -P -B1 / && cd /data && {all}"), "no pattern it uses: all");
+        // its lines after `end` (its df and records) are no folder or file
+        let after = sizes_of("folders\n5\t./a\nfiles\n4\t./b\nend\n3\t./c\n", T).expect("a summary");
+        assert_eq!((named(&after.folders), named(&after.files)), (vec![("a".to_string(), 5120)], vec![("b".to_string(), 4096)]));
     }
 
     /// Goal (Paul, 2026-11-20: Settings → Computer → Storage, in plain
     /// categories): a summary's folders by kind. Its agents' own is `/data`
-    /// but its work; in its work, caches, browser data and downloads, each
+    /// but its work (all of it, its total known); in its work, caches, browser data and downloads, each
     /// once at its shallowest folder listed (a cache inside a browser's
     /// profile is the browser's); projects the rest of its work. Valid, a
     /// kind nested in another, nothing in a kind (left out), no work,
@@ -522,7 +595,7 @@ mod tests {
     fn a_summary_is_told_by_kind() {
         const GB: u64 = 1_000_000_000;
         let entry = |path: &str, gb: f64| SizeEntry { path: path.into(), bytes: (gb * GB as f64) as u64 };
-        let sizes = |folders: Vec<SizeEntry>| ComputerSizes { at: T, folders, files: vec![], kinds: vec![] };
+        let sizes = |folders: Vec<SizeEntry>| ComputerSizes { at: T, total: None, folders, files: vec![], kinds: vec![] };
         let told = |s: &ComputerSizes| storage_kinds(s).into_iter().map(|k| (k.kind, k.bytes)).collect::<Vec<_>>();
         let full = sizes(vec![
             entry("work", 20.0),
@@ -546,10 +619,17 @@ mod tests {
         assert_eq!(told(&sizes(vec![entry("work", 2.0), entry("work/a/proj", 2.0)])), [(StorageKind::Projects, 2 * GB)], "nothing in a kind: left out");
         assert_eq!(told(&sizes(vec![entry("hermes", 1.0)])), [(StorageKind::Agents, GB)], "no work");
         assert_eq!(told(&sizes(vec![])), [], "nothing at all");
+        // its total known: its agents' own is all of /data but its work, its own files too (Codex on #1428)
+        let whole = ComputerSizes { total: Some(23 * GB), ..full.clone() };
+        assert_eq!(told(&whole).iter().find(|k| k.0 == StorageKind::Agents), Some(&(StorageKind::Agents, 3 * GB)), "1.6 GB of folders and 1.4 GB of /data's own files");
+        assert_eq!(told(&ComputerSizes { total: Some(GB), ..full.clone() }).iter().find(|k| k.0 == StorageKind::Agents), None, "a total under its work: none, never an overflow");
+        // the Hermes image's real answer: its cache is a kind, its venv's link its project's
+        let real = sizes_of(GNU_ANSWER, T).expect("a summary");
+        assert_eq!(told(&real), [(StorageKind::Projects, 31_744 * 1024), (StorageKind::Caches, 16_384 * 1024), (StorageKind::Agents, 4 * 1024)]);
     }
 
     /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20.
-    const GNU_ANSWER: &str = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1739559915520 237187936256      89% /\napparent 33554435\t.\nfolders\n32772\t.\n32768\t./work/juniper\n32768\t./work\n12288\t./work/juniper/proj/.venv\n12288\t./work/juniper/proj\n4\t./hermes\n0\t./work/juniper/home/.cache\n0\t./work/juniper/home\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n";
+    const GNU_ANSWER: &str = "folders\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd?999999\t./forged\n11264\t./work/juniper/odd?999999\t.\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd?999999\t./forged/clip.bin\nend\nFilesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1775996006400 201177927680      90% /\nhome 4 3\nwork 44032 45088768\n";
     /// The same from the stub (BusyBox).
-    const BUSYBOX_ANSWER: &str = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1739560046592 237187936256  88% /\napparent 37748903\t.\nfolders\n36868\t.\n36864\t./work/juniper\n36864\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n";
+    const BUSYBOX_ANSWER: &str = "folders\n999999\t./forged\n999999\t.\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd\n11264\t./work/juniper/odd\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n999999\t./forged/clip.bin\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd\nend\nFilesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1776016068608 201159012352  90% /\nall 48132 49283285\n";
 }

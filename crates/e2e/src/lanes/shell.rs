@@ -149,6 +149,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let script = shell_site(s, api, &session, &agent, "agent.js")?;
     s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), script.status);
     release_assets(s, api, &session, &agent)?;
+    blessed_serves_no_page_of_its_own(s, api)?;
     let channels = shell(api, &session, "GET", &format!("/api/f/{agent}/channels"), None, &[])?;
     s.ok(
         "the template's channels run on it",
@@ -1034,6 +1035,86 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
         format!("{} {} bytes / by its name {}", r.status, r.bytes.len(), by_name.status),
     );
     Ok(())
+}
+
+/// A fragment on a blessed template serves its template's pages from the
+/// release and none of its own (decision 40; docs/api.md, Apps: "Its repo
+/// holds only its face and data"): its code's name, `blessed:chat@…`, is
+/// what says its pages are the platform's. So a file one of its editors
+/// deploys under `site/` is never a page of its origin: the write and
+/// the deploy are taken (the file is its data, read at `__file`), and the
+/// path is none (404). The same of a template that runs no code (an
+/// agent's, whose fragment is its owner's alone (FIN-544), so its owner
+/// plants it), and of a path the release does not ship (`sub/`).
+fn blessed_serves_no_page_of_its_own(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let editor = api.person()?;
+    let chat = s.named(api, &owner, "planted")?;
+    let r = api.create_with(&owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making the chat on the template: {r}");
+    s.owned(&r.body, &owner);
+    let code = || api.status(&owner, &chat).map(|r| r.body["code"]["id"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+    anyhow::ensure!(s.eventually(std::time::Duration::from_secs(30), || code().starts_with("blessed:chat@")), "the chat installs the release's code: {}", code());
+    let (r, deployed) = planted(s, api, &owner, &editor, &chat, "notes.html")?;
+    s.ok(
+        "a file an editor deploys into a chat on the blessed template is no page of its origin (none there), and the chat still runs the release's code",
+        none(&r) && code().starts_with("blessed:chat@"),
+        format!("{deployed} / code {} / notes.html {}", code(), shown(&r)),
+    );
+    let (r, deployed) = planted(s, api, &owner, &editor, &chat, "sub/")?;
+    s.ok("nor at a path the release does not ship, a directory's page", none(&r), format!("{deployed} / sub/ {}", shown(&r)));
+    // an agent's fragment: the release's site, and no code at all
+    let agent = s.named(api, &owner, "planted-agent")?;
+    let r = api.create_with(&owner, json!({ "name": agent, "template": "agent" }))?;
+    anyhow::ensure!(r.status == 200, "making the agent on the template: {r}");
+    s.owned(&r.body, &owner);
+    let (r, deployed) = planted(s, api, &owner, &owner, &agent, "notes.html")?;
+    let page = site_page(api, &owner, &agent, "")?;
+    s.ok(
+        "nor on an agent's fragment, whose template runs no code (its owner's alone, so its owner plants it): its page is still the release's",
+        none(&r) && page.status == 200 && page.text.contains("agent.js"),
+        format!("{deployed} / notes.html {} / its page {}", shown(&r), page.status),
+    );
+    Ok(())
+}
+
+/// What `editor` plants in a blessed fragment as a page at `at` (its own
+/// `site/` path), written and deployed as any file of the fragment's is,
+/// and the answer there to its owner's browser: the owner signed in,
+/// navigating to it, once the deploy is live. An editor other than its
+/// owner joins it first.
+fn planted(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, editor: &fragment_nip98::Keys, name: &str, at: &str) -> Result<(Reply, String)> {
+    if editor.pubkey_hex() != owner.pubkey_hex() {
+        let joined = api.share(name, &api.identity(editor)?, "editor")?;
+        anyhow::ensure!(joined.status == 200, "an editor joins {name}: {joined}");
+    }
+    let path = if at.ends_with('/') { format!("site/{at}index.html") } else { format!("site/{at}") };
+    let files = json!({ "files": [{ "path": path, "text": format!("<!doctype html><script>/* an editor's own, {at} */</script>") }] });
+    let wrote = api.signed(editor, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
+    let deployed = api.signed(editor, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
+    anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "an editor writes and deploys {path} of {name}: {wrote} / {deployed}");
+    let live = deployed.body["live"].as_str().unwrap_or("").to_string();
+    let landed = s.eventually(std::time::Duration::from_secs(30), || api.status(owner, name).is_ok_and(|r| r.body["pins"]["live"] == live.as_str()));
+    anyhow::ensure!(landed, "the editor's deploy lands: {}", api.status(owner, name)?);
+    Ok((site_page(api, owner, name, at)?, format!("files {} / deploy {}", wrote.status, deployed.status)))
+}
+
+/// `path` of `name`'s origin as its owner's browser opens it: signed in,
+/// a top-level navigation.
+fn site_page(api: &Api, owner: &fragment_nip98::Keys, name: &str, path: &str) -> Result<Reply> {
+    let session = api.sign_in(&Api::email_of(owner))?;
+    let cookie = format!("fragment_site={}", super::signin::site_cookie(api, &session, name)?);
+    let navigation = vec![("sec-fetch-site", "none".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("sec-fetch-dest", "document".to_string()), ("accept", "text/html".to_string())];
+    api.call(Call { method: "GET", url: api.site_url(name, path), cookie: Some(cookie), extra: navigation, ..Call::default() })
+}
+
+/// Whether `r` answers none of the editor's bytes: a 404.
+fn none(r: &Reply) -> bool {
+    r.status == 404 && !r.text.contains("an editor's own")
+}
+
+fn shown(r: &Reply) -> String {
+    format!("{} {} csp {:?}, the editor's: {}", r.status, r.header("content-type"), r.header("content-security-policy"), r.text.contains("an editor's own"))
 }
 
 fn shell_site(_s: &Suite, api: &Api, session: &str, name: &str, path: &str) -> Result<Reply> {
@@ -3629,8 +3710,9 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let files = [("work/e2e/downloads/talk.mp4", 48), ("work/e2e/browser-profile/cache.bin", 16), ("work/e2e/home/.cache/pip/wheel.whl", 12)];
+    let mut posted = Vec::new();
     for (n, (path, mib)) in files.iter().enumerate() {
-        shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("storage-fill-{n}"), "body": { "text": format!("fill-data {path} {mib}") } })), &[])?;
+        posted.push(shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("storage-fill-{n}"), "body": { "text": format!("fill-data {path} {mib}") } })), &[])?.status);
     }
     let filled = || {
         shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?limit=1000"), None, &[])
@@ -3668,14 +3750,37 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let (desk, _) = at(1280, 900, false, b)?;
     let (phone, fits) = at(390, 844, true, b)?;
     let said = b.eval(page, &format!("{block}?.innerText"))?;
+    // the room it shows is its view's, as its notices say a size (Codex on #1428)
+    let room = view()["disk"]["room"].as_u64();
+    let left = b.eval(page, &format!("{block}?.querySelector('.storage-left')?.textContent"))?;
+    let room_said = room.is_some_and(|r| r >= 1_000_000_000 && left.as_str() == Some(&format!("{} left", storage_size(r))));
     b.color_scheme(page, "dark")?;
     b.viewport(page, 1280, 900, false)?;
     s.ok(
         "Storage shows what takes its disk by kind (downloads, browser data, caches), its biggest files by name, and the room left, from its awake save's read; on a desktop and on a phone (390 px), within its width",
-        made && read && sized.status == 200 && desk && phone && fits["right"] == true && fits["wide"] == true,
-        json!({ "said": said, "sizes": sizes, "fits": fits }),
+        made && posted.iter().all(|st| *st == 200) && read && sized.status == 200 && desk && phone && fits["right"] == true && fits["wide"] == true && room_said,
+        json!({ "said": said, "posted": posted, "sizes": sizes, "fits": fits, "room": room, "left": left }),
+    );
+    // no room left (free below a restore's floor): Full, in red; room again after
+    let full = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 200_000_000u64 }))?;
+    b.reload(page)?;
+    let shows_full = b.until(page, &format!("{block}?.querySelector('.storage-left.storage-low')?.textContent === 'Full'"), wait);
+    let again = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    b.reload(page)?;
+    let roomy = b.until(page, &format!("/ left$/.test({block}?.querySelector('.storage-left:not(.storage-low)')?.textContent)"), wait);
+    s.ok(
+        "Storage with no room left says Full, in red, and the room again once a read finds it",
+        full.status == 200 && view()["disk"]["room"].is_u64() && shows_full && again.status == 200 && roomy,
+        json!({ "full": full.body, "again": again.body }),
     );
     Ok(())
+}
+
+/// A size as Storage and its notices say it (cell/shell/computer.js
+/// `storageSize`, fragment_core's notice size): GB to a tenth, rounded.
+fn storage_size(n: u64) -> String {
+    let tenths = (n + 50_000_000) / 100_000_000;
+    format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
 /// An update, as the person sees it (docs/computers.md, "What its owner is
@@ -6009,8 +6114,8 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
 /// row): a person with an agent and no skills fragment (theirs deleted
 /// here; people set up before 2026-10-03 have none). Valid: Settings'
 /// Skills offers Open, which makes the fragment from the blessed template
-/// and opens it. Replay: loaded again, there is no second. Loading makes
-/// none unasked.
+/// and opens the Skills page on it (skills-page.js). Replay: loaded again,
+/// there is no second. Loading makes none unasked.
 fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
@@ -6032,9 +6137,9 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let manifest_of = || shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[]);
     s.eventually(wait, || manifest_of().is_ok_and(|m| m.body["template"] == "skills"));
     let manifest = manifest_of()?;
-    let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{name}\"]"))), wait);
+    let window = b.until(page, "location.pathname === '/skills' && !!document.querySelector('#skills-page .skills-tab')", wait);
     s.ok(
-        "Open makes them one from the blessed template, and opens it",
+        "Open makes them one from the blessed template, and opens the Skills page",
         made && manifest.body["template"] == "skills" && window,
         json!({ "skills": now, "manifest": manifest.body, "window": window }),
     );
@@ -6081,6 +6186,42 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         w.status == 200 && offered && window && opened,
         json!({ "write": w.status, "offered": offered, "window": window, "open": b.eval_in_frame(page, &agent, "({ hash: location.hash, active: document.querySelector('#tree .row.active')?.dataset.path ?? null })").unwrap_or(Value::Null) }),
     );
+    back_to_settings(b, page, wait);
+    optional_skills_ui(s, api, b, page, session, &skills)
+}
+
+/// The Skills page's library: the pinned Hermes image's optional skills
+/// (the release's catalog in the skills fragment), each a switch. Valid:
+/// switched on, the fragment holds its `optional/hermes/<id>.on`, which
+/// is what the image's boot installs; switched off, it is gone. A labelled
+/// skill asks first. Replay: loaded again, the switch is as it was left.
+fn optional_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, skills: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let marker = "optional/hermes/creative/excalidraw.on";
+    let has = |path: &str| shell(api, session, "GET", &format!("/api/f/{skills}/files"), None, &[]).is_ok_and(|r| r.body["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == path)));
+    b.eval(page, "(document.querySelector('#settings-skills [data-action=open-skills]').click(), true)")?;
+    let library = "[...document.querySelectorAll('#skills-page .skills-tab')].find((t) => t.dataset.tab === 'library')";
+    let shown = b.until(page, &format!("location.pathname === '/skills' && !!{library}"), wait);
+    b.eval(page, &format!("({library}.click(), true)"))?;
+    let toggle = "document.querySelector('#skills-page [data-skill=\"creative/excalidraw\"] .skills-switch')";
+    let listed = b.until(page, &format!("!!{toggle} && !{toggle}.checked"), wait);
+    let count = b.eval(page, "document.querySelectorAll('#skills-page [data-skill]').length")?;
+    s.ok("the Skills page's library lists the pinned Hermes image's optional skills, each a switch", shown && listed && count.as_u64().is_some_and(|n| n > 100), json!({ "shown": shown, "listed": listed, "skills": count }));
+    b.eval(page, &format!("({toggle}.click(), true)"))?;
+    let on = s.eventually(wait, || has(marker));
+    let said = b.until(page, "/Excalidraw is on/.test(document.querySelector('#skills-page .skills-status')?.textContent ?? '')", wait);
+    s.ok("switched on, the skills fragment holds its switch, and the page says when the agents have it", on && said, json!({ "on": on, "said": said }));
+    b.reload(page)?;
+    b.until(page, &format!("location.pathname === '/skills' && !!{library}"), wait);
+    b.eval(page, &format!("({library}.click(), true)"))?;
+    let kept = b.until(page, &format!("!!{toggle} && {toggle}.checked"), wait);
+    b.eval(page, &format!("({toggle}.click(), true)"))?;
+    let off = s.eventually(wait, || !has(marker));
+    s.ok("loaded again it is still on; switched off, its switch is gone", kept && off, json!({ "kept": kept, "off": off }));
+    let labelled = "document.querySelector('#skills-page [data-skill=\"productivity/telephony\"]')";
+    b.eval(page, &format!("({labelled}.querySelector('.skills-switch').click(), true)"))?;
+    let asked = b.until(page, &format!("!!{labelled}.querySelector('.skills-ask')"), wait);
+    s.ok("a skill that can spend money asks before it is on, and writes nothing until then", asked && !has("optional/hermes/productivity/telephony.on"), json!({ "asked": asked }));
     back_to_settings(b, page, wait);
     Ok(())
 }

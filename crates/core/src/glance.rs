@@ -125,7 +125,8 @@ impl Question {
         const AWAKE: (&str, &str, &str, &str) = ("phase.phase", "eq", "string", "\"awake\"");
         const FRAGMENT: (&str, &str, &str, &str) = ("$workers.entrypoint", "eq", "string", "\"Fragment\"");
         const SAVE_FAILED: (&str, &str, &str, &str) = ("event.event", "eq", "string", "\"save_failed\"");
-        let disk = ROOM_TOLD_MAX.to_string();
+        // told at ROOM_TOLD_MAX or less: lt one more (the query has no lte)
+        let disk = (ROOM_TOLD_MAX + 1).to_string();
         let (filter, asks, from) = match self {
             Question::AwakeNow => (AWAKE, Asks::Uniq("computer"), now_ms - NOW_MS),
             Question::AwakeToday => (AWAKE, Asks::Uniq("computer"), day_start_ms),
@@ -386,7 +387,7 @@ mod tests {
         assert_eq!(fragments["parameters"]["calculations"][0]["key"], "$workers.durableObjectId");
         assert_eq!(Question::WontWake.body(SCRIPT, NOW, day)["parameters"]["filters"][1]["value"], "failed");
         assert_eq!(Question::SavesFailing.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "event.event", "operation": "eq", "type": "string", "value": "save_failed" }));
-        assert_eq!(Question::DiskFilling.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "disk.room", "operation": "lt", "type": "number", "value": ROOM_TOLD_MAX }));
+        assert_eq!(Question::DiskFilling.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "disk.room", "operation": "lt", "type": "number", "value": ROOM_TOLD_MAX + 1 }));
         for q in Question::ALL {
             let b = q.body("fragment-preview", NOW, day);
             assert_eq!((&b["queryId"], &b["parameters"]["filters"][0]["value"]), (&json!(QUERY_ID), &json!("fragment-preview")), "every query is its own deployment's");

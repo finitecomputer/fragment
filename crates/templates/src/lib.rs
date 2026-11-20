@@ -580,6 +580,30 @@ pub(crate) mod tests {
         assert!(missing.is_empty(), "{}", missing.into_iter().collect::<Vec<_>>().join("\n"));
     }
 
+    /// The optional skills' catalog (`cargo xtask skills-catalog`) is the
+    /// pinned Hermes image's: a move of images/hermes/Dockerfile's pin
+    /// without it fails here. It is the skills template's data, each entry
+    /// an id the boot can switch on with a name and a description.
+    #[test]
+    fn the_optional_skills_catalog_is_the_pinned_hermes() {
+        let f = SKILLS.file("catalog/hermes.json").expect("the skills template carries the catalog");
+        assert!(crate::blessed::is_data(f.path), "every skills fragment reads it from the release");
+        let catalog: serde_json::Value = serde_json::from_slice(&bytes_of(&SKILLS, f)).unwrap();
+        let pin = std::fs::read_to_string(repo().join("images/hermes/Dockerfile")).unwrap();
+        let pin = pin.lines().find_map(|l| l.strip_prefix("ARG HERMES=")).expect("the Dockerfile pins Hermes");
+        let version = catalog["hermes"].as_str().unwrap();
+        assert!(pin.contains(&format!("-{version}-")), "the catalog is Hermes {version}'s, the pin {pin}: run `cargo xtask skills-catalog`");
+        assert_eq!(catalog["runtime"], "hermes");
+        let skills = catalog["skills"].as_array().unwrap();
+        let ids: std::collections::BTreeSet<&str> = skills.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), skills.len(), "ids are unique");
+        for s in skills {
+            let id = s["id"].as_str().unwrap();
+            assert!(id.split('/').count() >= 2 && id.split('/').all(|p| !p.is_empty() && !p.starts_with('.')), "{id}");
+            assert!(s["name"].as_str().is_some_and(|n| !n.is_empty()) && s["description"].as_str().is_some_and(|d| !d.is_empty()), "{id}");
+        }
+    }
+
     #[test]
     fn every_template_has_a_manifest() {
         for t in ALL {
