@@ -106,26 +106,35 @@ pub const DISK_READ: &str = "df -P -B1 /";
 
 /// What reads a computer's disk and what its `/data` restores to after an
 /// awake save, run in its container (`disk_of_sizes` reads its answer):
-/// `DISK_READ`, then `du` of `/data`, allocated (KiB) and apparent (bytes),
-/// each line named, leaving out what that save left out (`left_out`, the
-/// held guest's patterns, anchored to `/data`) as GNU's `du --exclude`
-/// does: what is kept is measured, so a file hard-linked between a cache
-/// left out and the work kept (uv's and pnpm's caches link into a project)
-/// counts once, where it restores (Alex's review of #1421: subtracting the
-/// caches' own `du` dropped it). A `du` with no `--exclude` (BusyBox's: the
-/// stub) counts all of `/data`, more than restores. A pattern is a `du`
-/// pattern here, anchored at `./`, `*` and `?` as in the save's (a `*` may
-/// also cross a `/`: what it names counts as left out); one outside the
+/// `DISK_READ`, then a line for each record its save takes, measured as
+/// that save takes it (cell/src/computer.rs, `save`): `home` (`/data` but
+/// its work, less what its held guest named: `left_out`, anchored to
+/// `/data`) and `work` (`/data/work`, less what it named under its work:
+/// `work_left_out`), each allocated (KiB) and apparent (bytes). Measured
+/// apart, a file hard-linked between the two counts in each, as each record
+/// restores its own copy, and a guest that names its whole work leaves out
+/// nothing of it, as its work's record does (Codex on #1421). A left-out
+/// path is left out of the walk as GNU's `du --exclude` does, so a file
+/// linked from a cache into the work kept counts where it restores (Alex's
+/// review of #1421). A `du` with no `--exclude` (BusyBox's: the stub) gives
+/// `all`, every byte of `/data`. A step that fails prints its line with no
+/// number, never another's (`disk_of_sizes` reads none then). A pattern
+/// is a `du` pattern, anchored at `./`, `*` and `?` as in the save's (a `*`
+/// may also cross a `/`: what it names counts as left out); one outside the
 /// patterns' alphabet or with a `..` is not used, and what it names counts
 /// as restored.
 pub fn sizes_read(left_out: &[String]) -> String {
     let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
-    let exclude: String = left_out.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" --exclude='./{p}'")).collect();
-    let all = "printf 'alloc ' && du -sxk . && printf 'apparent ' && du -sxb .";
-    if exclude.is_empty() {
-        return format!("{DISK_READ} && cd /data && {all}");
-    }
-    format!("{DISK_READ} && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then printf 'alloc ' && du -sxk{exclude} . && printf 'apparent ' && du -sxb{exclude} .; else {all}; fi")
+    let exclude = |patterns: Vec<String>| -> String { patterns.iter().filter(safe).map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).map(|p| format!(" --exclude='./{p}'")).collect() };
+    let home = exclude(std::iter::once("/work/".to_string()).chain(left_out.iter().cloned()).collect());
+    let work = exclude(crate::computer::held::work_left_out(left_out));
+    let measured = |ex: &str| format!("$(du -sxk{ex} . 2>/dev/null | cut -f1) $(du -sxb{ex} . 2>/dev/null | cut -f1)");
+    format!(
+        "{DISK_READ}; if du -s --exclude=x /dev/null > /dev/null 2>&1; then cd /data && echo \"home {}\"; {{ cd /data/work && echo \"work {}\"; }} || echo work; else cd /data && echo \"all {}\"; fi",
+        measured(&home),
+        measured(&work),
+        measured("")
+    )
 }
 
 /// A computer's disk from `DISK_READ`'s answer, read at `at_ms` in start
@@ -133,23 +142,33 @@ pub fn sizes_read(left_out: &[String]) -> String {
 /// after its header, its size and what is available (to the guest's user,
 /// as a restore's floor counts it). None for an answer it cannot read.
 pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
-    let mut lines = out.lines().filter(|l| !l.trim().is_empty());
-    lines.next().filter(|h| h.starts_with("Filesystem"))?;
+    let mut lines = out.lines().filter(|l| !l.trim().is_empty()).skip_while(|l| !l.starts_with("Filesystem"));
+    lines.next()?;
     let cols: Vec<&str> = lines.next()?.split_whitespace().collect();
     let (total, free) = (cols.get(1)?.parse::<u64>().ok()?, cols.get(3)?.parse::<u64>().ok()?);
     (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation, data: None })
 }
 
 /// A computer's disk from `sizes_read`'s answer: its `df` (`disk_of_df`),
-/// and what a restore of its `/data` writes (`data`): the larger of what
-/// it keeps allocated and apparent (a restore writes each file whole, a
-/// sparse one's holes too, and a small one in blocks of its own). With no
-/// `du` it reads, the `df` alone; with no `df`, none.
+/// and what a restore of its `/data` writes (`data`): for each record, the
+/// larger of its allocated and its apparent size (a restore writes each
+/// file whole, a sparse one's holes too, and a small one in blocks of its
+/// own), summed; or `all`'s. A record whose measure is missing leaves
+/// `data` unread (the last one is kept: `Saves::measured`), never a part
+/// of it. With no `df`, none.
 pub fn disk_of_sizes(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
     let disk = disk_of_df(out, at_ms, generation)?;
-    let named = |name: &str| out.lines().find_map(|l| l.strip_prefix(name)?.split_whitespace().next()?.parse::<u64>().ok());
-    let (Some(alloc_kib), Some(apparent)) = (named("alloc "), named("apparent ")) else { return Some(disk) };
-    Some(ComputerDisk { data: Some(alloc_kib.saturating_mul(1024).max(apparent)), ..disk })
+    let record = |name: &str| -> Option<u64> {
+        let line = out.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))?;
+        let mut n = line.split_whitespace().map(|w| w.parse::<u64>().ok());
+        let (kib, bytes) = (n.next()??, n.next()??);
+        Some(kib.saturating_mul(1024).max(bytes))
+    };
+    let data = match record("all") {
+        Some(all) => Some(all),
+        None => record("home").zip(record("work")).map(|(h, w)| h.saturating_add(w)),
+    };
+    Some(ComputerDisk { data, ..disk })
 }
 
 /// A computer's disk, as a read found it (`disk_of_df`, `disk_of_sizes`):
@@ -335,38 +354,44 @@ mod tests {
     }
 
     /// Goal: what a restore of `/data` writes, read after a save as the
-    /// Hermes image's GNU `du` and the stub's BusyBox `du` print it (both
-    /// answers taken from the images, 2026-11-20): the larger of allocated
-    /// and apparent (a sparse file's holes are written), of what the save
-    /// keeps: GNU's `du --exclude` of what it left out, so a file
-    /// hard-linked between a cache left out and the work kept counts where
-    /// it restores (Alex's review of #1421; on the Hermes image, an 8 MiB
-    /// file in a uv cache linked into a venv read 8,192 KiB so, and 0 by the
-    /// cache's own `du` subtracted); with no `--exclude` (BusyBox), all.
-    /// Valid, a sparse file, small files, invalid (no `du`, no `df`, an
-    /// unsafe pattern, which is never used).
+    /// Hermes image's GNU `du` and the stub's BusyBox `du` answer it (both
+    /// answers the images' own, 2026-11-20, for an 8 MiB file hard-linked
+    /// between /data/hermes and the work, a uv cache left out holding a
+    /// 4 MiB file linked into a venv and a 2 MiB file of its own, and a
+    /// copied state.db left out): each record as its save takes it, so the
+    /// link across the records counts in each (each restores its copy) and
+    /// the venv's link counts though its cache is left out (Codex and Alex
+    /// on #1421), BusyBox all of it once. Valid, a sparse file and small
+    /// files, a record unread (none of data, never a part), invalid (no
+    /// `df`, an unsafe pattern, which is never used, a guest naming its
+    /// whole work, which its work's record keeps).
     #[test]
     fn data_is_read_from_du() {
-        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1685805481984 290545090560      86% /\nalloc 3912\t.\napparent 9000000\t.\n";
-        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1685711613952 290657275904  85% /\nalloc 3912\t.\napparent 9000064\t.\n";
-        // a 5 MB sparse file among 4 MB written: the apparent size
-        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some(9_000_000));
-        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(9_000_064));
-        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 290_545_090_560, 2)));
-        // small files: allocated is more than apparent
-        let small = "Filesystem x\noverlay 100 50 50 50% /\nalloc 100\t.\napparent 1000\t.\n";
-        assert_eq!(disk_of_sizes(small, T, 2).and_then(|d| d.data), Some(102_400));
-        // no du: the df alone; no df: none
-        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\n", T, 2).map(|d| d.data), Some(None));
-        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\nalloc x\t.\napparent 10\t.\n", T, 2).map(|d| d.data), Some(None));
-        assert_eq!(disk_of_sizes("alloc 1\t.\napparent 10\t.\n", T, 2), None);
-        // the read itself: nothing left out, all of /data
-        let all = "printf 'alloc ' && du -sxk . && printf 'apparent ' && du -sxb .";
-        assert_eq!(sizes_read(&[]), format!("df -P -B1 / && cd /data && {all}"));
-        // the save's patterns as du's excludes, anchored, quoted; never an unsafe one; BusyBox's du counts all
-        let read = sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), "/".into(), String::new()]);
-        let ex = " --exclude='./work/*/home/.cache/uv' --exclude='./hermes/state.db'";
-        assert_eq!(read, format!("df -P -B1 / && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then printf 'alloc ' && du -sxk{ex} . && printf 'apparent ' && du -sxb{ex} .; else {all}; fi"));
-        assert_eq!(sizes_read(&["/../etc/".into(), "/".into()]), format!("df -P -B1 / && cd /data && {all}"), "no pattern it uses: all");
+        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1771345412096 205765574656      90% /\nhome 8192 8388608\nwork 12288 12582912\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1771345223680 205765894144  90% /\nall 14340 14680254\n";
+        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some((8192 + 12288) * 1024), "the link in each record, the venv's link, not the cache");
+        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(14_680_254.max(14340 * 1024)), "all of it, once");
+        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 205_765_574_656, 2)));
+        // a sparse file: apparent past allocated; small files: allocated past apparent
+        let df = "Filesystem x\noverlay 100 50 50 50% /\n";
+        assert_eq!(disk_of_sizes(&format!("{df}home 4 9000000\nwork 100 1000\n"), T, 2).and_then(|d| d.data), Some(9_000_000 + 102_400));
+        // a record unread: no data (the last one is kept), never a part of it; no df: none
+        for unread in ["home 4 10\n", "home 4 10\nwork\n", "home 4 10\nwork 1\n", "work 4 10\n", "home x 10\nwork 1 1\n", "all \n", ""] {
+            assert_eq!(disk_of_sizes(&format!("{df}{unread}"), T, 2).map(|d| d.data), Some(None), "{unread:?}");
+        }
+        assert_eq!(disk_of_sizes("home 4 10\nwork 4 10\n", T, 2), None);
+        assert_eq!(disk_of_sizes(&format!("noise\n{df}all 1 1\n"), T, 2).map(|d| d.data), Some(Some(1024)), "df's header anywhere");
+        // the read itself: each record measured as its save takes it, BusyBox's all
+        let read = |home: &str, work: &str| {
+            let m = |ex: &str| format!("$(du -sxk{ex} . 2>/dev/null | cut -f1) $(du -sxb{ex} . 2>/dev/null | cut -f1)");
+            format!("df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then cd /data && echo \"home {}\"; {{ cd /data/work && echo \"work {}\"; }} || echo work; else cd /data && echo \"all {}\"; fi", m(home), m(work), m(""))
+        };
+        assert_eq!(sizes_read(&[]), read(" --exclude='./work'", ""));
+        assert_eq!(
+            sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), String::new()]),
+            read(" --exclude='./work' --exclude='./work/*/home/.cache/uv' --exclude='./hermes/state.db'", " --exclude='./*/home/.cache/uv'"),
+            "the home leaves out its work and all named; the work what was named under it; never an unsafe pattern"
+        );
+        assert_eq!(sizes_read(&["/work/".into()]), read(" --exclude='./work' --exclude='./work'", ""), "a guest naming its whole work: its work's record keeps it all, and so does its measure");
     }
 }

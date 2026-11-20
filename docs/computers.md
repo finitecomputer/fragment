@@ -558,17 +558,21 @@ stopped in its restore of `/data/work` with about 200 MB free).
   the larger is counted).
 - **What a restore writes** is read after each awake save, in the alarm
   that saved it (`sizes_read`, within `SIZES_READ_MS`, 30 s): `du` of
-  what that save keeps of `/data`, the larger of its allocated and its
-  apparent size: GNU's `du --exclude` of what it left out (its held
-  guest's patterns), so a file hard-linked between a cache left out and
+  each record as its save takes it, `/data` but its work less what its
+  held guest named, and `/data/work` less what it named under its work,
+  each the larger of its allocated and its apparent size, summed. Apart,
+  a file hard-linked between the two counts in each, as each record
+  restores its copy; GNU's `du --exclude` leaves out what the save does
+  without walking it, so a file hard-linked between a cache left out and
   the work kept (uv's and pnpm's caches link into projects) counts where
   it restores. A `du` with no `--exclude` (BusyBox's, the stub's) counts
-  all of `/data`. On ext4 the
-  allocated size is exactly what a restore writes; on btrfs it is a
+  all of `/data`, once. A record not read leaves the last read's size in
+  place, and a walk that failed part-way still gives its `df`. On ext4
+  the allocated size is exactly what a restore writes; on btrfs it is a
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
-  (`restore_writes`). A hard link between `/data` and its work is counted
-  once. A start's read is `df` alone and keeps the last `du`.
+  (`restore_writes`). A start's read is `df` alone and keeps the last
+  `du`.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,

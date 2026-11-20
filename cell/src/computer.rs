@@ -1972,8 +1972,10 @@ impl ComputerCell {
         let (read, bound) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS) } else { (DISK_READ.to_string(), DISK_READ_MS) };
         let argv = js::to_js(&json!(["sh", "-c", read]));
         let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        // a sizes read's answer is read whatever its exit (a walk that a
+        // file vanished from still printed its df: Codex on #1421)
         let out = match read {
-            Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
+            Ok(o) if sizes || o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
             Ok(o) => format!("exit {}", o["exitCode"]),
             Err(e) => e.message,
         };
