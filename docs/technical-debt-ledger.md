@@ -150,22 +150,25 @@ unfinished design, not debt.
   (CLIs, the CLI inside computer images, which can lag for days, and iOS
   builds) rename a fragment by its `fragment.json`'s `meta.title`, and set
   an agent's picture by its `avatar.png`, then deploy. So that they keep
-  working, `GET manifest` answers the face's title (plane.rs `manifest`),
-  and each install takes, from its own `fragment.json` and an agent's
+  working, `GET manifest` answers the face's title (plane.rs `manifest`)
+  with a mark of the read for an editor (`meta.titleRead`, kept in
+  `MetaKey::TitleRead`), a files write naming it renames it
+  (`title_from_read`), and each install takes, from its own `fragment.json` and an agent's
   `avatar.png`, what changed since its last install (plane.rs
   `face_from_git`, `picture_in_git`; `MetaKey::TitleSeen`,
   `MetaKey::PictureSeen`), as docs/api.md says ("A client from before the
   face").
-- **Risk:** a rename by such a client to the title its `fragment.json`
-  already says commits nothing and changes nothing; an app's own code that
-  changes its `meta.title` renames it, as it did before the face. An
+- **Risk:** such a client writes the mark into its `fragment.json`, where
+  it stays, read by nothing once taken; an app's own code that changes
+  its `meta.title` renames it, as it did before the face. An
   agent's install reads its `avatar.png` again only when it changed.
 - **Delete when:** the CLI release notice, the computer image pinned in
   production and the iOS build in use are all from this release or later,
-  and a week of production logs shows no `face.changed` event `by`
+  and a week of production logs shows no `face.changed` event from
   `fragment.json` and no `picture.changed`. Then a Fragment step deletes
-  the two `meta` rows, and the manifest route's title, `face_from_git`,
-  `picture_in_git` and `GitPicture` go.
+  the three `meta` rows, and the manifest route's title and mark,
+  `title_read`, `title_from_read`, `face_from_git`, `picture_in_git` and
+  `GitPicture` go.
 
 ## A computer keeps its owner's own keys from before the move
 
