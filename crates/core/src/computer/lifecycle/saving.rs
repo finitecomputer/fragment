@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Action, Lifecycle, Phase, SaveNote, Step};
-use crate::computer::limits::{HOLD_DEADLINE_MS, SAVE_DEADLINE_MS, SLEEP_DEADLINE_MS};
+use crate::computer::limits::{HOLD_DEADLINE_MS, SAVE_DEADLINE_MS, SAVE_SETTLE_MS, SLEEP_DEADLINE_MS};
 
 /// The save under way (awake, or a sleep's), by its step, and since when
 /// that step began (its deadline counts from there).
@@ -61,6 +61,39 @@ impl Lifecycle {
         self.busy_since_ms = None;
         self.save_asked_ms = now_ms;
         step.actions.push(Action::Sleep { generation });
+    }
+
+    /// Whether something that wants it now cancels the sleep under way: an
+    /// idle one (not its owner's, nor a restart) still at its hold or its
+    /// save. Once its stop begins, its container is going: not then.
+    pub(super) fn cancels_sleep(&self) -> bool {
+        matches!(self.phase, Phase::Sleeping { owner: false, .. }) && matches!(self.saving, Some(Saving::Hold { .. } | Saving::Save { .. }))
+    }
+
+    /// Its idle sleep is cancelled (`cancels_sleep`): awake again on the
+    /// container it has, nothing restored and nothing started. A hold not
+    /// answered yet is let go at once, and the save it was for is due when
+    /// work settles (a turn's end saves instead). A save under way goes on
+    /// as an awake save, held to its end as any is: a backup cut short is
+    /// never sure to be whole or gone, and one that goes on is reported,
+    /// and kept or failed, as every awake save is. It is awake as it was
+    /// before its sleep began (a moment before it), so its sleep's save,
+    /// asked as that began, is one this awake run made (`idle_and_kept`);
+    /// a keepalive open is busy from now (its saves every `SAVE_EVERY_MS`).
+    pub(super) fn sleep_cancelled(&mut self, generation: u64, now_ms: i64, step: &mut Step) {
+        assert!(self.cancels_sleep(), "only an idle sleep, before its stop, is cancelled");
+        let Phase::Sleeping { since_ms, .. } = self.phase else { unreachable!("a cancel is of a sleep") };
+        self.phase = Phase::Awake { generation, since_ms: since_ms - 1 };
+        if self.keepalives > 0 {
+            self.busy_since_ms = Some(now_ms);
+        }
+        if matches!(self.saving, Some(Saving::Hold { .. })) {
+            self.saving = None;
+            if self.keepalives == 0 {
+                self.save_due_ms = Some(now_ms + SAVE_SETTLE_MS);
+            }
+            step.actions.push(Action::Unhold { generation });
+        }
     }
 
     /// Begins a save while it stays awake: its hold first.
@@ -403,6 +436,50 @@ mod tests {
     /// A hold or a stop that never reports is asked for again at its
     /// deadline; a save that never reports failed
     /// (`a_save_that_never_answers_fails_at_its_deadline`).
+    /// Goal (Codex on #1375): a stop's deadline is minutes, for its
+    /// snapshot, yet one whose end its isolate lost is found within a minute,
+    /// as when the deadline was one: its alarm looks every `STOP_LOOK_MS`
+    /// whether its container is gone (`Action::Look`), even once a new
+    /// isolate adopted it as it went down, whose exit no report ends (Codex's
+    /// second round). A wake that came during the stop starts then, and the
+    /// sleep is metered to that look, no later. Valid (a look finds it gone),
+    /// replay (a look that finds it still stopping changes nothing, and looks
+    /// again), the bound (asked again at its deadline). Method: the
+    /// lifecycle's steps, as the DO hears them, its report lost.
+    #[test]
+    fn a_stop_whose_end_was_lost_is_found_within_a_minute() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let slept = T + IDLE_MS;
+        l.apply(Event::Alarm, slept);
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, slept + 500));
+        let stop = slept + 4_000;
+        let s = l.apply(Event::Saved { generation: g, seq }, stop);
+        assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }]);
+        assert_eq!(s.alarm_ms, Some(stop + STOP_LOOK_MS), "looked at within a minute, its deadline minutes away");
+        // a wake as it stops: a start once it ends
+        let s = l.apply(Event::Wake { why: Wake::Record }, stop + 2_000);
+        assert!(s.actions.is_empty() && s.alarm_ms == Some(stop + STOP_LOOK_MS), "{s:?}");
+        // a look that finds it still stopping (its snapshot runs on, or a
+        // new isolate adopted it as it went down): nothing more
+        let before = l.clone();
+        let s = l.apply(Event::Alarm, stop + STOP_LOOK_MS);
+        assert!(s.actions == vec![Action::Look { generation: g }] && l == before, "a look, nothing else: {s:?}");
+        assert_eq!(s.alarm_ms, Some(stop + 2 * STOP_LOOK_MS), "it looks again");
+        // its end lost with its isolate: the next look finds its container
+        // gone and reports it asleep (`Action::Look`)
+        let found = stop + 2 * STOP_LOOK_MS;
+        assert_eq!(l.apply(Event::Alarm, found).actions, vec![Action::Look { generation: g }]);
+        let s = l.apply(Event::Asleep { generation: g }, found);
+        assert!(s.actions.iter().any(|a| matches!(a, Action::Meter { to_ms, .. } if *to_ms == found)), "metered to the look: {s:?}");
+        assert_eq!(l.apply(Event::Alarm, found).actions, vec![Action::Start { generation: g + 1 }], "the wake's start");
+        // the bound: never found, its stop is asked again at its deadline
+        let mut l = before;
+        let s = l.apply(Event::Alarm, stop + SLEEP_DEADLINE_MS - 1);
+        assert!(s.actions == vec![Action::Look { generation: g }] && s.alarm_ms == Some(stop + SLEEP_DEADLINE_MS), "its last look is its deadline: {s:?}");
+        assert_eq!(l.apply(Event::Alarm, stop + SLEEP_DEADLINE_MS).actions, vec![Action::Stop { generation: g, saved: true }]);
+    }
+
     #[test]
     fn a_sleep_holds_then_saves_then_stops() {
         let mut l = Lifecycle::new();
@@ -415,7 +492,7 @@ mod tests {
         assert_eq!(s.alarm_ms, Some(T + IDLE_MS + 500 + SAVE_DEADLINE_MS));
         let s = l.apply(Event::Saved { generation: g, seq: 1 }, T + IDLE_MS + 4_000);
         assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }], "then its stop, a snapshot of the save first");
-        assert_eq!(s.alarm_ms, Some(T + IDLE_MS + 4_000 + SLEEP_DEADLINE_MS));
+        assert_eq!(s.alarm_ms, Some(T + IDLE_MS + 4_000 + STOP_LOOK_MS), "looked at in a minute (its deadline is `SLEEP_DEADLINE_MS`)");
         let s = l.apply(Event::Asleep { generation: g }, T + IDLE_MS + 12_000);
         assert_eq!(s.actions, vec![Action::Meter { from_ms: T + IDLE_MS, to_ms: T + IDLE_MS + 12_000 }]);
         assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: T + IDLE_MS + 12_000, restart: false, quiet: true }));
@@ -458,15 +535,14 @@ mod tests {
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
         l.apply(Event::Alarm, T + IDLE_MS);
-        // a record wakes it as it holds: the newest push wins either way
-        l.apply(Event::Wake { why: Wake::Record }, T + IDLE_MS + 100);
         let s = l.apply(Event::Opened { socket: Socket::Keepalive }, T + IDLE_MS + 200);
         assert_eq!(s.actions, vec![Action::Unhold { generation: g }]);
-        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS + 200 });
-        assert!(l.saving().is_none(), "awake: a wake heard as it was held owes nothing more");
-        // its hold's late answer changes nothing
+        assert_eq!(l.phase, Phase::Awake { generation: g, since_ms: T + IDLE_MS - 1 }, "awake as before its sleep");
+        assert!(l.saving().is_none(), "awake, held no more");
+        // its hold's late answer changes nothing, but lets go again (its
+        // touch may have landed after the cancel let go of it)
         let before = l.clone();
-        assert!(l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 300).actions.is_empty());
+        assert_eq!(l.apply(Event::Held { generation: g, held: true }, T + IDLE_MS + 300).actions, vec![Action::Unhold { generation: g }]);
         assert_eq!(l, before);
         // the work ends: saved as any work is, then idle it sleeps again
         l.apply(Event::Closed { socket: Socket::Keepalive }, T + IDLE_MS + 60_000);

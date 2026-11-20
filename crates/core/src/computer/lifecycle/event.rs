@@ -109,6 +109,13 @@ pub enum Event {
     /// `destroying`), and the start's own report follows. Kept with the
     /// lifecycle, so an isolate that comes up after it knows it too.
     StartFailing { generation: u64 },
+    /// The start `generation` found the container before it still running
+    /// past its destroy (a snapshot the runtime still takes holds a sleep's
+    /// container until it ends), or its isolate went as it looked
+    /// (`unplanned_start`), and started nothing: made again at once, no
+    /// strike, until that container has had a stop's deadline
+    /// (`SLEEP_DEADLINE_MS`) since the first such try; a failure after.
+    StartBlocked { generation: u64 },
     Alarm,
     /// Its owner put it to sleep: what held it is let go (its sockets close
     /// with its container).
@@ -144,6 +151,11 @@ pub enum Action {
     /// End its sleep: a snapshot (when its save worked: a cache of it), the
     /// signal, the wait, the destroy; then report `Asleep`.
     Stop { generation: u64, saved: bool },
+    /// Look whether the container of the stop under way is gone, and report
+    /// `Asleep` if it is: a look (`STOP_LOOK_MS`) finds a stop whose end its
+    /// isolate took with it, which no exit report ends (its container's,
+    /// heard during a stop, is that stop's own to report).
+    Look { generation: u64 },
     /// Meter awake time from `from_ms` to `to_ms` to the owner.
     Meter { from_ms: i64, to_ms: i64 },
 }

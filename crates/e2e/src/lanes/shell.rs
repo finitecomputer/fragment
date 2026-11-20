@@ -1134,8 +1134,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
       }
       // Every read that can change Settings' Computer known from its start,
       // in every document of this page (`add_agent_ui` holds them): the
-      // computer's (`/api/computers…`, but Settings' own `/uses`, which it
-      // draws only once answered) and the list's read, which `load` (shell.js)
+      // computer's (`/api/computers…`) and the list's read, which `load` (shell.js)
       // awaits with the computer's before it draws either. `hold()` holds
       // the computer's asked from then on and, once each read already on
       // its way has had its body read (`api` reads every answer's) and a
@@ -1145,7 +1144,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         const kind = (u, o) => {
           const p = new URL(String(u instanceof Request ? u.url : u), location.href).pathname;
           const get = (o?.method ?? (u instanceof Request ? u.method : 'GET')).toUpperCase() === 'GET';
-          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') && !p.endsWith('/uses') ? 'computer' : null;
+          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') ? 'computer' : null;
         };
         const open = new Set(), queued = [];
         let holding = false;
@@ -1700,6 +1699,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     );
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
     phone_sheet_still(s, &mut b, &page, &shots)?;
+    // before the desktop's settling, which draws it afresh after
+    agent_share_ui(s, api, &mut b, &page, &me, &shots)?;
     desktop_settle_ui(s, &mut b, &page)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
@@ -4304,7 +4305,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     };
     let id = computer["computer"].as_str().unwrap_or("").to_string();
     // the uses below, and the page's month of them, in one month
-    super::computers::pin_month(api, &id)?;
+    super::computers::pin_month(api, &id, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -4334,7 +4335,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         s.eventually(std::time::Duration::from_secs(60), || replies() > n);
     }
     let counted = s.eventually(wait, || {
-        shell(api, session, "GET", &format!("/api/computers/{id}/uses"), None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
+        shell(api, session, "GET", "/api/ledger/uses", None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
     });
     b.reload(page)?;
     let row = |p: &str| format!("#settings-connections [data-provider={p:?}]");
@@ -4390,8 +4391,21 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
-    // the lane's pictures so far are there: `dir` would start it afresh
+    // the lane's pictures so far are there: `dir` would start it afresh;
+    // this month's use, read from the person's ledger, on the cards and,
+    // by agent, in a key's sheet, at 1280 and 390 px
     let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections.png"));
+    sheet_of(b, page, &row("perplexity"))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections-sheet.png"));
+    close_sheets(b, page)?;
+    b.viewport(page, 390, 844, true)?;
+    b.eval(page, &format!("(document.querySelector('{}').scrollIntoView(), true)", row("perplexity")))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/phone-390-connections.png"));
+    sheet_of(b, page, &row("perplexity"))?;
+    let _ = b.screenshot(page, &s.scratch.join("shell-ui/phone-390-connections-sheet.png"));
+    close_sheets(b, page)?;
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
@@ -4645,6 +4659,20 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     Ok(())
 }
 
+/// Screenshots of settings' row `row` (an own key's), at 1280 px and at
+/// 390 px as a phone's, named `<name>-<width>.png` in `shots`, any dialog
+/// an earlier step left open closed first; the page left at 1280 by 800,
+/// as the lane runs it.
+fn own_key_shots(b: &mut Browser, page: &Page, row: &str, shots: &std::path::Path, name: &str) -> Result<()> {
+    b.eval(page, "(document.querySelectorAll('dialog[open]').forEach((d) => d.close()), true)")?;
+    for (width, height, mobile) in [(1280, 800, false), (390, 844, true)] {
+        b.viewport(page, width, height, mobile)?;
+        b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let _ = b.screenshot(page, &shots.join(format!("{name}-{width}.png")));
+    }
+    b.viewport(page, 1280, 800, false)
+}
+
 /// Two loads of settings at once (#441): the first one's read of the
 /// connections answered (no key yet) and held, the person's own key saved,
 /// and settings opened again, which show it set; the first then let go and
@@ -4667,6 +4695,8 @@ fn settings_race_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     let settled = b.until(page, HELD_SETTLED, wait);
     let after = b.eval(page, &format!("({{ state: {state} ?? null, same: document.querySelector('#settings-page .settings-layout') === window.__held.newer }})"))?;
     b.eval(page, "(window.__held.restore(), true)")?;
+    // the row of an own key set, as its person's Vault holds it (M16), at 1280 and 390 px
+    own_key_shots(b, page, &row, &s.scratch.join("shell-ui"), "own-key-set")?;
     s.ok(
         "two loads of settings at once: the older one, whose read of the connections said no key and answered last, draws nothing over the newer one; the row stays set",
         held && saved.status == 200 && newer && settled && after == json!({ "state": "set", "same": true }),
@@ -5402,6 +5432,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let _ = b.screenshot(page, &shots.join("desktop-own-models.png"));
     b.eval(page, &format!("(document.querySelector('{row}')?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-own-models-connected.png"));
+    own_key_shots(b, page, &row, shots, "own-key-signed-in")?;
     s.ok(
         "picked, Fast and Deep start on the selected own model at High, its tier kept, and no colour (its identity's)",
         saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "deep": { "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "reasoning": "high" } }) && after["tier"] == before["tier"] && after.get("color").is_none(),
@@ -5999,6 +6030,55 @@ fn replies(api: &Api, session: &str, chat: &str, agent: &str, said: &str) -> usi
 fn screen_landed(s: &mut Suite, b: &mut Browser, page: &Page, agent: &str) -> bool {
     let landed = format!("/p/6080/?agent={agent}");
     s.eventually(std::time::Duration::from_secs(30), || b.eval_in_frame(page, &landed, "location.search").ok() == Some(json!(format!("?agent={agent}"))))
+}
+
+/// An agent's own is its owner's alone (FIN-544): its profile's Share…
+/// opens a sheet with no invite, no link and no public, which says so in
+/// one line. Shot at 1280 and 390 px, light and dark (`agent-share-*`).
+fn agent_share_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agent = agents.iter().filter_map(|a| a["fragment"].as_str()).find(|f| label_of(f) == me.first).unwrap_or("").to_string();
+    anyhow::ensure!(!agent.is_empty(), "the first agent: {r}");
+    // a desktop's page, drawn afresh after the phone's checks
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{agent}")));
+    b.viewport(page, 1280, 900, false)?;
+    b.reload(page)?;
+    b.until(page, &format!("!document.getElementById('layout').hidden && document.querySelector({})?.getClientRects().length > 0", js(&hero)), wait);
+    // its profile, from its hero's menu, and the window's Share…
+    b.click(page, &hero)?;
+    let profile = menu_item(b, page, "Its profile")?;
+    let pane = format!("#stack .pane[data-key={}]", js(&format!("app:{agent}")));
+    let share = js(&format!("{pane} button[aria-label=\"Share…\"]"));
+    let offered = profile && b.until(page, &format!("!!document.querySelector({share})"), wait);
+    b.eval(page, &format!("(document.querySelector({share})?.click(), true)"))?;
+    let drawn = format!(
+        "(() => document.body.innerText.includes({}) && !document.querySelector('input[type=email]') && !document.querySelector('button[value=link], button[value=public]'))()",
+        js("An agent's own page stays private to its owner.")
+    );
+    let open = "document.getElementById('sheet').open && document.getAnimations().length === 0";
+    let sheet = b.until(page, open, wait) && s.eventually(wait, || b.eval_in_frame(page, "/share/", &drawn).ok() == Some(Value::Bool(true)));
+    let said = b.eval_in_frame(page, "/share/", "document.body.innerText").unwrap_or(Value::Null);
+    let mut shown = sheet;
+    for (width, height, phone) in [(1280, 900, false), (390, 844, true)] {
+        b.viewport(page, width, height, phone)?;
+        for scheme in ["light", "dark"] {
+            b.color_scheme(page, scheme)?;
+            shown &= b.until(page, open, wait);
+            let _ = b.screenshot(page, &shots.join(format!("agent-share-{width}-{scheme}.png")));
+        }
+    }
+    b.color_scheme(page, "light")?;
+    let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+    let closed = b.until(page, "!document.getElementById('sheet').open", wait);
+    b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("{pane} button[aria-label=Close]"))))?;
+    s.ok(
+        "FIN-544: an agent's profile offers Share…, whose sheet offers no invite, no link and no public, and says in one line that an agent's own page stays private to its owner, at 1280 and 390, light and dark",
+        offered && shown && closed,
+        json!({ "profile": profile, "offered": offered, "sheet": sheet, "shown": shown, "closed": closed, "said": said }),
+    );
+    Ok(())
 }
 
 /// Clicks the open menu's item named `text` (a script's click: a menu's

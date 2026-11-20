@@ -173,8 +173,8 @@ enum Cmd {
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Delete a fragment you own, for everyone in it: its pages, data and
-    /// blobs go, and its name is free; its repo's history stays. At a
-    /// terminal it asks you to type its name first, unless --yes
+    /// files go, and its name is free. At a terminal it asks you
+    /// to type its name first, unless --yes
     Rm {
         name: String,
         /// Delete without asking (only a terminal asks)
@@ -562,7 +562,8 @@ enum OperatorCmd {
     },
     /// FIN-352's census: of everyone's fragments, how many of each kind
     /// hold a key or a door, and how many of those are open by their link
-    /// or public. Counts only, no names
+    /// or public; and, by name, each agent fragment shared beyond its
+    /// owner (FIN-544). No other names
     Reach {
         #[arg(long)]
         key_file: Option<PathBuf>,
@@ -1602,6 +1603,7 @@ fn run(cli: Cli) -> Result<()> {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             let (mut people, mut owned, mut unanswered) = (0u64, 0u64, 0u64);
             let (mut reaching, mut beyond) = (std::collections::BTreeMap::<String, u64>::new(), std::collections::BTreeMap::<String, u64>::new());
+            let mut shared: Vec<String> = vec![];
             let mut after: Option<String> = None;
             loop {
                 let page = admin_answer(&c, c.get(&format!("/api/admin/people?after={}", api::encode_q(after.as_deref().unwrap_or(""))))?)?;
@@ -1616,17 +1618,23 @@ fn run(cli: Cli) -> Result<()> {
                             *into.entry(kind.clone()).or_default() += n.as_u64().unwrap_or(0);
                         }
                     }
+                    // none from a release before it lists them
+                    shared.extend(r["sharedAgents"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
                 }
                 match page["next"].as_str() {
                     Some(next) => after = Some(next.to_string()),
                     None => break,
                 }
             }
-            json_exit(j, &json!({ "people": people, "owned": owned, "reaching": reaching, "beyond": beyond, "unanswered": unanswered }));
+            json_exit(j, &json!({ "people": people, "owned": owned, "reaching": reaching, "beyond": beyond, "sharedAgents": shared, "unanswered": unanswered }));
             let say = |m: &std::collections::BTreeMap<String, u64>| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ") };
             println!("{people} people, {owned} fragments owned ({unanswered} did not answer)");
             println!("with a key or a door: {}", say(&reaching));
             println!("of those, open by link or public: {}", say(&beyond));
+            println!("agent fragments shared beyond their owner: {}", shared.len());
+            for name in &shared {
+                println!("  {name}");
+            }
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
@@ -2129,7 +2137,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Rm { name, yes } => {
             let name = c.fragment(&name)?;
             if !yes && std::io::stdin().is_terminal() {
-                eprintln!("Delete {name} for everyone in it? Its pages, data and blobs go. This can't be undone.");
+                eprintln!("Delete {name} for everyone in it? Its pages, data and files go. This can't be undone.");
                 eprint!("Type {name} to delete it: ");
                 let mut typed = String::new();
                 std::io::stdin().read_line(&mut typed)?;
@@ -2139,7 +2147,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
             json_exit(j, &json!({ "deleted": true, "name": name }));
-            println!("deleted {name} for everyone in it: its pages, data and blobs are gone, and the name is free. Its repo's history stays, and comes back if you make {name} again.");
+            println!("deleted {name} for everyone in it: its pages, data and files go, and the name is free.");
         }
         Cmd::Archive { name } => {
             let done = set_archived(&c, &name, true)?;

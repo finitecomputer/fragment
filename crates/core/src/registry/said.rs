@@ -51,9 +51,7 @@ pub fn seat_lapsed(admin: bool, pay_again: bool) -> Notice {
 /// How long before a seat ends by itself it is told (Paul, 2026-11-09).
 pub const ENDING_TOLD_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 
-/// Why a seat ends by itself on a date. A Stripe trial now; the
-/// migration's free month (a comp with an end, FIN-463) comes next, in
-/// words of its own: a comp holds no card, so it says to add one.
+/// Why a seat ends by itself on a date: a Stripe trial.
 pub enum Ending {
     /// A Stripe trial: a card on file keeps the seat, and this registry
     /// does not know whether one is, so the words are true either way.
