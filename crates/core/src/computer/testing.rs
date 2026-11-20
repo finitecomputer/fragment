@@ -117,7 +117,7 @@ impl Computer {
         assert!(held);
         let s = match save {
             Some(id) => {
-                self.saves.saved(g, rec(id), self.now, self.now, held);
+                self.saves.saved(g, rec(id), 0, self.now, held);
                 self.apply(Event::Saved { generation: g, seq })
             }
             None => {
@@ -143,7 +143,7 @@ impl Computer {
     pub(super) fn saved_as(&mut self, id: &str) {
         let g = self.life.generation();
         let (_, held, seq) = save_asked(&self.apply(Event::Held { generation: g, held: true }));
-        self.saves.saved(g, rec(id), self.now, self.now, held);
+        self.saves.saved(g, rec(id), 0, self.now, held);
         self.apply(Event::Saved { generation: g, seq });
     }
 

@@ -321,21 +321,22 @@ mod tests {
     /// kept in the order they began, whichever ends first: the newer
     /// capture is the newest kept, and the restart or sleep goes on saved.
     /// An older one ending last is let go; one ending first is kept until
-    /// the newer is (and stays the newest if the newer fails). Method: the
-    /// lifecycle's events, each save kept or let go as the DO's `save`
-    /// does (`Saves::overtaken` with the time it began), valid (both
-    /// orders), the newer failing, and the saves stored and read back
-    /// between the two ends (a restart of the DO).
+    /// the newer is (and stays the newest if the newer fails), by their
+    /// numbers, never their clocks, which two may share (Codex on #1378).
+    /// Method: the lifecycle's events, each
+    /// save kept or let go as the DO's `save` does (`Saves::overtaken` with
+    /// its `seq`), valid (both orders), the newer failing, and the saves
+    /// stored and read back between the two ends (a restart of the DO).
     #[test]
     fn overlapping_saves_are_kept_in_the_order_they_began() {
         // the DO's `save`, ending at `at`: kept unless a newer one was
-        fn end(l: &mut Lifecycle, saves: &mut Saves, g: u64, (seq, began): (u64, i64), id: &str, at: i64) -> Step {
+        fn end(l: &mut Lifecycle, saves: &mut Saves, g: u64, seq: u64, id: &str, at: i64) -> Step {
             let records = vec![json!({ "id": id, "dir": "/data" }), json!({ "id": format!("{id}-work"), "dir": "/data/work" })];
-            if saves.overtaken(g, began) {
+            if saves.overtaken(g, seq) {
                 assert!(saves.let_go(records).is_empty());
                 return l.apply(Event::SaveFailed { generation: g, seq, why: "a newer save was kept as it ran".into() }, at);
             }
-            saves.saved(g, records, began, at, true);
+            saves.saved(g, records, seq, at, true);
             l.apply(Event::Saved { generation: g, seq }, at)
         }
         let newest = |saves: &Saves| saves.all().first().map(|s| s.id.clone());
@@ -356,7 +357,7 @@ mod tests {
                 l.apply(owner.clone(), at + 3_000);
                 let (_, _, b) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 4_000));
                 assert!(b > a);
-                (l, g, (a, at + 500), (b, at + 4_000), at)
+                (l, g, a, b, at)
             };
             let stops = |s: &Step, g: u64| s.actions == vec![Action::Stop { generation: g, saved: true }];
             // A ends first (it has only its work left): kept, then B is, the newest
@@ -383,7 +384,7 @@ mod tests {
                 if a_first {
                     end(&mut l, &mut saves, g, a, "a", at + 6_000);
                 }
-                let failed = l.apply(Event::SaveFailed { generation: g, seq: b.0, why: "R2 is down".into() }, at + 8_000);
+                let failed = l.apply(Event::SaveFailed { generation: g, seq: b, why: "R2 is down".into() }, at + 8_000);
                 if !a_first {
                     end(&mut l, &mut saves, g, a, "a", at + 9_000);
                 }

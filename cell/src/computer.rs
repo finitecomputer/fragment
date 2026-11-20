@@ -2128,7 +2128,7 @@ impl ComputerCell {
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         // a newer save of its start was kept as this one ran (its owner's
         // sleep, once its guest went on): never kept ahead of it
-        if self.saves().is_ok_and(|s| s.overtaken(generation, t0)) {
+        if self.saves().is_ok_and(|s| s.overtaken(generation, seq)) {
             console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "overtaken": true, "ms": js::now_ms() - t0 }));
             match self.update_saves(|s| s.let_go(records)) {
                 Ok(lost) => self.forget(lost).await,
@@ -2136,7 +2136,7 @@ impl ComputerCell {
             }
             return Event::SaveFailed { generation, seq, why: "a newer save was kept as it ran".into() };
         }
-        match self.keep_save(generation, records, t0, held).await {
+        match self.keep_save(generation, records, seq, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
@@ -2207,12 +2207,12 @@ impl ComputerCell {
         })
     }
 
-    /// A save begun at `began_ms` worked: it is the newest save, and the
-    /// ones it pushed out of the newest `SAVES_KEPT` are let go of
-    /// (`forget`). Answers it.
-    async fn keep_save(&self, generation: u64, records: Vec<Value>, began_ms: i64, held: bool) -> CellResult<Save> {
+    /// Save `seq` worked, and was not overtaken (checked just before, with
+    /// no await between): it is the newest save, and the ones it pushed out
+    /// of the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
+    async fn keep_save(&self, generation: u64, records: Vec<Value>, seq: u64, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let lost = self.update_saves(|s| s.saved(generation, records, began_ms, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, seq, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");
