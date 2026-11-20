@@ -4,24 +4,28 @@
 //! Workers Observability with a read-only key (`keys::observability_query`),
 //! answer what runs: computers awake, fragments that ran, and computers in
 //! trouble, with why a save failed (`fragment_core::glance`). No person's
-//! object is called. Each read asks afresh: the page asks again every
-//! minute, and only operators open it.
+//! object is called. What the logs answered is kept by the registry, a
+//! part at a time (`glance::Part`): a load reads a part again only when
+//! the registry says it is due and no other load is reading it, and
+//! otherwise shows what was kept, with when it was read.
 
-use fragment_core::glance::{self as core, Question};
+use fragment_core::glance::{self as core, Part, Question, Shown};
 use fragment_proto::org::{AdminGlance, GlanceLogs, GlanceTrouble, TroubleKind, TroubleWhy};
+use serde::{Deserialize, Serialize};
 use worker::{Env, Url};
 
-use crate::config::Config;
+use crate::config::{Config, ObservabilityConfig};
 use crate::error::{CellError, CellResult};
 use crate::registry::admin;
 use crate::{ask_registry, js};
 
-/// What the logs said, before the registry names whose each computer is.
-struct Read {
+/// What the logs said of the now part (`Part::Now`), before the registry
+/// names whose each computer is: as kept, its JSON.
+#[derive(Serialize, Deserialize)]
+struct Now {
     awake_now: u64,
-    awake_today: u64,
-    /// The computers awake in the last week (at most `core::GROUPS_MAX`).
-    awake_week: Vec<String>,
+    /// The computers awake since the day's start (at most `core::GROUPS_MAX`).
+    awake_today: Vec<String>,
     fragments_now: u64,
     fragments_today: u64,
     trouble: Vec<(String, TroubleKind, u64)>,
@@ -29,6 +33,10 @@ struct Read {
     /// read (`core::whys_of`), or why they were not read.
     whys: Result<Vec<(String, i64, String)>, String>,
 }
+
+/// The week's (`Part::Week`): the computers awake in the last week (at
+/// most `core::GROUPS_MAX`).
+type Week = Vec<String>;
 
 /// The glance now, the day starting at the operator's `dayStart`.
 pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<AdminGlance> {
@@ -39,38 +47,44 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
         .map(|(_, v)| v.parse::<i64>().map_err(|_| CellError::invalid("dayStart is the start of today, in ms")))
         .transpose()?;
     let day_start = core::day_start(named, now).map_err(CellError::invalid)?;
+    let mut read = vec![];
     let logs = match &cfg.observability {
         None => Err(None),
-        Some(o) => read(env, o, now, day_start).await.map_err(|e| Some(e.message)),
+        Some(o) => logs(env, o, now, day_start, &mut read).await?.map_err(Some),
     };
     // the computers in trouble, each once, for the registry to say whose
-    let mut computers = logs.as_ref().map(|r| r.trouble.iter().map(|(c, _, _)| c.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let mut computers = logs.as_ref().map(|(n, _)| n.answer.trouble.iter().map(|(c, _, _)| c.clone()).collect::<Vec<_>>()).unwrap_or_default();
     computers.sort();
     computers.dedup();
-    let g = ask_registry(env, &admin::Glance { now_ms: now, day_start, computers }).await?;
+    let g = ask_registry(env, &admin::Glance { now_ms: now, day_start, computers, read }).await?;
     let mut new_people = g.new_people;
-    if let Ok(r) = &logs {
+    if let Ok((n, w)) = &logs {
+        // awake this week: as the week's says, or since, today
         for p in &mut new_people {
-            p.computer_up = Some(r.awake_week.contains(&p.computer));
+            p.computer_up = Some(w.answer.contains(&p.computer) || n.answer.awake_today.contains(&p.computer));
         }
     }
     let logs = match logs {
         Err(None) => GlanceLogs::NotConfigured,
         Err(Some(why)) => GlanceLogs::Failed { why },
-        Ok(r) => GlanceLogs::Read {
-            why_unread: r.whys.as_ref().err().cloned(),
-            computers_awake_now: r.awake_now,
-            computers_awake_today: r.awake_today,
-            computers_awake_week: r.awake_week.len() as u64,
-            fragments_awake_now: r.fragments_now,
-            fragments_awake_today: r.fragments_today,
-            trouble: r
+        Ok((n, w)) => GlanceLogs::Read {
+            at: n.at,
+            week_at: w.at,
+            why_kept: n.why_kept.or(w.why_kept),
+            why_unread: n.answer.whys.as_ref().err().cloned(),
+            computers_awake_now: n.answer.awake_now,
+            computers_awake_today: n.answer.awake_today.len() as u64,
+            computers_awake_week: w.answer.len() as u64,
+            fragments_awake_now: n.answer.fragments_now,
+            fragments_awake_today: n.answer.fragments_today,
+            trouble: n
+                .answer
                 .trouble
                 .into_iter()
                 .map(|(computer, kind, lines)| {
                     let owner = g.owners.iter().find(|(c, _, _)| *c == computer);
                     let why = match kind {
-                        TroubleKind::SavesFailing => r.whys.iter().flatten().find(|(c, _, _)| *c == computer).map(|(_, at, text)| TroubleWhy { at: *at, text: text.clone() }),
+                        TroubleKind::SavesFailing => n.answer.whys.iter().flatten().find(|(c, _, _)| *c == computer).map(|(_, at, text)| TroubleWhy { at: *at, text: text.clone() }),
                         TroubleKind::WontWake | TroubleKind::DiskFilling => None,
                     };
                     GlanceTrouble { npub: owner.map(|(_, n, _)| n.clone()), email: owner.and_then(|(_, _, e)| e.clone()), computer, kind, lines, why }
@@ -81,29 +95,78 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
     Ok(AdminGlance { at: now, signups: g.signups, signed_in: g.signed_in, new_people, logs })
 }
 
-/// Every question, asked together: what the logs say, or the first
-/// counting question's failure. Why saves failed is the lines themselves,
-/// which may run past the cell's bound on an answer: its read failing
-/// leaves the rest, and says why (`why_unread`).
-async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_start: i64) -> CellResult<Read> {
-    let asked = Question::ALL.map(|q| async move { (q, crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await) });
-    let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: Ok(vec![]) };
+/// The logs as this load shows them: each part read again when the
+/// registry says this load is to (`admin::GlanceTake`), else as it kept it
+/// (`core::shown_part`); or why there is none. What was read again is put
+/// in `read`, for the registry to keep (`admin::Glance`).
+async fn logs(env: &Env, o: &ObservabilityConfig, now: i64, day_start: i64, read: &mut Vec<(String, Option<String>)>) -> CellResult<Result<(Shown<Now>, Shown<Week>), String>> {
+    let taken = ask_registry(env, &admin::GlanceTake { now_ms: now, day_start }).await?;
+    let [n, w] = <&[admin::TakenPart; 2]>::try_from(taken.parts.as_slice()).map_err(|_| CellError::host("the registry keeps two parts of the glance"))?;
+    // the week's scan beside the now part's queries: `ASKED_AT_ONCE` at most
+    let (now_read, week_read) = futures_util::future::join(
+        async { if n.read { Some(read_now(env, o, now, day_start).await) } else { None } },
+        async { if w.read { Some(read_week(env, o, now, day_start).await) } else { None } },
+    )
+    .await;
+    read.extend(now_read.as_ref().map(|r| (Part::Now.key().to_string(), r.as_ref().ok().map(json))));
+    read.extend(week_read.as_ref().map(|r| (Part::Week.key().to_string(), r.as_ref().ok().map(json))));
+    let n = core::shown_part(now_read, kept(&n.kept, Part::Now), now);
+    let w = core::shown_part(week_read, kept(&w.kept, Part::Week), now);
+    Ok(n.and_then(|n| w.map(|w| (n, w))))
+}
+
+fn json<T: Serialize>(answer: &T) -> String {
+    serde_json::to_string(answer).expect("a part's answer is JSON")
+}
+
+/// A part's kept answer: when it was read, and it, or why it does not decode.
+fn kept<T: serde::de::DeserializeOwned>(kept: &Option<(i64, String)>, part: Part) -> Option<(i64, Result<T, String>)> {
+    kept.as_ref().map(|(at, answer)| (*at, crate::json_text(answer).map_err(|e| format!("the glance's kept {} does not decode: {e}", part.key()))))
+}
+
+/// One question's answer, or why not: the query API's, or its own error.
+async fn ask(env: &Env, o: &ObservabilityConfig, q: Question, now: i64, day_start: i64) -> Result<serde_json::Value, String> {
+    crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await.map_err(|e| e.message)
+}
+
+/// Why a question's answer read as nothing.
+fn why(q: Question) -> impl Fn(String) -> String {
+    move |e| format!("Workers Observability, {q:?}: {e}")
+}
+
+/// The now part, its questions `ASKED_AT_ONCE - 1` at a time: what the
+/// logs say, or the first counting question's failure, after which nothing
+/// more is asked. Why saves failed is the lines themselves, which may run
+/// past the cell's bound on an answer: its read failing leaves the rest,
+/// and says why (`why_unread`).
+async fn read_now(env: &Env, o: &ObservabilityConfig, now: i64, day_start: i64) -> Result<Now, String> {
+    let mut read = Now { awake_now: 0, awake_today: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: Ok(vec![]) };
     let mut kinds = Vec::with_capacity(3);
-    // bounded: one answer per question
-    for (q, answered) in futures_util::future::join_all(asked).await {
-        let why = |e: String| CellError::new(fragment_proto::ErrorCode::UpstreamFailed, format!("Workers Observability, {q:?}: {e}"));
-        match q {
-            Question::AwakeNow => read.awake_now = core::uniq_of(&answered?).map_err(why)?,
-            Question::AwakeToday => read.awake_today = core::uniq_of(&answered?).map_err(why)?,
-            Question::AwakeWeek => read.awake_week = core::by_computer_of(&answered?).map_err(why)?.into_iter().map(|(c, _)| c).collect(),
-            Question::FragmentsNow => read.fragments_now = core::uniq_of(&answered?).map_err(why)?,
-            Question::FragmentsToday => read.fragments_today = core::uniq_of(&answered?).map_err(why)?,
-            Question::WontWake => kinds.push((TroubleKind::WontWake, core::by_computer_of(&answered?).map_err(why)?)),
-            Question::SavesFailing => kinds.push((TroubleKind::SavesFailing, core::by_computer_of(&answered?).map_err(why)?)),
-            Question::DiskFilling => kinds.push((TroubleKind::DiskFilling, core::by_computer_of(&answered?).map_err(why)?)),
-            Question::SaveWhys => read.whys = answered.and_then(|a| core::whys_of(&a).map_err(why)).map_err(|e| e.message),
+    for asked in Part::Now.questions().chunks(core::ASKED_AT_ONCE - 1) {
+        // bounded: one answer per question
+        let answers = futures_util::future::join_all(asked.iter().map(|&q| async move { (q, ask(env, o, q, now, day_start).await) })).await;
+        for (q, answered) in answers {
+            let why = why(q);
+            match q {
+                Question::AwakeNow => read.awake_now = core::uniq_of(&answered?).map_err(why)?,
+                Question::AwakeToday => read.awake_today = core::by_computer_of(&answered?).map_err(why)?.into_iter().map(|(c, _)| c).collect(),
+                Question::FragmentsNow => read.fragments_now = core::uniq_of(&answered?).map_err(why)?,
+                Question::FragmentsToday => read.fragments_today = core::uniq_of(&answered?).map_err(why)?,
+                Question::WontWake => kinds.push((TroubleKind::WontWake, core::by_computer_of(&answered?).map_err(why)?)),
+                Question::SavesFailing => kinds.push((TroubleKind::SavesFailing, core::by_computer_of(&answered?).map_err(why)?)),
+                Question::DiskFilling => kinds.push((TroubleKind::DiskFilling, core::by_computer_of(&answered?).map_err(why)?)),
+                Question::SaveWhys => read.whys = answered.and_then(|a| core::whys_of(&a).map_err(why)),
+                Question::AwakeWeek => unreachable!("the week's is its own part"),
+            }
         }
     }
     read.trouble = core::troubles(kinds);
     Ok(read)
+}
+
+/// The week's part: the computers awake in it, or why not.
+async fn read_week(env: &Env, o: &ObservabilityConfig, now: i64, day_start: i64) -> Result<Week, String> {
+    let why = why(Question::AwakeWeek);
+    let answered = ask(env, o, Question::AwakeWeek, now, day_start).await.map_err(&why)?;
+    Ok(core::by_computer_of(&answered).map_err(why)?.into_iter().map(|(c, _)| c).collect())
 }

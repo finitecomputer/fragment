@@ -38,10 +38,11 @@ const CODESTORAGE_SCOPES: [&str; 4] = ["git:read", "git:write", "repo:write", "o
 /// read (its answers are a user, a token, or a link: a few KiB).
 const VENDOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const VENDOR_ANSWER_MAX_BYTES: usize = 64 * 1024;
-/// A glance's query to Workers Observability: its deadline (the queries run
-/// together, so the page waits about this at most), and its answer read
-/// whole (`glance::GROUPS_MAX` groups of a computer's id each: some 200 KB).
-const OBSERVABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// A glance's query to Workers Observability: its deadline
+/// (`glance::QUERY_TIMEOUT_MS`, on which a load's hold of a part is
+/// counted), and its answer read whole (`glance::GROUPS_MAX` groups of a
+/// computer's id each: some 200 KB).
+const OBSERVABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(fragment_core::glance::QUERY_TIMEOUT_MS as u64);
 const OBSERVABILITY_ANSWER_MAX_BYTES: usize = 1024 * 1024;
 
 thread_local! {

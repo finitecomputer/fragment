@@ -377,10 +377,11 @@ pub struct AdminHealth {
 }
 
 /// The operators' glance (`GET /api/admin/glance`): who joined and signed
-/// in, from the registry, and what ran, from the deployment's Workers
-/// Logs, read as it is asked (no cache: the page asks again every minute).
-/// Never a person's own objects: no number here calls a computer, a
-/// fragment or a ledger.
+/// in, from the registry, as it is asked, and what ran, from the
+/// deployment's Workers Logs, as the registry kept it
+/// (`fragment_core::glance::Part`: read again past its life). Never a
+/// person's own objects: no number here calls a computer, a fragment or a
+/// ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminGlance {
@@ -443,6 +444,14 @@ pub enum GlanceLogs {
     Failed { why: String },
     #[serde(rename_all = "camelCase")]
     Read {
+        /// When the numbers were read (ms), and the week's count: each is
+        /// kept, and read again past its life (two minutes, and an hour).
+        at: i64,
+        week_at: i64,
+        /// Why a newer read failed (Cloudflare's "Too many requests"),
+        /// when it did: the numbers are the last read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why_kept: Option<String>,
         /// Distinct computers whose lines say they are awake: in the last
         /// ten minutes (an awake one logs at least every five), since
         /// `dayStart`, in the last seven days.

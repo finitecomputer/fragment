@@ -23,7 +23,16 @@
 //! preview's account, its branches'), whose computers' ids are hashes of
 //! the same people.
 //!
-//! Nothing is cached: the page asks again every minute.
+//! The answers are kept (the registry's `glance_parts`): Cloudflare limits
+//! the query API per account, and other tools on the account use it too.
+//! Nine queries at once at every load, each minute, in each open tab, were
+//! answered "Too many requests", and the week's scan is slow. Each `Part`
+//! is read again once it is older than its life (the week's an hour, the
+//! rest two minutes), by one load at a time (`REFRESH_LEASE_MS`). A load
+//! meanwhile shows what was kept, and when it was read. At most
+//! `ASKED_AT_ONCE` queries run at once, and a part's read stops at its
+//! first refusal. A read that fails leaves the last answer read standing,
+//! with when, and why the newer read failed (`shown_part`).
 
 use serde_json::Value;
 
@@ -40,9 +49,34 @@ pub const WEEK_MS: i64 = 7 * DAY_MS;
 pub const DAY_START_MAX_MS: i64 = DAY_MS + 3_600_000;
 /// The newest people listed.
 pub const NEW_PEOPLE_MAX: u32 = 50;
-/// The groups one grouped query answers: computers awake in a week, or in
-/// trouble in a day. A week with more is counted as this many, at least.
+/// The groups one grouped query answers: computers awake in a week or
+/// today, or in trouble in a day. A week or a day with more is counted as
+/// this many, at least.
 pub const GROUPS_MAX: u32 = 1_000;
+/// How long the now part's answer stands before a load reads it again.
+pub const NOW_LIFE_MS: i64 = 2 * 60_000;
+/// How long the week's stands: an hour moves a week's count little, and
+/// today's computers (`Part::Now`) say whose came up since.
+pub const WEEK_LIFE_MS: i64 = 3_600_000;
+/// The queries asked at once, at most: the week's beside the now part's,
+/// which are asked `ASKED_AT_ONCE - 1` at a time.
+pub const ASKED_AT_ONCE: usize = 3;
+/// How long one query's answer is waited for (keys.rs).
+pub const QUERY_TIMEOUT_MS: i64 = 20_000;
+/// How long a load that reads a part holds it: the now part's queries,
+/// `ASKED_AT_ONCE - 1` at a time, each within `QUERY_TIMEOUT_MS`, and ten
+/// seconds more. Another load meanwhile shows what was kept; one after it
+/// reads the part again (the first load may have died).
+pub const REFRESH_LEASE_MS: i64 = Part::Now.questions().len().div_ceil(ASKED_AT_ONCE - 1) as i64 * QUERY_TIMEOUT_MS + 10_000;
+/// A part's kept answer, at most (the cell's JSON of it, some 100 KB at
+/// most: its lists are bounded by `GROUPS_MAX`, `TROUBLE_MAX` and
+/// `WHYS_READ_MAX`).
+pub const KEPT_MAX_BYTES: usize = 256 * 1024;
+/// What a load says of a part another load is reading for the first time.
+pub const BEING_READ: &str = "another load is reading the logs; look again in a moment";
+
+const _: () = assert!(ASKED_AT_ONCE >= 2, "the week's query and one of the now part's at once");
+const _: () = assert!(REFRESH_LEASE_MS < NOW_LIFE_MS, "a load that died holds a part for less than its life");
 /// Computers in trouble listed, the most lines first.
 pub const TROUBLE_MAX: usize = 100;
 /// Failed saves' lines read for their reasons, at most: the events
@@ -76,8 +110,10 @@ const _: () = assert!(NOW_MS >= 2 * METER_EVERY_MS, "an awake computer writes a 
 /// Each question the glance asks, one query each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Question {
-    /// Distinct computers awake in the last `NOW_MS`, and since the day's start.
+    /// Distinct computers awake in the last `NOW_MS`.
     AwakeNow,
+    /// The computers awake since the day's start, by computer: its count,
+    /// and, with the week's, whether a new person's came up.
     AwakeToday,
     /// The computers awake in the last week, by computer: its count, and
     /// whether a new person's came up.
@@ -128,7 +164,7 @@ impl Question {
         let disk = DISK_TOLD_FREE_MAX.to_string();
         let (filter, asks, from) = match self {
             Question::AwakeNow => (AWAKE, Asks::Uniq("computer"), now_ms - NOW_MS),
-            Question::AwakeToday => (AWAKE, Asks::Uniq("computer"), day_start_ms),
+            Question::AwakeToday => (AWAKE, Asks::ByComputer, day_start_ms),
             Question::AwakeWeek => (AWAKE, Asks::ByComputer, now_ms - WEEK_MS),
             Question::FragmentsNow => (FRAGMENT, Asks::Uniq("$workers.durableObjectId"), now_ms - NOW_MS),
             Question::FragmentsToday => (FRAGMENT, Asks::Uniq("$workers.durableObjectId"), day_start_ms),
@@ -147,6 +183,91 @@ impl Question {
             r#"{{"queryId":"{QUERY_ID}","timeframe":{{"from":{from},"to":{now_ms}}},"view":"{view}","limit":{limit},"parameters":{{"datasets":["cloudflare-workers"],"filters":[{{"key":"$workers.scriptName","operation":"eq","type":"string","value":"{script}"}},{{"key":"{key}","operation":"{op}","type":"{kind}","value":{value}}}]{asked}}}}}"#
         );
         serde_json::from_slice(body.as_bytes()).expect("a glance's query is JSON")
+    }
+}
+
+/// A part of what the glance reads, kept and read again on a life of its
+/// own: the week's scan, the slowest, apart from the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// Every question but the week's: the last ten minutes, today, and the
+    /// last day's trouble.
+    Now,
+    /// The computers awake in the last week.
+    Week,
+}
+
+impl Part {
+    pub const ALL: [Part; 2] = [Part::Now, Part::Week];
+
+    /// Its row's key in the registry's `glance_parts`: its name and its
+    /// answer's shape's version. A new shape takes a new key, so an answer
+    /// kept by other code is never read as this code's.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Part::Now => "now.1",
+            Part::Week => "week.1",
+        }
+    }
+
+    pub const fn life_ms(self) -> i64 {
+        match self {
+            Part::Now => NOW_LIFE_MS,
+            Part::Week => WEEK_LIFE_MS,
+        }
+    }
+
+    /// Its questions, in the order asked: why saves failed last, as its
+    /// failure alone takes nothing else.
+    pub const fn questions(self) -> &'static [Question] {
+        match self {
+            Part::Now => &[
+                Question::AwakeNow,
+                Question::AwakeToday,
+                Question::FragmentsNow,
+                Question::FragmentsToday,
+                Question::WontWake,
+                Question::SavesFailing,
+                Question::DiskFilling,
+                Question::SaveWhys,
+            ],
+            Part::Week => &[Question::AwakeWeek],
+        }
+    }
+
+    /// Whether a load at `now_ms`, of the day starting at `day_start`,
+    /// reads it, as the registry keeps it: until when a load reads it
+    /// (`busy_until`, at most `REFRESH_LEASE_MS` ahead; any other is no
+    /// load's), and when its answer was `read` and for which day's start.
+    /// No load reads it, and none was read, or one older than its life (or
+    /// ahead: a clock that moved), or the now part's of another day.
+    pub fn due(self, busy_until: i64, read: Option<(i64, i64)>, now_ms: i64, day_start: i64) -> bool {
+        let busy = (1..=REFRESH_LEASE_MS).contains(&busy_until.saturating_sub(now_ms));
+        !busy && read.is_none_or(|(at, day)| !(0..self.life_ms()).contains(&now_ms.saturating_sub(at)) || (self == Part::Now && day != day_start))
+    }
+}
+
+/// A part as the glance shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown<T> {
+    /// When its answer was read (ms).
+    pub at: i64,
+    pub answer: T,
+    /// Why this load's read of it failed, when an older answer stands.
+    pub why_kept: Option<String>,
+}
+
+/// What the glance shows of a part: this load's read of it (none: it was
+/// not due, or another load reads it), else the answer kept (when it was
+/// read, and it, or why it does not decode), with why the newer read
+/// failed; or why there is none.
+pub fn shown_part<T>(read: Option<Result<T, String>>, kept: Option<(i64, Result<T, String>)>, now_ms: i64) -> Result<Shown<T>, String> {
+    match (read, kept) {
+        (Some(Ok(answer)), _) => Ok(Shown { at: now_ms, answer, why_kept: None }),
+        (Some(Err(why)), Some((at, Ok(answer)))) => Ok(Shown { at, answer, why_kept: Some(why) }),
+        (None, Some((at, Ok(answer)))) => Ok(Shown { at, answer, why_kept: None }),
+        (Some(Err(why)), _) | (None, Some((_, Err(why)))) => Err(why),
+        (None, None) => Err(BEING_READ.to_string()),
     }
 }
 
@@ -377,7 +498,8 @@ mod tests {
         assert_eq!(awake["parameters"]["filters"], json!([ours, { "key": "phase.phase", "operation": "eq", "type": "string", "value": "awake" }]));
         assert_eq!(awake["parameters"]["calculations"], json!([{ "operator": "uniq", "key": "computer", "alias": "n" }]));
         assert!(awake["parameters"].get("groupBys").is_none());
-        assert_eq!(Question::AwakeToday.body(SCRIPT, NOW, day)["timeframe"]["from"], day);
+        let today = Question::AwakeToday.body(SCRIPT, NOW, day);
+        assert_eq!((today["timeframe"]["from"].as_i64(), &today["parameters"]["groupBys"]), (Some(day), &json!([{ "type": "string", "value": "computer" }])));
         let week = Question::AwakeWeek.body(SCRIPT, NOW, day);
         assert_eq!((week["timeframe"]["from"].as_i64(), &week["parameters"]["groupBys"]), (Some(NOW - WEEK_MS), &json!([{ "type": "string", "value": "computer" }])));
         assert_eq!(week["limit"], GROUPS_MAX);
@@ -391,6 +513,68 @@ mod tests {
             let b = q.body("fragment-preview", NOW, day);
             assert_eq!((&b["queryId"], &b["parameters"]["filters"][0]["value"]), (&json!(QUERY_ID), &json!("fragment-preview")), "every query is its own deployment's");
         }
+    }
+
+    /// Goal: the parts ask every question once between them, the week's
+    /// scan apart, why saves failed last of its part.
+    #[test]
+    fn the_parts_ask_each_question_once() {
+        let asked: Vec<Question> = Part::ALL.iter().flat_map(|p| p.questions().iter().copied()).collect();
+        assert_eq!(asked.len(), Question::ALL.len());
+        assert!(Question::ALL.iter().all(|q| asked.iter().filter(|a| *a == q).count() == 1), "{asked:?}");
+        assert_eq!(Part::Week.questions(), [Question::AwakeWeek]);
+        assert_eq!(Part::Now.questions().last(), Some(&Question::SaveWhys));
+        assert_ne!(Part::Now.key(), Part::Week.key());
+        assert_eq!(REFRESH_LEASE_MS, 4 * QUERY_TIMEOUT_MS + 10_000, "eight queries, two at a time");
+    }
+
+    /// Goal: a part is read again once older than its life, or (the now
+    /// part) kept of another day, by one load at a time. Valid (fresh, at
+    /// its life, past it, none kept, the week of another day), a load
+    /// reading it (busy until ahead), restart (the load that held it died:
+    /// its hold past), invalid (a hold or an answer ahead of any clock: no
+    /// load's, read again).
+    #[test]
+    fn a_part_is_read_again_past_its_life_by_one_load_at_a_time() {
+        let day = NOW - 3_600_000;
+        for part in Part::ALL {
+            let life = part.life_ms();
+            assert!(!part.due(0, Some((NOW - 1, day)), NOW, day), "{part:?} fresh");
+            assert!(!part.due(0, Some((NOW - life + 1, day)), NOW, day), "{part:?} within its life");
+            assert!(part.due(0, Some((NOW - life, day)), NOW, day), "{part:?} at its life");
+            assert!(part.due(0, None, NOW, day), "{part:?} none kept");
+            assert!(part.due(0, Some((NOW + 60_000, day)), NOW, day), "{part:?} read ahead of now: a clock that moved");
+            // another load reads it: none kept or old, this load shows what there is
+            assert!(!part.due(NOW + REFRESH_LEASE_MS, None, NOW, day), "{part:?} just taken");
+            assert!(!part.due(NOW + 1, Some((NOW - 2 * life, day)), NOW, day), "{part:?} about to be let go");
+            // that load died: past its hold, the next reads it
+            assert!(part.due(NOW, None, NOW, day) && part.due(NOW - 1, Some((NOW - 2 * life, day)), NOW, day), "{part:?} its hold past");
+            assert!(part.due(NOW + REFRESH_LEASE_MS + 1, None, NOW, day), "{part:?} a hold past any load's is none");
+            assert!(part.due(i64::MAX, None, NOW, day) && part.due(i64::MIN, Some((i64::MIN, i64::MIN)), NOW, day), "{part:?} the integers' ends");
+        }
+        assert!(Part::Now.due(0, Some((NOW - 1, day - 1)), NOW, day), "today's numbers are of the day asked");
+        assert!(!Part::Week.due(0, Some((NOW - 1, day - 1)), NOW, day), "the week's are any day's");
+    }
+
+    /// Goal: a part shows this load's read, else what was kept, with when
+    /// and why a newer read failed, else why there is none. Valid (read,
+    /// kept), a read refused (429) with an answer kept and without, another
+    /// load reading the first answer, invalid (a kept answer that does not
+    /// decode).
+    #[test]
+    fn a_part_shows_its_read_or_the_last_kept() {
+        let kept = |at: i64| Some((at, Ok(7)));
+        assert_eq!(shown_part(Some(Ok(9)), kept(NOW - 60_000), NOW), Ok(Shown { at: NOW, answer: 9, why_kept: None }));
+        assert_eq!(shown_part(Some(Ok(9)), None, NOW), Ok(Shown { at: NOW, answer: 9, why_kept: None }));
+        assert_eq!(shown_part(None, kept(NOW - 60_000), NOW), Ok(Shown { at: NOW - 60_000, answer: 7, why_kept: None }));
+        let refused = || Some(Err::<i32, _>("Too many requests".to_string()));
+        assert_eq!(shown_part(refused(), kept(NOW - 600_000), NOW), Ok(Shown { at: NOW - 600_000, answer: 7, why_kept: Some("Too many requests".into()) }), "the last answer stands, with when and why");
+        assert_eq!(shown_part(refused(), None, NOW), Err("Too many requests".into()), "none kept: why");
+        assert_eq!(shown_part::<i32>(None, None, NOW), Err(BEING_READ.into()));
+        let undecoded = || Some((NOW - 1, Err::<i32, _>("no".to_string())));
+        assert_eq!(shown_part(None, undecoded(), NOW), Err("no".into()));
+        assert_eq!(shown_part(refused(), undecoded(), NOW), Err("Too many requests".into()));
+        assert_eq!(shown_part(Some(Ok(9)), undecoded(), NOW), Ok(Shown { at: NOW, answer: 9, why_kept: None }));
     }
 
     /// Goal: a Worker's name goes into a query only as one: valid,

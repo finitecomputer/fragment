@@ -1,4 +1,5 @@
-// cell/shell/admin-glance.js: the glance's trouble rows in words. A failed
+// cell/shell/admin-glance.js: the glance in words. How old the logs'
+// numbers are, in minutes, then hours. Its trouble rows: a failed
 // save whose reason the glance read says it, after a short label when its
 // words are of one of a few kinds, and when; a reason of no known kind
 // stands alone; another kind of trouble, or a failed save with no reason
@@ -7,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { troubleWhat } from "../shell/admin-glance.js";
+import { ago, troubleWhat } from "../shell/admin-glance.js";
 
 const AT = Date.UTC(2026, 10, 18, 14, 2);
 const when = (ms) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
@@ -40,4 +41,19 @@ test("no reason read, or another kind: its kind alone", () => {
   assert.deepEqual(troubleWhat({ ...unread, kind: "disk_filling" }, when), { what: "disk nearly full", why: null });
   // a kind a newer cell names, as it is
   assert.deepEqual(troubleWhat({ ...unread, kind: "something_new" }, when), { what: "something_new", why: null });
+});
+
+test("how old the logs' numbers are: minutes, then hours, never ahead", () => {
+  const cases = [
+    [0, "just now"],
+    [59_999, "just now"],
+    [60_000, "a minute ago"],
+    [3 * 60_000 + 59_999, "3 minutes ago"],
+    [59 * 60_000, "59 minutes ago"],
+    [60 * 60_000, "an hour ago"],
+    [5 * 3_600_000 + 1, "5 hours ago"],
+    // a clock that moved: the cell's own, so at most a little
+    [-5_000, "just now"],
+  ];
+  for (const [age, said] of cases) assert.equal(ago(AT - age, AT), said, `${age} ms`);
 });

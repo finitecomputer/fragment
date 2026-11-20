@@ -62,16 +62,50 @@ impl Call for Health {
     type Answer = AdminHealth;
 }
 
+/// `POST /admin/glance-take`: what the registry keeps of each part of the
+/// glance's logs (`fragment_core::glance::Part`, `glance_parts`), and which
+/// parts the load at `now_ms`, of the day starting at `day_start`, reads
+/// again: those due, each held for it until `now_ms + REFRESH_LEASE_MS`.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct GlanceTake {
+    pub now_ms: i64,
+    pub day_start: i64,
+}
+
+/// Each part's, in `Part::ALL`'s order.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Taken {
+    pub parts: Vec<TakenPart>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TakenPart {
+    /// When its kept answer was read, and it (the cell's JSON), if one was.
+    pub kept: Option<(i64, String)>,
+    /// Whether this load reads it again.
+    pub read: bool,
+}
+
+impl Call for GlanceTake {
+    const PATH: &'static str = "/admin/glance-take";
+    type Answer = Taken;
+}
+
 /// `POST /admin/glance`: the operators' glance, as far as the registry
 /// answers it (signups, sign-ins, the newest people), at `now_ms`, the day
 /// starting at `day_start` (both checked by the router:
 /// `fragment_core::glance::day_start`), and whose each of `computers` is
-/// (at most `glance::TROUBLE_MAX`: those in trouble).
+/// (at most `glance::TROUBLE_MAX`: those in trouble). First it keeps the
+/// parts the same load read again (`GlanceTake`), by key: each answer read
+/// (the cell's JSON, at most `glance::KEPT_MAX_BYTES`), or none when its
+/// read failed. Either way the load's hold on the part ends.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Glance {
     pub now_ms: i64,
     pub day_start: i64,
     pub computers: Vec<String>,
+    #[serde(default)]
+    pub read: Vec<(String, Option<String>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -298,10 +332,54 @@ impl RegistryCell {
         })
     }
 
+    fn glance_take(&self, b: GlanceTake) -> CellResult<Taken> {
+        use fragment_core::glance::{Part, REFRESH_LEASE_MS};
+        #[derive(Deserialize)]
+        struct Row {
+            busy_until: i64,
+            at: Option<i64>,
+            day_start: Option<i64>,
+            answer: Option<String>,
+        }
+        let mut parts = Vec::with_capacity(Part::ALL.len());
+        for part in Part::ALL {
+            let row = self.row::<Row>("SELECT busy_until, at, day_start, answer FROM glance_parts WHERE part = ?", vec![part.key().into()])?;
+            let read = part.due(row.as_ref().map_or(0, |r| r.busy_until), row.as_ref().and_then(|r| r.at.zip(r.day_start)), b.now_ms, b.day_start);
+            if read {
+                self.exec(
+                    "INSERT INTO glance_parts (part, busy_until) VALUES (?, ?) ON CONFLICT (part) DO UPDATE SET busy_until = excluded.busy_until",
+                    vec![part.key().into(), SqlStorageValue::Integer(b.now_ms + REFRESH_LEASE_MS)],
+                )?;
+            }
+            parts.push(TakenPart { kept: row.and_then(|r| r.at.zip(r.answer)), read });
+        }
+        Ok(Taken { parts })
+    }
+
     fn glance(&self, b: Glance) -> CellResult<Glanced> {
-        use fragment_core::glance::{DAY_MS, NEW_PEOPLE_MAX, TROUBLE_MAX, WEEK_MS};
+        use fragment_core::glance::{Part, DAY_MS, KEPT_MAX_BYTES, NEW_PEOPLE_MAX, REFRESH_LEASE_MS, TROUBLE_MAX, WEEK_MS};
         if b.computers.len() > TROUBLE_MAX {
             return Err(CellError::invalid(format!("a glance names at most {TROUBLE_MAX} computers")));
+        }
+        if b.read.len() > Part::ALL.len() {
+            return Err(CellError::invalid(format!("a glance reads at most {} parts", Part::ALL.len())));
+        }
+        if let Some((key, _)) = b.read.iter().find(|(k, _)| !Part::ALL.iter().any(|p| p.key() == k)) {
+            return Err(CellError::invalid(format!("no part of the glance is {key:?}")));
+        }
+        if b.read.iter().any(|(_, a)| a.as_ref().is_some_and(|a| a.len() > KEPT_MAX_BYTES)) {
+            return Err(CellError::invalid(format!("a part of the glance is at most {KEPT_MAX_BYTES} bytes")));
+        }
+        for (key, answer) in &b.read {
+            // this load's hold ends, then its answer is kept unless a newer one is
+            let key = SqlStorageValue::from(key.as_str());
+            self.exec("UPDATE glance_parts SET busy_until = 0 WHERE part = ? AND busy_until = ?", vec![key.clone(), SqlStorageValue::Integer(b.now_ms + REFRESH_LEASE_MS)])?;
+            if let Some(answer) = answer {
+                self.exec(
+                    "UPDATE glance_parts SET at = ?, day_start = ?, answer = ? WHERE part = ? AND (at IS NULL OR at < ?)",
+                    vec![SqlStorageValue::Integer(b.now_ms), SqlStorageValue::Integer(b.day_start), answer.as_str().into(), key, SqlStorageValue::Integer(b.now_ms)],
+                )?;
+            }
         }
         #[derive(Deserialize)]
         struct Counts {
@@ -398,6 +476,7 @@ impl RegistryCell {
             Person::PATH => reply::<Person>(body(bytes).and_then(|b| self.person(b))),
             Orgs::PATH => reply::<Orgs>(body(bytes).and_then(|b| self.orgs_page(b))),
             Health::PATH => reply::<Health>(self.health()),
+            GlanceTake::PATH => reply::<GlanceTake>(body(bytes).and_then(|b| self.glance_take(b))),
             Glance::PATH => reply::<Glance>(body(bytes).and_then(|b| self.glance(b))),
             Log::PATH => reply::<Log>(body(bytes).and_then(|b| self.log_page(b))),
             Note::PATH => reply::<Note>(body::<Note>(bytes).and_then(|b| match (&b.request, fragment_core::ledger::org::Payer::parse(&b.target)) {
