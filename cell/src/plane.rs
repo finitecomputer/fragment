@@ -830,9 +830,13 @@ impl FragmentCell {
             GitPicture::Unchanged => {}
             GitPicture::Changed { last_commit, checked: Some((sha256, mime)) } => {
                 self.set_meta(MetaKey::PictureSeen, &format!("{last_commit} {sha256}"))?;
-                if self.meta(MetaKey::Icon)?.as_deref() != Some(sha256.as_str()) {
-                    self.set_meta(MetaKey::Picture, &format!("{sha256} {mime} {sha}"))?;
-                    self.event("picture.changed", "its picture is its avatar.png, as live has it now", json!({ "sha256": sha256, "commit": sha }));
+                match self.meta(MetaKey::Icon)?.as_deref() == Some(sha256.as_str()) {
+                    // its icon already: an older picture waiting to be taken goes
+                    true => self.del_meta(MetaKey::Picture)?,
+                    false => {
+                        self.set_meta(MetaKey::Picture, &format!("{sha256} {mime} {sha}"))?;
+                        self.event("picture.changed", "its picture is its avatar.png, as live has it now", json!({ "sha256": sha256, "commit": sha }));
+                    }
                 }
             }
             GitPicture::Changed { last_commit, checked: None } => {
@@ -1111,7 +1115,11 @@ impl FragmentCell {
             _ => return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
         };
         if let (Some(title), Some(fields)) = (self.face_now()?.title, manifest.as_object_mut()) {
-            if let Some(meta) = fields.entry("meta").or_insert_with(|| json!({})).as_object_mut() {
+            let meta = fields.entry("meta").or_insert_with(|| json!({}));
+            if meta.is_null() {
+                *meta = json!({});
+            }
+            if let Some(meta) = meta.as_object_mut() {
                 meta.insert("title".into(), title.into());
             }
         }

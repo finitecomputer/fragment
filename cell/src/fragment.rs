@@ -378,10 +378,10 @@ pub(crate) enum MetaKey {
     /// <commit>`, its `avatar.png` there), until taken as its icon
     /// (runs_on.rs `take_picture`; the debt ledger).
     Picture,
-    /// The names an agent's job may say since its last rename that ended
-    /// (a JSON array, newest last): each one a rename was writing into it
-    /// when its answer was lost or refused (members.rs `face_put`), read as
-    /// an old name by the next.
+    /// An agent's renames since its last that ended whose commit's answer
+    /// was lost or refused (a JSON array of `[name, sha256 of the job it
+    /// wrote]`): the next reads a name as an old one only while the job is
+    /// the one that rename wrote (members.rs `job_says`).
     Renaming,
     /// The title its own `fragment.json` said at its last install (`""`:
     /// none), and its `avatar.png` there (`<last commit> <sha256>`, an

@@ -240,8 +240,8 @@ keeps a rename made meanwhile. Each change is a `face.changed` event
 --no-picture]` use the face and icon routes. An agent's rename also says
 its new name in its job, in the same request and before its face: each
 whole-word mention of an old name in its `SOUL.md` (its title, the name
-its first job gave it, and any a rename since the last that ended was
-writing when it failed) as the new one, a commit on `main`
+its first job gave it, and that of a rename whose commit's answer was lost,
+while its job is the one that rename wrote) as the new one, a commit on `main`
 (`fragment_core::face::job_renamed`) over the job it read (an edit
 meanwhile: 409, nothing renamed). A rename that fails there changes
 neither; one whose commit landed and whose answer was lost is finished by

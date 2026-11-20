@@ -242,74 +242,95 @@ impl FragmentCell {
     /// are read-only.
     pub(crate) async fn face_put(&self, caller: &Caller, body: FaceChange) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        // the life it was let in to: a delete, or the name made again,
+        // while it waits ends it (404), never renaming another life
+        let life = self.life()?;
         self.writable().await?;
         if body.picture.is_some() {
             return Err(CellError::invalid("a picture is its icon: PUT /api/f/{name}/icon"));
         }
         // one at a time: each reads the job and face the last one left
         let _renaming = self.renaming.lock().await;
-        let life = self.must(MetaKey::CreatedAt)?;
+        self.same_life(life, "while it waited to be renamed")?;
         let now = self.face_now()?;
-        let (title, role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
-        if body.was.as_ref().is_some_and(|was| now.title.as_ref() != Some(was) && (title.is_none() || now.title.as_deref() != title)) {
-            return Err(CellError::new(ErrorCode::Conflict, format!("its title is no longer {:?}: nothing was changed", body.was.unwrap_or_default())));
+        let (title, mut role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        if let Some(was) = body.was.as_ref().filter(|was| now.title.as_ref() != Some(*was)) {
+            match title.is_some() && now.title.as_deref() == title {
+                // a retry whose answer was lost: its title is the one asked,
+                // and its role is left as a change since may have set it
+                true => role = None,
+                false => return Err(CellError::new(ErrorCode::Conflict, format!("its title is no longer {was:?}: nothing was changed"))),
+            }
         }
         let by = self.caller_id(caller)?.to_string();
         let job = now.kind == FragmentKind::Agent && title.is_some();
         if let (true, Some(asked)) = (job, title) {
-            self.job_says(&by, now.title.as_deref(), asked).await?;
-            // a delete, or the name made again, while its job was written ends it
-            if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
-                return Err(CellError::new(ErrorCode::NotFound, format!("{} ended while it was renamed", self.name().unwrap_or_default())));
-            }
+            self.job_says(&by, life, now.title.as_deref(), asked).await?;
+            self.same_life(life, "while it was renamed")?;
         }
         let now = self.face_now()?;
         let (title, role) = (title.or(now.title.as_deref()), role.unwrap_or(now.role.as_deref()));
-        if (title, role) != (now.title.as_deref(), now.role.as_deref()) {
+        let changed = (title, role) != (now.title.as_deref(), now.role.as_deref());
+        if changed {
             self.face_is(now.kind, title, role)?;
             self.event("face.changed", &format!("its name is {:?}{}", title.unwrap_or(""), role.map(|r| format!(", its role {r:?}")).unwrap_or_default()), json!({ "title": title, "role": role, "by": by }));
-            self.flush_index().await;
         }
         if job {
             self.del_meta(MetaKey::Renaming)?;
         }
         let shown = self.face_now()?;
+        if changed {
+            self.flush_index().await;
+        }
         json_response(&FaceChange { title: shown.title, role: shown.role, picture: shown.picture, was: None })
     }
 
     /// An agent's job (its `SOUL.md` at main, where its computer reads it)
     /// says `asked` where it said an old name (`face::job_renamed`): its
-    /// title now, the name its first job gave it, and each name a rename
-    /// since the last one that ended wrote there (`MetaKey::Renaming`).
-    /// That name is kept before its commit, so one whose answer is lost or
-    /// refused is found by the next rename, whatever it asks; a rename
-    /// that ends lets them go. Committed only over the job it read: an
-    /// edit of it meanwhile is a 409, its job and face as they were.
-    async fn job_says(&self, by: &str, title: Option<&str>, asked: &str) -> CellResult<()> {
-        use fragment_core::face::{JOB, JOB_RENAME_MAX_BYTES, RENAMING_MAX};
-        let kept = self.meta(MetaKey::Renaming)?;
-        let mut pending: Vec<String> = kept.as_deref().and_then(|r| crate::json_text(r).ok()).unwrap_or_default();
-        // read at main's head, not its pin: a commit whose answer was lost
-        // moved main with no pin following yet. None, or one past what a
-        // rename rewrites (or not text): nothing to say
+    /// title now, the name its first job gave it, and the name of a rename
+    /// whose commit's answer was lost or refused, when the job is the one
+    /// that rename wrote (`MetaKey::Renaming`: each attempt's name and its
+    /// job's SHA-256, kept before its commit; a job that is not what it
+    /// wrote never says its name for it). A rename that ends lets them go.
+    /// Committed to the repo it read, over the job it read: an edit of it
+    /// meanwhile is a 409, its job and face as they were.
+    async fn job_says(&self, by: &str, life: i64, title: Option<&str>, asked: &str) -> CellResult<()> {
+        use fragment_core::face::{JOB, JOB_RENAME_MAX_BYTES};
+        // read at main's head, not its pin. None, or one past what a rename
+        // rewrites (or not text): nothing to say
         let Some(repo) = self.meta(MetaKey::Repo)?.filter(|r| !r.is_empty()) else { return Ok(()) };
         let cs = self.cs()?;
         let Some(head) = cs.branch_head(&repo, "main").await? else { return Ok(()) };
+        // main moved with no pin following (a commit whose answer was lost):
+        // followed now, so its job is served as main has it
+        if self.pin("main")?.as_deref() != Some(head.as_str()) {
+            self.same_life(life, "while it was renamed")?;
+            if let Err(e) = self.interpret(&["main"]).await {
+                self.event("files.refresh-failed", &e.message, json!({ "commit": head }));
+                self.may_lag().await?;
+            }
+        }
         let Some(file) = cs.head(&repo, &head, JOB).await?.filter(|f| f.size <= JOB_RENAME_MAX_BYTES as u64) else { return Ok(()) };
         let Some(job) = cs.read(&repo, &head, JOB, JOB_RENAME_MAX_BYTES).await?.and_then(|b| String::from_utf8(b).ok()) else { return Ok(()) };
-        let olds: Vec<&str> = title.into_iter().chain(pending.iter().map(String::as_str)).chain(fragment_core::face::job_first_name(&job)).collect();
+        self.same_life(life, "while it was renamed")?;
+        let sha256 = |text: &str| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()));
+        let said = sha256(&job);
+        let kept = self.meta(MetaKey::Renaming)?;
+        // the attempts whose job is the one here: any of them may have landed
+        let mut pending: Vec<Value> = kept.as_deref().and_then(|r| crate::json_text::<Value>(r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        pending.retain(|p| p[1] == said.as_str());
+        let olds: Vec<&str> = title.into_iter().chain(pending.iter().filter_map(|p| p[0].as_str())).chain(fragment_core::face::job_first_name(&job)).collect();
         let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked) else { return Ok(()) };
-        // bounded: the oldest names go first (each rename rewrites them all)
-        pending.retain(|p| p != asked);
-        pending.push(asked.to_string());
-        let from = pending.len().saturating_sub(RENAMING_MAX);
-        self.set_meta(MetaKey::Renaming, &serde_json::to_string(&pending[from..]).expect("names serialize"))?;
+        pending.push(json!([asked, sha256(&renamed)]));
+        self.set_meta(MetaKey::Renaming, &Value::Array(pending).to_string())?;
         let path = fragment_proto::RepoPath::parse(JOB).expect("its job's path is a repo path");
         let expect = std::collections::BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
         let key = format!("face:{by}:{}", js::random_hex::<16>());
-        match self.commit(&key, &[crate::files::FileWrite { path, bytes: Some(renamed.into_bytes()) }], &expect, &format!("its job, renamed {asked}"), by, 0).await? {
+        let wrote = self.commit_in(&repo, &key, &[crate::files::FileWrite { path, bytes: Some(renamed.into_bytes()) }], &expect, &format!("its job, renamed {asked}"), by, 0).await?;
+        self.same_life(life, "while it was renamed")?;
+        match wrote {
             crate::files::Wrote::Commit(_) => Ok(()),
-            // not written: the names it may say are the ones before
+            // not written: the attempts it may hold are the ones before
             crate::files::Wrote::Conflict(why) => {
                 match &kept {
                     Some(k) => self.set_meta(MetaKey::Renaming, k)?,
