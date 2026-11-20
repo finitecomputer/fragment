@@ -522,17 +522,25 @@ impl Saves {
         self.snapshot.is_some()
     }
 
-    /// Its disk was read (`df`, after a start came up or a save): kept
-    /// when it is newer than the one kept (a late read of an earlier
-    /// moment changes nothing). Answers whether it was kept.
+    /// Its disk was read (`df` in a start, `df` and `du` after an awake
+    /// save): kept when it is newer than the one kept (a late read of an
+    /// earlier moment changes nothing), with the newest read of what its
+    /// `/data` restores to when it has none (a start's). Answers whether it
+    /// was kept.
     pub fn measured(&mut self, disk: ComputerDisk) -> bool {
         assert!(disk.total > 0 && disk.free <= disk.total, "a disk read is its size and what fits in it: {disk:?}");
         if self.disk.is_some_and(|d| d.at > disk.at) {
             return false;
         }
-        self.disk_told = if self.disk_told { !disk_clear(disk.total, disk.free) } else { disk_filling(disk.total, disk.free) };
+        let disk = ComputerDisk { data: disk.data.or(self.disk.and_then(|d| d.data)), ..disk };
+        self.disk_told = if self.disk_told { !disk_clear(&disk) } else { disk_filling(&disk) };
         self.disk = Some(disk);
         true
+    }
+
+    /// Its disk as its view shows it: as last read, and the room it has.
+    pub fn disk_view(&self) -> Option<fragment_proto::computer::DiskRoom> {
+        self.disk.map(|d| d.view(self.disk_told))
     }
 
     /// Its disk as last read.

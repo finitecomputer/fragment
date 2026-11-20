@@ -1,44 +1,88 @@
 //! A computer's disk: read in its container, kept with its saves, and told to
-//! its owner while it fills.
+//! its owner while it fills. What it is told is its room to restore
+//! (docs/computers.md, "Room to restore"): a save is only good while a wake
+//! can restore it, and a restore needs more of the disk than the running
+//! computer used.
 
+use fragment_proto::computer::DiskRoom;
 use serde::{Deserialize, Serialize};
 
+use crate::computer::held::LEFT_OUT_PATTERN_MAX_BYTES;
 use crate::computer::lifecycle::{Event, Lifecycle, Phase};
 
-/// Its owner is told its disk is filling once this much of it is used
-/// (`notices`, `disk_filling`): on a 20 GB disk, about 4 GB before it is
-/// full, while a save still fits and there is room to tidy up. A disk that
-/// filled made a computer's every later start fail (2026-11-03).
-pub const DISK_TOLD_USED_PCT: u64 = 80;
-const _: () = assert!(DISK_TOLD_USED_PCT > 0 && DISK_TOLD_USED_PCT < 100, "told before it is full, never always");
+/// A restore stops once its disk has less than this free (the Sandbox SDK's
+/// `sandbox-shim` 1.0.0, `Extractor::check_floor`: a twentieth of the disk,
+/// at most 256 MiB), checked every 8 MiB or 1,024 entries it writes: on a
+/// computer's 20 GB disk, 256 MiB. A start whose restore stops so fails, and
+/// so does each start after it (2026-11-20: a computer that ran with 2.1 GB
+/// free could not restore its save). The shim's own number, never a file's
+/// bound (proto's `limits`), whatever it happens to equal.
+pub const RESTORE_FLOOR_MAX: u64 = 1 << 28;
 
-/// And only once at most this is free: a computer's own disk (20 GB) is
-/// told at 4 GB, past `DISK_TOLD_USED_PCT`, while one on a host's shared
-/// disk (a dev box's, CI's: terabytes, most of it others') is not told of
-/// room it has plenty of.
-pub const DISK_TOLD_FREE_MAX: u64 = 5_000_000_000;
-
-/// Told, it is told no more only once a read finds clearly more room:
-/// at most this much used, or at least `DISK_CLEAR_FREE_MIN` free. The gap
-/// below where it is told keeps a disk that hovers at the edge (a read a
-/// few KB either side) from showing and clearing its notice in turn.
-pub const DISK_CLEAR_USED_PCT: u64 = 70;
-pub const DISK_CLEAR_FREE_MIN: u64 = 6_000_000_000;
-const _: () = assert!(DISK_CLEAR_USED_PCT < DISK_TOLD_USED_PCT && DISK_CLEAR_FREE_MIN > DISK_TOLD_FREE_MAX, "it clears only past where it is told");
-
-/// Whether a disk of `total` bytes with `free` left is used past
-/// `DISK_TOLD_USED_PCT`, with at most `DISK_TOLD_FREE_MAX` free: its owner
-/// is told.
-pub fn disk_filling(total: u64, free: u64) -> bool {
-    assert!(free <= total, "free fits in its disk");
-    (total - free) as u128 * 100 >= total as u128 * DISK_TOLD_USED_PCT as u128 && free <= DISK_TOLD_FREE_MAX
+/// The restore's floor on a disk of `total` bytes (`RESTORE_FLOOR_MAX`).
+pub fn restore_floor(total: u64) -> u64 {
+    (total / 20).min(RESTORE_FLOOR_MAX)
 }
 
-/// Whether a disk told filling has clearly more room now: at most
-/// `DISK_CLEAR_USED_PCT` used, or at least `DISK_CLEAR_FREE_MIN` free.
-pub fn disk_clear(total: u64, free: u64) -> bool {
-    assert!(free <= total, "free fits in its disk");
-    (total - free) as u128 * 100 <= total as u128 * DISK_CLEAR_USED_PCT as u128 || free >= DISK_CLEAR_FREE_MIN
+/// The most of a computer's disk its image takes, as a fresh computer's
+/// disk reads it (`df` as it starts, before anything is restored): its
+/// files, written to the disk as its runtime unpacks them, and the disk's
+/// own keep. An empty 20 GB btrfs disk keeps 0.55 GB for itself (its
+/// metadata twice), and our image written to it with zstd took 2.41 GB
+/// more: 2.99 GB in all (2026-11-20). Production's empty computers read
+/// about 17.4 GB free, 2.6 GB used; the larger is counted. A restore of
+/// `/data` comes on top of it.
+pub const IMAGE_DISK_MAX: u64 = 3_000_000_000;
+
+/// What a restore writes past `/data`'s size as `du` reads it, at most,
+/// in hundredths: a big file's checksums and extents (a 17 GB restore
+/// stopped 43 MB short of what `du` predicted, 0.26%).
+pub const RESTORE_SLACK_PCT: u64 = 1;
+
+/// What a restore of a `/data` of `data` bytes (`du`'s, `disk_of_sizes`)
+/// writes, at most (`RESTORE_SLACK_PCT` more).
+pub fn restore_writes(data: u64) -> u64 {
+    data.saturating_add(data / 100 * RESTORE_SLACK_PCT)
+}
+
+/// Its owner and its agents are told its disk is filling once it has at
+/// most this much room (`room`): on a 20 GB disk, at about 13.6 GB of a
+/// person's files at their full size. Room enough that a save still restores, with
+/// time to move big files to storage.
+pub const ROOM_TOLD_MAX: u64 = 3_000_000_000;
+
+/// Told, it is told no more only once a read finds at least this much room.
+/// The gap above where it is told keeps a disk that hovers at the edge (a
+/// read a few KB either side) from showing and clearing its notice in turn.
+pub const ROOM_CLEAR_MIN: u64 = 4_000_000_000;
+const _: () = assert!(ROOM_TOLD_MAX < ROOM_CLEAR_MIN && ROOM_TOLD_MAX > RESTORE_FLOOR_MAX, "it clears only past where it is told, and is told well before a restore's floor");
+
+/// The room a computer's disk has left (docs/computers.md, "Room to
+/// restore"): the least of what is free now (a write that fails fails now)
+/// and what a restore of its `/data` as last read (`data`) would leave
+/// beside the largest image (`IMAGE_DISK_MAX`; `restore_writes`), each
+/// less a restore's floor (`restore_floor`). A read with no `data` (before
+/// the first read after a save) is what is free alone. At 0, its newest
+/// save may no longer restore.
+pub fn room(d: &ComputerDisk) -> u64 {
+    let floor = restore_floor(d.total);
+    let now = d.free.saturating_sub(floor);
+    match d.data {
+        Some(data) => now.min(d.total.saturating_sub(IMAGE_DISK_MAX.saturating_add(floor).saturating_add(restore_writes(data)))),
+        None => now,
+    }
+}
+
+/// Whether a disk as `d` read has at most `ROOM_TOLD_MAX` of room: its
+/// owner and its agents are told.
+pub fn disk_filling(d: &ComputerDisk) -> bool {
+    room(d) <= ROOM_TOLD_MAX
+}
+
+/// Whether a disk told filling has clearly more room now: at least
+/// `ROOM_CLEAR_MIN`.
+pub fn disk_clear(d: &ComputerDisk) -> bool {
+    room(d) >= ROOM_CLEAR_MIN
 }
 
 /// The start whose disk to read once `event` was applied to `life`: an
@@ -55,9 +99,29 @@ pub fn reads_disk_after(event: &Event, life: &Lifecycle) -> Option<u64> {
     }
 }
 
-/// What reads a computer's disk, run in its container (`disk_of_df` reads
-/// its answer): POSIX `df` in bytes, which GNU's and BusyBox's both print.
+/// What reads a computer's disk in a start, run in its container
+/// (`disk_of_df` reads its answer): POSIX `df` in bytes, which GNU's and
+/// BusyBox's both print.
 pub const DISK_READ: &str = "df -P -B1 /";
+
+/// What reads a computer's disk and what its `/data` restores to after an
+/// awake save, run in its container (`disk_of_sizes` reads its answer):
+/// `DISK_READ`, then `du` of `/data`, allocated (KiB) and apparent (bytes),
+/// and the total of what that save left out (`left_out`, the held guest's
+/// patterns, anchored to `/data`), each line named. GNU's `du` and
+/// BusyBox's print these alike. A pattern is a shell glob here, `*` one
+/// name and `?` one character as in the save's; one that is no safe glob
+/// (outside the patterns' alphabet, or with a `..`) is not read, and
+/// what it names counts as restored.
+pub fn sizes_read(left_out: &[String]) -> String {
+    let mut read = format!("{DISK_READ} && cd /data && printf 'alloc ' && du -sxk . && printf 'apparent ' && du -sxb .");
+    let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
+    let paths: Vec<String> = left_out.iter().filter(safe).map(|p| format!("./{}", p.trim_start_matches('/'))).collect();
+    if !paths.is_empty() {
+        read.push_str(&format!(" && printf 'out ' && {{ du -sxkc -- {} 2>/dev/null | tail -n 1; }}", paths.join(" ")));
+    }
+    read
+}
 
 /// A computer's disk from `DISK_READ`'s answer, read at `at_ms` in start
 /// `generation`'s container: the line
@@ -68,12 +132,30 @@ pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk
     lines.next().filter(|h| h.starts_with("Filesystem"))?;
     let cols: Vec<&str> = lines.next()?.split_whitespace().collect();
     let (total, free) = (cols.get(1)?.parse::<u64>().ok()?, cols.get(3)?.parse::<u64>().ok()?);
-    (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation })
+    (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation, data: None })
 }
 
-/// A computer's disk, as a read found it (`disk_of_df`): its size and what
-/// is free, in bytes; when it was read, and the start whose container it
-/// read (0 in a read stored before it was kept).
+/// A computer's disk from `sizes_read`'s answer: its `df` (`disk_of_df`),
+/// and what a restore of its `/data` writes (`data`): the larger of its
+/// allocated and its apparent size (a restore writes each file whole, a
+/// sparse one's holes too, and a small one in blocks of its own), less what
+/// the save left out. With no `du` it reads, the `df` alone; with no `df`,
+/// none.
+pub fn disk_of_sizes(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
+    let disk = disk_of_df(out, at_ms, generation)?;
+    let named = |name: &str| out.lines().find_map(|l| l.strip_prefix(name)?.split_whitespace().next()?.parse::<u64>().ok());
+    let (Some(alloc_kib), Some(apparent)) = (named("alloc "), named("apparent ")) else { return Some(disk) };
+    let out_kib = named("out ").unwrap_or(0);
+    let data = alloc_kib.saturating_mul(1024).max(apparent).saturating_sub(out_kib.saturating_mul(1024));
+    Some(ComputerDisk { data: Some(data), ..disk })
+}
+
+/// A computer's disk, as a read found it (`disk_of_df`, `disk_of_sizes`):
+/// its size and what is free, in bytes; when it was read, and the start
+/// whose container it read (0 in a read stored before it was kept); and
+/// what a restore of its `/data` writes, as the newest read after a save
+/// found it (`data`: a start's read keeps the one before, `Saves::measured`;
+/// none before the first, or in a read stored before it was kept).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerDisk {
     pub total: u64,
@@ -81,6 +163,15 @@ pub struct ComputerDisk {
     pub at: i64,
     #[serde(default)]
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<u64>,
+}
+
+impl ComputerDisk {
+    /// As its view shows it, told filling or not (`filling`).
+    pub fn view(&self, filling: bool) -> DiskRoom {
+        DiskRoom { total: self.total, free: self.free, data: self.data, room: room(self), filling, at: self.at }
+    }
 }
 
 #[cfg(test)]
@@ -91,54 +182,105 @@ mod tests {
     use crate::computer::testing::T;
     use crate::computer::*;
 
+    const GB: u64 = 1_000_000_000;
+    /// A computer's disk, as production's `df` reads it.
+    const DISK: u64 = 20_000_002_048;
+    const FLOOR: u64 = RESTORE_FLOOR_MAX;
+
+    fn read(total: u64, free: u64, data: Option<u64>, at: i64) -> ComputerDisk {
+        ComputerDisk { total, free, at, generation: 1, data }
+    }
+
+    /// Goal (2026-11-20: a computer ran with 2.1 GB free, saved, and its
+    /// restore stopped at the shim's floor, every start after it too): the
+    /// room a disk has is what a restore of its `/data` leaves beside the
+    /// largest image, less the restore's floor, or what is free less the
+    /// floor, whichever is less, never what `df` says alone. Valid (each
+    /// term the least, exactly at the edges), the incident's numbers,
+    /// invalid (more than the disk: no room, never an overflow), and a
+    /// host's shared disk.
+    #[test]
+    fn room_is_what_a_restore_leaves() {
+        assert_eq!(restore_floor(DISK), 1024 * 1024 * 256, "a computer's disk: 256 MiB");
+        assert_eq!(restore_floor(2 * GB), 100_000_000, "a small disk: a twentieth");
+        assert_eq!(restore_floor(0), 0);
+        // no read of /data yet: what is free, less the floor
+        assert_eq!(room(&read(DISK, 3 * GB, None, T)), 3 * GB - FLOOR);
+        assert_eq!(room(&read(DISK, FLOOR - 1, None, T)), 0, "below the floor: none");
+        // /data read: what its restore writes (1% past du) leaves beside the largest image
+        assert_eq!(restore_writes(14 * GB), 14_140_000_000);
+        assert_eq!(restore_writes(99), 99, "under 100 bytes, nothing past it");
+        let left = DISK - IMAGE_DISK_MAX - FLOOR - 14_140_000_000;
+        assert_eq!(room(&read(DISK, 10 * GB, Some(14 * GB), T)), left, "compressed while running, 10 GB free: a restore of 14 GB leaves 2.6 GB");
+        assert_eq!(room(&read(DISK, left + FLOOR - 1, Some(14 * GB), T)), left - 1, "what is free now, when less");
+        // the incident, as the bench made it (2026-11-20): 2.1 GB free
+        // running, du 16.8 GB; its restore stopped 6.7 MB short of the floor
+        let incident = read(DISK, 2_099_998_720, Some(16_812_892_160), T);
+        assert_eq!(room(&incident), 0, "its save would not restore");
+        assert!(disk_filling(&incident));
+        assert_eq!(room(&read(DISK, 2_100_000_000, None, T)), 2_100_000_000 - FLOOR, "what df alone said: room it never had");
+        // more than the disk holds: no room, no overflow
+        assert_eq!(room(&read(DISK, DISK, Some(u64::MAX), T)), 0);
+        assert_eq!(room(&read(u64::MAX, u64::MAX, Some(u64::MAX), T)), 0);
+        // a host's shared disk (a dev box's, CI's): room to spare
+        assert!(!disk_filling(&read(2_000 * GB, 300 * GB, Some(5 * GB), T)));
+        // told at ROOM_TOLD_MAX, cleared at ROOM_CLEAR_MIN, exactly
+        let at = |room: u64| read(DISK, room + FLOOR, None, T);
+        assert!(disk_filling(&at(ROOM_TOLD_MAX)) && !disk_filling(&at(ROOM_TOLD_MAX + 1)), "told at 3 GB of room, a byte more is not");
+        assert!(disk_clear(&at(ROOM_CLEAR_MIN)) && !disk_clear(&at(ROOM_CLEAR_MIN - 1)), "clear at 4 GB");
+        // its view says the same
+        let v = read(DISK, 10 * GB, Some(14 * GB), T).view(true);
+        assert_eq!((v.room, v.filling, v.data, v.total, v.free), (left, true, Some(14 * GB), DISK, 10 * GB));
+    }
+
     /// Goal (2026-11-03: a disk that filled left a computer that could not
-    /// start): its owner is told its disk is filling once a read finds it
-    /// used past `DISK_TOLD_USED_PCT` with at most `DISK_TOLD_FREE_MAX`
-    /// free, and no more only once a read finds clearly more room
-    /// (`disk_clear`): a disk hovering at either edge, reads a few KB
-    /// apart, never shows and clears it in turn (Codex on #1015). Valid
-    /// (each edge, exactly), oscillation around both edges, replay and
-    /// order (a read of an earlier moment changes nothing), invalid (more
-    /// free than its size is refused), saves stored before (none told).
-    /// Method: the reads as the DO takes them, and what is told.
+    /// start; 2026-11-20: one whose save no longer fit): its owner is told
+    /// its disk is filling once a read finds at most `ROOM_TOLD_MAX` of
+    /// room, and no more only once a read finds at least `ROOM_CLEAR_MIN`:
+    /// a disk hovering at either edge, reads a few KB apart, never shows and
+    /// clears it in turn (Codex on #1015). A start's read (no `du`) keeps
+    /// the newest read of `/data`. Valid (each edge, exactly), oscillation
+    /// around both edges, replay and order (a read of an earlier moment
+    /// changes nothing), invalid (more free than its size is refused),
+    /// saves stored before (none told).
     #[test]
     fn a_disk_filling_is_told_until_a_read_finds_room() {
-        const GB: u64 = 1_000_000_000;
         const KB: u64 = 8_192;
         let told = |s: &Saves| notices(&Lifecycle::new(), s, &Images::default(), &Rules::default());
-        assert!(disk_filling(20 * GB, 4 * GB) && !disk_filling(20 * GB, 4 * GB + 1), "80% used exactly is told, a byte under is not");
-        assert!(!disk_filling(2_000 * GB, 300 * GB), "a host's shared disk, 85% used with room to spare");
-        assert!(disk_filling(2_000 * GB, 5 * GB) && !disk_filling(2_000 * GB, 5 * GB + 1), "told once at most DISK_TOLD_FREE_MAX is free");
-        assert!(disk_clear(20 * GB, 6 * GB) && !disk_clear(20 * GB, 6 * GB - 1), "clear at 70% used, or 6 GB free");
-        assert!(disk_clear(2_000 * GB, 6 * GB) && !disk_clear(2_000 * GB, 6 * GB - 1));
-        // a run of reads, each a moment later, and whether it is told after each
-        let run = |total: u64, frees: &[u64]| -> Vec<bool> {
+        // a run of reads, each a moment later, with the room each leaves
+        // (what is free less the floor: a start's read), and whether it
+        // is told after each
+        let run = |rooms: &[u64]| -> Vec<bool> {
             let mut s = Saves::default();
-            frees.iter().enumerate().map(|(i, free)| {
-                assert!(s.measured(ComputerDisk { total, free: *free, at: T + i as i64, generation: 1 }));
-                matches!(told(&s).as_slice(), [ComputerNotice::DiskFilling { total: t, free: f }] if *t == total && *f == *free)
+            rooms.iter().enumerate().map(|(i, room)| {
+                assert!(s.measured(read(DISK, room + FLOOR, None, T + i as i64)));
+                matches!(told(&s).as_slice(), [ComputerNotice::DiskFilling { total, free, room: r }] if *total == DISK && *free == room + FLOOR && r == room)
             }).collect()
         };
-        // around the told edge of a computer's own disk: shown, and it stays until 6 GB free
-        assert_eq!(run(20 * GB, &[4 * GB + KB, 4 * GB, 4 * GB + KB, 4 * GB, 5 * GB, 6 * GB - 1, 6 * GB, 6 * GB - KB, 4 * GB + KB, 4 * GB]), [false, true, true, true, true, true, false, false, false, true]);
+        // around the told edge: shown, and it stays until 4 GB of room
+        assert_eq!(run(&[3 * GB + KB, 3 * GB, 3 * GB + KB, 3 * GB, 3 * GB + 500_000_000, 4 * GB - 1, 4 * GB, 4 * GB - KB, 3 * GB + KB, 3 * GB]), [false, true, true, true, true, true, false, false, false, true]);
         // around the cleared edge: once clear, never told again until the told edge
-        assert_eq!(run(20 * GB, &[4 * GB, 6 * GB, 6 * GB - KB, 6 * GB, 6 * GB - KB, 4 * GB + KB]), [true, false, false, false, false, false]);
-        // a host's shared disk, around 5 GB free
-        assert_eq!(run(2_000 * GB, &[5 * GB + KB, 5 * GB, 5 * GB + KB, 6 * GB - KB, 6 * GB, 5 * GB + KB]), [false, true, true, true, false, false]);
+        assert_eq!(run(&[3 * GB, 4 * GB, 4 * GB - KB, 4 * GB, 4 * GB - KB, 3 * GB + KB]), [true, false, false, false, false, false]);
+        // a start's read keeps /data's size from the read after the save
+        let mut s = Saves::default();
+        assert!(s.measured(read(DISK, 10 * GB, Some(15 * GB), T)));
+        assert!(s.measured(read(DISK, 11 * GB, None, T + 1)));
+        assert_eq!(s.disk().map(|d| (d.free, d.data)), Some((11 * GB, Some(15 * GB))), "kept, its free from the new read");
+        assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: DISK, free: 11 * GB, room: DISK - IMAGE_DISK_MAX - FLOOR - restore_writes(15 * GB) }]);
         // replay and order
         let mut s = Saves::default();
         assert!(told(&s).is_empty() && s.disk().is_none(), "never read: nothing told");
-        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10, generation: 1 }));
-        assert!(!s.measured(ComputerDisk { total: 20 * GB, free: 15 * GB, at: T + 5, generation: 1 }), "a late read of an earlier moment");
-        assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: 20 * GB, free: 3 * GB }]);
-        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10, generation: 1 }), "the same read again: the same");
+        assert!(s.measured(read(DISK, 3 * GB, None, T + 10)));
+        assert!(!s.measured(read(DISK, 15 * GB, None, T + 5)), "a late read of an earlier moment");
+        assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: DISK, free: 3 * GB, room: 3 * GB - FLOOR }]);
+        assert!(s.measured(read(DISK, 3 * GB, None, T + 10)), "the same read again: the same");
         assert_eq!(told(&s).len(), 1);
-        assert!(std::panic::catch_unwind(|| Saves::default().measured(ComputerDisk { total: GB, free: 2 * GB, at: T, generation: 1 })).is_err(), "more free than its size");
-        // a read stored by a release before reads named their start: kept, its start 0
+        assert!(std::panic::catch_unwind(|| Saves::default().measured(read(GB, 2 * GB, None, T))).is_err(), "more free than its size");
+        // a read stored by a release before reads named their start or /data's size: kept, its start 0
         let mut stored = serde_json::to_value(&s).unwrap();
         stored["disk"].as_object_mut().unwrap().remove("generation");
         let old: Saves = serde_json::from_value(stored).unwrap();
-        assert_eq!(old.disk(), Some(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10, generation: 0 }));
+        assert_eq!(old.disk(), Some(ComputerDisk { total: DISK, free: 3 * GB, at: T + 10, generation: 0, data: None }));
         assert_eq!(told(&old), told(&s));
         // saves stored before the disk was read, or before the latch: none told
         let mut stored = serde_json::to_value(&s).unwrap();
@@ -183,10 +325,40 @@ mod tests {
     fn a_disk_is_read_from_df() {
         let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1450459369472 536433389568      74% /\n";
         let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1450465140736 536427945984  73% /\n";
-        assert_eq!(disk_of_df(gnu, T, 3), Some(ComputerDisk { total: 1_998_232_485_888, free: 536_433_389_568, at: T, generation: 3 }));
+        assert_eq!(disk_of_df(gnu, T, 3), Some(ComputerDisk { total: 1_998_232_485_888, free: 536_433_389_568, at: T, generation: 3, data: None }));
         assert_eq!(disk_of_df(busybox, T, 3).map(|d| d.free), Some(536_427_945_984));
         for bad in ["", "overlay 10 5 5 50% /", "Filesystem 1-blocks Used Available Capacity Mounted on", "Filesystem x\noverlay ten 5 five 50% /", "Filesystem x\noverlay 10 0 11 0% /", "Filesystem x\noverlay 0 0 0 0% /"] {
             assert_eq!(disk_of_df(bad, T, 3), None, "{bad:?}");
         }
+    }
+
+    /// Goal: what a restore of `/data` writes, read after a save as the
+    /// Hermes image's GNU `du` and the stub's BusyBox `du` print it (both
+    /// answers taken from the images, 2026-11-20): the larger of allocated
+    /// and apparent (a sparse file's holes are written), less what the save
+    /// left out; the left-out paths only as safe globs. Valid, a sparse
+    /// file, nothing left out or nothing of it there, invalid (no `du`, no
+    /// `df`, an unsafe pattern).
+    #[test]
+    fn data_is_read_from_du() {
+        let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1685805481984 290545090560      86% /\nalloc 3912\t.\napparent 9000000\t.\nout 2932\ttotal\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1685711613952 290657275904  85% /\nalloc 3912\t.\napparent 9000064\t.\nout 2932\ttotal\n";
+        // a 5 MB sparse file among 4 MB written: the apparent size, less the 2932 KiB left out
+        assert_eq!(disk_of_sizes(gnu, T, 2).and_then(|d| d.data), Some(9_000_000 - 2932 * 1024));
+        assert_eq!(disk_of_sizes(busybox, T, 2).and_then(|d| d.data), Some(9_000_064 - 2932 * 1024));
+        assert_eq!(disk_of_sizes(gnu, T, 2).map(|d| (d.total, d.free, d.generation)), Some((1_998_232_485_888, 290_545_090_560, 2)));
+        // small files: allocated is more than apparent
+        let small = "Filesystem x\noverlay 100 50 50 50% /\nalloc 100\t.\napparent 1000\t.\n";
+        assert_eq!(disk_of_sizes(small, T, 2).and_then(|d| d.data), Some(102_400), "nothing left out");
+        assert_eq!(disk_of_sizes(&format!("{small}out \n"), T, 2).and_then(|d| d.data), Some(102_400), "nothing of it there");
+        assert_eq!(disk_of_sizes(&format!("{small}out 200\ttotal\n"), T, 2).and_then(|d| d.data), Some(0), "never below nothing");
+        // no du: the df alone; no df: none
+        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\n", T, 2).map(|d| d.data), Some(None));
+        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\nalloc x\t.\napparent 10\t.\n", T, 2).map(|d| d.data), Some(None));
+        assert_eq!(disk_of_sizes("alloc 1\t.\napparent 10\t.\n", T, 2), None);
+        // the read itself: the save's patterns as globs under /data, never an unsafe one
+        assert_eq!(sizes_read(&[]), "df -P -B1 / && cd /data && printf 'alloc ' && du -sxk . && printf 'apparent ' && du -sxb .");
+        let read = sizes_read(&["/work/*/home/.cache/pip/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), String::new()]);
+        assert!(read.ends_with(" && printf 'out ' && { du -sxkc -- ./work/*/home/.cache/pip/ ./hermes/state.db 2>/dev/null | tail -n 1; }"), "{read}");
     }
 }

@@ -464,6 +464,36 @@ pub struct ComputerView {
     /// 443, for images that read only it. The guest's view alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_targets: Option<Vec<RelayTarget>>,
+    /// Its disk as the platform last read it, and the room it has left
+    /// (docs/computers.md, "Room to restore"); absent before its first read.
+    /// Its owner's view and its guest's alike: its agents make room when it
+    /// is filling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskRoom>,
+}
+
+/// A computer's disk as the platform last read it (`df` of its container,
+/// and `du` of its `/data` after an awake save), and the room it has left
+/// (docs/computers.md, "Room to restore"), in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskRoom {
+    /// Its size, and what was free.
+    pub total: u64,
+    pub free: u64,
+    /// What a restore of its `/data` writes, as last read after a save;
+    /// absent before the first such read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<u64>,
+    /// What it can still take: the least of what is free now and what a
+    /// restore of its `/data` would leave beside the largest image, each
+    /// less the restore's own floor. At 0 its save may no longer restore.
+    pub room: u64,
+    /// Its owner and its agents are told it is filling (`disk_filling`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filling: bool,
+    /// When it was read.
+    pub at: i64,
 }
 
 /// One endpoint a computer's relay carries: exactly this DNS name and port
@@ -634,11 +664,18 @@ pub enum ComputerNotice {
     /// a version other than that one is ready.
     Update { version: String },
     /// Its disk is filling, as the platform last read it (`df` of its
-    /// container, after a start came up and after each save): `free` of its
-    /// `total` bytes are left, the image's own share counted used. A disk
-    /// that fills stops its agents from saving their work, so its owner is
-    /// told well before.
-    DiskFilling { total: u64, free: u64 },
+    /// container, after a start came up and after each save, and `du` of its
+    /// `/data` after an awake save): `free` of its `total` bytes are free,
+    /// and it has `room` left before its save may no longer restore
+    /// (docs/computers.md, "Room to restore"; 0 from a platform before it).
+    /// A save that does not restore leaves a computer that cannot start,
+    /// so its owner is told well before.
+    DiskFilling {
+        total: u64,
+        free: u64,
+        #[serde(default)]
+        room: u64,
+    },
     /// A shared key its agents call is paused (FIN-448): its owner's calls
     /// on `provider` were charged `spent_micros` this last hour, its cap
     /// `cap_micros`, until `resumes_at` as the hour passes, or its owner

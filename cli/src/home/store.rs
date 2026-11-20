@@ -56,10 +56,10 @@ use crate::offload::{self, Folder, Moved, Record, Said, NOTE_SUFFIX};
 
 /// The files one note keeps, at most: what `fragment offload` moves at once.
 pub const NOTE_FILES_MAX: usize = offload::FILES_MAX;
-/// The bytes one folder's note keeps, at most: a fifth of the room a
-/// computer's owner is told it is short of (`DISK_TOLD_FREE_MAX`), so any
-/// note comes back where there is room. A file past it has a note alone.
-pub const NOTE_BYTES_MAX: u64 = fragment_core::computer::DISK_TOLD_FREE_MAX / 5;
+/// The bytes one folder's note keeps, at most: a third of the room a
+/// computer's owner is told it is short of (`ROOM_TOLD_MAX`), so any note
+/// comes back where there is room. A file past it has a note alone.
+pub const NOTE_BYTES_MAX: u64 = fragment_core::computer::ROOM_TOLD_MAX / 3;
 /// The files one storage fragment holds, at most: what a person's export
 /// takes of one fragment, less room for its own (manifest, and the like).
 pub const STORE_FILES_MAX: usize = fragment_core::export::limits::FILES_MAX - STORE_ROOM;
@@ -70,7 +70,7 @@ const COPIES_AT_ONCE: usize = 4;
 /// what a run holds in memory at once (small parts are under a blob's size).
 const WINDOW: usize = 16;
 const _: () = assert!(NOTE_FILES_MAX as u64 <= offload::PARTS_MAX && STORE_FILES_MAX as u64 <= offload::PARTS_MAX, "a note a store writes is one offload reads");
-const _: () = assert!(NOTE_BYTES_MAX > 0 && NOTE_BYTES_MAX < fragment_core::computer::DISK_TOLD_FREE_MAX, "a note comes back where there is room");
+const _: () = assert!(NOTE_BYTES_MAX > 0 && NOTE_BYTES_MAX < fragment_core::computer::ROOM_TOLD_MAX, "a note comes back where there is room");
 
 fn coded(code: Code, msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(CodedError { code, msg: msg.into() })

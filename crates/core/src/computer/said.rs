@@ -102,11 +102,13 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             actions: vec![restart("Restart"), NoticeAction::post("Later", at("notices/later"), body("version", version.as_str()))],
             ..notice(format!("update:{version}"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
         },
-        ComputerNotice::DiskFilling { free, .. } => Notice {
+        ComputerNotice::DiskFilling { room, .. } => Notice {
             // Paul, 2026-11-18: its agent makes room (`fragment offload`, the
-            // `disk-space-finite` skill)
-            text: Some("Ask your agent to move big files to storage.".into()),
-            ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, format!("Your computer is almost full ({} left)", size(*free)))
+            // `disk-space-finite` skill). The room is what a restore of its
+            // save leaves (docs/computers.md, "Room to restore"), never what
+            // `df` says: at none, its next start may not restore it.
+            text: Some(if *room == 0 { "It may not start again until there is room. Ask your agent to move big files to storage." } else { "Ask your agent to move big files to storage." }.into()),
+            ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, if *room == 0 { "Your computer is full".into() } else { format!("Your computer is almost full ({} left)", size(*room)) })
         },
         ComputerNotice::KeyPaused { provider, spent_micros, cap_micros, allow_micros, resumes_at } => Notice {
             text: allow_micros.is_none().then(|| format!("{} an hour is the most allowed.", usd(*cap_micros))),
@@ -211,10 +213,14 @@ mod tests {
         let always = said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &Facts { always_on: true, ..facts() });
         assert_eq!(always[0].text.as_deref(), Some("Restart to get it; your chats and work are kept."), "an always-on computer never sleeps");
 
-        let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 3_240_662_016 }], &f)[0];
-        assert_eq!(disk.title, "Your computer is almost full (3.2 GB left)");
+        // its room, never df's free (2026-11-20: 2.1 GB free, and no room to restore)
+        let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 9_000_000_000, room: 2_972_226_560 }], &f)[0];
+        assert_eq!(disk.title, "Your computer is almost full (3.0 GB left)");
         assert_eq!(disk.text.as_deref(), Some("Ask your agent to move big files to storage."));
         assert!(disk.actions.is_empty());
+        let full = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 2_100_000_000, room: 0 }], &f)[0];
+        assert_eq!(full.title, "Your computer is full");
+        assert_eq!(full.text.as_deref(), Some("It may not start again until there is room. Ask your agent to move big files to storage."));
 
         let paused = |allow_micros| said(&[ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 5_030_000, cap_micros: 5_000_000, allow_micros, resumes_at: 123 * MIN }], &f).remove(0);
         let one = paused(Some(20_000_000));
@@ -232,7 +238,7 @@ mod tests {
         let told = vec![
             ComputerNotice::WontWake { why: "x".into() },
             ComputerNotice::Update { version: "0123456789ab".into() },
-            ComputerNotice::DiskFilling { total: 2, free: 1 },
+            ComputerNotice::DiskFilling { total: 2, free: 1, room: 0 },
             ComputerNotice::KeyPaused { provider: "xai".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
             ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
         ];

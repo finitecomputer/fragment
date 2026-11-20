@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -159,6 +159,11 @@ const UNHELD_EXEC_MS: i64 = 5_000;
 /// A read of its disk (`DISK_READ`) answers within this, or it is not read:
 /// a start's, made before its guest is let go, is in the start's deadline.
 const DISK_READ_MS: i64 = 5_000;
+/// A read of its disk and of what its `/data` restores to (`sizes_read`:
+/// `du` walks it, after an awake save whose backups just read it all)
+/// answers within this, or it is not read. A walk of a 4 GB tree of 121,000
+/// files took about a second; this is what an awake save's alarm leaves.
+const SIZES_READ_MS: i64 = 30_000;
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -306,7 +311,7 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + SIZES_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the read of its disk and /data after it fit the one alarm they run in");
 const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
@@ -499,6 +504,10 @@ pub struct ComputerCell {
     /// The same turn orders a start's let-go of its snapshot's hold and
     /// an awake save's let-go past its home (#1378).
     marking: futures_util::lock::Mutex<()>,
+    /// What the newest save left out (its held guest's patterns): the read
+    /// of `/data` after an awake save (`read_disk`) leaves the same out of
+    /// what a restore writes. In memory only: a read with none counts all.
+    left_out: RefCell<Vec<String>>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -556,6 +565,7 @@ impl DurableObject for ComputerCell {
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
             marking: futures_util::lock::Mutex::new(()),
+            left_out: RefCell::default(),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -811,11 +821,14 @@ struct TestLever {
     /// `legacy-uses`': the month (`YYYY-MM`) it makes owed.
     #[serde(default)]
     month: Option<String>,
-    /// `disk`'s read: its size and what is free, in bytes.
+    /// `disk`'s read: its size and what is free, in bytes, and what its
+    /// `/data` restores to (none: a start's read, which keeps the last).
     #[serde(default)]
     total: Option<u64>,
     #[serde(default)]
     free: Option<u64>,
+    #[serde(default)]
+    data: Option<u64>,
 }
 
 /// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
@@ -1255,10 +1268,11 @@ impl ComputerCell {
             for next in self.perform(step, until_ms, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
             }
-            // its disk, once an awake save worked (a start reads its own
-            // before its guest runs: `try_start`)
+            // its disk and what its /data restores to, once an awake save
+            // worked (a start reads its disk alone, before its guest runs:
+            // `try_start`)
             if let Some(generation) = reads_disk_after(&applied, &life) {
-                self.read_disk(generation).await;
+                self.read_disk(generation, true).await;
             }
         }
         Ok(refused)
@@ -1898,7 +1912,7 @@ impl ComputerCell {
                 // its disk as restored, before the gate lets its guest go:
                 // read after, the read raced the guest's first seconds, the
                 // start's slowest moment (FIN-462)
-                self.read_disk(generation).await;
+                self.read_disk(generation, false).await;
                 self.mark(&g, RESTORED_MARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
                 self.starts.borrow_mut().data(generation, js::now_ms());
             }
@@ -1908,7 +1922,7 @@ impl ComputerCell {
                 self.exec_ready(&g).await?;
                 self.starts.borrow_mut().up(generation, js::now_ms());
                 // its disk, before its guest is let go (as a restore's)
-                self.read_disk(generation).await;
+                self.read_disk(generation, false).await;
                 // unless its owner's sleep held it meanwhile (`lets_go`), as
                 // any unhold (Codex on #1378)
                 let _marking = self.marking.lock().await;
@@ -1925,26 +1939,32 @@ impl ComputerCell {
         Ok(())
     }
 
-    /// Reads the disk of start `generation`'s container (`DISK_READ`) and
-    /// keeps it (`Saves::measured`), which its owner's notices tell: in its
-    /// start, its restore in place and its guest not yet let go
-    /// (`try_start`), and after each awake save (`reads_disk_after`), a
-    /// line of its own. Best effort: a read that fails is logged and
-    /// changes nothing.
-    async fn read_disk(&self, generation: u64) -> Option<fragment_core::computer::ComputerDisk> {
+    /// Reads the disk of start `generation`'s container and keeps it
+    /// (`Saves::measured`), which its owner's notices tell: in its start
+    /// (`DISK_READ`), its restore in place and its guest not yet let go
+    /// (`try_start`), and after each awake save (`reads_disk_after`), with
+    /// what its `/data` restores to (`sizes`: `sizes_read`, leaving out what
+    /// that save did), a line of its own. Best effort: a read that fails is
+    /// logged and changes nothing.
+    async fn read_disk(&self, generation: u64, sizes: bool) -> Option<fragment_core::computer::ComputerDisk> {
         let at = js::now_ms();
-        let argv = js::to_js(&json!(["sh", "-c", DISK_READ]));
-        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let (read, bound) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS) } else { (DISK_READ.to_string(), DISK_READ_MS) };
+        let argv = js::to_js(&json!(["sh", "-c", read]));
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
         let out = match read {
             Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
             Ok(o) => format!("exit {}", o["exitCode"]),
             Err(e) => e.message,
         };
-        let disk = disk_of_df(&out, at, generation);
+        let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
         match (disk, kept) {
-            // one line per read (lesson 14): its size and what is free
-            (Some(d), Some(Ok(_))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free }, "generation": generation })),
+            // one line per read (lesson 14): its size, what is free, what its
+            // /data restores to, and the room that leaves (as kept)
+            (Some(d), Some(Ok(_))) => {
+                let room = self.saves().ok().and_then(|s| s.disk()).map(|k| fragment_core::computer::room(&k));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
+            }
             _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() })),
         }
         disk
@@ -2143,6 +2163,8 @@ impl ComputerCell {
         }
         // what a held guest copied to names the save keeps, it leaves out
         let left_out = if held { self.left_out(&g).await } else { vec![] };
+        // the read of /data after it leaves the same out
+        self.left_out.replace(left_out.clone());
         let mut records: Vec<Value> = Vec::with_capacity(SAVED_DIRS.len());
         // its backups together within `BACKUPS_MS` (the lever's
         // `hang-backups`: its own), each given what is left
@@ -2807,6 +2829,7 @@ impl ComputerCell {
             simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
             relay: None,
             relay_targets: None,
+            disk: saves.disk_view(),
         }))
     }
 
@@ -3140,9 +3163,9 @@ impl ComputerCell {
                 // kept and told as one is (`read_disk`): a test fleet's
                 // computers share their host's disk, which never fills
                 let (total, free) = b.total.zip(b.free).filter(|(t, f)| *t > 0 && f <= t).ok_or_else(|| CellError::invalid("disk names its total and free bytes, free at most total"))?;
-                let d = fragment_core::computer::ComputerDisk { total, free, at: js::now_ms(), generation: self.lifecycle()?.generation() };
+                let d = fragment_core::computer::ComputerDisk { total, free, at: js::now_ms(), generation: self.lifecycle()?.generation(), data: b.data };
                 let kept = self.update_saves(|s| s.measured(d))?;
-                console_log!("{}", json!({ "computer": id, "lever": "disk", "total": total, "free": free, "kept": kept }));
+                console_log!("{}", json!({ "computer": id, "lever": "disk", "total": total, "free": free, "data": b.data, "kept": kept }));
                 Ok(json!({ "computer": id, "disk": d, "kept": kept }))
             }
             "saves" => {

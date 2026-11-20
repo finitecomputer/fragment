@@ -12,7 +12,7 @@
 //!   anything (`$workers.entrypoint`, `$workers.durableObjectId`);
 //! - a computer is in trouble when its lines in the last day say it was
 //!   failed (won't wake), that a save failed, or that its disk had less
-//!   than `computer::DISK_TOLD_FREE_MAX` free;
+//!   than `computer::ROOM_TOLD_MAX` of room (`computer::room`);
 //! - why a save failed is its line's own words (the lifecycle's
 //!   `Event::SaveFailed`'s `why`), the newest of each computer's among the
 //!   newest lines read (`WHYS_READ_MAX`), shown short and with a person's
@@ -27,7 +27,7 @@
 
 use serde_json::Value;
 
-use crate::computer::{DISK_TOLD_FREE_MAX, METER_EVERY_MS, SAVED_DIRS};
+use crate::computer::{METER_EVERY_MS, ROOM_TOLD_MAX, SAVED_DIRS};
 use crate::search::cut;
 
 /// "Now": the last ten minutes, twice an awake computer's meter alarm.
@@ -125,7 +125,7 @@ impl Question {
         const AWAKE: (&str, &str, &str, &str) = ("phase.phase", "eq", "string", "\"awake\"");
         const FRAGMENT: (&str, &str, &str, &str) = ("$workers.entrypoint", "eq", "string", "\"Fragment\"");
         const SAVE_FAILED: (&str, &str, &str, &str) = ("event.event", "eq", "string", "\"save_failed\"");
-        let disk = DISK_TOLD_FREE_MAX.to_string();
+        let disk = ROOM_TOLD_MAX.to_string();
         let (filter, asks, from) = match self {
             Question::AwakeNow => (AWAKE, Asks::Uniq("computer"), now_ms - NOW_MS),
             Question::AwakeToday => (AWAKE, Asks::Uniq("computer"), day_start_ms),
@@ -134,7 +134,7 @@ impl Question {
             Question::FragmentsToday => (FRAGMENT, Asks::Uniq("$workers.durableObjectId"), day_start_ms),
             Question::WontWake => (("phase.phase", "eq", "string", "\"failed\""), Asks::ByComputer, now_ms - DAY_MS),
             Question::SavesFailing => (SAVE_FAILED, Asks::ByComputer, now_ms - DAY_MS),
-            Question::DiskFilling => (("disk.free", "lt", "number", disk.as_str()), Asks::ByComputer, now_ms - DAY_MS),
+            Question::DiskFilling => (("disk.room", "lt", "number", disk.as_str()), Asks::ByComputer, now_ms - DAY_MS),
             Question::SaveWhys => (SAVE_FAILED, Asks::Lines, now_ms - DAY_MS),
         };
         let (key, op, kind, value) = filter;
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(fragments["parameters"]["calculations"][0]["key"], "$workers.durableObjectId");
         assert_eq!(Question::WontWake.body(SCRIPT, NOW, day)["parameters"]["filters"][1]["value"], "failed");
         assert_eq!(Question::SavesFailing.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "event.event", "operation": "eq", "type": "string", "value": "save_failed" }));
-        assert_eq!(Question::DiskFilling.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "disk.free", "operation": "lt", "type": "number", "value": DISK_TOLD_FREE_MAX }));
+        assert_eq!(Question::DiskFilling.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "disk.room", "operation": "lt", "type": "number", "value": ROOM_TOLD_MAX }));
         for q in Question::ALL {
             let b = q.body("fragment-preview", NOW, day);
             assert_eq!((&b["queryId"], &b["parameters"]["filters"][0]["value"]), (&json!(QUERY_ID), &json!("fragment-preview")), "every query is its own deployment's");
