@@ -88,11 +88,13 @@ kind, `index/<kind>.json`, `{format, kind, sessions: [entry]}`, newest
 first. Until they are gone (docs/technical-debt-ledger.md) every import
 writes them again after its rows, from the same entries, whenever the
 list moved: one try on the head it left, so a file another writer
-changed since is newer than them, and an older CLI reads it. Readers
-list the rows and, beside them, any conversation of an index file that
-no row lists: one an older CLI imported, or an archive from before its
-rows, whose next import of anything lists every conversation as rows
-from its files.
+changed since is newer than them, and an older CLI reads it; the next
+import writes them, main's head no longer theirs. Readers list the rows
+and, beside them, any conversation of an index file that no row lists,
+or lists as a newer copy (by the import's own rule: last said, then the
+better read, then more of its files): what an older CLI imported, or an
+archive from before its rows, whose next import of anything lists every
+conversation as rows from its files.
 
 A conversation's key is its origin and its id there,
 `hermes-20261029_183012_ab12cd`; an id that is no file name's (another

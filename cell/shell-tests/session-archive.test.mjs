@@ -79,3 +79,13 @@ test("a list that fails to read keeps what was read before: nothing changes", as
   const r = await listed({ rows: [], index: [], fail: "rows" });
   assert.equal(r.changed, 0);
 });
+
+test("a copy of the index file newer than its row's (an older CLI's update) is listed; an older one is not", async () => {
+  const rows = [{ key: "hermes-a", kind: "chat", title: "A", ended_at: "2026-10-01T09:00:00.000Z", reader: 20 }];
+  const later = [{ key: "hermes-a", kind: "chat", title: "A, said on since", ended_at: "2026-10-05T09:00:00.000Z", reader: 20 }];
+  assert.deepEqual((await listed({ rows, index: later })).titles, ["A, said on since"]);
+  const earlier = [{ key: "hermes-a", kind: "chat", title: "A, before", ended_at: "2026-09-01T09:00:00.000Z", reader: 20 }];
+  assert.deepEqual((await listed({ rows, index: earlier })).titles, ["A"]);
+  const better = [{ key: "hermes-a", kind: "chat", title: "A, a better read", ended_at: "2026-10-01T09:00:00.000Z", reader: 21 }];
+  assert.deepEqual((await listed({ rows, index: better })).titles, ["A, a better read"], "as late, a better read");
+});

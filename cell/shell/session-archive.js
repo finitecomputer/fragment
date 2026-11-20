@@ -36,6 +36,24 @@ export function foundSessions(results) {
   return [...found].map(([key, snippet]) => ({ key, snippet }));
 }
 
+// Of a conversation's copies, the newer: last said later, else as late by a
+// better read, else holding more of its files (fragment_core::session,
+// `Entry::newer`, which an import keeps to).
+const copy = (e) => [e.ended_at ?? e.started_at ?? "", e.reader ?? 0, e.media ?? 0];
+function newer(a, b) {
+  const [x, y] = [copy(a), copy(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
+// The rows, and each of `indexed` (an index file's entries) no row holds,
+// or holds an older copy of.
+export function newestOf(rows, indexed) {
+  const by = new Map(rows.map((e) => [e.key, e]));
+  for (const e of indexed) if (typeof e?.key === "string" && (!by.has(e.key) || newer(e, by.get(e.key)))) by.set(e.key, e);
+  return [...by.values()];
+}
+
 export function createSessionArchive({
   api, ui: { renderHeading }, data: { allFragments, own, seg },
   selection: { getFrame }, navigation: { openChat, leaveSidebar }, continuing, store, changed,
@@ -65,7 +83,9 @@ export function createSessionArchive({
   }
 
   // the archive's chats: every page of its rows, and any chat of the index
-  // file older clients keep (`index/chat.json`) that no row lists yet
+  // file older clients keep (`index/chat.json`) that no row lists yet or
+  // that it lists as a newer copy (an older CLI's import, not yet read by a
+  // newer one)
   async function chatsOf(name) {
     const out = [];
     for (let after = "", i = 0; i < 64; i++) {
@@ -78,8 +98,7 @@ export function createSessionArchive({
       after = page.next;
     }
     const index = await api("GET", `/api/f/${seg(name)}/file?path=${encodeURIComponent("index/chat.json")}`).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
-    const held = new Set(out.map((e) => e.key));
-    return [...out, ...(Array.isArray(index?.sessions) ? index.sessions.filter((e) => typeof e?.key === "string" && !held.has(e.key)) : [])];
+    return newestOf(out, Array.isArray(index?.sessions) ? index.sessions : []);
   }
 
   document.addEventListener("visibilitychange", () => {

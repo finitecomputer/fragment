@@ -435,7 +435,7 @@ final class Library {
     /// The person's imported chats: their session archive's rows of kind
     /// `chat` (its app's `sessions`, templates/sessions/README.md) and any
     /// chat of the `index/chat.json` older clients keep that no row lists,
-    /// as the web's History reads them, apart from the rest of the list, the
+    /// or lists as a newer copy, as the web's History reads them, apart from the rest of the list, the
     /// newest 2,000. A read that fails keeps what was read before, and
     /// nothing else waits on it.
     private func loadImported(_ api: FragmentAPI, _ requestID: UUID) async {
@@ -460,9 +460,12 @@ final class Library {
                 guard let next = answer.result.next, next > after else { break }
                 after = next
             }
-            let held = Set(rows.map(\.key))
+            // and each chat of the index file no row holds, or holds an
+            // older copy of (an older CLI's import)
             let index = try await api.optional(Index.self, "api/f/\(archive.name)/file", query: [URLQueryItem(name: "path", value: "index/chat.json")])
-            rows += (index?.sessions ?? []).filter { !held.contains($0.key) }
+            var byKey = Dictionary(rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+            for entry in index?.sessions ?? [] where byKey[entry.key].map({ entry.newer(than: $0) }) ?? true { byKey[entry.key] = entry }
+            rows = Array(byKey.values)
         } catch { return }
         guard loadID == requestID, !Task.isCancelled else { return }
         imported = Array(rows.sorted { $0.at > $1.at }.prefix(2_000))

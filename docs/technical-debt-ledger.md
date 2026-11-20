@@ -1173,11 +1173,12 @@ unfinished design, not debt.
   the page (templates/sessions/site/sessions.js `list`), the shell's
   History (cell/shell/session-archive.js `chatsOf`) and the iPhone's
   (ios/Sources/FragmentApp.swift `loadImported`) list the rows and any
-  conversation of an index file no row lists.
-- **Risk:** a commit and a read more an import; an index file stays
-  stale when another writer moved main first (the next import that moves
-  the list writes it); a conversation deleted by hand stays in the index
-  file, listed by its key, until the next import.
+  conversation of an index file no row lists, or lists as a newer copy.
+- **Risk:** a commit and a read more an import; the index files stay
+  as they were when another writer came between an import's commits
+  (older than its files, so an older CLI reads them; the next import
+  writes them); a conversation deleted by hand stays in the index file,
+  listed by its key, until the next import.
 - **Delete when:** every client reads the rows: iPhone builds and every
   computer image's CLI from this release on (an operator's check of the
   pinned image and the iPhone build). Then the readers drop the index

@@ -64,6 +64,16 @@ async function rows() {
   return null;
 }
 
+// Of a conversation's copies, the newer: last said later, else as late by a
+// better read, else holding more of its files (fragment_core::session,
+// `Entry::newer`, which an import keeps to).
+const copy = (e) => [e.ended_at ?? e.started_at ?? "", e.reader ?? 0, e.media ?? 0];
+function newer(a, b) {
+  const [x, y] = [copy(a), copy(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
 // When it was last said, else begun: newest first.
 const newest = (a, b) => (b.ended_at ?? b.started_at ?? "").localeCompare(a.ended_at ?? a.started_at ?? "") || (a.key < b.key ? -1 : 1);
 
@@ -71,13 +81,13 @@ async function list(page) {
   const listed = await rows();
   if (!listed) throw new Error("its list was not read");
   // its rows, and any conversation of the index files older clients keep
-  // that no row lists yet (docs/technical-debt-ledger.md)
+  // that no row lists yet, or lists as a newer copy (an older CLI's import:
+  // docs/technical-debt-ledger.md)
   const indexed = await Promise.all(KINDS.map(([kind]) => file(`index/${kind}.json`)));
-  const held = new Set(listed.map((e) => e.key));
-  const lists = KINDS.map(([kind], i) => {
-    const older = Array.isArray(indexed[i]?.sessions) ? indexed[i].sessions.filter((e) => typeof e?.key === "string" && !held.has(e.key)) : [];
-    return [...listed.filter((e) => e.kind === kind), ...older].sort(newest);
-  });
+  const by = new Map(listed.map((e) => [e.key, e]));
+  for (const v of indexed) for (const e of Array.isArray(v?.sessions) ? v.sessions : []) if (typeof e?.key === "string" && (!by.has(e.key) || newer(e, by.get(e.key)))) by.set(e.key, e);
+  const all = [...by.values()];
+  const lists = KINDS.map(([kind]) => all.filter((e) => e.kind === kind).sort(newest));
   const head = el("header", "archive-head");
   head.append(el("h1", null, "Session Archive"));
   if (lists.every((l) => !l.length)) {

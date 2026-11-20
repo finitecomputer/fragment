@@ -450,7 +450,17 @@ struct ImportedSession: Decodable, Identifiable, Sendable {
     var preview: String?
     var started_at: String?
     var ended_at: String?
+    var reader: Int?
+    var media: Int64?
     var id: String { key }
+    /// Whether this copy of a conversation is newer than `other`: last said
+    /// later, else as late by a better read, else holding more of its files
+    /// (fragment_core::session `Entry::newer`, which an import keeps to).
+    func newer(than other: ImportedSession) -> Bool {
+        let mine = (ended_at ?? started_at ?? "", reader ?? 0, media ?? 0)
+        let theirs = (other.ended_at ?? other.started_at ?? "", other.reader ?? 0, other.media ?? 0)
+        return mine > theirs
+    }
     /// When it was last said, else begun, in milliseconds: an archive writes
     /// its times with milliseconds (`2026-10-02T10:00:00.000Z`), an older
     /// one without.

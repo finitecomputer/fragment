@@ -381,9 +381,11 @@ struct Held {
     /// The rows whose files are gone.
     gone: Vec<String>,
     /// The files `media/` holds, by path, and the kinds of the index files
-    /// main holds (`index/<kind>.json`: a copy for older clients).
+    /// main holds (`index/<kind>.json`: a copy for older clients), and
+    /// whether they were written in main's head (nothing changed since).
     media: BTreeSet<String>,
     indexes: BTreeSet<Kind>,
+    indexes_current: bool,
 }
 
 struct Stored {
@@ -482,6 +484,8 @@ fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
         listed.iter().filter_map(|e| session::key_of_path(e.path.as_str()).map(|k| (k.to_string(), Stored { commit: e.last_commit_sha.clone() }))).collect();
     let media = listed.iter().filter(|e| e.path.as_str().starts_with("media/")).map(|e| e.path.to_string()).collect();
     let indexes = listed.iter().filter_map(|e| session::kind_of_index_path(e.path.as_str())).collect();
+    let mut index_commits = listed.iter().filter(|e| session::kind_of_index_path(e.path.as_str()).is_some()).map(|e| e.last_commit_sha.as_str());
+    let indexes_current = index_commits.next().is_some_and(|first| head.as_deref() == Some(first)) && index_commits.all(|c| head.as_deref() == Some(c));
     let rows = rows(c, name)?;
     let (mut indexed, mut gone) = (BTreeMap::new(), Vec::new());
     for row in rows {
@@ -501,7 +505,7 @@ fn held(c: &Client, name: &str, storage: &CodeStorage) -> Result<Held> {
             Some(_) => {}
         }
     }
-    Ok(Held { head, indexed, stored, gone, media, indexes })
+    Ok(Held { head, indexed, stored, gone, media, indexes, indexes_current })
 }
 
 /// The entry of each conversation whose file in `sessions/` no row
@@ -557,6 +561,9 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let merge = session::merge(&h.indexed, &h.keys(), found.iter().map(|r| r.entry.clone()).collect(), incoming).map_err(too_much)?;
     let (added, updated, unchanged) = (merge.added, merge.updated, merge.unchanged);
     let mut head = h.head.clone();
+    // whether every commit landed on the head this import read and left (no
+    // other writer between): only then do its entries describe main
+    let mut alone = true;
     // each row to file: what was read, then what was written over it
     let mut filed: BTreeMap<String, Row> = found.into_iter().map(|r| (r.entry.key.clone(), r)).collect();
 
@@ -586,15 +593,17 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
         batch.push(Change::Upsert { path: RepoPath::parse(&repo_path).map_err(|e| anyhow!("{e}"))?, bytes: stored });
         if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
             sent += batch.len();
-            let tip;
-            (head, tip) = commit(&storage, &author, head, &format!("session import: {sent} of {total} files"), &batch)?;
+            let (tip, first);
+            (head, tip, first) = commit(&storage, &author, head, &format!("session import: {sent} of {total} files"), &batch)?;
+            alone &= first;
             landed(&mut keys, tip);
             (batch, batch_bytes) = (Vec::new(), 0);
         }
     }
     if !batch.is_empty() {
-        let tip;
-        (head, tip) = commit(&storage, &author, head, &format!("session import: {total} files"), &batch)?;
+        let (tip, first);
+        (head, tip, first) = commit(&storage, &author, head, &format!("session import: {total} files"), &batch)?;
+        alone &= first;
         landed(&mut keys, tip);
     }
     if total > 0 {
@@ -612,12 +621,15 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     };
     file_rows(c, name, filed.into_values().collect(), gone)?;
     // then the index files older clients read and write, a copy of the list
-    // (docs/technical-debt-ledger.md): every kind held or indexed, when the
-    // list moved or a kind held has none. One try, on the head this import
-    // left: another writer since, and they stay as they were (older than
-    // the files changed after them, so an older CLI reads those files).
+    // (docs/technical-debt-ledger.md): every kind held or indexed, unless
+    // they were written in the head this import read and nothing moved. Only
+    // while no other writer came between (`alone`), and one try on the head
+    // this import left: else they stay as they were, older than the files
+    // changed after them (so an older CLI reads those files), and the next
+    // import writes them, main's head no longer theirs.
     let kinds: BTreeSet<Kind> = merge.entries.values().map(|e| e.kind.clone()).chain(h.indexes.iter().cloned()).collect();
-    if moved || kinds.iter().any(|k| !h.indexes.contains(k)) {
+    let stale = moved || !h.indexes_current || kinds.iter().any(|k| !h.indexes.contains(k));
+    if stale && alone {
         let mut changes = Vec::new();
         for kind in kinds {
             let bytes = blobs.store(session::Index::of(kind.clone(), &merge.entries).file())?;
@@ -634,16 +646,17 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
 
 /// One commit of `changes` on `head`: on another head when another writer
 /// moved main meanwhile (the conversations are upserts: any head takes
-/// them), and once more when its answer was lost. Main's new head, and the
+/// them), and once more when its answer was lost. Main's new head, the
 /// commit made when it is known to be this one's (not when its answer was
 /// lost and main holds its changes already: a row naming no commit is read
-/// again by the next import).
-fn commit(storage: &CodeStorage, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<(Option<String>, Option<String>)> {
+/// again by the next import), and whether it landed on `head` at its first
+/// try (no other writer between).
+fn commit(storage: &CodeStorage, author: &Author, mut head: Option<String>, message: &str, changes: &[Change]) -> Result<(Option<String>, Option<String>, bool)> {
     for attempt in 1..=COMMIT_TRIES {
         match storage.commit(head.as_deref(), message, author, changes) {
-            Ok(tip) => return Ok((Some(tip.clone()), Some(tip))),
+            Ok(tip) => return Ok((Some(tip.clone()), Some(tip), attempt == 1)),
             // main holds them already (a try whose answer was lost landed)
-            Err(CsError::Precondition(_)) => return Ok((storage.branch_head(MAIN)?, None)),
+            Err(CsError::Precondition(_)) => return Ok((storage.branch_head(MAIN)?, None, false)),
             Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => head = storage.branch_head(MAIN)?,
             Err(e) => return Err(anyhow::Error::new(e).context("writing the archive's conversations")),
         }
@@ -1280,6 +1293,34 @@ mod tests {
         let w = write(&c, NAME, &spooled(vec![])).unwrap();
         assert_eq!(w.entries.get(&older_entry.key), Some(&Entry { sha256: sha(&older_bytes), bytes: older_bytes.len() as u64, ..older_entry }));
         assert!(keys(&mock, Kind::Chat).contains(&"hermes-c".to_string()), "listed by its row now");
+    }
+
+    /// Goal: the index files older clients trust are never newer than a
+    /// file they misdescribe. Another writer's newer copy of a chat lands
+    /// while an import writes another chat (its commit made again on the
+    /// new head): the import leaves the index files as they were (older than
+    /// that copy, so an older CLI reads its file), and the next import of
+    /// anything writes them again as main holds it, a replay then writing
+    /// nothing. Method: the fake's competitor commit, then imports.
+    #[test]
+    fn index_files_never_describe_a_file_newer_than_them() {
+        let (mock, c) = archive();
+        write(&c, NAME, &spooled(vec![session("a", Kind::Chat, "2026-10-01T09:00:00Z", &["hellp"])])).unwrap();
+        let before = mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)).unwrap();
+        let newer_a = file_of(session("a", Kind::Chat, "2026-10-02T09:00:00Z", &["hello"]));
+        mock.sabotage_commit_packs_with(1, vec![(session::session_path("hermes-a"), Some(newer_a.clone()))]);
+        write(&c, NAME, &spooled(vec![session("b", Kind::Chat, "2026-10-03T09:00:00Z", &["b"])])).unwrap();
+        assert_eq!(mock.file_at(NAME, "main", &session::session_path("hermes-a")), Some(newer_a.clone()), "the other writer's copy stands");
+        assert_eq!(mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)), Some(before), "the index files left as they were, older than it");
+
+        write(&c, NAME, &spooled(vec![])).unwrap();
+        let indexed = serde_json::from_slice::<session::Index>(&mock.file_at(NAME, "main", &session::index_path(&Kind::Chat)).unwrap()).unwrap();
+        let listed: Vec<(String, String)> = indexed.sessions.into_iter().map(|e| (e.key, e.sha256)).collect();
+        assert_eq!(listed[1], ("hermes-a".to_string(), sha(&newer_a)), "written again by the next import, as main holds it");
+        assert_eq!(listed[0].0, "hermes-b");
+        let packs = mock.requests(NAME, "POST commit-pack");
+        write(&c, NAME, &spooled(vec![])).unwrap();
+        assert_eq!(mock.requests(NAME, "POST commit-pack"), packs, "then nothing again");
     }
 
     /// Goal: on a host whose archive has no list yet (an older platform,
