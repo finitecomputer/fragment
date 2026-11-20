@@ -1538,13 +1538,21 @@ impl ComputerCell {
         Ok(())
     }
 
-    /// The hosts the swap intercepts: every provider's in the catalog (an
-    /// account host's as its glob, `*.under`), and each its agents' Vault
-    /// secrets go to (`vault_usable`).
+    /// The hosts the swap intercepts that need no round trip: every
+    /// provider's in the catalog (an account host's as its glob, `*.under`).
+    fn catalog_hosts(&self) -> Vec<String> {
+        let mut hosts = self.cfg.providers.intercepts();
+        hosts.sort_unstable();
+        hosts.dedup();
+        hosts
+    }
+
+    /// The hosts the swap intercepts: the catalog's, and each its agents'
+    /// Vault secrets go to (`vault_usable`).
     async fn swap_hosts(&self) -> CellResult<Vec<String>> {
         let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
         let usable = self.vault_usable(&fragments).await.0;
-        let mut hosts = self.cfg.providers.intercepts();
+        let mut hosts = self.catalog_hosts();
         hosts.extend(usable.into_iter().flat_map(|u| u.2));
         hosts.sort_unstable();
         hosts.dedup();
@@ -1552,10 +1560,9 @@ impl ComputerCell {
     }
 
     /// Sets its running start `generation`'s egress intercepts again
-    /// (entry.mjs `arm`: a takeover's, or a Vault host set since it
-    /// started; its start registered them before it began, `try_start`):
-    /// the platform's own hosts and `hosts`, kept as armed. False: that
-    /// start was superseded.
+    /// (entry.mjs `arm`: a takeover's; its start registered them before it
+    /// began, `try_start`): the platform's own hosts and `hosts`, kept as
+    /// armed. False: that start was superseded.
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
         let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
@@ -1566,29 +1573,37 @@ impl ComputerCell {
         Ok(done)
     }
 
-    /// Arms its running start again when `vault_hosts` names a host its
-    /// egress does not catch yet (an agent's Vault secret set since it
-    /// started), so a guest that reads a placeholder reaches the swap with
-    /// it. Asleep, its next start arms them all. A failure is logged: the
-    /// placeholder then goes out uncaught, and fills nothing.
+    /// Has its running start's swap catch each of `vault_hosts` it does
+    /// not catch yet (entry.mjs `armSwap`: those alone), so a guest that
+    /// reads a placeholder reaches the swap with it. Its guest's view
+    /// answers only after (`guest_view`), and a guest learns a Vault
+    /// secret's placeholder only from its view: a start asks no Vault
+    /// (`try_start`), and its guest's first read, made at once as it
+    /// boots, catches them. A failure is logged: the placeholder then goes
+    /// out uncaught, and fills nothing.
     async fn arm_more(&self, vault_hosts: Vec<String>) {
         let Ok(life) = self.lifecycle() else { return };
         let Some(generation) = life.running() else { return };
-        let armed = self.armed.borrow().clone();
-        let mut hosts = armed.filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-        if vault_hosts.iter().all(|h| hosts.contains(h)) {
+        // the start's own or a takeover's, as armed: the catalog's at least
+        let armed = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        let mut more: Vec<String> = vault_hosts.into_iter().filter(|h| !armed.contains(h)).collect();
+        more.sort_unstable();
+        more.dedup();
+        if more.is_empty() {
             return;
         }
-        hosts.extend(self.cfg.providers.intercepts());
-        hosts.extend(vault_hosts);
-        hosts.sort_unstable();
-        hosts.dedup();
-        let armed = match self.meta(MetaKey::Id) {
-            Ok(Some(id)) => self.arm(generation, &id, hosts).await,
-            _ => return,
-        };
-        if let Err(e) = armed {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "error": e.message }));
+        let Ok(Some(id)) = self.meta(MetaKey::Id) else { return };
+        let g = JsValue::from_f64(generation as f64);
+        match self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await {
+            Ok(done) if done.as_bool() == Some(true) => {
+                let mut hosts = armed;
+                hosts.extend(more);
+                hosts.sort_unstable();
+                *self.armed.borrow_mut() = Some((generation, hosts));
+            }
+            // superseded: the start after it arms its own
+            Ok(_) => {}
+            Err(e) => console_error!("{}", json!({ "computer": id, "arm": "vault", "error": e.message })),
         }
     }
 
@@ -1864,8 +1879,10 @@ impl ComputerCell {
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
-        // what its egress catches, asked before it starts (its agents' Vault's)
-        let hosts = self.swap_hosts().await?;
+        // what its egress catches from its start: the catalog's, asking
+        // nothing; its agents' Vault secrets' hosts its guest's first read
+        // of its view catches, before it can know one (`arm_more`)
+        let hosts = self.catalog_hosts();
         // a wipe that began while this start awaited starts nothing: one
         // begun before the host's start is seen here, and one begun while
         // the host registers the intercepts is the host's to see (its

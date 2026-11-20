@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use super::jobs::{events, records};
 use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
-use super::credentials::{grant_checks, model_checks, own_move_checks, own_signin_moved_checks, placeholder, swap_checks, uses_checks, vault_checks, Swapping, GRANT_CHECKS, MODEL_CHECKS, OWN_MOVE_CHECKS, OWN_SIGNIN_MOVED_CHECKS, SWAP_CHECKS, VAULT_CHECKS};
+use super::credentials::{grant_checks, model_checks, own_move_checks, own_signin_moved_checks, placeholder, swap_checks, uses_checks, vault_after_wake, vault_checks, vault_while_asleep, Swapping, GRANT_CHECKS, MODEL_CHECKS, OWN_MOVE_CHECKS, OWN_SIGNIN_MOVED_CHECKS, SWAP_CHECKS, VAULT_AFTER_WAKE, VAULT_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
@@ -2711,6 +2711,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         !awake.is_empty() && awake.iter().all(|e| e["entry"]["row"]["usage"]["ms"].as_u64().is_some_and(|ms| ms > 0) && e["entry"]["charge"].as_i64().is_some_and(|c| c > 0)),
         json!(awake),
     );
+    // a Vault secret bound while it sleeps, for its wake's guest (VAULT_AFTER_WAKE)
+    let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity, month: &month };
+    let wake_secret = if fakes && scripted { Some(vault_while_asleep(api, &swapping)?) } else { None };
     // its wake goes from the chat's outbox to the computer itself, never
     // through the delivery queue: with every queue send of the chat's
     // failing, the record wakes it all the same
@@ -2731,6 +2734,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     fail_queue(0)?;
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("awake again", r.body["phase"] == "awake", &r);
+    match &wake_secret {
+        Some(value) => replies_so_far += vault_after_wake(s, &swapping, &fetched, value)?,
+        None => s.skip(VAULT_AFTER_WAKE, "it needs the stub's fetch, and the fakes' provider behind the swap"),
+    }
     // its answer came after every turn its restore read again: the runs
     // (where the fakes count them) and the replies are as they were
     let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);

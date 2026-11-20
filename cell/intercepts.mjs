@@ -22,27 +22,36 @@ export async function settled(f) {
   }
 }
 
+// Each of `hosts` caught by the swap, on HTTPS and on plain HTTP alike:
+// the swap always sends on over HTTPS, so a credential never crosses the
+// internet in the clear.
+function swapped(c, egress, hosts) {
+  return hosts.flatMap((host) => [() => c.interceptOutboundHttp(host, egress("swap")), () => c.interceptOutboundHttps(host, egress("swap"))]);
+}
+
 // Registers every egress intercept of a computer's guest on container `c`,
 // all at once (one round trip, not one each): the platform's hosts, a
 // local fleet's code.storage (`codestorage`: at a loopback address the
-// container cannot reach), each of `swapHosts` on HTTPS and on plain HTTP
-// alike (the swap always sends on over HTTPS, so a credential never
-// crosses the internet in the clear), each `ComputerEgress` with its route
-// as `egress(route)` makes it; and each of `more`, a call that registers
-// one of its own (the backups'). Neither survives a stop: each start
-// registers them again.
+// container cannot reach), each of `swapHosts` (`swapped`), each
+// `ComputerEgress` with its route as `egress(route)` makes it; and each of
+// `more`, a call that registers one of its own (the backups'). None
+// survives a stop: each start registers them again.
 export function intercept(c, egress, swapHosts, codestorage, more) {
   const each = [
     () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
     () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
   ];
   if (codestorage) each.push(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
-  for (const host of swapHosts) {
-    each.push(() => c.interceptOutboundHttp(host, egress("swap")));
-    each.push(() => c.interceptOutboundHttps(host, egress("swap")));
-  }
-  each.push(...more);
+  each.push(...swapped(c, egress, swapHosts), ...more);
   return Promise.all(each.map((f) => settled(f)));
+}
+
+// `hosts` more for the swap of a running container (a Vault secret's, set
+// since it started or named by its guest's first read of its view): these
+// alone, at once, never the rest again. The backups' own, registered
+// again, would replace the grant of a save or a restore under way.
+export function interceptSwap(c, egress, hosts) {
+  return Promise.all(swapped(c, egress, hosts).map((f) => settled(f)));
 }
 
 // Starts container `c` (`opts`) once `intercepted()` has registered its

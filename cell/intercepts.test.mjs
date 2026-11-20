@@ -4,11 +4,12 @@
 // Valid (that first call answered; every intercept asked at once, the
 // swap's hosts on both schemes), invalid (a registration that fails starts
 // nothing), the fence (a start overtaken while it registered starts
-// nothing), and the settle (a registration a snapshot's start finds
-// "temporarily unavailable" is asked again).
+// nothing), the settle (a registration a snapshot's start finds
+// "temporarily unavailable" is asked again), and a running container's
+// Vault hosts (those alone, never the backups' own again).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { intercept, startIntercepted } from "./intercepts.mjs";
+import { intercept, interceptSwap, startIntercepted } from "./intercepts.mjs";
 
 const API = "api.fragment.internal";
 const MODEL = "model.fragment.internal";
@@ -119,4 +120,15 @@ test("a registration answered temporarily unavailable is asked again, and the st
     [API, "answered"],
     [MODEL, "answered"],
   ]);
+});
+
+test("a Vault host its guest's view names, running, is registered alone: never the backups' own or the platform's again", async () => {
+  const { c, seen } = container();
+  await start(c);
+  seen.asked.length = 0;
+  await interceptSwap(c, egress, ["api.vault.test"]);
+  // the backups' own, registered again, would replace a save's or a
+  // restore's grant under way (its first read comes as a restore runs)
+  assert.deepEqual(seen.asked, ["http://api.vault.test → swap", "https://api.vault.test → swap"]);
+  assert.equal(seen.started, 1, "it starts nothing");
 });
