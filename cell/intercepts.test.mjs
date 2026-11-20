@@ -1,11 +1,12 @@
 // intercepts.mjs: a computer's start registers every egress intercept of
 // its guest first, all at once, and only then starts it, so the guest's
 // first call, made at once as it boots, is answered and never tried again.
-// Valid (that first call answered; every intercept asked at once, the
-// swap's hosts on both schemes), invalid (a registration that fails starts
-// nothing), the fence (a start overtaken while it registered starts
-// nothing), and the settle (a registration a snapshot's start finds
-// "temporarily unavailable" is asked again).
+// Valid (that first call answered; every intercept in place at the start,
+// asked at once, the swap's hosts on both schemes), invalid (a registration
+// that fails starts nothing, and fails only once its siblings have landed),
+// the fence (a start overtaken while it registered starts nothing), and the
+// settle (a registration a snapshot's start finds "temporarily
+// unavailable" is asked again).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { intercept, startIntercepted } from "./intercepts.mjs";
@@ -22,11 +23,14 @@ const MODEL = "model.fragment.internal";
 // 1.5 s). `fail` names a registration the runtime refuses, `busy` one it
 // answers "temporarily unavailable" once.
 function container({ fail = null, busy = null } = {}) {
-  const seen = { caught: new Set(), asked: [], inFlight: 0, inFlightMax: 0, started: 0, first: null };
+  const seen = { caught: new Set(), asked: [], inFlight: 0, inFlightMax: 0, started: 0, first: null, atStart: null };
   const register = (scheme) => async (host, binding) => {
     const name = `${scheme}://${host} → ${binding.route}`;
     seen.asked.push(name);
-    if (name === fail) throw new Error("the runtime refused it");
+    if (name === fail) {
+      // refused at once, while the others are still on their way
+      throw new Error("the runtime refused it");
+    }
     if (name === busy) {
       busy = null;
       throw new Error("the container is temporarily unavailable");
@@ -43,6 +47,7 @@ function container({ fail = null, busy = null } = {}) {
     start(opts) {
       seen.started++;
       seen.opts = opts;
+      seen.atStart = new Set(seen.caught);
       seen.first = [API, MODEL].map((host) => [host, seen.caught.has(`http://${host}`) ? "answered" : "failed: tried again after a backoff"]);
     },
   };
@@ -50,12 +55,11 @@ function container({ fail = null, busy = null } = {}) {
 }
 
 const egress = (route) => ({ route });
-const backups = (c) => () => c.interceptOutboundHttp("backups.sandbox.internal", { route: "backups" });
 const SWAP = ["api.example.com", "*.example.net"];
 
 // What a computer's start asks of the host: its intercepts, then the start.
 function start(c, overtaken = () => false) {
-  return startIntercepted(c, { image: "stub" }, () => intercept(c, egress, SWAP, true, [backups(c)]), overtaken);
+  return startIntercepted(c, { image: "stub" }, () => intercept(c, egress, SWAP, true), overtaken);
 }
 
 test("the guest's first call, made at once as it boots, is answered: never tried again", async () => {
@@ -69,7 +73,7 @@ test("the guest's first call, made at once as it boots, is answered: never tried
   ]);
 });
 
-test("every intercept is in place before the start, all asked at once", async () => {
+test("every intercept is in place at the start itself, all asked at once", async () => {
   const { c, seen } = container();
   await start(c);
   const every = [
@@ -80,25 +84,28 @@ test("every intercept is in place before the start, all asked at once", async ()
     "https://api.example.com → swap",
     "http://*.example.net → swap",
     "https://*.example.net → swap",
-    "http://backups.sandbox.internal → backups",
   ];
   assert.deepEqual([...seen.asked].sort(), [...every].sort());
-  assert.equal(seen.caught.size, every.length);
+  // what had landed when the container started, not after
+  assert.deepEqual([...seen.atStart].sort(), every.map((e) => e.split(" → ")[0]).sort());
   // one round trip for them all, not one each
   assert.equal(seen.inFlightMax, every.length);
 });
 
-test("without a code.storage of its own or a swap host, the platform's two and the backups'", async () => {
+test("without a code.storage of its own or a swap host, the platform's two; never the backups' host, whose saves and restores grant their own", async () => {
   const { c, seen } = container();
-  await startIntercepted(c, {}, () => intercept(c, egress, [], false, [backups(c)]), () => false);
-  assert.deepEqual(seen.asked, [`http://${API} → api`, `http://${MODEL} → model`, "http://backups.sandbox.internal → backups"]);
+  await startIntercepted(c, {}, () => intercept(c, egress, [], false), () => false);
+  assert.deepEqual(seen.asked, [`http://${API} → api`, `http://${MODEL} → model`]);
   assert.equal(seen.started, 1);
 });
 
-test("a registration the runtime refuses starts nothing: no guest without its intercepts", async () => {
+test("a registration the runtime refuses starts nothing, and fails only once the others have landed", async () => {
   const { c, seen } = container({ fail: "https://api.example.com → swap" });
   await assert.rejects(start(c), /the runtime refused it/);
   assert.equal(seen.started, 0);
+  // none of the failed start's still on its way, to land after a later start's
+  assert.equal(seen.inFlight, 0);
+  assert.equal(seen.caught.size, 6);
 });
 
 test("a start overtaken while it registered (a wipe's destroy, a later start) starts nothing", async () => {
@@ -108,7 +115,7 @@ test("a start overtaken while it registered (a wipe's destroy, a later start) st
   destroyed = true;
   assert.equal(await registering, false);
   assert.equal(seen.started, 0);
-  assert.equal(seen.caught.size, 8, "what it registered stays: the next start registers the same again");
+  assert.equal(seen.caught.size, 7, "what it registered stays: the next start registers the same again");
 });
 
 test("a registration answered temporarily unavailable is asked again, and the start waits for it", async () => {

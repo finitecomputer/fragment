@@ -28,10 +28,11 @@ export async function settled(f) {
 // container cannot reach), each of `swapHosts` on HTTPS and on plain HTTP
 // alike (the swap always sends on over HTTPS, so a credential never
 // crosses the internet in the clear), each `ComputerEgress` with its route
-// as `egress(route)` makes it; and each of `more`, a call that registers
-// one of its own (the backups'). Neither survives a stop: each start
-// registers them again.
-export function intercept(c, egress, swapHosts, codestorage, more) {
+// as `egress(route)` makes it. None survives a stop: each start registers
+// them again. It answers once every registration has: one that fails
+// fails it (the first's reason), never while another is still on its way
+// to the runtime, so nothing of a failed start's lands after it.
+export async function intercept(c, egress, swapHosts, codestorage) {
   const each = [
     () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
     () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
@@ -41,8 +42,9 @@ export function intercept(c, egress, swapHosts, codestorage, more) {
     each.push(() => c.interceptOutboundHttp(host, egress("swap")));
     each.push(() => c.interceptOutboundHttps(host, egress("swap")));
   }
-  each.push(...more);
-  return Promise.all(each.map((f) => settled(f)));
+  const answers = await Promise.allSettled(each.map((f) => settled(f)));
+  const failed = answers.find((a) => a.status === "rejected");
+  if (failed) throw failed.reason;
 }
 
 // Starts container `c` (`opts`) once `intercepted()` has registered its
