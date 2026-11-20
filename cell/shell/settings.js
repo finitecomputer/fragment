@@ -44,7 +44,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, seg, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
+export function createSettings({ api, $, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -228,7 +228,7 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
       read("/api/ledger"),
       read("/api/seat"),
       read("/api/connections"),
-      getComputer() ? read(`/api/computers/${seg(getComputer().computer)}/uses`) : { value: null },
+      read("/api/ledger/uses"),
     ]), readTelegram()]);
     if (lost()) return;
     const [ledger, mySeat, linked, uses] = reads.map((r) => r.value ?? null);

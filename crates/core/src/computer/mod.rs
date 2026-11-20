@@ -10,7 +10,9 @@
 //!   page's presence (a pre-wake), one of its agents added to a fragment,
 //!   or the owner. A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
-//!   longer; one while it is going to sleep starts it again once it is
+//!   longer; one during an idle sleep's hold or save cancels that sleep,
+//!   and it stays awake on the container it has; one during its owner's
+//!   sleep, or once a sleep's stop began, starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
 //! - **Staying awake.** While the guest holds a keepalive socket or a
 //!   port tab is open; with nothing open, until the latest hold runs out
@@ -27,7 +29,9 @@
 //! - **Sleeping.** Its hold and its save, then its stop (snapshot, signal,
 //!   wait, destroy), reported back by `Asleep`. A keepalive that opens
 //!   during an idle sleep's hold cancels the sleep: the guest took work as
-//!   it was held, so it stays awake (docs/computers.md, Lifecycle).
+//!   it was held, so it stays awake (docs/computers.md, Lifecycle). So
+//!   does a wake during its hold or its save: a save under way goes on as
+//!   an awake save, and is kept or failed as one.
 //!   A sleep whose save fails keeps its container and is tried again, for
 //!   at most `Rules::unsaved_max_ms`; then it sleeps unsaved, and says so.
 //!   A container its host stops unasked while it is idle, with all this
@@ -62,6 +66,7 @@
 //! something was done on the life it lost after the save it went back to.
 
 pub mod said;
+pub mod start_line;
 
 mod awake;
 mod disk;
@@ -77,12 +82,12 @@ mod which;
 
 pub use awake::awake_batch;
 pub use disk::{disk_clear, disk_filling, disk_of_df, reads_disk_after, ComputerDisk, DISK_CLEAR_FREE_MIN, DISK_CLEAR_USED_PCT, DISK_READ, DISK_TOLD_FREE_MAX, DISK_TOLD_USED_PCT};
-pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, UNHELD_MAX_BYTES};
+pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, SAVED_DIRS, UNHELD_MAX_BYTES};
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
-pub use lifecycle::{alive, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
+pub use lifecycle::{alive, unplanned_start, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};
 pub use limits::{
     ALARM_LATE_MS, ALIVE_MS, AWAKE_ROW_MAX_MS, FAILED_WHY_MAX_BYTES, HOLD_DEADLINE_MS, HOLD_WAIT_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, PREWAKE_MS, RETRY_PAUSE_MS, SAVES_KEPT, SAVE_DEADLINE_MS, SAVE_EVERY_MS, SAVE_RETRY_MS,
-    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
+    SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, STARTS_OWED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, UNSAVED_MAX_MS_DEFAULT, UNSAVED_NOTICE_FAILURES, WONT_WAKE_RETRY_MS,
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
 pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};

@@ -358,30 +358,6 @@ pub struct Providers {
     pub providers: Vec<ProviderView>,
 }
 
-/// One agent's use of one provider in a month: its calls the provider
-/// answered, and what they were charged (an operator key's; zero for a
-/// connection or an own key, which are counted, never charged).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderUse {
-    pub provider: String,
-    /// The agent fragment.
-    pub agent: String,
-    pub calls: u64,
-    pub micros: i64,
-}
-
-/// `GET /api/computers/{id}/uses?month=YYYY-MM`: a month's uses of the
-/// deployment's providers through the computer's swap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComputerUses {
-    pub computer: String,
-    /// `YYYY-MM`, UTC.
-    pub month: String,
-    pub uses: Vec<ProviderUse>,
-}
-
 /// `PUT /api/computers/{id}/agents/{fragment}/connections`: the providers
 /// an agent may use, all of them named at once, or `null` for every one
 /// its owner has (the default again). The field is named even when it is

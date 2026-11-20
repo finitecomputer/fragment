@@ -306,7 +306,10 @@ masked field, and:
   gets its words once the card's closure is on `work`; the closure says it
   was answered by the agent's owner, nothing of what. A record answering
   it is ignored, live or late. A card whose turn is gone (a restart) takes
-  it no more, saying so: its person sends a message to start again.
+  it no more, saying so: its person sends a message to start again. So
+  such a card holds the computer while it is open, at most
+  `COMPUTER_CARD_HOLD_MS` (10 minutes) or to its expiry if sooner
+  (`Prompt::holds_until`): a sleep comes only after that.
 
 The value is never logged or kept, here or on the platform, which only
 carries the port's bytes. Something on the computer itself (the agent's
@@ -317,7 +320,8 @@ only fail.
 ## A card outlives its turn
 
 Waiting on a person (a card, or a question in words) never holds the
-computer, so a sleep or a restart may cut a turn under its card. The
+computer, but for a card only this life can take ("An answer for the
+computer"), so a sleep or a restart may cut a turn under its card. The
 turn ends as lost; its cards stay answerable until `expiresAt`. An owner's
 answer that no running turn of this life holds is late, and the engine
 resolves it from the chat's journal, read back to the card (`cards.rs`):
@@ -349,7 +353,8 @@ it.
 ## Runtime work outside a turn
 
 The keepalive is held while a turn is queued or runs (not while it waits
-on a person), and while a runtime says it has work of its own (`Working`):
+on a person, but for a card only this life can take), and while a
+runtime says it has work of its own (`Working`):
 in our image, delegated children still running after their parent
 replied.
 
@@ -412,6 +417,40 @@ it, and the hook returns only then:
   turn's own calls are steps (`pre_llm_call` maps Hermes' run to our
   turn): its memory review's and a delegated child's are not. A call
   whose end is not observed is no step; nothing is guessed.
+
+## Work left running
+
+Work an agent leaves running outside its turns (a background command of
+any runtime's, `nohup … &`, a download) holds the computer while the
+computer is working, for at most `LEFT_RUNNING_HOLD_MS` (2 hours) after
+its agents' work last held it: a turn queued or running, or a runtime's
+own work. An idle server, an idle runtime and its desktop never do
+(load.rs; `Input::Slice`).
+
+- **Working** is read from the computer's own counters every
+  `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`) and its
+  network bytes both ways on every interface but loopback
+  (`/proc/net/dev`). A slice over either floor
+  (`LOAD_CPU_FLOOR_PERMILLE`, `LOAD_NET_FLOOR_BYTES_PER_S`) is work, and
+  the computer is working while one of its last `LOAD_SLICES` (2
+  minutes) was, counting only slices that began after its agents' work
+  stopped holding it: a turn's own work (its last tool, the runtime's
+  reply) never holds the computer on. A slice the platform's hold
+  overlapped says nothing: the save's own work would hold the computer it
+  saves, and its end save it again; a hold stays as it was through a
+  save, so a long one never ends it while work runs. Disk writes are no measure: idle
+  write-back alone passes any useful floor. The measurements behind the
+  floors are beside them.
+- **The bound is this life's**, never saved: a new life (a restart, a
+  wake) holds nothing until its own agents' work ends (an earlier life's
+  turns it ends as lost are none of its), so a wake's own start never
+  holds a computer woken for a look. The bound runs on the guest's clock,
+  as every bound of the engine does: a clock set back holds that much
+  longer. A bridge restarted alone
+  loses the hold; the computer then sleeps after its idle wait unless a
+  turn runs.
+- A computer with no counters to read (`load.counters` says so) holds
+  nothing for it. Its awake time is billed as any other.
 
 ## Agents asking each other
 
@@ -616,9 +655,10 @@ reaches it (`withheld`).
   expiring, ends the turn, its login with it, and no session begins; the
   URL is taken only once said whole (a pipe's reads are not its lines).
   The login's verifier lives only in
-  its process (PKCE), so a sign-in never outlives its turn: after a sleep
-  or a restart its card's code is refused, saying so, and the next
-  message asks anew.
+  its process (PKCE), so a sign-in never outlives its turn: its card holds
+  the computer for at most `COMPUTER_CARD_HOLD_MS`, and after a sleep or
+  a restart its card's code is refused, saying so, and the next message
+  asks anew.
 - **Its model and effort** are its agent's own: its `agent.json`'s
   `"claude": {"model", "effort"}` (`ClaudeSettings`), read with its
   runtime, in Claude Code's own names (`opus`, `sonnet`, `haiku`, `fable`

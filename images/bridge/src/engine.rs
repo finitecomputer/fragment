@@ -362,6 +362,10 @@ pub struct Prompt {
     pub computer: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
+    /// Until when it holds the computer (0, never): an option for the
+    /// computer is this life's alone (`COMPUTER_CARD_HOLD_MS`). Never kept.
+    #[serde(skip)]
+    pub holds_until: u64,
     /// Its owner's answer, held from the runtime until its closure is on
     /// `work` (`Effect::Fence`). A restart ends its turn, so never kept.
     #[serde(skip)]
@@ -517,6 +521,11 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
+    /// The door this chat is of the agent reading it, as the agent's own row
+    /// of its members says (`door`: a connector bound as the agent's door,
+    /// while open: docs/api.md, "An agent's doors"): `telegram`, …. None for
+    /// any other chat, and from a platform before the row said it.
+    pub door: Option<String>,
 }
 
 impl ChatView {
@@ -557,6 +566,9 @@ pub enum Input {
     Posted { turn: String, id: String, kept: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
+    /// A slice of the computer's counters from `from` (ms) to now, over a
+    /// floor or not; none under the platform's hold (load.rs).
+    Slice { from: u64, over: Option<bool> },
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
     /// The agents whose SimpleX link is bound now (simplex/run.rs), each
@@ -660,6 +672,16 @@ pub struct Engine {
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
+    /// Its agents' work held the computer at the last step: a turn queued
+    /// or running, or a runtime's own work.
+    busy: bool,
+    /// Work left running (docs/bridge.md): the last `LOAD_SLICES` slices
+    /// (start, `Input::Slice`'s `over`); when this life's agents' work last
+    /// stopped holding the computer; whether it holds it now. Never saved:
+    /// a wake's own start never holds a computer woken for a look.
+    slices: VecDeque<(u64, Option<bool>)>,
+    left_from: Option<u64>,
+    left: bool,
     /// Turns that ran here and ended lately, oldest first (at most
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
@@ -779,6 +801,10 @@ impl Engine {
             agents: Vec::new(),
             views: HashMap::new(),
             keepalive: false,
+            busy: false,
+            slices: VecDeque::new(),
+            left_from: None,
+            left: false,
             ended: VecDeque::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
@@ -883,6 +909,9 @@ impl Engine {
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
+        // an earlier life's turns, ended here, are no work of this life's
+        self.busy = false;
+        self.left_from = None;
         self.pump_all();
         self.finish()
     }
@@ -902,6 +931,12 @@ impl Engine {
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
             Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
+            Input::Slice { from, over } => {
+                if self.slices.len() == limits::LOAD_SLICES {
+                    self.slices.pop_front();
+                }
+                self.slices.push_back((from, over));
+            }
             Input::Relaying(agents) => {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
@@ -920,9 +955,28 @@ impl Engine {
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
         let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
-        if busy != self.keepalive {
-            self.keepalive = busy;
-            self.out.push(Effect::Keepalive(busy));
+        // a card only this life can take holds it too; it waits on a
+        // person, so work left running counts from its start
+        let card = self.state.turns.values().any(|t| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until));
+        if self.busy && !busy {
+            self.left_from = Some(self.now);
+        }
+        self.busy = busy;
+        // only slices wholly after the agents' work count, and a save's
+        // (none) keep a hold as it was
+        let window = limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS;
+        let fresh = |start: u64| start + window + limits::LOAD_SLICE_MS > self.now;
+        let working = |from: u64| self.slices.iter().any(|&(start, over)| over == Some(true) && start >= from && fresh(start));
+        let saving = self.slices.back().is_some_and(|&(start, over)| over.is_none() && start + 2 * limits::LOAD_SLICE_MS > self.now);
+        let left = !busy && self.left_from.is_some_and(|from| self.now < from + limits::LEFT_RUNNING_HOLD_MS && (working(from) || (saving && self.left)));
+        if left != self.left {
+            self.left = left;
+            crate::ev!("keepalive.left", { "hold": left, "from": self.left_from });
+        }
+        let hold = busy || card || left;
+        if hold != self.keepalive {
+            self.keepalive = hold;
+            self.out.push(Effect::Keepalive(hold));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
         // the format it holds: 3 only while a turn holds a return
@@ -1061,10 +1115,12 @@ impl Engine {
         match record.channel.as_str() {
             // its owner's words through one of its doors (docs/chat-records.md,
             // "A relayed message") are their message, as theirs, whichever
-            // door and whoever carried them: the platform takes such a record
-            // only through a door its owner opened, so no door need be linked
-            // on this computer. Another agent of the chat carrying them is a
-            // hand-off from that agent at most, never its owner.
+            // door: the platform takes such a record only through a door its
+            // owner opened, so no door need be linked on this computer. Only
+            // a carrier that is that door counts (`relayed_for`); from any
+            // other it is the record without the mark: another agent of the
+            // chat carrying them is a hand-off from that agent at most, never
+            // its owner.
             records::CHAT if self.relayed_for(&agent, fragment, &record) => {
                 let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
                 crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via });
@@ -1159,13 +1215,33 @@ impl Engine {
     }
 
     /// Whether `record` relays `agent`'s owner through `agent`'s own door,
-    /// carried by the agent itself or by a key that is none of the chat's
-    /// members (a hosted connector publishes as its own fragment's key), as
-    /// the chat's page reads it.
+    /// carried by that door (docs/api.md, "An agent's doors"):
+    ///
+    /// - **the agent itself**: its SimpleX door's, which the platform took
+    ///   only signed by the door key its owner's ticket registered;
+    /// - **a hosted door**: a key none of the chat's members (a connector
+    ///   publishes as its own fragment), in a chat whose members mark the
+    ///   agent's row as that door (`ChatView::door`), whose `via` it is.
+    ///
+    /// Any other key that is none of the chat's members (the chat's own,
+    /// firing a record one of its editors scheduled, which the platform
+    /// took until it refused relaying schedules; or one no one holds)
+    /// speaks for no one: the record is its carrier's, without the mark,
+    /// and is logged as such.
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
-        let member = |v: &ChatView| v.agents.contains(&record.principal) || v.people.contains(&record.principal);
-        let carrier = record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v));
-        carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
+        let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
+        if record.principal == agent.identity {
+            return true;
+        }
+        let Some(v) = self.views.get(fragment) else { return false };
+        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
+            return false;
+        }
+        let door = v.door.as_deref() == Some(r.via.as_str());
+        if !door {
+            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
+        }
+        door
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -2558,7 +2634,9 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer: options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
+        let computer: Vec<String> = options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect();
+        let holds_until = if computer.is_empty() { 0 } else { expires_at.min(self.now + limits::COMPUTER_CARD_HOLD_MS) };
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer, expires_at, closed: false, holds_until, held: None });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
