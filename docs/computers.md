@@ -1214,5 +1214,10 @@ a sleep's. An event that comes when nothing was heard of a running
 computer for `ALARM_LATE_MS` (twenty minutes: its alarms went unheard)
 meters it only to the last moment it was shown up, never the silence
 (FIN-511).
-At zero credit no wake starts, and a computer already awake runs on
-until it sleeps (decision 27).
+At zero credit no wake keeps a computer up, and a computer already awake
+runs on until it sleeps (decision 27). Its ledger is asked beside a
+wake's start, never before it (no round trip is added to a wake for the
+ledger's sake): a refusal heard puts what started back to sleep, saved,
+its why kept in the view, and the wakes after it are asked first and
+start nothing until a start comes up. So a person at zero credit costs
+one start a refusal, never one a wake.

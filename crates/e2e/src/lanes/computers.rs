@@ -3173,7 +3173,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         // the node and the deployment's operator are a local run's; a
         // preview's computer is put to sleep, so it bills no awake time after
         s.skip("after a crash of the platform, the computer answers what comes next, once", "it crashes the node");
-        s.skip("at zero credit no wake starts, nor does a record wake it", "it needs the deployment's operator (to make its owner a guest)");
+        s.skip("at zero credit its wake's start stops, and no record wakes it", "it needs the deployment's operator (to make its owner a guest)");
+        s.skip(BESIDE_LEDGER, "it slows the deployment's ledger, a local run's lever");
         for label in START_LINE_CHECKS {
             s.skip(label, "it reads the node's logs, a local run's");
         }
@@ -3341,29 +3342,73 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(dns, !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep", json!({ "sidecars": dropping.len(), "asked": asked }));
     }
     made_while_its_seat_sync_fails(s, &api)?;
+    wake_beside_ledger(s, &api, &owner, &owner_id, &id)?;
 
-    // at zero credit agents stop, and no wake starts (decision 27): an
-    // operator makes its owner a guest
+    // at zero credit agents stop (decision 27): an operator makes its owner
+    // a guest. Its next wake starts at once, its ledger asked beside the
+    // start, and the refusal stops what started; the wakes after it are
+    // asked first, and start nothing
     let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/plan"), Some(&json!({ "id": "computers-guest", "plan": "guest" })))?;
     s.ok("an operator makes its owner a guest", r.status == 200, &r);
+    let numbered = newest_save(&api, &id)["number"].as_u64().unwrap_or(0);
+    let before = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?.body["generation"].as_u64().unwrap_or(0);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     // a guest's ledger answers 403 (a guest pays for nothing); one at zero, 402
     s.ok("its owner's ledger refuses the wake, saying why", r.status == 403 && r.text.contains("a guest pays for nothing"), &r);
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
-    s.ok("it stays asleep, the refusal its why", r.body["phase"] == "asleep" && r.body["why"].as_str().is_some_and(|w| w.contains("a guest pays for nothing")), &r);
+    let saved = newest_save(&api, &id);
+    s.ok(
+        "the start it let begin, asked beside it, sleeps again as its owner's sleep puts it, saved: asleep, the refusal its why",
+        r.body["phase"] == "asleep" && r.body["generation"].as_u64().is_some_and(|g| g == before + 1) && r.body["why"].as_str().is_some_and(|w| w.contains("a guest pays for nothing")) && saved["number"].as_u64().is_some_and(|n| n > numbered),
+        json!({ "view": r.body, "before": before, "saved": saved }),
+    );
     let replies_now = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len();
     say(31, "anyone there?")?;
     std::thread::sleep(Duration::from_secs(5));
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok(
-        "nor does a record on its chat wake it",
-        r.body["phase"] == "asleep" && agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == replies_now,
+        "nor does a record on its chat wake it: its ledger asked first, refused before, it starts nothing",
+        r.body["phase"] == "asleep" && r.body["generation"].as_u64().is_some_and(|g| g == before + 1) && agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == replies_now,
         &r,
     );
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({})))?;
     let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("nor does its owner's restart: the ledger refuses it too, and it stays asleep", r.status == 403 && r.text.contains("a guest pays for nothing") && v.body["phase"] == "asleep", &r);
     start_line_checks(s, &id);
+    Ok(())
+}
+
+const BESIDE_LEDGER: &str = "asleep, its owner's wake starts it at once, its ledger asked beside the start and never before it: slowed by seconds, the ledger holds up no start";
+
+/// `BESIDE_LEDGER`: its owner's ledger slowed (the ledger's `slow` lever,
+/// each answer `SLOW_MS` late), its owner's wake of it asleep starts it at
+/// once: its start line's `beganMs`, from the wake's ask to its start's
+/// beginning, is far under the ledger's wait (asked first, as before, it
+/// was over it). Asleep again after.
+fn wake_beside_ledger(s: &mut Suite, api: &Api, owner: &crate::Keys, owner_id: &str, id: &str) -> Result<()> {
+    const SLOW_MS: u64 = 6_000;
+    let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
+    let slowed = slow(SLOW_MS)?;
+    let woke = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let unslowed = slow(0)?;
+    let generation = woke.body["generation"].as_u64().unwrap_or(0);
+    // its start's line, as the node's log has it (a moment after it is written)
+    let line = |s: &Suite| {
+        super::vault::logs(s)
+            .lines()
+            .filter_map(|l| l.find(r#"{"start":{"generation":"#).map(|at| &l[at..]))
+            .filter_map(|l| serde_json::Deserializer::from_str(l).into_iter::<Value>().next().and_then(Result::ok))
+            .find(|v| v["computer"] == id && v["start"]["generation"].as_u64() == Some(generation))
+    };
+    s.eventually(Duration::from_secs(10), || line(s).is_some());
+    let line = line(s);
+    let began = line.as_ref().and_then(|l| l["start"]["beganMs"].as_i64());
+    let slept = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    s.ok(
+        BESIDE_LEDGER,
+        slowed.status == 200 && unslowed.status == 200 && woke.body["phase"] == "awake" && began.is_some_and(|ms| (0..SLOW_MS as i64 / 2).contains(&ms)) && slept.body["phase"] == "asleep",
+        json!({ "woke": woke.body, "line": line, "slept": slept.body }),
+    );
     Ok(())
 }
 

@@ -1402,42 +1402,86 @@ impl ComputerCell {
     }
 
     /// A wake, unless the owner's ledger refuses it (decision 27: at zero
-    /// credit, no wakes). A computer already up is not asked about. A
-    /// ledger that does not answer lets it wake (docs/ledger.md).
+    /// credit, no wakes). A computer already up is not asked about. One
+    /// asleep starts at once, its ledger asked beside its start, never
+    /// before it (Paul: no round trip is added to an action for the
+    /// ledger's sake; a minute of overspend before a cap stops someone
+    /// beats a wait on every wake): a refusal heard stops what started
+    /// (`refused`). One whose last wake was refused (its view's why, kept
+    /// until a start comes up) is asked first, as is one sleeping or that
+    /// won't wake, so a person at zero credit costs one start a refusal,
+    /// not one a wake. A ledger that does not answer lets it wake
+    /// (docs/ledger.md).
     async fn wake(&self, why: Wake) -> CellResult<()> {
         let asked = js::now_ms();
-        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
+        let life = self.lifecycle()?;
+        let up = matches!(life.phase, Phase::Awake { .. } | Phase::Starting { .. });
+        let beside = matches!(life.phase, Phase::Asleep { .. }) && self.meta(MetaKey::Note)?.is_none();
+        if !up && !beside {
             self.may_start(json!(why)).await?;
+        }
+        if !up {
             // what the start it brings counts its time from (a read that
             // fails costs the line its ask, never the wake)
             if let Ok(life) = self.lifecycle() {
                 self.starts.borrow_mut().asked(Woke::Wake(why), &life.phase, asked);
             }
         }
+        let started = if beside {
+            let (refusal, started) = futures_util::future::join(self.refusal(), self.drive(Event::Wake { why })).await;
+            if let Some(e) = refusal? {
+                return self.refused(json!(why), e).await;
+            }
+            started?
+        } else {
+            self.drive(Event::Wake { why }).await?
+        };
         // a wake that started nothing says why
-        if let Some(why) = self.drive(Event::Wake { why }).await? {
+        if let Some(why) = started {
             return Err(CellError::new(ErrorCode::WontWake, why));
         }
         Ok(())
     }
 
     /// Whether its owner's ledger lets it start (decision 27: at zero
-    /// credit, no wakes; `asked` names what asked, for the log). A refusal
-    /// is kept as its view's `why` until a start comes up. A ledger that
-    /// does not answer lets it (docs/ledger.md).
+    /// credit, no wakes; `asked` names what asked, for the log), asked
+    /// before its start. A refusal is kept as its view's `why` until a start
+    /// comes up.
     async fn may_start(&self, asked: Value) -> CellResult<()> {
+        if let Some(e) = self.refusal().await? {
+            self.set_meta(MetaKey::Note, &e.message)?;
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "refused": e.message }));
+            return Err(CellError::new(e.code, e.message));
+        }
+        Ok(())
+    }
+
+    /// Its owner's ledger's refusal of a start, if it refuses one, and the
+    /// awake time it has not taken sent after (`flush_awake`). A ledger that
+    /// does not answer lets it (docs/ledger.md), logged.
+    async fn refusal(&self) -> CellResult<Option<crate::ledger::LedgerError>> {
         let owner = self.must(MetaKey::Owner)?;
         let may = crate::ledger::MaySpend { spend: Spend::Wake, fragment: None, by_owner: true };
-        if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
-            if e.refused.is_some() {
-                self.set_meta(MetaKey::Note, &e.message)?;
-                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "refused": e.message }));
-                return Err(CellError::new(e.code, e.message));
-            }
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "ledger": e.message }));
+        match crate::ledger::ask(&self.env, &owner, &may).await {
+            Err(e) if e.refused.is_some() => return Ok(Some(e)),
+            Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": "asked", "ledger": e.message })),
+            Ok(_) => {}
         }
         self.flush_awake().await;
-        Ok(())
+        Ok(None)
+    }
+
+    /// A wake its owner's ledger refused beside its start (`wake`, `asked`
+    /// names what asked): the refusal is kept as its view's `why` (after
+    /// its start, whose coming up clears one), and what the start brought
+    /// up goes to sleep again as its owner's sleep puts it, saved (the
+    /// lifecycle's own: whatever its phase, nothing lost). The wake answers
+    /// the refusal once it sleeps.
+    async fn refused(&self, asked: Value, e: crate::ledger::LedgerError) -> CellResult<()> {
+        self.set_meta(MetaKey::Note, &e.message)?;
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "refused": e.message, "beside": "its start" }));
+        self.drive_with(Some(Event::Sleep), false).await?;
+        Err(CellError::new(e.code, e.message))
     }
 
     /// Its owner's restart (`POST /api/computers/{id}/restart`): the way
