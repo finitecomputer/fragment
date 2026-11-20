@@ -117,24 +117,31 @@ pub fn job_first_name(job: &str) -> Option<&str> {
 /// `fragment agent --name`, a commit beside the rename; docs/api.md, "An agent's
 /// name and picture"): each whole-word mention of one of `olds`
 /// (case and all; a mention is whole when no letter, digit or `_` touches
-/// it) said as `name` instead, in one pass, the longest old name first.
+/// it) said as `name` instead, in one pass, the longest old name first;
+/// where `name` stands already (an old one may begin it), it is kept.
 /// None when there is nothing to rewrite: no old name but `name` itself,
 /// none mentioned, or a job past `JOB_RENAME_MAX_BYTES` before or after.
 /// So asking again, with the name it has now, changes nothing.
 pub fn job_renamed(job: &str, olds: &[&str], name: &str) -> Option<String> {
     let name = name.trim();
-    let mut olds: Vec<&str> = olds.iter().map(|o| o.trim()).filter(|o| !o.is_empty() && *o != name).collect();
+    let olds: Vec<&str> = olds.iter().map(|o| o.trim()).filter(|o| !o.is_empty() && *o != name).collect();
     if name.is_empty() || olds.is_empty() || job.len() > JOB_RENAME_MAX_BYTES {
         return None;
     }
-    olds.sort_by_key(|o| std::cmp::Reverse(o.len()));
     let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let (mut out, mut at, mut changed) = (String::with_capacity(job.len()), 0, false);
     // bounded by the job: each pass takes at least one char of it
     while at < job.len() {
         let rest = &job[at..];
         let whole = |o: &str| rest.starts_with(o) && !word(job[..at].chars().next_back()) && !word(rest[o.len()..].chars().next());
-        match olds.iter().copied().find(|o| whole(o)) {
+        // the longest whole mention here; the new name where it stands
+        // already (an old one may begin it) is kept as it is
+        let old = olds.iter().copied().filter(|o| whole(o)).max_by_key(|o| o.len());
+        match old {
+            _ if whole(name) && old.is_none_or(|o| o.len() < name.len()) => {
+                out.push_str(name);
+                at += name.len();
+            }
             Some(o) => {
                 out.push_str(name);
                 at += o.len();
@@ -236,6 +243,18 @@ mod tests {
         assert_eq!(job_first_name("You are Bliss, the Great, paul's default agent: x"), Some("Bliss, the Great"), "the owner holds no \", \"");
     }
 
+    /// Goal: a rename never renames its new name again. Where the job
+    /// says the new name already (a retry of a rename whose commit landed
+    /// unseen, or a job that named it so), it stands, though an old name
+    /// begins it ("Scout" in "Scout Prime"); an old name longer than the
+    /// new one there is still renamed (replay, invalid).
+    #[test]
+    fn a_rename_leaves_its_new_name_standing() {
+        assert_eq!(job_renamed("Scout Prime helps with research.\n", &["Scout"], "Scout Prime"), None, "a retry: nothing to rewrite");
+        assert_eq!(job_renamed("Scout, then Scout Prime.", &["Scout"], "Scout Prime").as_deref(), Some("Scout Prime, then Scout Prime."));
+        assert_eq!(job_renamed("Scout Prime Alpha here.", &["Scout Prime Alpha"], "Scout Prime").as_deref(), Some("Scout Prime here."), "a longer old name is renamed");
+    }
+
     /// Valid: a title, a role, both, trimmed; a role of spaces taken away.
     /// Invalid: neither, a blank or too long title, a role too long, and a
     /// role for anything but an agent, each saying why.
@@ -256,8 +275,8 @@ mod tests {
     }
 
     /// Goal: a face the cell keeps never meets the release before, which
-    /// read it from live at each install (it would write a rename away)
-    /// and served the picture from git (no taken one). An object that took
+    /// read it from live at each install (it would write a rename away).
+    /// An object that took
     /// Fragment step 10 is refused by the code of the step before, so
     /// rollout's `eligible` never rolls back across it; rolled forward, it
     /// runs as it was (valid, rollback, restart). Method: an object made by

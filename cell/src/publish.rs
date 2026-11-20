@@ -359,7 +359,7 @@ impl FragmentCell {
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
             Wrote::Commit(sha) => {
                 if let Some(bytes) = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.as_deref()) {
-                    self.renamed_by_git(bytes, &who).await?;
+                    self.renamed_by_git(bytes, &who, life).await?;
                 }
                 json_response(&json!({ "commit": sha }))
             }
@@ -371,11 +371,14 @@ impl FragmentCell {
     /// An agent's `fragment.json` written with a title other than its
     /// face's: an older CLI's `fragment agent --name`, which renames by
     /// writing it (a computer's image carries its own CLI, which can lag for
-    /// days: the debt ledger). Its face takes that title; any other
-    /// fragment's `fragment.json` names nothing.
-    async fn renamed_by_git(&self, bytes: &[u8], by: &str) -> CellResult<()> {
+    /// days: the debt ledger). Its face takes that title, one rename at a
+    /// time as its face route's are, in the life the write was let in to
+    /// (one ended meanwhile renames no other); any other fragment's
+    /// `fragment.json` names nothing.
+    async fn renamed_by_git(&self, bytes: &[u8], by: &str, life: i64) -> CellResult<()> {
+        let _renaming = self.renaming.lock().await;
         let now = self.face_now()?;
-        if now.kind != fragment_proto::FragmentKind::Agent {
+        if now.kind != fragment_proto::FragmentKind::Agent || self.life()? != life {
             return Ok(());
         }
         let Ok(written) = fragment_core::manifest::parse(bytes) else { return Ok(()) };
