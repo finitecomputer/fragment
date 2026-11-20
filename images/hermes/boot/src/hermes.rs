@@ -402,7 +402,7 @@ pub const DELEGATING: &str = "Hand big builds (a new app, a large change, or wid
 /// and makes room, big files moved into storage with `fragment offload`,
 /// checked before anything is removed. It and its owner are told as it
 /// fills (`disk_filling`; the bridge's disk note at its next turn).
-pub const DISK: &str = "Your computer's disk holds 20 GB, and your files count at their full size there: check them with du -sh /data, as df -h / shows more room than a restart has. Do so before a big download, dataset or build. When you are told it is almost full, a write fails for lack of space, or your owner says their computer is almost full, load the disk-space-finite skill: it says how much fits and makes room by moving big files to storage, safely.";
+pub const DISK: &str = "Your computer's disk holds 20 GB, and your files count at their full size there: check with du -sh /data and du -sh --apparent-size /data, the larger, as df -h / shows more room than a restart has. Check before a big download, dataset or build. When told it is almost full, a write fails for lack of space, or your owner says so, load the disk-space-finite skill: it says how much fits and moves big files to storage, safely.";
 
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
@@ -1818,7 +1818,7 @@ mod tests {
         let m = managed_config(&[], CARD_TIMEOUT_S);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{VOICE}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}\n\n{DISK}"));
         // its disk, read by itself, and the skill that makes room on it
-        assert!(DISK.contains("du -sh /data") && DISK.contains("disk-space-finite") && !DISK.contains(['`', '\n', '$']) && DISK.len() < 450, "{DISK}");
+        assert!(DISK.contains("du -sh /data") && DISK.contains("du -sh --apparent-size /data") && DISK.contains("disk-space-finite") && !DISK.contains(['`', '\n', '$']) && DISK.len() < 450, "{DISK}");
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "browser_exec's upload_file(selector, full path)", "check the page shows it", "With no file input", "desktop's file dialog with computer_use"] {
             assert!(FILES.contains(said), "{said}: {FILES}");

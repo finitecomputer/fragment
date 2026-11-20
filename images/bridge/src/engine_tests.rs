@@ -555,8 +555,9 @@ fn a_late_message_is_told_its_age() {
 /// its note (`TurnStart::disk`): once per read, so it is not told stale
 /// room again while it makes room; again at a newer read still filling.
 /// Each agent of the computer is told at its own next turn. Valid: not
-/// filling, nothing. Replay: the same read again tells no more. Restart:
-/// a new life tells again (never saved).
+/// filling, nothing. Replay: the same read again tells no more. Order: a
+/// read older than the newest changes nothing, filling or not (Codex on
+/// #1425). Restart: a new life tells again (never saved).
 #[test]
 fn an_agent_is_told_its_disk_is_filling_once_per_read() {
     let (a, b) = (agent("juniper"), agent("rowan"));
@@ -567,29 +568,36 @@ fn an_agent_is_told_its_disk_is_filling_once_per_read() {
         started(&answered(e, s, at)).expect("handed").disk
     };
     let told = |room: &str| Some(format!("Your computer is almost full: only {room} of room is left before it can no longer start again from its save. Before anything else, load the disk-space-finite skill and make room: move big files you are not using to storage, then tell your owner what you moved."));
+    let read = |at: i64, room: u64, filling: bool| Input::Disk(Some(crate::api::Disk { room, filling, at }));
     let mut e = engine(&[a.clone(), b.clone()]);
     assert_eq!(turn(&mut e, &a, "one", T0 + 1), None, "never read: nothing");
     e.step(Input::Disk(None), T0 + 2);
+    e.step(read(50, 9_000_000_000, false), T0 + 2);
     assert_eq!(turn(&mut e, &a, "two", T0 + 3), None, "not filling: nothing");
     // a read finds it filling: each agent told at its next turn, once
-    e.step(Input::Disk(Some((100, 2_400_000_000))), T0 + 4);
+    e.step(read(100, 2_400_000_000, true), T0 + 4);
     assert_eq!(turn(&mut e, &a, "three", T0 + 5), told("2.4 GB"));
     assert_eq!(turn(&mut e, &a, "four", T0 + 6), None, "told once for that read");
-    e.step(Input::Disk(Some((100, 2_400_000_000))), T0 + 7);
+    e.step(read(100, 2_400_000_000, true), T0 + 7);
     assert_eq!(turn(&mut e, &a, "five", T0 + 8), None, "replay: the same read again");
     assert_eq!(turn(&mut e, &b, "six", T0 + 9), told("2.4 GB"), "the other agent, at its own next turn");
     // a newer read, still filling, less room: told again
-    e.step(Input::Disk(Some((200, 900_000_000))), T0 + 10);
+    e.step(read(200, 900_000_000, true), T0 + 10);
     assert_eq!(turn(&mut e, &a, "seven", T0 + 11), told("900 MB"));
+    // a view read before it, answered after: nothing changes, nor does a view with no disk
+    e.step(read(150, 9_000_000_000, false), T0 + 10);
+    e.step(Input::Disk(None), T0 + 10);
+    assert_eq!(turn(&mut e, &b, "seven-b", T0 + 11), told("900 MB"), "an older read clears nothing");
     // none left
-    e.step(Input::Disk(Some((300, 0))), T0 + 12);
+    e.step(read(300, 0, true), T0 + 12);
     assert_eq!(turn(&mut e, &a, "eight", T0 + 13), Some("Your computer is full: it may not start again from its save after it sleeps. Before anything else, load the disk-space-finite skill and make room: move big files you are not using to storage, then tell your owner what you moved.".into()));
-    // room made: nothing more
-    e.step(Input::Disk(None), T0 + 14);
+    // room made: nothing more, and an older filling read tells nothing again
+    e.step(read(400, 6_000_000_000, false), T0 + 14);
+    e.step(read(350, 100, true), T0 + 14);
     assert_eq!(turn(&mut e, &b, "nine", T0 + 15), None);
     // restart: a new life is told again
     let mut n = engine(&[a.clone(), b.clone()]);
-    n.step(Input::Disk(Some((300, 0))), T0 + 16);
+    n.step(read(300, 0, true), T0 + 16);
     assert!(turn(&mut n, &a, "ten", T0 + 17).is_some(), "a new life tells again");
     for room in [0, 1, 999_999, 1_000_000_000, 2_999_999_999, u64::MAX] {
         assert!(crate::note::disk(room).len() <= limits::DISK_NOTE_MAX_BYTES, "{room}");

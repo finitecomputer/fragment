@@ -383,12 +383,14 @@ fn told_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     }
     let told = said.last().is_some_and(|t| t.contains(TOLD_FILLING));
     said.push(ask(s, &mut added, 903)?);
-    s.ok(TOLD_CHECKS[1], told && !said.last().is_some_and(|t| t.contains("(told:")), json!(said));
+    // each turn answered: a reply that never came tells nothing (Codex on #1425)
+    let answered = said.iter().all(|t| !t.is_empty());
+    s.ok(TOLD_CHECKS[1], answered && told && !said.last().is_some_and(|t| t.contains("(told:")), json!(said));
     let room = lever_with(api, c.id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64, "data": 3_000_000_000u64 }))?;
     let at = room.body["disk"]["at"].as_i64().unwrap_or(i64::MAX);
     let read = room.status == 200 && s.eventually(reread, || heard() > at);
     let after = ask(s, &mut added, 904)?;
-    s.ok(TOLD_CHECKS[2], read && !after.contains("(told:"), json!({ "lever": room.body, "said": after }));
+    s.ok(TOLD_CHECKS[2], read && !after.is_empty() && !after.contains("(told:"), json!({ "lever": room.body, "said": after }));
     Ok(added)
 }
 

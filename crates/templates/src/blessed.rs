@@ -417,7 +417,7 @@ mod tests {
         let (most, told) = (gb(fits), gb(fits - ROOM_TOLD_MAX));
         assert_eq!((most, told), (16, 13), "as the skill says them now");
         assert!(text.contains(&format!("Your files may take about {most} GB in all. Past about {told} GB, make room")), "{text}");
-        assert!(text.contains("du -sxh /data") && !text.contains("Past about 80% used"), "du, never df's percentage");
+        assert!(text.contains("du -sxh /data") && text.contains("du -sxh --apparent-size /data") && !text.contains("Past about 80% used"), "du, allocated and apparent (the larger, as the platform's read: Codex on #1425), never df's percentage");
     }
 
     /// A command of the import skill's (FIN-401): the agent's terminal starts

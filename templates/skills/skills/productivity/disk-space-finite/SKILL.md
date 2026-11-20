@@ -13,12 +13,15 @@ work, so keep room on it.
 
 ```
 du -sxh /data
+du -sxh --apparent-size /data
 du -xh --max-depth=3 /data/work 2>/dev/null | sort -h | tail -20
 ```
 
 `du` counts your files at their full size, which is what your computer
-needs room for when it starts again from its save. `df -h /` shows less
-used, since the disk compresses them: don't go by it.
+needs room for when it starts again from its save: go by the larger of
+the first two (a file with holes in it, or many small ones, counts more
+than it seems). `df -h /` shows less used, since the disk compresses
+them: don't go by it.
 
 Your files may take about 16 GB in all. Past about 13 GB, make room
 before anything big: you are told then, with the room left, and so is

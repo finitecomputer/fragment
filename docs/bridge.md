@@ -235,8 +235,10 @@ not using to storage, then tell your owner what you moved." At no room
 it says the computer may not start again after it sleeps. Each agent is
 told once per read (a later turn is not told stale room while it makes
 room), and again at a newer read still filling: one after each awake
-save. Never a command's turn. Nothing of it is saved: a new life tells
-each agent again.
+save. Its first view counts, as each after it, and the newest read wins:
+a view read before another that answers after it changes nothing. Never
+a command's turn. Nothing of it is saved: a new life tells each agent
+again.
 
 ### What a runtime forgot
 

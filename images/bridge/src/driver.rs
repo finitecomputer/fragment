@@ -448,6 +448,10 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
+    // its disk as its first view says it: filling, its agents are told at
+    // their first turns (Codex on #1425)
+    let s = engine.step(Input::Disk(computer.disk), crate::log::now_ms());
+    act(&engine, s)?;
     let s = engine.step(Input::Unready(unready(&computer.agents, &ready)), crate::log::now_ms());
     act(&engine, s)?;
     // the agents whose SimpleX link is bound, and their chats, as their files
@@ -503,7 +507,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     Msg::Computer(c) => {
                         let agents = gated(c.agents.clone(), &ready);
                         // its disk, filling or not (read before the view goes to SimpleX)
-                        let disk = c.disk.filter(|d| d.filling).map(|d| (d.at, d.room));
+                        let disk = c.disk;
                         if let Some(h) = &simplex {
                             h.computer(c, agents.clone());
                         }

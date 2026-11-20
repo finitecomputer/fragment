@@ -539,9 +539,11 @@ impl ChatView {
 pub enum Input {
     /// The computer's agents, as `GET /api/computer` lists them now.
     Agents(Vec<Agent>),
-    /// Its disk, as `GET /api/computer` says it now, when it is filling:
-    /// the read's time and the room left (none: not filling, or not read).
-    Disk(Option<(i64, u64)>),
+    /// Its disk, as a view of `GET /api/computer` says it (none: not read
+    /// yet): the read's time, its room, and whether it is told filling. A
+    /// read older than the newest it was told changes nothing: a view read
+    /// before another may answer after it (Codex on #1425).
+    Disk(Option<crate::api::Disk>),
     /// A record of a followed channel, read as `agent`, with the chat's view
     /// (a `chat` record's admission needs it; a `tasks` record's does not).
     /// A record from before `since` (ms; when the agent joined the chat) is
@@ -677,12 +679,12 @@ pub struct Engine {
     /// prompt (`Effect::Fence`): one not answered is posted again at a tick.
     fencing: BTreeSet<(String, String)>,
     agents: Vec<Agent>,
-    /// Its disk while it is filling (`Input::Disk`: the read's time and its
-    /// room), and the read each agent was last told of: an agent is told
-    /// at its next turn after each read that finds it filling, once
-    /// (docs/bridge.md, "An agent is told to make room"). Never saved: a
-    /// new life tells each again.
-    disk: Option<(i64, u64)>,
+    /// Its disk as the newest read it was told says it (`Input::Disk`),
+    /// and the read each agent was last told of: an agent is told at its
+    /// next turn after each read that finds it filling, once (docs/bridge.md,
+    /// "An agent is told to make room"). Never saved: a new life tells each
+    /// again.
+    disk: Option<crate::api::Disk>,
     disk_told: BTreeMap<String, i64>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
@@ -952,7 +954,8 @@ impl Engine {
                 self.disk_told.retain(|told, _| agents.iter().any(|a| a.fragment == *told));
                 self.set_agents(agents)
             }
-            Input::Disk(disk) => self.disk = disk,
+            Input::Disk(Some(read)) if self.disk.is_none_or(|newest| read.at >= newest.at) => self.disk = Some(read),
+            Input::Disk(_) => {}
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
             Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime { runtime, event } => self.runtime(&runtime, event),
@@ -2020,7 +2023,7 @@ impl Engine {
         // read that finds it so, first in the note; never to a command
         let command = t.command;
         let disk = match self.disk {
-            Some((at, room)) if !command && self.disk_told.get(&agent) != Some(&at) => {
+            Some(crate::api::Disk { at, room, filling: true }) if !command && self.disk_told.get(&agent) != Some(&at) => {
                 self.disk_told.insert(agent.clone(), at);
                 Some(crate::note::disk(room))
             }
