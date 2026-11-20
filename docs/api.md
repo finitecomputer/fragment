@@ -65,7 +65,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -346,7 +346,7 @@ grant's `by`, the log's).
 `GET /admin` (the operators' page) answers only an operator's platform
 session; to anyone else it is the 404 a missing route is, word for word.
 Its API decides again on every call. `fragment operator
-people|person|pin|orgs|comp|uncomp|trials|health|log|credit|budget|payer`
+people|person|pin|start-from|orgs|comp|uncomp|trials|health|log|credit|budget|payer`
 calls the same.
 
 | method & path | who | body → answer |
@@ -355,6 +355,7 @@ calls the same.
 | `GET /api/admin/people/{npub}` | the same | → `{person, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: the full image references its computer runs and its next start runs |
 | `GET /api/admin/people/{npub}/reach` | the same | → `{owned, reaching: {<kind>: n}, beyond: {<kind>: n}, sharedAgents: [<name>], unanswered}`: of the fragments they own, how many of each kind have reach, and how many of those are shared beyond them and their agents (Sharing; counts only), and `sharedAgents`: the names of their agent fragments shared beyond them and their own agents (FIN-544, from before its rule; none from an older release). `fragment operator reach` sums them over everyone |
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`, pinned as its owner's `PUT /api/computers/{id}/image` pins it; logged (`pin`). An image the deployment lacks 400; no computer 404 |
+| `POST /api/admin/people/{npub}/computer/start-from` | the same | `{save}` (a save's `number`, as its view lists it) → `ComputerView`: its next start restores that save, and each newer save is set aside (its `setAside`: when), kept `SET_ASIDE_KEPT_MS` (30 days) past the rotation and read by its owner's export, never restored by a start (docs/computers.md, "Saves and what a wake restores"). One that won't wake is asleep after it, its strikes counted anew, so its next wake or restart starts it; nothing starts by itself. Again, the same. Logged (`start-from`, with the saves set aside). Running (starting, awake or going to sleep) 409; a save it does not keep, or one found unusable, 400; no computer 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
 | `GET /api/admin/glance?dayStart=` | the same | → `AdminGlance {at, signups: {hour, today, week, total}, signedIn: {day, week}, newPeople: [{npub, email, joinedAt, lastSignInAt, seat, agentAt, computer, computerUp}], logs: {state: "notConfigured"} \| {state: "failed", why} \| {state: "read", computersAwakeNow, computersAwakeToday, computersAwakeWeek, fragmentsAwakeNow, fragmentsAwakeToday, trouble: [{computer, kind: wont_wake \| saves_failing \| disk_filling, lines, npub, email, why?: {at, text}}], whyUnread?}}`: the registry's people (signups since `dayStart`, the operator's midnight, at most a day and an hour ago, else 400; unnamed, UTC's), and what the deployment's Workers Logs say, its own Worker's lines alone (`FRAGMENT_WORKER_NAME`: an account holds other deployments), read afresh with its read-only key (`observability_read`; docs/secrets.md) and never from a person's own objects (`fragment_core::glance`). The newest 50 people; trouble in the last day, the most lines first, a failed save's row with `why`: the reason its newest line gave, and when, if that line is among the day's newest such lines read (`fragment_core::glance::WHYS_READ_MAX`; the platform's words, short, a person's paths left out: `glance::why`; when those lines can't be read, `whyUnread` says why, and the rest stands). A fleet with test levers counts its e2e people too |
@@ -2231,7 +2232,10 @@ nor speak through one (`fragment_core::door`):
   signature of the SHA-256 of `fragment door record
   1\n<via>\n<fragment>\n<channel>\n<post id>\n` followed by the body as
   canonical JSON (keys in order, no space) less `relayed.sig`, within ten
-  minutes of `at` (ms). Anything else saying `relayed` is 403; an app's
+  minutes of `at` (ms), and only into a fragment its owner (`for`) owns:
+  the signature names the fragment, not its life, and a deleted name is
+  free at once (`door::lands_in_owners`). Anything else saying `relayed`
+  is 403; an app's
   operation or job publishes none (400), but a hosted door's.
 - **A hosted door** is a fragment made from a blessed connector template
   (`blessed::CONNECTORS`: `telegram`, templates/telegram) that has never
