@@ -473,6 +473,12 @@ impl Entry {
         self.ended_at.as_deref().or(self.started_at.as_deref())
     }
 
+    /// Whether it describes the file last changed in `last_commit` (none:
+    /// no file): it names that commit. One naming none describes no file.
+    pub fn describes(&self, last_commit: Option<&String>) -> bool {
+        self.commit.is_some() && self.commit.as_ref() == last_commit
+    }
+
     /// Whether this copy of a conversation should replace `held`: it was
     /// last said later, or as late by a better read of it (a reader that
     /// shows it as its origin did, or one fixed since: `reader`), or as
@@ -873,6 +879,20 @@ mod tests {
 
     fn held(entries: &[&Entry]) -> (BTreeMap<String, Entry>, BTreeSet<String>) {
         (entries.iter().map(|e| (e.key.clone(), (*e).clone())).collect(), entries.iter().map(|e| e.key.clone()).collect())
+    }
+
+    /// Goal: an entry describes only the file last changed in the commit it
+    /// names. Valid: the same commit. Invalid: another, the file gone, an
+    /// entry naming none (an import whose commit's answer was lost), even
+    /// for a file gone.
+    #[test]
+    fn an_entry_describes_only_the_file_of_its_commit() {
+        let (mut e, _) = filed(chat("a", vec![said("user", "2026-10-01T09:00:00Z", "a")]));
+        let (c1, c2) = ("1".repeat(40), "2".repeat(40));
+        assert!(!e.describes(Some(&c1)) && !e.describes(None), "naming none, it describes no file, nor a file gone");
+        e.commit = Some(c1.clone());
+        assert!(e.describes(Some(&c1)));
+        assert!(!e.describes(Some(&c2)) && !e.describes(None));
     }
 
     /// Goal: an import adds each conversation once, however often it runs

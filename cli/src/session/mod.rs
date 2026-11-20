@@ -401,7 +401,7 @@ fn held(storage: &CodeStorage, blobs: &Blobs) -> Result<Held> {
         // an entry is trusted only while it names its file's last commit;
         // an index that is not one (an agent edited it) is trusted for none
         let entries = serde_json::from_slice::<Index>(&bytes).map(|i| i.sessions).unwrap_or_default();
-        indexed.extend(entries.into_iter().filter(|e| e.kind == kind && e.commit.is_some() && stored.get(&e.key) == e.commit.as_ref()).map(|e| (e.key.clone(), e)));
+        indexed.extend(entries.into_iter().filter(|e| e.kind == kind && e.describes(stored.get(&e.key))).map(|e| (e.key.clone(), e)));
         indexes.insert(kind, bytes);
     }
     Ok(Held { head, indexed, stored, media, indexes })
@@ -501,7 +501,7 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     for attempt in 1..=COMMIT_TRIES {
         if now {
             let mut main = held(&storage, &blobs)?;
-            main.indexed.extend(entries.into_iter().filter(|(k, e)| main.stored.get(k) == e.commit.as_ref()));
+            main.indexed.extend(entries.into_iter().filter(|(k, e)| e.describes(main.stored.get(k))));
             let read = found(c, name, &storage, &main)?;
             main.indexed.extend(read.into_iter().map(|e| (e.key.clone(), e)));
             (entries, indexes, base) = (main.indexed, main.indexes, main.head);
