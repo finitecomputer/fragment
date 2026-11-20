@@ -1702,9 +1702,10 @@ impl RuntimeLane {
                     _ => {}
                 }
                 if let Command::Start(ts) = &mut c {
-                    // what its runtime was last handed here, beside its memory
+                    // what its runtime last took here: its marker, or one a
+                    // hold keeps from its memory still (`Marks::seen`)
                     let memory = memory.as_ref().map(|m| m(&ts.agent.fragment));
-                    let seen = memory.as_ref().map(|m| crate::seen::read(m, &ts.fragment));
+                    let seen = memory.as_ref().map(|m| marks.seen(m, &ts.fragment));
                     let note = async {
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts, seen)).await;
                         read.unwrap_or_else(|_| {
@@ -1800,6 +1801,15 @@ impl Marks {
         }
         drop(d);
         self.write();
+    }
+
+    /// What the runtime last took in `chat` in this life: a marker a hold
+    /// keeps from its memory still (a save after each turn holds it often,
+    /// and the turn after must not be told the chat for it), else the
+    /// marker in its memory.
+    fn seen(&self, memory: &Path, chat: &str) -> Option<String> {
+        let waiting = self.due.lock().expect("marks").ready.get(&(memory.to_path_buf(), chat.to_string())).cloned();
+        waiting.or_else(|| crate::seen::read(memory, chat))
     }
 
     fn write(&self) {
@@ -2336,6 +2346,9 @@ mod tests {
         marks.due("t3", memory.clone(), "talk--k3x9", false);
         marks.taken("t3", true);
         assert_eq!(seen().as_deref(), Some("t2b"), "held: it waits");
+        // the turn after, handed while the hold lasts, compares with it
+        assert_eq!(marks.seen(&memory, "talk--k3x9").as_deref(), Some("t3"), "held: the turn after sees what it took");
+        assert_eq!(marks.seen(&memory, "other--k3x9"), None);
         hold.send_replace(false);
         for _ in 0..100 {
             if seen().as_deref() == Some("t3") {
