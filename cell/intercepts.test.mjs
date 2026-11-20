@@ -191,3 +191,13 @@ test("a start whose container has no room for a swap host it asks starts nothing
   await assert.rejects(startIntercepted(c, { image: "stub" }, () => intercept(c, egress, hosts("s", 32), false), () => false), /no room for 1 of its swap hosts/);
   assert.equal(c.started, 0);
 });
+
+test("a registration asked again once its start is no longer the running one is never sent: it would land on the next start's container", async () => {
+  const busy = "https://late.example.test → swap";
+  const { c, seen } = container({ busy });
+  // superseded as its first try came back "temporarily unavailable"
+  const live = () => !seen.asked.includes(busy);
+  await assert.rejects(interceptSwap(c, egress, ["late.example.test"], live), /no longer the running one/);
+  assert.deepEqual(seen.asked, ["http://late.example.test → swap", busy]);
+  assert.ok(!seen.caught.has("https://late.example.test"));
+});

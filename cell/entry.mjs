@@ -365,7 +365,7 @@ class ContainerHost {
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
-    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage), overtaken))) return false;
+    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage, () => !overtaken()), overtaken))) return false;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
@@ -390,8 +390,8 @@ class ContainerHost {
   // intercept, which a computer has none of. One registered late (a
   // start's that was overtaken) would replace the grant of a restore under
   // way.
-  #intercept(computer, swapHosts, codestorage) {
-    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage);
+  #intercept(computer, swapHosts, codestorage, live) {
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, live);
   }
 
   #egress(computer) {
@@ -401,22 +401,37 @@ class ContainerHost {
   // Its running start `generation`'s intercepts again (a new isolate's),
   // and the runtime's idle stop, the safety net under the Computer DO's
   // own sleep. Answers the swap hosts its container had no room for
-  // (intercepts.mjs `landed`), or false: that start was superseded.
+  // (intercepts.mjs `landed`); null when that start is not this isolate's
+  // running one, nothing asked; false when it was superseded meanwhile.
   async arm(generation, computer, idleMs, swapHosts, codestorage) {
-    if (generation !== this.#generation) return false;
-    const full = await this.#intercept(computer, swapHosts, codestorage);
+    if (generation !== this.#generation) return null;
+    const live = () => generation === this.#generation;
+    let full;
+    try {
+      full = await this.#intercept(computer, swapHosts, codestorage, live);
+    } catch (e) {
+      if (!live()) return false;
+      throw e;
+    }
     await settled(() => this.#c.setInactivityTimeout(idleMs));
-    return generation === this.#generation && full;
+    return live() && full;
   }
 
   // `hosts` more for its running start `generation`'s swap (its agents'
   // Vault secrets'), those alone (`interceptSwap`). Answers those its
-  // container had no room for, or false: that start was superseded,
-  // before or while they registered.
+  // container had no room for; null when that start is not this isolate's
+  // running one (a new isolate's, before its takeover), nothing asked;
+  // false when it was superseded while they registered.
   async armSwap(generation, computer, hosts) {
-    if (generation !== this.#generation) return false;
-    const full = await interceptSwap(this.#c, this.#egress(computer), hosts);
-    return generation === this.#generation && full;
+    if (generation !== this.#generation) return null;
+    const live = () => generation === this.#generation;
+    try {
+      const full = await interceptSwap(this.#c, this.#egress(computer), hosts, live);
+      return live() && full;
+    } catch (e) {
+      if (!live()) return false;
+      throw e;
+    }
   }
 
   // Waits until the container takes an exec (it is up), for at most `ms`.

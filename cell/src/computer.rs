@@ -1607,7 +1607,15 @@ impl ComputerCell {
         Ok(if of == generation { armed } else { Armed::default() })
     }
 
+    /// Never over a newer start's: an arm of the one before it may answer
+    /// after it began.
     fn set_armed(&self, generation: u64, armed: &Armed) -> CellResult<()> {
+        if let Some(text) = self.meta(MetaKey::Armed)? {
+            let (of, _): (u64, Armed) = crate::json_text(&text).map_err(|e| CellError::host(format!("the stored armed hosts: {e}")))?;
+            if of > generation {
+                return Ok(());
+            }
+        }
         let text = serde_json::to_string(&(generation, armed)).map_err(|e| CellError::host(e.to_string()))?;
         self.set_meta(MetaKey::Armed, &text)
     }
@@ -1654,11 +1662,16 @@ impl ComputerCell {
     /// superseded.
     async fn arm(&self, generation: u64, id: &str) -> CellResult<bool> {
         let _arming = self.arming.lock().await;
-        let Armed { counted, tried } = self.armed(generation)?;
-        let hosts = self.egress_plan(counted, self.vault_hosts().await);
-        self.set_armed(generation, &Armed { counted: hosts.clone(), tried })?;
+        let before = self.armed(generation)?;
+        let hosts = self.egress_plan(before.counted.clone(), self.vault_hosts().await);
+        self.set_armed(generation, &Armed { counted: hosts.clone(), tried: before.tried.clone() })?;
         let g = JsValue::from_f64(generation as f64);
         let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
+        if armed.is_null() {
+            // not this isolate's start: nothing asked, nothing more counted
+            self.set_armed(generation, &before)?;
+            return Ok(false);
+        }
         let done = self.full_of(id, &armed)?.is_some();
         if done {
             self.set_armed(generation, &Armed { counted: hosts.clone(), tried: hosts })?;
@@ -1692,7 +1705,8 @@ impl ComputerCell {
     async fn arm_vault(&self, vault_hosts: Vec<String>, start: bool) -> CellResult<bool> {
         let _arming = self.arming.lock().await;
         let Some(generation) = self.lifecycle()?.running() else { return Ok(true) };
-        let Armed { counted, mut tried } = self.armed(generation)?;
+        let before = self.armed(generation)?;
+        let Armed { counted, mut tried } = Armed { counted: before.counted.clone(), tried: before.tried.clone() };
         let fresh = || fragment_core::computer::egress::armed(vec![], self.catalog_hosts(), vault_hosts.clone()).0;
         if vault_hosts.iter().all(|h| fragment_core::computer::egress::caught(&tried, h)) {
             return Ok(true);
@@ -1704,7 +1718,14 @@ impl ComputerCell {
             self.set_armed(generation, &Armed { counted: counted.clone(), tried: tried.clone() })?;
             let id = self.must(MetaKey::Id)?;
             let g = JsValue::from_f64(generation as f64);
-            let Some(refused) = self.full_of(&id, &self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?)? else {
+            let answer = self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?;
+            if answer.is_null() {
+                // not this isolate's start (a new isolate's, before its
+                // takeover): nothing asked, nothing more counted
+                self.set_armed(generation, &before)?;
+                return Ok(false);
+            }
+            let Some(refused) = self.full_of(&id, &answer)? else {
                 return Ok(false);
             };
             tried.extend(more);

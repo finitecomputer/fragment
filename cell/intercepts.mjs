@@ -44,23 +44,28 @@ function swapped(c, egress, hosts) {
 // container cannot reach), each of `swapHosts` (`swapped`), each
 // `ComputerEgress` with its route as `egress(route)` makes it. None
 // survives a stop: each start registers them again. Answers the swap
-// hosts left for want of room (`landed`).
-export function intercept(c, egress, swapHosts, codestorage) {
+// hosts left for want of room (`landed`). `live()`: whether the start
+// these are for is still the running one (`landed`).
+export function intercept(c, egress, swapHosts, codestorage, live) {
   const each = [
     { f: () => c.interceptOutboundHttp("api.fragment.internal", egress("api")) },
     { f: () => c.interceptOutboundHttp("model.fragment.internal", egress("model")) },
   ];
   if (codestorage) each.push({ f: () => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")) });
   each.push(...swapped(c, egress, swapHosts));
-  return landed(each);
+  return landed(each, live);
 }
 
 // `hosts` more for the swap of a running container (a Vault secret's, set
 // since it started or named by its guest's first read of its view): these
 // alone, at once, never the rest again.
-export function interceptSwap(c, egress, hosts) {
-  return landed(swapped(c, egress, hosts));
+export function interceptSwap(c, egress, hosts, live) {
+  return landed(swapped(c, egress, hosts), live);
 }
+
+// A registration asked once its start is no longer the running one (`live`):
+// never sent, since the container may be another start's by then.
+const SUPERSEDED = "its start is no longer the running one";
 
 // Each of `each` (a call `f` that registers one intercept, of a swap
 // `host` or the platform's) at once, answered once every one has: one that
@@ -69,9 +74,16 @@ export function interceptSwap(c, egress, hosts) {
 // host the container has no room for (`FULL`: a container taken over may
 // hold hosts set before; two arms may race for the last room) is no
 // failure: it goes uncaught, and the hosts so left, each once, are the
-// answer. The platform's own never are.
-async function landed(each) {
-  const answers = await Promise.allSettled(each.map((e) => settled(e.f)));
+// answer. The platform's own never are. Each is sent, and asked again
+// (`settled`), only while `live()`: a try asked again once its start has
+// gone would land on the container of the start after it, there spending
+// the room its own arms counted (Sol on #1427), so it fails instead.
+async function landed(each, live = () => true) {
+  const sent = (f) => () => {
+    if (!live()) throw new Error(SUPERSEDED);
+    return f();
+  };
+  const answers = await Promise.allSettled(each.map((e) => settled(sent(e.f))));
   const full = new Set();
   for (const [i, a] of answers.entries()) {
     if (a.status === "fulfilled") continue;
