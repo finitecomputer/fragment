@@ -7003,17 +7003,28 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     std::thread::sleep(std::time::Duration::from_secs(1));
     let nothing = chats_with(&own_chat) == before && b.eval(page, "document.getElementById('search-dialog').open")? == true;
     s.ok("the launcher opens on its input, and with nothing typed, Enter starts nothing", open && nothing, json!({ "before": before, "now": chats_with(&own_chat) }));
-    // words: the first row starts a chat with the agent New chat names (from
-    // the Reader's chat, the Reader), and beside it their agents (the main
-    // one first) to pick another for this launch: here, their main agent
+    // words: the arrow starts a chat with the agent New chat names (from the
+    // Reader's chat, the Reader; its label says so), and under the input
+    // their agents' faces (the main one first, launcher.js `renderPick`) to
+    // pick another for this launch: each named, the one picked pressed and
+    // the row's one tab stop. Here their main agent, from the keyboard: Left
+    // from the Reader's face to theirs, then Enter.
     let said = "Plan my reading for October: three novels and one history of maps";
     b.eval(page, &fill("#workspace-search", said))?;
-    let start_says = |b: &mut Browser, name: &str| b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Start a new chat with {name}"))), wait);
+    let start_says = |b: &mut Browser, name: &str| b.until(page, &format!("document.getElementById('search-send').getAttribute('aria-label') === {}", js(&format!("Start a new chat with {name}"))), wait);
     let readers = start_says(b, "Reader");
-    let picks = b.eval(page, "[...document.querySelectorAll('#search-results .search-agent option')].map((o) => o.textContent)")?;
+    let faces = "[...document.querySelectorAll('#search-agents .search-agent-face')]";
+    let picks = b.eval(page, &format!("{faces}.map((f) => f.getAttribute('aria-label'))"))?;
+    let pressed = b.eval(page, &format!("{faces}.map((f) => [f.getAttribute('aria-pressed'), f.tabIndex])"))?;
     let _ = b.screenshot(page, &shots.join("desktop-launcher.png"));
-    b.eval(page, &format!("(() => {{ const p = document.querySelector('#search-results .search-agent'); p.value = {}; p.dispatchEvent(new Event('change')); return true; }})()", js(&first_id)))?;
-    let offered = readers && picks == json!([me.first_title, "Reader"]) && start_says(b, me.first_title);
+    let keyed = b.eval(
+        page,
+        &format!(
+            "(() => {{ const on = document.querySelector('#search-agents .search-agent-face.on'); on.focus(); on.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'ArrowLeft', bubbles: true }})); const f = document.activeElement; const moved = f?.dataset.identity === {} && f.tabIndex === 0 && on.tabIndex === -1; f.click(); return moved && f.getAttribute('aria-pressed') === 'true' && on.getAttribute('aria-pressed') === 'false'; }})()",
+            js(&first_id)
+        ),
+    )?;
+    let offered = readers && picks == json!([me.first_title, "Reader"]) && pressed == json!([["false", -1], ["true", 0]]) && keyed == true && start_says(b, me.first_title);
     // its first answer lost: the platform has the record, the page is told it failed
     b.eval(
         page,
@@ -7034,7 +7045,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     s.ok(
         "from the Reader's chat the launcher offers a new chat with the Reader, or another of their agents; their main agent picked, Enter makes a chat with it, labelled beside its own, and posts the words once, though the first answer was lost and it was sent again",
         offered && lost && opened && shows == fresh && agents == vec![(json!(first_id), json!("editor"))] && sent == 1,
-        json!({ "status": status, "shows": shows, "fresh": fresh, "agents": agents, "sent": sent }),
+        json!({ "picks": picks, "pressed": pressed, "keyed": keyed, "status": status, "shows": shows, "fresh": fresh, "agents": agents, "sent": sent }),
     );
     let title: String = format!("{}…", said.chars().take(47).collect::<String>().trim_end());
     let answered = s.eventually(agent_wait, || replies(api, me.session, &fresh, &first_id, said) == 1);
@@ -7832,7 +7843,8 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     b.eval(page, &refuse_once("POST", "^/api/search$"))?;
     launch(b, "ferry crossings")?;
     let failed = b.until(page, "document.querySelector('.search-known-failed')?.textContent.startsWith('Not searched')", wait);
-    let rest = b.eval(page, "!!document.querySelector('#search-results .search-start') && document.getElementById('search-status').textContent === ''")?;
+    // a new chat is still the arrow's (launcher.js `sayWhom`)
+    let rest = b.eval(page, "!document.getElementById('search-send').disabled && document.getElementById('search-send').getAttribute('aria-label').startsWith('Start a new chat with') && document.getElementById('search-status').textContent === ''")?;
     s.ok("the knowledge question refused, Knowledge says it was not searched and the rest stands", failed && rest == true, b.eval(page, "document.getElementById('search-results').innerText")?);
     // the answer came, a fragment of it failed: the hits, and that one named
     b.eval(page, &doctor_once(&format!("(a) => a.fragments.push({{ name: {}, state: 'failed', message: 'the index did not answer' }})", js(&old))))?;

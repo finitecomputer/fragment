@@ -35,6 +35,7 @@ import { icon } from "./icons.js";
 import { KIND } from "./frame-messages.js";
 import { speakers } from "./session-text.js";
 import { refusal } from "./limits.js";
+import { avatar } from "./agent-identity.js";
 
 // A connection dropped on a file's upload is tried again, as `fragment.blob` does.
 const UPLOAD_TRIES = 3;
@@ -57,6 +58,12 @@ const KNOWLEDGE_ASKED = 20;
 // the fragments not indexed yet named at most, the rest counted
 const UNINDEXED_NAMED = 3;
 const KNOWLEDGE_WAIT_MS = 400;
+// The agents' pill sliding to the one picked, as the names open and close
+// beside it: a little longer than the iOS app's `.snappy(duration: 0.25)`,
+// as the web's names move with it. Its curve is an ease-out cubic, the
+// names' `cubic-bezier(.33, 1, .68, 1)` in shell.css (--agent-pick-ms too).
+const PILL_SLIDE_MS = 300;
+const pillEase = (t) => 1 - (1 - t) ** 3;
 
 // What the knowledge question asks: the person's brains and Session Archive
 // (not ones they archived), as `fragment search --all` asks them, in their
@@ -118,7 +125,7 @@ export function knownAt(hit, kind) {
  * not sent yet (a reload for a new release waits for it).
  */
 export function createLauncher(shell) {
-  const { $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
+  const { $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, faceOf, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED } = shell;
   const { openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake, originOf, offers } = shell;
   const input = $("workspace-search");
   const dialog = $("search-dialog");
@@ -226,20 +233,23 @@ export function createLauncher(shell) {
     results.replaceChildren();
     const q = input.value.trim();
     if (!q) return;
+    // A new chat is the arrow's (its label names the agent: `sayWhom`, the
+    // agents' row under the input picks it); before their agent runs, the
+    // words go to their first chat, its row said here.
     const waiting = !canLaunch() && firstChat();
-    if (canLaunch() || waiting) {
+    if (waiting) {
       const action = el("button", "row search-result search-start");
       action.type = "button";
       const glyph = el("span", "search-action-icon");
       glyph.append(icon("newChat"));
       const copy = el("span", "agent-copy");
-      copy.append(el("span", "label", waiting ? `Say it in ${titleOf(waiting)}` : `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
+      copy.append(el("span", "label", `Say it in ${titleOf(waiting)}`), el("span", "agent-preview", q));
       const enter = el("span", "meta search-enter");
       enter.title = "Enter";
       enter.replaceChildren(icon("cornerDownLeft"));
       action.append(glyph, copy, enter);
       action.onclick = startFromSearch;
-      results.append(waiting ? action : withPick(action, copy.firstElementChild));
+      results.append(action);
     }
     const groups = [
       ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
@@ -287,28 +297,115 @@ export function createLauncher(shell) {
     fitSearch();
   }
 
-  // With more than one agent, the start row's pick of whom the new chat is
-  // with (its label says so), for this launch alone; with one, the row.
-  function withPick(action, label) {
-    const mine = [...state.agents.values()].filter((a) => byName(a.fragment)?.role === "owner");
-    if (mine.length < 2) return action;
-    const pick = el("select", "search-agent");
-    pick.setAttribute("aria-label", "Agent");
-    for (const a of mine) {
-      const o = el("option", null, titleOf(a.fragment));
-      o.value = a.identity;
-      pick.append(o);
-    }
-    pick.value = searchIdentity;
-    pick.disabled = launching;
-    pick.onchange = () => {
-      launchPick = pick.value;
-      canLaunch();
-      label.textContent = `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`;
+  // The arrow's label: the agent a new chat is with, as the picked face says.
+  function sayWhom() {
+    const say = canLaunch() ? `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}` : "Start a new chat";
+    $("search-send").setAttribute("aria-label", say);
+    $("search-send").title = say;
+  }
+  // With more than one agent, the pick of whom a new chat is with (the
+  // arrow's label says so), for this launch alone, under the input; with
+  // one, none. The iOS app's (HomeView.swift, AgentSegments): the agents'
+  // faces in a row, the picked one on a pill with its name, the pill
+  // sliding to the next one picked; a long row scrolls. A group of toggle
+  // buttons: one tab stop (the picked one), the arrows between them, Enter
+  // or Space to pick. Drawn again only when what it shows changes (the
+  // agents, the one picked, a send on its way), so typing keeps the row,
+  // its scroll and its focus.
+  let picked = "";
+  function renderPick() {
+    const pick = $("search-agents");
+    const mine = canLaunch() ? [...state.agents.values()].filter((a) => byName(a.fragment)?.role === "owner") : [];
+    const now = mine.length < 2 ? "" : JSON.stringify([mine.map((a) => [a.identity, titleOf(a.fragment)]), searchIdentity, launching]);
+    if (now === picked) return;
+    picked = now;
+    pick.replaceChildren();
+    pick.hidden = !now;
+    dialog.classList.toggle("has-agents", !!now);
+    if (!now) return;
+    const track = el("div", "search-agent-track");
+    pick.append(track);
+    const faces = mine.map((a) => {
+      const face = el("button", "search-agent-face");
+      face.type = "button";
+      face.dataset.identity = a.identity;
+      face.setAttribute("aria-label", titleOf(a.fragment));
+      face.disabled = launching;
+      // the name in a box that opens to it (shell.css): a grid column from
+      // 0fr to 1fr, the words clipped inside
+      const name = el("span", "search-agent-name");
+      const clip = el("span", "search-agent-clip");
+      clip.append(el("span", "search-agent-label", titleOf(a.fragment)));
+      name.append(clip);
+      face.append(avatar(faceOf(a.identity), "small"), name);
+      face.onclick = () => choose(face);
+      track.append(face);
+      return face;
+    });
+    const shown = (face, on) => {
+      face.classList.toggle("on", on);
+      face.setAttribute("aria-pressed", String(on));
+      face.tabIndex = on ? 0 : -1;
     };
-    const row = el("div", "search-start-row");
-    row.append(action, pick);
-    return row;
+    for (const face of faces) shown(face, face.dataset.identity === searchIdentity);
+    // the pill on its way, and where it is drawn now: a pick before it lands
+    // slides on from there
+    let sliding = 0;
+    let at = null;
+    function choose(face) {
+      const was = faces.find((f) => f.classList.contains("on"));
+      if (face === was) return;
+      launchPick = face.dataset.identity;
+      canLaunch();
+      picked = JSON.stringify([mine.map((a) => [a.identity, titleOf(a.fragment)]), searchIdentity, launching]);
+      sayWhom();
+      // the pill from where it was to the face picked, as the names open
+      // and close (their CSS transition): each frame it eases from where it
+      // started to where that face is now, so it lands on it as they settle
+      const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const from = at ?? (was && { left: was.offsetLeft, width: was.offsetWidth });
+      for (const f of faces) shown(f, f === face);
+      face.scrollIntoView({ block: "nearest", inline: "nearest", behavior: still ? "auto" : "smooth" });
+      cancelAnimationFrame(sliding);
+      at = null;
+      track.querySelector(".search-agent-pill")?.remove();
+      for (const f of faces) f.classList.remove("arriving");
+      if (!from || still) return;
+      const pill = el("span", "search-agent-pill");
+      pill.setAttribute("aria-hidden", "true");
+      track.prepend(pill);
+      face.classList.add("arriving");
+      // its width toward the face's once its name is open (the face's
+      // padding, its avatar, its words' own width), so it never dips as
+      // the names trade places; where it goes, toward where the face is now
+      const open = face.offsetWidth - face.querySelector(".search-agent-clip").offsetWidth + face.querySelector(".search-agent-label").offsetWidth;
+      const start = performance.now();
+      const frame = (now) => {
+        const e = pillEase(Math.min(1, (now - start) / PILL_SLIDE_MS));
+        at = { left: from.left + (face.offsetLeft - from.left) * e, width: from.width + (open - from.width) * e };
+        pill.style.transform = `translateX(${at.left}px)`;
+        pill.style.width = `${at.width}px`;
+        if (now - start < PILL_SLIDE_MS) sliding = requestAnimationFrame(frame);
+        else { at = null; pill.remove(); face.classList.remove("arriving"); }
+      };
+      frame(start);
+    }
+    // the arrows move between the faces, Home and End to its ends
+    pick.onkeydown = (e) => {
+      const at = faces.indexOf(document.activeElement);
+      if (at < 0) return;
+      const to = { ArrowLeft: at - 1, ArrowRight: at + 1, Home: 0, End: faces.length - 1 }[e.key];
+      if (to === undefined) return;
+      e.preventDefault();
+      const next = faces[Math.max(0, Math.min(faces.length - 1, to))];
+      for (const f of faces) f.tabIndex = f === next ? 0 : -1;
+      next.focus();
+    };
+    // leaving the row, its tab stop is the picked face again
+    pick.onfocusout = (e) => {
+      if (pick.contains(e.relatedTarget)) return;
+      for (const f of faces) f.tabIndex = f.classList.contains("on") ? 0 : -1;
+    };
   }
   // The person's agent for a new chat (`newChatAgent`, or the one picked),
   // asked again each time (their computer's agents may arrive after the
@@ -519,6 +616,7 @@ export function createLauncher(shell) {
       return;
     }
     launching = true;
+    renderPick();
     ++asked;
     clearTimeout(typing);
     const trigger = searchTrigger;
@@ -606,6 +704,8 @@ export function createLauncher(shell) {
     $("search-status").textContent = launchError;
     fitSearch();
     $("search-send").disabled = !sendable();
+    renderPick();
+    sayWhom();
     ++knowAsked;
     clearTimeout(knowing);
     found = { fragments: [], messages: [] };
@@ -724,7 +824,7 @@ export function createLauncher(shell) {
   return {
     open: openSearch,
     agentsRead() {
-      if (dialog.open && !launching) $("search-send").disabled = !sendable();
+      if (dialog.open && !launching) { $("search-send").disabled = !sendable(); renderPick(); sayWhom(); }
     },
     holds: () => !!(pendingLaunch || firstChatDraft),
   };
