@@ -239,7 +239,7 @@ impl FragmentCell {
         // its checks: JSON only, and a session or an anonymous principal.
         // No operation name has a `/`, so none is ever mistaken for one.
         if let Some(channel) = op.strip_prefix(SITE_POST_PREFIX).filter(|_| caller.site) {
-            let (record, replayed) = self.post(caller, facts, principal, link, channel, &body.id, &body.input).await?;
+            let (record, replayed) = self.post(caller, facts, principal, link, channel, &body.id, &body.input, crate::channels::POST_TRIGGERS_DEPTH).await?;
             let result = serde_json::value::to_raw_value(&record).expect("a record serializes");
             return Ok(Answered { result, replayed });
         }

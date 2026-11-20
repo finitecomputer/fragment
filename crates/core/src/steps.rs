@@ -70,6 +70,11 @@ pub enum Step {
     /// hold them (`{id, principal, data}`, one a socket that shares any).
     #[serde(rename = "presence")]
     Presence {},
+    /// `job.otherFragments.post | records(name, channel, body)`: an act in
+    /// another fragment as this fragment's agent (crate::acting), at the
+    /// run's depth.
+    #[serde(rename = "fragments")]
+    Fragments { act: String, name: String, channel: String, body: Value },
 }
 
 /// The identities one `job.people` step names: a page's `__people` limit.
@@ -243,6 +248,7 @@ impl Step {
             Step::Members {} => "members",
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
+            Step::Fragments { .. } => "fragments",
         }
     }
 }
@@ -311,13 +317,14 @@ mod tests {
             ("members", json!({})),
             ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
             ("presence", json!({})),
+            ("fragments", json!({ "act": "post", "name": "room--k3x9", "channel": "chat", "body": { "id": "a", "body": { "text": "hi" } } })),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 18, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 19, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);

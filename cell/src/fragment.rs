@@ -448,6 +448,10 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// The installed code (its loader id) that may act elsewhere as its
+    /// agent: its owner's or its agent's deploy, or a blessed release
+    /// (acting.rs `vouch`).
+    ActsAs,
     /// What this agent may use of its owner's (`fragment_core::grants`):
     /// set by its owner in person, through their computer (runs_on.rs), or
     /// taken once from that computer's row from before the move. None:
@@ -572,6 +576,7 @@ impl MetaKey {
             MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::ActsAs => "acts_as",
             MetaKey::Grants => "grants",
             MetaKey::Door => "door",
             MetaKey::DoorTicket => "door_ticket",
@@ -1035,9 +1040,13 @@ impl FragmentCell {
         self.ready()?;
         // the app facet's capabilities: each call one of its subrequests,
         // to a fragment that is
-        if calls::CAPABILITIES.contains(&path) {
+        let acts = path.starts_with(crate::acting::PREFIX);
+        if calls::CAPABILITIES.contains(&path) || acts {
             self.facet_calls_lever()?;
             self.name()?;
+        }
+        if acts {
+            return self.act(path, body).await;
         }
         match path {
             KeysLever::PATH if self.cfg.test_hooks => {
@@ -1251,9 +1260,10 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "channels", channel, "newest"]) => self.newest_api(&caller, channel),
             (Method::Post, ["api", "channels", channel]) => {
+                let depth = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok());
                 let body = body_json(&mut req).await?;
                 let channel = channel.to_string();
-                self.post_api(&caller, &channel, body).await
+                self.post_api(&caller, &channel, body, depth).await
             }
             (Method::Put, ["api", "channels", channel, "draft"]) => {
                 let body = body_json(&mut req).await?;

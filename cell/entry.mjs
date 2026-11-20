@@ -128,23 +128,8 @@ export class Files extends WorkerEntrypoint {
 // none of a thrown Error's own fields, so platform.mjs's `searchIndex`
 // throws it on the app's side, its fields whole.
 export class Search extends WorkerEntrypoint {
-  async #answer(op, body) {
-    const { fragment } = this.ctx.props;
-    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/search/${op}`, JSON.stringify(body)));
-    const answer = await resp.json().catch(() => ({}));
-    if (resp.ok) return { answer };
-    return {
-      error: {
-        message: answer.message || `search.${op} answered ${resp.status}`,
-        code: answer.error ?? null,
-        status: resp.status,
-        // a write's: whether it emptied an index of another embeddings space
-        // first, the newer fence that refused it, and the wait a 429 asks for
-        cleared: answer.cleared === true,
-        fence: answer.fence ?? null,
-        retry_after_ms: answer.retry_after_ms ?? null,
-      },
-    };
+  #answer(op, body) {
+    return asked.call(this, `call/search/${op}`, body, `search.${op}`);
   }
 
   upsert(source) { return this.#answer("upsert", source); }
@@ -155,6 +140,43 @@ export class Search extends WorkerEntrypoint {
   }
   query(question) { return this.#answer("query", question); }
   status() { return this.#answer("status", {}); }
+}
+
+// A capability's call to its fragment's supervisor (`this`, SEARCH's or
+// FRAGMENTS'), answered `{answer}`, or a refusal as a plain `{error}`.
+async function asked(path, body, what) {
+  const { fragment } = this.ctx.props;
+  const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, path, JSON.stringify(body)));
+  const answer = await resp.json().catch(() => ({}));
+  if (resp.ok) return { answer };
+  return {
+    error: {
+      message: answer.message || `${what} answered ${resp.status}`,
+      code: answer.error ?? null,
+      status: resp.status,
+      // a search write's: whether it emptied an index of another embeddings
+      // space first, the newer fence that refused it, and the wait a 429 asks for
+      cleared: answer.cleared === true,
+      fence: answer.fence ?? null,
+      retry_after_ms: answer.retry_after_ms ?? null,
+    },
+  };
+}
+
+// The app acting in another fragment (acting.rs), handed to its facet as
+// `env.FRAGMENTS` bound to one fragment by `props`, as SEARCH is: as that
+// fragment's own principal, its agent, whom the target checks as it would
+// the agent's own request. A draft and a read: a post is a job's step
+// (`job.otherFragments`), which carries its run's hop depth. It answers as
+// SEARCH does, `{answer}` or a plain `{error}`, which platform.mjs's
+// `otherFragments` throws.
+export class Fragments extends WorkerEntrypoint {
+  #answer(act, name, channel, body) {
+    return asked.call(this, `call/fragments/${act}/${encodeURIComponent(name)}/${encodeURIComponent(channel)}`, body ?? {}, `fragments.${act}`);
+  }
+
+  draft(name, channel, draft) { return this.#answer("draft", name, channel, draft); }
+  records(name, channel, page) { return this.#answer("records", name, channel, page); }
 }
 
 // One run of an operation (docs/api.md, Jobs and triggers). Each round asks

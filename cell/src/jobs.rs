@@ -832,6 +832,7 @@ impl FragmentCell {
                 }
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
+            Step::Fragments { act, name, channel, body } => self.step_fragments(run, &act, &name, &channel, &body).await,
         }
     }
 
@@ -992,6 +993,27 @@ impl FragmentCell {
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
+    }
+
+    /// `job.otherFragments.post | records`: an act in another fragment as
+    /// this fragment's agent, at the run's depth (acting.rs), its answer the
+    /// target's. A refusal there is the job's to catch, its status first; a
+    /// target that did not answer is tried again.
+    async fn step_fragments(&self, run: &RunRow, act: &str, name: &str, channel: &str, body: &Value) -> Result<Value, StepFail> {
+        let bytes = serde_json::to_vec(body).expect("a step's body is JSON");
+        let mut resp = match self.act_as_agent(&format!("{act}/{name}/{channel}"), &bytes, Some(run.depth)).await {
+            Ok(resp) => resp,
+            Err(e) if matches!(e.code, ErrorCode::HostFailed | ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::Deploying) => return Err(StepFail::Retry(e.message)),
+            Err(e) => return Err(permanent(format!("{}: {}", e.code.status(), e.message))),
+        };
+        let status = resp.status_code();
+        let text = resp.text().await.map_err(|e| StepFail::Retry(e.to_string()))?;
+        let answer: Value = crate::json_text(&text).unwrap_or(Value::Null);
+        match status {
+            200..=299 => Ok(answer),
+            429 | 500..=599 => Err(StepFail::Retry(format!("{name} answered {status}"))),
+            _ => Err(permanent(format!("{status}: {}", answer["message"].as_str().unwrap_or(&text)))),
+        }
     }
 
     /// `job.files.write` and `remove` (`bytes: None`): one commit per step,

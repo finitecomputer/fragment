@@ -19,6 +19,9 @@
 // / query / status` write and ask the fragment's own search index
 // (docs/api.md, "A fragment's search") as the fragment itself, its owner
 // paying; camel case, so no operation (`a-z`, `0-9`, `_`) can shadow it.
+// `this.otherFragments.draft / records` act in another fragment as this
+// one's agent (docs/api.md, "Acting in another fragment"), and a job's
+// `job.otherFragments.post / records` as steps.
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -183,6 +186,14 @@ class FileEffects {
   }
 }
 
+// A capability's answer (entry.mjs `asked`), or its refusal thrown here
+// with its fields whole.
+async function answered(pending) {
+  const { answer, error } = await pending;
+  if (error) throw Object.assign(new Error(error.message), error);
+  return answer;
+}
+
 function authorMethod(name) {
   return !name.startsWith("__") && !RESERVED_OP_NAMES.has(name) && typeof AuthorApp.prototype[name] === "function";
 }
@@ -325,6 +336,18 @@ class Job {
     const text = JSON.stringify(body ?? null);
     if (utf8Bytes(text) > RECORD_BODY_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_BODY_MAX_BYTES} bytes`);
     return this.#step("publish", { channel, kind, body: JSON.parse(text) });
+  }
+
+  // Another fragment, acted in as this fragment's agent (acting.rs), as
+  // steps: a post carries the run's hop depth and is made once; a read is
+  // recorded. A refusal there throws a StepError whose message begins with
+  // its status.
+  get otherFragments() {
+    const act = (act, name, channel, body) => this.#step("fragments", { act, name: String(name), channel: String(channel), body: JSON.parse(JSON.stringify(body ?? {})) });
+    return {
+      post: (name, channel, record) => act("post", name, channel, record),
+      records: (name, channel, page = {}) => act("records", name, channel, page),
+    };
   }
 
   // Files at `main`, as steps: reads are recorded, writes are one commit
@@ -486,16 +509,23 @@ export class App extends AuthorApp {
   // `{error}`: an Error crossing Workers RPC keeps no field of its own).
   get searchIndex() {
     const cap = this.env.SEARCH;
-    const answered = async (pending) => {
-      const { answer, error } = await pending;
-      if (error) throw Object.assign(new Error(error.message), error);
-      return answer;
-    };
     return {
       upsert: (source) => answered(cap.upsert(source)),
       delete: (source) => answered(cap.delete(source)),
       query: (question) => answered(cap.query(question)),
       status: () => answered(cap.status()),
+    };
+  }
+
+  // Another fragment, acted in through the FRAGMENTS capability as this
+  // fragment's agent (acting.rs): a refusal throws as `searchIndex`'s does.
+  // A post is a job's step (`job.otherFragments`).
+  get otherFragments() {
+    const cap = this.env.FRAGMENTS;
+    return {
+      post: () => Promise.reject(new Error("a post in another fragment is a job's step (job.otherFragments.post): it carries its run's depth and is made once")),
+      draft: (name, channel, draft) => answered(cap.draft(String(name), String(channel), draft)),
+      records: (name, channel, page = {}) => answered(cap.records(String(name), String(channel), page)),
     };
   }
 
