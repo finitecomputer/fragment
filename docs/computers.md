@@ -617,7 +617,10 @@ beside the new one.
   the Hermes image so on every change to it and fails past the budget
   (`the_hermes_image_fits_its_disk_budget`, images/bridge/tests/docker.rs,
   which reads both numbers from their one definition in core). Today's
-  image measured MEASURED. Raising it is Paul's word alone, recorded
+  image measured 2.53 to 2.67 GB in five runs on a quiet box (2026-11-20;
+  production's empty computers read about 2.6 GB used), and 2.99 GB once
+  under heavy disk load, when btrfs compresses less as it writes back in a
+  hurry: the budget is that plus a little. Raising it is Paul's word alone, recorded
   beside the constant: each GB raised is a GB less of every person's files
   that restore.
 - **Room counts the largest image.** A computer's room (above, "Room to

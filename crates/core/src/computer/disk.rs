@@ -31,10 +31,13 @@ pub fn restore_floor(total: u64) -> u64 {
 /// `the_hermes_image_fits_its_disk_budget`, images/bridge/tests/docker.rs),
 /// so a computer's room (`room`) counts it, whichever image the deployment
 /// moves it to (Paul, 2026-11-20: "our image update either never goes up
-/// in size, or that it's safe for all existing users somehow"). An empty
-/// 20 GB btrfs disk keeps 0.55 GB for itself (its metadata twice), and our
-/// image written to it with zstd took 2.41 GB more: 2.99 GB in all
-/// (2026-11-20; production's empty computers read about 2.6 GB used).
+/// in size, or that it's safe for all existing users somehow"). Today's
+/// image measured 2.53 to 2.67 GB of a fresh 20 GB btrfs disk with zstd in
+/// five runs on a quiet box (0.55 GB of it the disk's own keep: its
+/// metadata twice), and 2.99 GB once under heavy disk load, when btrfs
+/// compresses less as it writes back in a hurry; production's empty
+/// computers read about 2.6 GB used (2026-11-20). The budget is that plus
+/// a little.
 ///
 /// Raised only on Paul's word, recorded here: each GB raised is a GB less
 /// of every person's files that restore.
