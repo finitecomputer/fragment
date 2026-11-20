@@ -574,7 +574,15 @@ stopped in its restore of `/data/work` with about 200 MB free).
   least 10 MiB anywhere (a cache's too), each the biggest first, at most
   64 and 32, a path at most 400 bytes, 16 KiB of paths in all. Kept in a
   row of its own (`sizes`), shown on its owner's view (`sizes`) and never
-  on its guest's, never logged: it names a person's files.
+  on its guest's, never logged: it names a person's files. Its view adds
+  its folders by kind (`kinds`, `storage_kinds`): its agents' own (`/data`
+  but its work), and in its work caches, browser data and downloads by
+  their folders' names, projects the rest.
+- **Settings → Computer → Storage** (cell/shell/computer.js) draws it
+  from its owner's view, so asleep, awake and not waking alike: a bar of
+  what its save keeps by kind, the room left (red while it is told
+  filling), its five biggest files by name, and when it was measured;
+  before its first read, that it is measured after its next save.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,

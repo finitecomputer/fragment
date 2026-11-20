@@ -1629,6 +1629,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     disk_ui(s, api, &mut b, &page, &session, &shots)?;
+    storage_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
@@ -3609,6 +3610,71 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     b.reload(page)?;
     let gone = b.until(page, "!document.querySelector('#computer-notices .computer-notice[data-kind=disk_filling]')", wait);
     s.ok("a read with room again tells it no more", room.status == 200 && gone, &room.body);
+    Ok(())
+}
+
+/// Settings → Computer → Storage, as its owner sees it (docs/computers.md,
+/// "Room to restore"; Paul, 2026-11-20: an iPhone-style view in plain
+/// categories): its agent leaves three real files on its computer (the
+/// stub's `fill-data`: a 48 MiB download, 16 MiB of browser data, a 12 MiB
+/// cache), its awake save after that work reads what takes its disk, and
+/// Storage shows them by kind, the biggest files by name, and the room
+/// left; its disk's size a computer's (the `disk` lever, its /data as that
+/// read found it: a test fleet's computers share their host's disk), at
+/// 1280 and 390 px, light and dark, within the phone's width. Starts and
+/// ends on settings.
+fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let files = [("work/e2e/downloads/talk.mp4", 48), ("work/e2e/browser-profile/cache.bin", 16), ("work/e2e/home/.cache/pip/wheel.whl", 12)];
+    for (n, (path, mib)) in files.iter().enumerate() {
+        shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("storage-fill-{n}"), "body": { "text": format!("fill-data {path} {mib}") } })), &[])?;
+    }
+    let filled = || {
+        shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?limit=1000"), None, &[])
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo:") && t.contains("filled work/e2e/")))
+            .count()
+            == files.len()
+    };
+    let made = s.eventually(std::time::Duration::from_secs(60), filled);
+    // its work over, it saves awake, and reads what takes its disk
+    let listed = |v: &Value| files.iter().all(|(path, mib)| v["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == *path && f["bytes"].as_u64() == Some(mib * 1024 * 1024))));
+    let read = made && s.eventually(std::time::Duration::from_secs(180), || listed(&view()));
+    let sizes = view()["sizes"].clone();
+    // its disk a computer's: 20 GB with 15 GB free, its /data as read
+    let sized = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    let block = "document.querySelector('#settings-page [data-storage]')";
+    let drawn = format!(
+        "!!{block}?.checkVisibility() && ['downloads', 'browser', 'caches'].every((k) => {block}.querySelector(`[data-kind=${{k}}]`)) && ['talk.mp4', 'cache.bin', 'wheel.whl'].every((n) => [...{block}.querySelectorAll('.storage-file-name')].some((e) => e.textContent === n)) && /left$/.test({block}.querySelector('.storage-left').textContent)"
+    );
+    let at = |w: u32, h: u32, mobile: bool, b: &mut Browser| -> Result<(bool, Value)> {
+        b.viewport(page, w, h, mobile)?;
+        b.reload(page)?;
+        let ok = b.until(page, &drawn, wait);
+        b.eval(page, &format!("({block}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let fits = b.eval(page, &format!("({{ right: {block}?.getBoundingClientRect().right <= innerWidth + 1, wide: document.scrollingElement.scrollWidth <= innerWidth + 1 }})"))?;
+        for scheme in ["dark", "light"] {
+            b.color_scheme(page, scheme)?;
+            let _ = b.screenshot(page, &shots.join(format!("computer-storage-{w}-{scheme}.png")));
+        }
+        Ok((ok, fits))
+    };
+    let (desk, _) = at(1280, 900, false, b)?;
+    let (phone, fits) = at(390, 844, true, b)?;
+    let said = b.eval(page, &format!("{block}?.innerText"))?;
+    b.color_scheme(page, "dark")?;
+    b.viewport(page, 1280, 900, false)?;
+    s.ok(
+        "Storage shows what takes its disk by kind (downloads, browser data, caches), its biggest files by name, and the room left, from its awake save's read; on a desktop and on a phone (390 px), within its width",
+        made && read && sized.status == 200 && desk && phone && fits["right"] == true && fits["wide"] == true,
+        json!({ "said": said, "sizes": sizes, "fits": fits }),
+    );
     Ok(())
 }
 

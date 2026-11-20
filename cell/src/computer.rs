@@ -2868,7 +2868,10 @@ impl ComputerCell {
             relay: None,
             relay_targets: None,
             disk: saves.disk_view(),
-            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| serde_json::from_str(&j).ok()),
+            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| serde_json::from_str::<fragment_proto::computer::ComputerSizes>(&j).ok()).map(|mut s| {
+                s.kinds = fragment_core::computer::storage_kinds(&s);
+                s
+            }),
         }))
     }
 

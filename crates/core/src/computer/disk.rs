@@ -4,7 +4,7 @@
 //! can restore it, and a restore needs more of the disk than the running
 //! computer used.
 
-use fragment_proto::computer::{ComputerSizes, DiskRoom, SizeEntry};
+use fragment_proto::computer::{ComputerSizes, DiskRoom, KindSize, SizeEntry, StorageKind};
 use serde::{Deserialize, Serialize};
 
 use crate::computer::held::LEFT_OUT_PATTERN_MAX_BYTES;
@@ -198,7 +198,55 @@ pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
     };
     let folders = take("folders", SIZES_FOLDERS_MAX);
     let files = take("files", SIZES_FILES_MAX);
-    Some(ComputerSizes { at: at_ms, folders, files })
+    Some(ComputerSizes { at: at_ms, folders, files, kinds: vec![] })
+}
+
+/// What a summary's folders hold, by kind, the most first, none empty
+/// (its owner's Storage). Its agents' own: the folders of `/data` but its
+/// work (the seam: docs/computers.md, "Data and the restore gate"). In its
+/// work, a folder named as a cache (`.cache`, `.npm`, `Cache`), a browser's
+/// (`browser-profile`, `chromium`, `google-chrome`) or downloads
+/// (`Downloads`, `downloads`) is of that kind, counted once at the
+/// shallowest such folder listed; its projects are the rest of its work.
+/// A summary lists folders a few levels deep, so a kind's folder deeper
+/// than that counts as projects.
+pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
+    let kind_of = |name: &str| match name {
+        ".cache" | ".npm" | "Cache" => Some(StorageKind::Caches),
+        "browser-profile" | "chromium" | "google-chrome" => Some(StorageKind::Browser),
+        "Downloads" | "downloads" => Some(StorageKind::Downloads),
+        _ => None,
+    };
+    let mut bytes = std::collections::BTreeMap::<StorageKind, u64>::new();
+    let mut counted: Vec<&str> = Vec::new();
+    // shallowest first, so a kind's folder inside another is not counted twice
+    let mut folders: Vec<&SizeEntry> = sizes.folders.iter().collect();
+    folders.sort_by_key(|e| e.path.matches('/').count());
+    let mut work = 0u64;
+    for e in folders {
+        let path = e.path.as_str();
+        if path == "work" {
+            work = e.bytes;
+            continue;
+        }
+        if !path.starts_with("work/") {
+            if !path.contains('/') {
+                *bytes.entry(StorageKind::Agents).or_default() += e.bytes;
+            }
+            continue;
+        }
+        let Some(kind) = path.rsplit('/').next().and_then(kind_of) else { continue };
+        if counted.iter().any(|c| path.starts_with(&format!("{c}/"))) {
+            continue;
+        }
+        counted.push(path);
+        *bytes.entry(kind).or_default() += e.bytes;
+    }
+    let in_work: u64 = [StorageKind::Caches, StorageKind::Browser, StorageKind::Downloads].iter().map(|k| bytes.get(k).copied().unwrap_or(0)).sum();
+    bytes.insert(StorageKind::Projects, work.saturating_sub(in_work));
+    let mut kinds: Vec<KindSize> = bytes.into_iter().filter(|(_, b)| *b > 0).map(|(kind, bytes)| KindSize { kind, bytes }).collect();
+    kinds.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.kind.cmp(&b.kind)));
+    kinds
 }
 
 /// A computer's disk from `DISK_READ`'s answer, read at `at_ms` in start
@@ -461,6 +509,43 @@ mod tests {
         let kept = format!("printf 'apparent ' && du -sxb{ex} . && echo folders && du -xk -d 4{ex} . | awk 'length < 424' | sort -rn | head -n 65 && echo files && find . -xdev -type f -size +10240k -exec du -k {{}} + 2>/dev/null | awk 'length < 424' | sort -rn | head -n 32");
         assert_eq!(read, format!("df -P -B1 / && cd /data && if du -s --exclude=x /dev/null > /dev/null 2>&1; then {kept}; else {all}; fi"));
         assert_eq!(sizes_read(&["/../etc/".into(), "/".into()]), format!("df -P -B1 / && cd /data && {all}"), "no pattern it uses: all");
+    }
+
+    /// Goal (Paul, 2026-11-20: Settings → Computer → Storage, in plain
+    /// categories): a summary's folders by kind. Its agents' own is `/data`
+    /// but its work; in its work, caches, browser data and downloads, each
+    /// once at its shallowest folder listed (a cache inside a browser's
+    /// profile is the browser's); projects the rest of its work. Valid, a
+    /// kind nested in another, nothing in a kind (left out), no work,
+    /// nothing at all.
+    #[test]
+    fn a_summary_is_told_by_kind() {
+        const GB: u64 = 1_000_000_000;
+        let entry = |path: &str, gb: f64| SizeEntry { path: path.into(), bytes: (gb * GB as f64) as u64 };
+        let sizes = |folders: Vec<SizeEntry>| ComputerSizes { at: T, folders, files: vec![], kinds: vec![] };
+        let told = |s: &ComputerSizes| storage_kinds(s).into_iter().map(|k| (k.kind, k.bytes)).collect::<Vec<_>>();
+        let full = sizes(vec![
+            entry("work", 20.0),
+            entry("work/juniper", 18.0),
+            entry("work/juniper/home", 5.0),
+            entry("work/juniper/home/.cache", 2.0),
+            entry("work/juniper/browser-profile", 3.0),
+            entry("work/juniper/browser-profile/Cache", 1.0),
+            entry("work/juniper/downloads", 4.0),
+            entry("work/juniper/home/Downloads", 1.0),
+            entry("work/juniper/proj", 6.0),
+            entry("hermes", 1.5),
+            entry("hermes/sessions", 1.0),
+            entry("bridge", 0.1),
+        ]);
+        assert_eq!(
+            told(&full),
+            [(StorageKind::Projects, 10 * GB), (StorageKind::Downloads, 5 * GB), (StorageKind::Browser, 3 * GB), (StorageKind::Caches, 2 * GB), (StorageKind::Agents, (1.6 * GB as f64) as u64)],
+            "the browser's own Cache is the browser's, once"
+        );
+        assert_eq!(told(&sizes(vec![entry("work", 2.0), entry("work/a/proj", 2.0)])), [(StorageKind::Projects, 2 * GB)], "nothing in a kind: left out");
+        assert_eq!(told(&sizes(vec![entry("hermes", 1.0)])), [(StorageKind::Agents, GB)], "no work");
+        assert_eq!(told(&sizes(vec![])), [], "nothing at all");
     }
 
     /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20.

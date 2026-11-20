@@ -24,6 +24,38 @@ export function untilSaid(u, now) {
 // A platform path's image (a notice's `image`) on `img`: read as the shell
 // reads the API, with its header (the session's cookie alone is no caller
 // for `/api/…`), and shown from its bytes; one that won't load goes.
+// Bytes as its notices say them (fragment_core's `notice::size`): GB to a
+// tenth, under one in whole MB (at least 1).
+export function storageSize(n) {
+  if (n >= 1e9) {
+    const tenths = Math.round((n * 10) / 1e9);
+    return `${Math.floor(tenths / 10)}.${tenths % 10} GB`;
+  }
+  return `${Math.max(1, Math.round(n / 1e6))} MB`;
+}
+
+// The kinds Storage names, in its words (proto's `StorageKind`).
+export const STORAGE_KINDS = { projects: "Projects", downloads: "Downloads", browser: "Browser data", agents: "Agents", caches: "Caches" };
+
+// Settings → Computer → Storage (docs/computers.md, "Room to restore"), as
+// its owner's view last said it: what its save keeps at full size (`used`),
+// the room left before it may not start again from that save, each kind's
+// share (what the kinds leave out of `used` as Other), its biggest files,
+// and when it was measured. Null before its first read after a save.
+export function storageParts(c) {
+  const d = c?.disk;
+  if (!d || typeof d.data !== "number" || typeof d.room !== "number") return null;
+  const kinds = (c.sizes?.kinds ?? []).filter((k) => STORAGE_KINDS[k.kind] && k.bytes > 0).map((k) => ({ kind: k.kind, label: STORAGE_KINDS[k.kind], bytes: k.bytes }));
+  const listed = kinds.reduce((a, k) => a + k.bytes, 0);
+  const other = d.data - listed;
+  if (other >= 1e6) kinds.push({ kind: "other", label: "Other", bytes: other });
+  const files = (c.sizes?.files ?? []).slice(0, 5).map((f) => {
+    const at = f.path.lastIndexOf("/");
+    return { path: f.path, name: f.path.slice(at + 1), folder: at > 0 ? f.path.slice(0, at) : "", bytes: f.bytes };
+  });
+  return { used: Math.max(d.data, listed), left: d.room, filling: !!d.filling, kinds, files, at: c.sizes?.at ?? d.at };
+}
+
 export function platformImage(img, path) {
   img.dataset.src = path;
   if (!globalThis.location || typeof fetch !== "function") return;
@@ -461,6 +493,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         ? [
             stateLine(c),
             line("Version", c.version ?? c.latest ?? c.image),
+            storageBlock(c),
             ...(behind
               ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
               : []),
@@ -510,6 +543,47 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
     shown.section = computer;
     return computer;
+  }
+  // Storage: a bar of what takes its disk by kind, the room left, the
+  // biggest files; asleep, awake or not waking alike (its view keeps it)
+  function storageBlock(c) {
+    const parts = storageParts(c);
+    if (!parts) return line("Storage", "Measured after your computer next saves.");
+    const block = el("div", "settings-line storage");
+    block.dataset.storage = "";
+    const head = el("div", "storage-head");
+    head.append(el("span", "settings-key", "Storage"), el("span", parts.filling ? "storage-left storage-low" : "storage-left", `${storageSize(parts.left)} left`));
+    const whole = parts.used + parts.left || 1;
+    const bar = el("div", "storage-bar");
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", `${storageSize(parts.used)} used, ${storageSize(parts.left)} left`);
+    const legend = el("div", "storage-legend");
+    for (const k of parts.kinds) {
+      const piece = el("span", `storage-piece storage-${k.kind}`);
+      piece.style.width = `${(100 * k.bytes) / whole}%`;
+      bar.append(piece);
+      const key = el("span", `storage-kind storage-${k.kind}`);
+      key.dataset.kind = k.kind;
+      key.append(el("span", "storage-name", k.label), el("span", "storage-size", storageSize(k.bytes)));
+      legend.append(key);
+    }
+    block.append(head, bar, legend);
+    if (parts.files.length) {
+      const files = el("div", "storage-files");
+      files.append(el("span", "storage-files-title", "Biggest files"));
+      for (const f of parts.files) {
+        const row = el("div", "storage-file");
+        row.dataset.path = f.path;
+        const name = el("span", "storage-file-name", f.name);
+        name.title = f.path;
+        row.append(name, el("span", "storage-file-folder", f.folder), el("span", "storage-size", storageSize(f.bytes)));
+        files.append(row);
+      }
+      block.append(files);
+    }
+    const when = new Date(parts.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    block.append(el("span", "storage-at", `Measured ${when}`));
+    return block;
   }
   function stateLine(c) {
     const l = line("State", stateSaid(c, active(follow.op())));
