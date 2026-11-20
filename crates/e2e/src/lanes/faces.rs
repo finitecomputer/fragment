@@ -332,9 +332,11 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     let kept_icon = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&gone))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && row(api, &paul, &agent)["picture"] == shown.as_str();
     let again = json!({ "message": "a picture in git", "files": [{ "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(&blue) }] });
     let given = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&again))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && s.eventually(WAIT, || row(api, &paul, &agent)["picture"] == blue_shown.as_str());
+    // (its picture shown from its avatar.png, not yet taken into its icon:
+    // removed, the icon it had before is not shown again)
     let removed = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&gone))?.status == 200 && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200 && s.eventually(WAIT, || row(api, &paul, &agent).get("picture").is_none());
     s.ok(
-        "a client from before the face removing avatar.png: a picture set through its icon since stays; one its avatar.png gave is taken away",
+        "a client from before the face removing avatar.png: a picture set through its icon since stays; one its avatar.png gave is taken away, the icon it had before it not shown again",
         kept_icon && given && removed,
         json!({ "row": row(api, &paul, &agent), "events": super::site::event_kinds(api, &paul, &agent) }),
     );
@@ -598,6 +600,9 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // would be: its icon stays its viewers' alone
     if s.makes_icons() {
         let (_, iconed) = set_face(api, &paul, &app, None, Some(Some(&orange)))?;
+        // shared past its owner, it runs as no agent (FIN-544): its own alone
+        let alone = api.signed(&paul, "PUT", &format!("/api/f/{app}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(alone.status == 200, "the app, members only: {alone}");
         let computer = api.signed(&paul, "POST", "/api/computers", Some(&json!({})))?.body["computer"].as_str().unwrap_or("").to_string();
         let r = api.signed(&paul, "PUT", &format!("/api/computers/{computer}/agents/{app}"), Some(&json!({})))?;
         let id = r.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == app.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
