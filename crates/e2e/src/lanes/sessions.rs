@@ -231,39 +231,49 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // its list is rows: History and the archive's page as a person sees
     // them, wide and at a phone's width
     let beans_row = ".history-row[data-key=\"imported:hermes-e2e_beans\"]";
-    let listed_shots = |b: &mut Browser, at: &str| -> Result<()> {
-        b.click(&page, "#history-link")?;
-        b.click(&page, ".history-filter[data-filter=\"imported\"]")?;
-        b.until(&page, &format!("{imported}.length === 2"), wait);
-        b.screenshot(&page, &shots.join(format!("{at}-history-1280.png")))?;
-        b.viewport(&page, 390, 844, true)?;
-        b.until(&page, &format!("{imported}.length === 2 && innerWidth === 390"), wait);
-        b.screenshot(&page, &shots.join(format!("{at}-history-390.png")))?;
-        b.viewport(&page, 1280, 900, false)?;
-        b.until(&page, "innerWidth === 1280", wait);
+    // History (open on `pg`) and then the archive's page, each wide and at
+    // a phone's width; a page of its own for each stage, as a reload after
+    // a phone's width may leave the shell narrow
+    let listed_shots = |b: &mut Browser, pg: &Page, at: &str| -> Result<()> {
+        b.until(pg, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.checkVisibility()", wait);
+        b.click(pg, ".history-filter[data-filter=\"imported\"]")?;
+        b.until(pg, &format!("{imported}.length === 2"), wait);
+        b.screenshot(pg, &shots.join(format!("{at}-history-1280.png")))?;
+        b.viewport(pg, 390, 844, true)?;
+        b.until(pg, &format!("{imported}.length === 2 && innerWidth === 390"), wait);
+        b.screenshot(pg, &shots.join(format!("{at}-history-390.png")))?;
+        b.viewport(pg, 1280, 900, false)?;
+        b.until(pg, "innerWidth === 1280", wait);
         Ok(())
     };
-    let list_shots = |s: &mut Suite, b: &mut Browser, at: &str, title: &str| -> Result<bool> {
-        b.click(&page, &format!("{beans_row} .history-open"))?;
-        s.eventually(wait, || b.eval_in_frame(&page, frame, "document.querySelectorAll('.msg').length === 2").is_ok_and(|v| v == true));
-        b.eval_in_frame(&page, frame, "(location.href = './', true)")?;
-        let shown = s.eventually(wait, || b.eval_in_frame(&page, &name, &format!("[...document.querySelectorAll('ul.sessions strong')].some((e) => e.textContent === {title:?})")).is_ok_and(|v| v == true));
-        b.screenshot(&page, &shots.join(format!("{at}-list-1280.png")))?;
-        b.viewport(&page, 390, 844, true)?;
-        b.until(&page, "innerWidth === 390", wait);
-        b.screenshot(&page, &shots.join(format!("{at}-list-390.png")))?;
-        b.viewport(&page, 1280, 900, false)?;
-        b.until(&page, "innerWidth === 1280", wait);
+    let list_shots = |s: &mut Suite, b: &mut Browser, pg: &Page, at: &str, title: &str| -> Result<bool> {
+        b.click(pg, &format!("{beans_row} .history-open"))?;
+        s.eventually(wait, || b.eval_in_frame(pg, frame, "document.querySelectorAll('.msg').length === 2").is_ok_and(|v| v == true));
+        b.eval_in_frame(pg, frame, "(location.href = './', true)")?;
+        let shown = s.eventually(wait, || b.eval_in_frame(pg, &name, &format!("[...document.querySelectorAll('ul.sessions strong')].some((e) => e.textContent === {title:?})")).is_ok_and(|v| v == true));
+        b.screenshot(pg, &shots.join(format!("{at}-list-1280.png")))?;
+        b.viewport(pg, 390, 844, true)?;
+        b.until(pg, "innerWidth === 390", wait);
+        b.screenshot(pg, &shots.join(format!("{at}-list-390.png")))?;
+        b.viewport(pg, 1280, 900, false)?;
+        b.until(pg, "innerWidth === 1280", wait);
         Ok(shown)
     };
-    listed_shots(&mut b, "rows")?;
-    let rows_listed = list_shots(s, &mut b, "rows", "Beans")?;
+    // a fresh shell at History, reading the archive's list at once
+    let history_page = |b: &mut Browser| -> Result<Page> {
+        let pg = b.open(&format!("{}/history", api.base))?;
+        b.viewport(&pg, 1280, 900, false)?;
+        Ok(pg)
+    };
+    b.click(&page, "#history-link")?;
+    listed_shots(&mut b, &page, "rows")?;
+    let rows_listed = list_shots(s, &mut b, &page, "rows", "Beans")?;
     s.ok("the archive's page lists its conversations from its rows", rows_listed, b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default());
 
     // an archive imported before its list was rows: its rows gone and its
-    // chats' index file back, as the CLI before this one left it. History
-    // and the archive's page list it from that file; the next import of
-    // anything lists it as rows again and takes the index file away.
+    // chats' index file as the CLI before this one left it. History and the
+    // archive's page list it from that file; the next import of anything
+    // lists it as rows again, and writes its index file again from them.
     let nanos = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let call = |op: &str, input: Value| api.signed(&keys, "POST", &format!("/api/f/{name}/ops/{op}"), Some(&json!({ "id": format!("e2e-old-{op}-{}", nanos()), "input": input })));
     let held = call("sessions", json!({}))?;
@@ -276,16 +286,14 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&made, &[("index/chat.json", Some(old.as_bytes()))]);
     let left = call("sessions", json!({}))?;
     let emptied = left.body["result"]["sessions"].as_array().is_some_and(Vec::is_empty);
-    // a fresh shell reads its archive's list at once
-    b.eval(&page, "(location.reload(), true)")?;
-    b.until(&page, "!document.getElementById('layout').hidden && !!document.getElementById('history-link')?.offsetParent", wait);
-    listed_shots(&mut b, "index")?;
-    let from_index = b.eval(&page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
-    let page_from_index = list_shots(s, &mut b, "index", "Beans, as its index lists it")?;
+    let old_page = history_page(&mut b)?;
+    listed_shots(&mut b, &old_page, "index")?;
+    let from_index = b.eval(&old_page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
+    let page_from_index = list_shots(s, &mut b, &old_page, "index", "Beans, as its index lists it")?;
     s.ok(
         "an archive with no rows yet, its chats' index file alone (as the CLI before the rows left it), is listed from that file by History and by its page",
         dropped.status == 200 && emptied && from_index == json!(["Beans, as its index lists it", "A long letter"]) && page_from_index,
-        json!({ "history": from_index, "page": b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default() }),
+        json!({ "history": from_index, "page": b.eval_in_frame(&old_page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default() }),
     );
     let again = s.cli_json(api, &home, &["session", "import", root.to_str().expect("utf-8 path"), "--json"])?;
     let refill = call("sessions", json!({ "kind": "chat" }))?;
@@ -294,10 +302,8 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let index_now = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=index/chat.json"), None)?;
     let index_titles: Vec<Value> = index_now.body["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
     let index_rewritten = Value::Array(index_titles.clone()) == json!(["A long letter", "Beans"]);
-    // a fresh shell, at History, reads the archive's list at once
-    let fresh = b.open(&format!("{}/history", api.base))?;
-    b.viewport(&fresh, 1280, 900, false)?;
-    b.until(&fresh, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.offsetParent", wait);
+    let fresh = history_page(&mut b)?;
+    b.until(&fresh, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.checkVisibility()", wait);
     b.click(&fresh, ".history-filter[data-filter=\"imported\"]")?;
     let relisted = b.until(&fresh, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent).join('|') === 'A long letter|Beans'"), wait);
     s.ok(
