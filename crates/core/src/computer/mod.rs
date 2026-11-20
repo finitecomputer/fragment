@@ -88,7 +88,7 @@ mod testing;
 mod which;
 
 pub use awake::awake_batch;
-pub use disk::{disk_clear, disk_filling, disk_of_df, disk_of_sizes, reads_disk_after, restore_floor, restore_writes, room, sizes_of, sizes_read, storage_kinds, ComputerDisk, DISK_READ, IMAGE_DISK_MAX, RESTORE_FLOOR_MAX, RESTORE_SLACK_PCT, ROOM_CLEAR_MIN, ROOM_TOLD_MAX, SIZES_DEPTH, SIZES_FILES_MAX, SIZES_FILE_MIN_KIB, SIZES_FOLDERS_MAX, SIZES_PATHS_MAX_BYTES, SIZES_READ_MAX_BYTES, SIZE_LINE_MAX_BYTES, SIZE_PATH_MAX_BYTES};
+pub use disk::{disk_clear, disk_filling, delete_read, disk_of_df, disk_of_sizes, DELETE_REFUSED, reads_disk_after, restore_floor, restore_writes, room, sizes_of, sizes_read, storage_kinds, ComputerDisk, DISK_READ, IMAGE_DISK_MAX, RESTORE_FLOOR_MAX, RESTORE_SLACK_PCT, ROOM_CLEAR_MIN, ROOM_TOLD_MAX, SIZES_DEPTH, SIZES_FILES_MAX, SIZES_FILE_MIN_KIB, SIZES_FOLDERS_MAX, SIZES_PATHS_MAX_BYTES, SIZES_READ_MAX_BYTES, SIZE_LINE_MAX_BYTES, SIZE_PATH_MAX_BYTES};
 pub use held::{left_out, unheld, work_left_out, HELD_ANSWER_MAX_BYTES, LEFT_OUT_MAX, LEFT_OUT_PATTERN_MAX_BYTES, SAVED_DIRS, UNHELD_MAX_BYTES};
 pub use images::{does_simplex, image_running, valid_version, version_now, version_of, version_running, Images, VERSION_HEX};
 pub use lifecycle::{alive, unplanned_start, Action, Alive, Ended, Event, Failing, Lifecycle, Phase, Retry, Rules, SaveNote, Saving, Socket, Step, Unsaved, Wake};

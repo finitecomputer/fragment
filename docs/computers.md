@@ -583,6 +583,14 @@ stopped in its restore of `/data/work` with about 200 MB free).
   what its save keeps by kind, the room left (red while it is told
   filling), its five biggest files by name, and when it was measured;
   before its first read, that it is measured after its next save.
+- **Delete** (`POST /api/computers/{id}/files/delete`), on an awake
+  computer, asked once in Storage: the platform removes one regular file
+  of its work in its container, no agent asked (so it works when its
+  agent is stuck), then reads its disk again. Never a folder, a link, or
+  a path outside `/data/work`: the path is held to `work/…` with no `.` or
+  `..` part (`delete_read`), and the command it runs (as root) resolves it
+  and holds it to `/data/work/` again, so a link to a folder elsewhere
+  leads nowhere. Its line logs whether it deleted, never the path.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,

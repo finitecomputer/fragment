@@ -3568,6 +3568,29 @@ impl ComputerCell {
                 self.wake(Wake::Owner).await?;
                 json_response(&self.view().await?)
             }
+            (Method::Post, ["files", "delete"]) => {
+                // its owner's Delete in Storage (docs/computers.md, "Room to
+                // restore"): one regular file of its work, removed by the
+                // platform in its container, no agent asked; awake alone
+                let body = req.bytes().await?;
+                let asked: fragment_proto::computer::FileAsk = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let read = fragment_core::computer::delete_read(&asked.path).map_err(CellError::invalid)?;
+                let Phase::Awake { generation, .. } = self.lifecycle()?.phase else {
+                    return Err(CellError::new(ErrorCode::Conflict, "it is not awake: wake it to delete a file"));
+                };
+                let argv = js::to_js(&json!(["sh", "-c", read]));
+                let out = js::from_js(&self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+                // one line (lesson 14), never the path: it names a person's file
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "deleted": out["exitCode"] == 0, "exit": out["exitCode"], "generation": generation }));
+                match out["exitCode"].as_i64() {
+                    Some(0) => {}
+                    Some(fragment_core::computer::DELETE_REFUSED) => return Err(CellError::new(ErrorCode::NotFound, "no such file in its work: none there, a folder or a link")),
+                    code => return Err(CellError::host(format!("its delete exited {code:?}"))),
+                }
+                // its room and what takes its disk, read again
+                self.read_disk(generation, true).await;
+                json_response(&self.view().await?)
+            }
             (Method::Post, ["sleep"]) => {
                 // a start a wake during its stop owes is its alarm's, as a
                 // restart's is: the sleep answers within its steps' bound

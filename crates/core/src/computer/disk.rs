@@ -201,6 +201,35 @@ pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
     Some(ComputerSizes { at: at_ms, folders, files, kinds: vec![] })
 }
 
+/// What a person's Delete in Storage removes (docs/computers.md, "Room to
+/// restore"): one regular file of its work, named by its path below
+/// `/data` as its summary names it (`work/…`), refused outside `/data/work`
+/// (a `..` or `.` or empty part, a control character, past
+/// `SIZE_PATH_MAX_BYTES`). Answers the command its computer runs (as root):
+/// the path quoted for `sh`, resolved (`readlink -f`, so a link to a folder
+/// elsewhere leads nowhere) and held to `/data/work/` again, a regular file
+/// that is no link itself; it exits 0 once that file is gone, and
+/// `DELETE_REFUSED` for anything else (none there, a folder, a link, a
+/// path that leads out), touching nothing.
+pub fn delete_read(path: &str) -> Result<String, &'static str> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let ok = path.len() <= SIZE_PATH_MAX_BYTES
+        && parts.first() == Some(&"work")
+        && parts.len() >= 2
+        && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != "..")
+        && !path.chars().any(char::is_control);
+    if !ok {
+        return Err("a file is named by its path below /data, in its work (work/…), with no . or .. part");
+    }
+    let quoted = format!("'/data/{}'", path.replace('\'', "'\\''"));
+    Ok(format!(
+        "p={quoted}; r=$(readlink -f -- \"$p\") || exit {DELETE_REFUSED}; case \"$r\" in /data/work/*) ;; *) exit {DELETE_REFUSED} ;; esac; {{ [ -f \"$r\" ] && [ ! -L \"$p\" ]; }} || exit {DELETE_REFUSED}; rm -f -- \"$r\""
+    ))
+}
+
+/// `delete_read`'s exit when it removed nothing.
+pub const DELETE_REFUSED: i64 = 3;
+
 /// What a summary's folders hold, by kind, the most first, none empty
 /// (its owner's Storage). Its agents' own: the folders of `/data` but its
 /// work (the seam: docs/computers.md, "Data and the restore gate"). In its
@@ -546,6 +575,28 @@ mod tests {
         assert_eq!(told(&sizes(vec![entry("work", 2.0), entry("work/a/proj", 2.0)])), [(StorageKind::Projects, 2 * GB)], "nothing in a kind: left out");
         assert_eq!(told(&sizes(vec![entry("hermes", 1.0)])), [(StorageKind::Agents, GB)], "no work");
         assert_eq!(told(&sizes(vec![])), [], "nothing at all");
+    }
+
+    /// Goal (Paul, 2026-11-20: Delete, done by the platform in the
+    /// container, never on a path outside /data/work): what a Delete runs
+    /// for a path as its summary names it. Valid: a file of the work, a
+    /// name with spaces and a quote, quoted for sh. Invalid: outside the
+    /// work, the work or an agent's folder's parent itself, `..`, `.`, an
+    /// empty part, an absolute path, a control character, past its bound.
+    /// What the command does on both images (a file gone; a folder, a link,
+    /// a link to a folder elsewhere and nothing there refused, untouched)
+    /// is the Docker check in the PR that added it.
+    #[test]
+    fn a_delete_is_a_file_of_the_work_alone() {
+        let ran = |path: &str| delete_read(path).expect("a file of the work");
+        assert!(ran("work/juniper/downloads/talk.mp4").starts_with("p='/data/work/juniper/downloads/talk.mp4'; r=$(readlink -f -- \"$p\") || exit 3;"));
+        assert!(ran("work/juniper/downloads/talk.mp4").ends_with("case \"$r\" in /data/work/*) ;; *) exit 3 ;; esac; { [ -f \"$r\" ] && [ ! -L \"$p\" ]; } || exit 3; rm -f -- \"$r\""));
+        assert!(ran("work/a b/it's.mp4").starts_with("p='/data/work/a b/it'\\''s.mp4';"), "a quote closes, is escaped, and opens again");
+        assert!(ran("work/x").starts_with("p='/data/work/x';"));
+        for bad in ["", "work", "work/", "/work/x", "hermes/state.db", "x/work/y", "work/../hermes/state.db", "work/./x", "work//x", "work/x/", "work/a\nb", "work/a\u{0}b", &format!("work/{}", "a".repeat(SIZE_PATH_MAX_BYTES))] {
+            assert!(delete_read(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(DELETE_REFUSED, 3);
     }
 
     /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20.

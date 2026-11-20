@@ -577,6 +577,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         const name = el("span", "storage-file-name", f.name);
         name.title = f.path;
         row.append(name, el("span", "storage-file-folder", f.folder), el("span", "storage-size", storageSize(f.bytes)));
+        // Delete: a file of its work, awake alone (the platform removes it
+        // in its container, no agent asked), asked once
+        if (c.phase === "awake" && f.path.startsWith("work/")) row.append(deleteControl(c, f));
         files.append(row);
       }
       block.append(files);
@@ -584,6 +587,30 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const when = new Date(parts.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     block.append(el("span", "storage-at", `Measured ${when}`));
     return block;
+  }
+  function deleteControl(c, f) {
+    const box = el("span", "storage-file-actions");
+    const ask = el("button", "quiet", "Delete");
+    ask.type = "button";
+    ask.dataset.action = "storage-delete";
+    ask.onclick = () => {
+      const cancel = el("button", "quiet", "Cancel");
+      cancel.type = "button";
+      cancel.onclick = () => box.replaceChildren(ask);
+      const sure = el("button", "danger", "Delete");
+      sure.type = "button";
+      sure.dataset.action = "storage-delete-sure";
+      sure.onclick = () => {
+        sure.disabled = cancel.disabled = true;
+        sure.textContent = "Deleting…";
+        api("POST", `/api/computers/${seg(c.computer)}/files/delete`, { path: f.path })
+          .then(computerIs)
+          .catch((e) => box.replaceChildren(ask, el("span", "form-error", `Couldn't delete it: ${e?.message ?? e}`)));
+      };
+      box.replaceChildren(cancel, sure);
+    };
+    box.append(ask);
+    return box;
   }
   function stateLine(c) {
     const l = line("State", stateSaid(c, active(follow.op())));
