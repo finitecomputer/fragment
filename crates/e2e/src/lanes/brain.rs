@@ -150,8 +150,16 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         })
     });
     s.ok("the person's list says it is a brain, and its title", listed, "");
-    let m = api.signed(&keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
-    s.ok("its repo names the template and its face, nothing else", m.body == json!({ "template": "brain", "meta": { "title": "Garden" } }), &m);
+    let m = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=fragment.json"), None)?;
+    s.ok("it has no repo until its first file (the release's code runs it): no fragment.json of its own (404), and its making named no repo", m.status == 404 && repo.is_empty(), &m);
+    // its preview, asked of its page as the release serves it, makes no repo
+    let asked = api.signed(&keys, "POST", &format!("/api/f/{name}/card"), None)?;
+    let brain_release = fragment_templates::blessed::release("brain").unwrap_or_default();
+    s.ok(
+        "a preview of it before its first file is asked of its release's page (its version the template's release), and makes no repo",
+        asked.status == 200 && asked.body["live"] == brain_release && api.status(&keys, &name)?.body["repo"] == "",
+        &asked,
+    );
     let st = api.status(&keys, &name)?;
     let ops = &st.body["code"]["operations"];
     let release = fragment_templates::blessed::release("brain").map(|r| format!("blessed:brain@{r}"));
@@ -321,6 +329,8 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // an asset: its bytes a blob, named by its source note, served
+    // its repo, made by its first sync
+    let repo = api.status(&keys, &name)?.body["repo"].as_str().unwrap_or("").to_string();
     let pointer = s.fake.file_at(&repo, "main", ASSET).unwrap_or_default();
     s.ok(
         "an asset of 1 MiB or more is a blob: a pointer in git",

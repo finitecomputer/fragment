@@ -51,12 +51,11 @@ pub mod limits {
     /// paragraph, never a manual (`MANIFEST_MAX_BYTES` bounds them all
     /// together).
     pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
-    /// A fragment's title (`fragment.json`'s `meta.title`: an agent's
-    /// name), in characters: in its manifest, given at its create, or
-    /// written by `fragment agent --name`.
+    /// A fragment's title (an agent's name), in characters: given at its
+    /// create, or set through its face (`PUT /api/f/{name}/face`).
     pub const TITLE_MAX_CHARS: usize = 120;
-    /// An agent's role (its `fragment.json`'s `meta.role`: "chief of
-    /// staff"), in characters: a tag beside its name, so a few words.
+    /// An agent's role ("chief of staff"), in characters, set through its
+    /// face: a tag beside its name, so a few words.
     pub const ROLE_MAX_CHARS: usize = 48;
     /// CPU per call into author code: the runtime's guard against a
     /// runaway call, each call's own (measured on a preview, 2026-11-01:
@@ -1059,9 +1058,8 @@ pub struct CreateFragment {
     /// first commit is a `fragment.json` that names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// With `template`, the fragment's title: its first `fragment.json`'s
-    /// `meta.title`, over the template's (at most
-    /// `limits::TITLE_MAX_CHARS`).
+    /// With `template`, the fragment's title, over the template's (at most
+    /// `limits::TITLE_MAX_CHARS`): its face's from its making.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// One of its maker's own agents (its identity), an editor from the
@@ -1144,8 +1142,8 @@ pub struct Urls {
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
-    /// What it is, and its title, as its live `fragment.json` last said
-    /// (an app with no title until it has).
+    /// What it is, as its live `fragment.json` last said (an app until it
+    /// has), and its title, its face's (`PUT /api/f/{name}/face`).
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1244,23 +1242,23 @@ pub enum PageErrorKind {
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
-    /// What it is, and its title, as its live `fragment.json` last said
-    /// (an app with no title until it has).
+    /// What it is, as its live `fragment.json` last said (an app until it
+    /// has), and its title, its face's (`PUT /api/f/{name}/face`).
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// Its picture, as the address on the platform that serves it: an
-    /// agent fragment's `avatar.png` at live (its agent's identity's
+    /// agent fragment's `avatar.png` at main (its agent's identity's
     /// `/api/identities/<npub>/picture?v=…`), any other's icon
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub picture: Option<String>,
-    /// An agent fragment's role (its live `fragment.json`'s `meta.role`,
-    /// trimmed; none when it says nothing), as its last install said: the
-    /// tag the shell shows beside its name. Never any other fragment's.
+    /// An agent fragment's role, as its face says it (trimmed; none when
+    /// it says nothing): the tag the shell shows beside its name. Never
+    /// any other fragment's.
     #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
@@ -1323,6 +1321,26 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub listed: Vec<ListedRecord>,
+}
+
+/// `PUT /api/f/{name}/face` (editors and up): its new title, an agent's
+/// new role (`""` takes it away), or both (docs/api.md, "An agent's
+/// name and picture"); with `was`, only while its title is that
+/// (else 409: a chat titled from its first message keeps a rename made
+/// meanwhile). Answered with its face as its lists show it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaceChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+    /// Its picture's address, in an answer (a change never names one: an
+    /// agent's picture is its `avatar.png`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a

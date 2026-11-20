@@ -672,14 +672,32 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "put": r.status, "status": status.body["reach"], "row": row(&name)["sharing"] }),
     );
     // an operator's census of its owner's fragments (`fragment operator
-    // reach`): each fragment asked its reach, counts alone, no names
+    // reach`): each fragment asked its reach, counts alone; by name only an
+    // agent fragment shared past its owner (FIN-544)
     if s.runs("reach", &[crate::Need::Levers, crate::Need::Operator]) {
         let owner_id = api.identity(&owner)?;
         let census = api.signed(&s.operator, "GET", &format!("/api/admin/people/{owner_id}/reach"), None)?;
         s.ok(
-            "an operator's census of its owner counts it: one app with reach, none open by its link, every fragment answered",
-            census.status == 200 && census.body["owned"].as_u64() >= Some(1) && census.body["reaching"] == json!({ "app": 1 }) && census.body["beyond"] == json!({}) && census.body["unanswered"] == 0,
+            "an operator's census of its owner counts it: one app with reach, none open by its link, no agent fragment shared, every fragment answered",
+            census.status == 200 && census.body["owned"].as_u64() >= Some(1) && census.body["reaching"] == json!({ "app": 1 }) && census.body["beyond"] == json!({}) && census.body["sharedAgents"] == json!([]) && census.body["unanswered"] == 0,
             &census,
+        );
+        // an agent fragment of theirs open by its link from before FIN-544
+        // (a lever leaves it so: none is shared so now), and one kept theirs
+        let named = |base: &str| -> Result<String> {
+            let n = s.named(api, &owner, base)?;
+            let made = api.create_with(&owner, json!({ "name": n, "template": "agent", "title": "Wren" }))?;
+            anyhow::ensure!(made.status == 200, "the agent fragment {base}: {made}");
+            s.owned(&made.body, &owner);
+            Ok(n)
+        };
+        let (shared, private) = (named("reach-shared-agent")?, named("reach-private-agent")?);
+        let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": shared, "op": "legacy-visibility", "visibility": "link" })))?;
+        let census = api.signed(&s.operator, "GET", &format!("/api/admin/people/{owner_id}/reach"), None)?;
+        s.ok(
+            "and names each agent fragment of theirs shared past them and their own agents (one open by its link from before FIN-544), not one kept theirs, its counts as they were",
+            lever.status == 200 && census.status == 200 && census.body["sharedAgents"] == json!([shared]) && census.body["reaching"] == json!({ "app": 1 }) && census.body["beyond"] == json!({}) && census.body["unanswered"] == 0,
+            json!({ "private": private, "census": census.body }),
         );
     }
     let (_, agent_id) = api.own_agent(&owner)?;
@@ -1077,10 +1095,10 @@ fn first_row_names_its_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str
     let deadline = Instant::now() + Duration::from_secs(60);
     s.fake.set_latency(Duration::from_millis(250));
     let (made, rows, before) = std::thread::scope(|scope| {
-        let made = scope.spawn(|| api.create_with(owner, json!({ "name": name, "template": "chat", "title": "Held", "agent": agent })));
+        let made = scope.spawn(|| api.create_with(owner, json!({ "name": name, "template": "todo", "title": "Held", "agent": agent })));
         // each distinct row the list shows, and how many while its seed
-        // runs (before its template landed): in the create, or after its
-        // answer (a chat's, publish.rs `seeds_later`)
+        // runs (before its template landed), in its create (a copied
+        // template's: a blessed one's waits for its first file)
         let (mut rows, mut before): (Vec<Value>, usize) = (vec![], 0);
         loop {
             let answered = made.is_finished();

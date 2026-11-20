@@ -4,6 +4,7 @@ mod admin;
 mod agent_app;
 mod agent_ask;
 mod agent_restart;
+mod agent_sharing;
 mod agent_smoke;
 mod ai_tools;
 mod app;
@@ -102,6 +103,7 @@ const LANES: &[Lane] = &[
     templates::templates,
     share::share,
     faces::faces,
+    agent_sharing::agent_sharing,
     isolation::isolation,
     frames::frames,
     app::ops,
@@ -179,6 +181,7 @@ const LANES: &[Lane] = &[
     migrations::migrations,
     moves::moves,
     moves::move_import,
+    moves::move_big,
     moves::move_ui,
     moves::move_comp,
     restart::restart,
@@ -210,14 +213,14 @@ pub const SHARDS: [&[&str]; 5] = [
     ],
     &["shell-ui"],
     &[
-        "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
+        "lockdown", "templates", "faces", "agent-sharing", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "trial-seats", "transcribe",
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "door", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
+        "members", "billing", "governance", "billing-page", "move", "move-import", "move-big", "move-ui", "move-comp",
     ],
 ];
 

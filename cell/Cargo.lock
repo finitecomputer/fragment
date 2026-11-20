@@ -397,6 +397,7 @@ name = "fragment-cell"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "crc32fast",
  "fragment-core",
  "fragment-nip98",
  "fragment-proto",

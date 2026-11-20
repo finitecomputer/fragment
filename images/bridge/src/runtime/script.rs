@@ -166,6 +166,11 @@ pub struct ScriptConfig {
     /// What `write` and `read` name paths under (`/data`: what a computer
     /// keeps).
     pub data: PathBuf,
+    /// Its memory of each agent's chats, as Hermes' profile is (`<memory>/
+    /// <agent>`: `Runtime::memory`). It remembers nothing there itself, so
+    /// its turns are told what Hermes' would be when that memory is behind.
+    /// None: it keeps none.
+    pub memory: Option<PathBuf>,
 }
 
 /// A path `write` and `read` take: relative, at most eight parts of
@@ -215,6 +220,11 @@ impl Runtime for Script {
         MENU
     }
 
+    fn memory(&self) -> Option<super::Memory> {
+        let memory = self.config.memory.clone()?;
+        Some(std::sync::Arc::new(move |agent: &str| memory.join(agent)))
+    }
+
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
         Box::pin(run(self.config, io))
     }
@@ -246,6 +256,7 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
         turns.retain(|_, tx| !tx.is_closed());
         match c {
             Command::Start(ts) => {
+                let _ = io.events.send(Event::Taken { turn: ts.turn.clone() }).await;
                 let (tx, rx) = mpsc::channel(8);
                 turns.insert(ts.turn.clone(), tx);
                 tokio::spawn(turn(cfg.clone(), *ts, rx, io.events.clone()));

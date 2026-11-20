@@ -141,6 +141,11 @@ tar -C "$H" --exclude=AGENTS.md --exclude=_index.md --exclude=.keep --exclude=_w
 ls "$C" && find "$C" -type f | wc -l
 ```
 
+In a move, its files are kept whole in your storage too (`SKILL.md`,
+step 3). A copy that won't fit your disk's room comfortably, keep none
+of: its note under `~/old-agent/home/workspace/finitebrain/` brings it
+back when you need it, and the README line says so.
+
 Bring its assets in as above, into the copy. Then mark what it is:
 - In `$HOME/old-finite-brains/README.md`, a line for it: its name, whose
   it was, and that it is a copy from finite.computer (the old Finite),

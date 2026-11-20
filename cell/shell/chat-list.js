@@ -261,7 +261,9 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     row.type = "button";
     row.dataset.key = `agent:${agent.fragment}`;
     const was = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"]`);
-    if (was?.hasAttribute("style")) row.setAttribute("style", was.getAttribute("style"));
+    // copied by the CSSOM: the page's CSP refuses a style attribute set
+    // from a string (`style-src` has no 'unsafe-inline')
+    for (const prop of was?.style ?? []) row.style.setProperty(prop, was.style.getPropertyValue(prop));
     row.setAttribute("aria-label", `${name}: its menu`);
     row.setAttribute("aria-haspopup", "menu");
     row.setAttribute("aria-controls", "menu");
@@ -432,10 +434,10 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   let sidebarEdgePointer = null;
   const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".agent-hero, .sidebar-new-chat");
   const expandedEdge = (control) => control.getAttribute("aria-expanded") === "true" && !menu.hidden && menu.classList.contains("agent-menu");
-  const edgeLit = new WeakMap();
+  // whether it is lit is its own style's, so a hero drawn again with the
+  // edge it kept (`hero`) goes dark as the pointer leaves
   function lightEdge(surface, x, y, light) {
-    if (!light && !edgeLit.get(surface)) return;
-    edgeLit.set(surface, light);
+    if (!light && !Number(surface.style.getPropertyValue("--edge-light"))) return;
     surface.style.setProperty("--edge-x", `${x}px`);
     surface.style.setProperty("--edge-y", `${y}px`);
     surface.style.setProperty("--edge-light", String(light));

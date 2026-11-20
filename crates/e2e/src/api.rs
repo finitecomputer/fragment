@@ -990,6 +990,17 @@ impl Socket {
         }
     }
 
+    /// The close that ends it, its frames before it read and dropped (at
+    /// most `limit`): its code and reason. `Err` on a timeout.
+    pub fn closed(&mut self, limit: usize) -> Result<(u16, String)> {
+        for _ in 0..limit {
+            if let tungstenite::Message::Close(f) = self.0.read()? {
+                return Ok(f.map(|f| (u16::from(f.code), f.reason.to_string())).unwrap_or((1005, String::new())));
+            }
+        }
+        anyhow::bail!("no close within {limit} frames")
+    }
+
     /// Sends `bytes` as one binary frame (an RFB client's).
     pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.0.send(tungstenite::Message::Binary(bytes.to_vec().into()))?;
