@@ -1158,9 +1158,10 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], restor
         let asked = Instant::now();
         restoring.lock().expect("the restores are never poisoned").asked = Some(Instant::now());
         match ask_gateway(home, "rescan-profiles").await {
-            // the profiles it serves now ready for Hermes (`serve_check`)
+            // the profiles it serves now ready for Hermes, every agent's
+            // it lists, not only the added ones' (`serve_check`)
             Ok(answer) => {
-                served(&answer, &change.added, restoring);
+                served(&answer, now, restoring);
                 ev!("agents.served", { "added": answer["added"], "pending": answer["pending"], "unserved": agents::unserved(&change.added, &answer), "ms": asked.elapsed().as_millis() as u64 })
             }
             // every relayed turn resolves its profile as it arrives, and Hermes
