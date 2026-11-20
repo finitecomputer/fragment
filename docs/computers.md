@@ -435,7 +435,7 @@ Node's, and its Chromium's policy).
   `DirectoryBackup` saves and restores `/data` through it.
 - `sh` (with its `test` and `printf`), `true`, `mkdir`, `touch`, `rm` and
   `cat`, with which the DO polls, marks and reads its markers; `df`, `du`
-  and `tail`, with which it reads its disk (below, "Room to restore"). GNU's
+  and `cut`, with which it reads its disk (below, "Room to restore"). GNU's
   and BusyBox's alike.
 
 ### The hold
@@ -589,7 +589,12 @@ stopped in its restore of `/data/work` with about 200 MB free).
   restores its copy; GNU's `du --exclude` leaves out what the save does
   without walking it, so a file hard-linked between a cache left out and
   the work kept (uv's and pnpm's caches link into projects) counts where
-  it restores. A `du` with no `--exclude` (BusyBox's, the stub's) counts
+  it restores. The shell finds what each pattern names (a `*` never
+  crosses a `/` nor matches a leading `.`, as the save's gitignore-style
+  patterns' `*` is one name), so `du` leaves out those paths alone, and
+  where the two differ it counts more, never less; each pattern is in the
+  command once, so a guest's largest answer fits one exec's argument
+  (`EXEC_ARG_MAX_BYTES`). A `du` with no `--exclude` (BusyBox's, the stub's) counts
   all of `/data`, once. A record not read leaves the last read's size in
   place, and a walk that failed part-way still gives its `df`. On ext4
   the allocated size is exactly what a restore writes; on btrfs it is a
