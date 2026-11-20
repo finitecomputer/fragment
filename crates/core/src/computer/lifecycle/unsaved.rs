@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(stopped.actions, vec![Action::Stop { generation: g, saved: false }], "nothing past the bound is metered for the try at it");
         assert!(matches!(&stopped.note, SaveNote::Says(why) if why.contains("slept unsaved")), "{:?}", stopped.note);
         let s = l.apply_with(Event::Asleep { generation: g }, at + 5_000, &rules);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: false, at_ms: at + 5_000, restart: false, quiet: true }), "its next wake is a rollback");
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: false, at_ms: at + 5_000, restart: false, quiet: true, unchanged: true }), "its next wake is a rollback");
         assert_eq!(s.actions.first(), Some(&Action::Meter { from_ms: at, to_ms: at + 5_000 }), "the stop's own seconds");
         // what it said goes with the next life's first save that works
         let t = at + 60_000;
@@ -457,7 +457,7 @@ mod tests {
         assert!(matches!(&stopped.note, SaveNote::Says(why) if why.contains("slept unsaved")), "{:?}", stopped.note);
         let s = l.apply_with(Event::Asleep { generation: g }, at + 5_000, &rules);
         keep(&s, &mut metered);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: false, at_ms: at + 5_000, restart: false, quiet: true }), "its next wake is a rollback");
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: false, at_ms: at + 5_000, restart: false, quiet: true, unchanged: true }), "its next wake is a rollback");
         assert!(!stopped.actions.iter().any(|a| matches!(a, Action::Meter { .. })), "the try at the bound is free past it too: {stopped:?}");
         // billing: nothing from its first try's start to its last's failure,
         // all else once: the time before, and its stop's seconds
@@ -472,15 +472,18 @@ mod tests {
         // after a pause, and its owner is told from the second in a row
         let mut l = Lifecycle::new();
         let g = started(&mut l, T);
+        // a person at work through a port tab keeps it awake
         l.apply(Event::Opened { socket: Socket::Tab }, T + 4_000);
         l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
         l.apply(Event::Closed { socket: Socket::Keepalive }, T + 10_000);
         let mut at = T + 10_000 + SAVE_SETTLE_MS;
         for n in 1..=UNSAVED_NOTICE_FAILURES {
+            l.apply(Event::TabUsed, at);
             let s = l.apply(Event::Alarm, at);
             assert_eq!(s.actions.last(), Some(&Action::Hold { generation: g }), "save {n}, awake: {s:?}");
             let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
             let due = at + 500 + SAVE_DEADLINE_MS;
+            l.apply(Event::TabUsed, due);
             let s = l.apply(Event::Alarm, due);
             assert_eq!(s.actions.last(), Some(&Action::Unhold { generation: g }), "save {n} failed: {s:?}");
             assert!(matches!(l.phase, Phase::Awake { .. }) && l.saving().is_none());
@@ -664,10 +667,19 @@ mod tests {
         c.now = since + rules.unsaved_max_ms - 60_000;
         c.apply(Event::Wake { why: Wake::Record });
         assert!(matches!(unsaved(&c), Some(ComputerNotice::Unsaved { stops_at: Some(at), .. }) if at == c.now + IDLE_MS), "{:?}", unsaved(&c));
-        // a tab open (in use): no stop is due while it is
+        // a tab its person uses holds it as a record does: its stop moves
+        // to that hold's end; one merely open moves it no further
         c.apply(Event::Opened { socket: Socket::Tab });
-        assert!(matches!(unsaved(&c), Some(ComputerNotice::Unsaved { stops_at: None, .. })), "never while in use");
+        c.apply(Event::TabUsed);
+        let used = c.now;
+        c.now += IDLE_MS / 2;
+        c.apply(Event::Alarm);
+        assert!(matches!(unsaved(&c), Some(ComputerNotice::Unsaved { stops_at: Some(at), .. }) if at == used + IDLE_MS), "{:?}", unsaved(&c));
         c.apply(Event::Closed { socket: Socket::Tab });
+        // a turn running: no stop is due while it is
+        c.apply(Event::Opened { socket: Socket::Keepalive });
+        assert!(matches!(unsaved(&c), Some(ComputerNotice::Unsaved { stops_at: None, .. })), "never while a turn runs");
+        c.apply(Event::Closed { socket: Socket::Keepalive });
         // always on, it never sleeps, so never stops
         c.apply(Event::AlwaysOn { on: true });
         assert!(matches!(unsaved(&c), Some(ComputerNotice::Unsaved { stops_at: None, .. })));
