@@ -3638,7 +3638,7 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
             .and_then(|r| r.body["records"].as_array().cloned())
             .unwrap_or_default()
             .iter()
-            .filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo:") && t.contains("filled work/e2e/")))
+            .filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("filled work/e2e/")))
             .count()
             == files.len()
     };
