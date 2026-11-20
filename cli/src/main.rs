@@ -593,6 +593,16 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Start a person's computer from one of the saves it keeps (its
+    /// number, as `person` lists them), while it is asleep or won't wake:
+    /// its next start restores that save, and the newer are set aside, kept
+    /// for a while and exportable, never restored by a start
+    StartFrom {
+        npub: String,
+        save: u64,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// List orgs, a page at a time: seats, admins, Stripe status
     Orgs {
         #[arg(long)]
@@ -1684,6 +1694,18 @@ fn run(cli: Cli) -> Result<()> {
             };
             let told = if v["notices"].as_array().is_some_and(|n| n.iter().any(|n| n["kind"] == "update")) { "; its owner is told an update is ready" } else { "" };
             println!("pinned {npub}'s computer to {}: {runs}, its next start runs {}{told}", v["image"].as_str().unwrap_or("?"), v["latest"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::StartFrom { npub, save, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.post_json(&format!("/api/admin/people/{npub}/computer/start-from"), &json!({ "save": save }))?)?;
+            json_exit(j, &v);
+            let aside: Vec<String> = v["saves"].as_array().into_iter().flatten().filter(|s| s["setAside"].is_i64()).filter_map(|s| s["number"].as_u64()).map(|n| n.to_string()).collect();
+            let aside = match aside.is_empty() {
+                true => "nothing set aside".to_string(),
+                false => format!("set aside: {}", aside.join(", ")),
+            };
+            println!("{npub}'s computer starts from save {save} at its next wake ({aside}); it is {}", v["phase"].as_str().unwrap_or("?"));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Orgs { after, key_file } } => {
