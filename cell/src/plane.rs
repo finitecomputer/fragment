@@ -1111,7 +1111,10 @@ impl FragmentCell {
         self.require(caller, false, Role::Viewer)?;
         let mut manifest = match (self.meta(MetaKey::ManifestMain)?, self.meta(MetaKey::TemplatePending)?) {
             (Some(text), _) => crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?,
-            (None, Some(which)) if self.pin("main")?.is_none() => serde_json::from_slice(&crate::publish::blessed_manifest_bytes(&which)).map_err(|e| CellError::host(e.to_string()))?,
+            // a blessed template's alone: a copied one's first commit is its own files
+            (None, Some(which)) if self.pin("main")?.is_none() && blessed::template(&which).is_some() => {
+                serde_json::from_slice(&crate::publish::blessed_manifest_bytes(&which)).map_err(|e| CellError::host(e.to_string()))?
+            }
             _ => return Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
         };
         if let (Some(title), Some(fields)) = (self.face_now()?.title, manifest.as_object_mut()) {

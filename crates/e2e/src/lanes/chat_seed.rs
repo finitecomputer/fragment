@@ -316,6 +316,19 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
             return Err(e);
         }
     };
+    // a copied template's first commit failed too: it has no manifest to
+    // give a client from before the face (only a blessed one's is the
+    // release's, its first commit's to be)
+    let copied = api.create_with(owner, json!({ "label": s.name("seed-half-todo"), "template": "todo" }))?;
+    s.owned(&copied.body, owner);
+    let copied_name = copied.body["name"].as_str().unwrap_or("").to_string();
+    let none = api.signed(owner, "GET", &format!("/api/f/{copied_name}/manifest"), None)?;
+    let pending = api.signed(owner, "GET", &format!("/api/f/{half}/manifest"), None)?;
+    s.ok(
+        "while their first commits fail, a copied template's GET manifest is 404, and a blessed one's answers the manifest its first commit will hold, with its title",
+        copied.status == 200 && none.status == 404 && pending.status == 200 && pending.body["template"] == "chat" && pending.body["meta"]["title"] == "Half",
+        format!("{copied} / {none} / {pending}"),
+    );
     // its first writer makes its repo; its commit fails
     let first = api.signed(owner, "GET", &format!("/api/f/{half}/storage-token"), None)?;
     let failed = first.status == 502 && repo_url(s, &half).is_some_and(|url| s.fake.requests(&url, "POST commit-pack") >= 1);
