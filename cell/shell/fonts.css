@@ -1,0 +1,14 @@
+/* The platform's type: Funnel Sans and JetBrains Mono, the release's own
+   files beside this one (CREDITS.md; both under the SIL Open Font
+   License). One file on two origins, its fonts named relative to it: the
+   shell's (/__shell/fonts.css) and every fragment's (/__fonts/fonts.css,
+   cell/src/shell.rs `fragment_font`), which cell/fragment.css imports and
+   the chat's page links. A page of ours loads no font from another domain
+   (xtask/src/remote_loads.rs). */
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:400;font-display:swap;src:url("funnel-sans-400.ttf") format("truetype")}
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:500;font-display:swap;src:url("funnel-sans-500.ttf") format("truetype")}
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:600;font-display:swap;src:url("funnel-sans-600.ttf") format("truetype")}
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:700;font-display:swap;src:url("funnel-sans-700.ttf") format("truetype")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url("jetbrains-mono-400.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:500;font-display:swap;src:url("jetbrains-mono-500.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:600;font-display:swap;src:url("jetbrains-mono-600.woff2") format("woff2")}

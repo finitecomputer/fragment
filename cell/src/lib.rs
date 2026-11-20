@@ -1044,6 +1044,10 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     if shell::is_fragment_sheet(rest) && matches!(req.method(), Method::Get | Method::Head) {
         return shell::fragment_sheet_asset(&req, env).await;
     }
+    // and the platform's type, which its pages load from it (shell.rs `fragment_font`)
+    if let Some(font) = shell::fragment_font(rest).filter(|_| matches!(req.method(), Method::Get | Method::Head)) {
+        return shell::fragment_font_asset(&req, env, font).await;
+    }
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
     }

@@ -68,6 +68,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && header("content-type").starts_with("text/html")
             && r.text.contains(&format!("<title>{title}</title>"))
             && r.text.contains(&format!("<h1>{h1}</h1>"))
+            && r.text.contains("/__shell/fonts.css")
             && r.text.contains("/__shell/platform-pages.css")
             && r.text.contains("/__shell/legal.css")
             && !r.text.contains("<script")
@@ -75,13 +76,28 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && header("content-security-policy").contains("font-src 'self'")
     });
     // their stylesheets, their paper's edge, and the type they and the shell
-    // share (platform-pages.css), the release's own; and the cell's pages'
+    // share (fonts.css), the release's own; and the cell's pages'
     // base look and their card's script, which they link too
-    let published = ["legal.css", "platform-pages.css", "funnel-sans-400.ttf", "funnel-sans-500.ttf", "funnel-sans-600.ttf", "funnel-sans-700.ttf", "paper-edge.svg", "sheet.css", "platform-pages.js"]
+    let published = [
+        "legal.css",
+        "platform-pages.css",
+        "fonts.css",
+        "funnel-sans-400.ttf",
+        "funnel-sans-500.ttf",
+        "funnel-sans-600.ttf",
+        "funnel-sans-700.ttf",
+        "jetbrains-mono-400.woff2",
+        "jetbrains-mono-500.woff2",
+        "jetbrains-mono-600.woff2",
+        "paper-edge.svg",
+        "sheet.css",
+        "platform-pages.js",
+    ]
         .iter()
         .map(|f| api.unsigned("GET", &format!("/__shell/{f}"), None).map(|r| (r.status, r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string())))
         .collect::<Result<Vec<_>>>()?;
-    let typed = published.iter().zip(["text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf", "image/svg+xml", "text/css", "text/javascript"]).all(|((status, got), want)| *status == 200 && got.starts_with(want));
+    let types = ["text/css", "text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf", "font/woff2", "font/woff2", "font/woff2", "image/svg+xml", "text/css", "text/javascript"];
+    let typed = published.iter().zip(types).all(|((status, got), want)| *status == 200 && got.starts_with(want));
     s.ok(
         "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, in the release's own type (their CSP allows its fonts), their stylesheets and paper published, never framed",
         shown && typed,
@@ -978,6 +994,8 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
             && page.text.contains(&format!(r#"<meta name="fragment-release" content="{release}">"#))
             && at.is_some_and(|t| t > 0 && t as i64 <= crate::api::now_s() + 60)
             && page.header("content-security-policy").contains("frame-ancestors 'none'")
+            // its styles and fonts from this origin alone: none from another domain
+            && ["style-src 'self'", "font-src 'self'"].iter().all(|d| page.header("content-security-policy").split(';').any(|have| have.trim() == *d))
             && page.header("x-frame-options") == "DENY"
             && page.header("cache-control") == "no-store"
             && origin.replace(fragment_templates::ORIGIN_NAME, "todo--k3x9") == api.site_origin("todo--k3x9"),
@@ -1088,7 +1106,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         logo == json!({ "src": "/__shell/finite-logo.svg", "drawn": true, "status": 200, "type": "image/svg+xml" }),
         &logo,
     );
-    // its type is the release's own Funnel Sans (platform-pages.css), loaded under
+    // its type is the release's own Funnel Sans (fonts.css), loaded under
     // the shell's CSP: the card's title (500) and its words (400)
     let faces = b.eval(
         &page,
@@ -1099,6 +1117,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         faces.as_array().is_some_and(|w| w.contains(&json!("400")) && w.contains(&json!("500"))),
         &faces,
     );
+    let seen = super::templates::own_type(&mut b, &page)?;
+    s.ok("and its code type, JetBrains Mono, loads too: every font from its own origin (/__shell/), nothing from another", super::templates::drawn_in_own_type(&seen, "/__shell/"), &seen);
     // evidence for a person: the signed-out page, on a desktop and a phone,
     // in its own fonts
     let _ = b.eval(&page, "document.fonts.ready.then(() => true)");

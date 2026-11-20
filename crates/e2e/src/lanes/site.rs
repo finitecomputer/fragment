@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -163,6 +163,48 @@ fn watch_answered(api: &Api, name: &str, query: &str) -> Result<(tungstenite::We
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
     }
     Ok((socket, answer))
+}
+
+/// The platform's type on a fragment's origin, which `__fragment.css`
+/// (`css`) imports from it, never from another domain: `__fonts/fonts.css`
+/// and each font it names beside it, the shell's own bytes, to whoever
+/// asks (the release's files are no one's), and nothing else of the
+/// shell's there: the rest is the fragment's own, asked as its viewer
+/// (`cookie`).
+fn platform_type(s: &mut Suite, api: &Api, name: &str, cookie: &str, css: &Reply) -> Result<()> {
+    let release = fragment_templates::shell("fonts.css").context("the release's fonts.css")?;
+    let fonts = api.page(name, "__fonts/fonts.css", None)?;
+    let named: Vec<&str> = fonts.text.split("url(\"").skip(1).filter_map(|rest| rest.split_once('"')).map(|(n, _)| n).collect();
+    let mut served = vec![];
+    for font in &named {
+        let r = api.page(name, &format!("__fonts/{font}"), None)?;
+        let same = fragment_templates::shell(font).is_some_and(|f| f.bytes == r.bytes.as_slice());
+        served.push(json!({ "font": font, "status": r.status, "type": r.header("content-type"), "release": same, "cors": r.header("access-control-allow-origin") }));
+    }
+    let woff2 = named.iter().filter(|n| n.ends_with(".woff2")).count();
+    s.ok(
+        "__fragment.css imports the platform's type from this origin (__fonts/fonts.css, the release's), which names its seven fonts beside it, each served as the release's bytes and type to anyone, any origin too (a sandboxed page's fonts)",
+        css.text.contains("@import url(\"__fonts/fonts.css\");")
+            && !css.text.contains("://")
+            && fonts.status == 200
+            && fonts.bytes == release.bytes
+            && fonts.header("content-type") == "text/css; charset=utf-8"
+            && named.len() == 7
+            && woff2 == 3
+            && served.iter().all(|f| f["status"] == 200 && f["release"] == true && f["cors"] == "*" && f["type"].as_str().is_some_and(|t| t.starts_with("font/"))),
+        json!({ "fonts.css": fonts.status, "named": named, "served": served }),
+    );
+    let mut other = vec![];
+    for path in ["__fonts/shell.css", "__fonts/platform-pages.css", "__fonts/index.html", "__fonts/CREDITS.md", "__fonts/vendor/jetbrains-mono-OFL.txt", "__fonts/"] {
+        other.push((path, api.page(name, path, Some(cookie))?.status));
+    }
+    let post = api.call(Call { method: "POST", url: api.site_url(name, "__fonts/fonts.css"), cookie: Some(cookie.to_string()), ..Call::default() })?;
+    s.ok(
+        "nothing else of the shell's is under __fonts/ (its other files, its pages, credits and licenses: the fragment's own paths, none here), and only GET and HEAD are the platform's",
+        other.iter().all(|(_, status)| *status == 404) && post.status == 404,
+        json!({ "other": other, "post": post.status }),
+    );
+    Ok(())
 }
 
 pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
@@ -358,6 +400,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let r = api.page(&name, "__fragment.css", Some(&cookie))?;
     s.ok("__fragment.css is a stylesheet: the theme's variables", r.status == 200 && r.header("content-type") == "text/css; charset=utf-8" && r.text.contains("--accent:"), r.header("content-type"));
+    platform_type(s, api, &name, &cookie, &r)?;
     s.commit(&c, &[("site/style.css", Some(b"body{color:blue}"))]);
     s.deploy(&c);
     let r = conditional("style.css", &css)?;
