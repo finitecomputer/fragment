@@ -400,21 +400,23 @@ class ContainerHost {
 
   // Its running start `generation`'s intercepts again (a new isolate's),
   // and the runtime's idle stop, the safety net under the Computer DO's
-  // own sleep.
+  // own sleep. Answers the swap hosts its container had no room for
+  // (intercepts.mjs `landed`), or false: that start was superseded.
   async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return false;
-    await this.#intercept(computer, swapHosts, codestorage);
+    const full = await this.#intercept(computer, swapHosts, codestorage);
     await settled(() => this.#c.setInactivityTimeout(idleMs));
-    return generation === this.#generation;
+    return generation === this.#generation && full;
   }
 
   // `hosts` more for its running start `generation`'s swap (its agents'
-  // Vault secrets'), those alone (`interceptSwap`). False: that start was
-  // superseded, before or while they registered.
+  // Vault secrets'), those alone (`interceptSwap`). Answers those its
+  // container had no room for, or false: that start was superseded,
+  // before or while they registered.
   async armSwap(generation, computer, hosts) {
     if (generation !== this.#generation) return false;
-    await interceptSwap(this.#c, this.#egress(computer), hosts);
-    return generation === this.#generation;
+    const full = await interceptSwap(this.#c, this.#egress(computer), hosts);
+    return generation === this.#generation && full;
   }
 
   // Waits until the container takes an exec (it is up), for at most `ms`.

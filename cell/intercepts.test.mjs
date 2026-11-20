@@ -147,3 +147,40 @@ test("a Vault host its guest's view names, running, is registered alone: never t
   assert.deepEqual(seen.asked, ["http://api.vault.test → swap", "https://api.vault.test → swap"]);
   assert.equal(seen.started, 1, "it starts nothing");
 });
+
+// A running container with Cloudflare's rules for its 128 entries (#1427):
+// each target (a scheme and a host) two of them, one registered again none
+// more, none given back; past them, its own words. `held`: its targets.
+const LIMIT = "You can't configure more than 128 egress interceptors";
+function full(held) {
+  const targets = new Set(held);
+  const register = (scheme) => async (host) => {
+    const target = `${scheme}://${host}`;
+    if (!targets.has(target) && 2 * (targets.size + 1) > 128) throw new Error(LIMIT);
+    targets.add(target);
+  };
+  return { targets, interceptOutboundHttp: register("http"), interceptOutboundHttps: register("https") };
+}
+const hosts = (prefix, n) => Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(2, "0")}.example.test`);
+const both = (list) => list.flatMap((h) => [`http://${h}`, `https://${h}`]);
+const PLATFORM = [`http://${API}`, `http://${MODEL}`];
+
+test("a container taken over holding hosts set before: one it has no room for is left and answered, never a failed arm", async () => {
+  // the platform's two, 30 swap hosts and one stray: 126 of its 128
+  const c = full([...PLATFORM, ...both(hosts("old", 30)), "http://stray.example.test"]);
+  assert.deepEqual(await intercept(c, egress, [...hosts("old", 30), "new.example.test"], false), ["new.example.test"]);
+  assert.equal(c.targets.size * 2, 128);
+});
+
+test("two Vault hosts racing for a running container's last room: both answer, the one left named", async () => {
+  // 124 of its 128: room for one host on both schemes
+  const c = full([...PLATFORM, ...both(hosts("held", 30))]);
+  const answers = await Promise.all([interceptSwap(c, egress, ["za.example.test"]), interceptSwap(c, egress, ["zb.example.test"])]);
+  assert.deepEqual(answers, [[], ["zb.example.test"]]);
+});
+
+test("no room for the platform's own still fails, and so does any other refusal of a swap host", async () => {
+  await assert.rejects(intercept(full(both(hosts("held", 32))), egress, [], false), { message: LIMIT });
+  const { c } = container({ fail: "https://api.example.com → swap" });
+  await assert.rejects(intercept(c, egress, SWAP, false), /refused/);
+});

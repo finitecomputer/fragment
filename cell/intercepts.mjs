@@ -22,11 +22,20 @@ export async function settled(f) {
   }
 }
 
+// A container's 128 entries spent (Cloudflare's words for it): the
+// intercepts registered before keep working, and none is ever given back
+// while it runs (fragment_core::computer::egress).
+const FULL = /more than 128 egress interceptors/;
+
 // Each of `hosts` caught by the swap, on HTTPS and on plain HTTP alike:
 // the swap always sends on over HTTPS, so a credential never crosses the
-// internet in the clear.
+// internet in the clear. Each registration names its host: one the
+// container has no room for is left (`landed`).
 function swapped(c, egress, hosts) {
-  return hosts.flatMap((host) => [() => c.interceptOutboundHttp(host, egress("swap")), () => c.interceptOutboundHttps(host, egress("swap"))]);
+  return hosts.flatMap((host) => [
+    { host, f: () => c.interceptOutboundHttp(host, egress("swap")) },
+    { host, f: () => c.interceptOutboundHttps(host, egress("swap")) },
+  ]);
 }
 
 // Registers every egress intercept of a computer's guest on container `c`,
@@ -34,13 +43,14 @@ function swapped(c, egress, hosts) {
 // local fleet's code.storage (`codestorage`: at a loopback address the
 // container cannot reach), each of `swapHosts` (`swapped`), each
 // `ComputerEgress` with its route as `egress(route)` makes it. None
-// survives a stop: each start registers them again.
+// survives a stop: each start registers them again. Answers the swap
+// hosts left for want of room (`landed`).
 export function intercept(c, egress, swapHosts, codestorage) {
   const each = [
-    () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
-    () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
+    { f: () => c.interceptOutboundHttp("api.fragment.internal", egress("api")) },
+    { f: () => c.interceptOutboundHttp("model.fragment.internal", egress("model")) },
   ];
-  if (codestorage) each.push(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
+  if (codestorage) each.push({ f: () => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")) });
   each.push(...swapped(c, egress, swapHosts));
   return landed(each);
 }
@@ -52,14 +62,23 @@ export function interceptSwap(c, egress, hosts) {
   return landed(swapped(c, egress, hosts));
 }
 
-// Each of `each` (a call that registers one intercept) at once, answered
-// once every one has: one that fails fails it (the first's reason), never
-// while another is still on its way to the runtime, so nothing of a failed
-// start's lands after it.
+// Each of `each` (a call `f` that registers one intercept, of a swap
+// `host` or the platform's) at once, answered once every one has: one that
+// fails fails it (the first's reason), never while another is still on its
+// way to the runtime, so nothing of a failed start's lands after it. A swap
+// host the container has no room for (`FULL`: a container taken over may
+// hold hosts set before; two arms may race for the last room) is no
+// failure: it goes uncaught, and the hosts so left, each once, are the
+// answer. The platform's own never are.
 async function landed(each) {
-  const answers = await Promise.allSettled(each.map((f) => settled(f)));
-  const failed = answers.find((a) => a.status === "rejected");
-  if (failed) throw failed.reason;
+  const answers = await Promise.allSettled(each.map((e) => settled(e.f)));
+  const full = new Set();
+  for (const [i, a] of answers.entries()) {
+    if (a.status === "fulfilled") continue;
+    if (each[i].host && FULL.test(String(a.reason))) full.add(each[i].host);
+    else throw a.reason;
+  }
+  return [...full];
 }
 
 // Starts container `c` (`opts`) once `intercepted()` has registered its
