@@ -98,5 +98,5 @@ pub use limits::{
     WONT_WAKE_RETRY_MS,
 };
 pub use notices::{notices, support_url_ok, SUPPORT_URL_MAX_BYTES};
-pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, NotChosen, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
+pub use saves::{Plan, Running, Save, Saves, Snapshot, Starting, NotChosen, VaultAsked, WentBack, FORGETTING_MAX, SAVE_RECORDS_MAX};
 pub use which::default_computer_of;

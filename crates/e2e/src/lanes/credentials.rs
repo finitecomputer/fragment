@@ -992,6 +992,32 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
     "a Nostr key kept parked, then pointed at its host by its person with no value, is in the agent's view and signs there by that key",
 ];
 
+/// A Vault secret bound while its computer sleeps, to a host none of its
+/// starts caught before (a local node keeps a container's intercepts from
+/// one start to the next), filled there after its wake: its start asked
+/// the Vault beside the container's start and caught the host
+/// (`ComputerCell::try_start`, `arm_more`).
+pub(super) const VAULT_AFTER_WAKE: &str = "a Vault secret bound while it slept is filled at its host after its wake: its start asked the Vault beside the container's start and caught the host";
+const WAKE_VAULT_HOST: &str = "api.vault-wake.test";
+const WAKE_VAULT_SECRET: &str = "e2e-vault-wake";
+
+/// `VAULT_AFTER_WAKE`'s secret, bound while its computer sleeps: its value.
+pub(super) fn vault_while_asleep(api: &Api, w: &Swapping) -> Result<String> {
+    let value = format!("vault-wake-{}", &fragment_nip98::Keys::generate().pubkey_hex()[..24]);
+    vault_put(api, w, WAKE_VAULT_SECRET, json!({ "value": value, "hosts": [WAKE_VAULT_HOST], "agents": [w.agent] }))?;
+    Ok(value)
+}
+
+/// `VAULT_AFTER_WAKE`, awake again: the agent's request with the secret's
+/// placeholder, filled at its host. Answers the turns it took.
+pub(super) fn vault_after_wake(s: &mut Suite, w: &Swapping, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, value: &str) -> Result<usize> {
+    let before = s.upstream.seen().len();
+    let r = fetched(s, 621, &format!("fetch http://{WAKE_VAULT_HOST}/v1/me with {}", placeholder(s, w.id, w.agent, WAKE_VAULT_SECRET)))?;
+    let seen = last_seen(s, before);
+    s.ok(VAULT_AFTER_WAKE, r.starts_with("fetched 200") && seen["host"] == WAKE_VAULT_HOST && seen["auth"]["authorization"] == format!("Bearer {value}") && !r.contains(value), json!({ "said": r, "seen": seen }));
+    Ok(1)
+}
+
 /// A Vault's secret, as its person puts it (`PUT /api/vault/{name}`).
 fn vault_put(api: &Api, w: &Swapping, name: &str, body: Value) -> Result<crate::api::Reply> {
     let r = api.signed(w.owner, "PUT", &format!("/api/vault/{name}"), Some(&body))?;

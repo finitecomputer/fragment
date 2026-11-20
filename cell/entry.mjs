@@ -9,7 +9,7 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
-import { intercept, settled, startIntercepted } from "./intercepts.mjs";
+import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import * as rs from "./build/index.js";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
@@ -382,26 +382,39 @@ class ContainerHost {
 
   // Every egress intercept of `computer`'s guest, all at once (one entry
   // per host: `ComputerEgress` with the route as props; intercepts.mjs).
-  // `swapHosts` are the connections', operator keys' and its agents' Vault
-  // secrets' hosts. Not the backups' host: each save and restore registers
-  // its own grant there and puts its refusal back after (the Sandbox SDK's
-  // `DirectoryBackup`), and its `intercept()`, a refusal registered again,
-  // is for beside a catch-all intercept, which a computer has none of. One
-  // registered late (a start's that was overtaken) would replace the grant
-  // of a restore under way.
+  // `swapHosts` are the connections' and operator keys' hosts, and on a
+  // takeover its agents' Vault secrets' too. Not the backups' host: each
+  // save and restore registers its own grant there and puts its refusal
+  // back after (the Sandbox SDK's `DirectoryBackup`), and its
+  // `intercept()`, a refusal registered again, is for beside a catch-all
+  // intercept, which a computer has none of. One registered late (a
+  // start's that was overtaken) would replace the grant of a restore under
+  // way.
   #intercept(computer, swapHosts, codestorage) {
-    const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
-    return intercept(this.#c, egress, swapHosts, codestorage);
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage);
   }
 
-  // Its running start `generation`'s intercepts again (a new isolate's,
-  // or a Vault host set since it started), and the runtime's idle stop,
-  // the safety net under the Computer DO's own sleep.
+  #egress(computer) {
+    return (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
+  }
+
+  // Its running start `generation`'s intercepts again (a new isolate's),
+  // and the runtime's idle stop, the safety net under the Computer DO's
+  // own sleep.
   async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return false;
     await this.#intercept(computer, swapHosts, codestorage);
     await settled(() => this.#c.setInactivityTimeout(idleMs));
-    return true;
+    return generation === this.#generation;
+  }
+
+  // `hosts` more for its running start `generation`'s swap (its agents'
+  // Vault secrets'), those alone (`interceptSwap`). False: that start was
+  // superseded, before or while they registered.
+  async armSwap(generation, computer, hosts) {
+    if (generation !== this.#generation) return false;
+    await interceptSwap(this.#c, this.#egress(computer), hosts);
+    return generation === this.#generation;
   }
 
   // Waits until the container takes an exec (it is up), for at most `ms`.

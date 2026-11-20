@@ -22,26 +22,41 @@ export async function settled(f) {
   }
 }
 
+// Each of `hosts` caught by the swap, on HTTPS and on plain HTTP alike:
+// the swap always sends on over HTTPS, so a credential never crosses the
+// internet in the clear.
+function swapped(c, egress, hosts) {
+  return hosts.flatMap((host) => [() => c.interceptOutboundHttp(host, egress("swap")), () => c.interceptOutboundHttps(host, egress("swap"))]);
+}
+
 // Registers every egress intercept of a computer's guest on container `c`,
 // all at once (one round trip, not one each): the platform's hosts, a
 // local fleet's code.storage (`codestorage`: at a loopback address the
-// container cannot reach), each of `swapHosts` on HTTPS and on plain HTTP
-// alike (the swap always sends on over HTTPS, so a credential never
-// crosses the internet in the clear), each `ComputerEgress` with its route
-// as `egress(route)` makes it. None survives a stop: each start registers
-// them again. It answers once every registration has: one that fails
-// fails it (the first's reason), never while another is still on its way
-// to the runtime, so nothing of a failed start's lands after it.
-export async function intercept(c, egress, swapHosts, codestorage) {
+// container cannot reach), each of `swapHosts` (`swapped`), each
+// `ComputerEgress` with its route as `egress(route)` makes it. None
+// survives a stop: each start registers them again.
+export function intercept(c, egress, swapHosts, codestorage) {
   const each = [
     () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
     () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
   ];
   if (codestorage) each.push(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
-  for (const host of swapHosts) {
-    each.push(() => c.interceptOutboundHttp(host, egress("swap")));
-    each.push(() => c.interceptOutboundHttps(host, egress("swap")));
-  }
+  each.push(...swapped(c, egress, swapHosts));
+  return landed(each);
+}
+
+// `hosts` more for the swap of a running container (a Vault secret's, set
+// since it started or named by its guest's first read of its view): these
+// alone, at once, never the rest again.
+export function interceptSwap(c, egress, hosts) {
+  return landed(swapped(c, egress, hosts));
+}
+
+// Each of `each` (a call that registers one intercept) at once, answered
+// once every one has: one that fails fails it (the first's reason), never
+// while another is still on its way to the runtime, so nothing of a failed
+// start's lands after it.
+async function landed(each) {
   const answers = await Promise.allSettled(each.map((f) => settled(f)));
   const failed = answers.find((a) => a.status === "rejected");
   if (failed) throw failed.reason;

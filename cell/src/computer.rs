@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -1545,24 +1545,43 @@ impl ComputerCell {
         Ok(())
     }
 
-    /// The hosts the swap intercepts: every provider's in the catalog (an
-    /// account host's as its glob, `*.under`), and each its agents' Vault
-    /// secrets go to (`vault_usable`).
-    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
-        let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
-        let usable = self.vault_usable(&fragments).await.0;
+    /// The hosts the swap intercepts that need no round trip: every
+    /// provider's in the catalog (an account host's as its glob, `*.under`).
+    fn catalog_hosts(&self) -> Vec<String> {
         let mut hosts = self.cfg.providers.intercepts();
-        hosts.extend(usable.into_iter().flat_map(|u| u.2));
+        hosts.sort_unstable();
+        hosts.dedup();
+        hosts
+    }
+
+    /// The hosts the swap intercepts: the catalog's, and each its agents'
+    /// Vault secrets go to (`vault_hosts`).
+    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
+        let mut hosts = self.catalog_hosts();
+        hosts.extend(self.vault_hosts().await);
         hosts.sort_unstable();
         hosts.dedup();
         Ok(hosts)
     }
 
+    /// The hosts its agents' Vault secrets go to, as its owner's Vault
+    /// answers (`vault_usable`): none, logged, when its agents or its Vault
+    /// cannot be read, so a start never fails for them.
+    async fn vault_hosts(&self) -> Vec<String> {
+        let fragments: Vec<String> = match self.agents() {
+            Ok(agents) => agents.into_iter().map(|a| a.fragment).collect(),
+            Err(e) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "agents", "error": e.message }));
+                return vec![];
+            }
+        };
+        self.vault_usable(&fragments).await.0.into_iter().flat_map(|u| u.2).collect()
+    }
+
     /// Sets its running start `generation`'s egress intercepts again
-    /// (entry.mjs `arm`: a takeover's, or a Vault host set since it
-    /// started; its start registered them before it began, `try_start`):
-    /// the platform's own hosts and `hosts`, kept as armed. False: that
-    /// start was superseded.
+    /// (entry.mjs `arm`: a takeover's; its start registered them before it
+    /// began, `try_start`): the platform's own hosts and `hosts`, kept as
+    /// armed. False: that start was superseded.
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
         let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
@@ -1573,30 +1592,44 @@ impl ComputerCell {
         Ok(done)
     }
 
-    /// Arms its running start again when `vault_hosts` names a host its
-    /// egress does not catch yet (an agent's Vault secret set since it
-    /// started), so a guest that reads a placeholder reaches the swap with
-    /// it. Asleep, its next start arms them all. A failure is logged: the
+    /// `arm_vault` for its guest's read of its view (a Vault secret set
+    /// since its start), its failure logged: the read goes on, and the
     /// placeholder then goes out uncaught, and fills nothing.
     async fn arm_more(&self, vault_hosts: Vec<String>) {
-        let Ok(life) = self.lifecycle() else { return };
-        let Some(generation) = life.running() else { return };
-        let armed = self.armed.borrow().clone();
-        let mut hosts = armed.filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-        if vault_hosts.iter().all(|h| hosts.contains(h)) {
-            return;
-        }
-        hosts.extend(self.cfg.providers.intercepts());
-        hosts.extend(vault_hosts);
-        hosts.sort_unstable();
-        hosts.dedup();
-        let armed = match self.meta(MetaKey::Id) {
-            Ok(Some(id)) => self.arm(generation, &id, hosts).await,
-            _ => return,
-        };
-        if let Err(e) = armed {
+        if let Err(e) = self.arm_vault(vault_hosts).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "error": e.message }));
         }
+    }
+
+    /// Has its running start's swap catch each of `vault_hosts` it does
+    /// not catch yet (entry.mjs `armSwap`: those alone), so a guest that
+    /// reads a placeholder reaches the swap with it: those its start asked
+    /// for beside the container's start (`try_start`, whose failure this
+    /// is), and any set since (its guest's view answers only after,
+    /// `guest_view`). False: its start was superseded meanwhile.
+    async fn arm_vault(&self, vault_hosts: Vec<String>) -> CellResult<bool> {
+        let Some(generation) = self.lifecycle()?.running() else { return Ok(true) };
+        // the start's own or a takeover's, as armed: the catalog's at least
+        let armed = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        let mut more: Vec<String> = vault_hosts.into_iter().filter(|h| !armed.contains(h)).collect();
+        more.sort_unstable();
+        more.dedup();
+        if more.is_empty() {
+            return Ok(true);
+        }
+        let id = self.must(MetaKey::Id)?;
+        let g = JsValue::from_f64(generation as f64);
+        if self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?.as_bool() != Some(true) {
+            return Ok(false);
+        }
+        // added to what is armed now, which another read's or its start's
+        // may have changed meanwhile
+        let mut hosts = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        hosts.extend(more);
+        hosts.sort_unstable();
+        hosts.dedup();
+        *self.armed.borrow_mut() = Some((generation, hosts));
+        Ok(true)
     }
 
     /// The Vault secrets each of its agents (`fragments`) may use, and its
@@ -1872,13 +1905,23 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
         let snapshot_js = match &planned.plan {
-            Restore::Snapshot { id } => JsValue::from_str(id),
+            Restore::Snapshot { id, .. } => JsValue::from_str(id),
             Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
-        // what its egress catches, asked before it starts (its agents' Vault's)
-        let hosts = self.swap_hosts().await?;
+        // what its egress catches before it starts: the platform's hosts and
+        // the catalog's, asking nothing; its agents' Vault secrets' hosts
+        // too when its guest runs at once (nothing restored), asked first
+        // as before, so no guest ever runs with one uncaught
+        // (`Plan::vault_asked`)
+        let asked = planned.plan.vault_asked();
+        let mut hosts = self.catalog_hosts();
+        if asked == VaultAsked::Before {
+            hosts.extend(self.vault_hosts().await);
+            hosts.sort_unstable();
+            hosts.dedup();
+        }
         // a wipe that began while this start awaited starts nothing: one
         // begun before the host's start is seen here, and one begun while
         // the host registers the intercepts is the host's to see (its
@@ -1890,10 +1933,27 @@ impl ComputerCell {
         // every intercept registered before the container starts, all at
         // once: its guest's first call never races them (entry.mjs `start`)
         let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
-        if self.call("start", &args).await?.as_bool() != Some(true) {
+        // as armed from its start, for a read of its view during it to add to
+        *self.armed.borrow_mut() = Some((generation, hosts));
+        // a guest held until the start lets it go (a restore's gate, a
+        // snapshot's hold): its Vault hosts asked beside the start, never
+        // before it, and caught before the start lets it go (any set since,
+        // its view's read catches before it answers; `arm_more`)
+        let beside = async {
+            match asked {
+                VaultAsked::Beside => self.vault_hosts().await,
+                VaultAsked::Before => vec![],
+            }
+        };
+        let (started, vault) = futures_util::future::join(self.call("start", &args), beside).await;
+        if started?.as_bool() != Some(true) {
             return Err(Unstarted::Overtaken);
         }
-        *self.armed.borrow_mut() = Some((generation, hosts));
+        // before its guest is let go (a restore's gate, a snapshot's hold): a
+        // host that will not register fails the start, as any intercept does
+        if !self.arm_vault(vault).await? {
+            return Err(Unstarted::Overtaken);
+        }
         if self.lever_take(MetaKey::FailStarts) {
             // the lever's `fail-starts`: a start that fails with its container up
             return Err(CellError::host(format!("start {generation} failed (the test lever)")).into());
