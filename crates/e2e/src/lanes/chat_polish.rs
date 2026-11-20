@@ -283,7 +283,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let roster = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob", "phase": "starting" }] });
     chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({roster}, location.origin); return true; }})()"))?;
     chrome.eval(&page, "(() => { const d = window.__frame.contentDocument; d.getElementById('text').value = 'A slow first reply'; d.getElementById('say').requestSubmit(); return true; })()")?;
-    s.ok("the shell's optional starting phase quietly explains a slow first reply", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('Bob is starting up…')"), "");
+    s.ok("the shell's optional starting phase quietly explains a slow first reply", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('Bob is getting ready…')"), "");
     // its post answered before any clock below moves: the line above is
     // already the message before's (the page's arrival waits for that one),
     // and a post answered under a clock 91 s ahead waits from then (a run
@@ -292,12 +292,21 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     anyhow::ensure!(super::shows(chrome, &page, sent), "the slow first reply is sent");
     chrome.screenshot(&page, &shots.join("starting-desktop.png"))?;
     chrome.eval(&page, &format!("new Promise(resolve => {{ const w = window.__frame.contentWindow; window.__bootNow = w.Date.now; w.Date.now = () => window.__bootNow() + 91000; w.postMessage({roster}, location.origin); w.requestAnimationFrame(() => w.requestAnimationFrame(() => resolve(true))); }})"))?;
-    s.ok("a known computer startup remains explained after ninety seconds", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('Bob is starting up…')"), "");
+    s.ok("a known computer startup remains explained after ninety seconds", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('Bob is getting ready…')"), "");
+    // up at last, past ninety seconds since the message: its ninety seconds
+    // count from then (before, the start's own time counted, and a slow
+    // wake read as no reply at once), and pass ninety seconds later
+    let awake = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob", "phase": "awake" }] });
+    chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({awake}, location.origin); return true; }})()"))?;
+    let up = super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent === 'Waiting for Bob…'");
+    s.ok("a start that ends past ninety seconds waits plainly for its reply, not yet late", up, chrome.eval(&page, "window.__frame.contentDocument.querySelector('.working')?.textContent ?? null").unwrap_or(Value::Null));
+    chrome.eval(&page, &format!("new Promise(resolve => {{ const w = window.__frame.contentWindow; w.Date.now = () => window.__bootNow() + 182000; w.postMessage({awake}, location.origin); w.requestAnimationFrame(() => w.requestAnimationFrame(() => resolve(true))); }})"))?;
+    s.ok("and ninety seconds after it is up, it says a reply has not started", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')"), "");
     chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__bootNow; return true; })()")?;
     for (phase, expected) in [
-        ("asleep", "Bob is starting up…"),
+        ("asleep", "Bob is getting ready…"),
         ("awake", "Waiting for Bob…"),
-        ("sleeping", "Bob's computer is going to sleep…"),
+        ("sleeping", "Bob is getting ready…"),
         ("wont_wake", "Bob's computer could not start. Open the computer settings to restart it."),
     ] {
         let roster = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob", "phase": phase }] });

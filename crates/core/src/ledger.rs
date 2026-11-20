@@ -67,6 +67,7 @@ pub mod gate;
 pub mod org;
 pub mod quote;
 pub mod said;
+pub mod uses;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
