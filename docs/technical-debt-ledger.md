@@ -179,6 +179,19 @@ unfinished design, not debt.
   the two reasons (kept on the wire as add-only names), the census route
   and command, and the `legacy-reach` lever.
 
+## Agent fragments shared before FIN-544
+
+- **Shortcut:** an agent fragment is its owner's alone from 2026-11-18
+  (`cell/src/alone.rs`): new sharing is refused, but one shared before
+  keeps its other members, invites, link or public, so no one's settings
+  change silently. Their cleanup is Paul's call; `fragment operator reach`
+  lists them by name (`shared_past_owner`, each fragment's answer).
+- **Risk:** whoever was let in before still reads its `memories/`, and an
+  editor still steers its agent.
+- **Delete when:** they are counted and narrowed. Then drop the sheet's
+  switch for an agent's link (share.rs `alone_now`) and the
+  `legacy-visibility` lever.
+
 ## An app facet's subrequests are the account's, for the facet's life
 
 - **Shortcut:** Cloudflare counts a Durable Object facet's subrequests

@@ -258,6 +258,18 @@ impl Starts {
         }
     }
 
+    /// The lifecycle is about to apply `event` to `life` at `now_ms`: an
+    /// owner's restart it takes (`Lifecycle::restarts`) asks the start it
+    /// brings, from then. One of an earlier start, made already, asks
+    /// nothing, so it never stands in for another's ask.
+    pub fn applying(&mut self, event: &Event, life: &Lifecycle, now_ms: i64) {
+        if let Event::Restart { generation } = event {
+            if life.restarts(*generation) {
+                self.asked(Woke::Restart, &life.phase, now_ms);
+            }
+        }
+    }
+
     /// Start `generation` of `computer` begins at `now_ms`: what the line
     /// of a start before it says, if one was under way still (replaced).
     pub fn begin(&mut self, computer: &str, generation: u64, now_ms: i64) -> Option<String> {
@@ -318,6 +330,11 @@ impl Starts {
     /// keepalive (a turn), or the lifecycle runs it no more (it ended).
     /// Answers its line, when that ends it.
     pub fn after(&mut self, event: &Event, life: &Lifecycle, now_ms: i64) -> Option<String> {
+        // a wake that leaves it awake was answered by the container it has
+        // (it cancelled an idle sleep): no start comes for its ask
+        if matches!(event, Event::Wake { .. }) && matches!(life.phase, Phase::Awake { .. }) {
+            self.asked = None;
+        }
         let l = self.line.as_mut()?;
         if life.running() != Some(l.generation) {
             // ended: as it came up, or as it failed
@@ -388,6 +405,8 @@ mod tests {
         }
 
         fn apply(&mut self, e: Event) -> Step {
+            // as the cell's `drive_events`: asked as it applies, at its time
+            self.starts.applying(&e, &self.c.life, self.c.now + 1_000);
             let s = self.c.apply(e.clone());
             self.lines.extend(self.starts.after(&e, &self.c.life, self.c.now));
             s
@@ -731,5 +750,78 @@ mod tests {
         assert_eq!(starts.asked, Some((91_000, Woke::Restart)), "a restart is its own wake");
         starts.asked(Woke::Wake(Wake::Record), &Phase::Asleep { retry: Some(Retry { at_ms: 95_000, owed: true }) }, 92_000);
         assert_eq!(starts.asked, Some((91_000, Woke::Restart)), "a start owed: the first ask stands");
+    }
+
+    /// Goal (#1357 with #1344): a wake during an idle sleep's hold cancels
+    /// the sleep and starts nothing, so the container it has answers its
+    /// ask: the start after (its container stopping under a turn an hour
+    /// on) is no wake's, timed from its own beginning. Method: the
+    /// lifecycle driven as the DO drives it, the wake asked as the cell
+    /// asks it, the lines parsed.
+    #[test]
+    fn a_wake_that_cancels_a_sleep_is_answered_by_it() {
+        let mut d = Driven::new();
+        let s = d.wake(Wake::Owner);
+        let (g1, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let _ = d.line(g1);
+        // its hold runs out: its idle sleep, at its hold
+        d.c.now = d.c.life.held_until_ms() - 1_000;
+        let s = d.apply(Event::Alarm);
+        assert_eq!(s.actions.last(), Some(&Action::Sleep { generation: g1 }), "{s:?}");
+        // a message's wake cancels it: awake on its container, no start
+        let s = d.wake(Wake::Record);
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })) && matches!(d.c.life.phase, Phase::Awake { .. }), "{s:?}");
+        // an hour on, its container stops under a turn: a start of its own
+        d.c.now += 3_600_000;
+        d.apply(Event::Opened { socket: Socket::Keepalive });
+        let s = d.apply(Event::Exited { generation: g1 });
+        let s = d.owed(&s);
+        let (g2, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g2);
+        assert_eq!((&l["woke"], ms(&l, "beganMs")), (&"itself".into(), 0), "{l}");
+        // an owner's restart, a wake landing before its event (its drive
+        // waiting on the wake's takeover: #1357's review): it asks its start
+        // as it applies, so that start is the restart's
+        d.wake(Wake::Owner);
+        d.apply(Event::Restart { generation: 0 });
+        let g = d.c.life.generation();
+        let (_, _, seq) = save_asked(&d.apply(Event::Held { generation: g, held: true }));
+        d.apply(Event::Saved { generation: g, seq });
+        let s = d.apply(Event::Asleep { generation: g });
+        let s = d.owed(&s);
+        let (g3, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g3);
+        assert!(l["woke"] == "restart" && ms(&l, "beganMs") > 0, "{l}");
+        // a duplicate of that restart, applied once its start came up (its
+        // ledger's answer slow: #1357's review): it names an earlier start,
+        // made already, so it asks nothing; a wake, then its container
+        // stopping under a turn: that start is no restart's
+        d.apply(Event::Restart { generation: g });
+        assert!(matches!(d.c.life.phase, Phase::Awake { .. }) && d.starts.asked.is_none(), "{:?}", d.starts.asked);
+        d.wake(Wake::Owner);
+        d.apply(Event::Opened { socket: Socket::Keepalive });
+        let s = d.apply(Event::Exited { generation: g3 });
+        let s = d.owed(&s);
+        let (g4, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g4);
+        assert_eq!((&l["woke"], ms(&l, "beganMs")), (&"itself".into(), 0), "{l}");
+        // a stale duplicate applied just before a valid restart (each
+        // request's drive in turn: #1357's review): the stale one asks
+        // nothing, so the valid one's start is the restart's
+        d.apply(Event::Restart { generation: g3 });
+        d.apply(Event::Restart { generation: 0 });
+        let g = d.c.life.generation();
+        let (_, _, seq) = save_asked(&d.apply(Event::Held { generation: g, held: true }));
+        d.apply(Event::Saved { generation: g, seq });
+        let s = d.apply(Event::Asleep { generation: g });
+        let s = d.owed(&s);
+        let (g5, _) = d.start(&s, Outcome::Ready);
+        d.turn();
+        let l = d.line(g5);
+        assert!(l["woke"] == "restart" && ms(&l, "beganMs") > 0, "{l}");
     }
 }

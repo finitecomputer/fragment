@@ -4,6 +4,7 @@ mod admin;
 mod agent_app;
 mod agent_ask;
 mod agent_restart;
+mod agent_sharing;
 mod agent_smoke;
 mod ai_tools;
 mod app;
@@ -102,6 +103,7 @@ const LANES: &[Lane] = &[
     templates::templates,
     share::share,
     faces::faces,
+    agent_sharing::agent_sharing,
     isolation::isolation,
     frames::frames,
     app::ops,
@@ -210,7 +212,7 @@ pub const SHARDS: [&[&str]; 5] = [
     ],
     &["shell-ui"],
     &[
-        "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
+        "lockdown", "templates", "faces", "agent-sharing", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
     ],

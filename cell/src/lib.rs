@@ -30,6 +30,7 @@
 mod across;
 mod ai;
 mod address;
+mod alone;
 mod assets;
 mod auth;
 mod billing;

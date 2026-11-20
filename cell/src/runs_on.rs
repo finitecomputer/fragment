@@ -187,11 +187,16 @@ impl FragmentCell {
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
                     Some(id) => id,
                     None => {
+                        // made an agent: its owner's alone from now (alone.rs),
+                        // refused before the registry is asked and again in
+                        // the write's own turn
+                        self.alone_while_shared()?;
                         let npub = self.must(MetaKey::Npub)?;
                         let key = npub::parse(&npub).ok_or_else(|| CellError::host("the fragment's npub does not decode"))?;
                         // the agent is named for its fragment (a page shows it so: `__people`)
                         let register = calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key, fragment: Some(self.name()?) };
                         let agent = crate::ask_registry(&self.env, &register).await?;
+                        self.alone_while_shared()?;
                         self.set_meta(MetaKey::AgentIdentity, &agent.id)?;
                         agent.id
                     }
@@ -359,7 +364,10 @@ impl FragmentCell {
     /// Its reach (fragment/calls.rs `ReachOf`).
     pub(crate) fn reach_of(&self) -> CellResult<Reach> {
         self.created()?;
-        Ok(Reach { kind: self.kind()?, reach: self.reaches()?, beyond: self.sharing_counts()?.beyond() })
+        // its sharing read once: its reach, its link, and past its owner
+        let sharing = self.sharing_counts()?;
+        let shared = self.alone()?.is_some() && crate::alone::past_owner(&sharing);
+        Ok(Reach { kind: self.kind()?, reach: sharing.reach, beyond: sharing.beyond(), shared })
     }
 
     /// The finite.computer move's routine (`Routine`), with no chat,
