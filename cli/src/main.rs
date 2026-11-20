@@ -3081,39 +3081,9 @@ fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<
     };
     let asked = name.is_some() || picture.is_some() || no_picture;
     if let Some(name) = name {
-        // its job written first: a rename that fails leaves both as they
-        // were, and asked again finds its old name there; then its face,
-        // only while its title is the one the job was rewritten from, so a
-        // rename made meanwhile wins (409), its name said in the job
-        let title_now = || -> Result<Option<String>> { Ok(c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{agent}/status"))?)?.title) };
-        let write_job = |text: &str| -> Result<()> {
-            // one key a write: its retries commit nothing twice, and a later
-            // rename back to this name commits again
-            let key = format!("agent-job-{:032x}", rand::random::<u128>());
-            let files = json!([{ "path": fragment_core::face::JOB, "text": text }]);
-            c.call_as::<Value>(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": "its job, renamed", "key": key }))?)?;
-            Ok(())
-        };
-        let before = title_now()?;
-        // its name now, and the one the shell's first job gave it
-        let renamed = agent_job(c, agent)?.and_then(|job| {
-            let olds: Vec<&str> = before.as_deref().into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
-            fragment_core::face::job_renamed(&job, &olds, name)
-        });
-        if let Some(text) = &renamed {
-            write_job(text)?;
-        }
-        let change = fragment_proto::FaceChange { title: Some(name.to_string()), was: before.clone(), ..Default::default() };
-        if let Err(e) = c.put_json(&format!("/api/f/{agent}/face"), &change).and_then(|r| c.call_as::<Value>(r)) {
-            if renamed.is_some() && classify_err(&e) == Code::Conflict {
-                if let (Some(now), Some(job)) = (title_now()?, agent_job(c, agent)?) {
-                    if let Some(back) = fragment_core::face::job_renamed(&job, &[name], &now) {
-                        write_job(&back)?;
-                    }
-                }
-            }
-            return Err(e);
-        }
+        // its cell says its new name in its job as well (members.rs `face_put`)
+        let change = fragment_proto::FaceChange { title: Some(name.to_string()), ..Default::default() };
+        c.call_as::<Value>(c.put_json(&format!("/api/f/{agent}/face"), &change)?)?;
     }
     let done = if name.is_some() { "its name was changed" } else { "nothing was changed" };
     if let Some(bytes) = picture {
@@ -3122,17 +3092,6 @@ fn agent_face(c: &api::Client, agent: &str, name: Option<&str>, picture: Option<
         c.call_as::<Value>(c.delete(&format!("/api/f/{agent}/icon"))?).with_context(|| format!("{done}; its picture stays"))?;
     }
     Ok(asked)
-}
-
-/// An agent's job (`SOUL.md`) at main, as text: none when it has none, or
-/// one past what a rename rewrites, or not text.
-fn agent_job(c: &api::Client, agent: &str) -> Result<Option<String>> {
-    let r = c.get(&format!("/api/f/{agent}/file?path={}", fragment_core::face::JOB))?;
-    if r.status == 404 {
-        return Ok(None);
-    }
-    anyhow::ensure!(r.ok(), "reading {agent}'s {}: {}", fragment_core::face::JOB, String::from_utf8_lossy(&r.body));
-    Ok((r.body.len() <= fragment_core::face::JOB_RENAME_MAX_BYTES).then(|| String::from_utf8(r.body).ok()).flatten())
 }
 
 fn writer_id(c: &api::Client) -> String {

@@ -121,10 +121,34 @@ unfinished design, not debt.
   lever `legacy-picture` writes such a row.
 - **Risk:** none lost: a row is taken whole or kept; one whose bytes are
   gone from git was unservable already.
-- **Delete when:** this release has run in production for a day (every
-  fragment's daily pass has taken its row) and a sweep finds no `picture`
-  row. Then `MetaKey::Picture`, `take_picture`, `picture_untaken`,
+- **Delete when:** the entry below is gone (it writes such rows), this
+  release has run in production for a day after (every fragment's daily
+  pass has taken its row) and a sweep finds no `picture` row. Then
+  `MetaKey::Picture`, `take_picture`, `picture_untaken`,
   `face::AGENT_PICTURE`, the lever and the pass's step go.
+
+## A client from before the face renames by git
+
+- **Shortcut:** clients from before an agent's face lived in its cell
+  (CLIs, the CLI inside computer images, which can lag for days, and iOS
+  builds) rename a fragment by its `fragment.json`'s `meta.title`, and set
+  an agent's picture by its `avatar.png`, then deploy. So that they keep
+  working, `GET manifest` answers the face's title (plane.rs `manifest`),
+  and each install takes, from its own `fragment.json` and an agent's
+  `avatar.png`, what changed since its last install (plane.rs
+  `face_from_git`, `picture_in_git`; `MetaKey::TitleSeen`,
+  `MetaKey::PictureSeen`), as docs/api.md says ("A client from before the
+  face").
+- **Risk:** a rename by such a client to the title its `fragment.json`
+  already says commits nothing and changes nothing; an app's own code that
+  changes its `meta.title` renames it, as it did before the face. An
+  agent's install reads its `avatar.png` again only when it changed.
+- **Delete when:** the CLI release notice, the computer image pinned in
+  production and the iOS build in use are all from this release or later,
+  and a week of production logs shows no `face.changed` event `by`
+  `fragment.json` and no `picture.changed`. Then a Fragment step deletes
+  the two `meta` rows, and the manifest route's title, `face_from_git`,
+  `picture_in_git` and `GitPicture` go.
 
 ## A computer keeps its owner's own keys from before the move
 

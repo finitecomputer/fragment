@@ -233,29 +233,91 @@ impl FragmentCell {
 
     /// `PUT /api/f/{name}/face` (editors and up; a connector's owner
     /// alone): its title, an agent's role, or both (`face::change`), kept
-    /// here alone, with no commit and no deploy. Each change is an `events`
-    /// row (`face.changed`), its history; its lists follow in this request.
-    /// A write: refused while its owner's fragments are read-only.
+    /// here alone, with no deploy. Each change is an `events` row
+    /// (`face.changed`), its history; its lists follow in this request.
+    /// With `was`, only while its title is that, or is already the one
+    /// asked (a retry whose answer was lost): 409 otherwise. An agent's
+    /// new title is said in its job first (`job_says`): a rename refused
+    /// there changes neither. A write: refused while its owner's fragments
+    /// are read-only.
     pub(crate) async fn face_put(&self, caller: &Caller, body: FaceChange) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
         if body.picture.is_some() {
             return Err(CellError::invalid("a picture is its icon: PUT /api/f/{name}/icon"));
         }
+        // one at a time: each reads the job and face the last one left
+        let _renaming = self.renaming.lock().await;
+        let life = self.must(MetaKey::CreatedAt)?;
         let now = self.face_now()?;
-        if body.was.as_ref().is_some_and(|was| now.title.as_ref() != Some(was)) {
+        let (title, role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        if body.was.as_ref().is_some_and(|was| now.title.as_ref() != Some(was) && (title.is_none() || now.title.as_deref() != title)) {
             return Err(CellError::new(ErrorCode::Conflict, format!("its title is no longer {:?}: nothing was changed", body.was.unwrap_or_default())));
         }
-        let (title, role) = fragment_core::face::change(body.title.as_deref(), body.role.as_deref(), now.kind == FragmentKind::Agent).map_err(CellError::invalid)?;
+        let by = self.caller_id(caller)?.to_string();
+        let job = now.kind == FragmentKind::Agent && title.is_some();
+        if let (true, Some(asked)) = (job, title) {
+            self.job_says(&by, now.title.as_deref(), asked).await?;
+            // a delete, or the name made again, while its job was written ends it
+            if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
+                return Err(CellError::new(ErrorCode::NotFound, format!("{} ended while it was renamed", self.name().unwrap_or_default())));
+            }
+        }
+        let now = self.face_now()?;
         let (title, role) = (title.or(now.title.as_deref()), role.unwrap_or(now.role.as_deref()));
         if (title, role) != (now.title.as_deref(), now.role.as_deref()) {
             self.face_is(now.kind, title, role)?;
-            let by = self.caller_id(caller)?.to_string();
             self.event("face.changed", &format!("its name is {:?}{}", title.unwrap_or(""), role.map(|r| format!(", its role {r:?}")).unwrap_or_default()), json!({ "title": title, "role": role, "by": by }));
             self.flush_index().await;
         }
+        if job {
+            self.del_meta(MetaKey::Renaming)?;
+        }
         let shown = self.face_now()?;
         json_response(&FaceChange { title: shown.title, role: shown.role, picture: shown.picture, was: None })
+    }
+
+    /// An agent's job (its `SOUL.md` at main, where its computer reads it)
+    /// says `asked` where it said an old name (`face::job_renamed`): its
+    /// title now, the name its first job gave it, and each name a rename
+    /// since the last one that ended wrote there (`MetaKey::Renaming`).
+    /// That name is kept before its commit, so one whose answer is lost or
+    /// refused is found by the next rename, whatever it asks; a rename
+    /// that ends lets them go. Committed only over the job it read: an
+    /// edit of it meanwhile is a 409, its job and face as they were.
+    async fn job_says(&self, by: &str, title: Option<&str>, asked: &str) -> CellResult<()> {
+        use fragment_core::face::{JOB, JOB_RENAME_MAX_BYTES, RENAMING_MAX};
+        let kept = self.meta(MetaKey::Renaming)?;
+        let mut pending: Vec<String> = kept.as_deref().and_then(|r| crate::json_text(r).ok()).unwrap_or_default();
+        // read at main's head, not its pin: a commit whose answer was lost
+        // moved main with no pin following yet. None, or one past what a
+        // rename rewrites (or not text): nothing to say
+        let Some(repo) = self.meta(MetaKey::Repo)?.filter(|r| !r.is_empty()) else { return Ok(()) };
+        let cs = self.cs()?;
+        let Some(head) = cs.branch_head(&repo, "main").await? else { return Ok(()) };
+        let Some(file) = cs.head(&repo, &head, JOB).await?.filter(|f| f.size <= JOB_RENAME_MAX_BYTES as u64) else { return Ok(()) };
+        let Some(job) = cs.read(&repo, &head, JOB, JOB_RENAME_MAX_BYTES).await?.and_then(|b| String::from_utf8(b).ok()) else { return Ok(()) };
+        let olds: Vec<&str> = title.into_iter().chain(pending.iter().map(String::as_str)).chain(fragment_core::face::job_first_name(&job)).collect();
+        let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked) else { return Ok(()) };
+        // bounded: the oldest names go first (each rename rewrites them all)
+        pending.retain(|p| p != asked);
+        pending.push(asked.to_string());
+        let from = pending.len().saturating_sub(RENAMING_MAX);
+        self.set_meta(MetaKey::Renaming, &serde_json::to_string(&pending[from..]).expect("names serialize"))?;
+        let path = fragment_proto::RepoPath::parse(JOB).expect("its job's path is a repo path");
+        let expect = std::collections::BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
+        let key = format!("face:{by}:{}", js::random_hex::<16>());
+        match self.commit(&key, &[crate::files::FileWrite { path, bytes: Some(renamed.into_bytes()) }], &expect, &format!("its job, renamed {asked}"), by, 0).await? {
+            crate::files::Wrote::Commit(_) => Ok(()),
+            // not written: the names it may say are the ones before
+            crate::files::Wrote::Conflict(why) => {
+                match &kept {
+                    Some(k) => self.set_meta(MetaKey::Renaming, k)?,
+                    None => self.del_meta(MetaKey::Renaming)?,
+                }
+                Err(CellError::new(ErrorCode::Conflict, format!("its job changed while it was renamed ({why}): nothing was renamed")))
+            }
+        }
     }
 
     /// Every list's row is sent again: its owner's and each member's.

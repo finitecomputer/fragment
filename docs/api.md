@@ -228,21 +228,35 @@ name never lends it a face.
 | --- | --- | --- |
 | `PUT /api/f/{name}/face` | editors (a connector's owner alone) | `{title?, role?, was?}` → `{title?, role?, picture?}` |
 
-**Changing them** sets them at once, with no commit and no deploy, so a
-rename never ships what waits on `main` (FIN-541). A title is trimmed; one
-blank or past its limit, a role past its limit or anything's but an
-agent's, a change naming neither, and one naming `picture` are 400; `was`
-sets it only while its title is that (else 409, nothing changed: a chat
-titled from its first message keeps a rename made meanwhile). Each change
-is a `face.changed` event (`{title, role, by}`), its history; the same
-change again writes none. A `fragment.json`'s `meta.title` or `meta.role`,
-or an `avatar.png`, names no face and refuses no install. `fragment rename`
-and `fragment agent [--name N] [--picture FILE | --no-picture]` use the
-face and icon routes. A rename by its owner (Settings, `fragment agent
---name`) also rewrites, in a commit of its own on `main`, each whole-word
-mention of an old name in its `SOUL.md` as the new one
-(`fragment_core::face::job_renamed`); a job past `face::JOB_RENAME_MAX_BYTES`
+**Changing them** sets them at once, with no deploy, so a rename never
+ships what waits on `main` (FIN-541). A title is trimmed; one blank or past
+its limit, a role past its limit or anything's but an agent's, a change
+naming neither, and one naming `picture` are 400; `was` sets it only while
+its title is that, or is already the one asked (a retry whose answer was
+lost), else 409, nothing changed: a chat titled from its first message
+keeps a rename made meanwhile. Each change is a `face.changed` event
+(`{title, role, by}`), its history; the same change again writes none.
+`fragment rename` and `fragment agent [--name N] [--picture FILE |
+--no-picture]` use the face and icon routes. An agent's rename also says
+its new name in its job, in the same request and before its face: each
+whole-word mention of an old name in its `SOUL.md` (its title, the name
+its first job gave it, and any a rename since the last that ended was
+writing when it failed) as the new one, a commit on `main`
+(`fragment_core::face::job_renamed`) over the job it read (an edit
+meanwhile: 409, nothing renamed). A rename that fails there changes
+neither; one whose commit landed and whose answer was lost is finished by
+the next, whatever name it asks. A job past `face::JOB_RENAME_MAX_BYTES`
 is left as it is.
+
+**A client from before the face** renamed a fragment by its
+`fragment.json`'s `meta.title`, and set an agent's picture by its
+`avatar.png`, then deployed. Until those are gone (the debt ledger),
+`GET manifest` answers its title as the face's, and an install takes, from
+its own `fragment.json` and `avatar.png` at live: a title that its last
+install's did not say, as its title (`face.changed`, `by` `fragment.json`);
+an agent's `avatar.png` changed since, checked as an icon is, as its
+picture (`picture.changed`), and one removed since, while its icon is still
+that one, as none. Nothing else of them names a face or refuses an install.
 
 **An agent's picture** is its icon, set and removed by `PUT` and `DELETE
 /api/f/{agent}/icon`: a picture (PNG, JPEG, WebP or GIF by its bytes, at

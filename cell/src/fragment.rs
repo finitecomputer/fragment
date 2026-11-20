@@ -97,6 +97,9 @@ pub struct FragmentCell {
     /// refused (publish.rs). Its stage is in its rows, not here
     /// (`fragment_core::seed`).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
+    /// Serializes an agent's renames: each reads its job, commits it and
+    /// sets its face (members.rs `face_put`).
+    pub(crate) renaming: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -158,6 +161,7 @@ impl DurableObject for FragmentCell {
             cfg,
             plane: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
+            renaming: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             woke: Cell::new(false),
@@ -374,6 +378,17 @@ pub(crate) enum MetaKey {
     /// <commit>`, its `avatar.png` there), until taken as its icon
     /// (runs_on.rs `take_picture`; the debt ledger).
     Picture,
+    /// The names an agent's job may say since its last rename that ended
+    /// (a JSON array, newest last): each one a rename was writing into it
+    /// when its answer was lost or refused (members.rs `face_put`), read as
+    /// an old name by the next.
+    Renaming,
+    /// The title its own `fragment.json` said at its last install (`""`:
+    /// none), and its `avatar.png` there (`<last commit> <sha256>`, an
+    /// agent's): how an install tells a client from before the face
+    /// renaming it (plane.rs `face_from_git`; the debt ledger).
+    TitleSeen,
+    PictureSeen,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -534,6 +549,9 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Renaming => "renaming",
+            MetaKey::TitleSeen => "title_seen",
+            MetaKey::PictureSeen => "picture_seen",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",

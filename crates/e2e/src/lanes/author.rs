@@ -756,12 +756,14 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
         waiting.status == 200 && status.body["pins"] == pins && served.status == 404 && status.body["title"] == "Meals this week",
         json!({ "pins": [pins, status.body["pins"]], "served": served.status, "title": status.body["title"] }),
     );
-    let after = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    // its fragment.json as main holds it (`GET manifest` says its face's title)
+    let file = || api.signed(keys, "GET", &format!("/api/f/{name}/file?path=fragment.json"), None).map(|r| r.text);
+    let after = file()?;
     let again = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
     s.ok(
         "CLI rename commits nothing (its fragment.json as it was), and is safe to repeat",
-        after.body == before.body && renamed["title"] == again["title"] && api.status(keys, &name)?.body["pins"] == pins,
-        json!({ "manifest": after.body, "renamed": renamed, "again": again }),
+        !after.is_empty() && file()? == after && renamed["title"] == again["title"] && api.status(keys, &name)?.body["pins"] == pins,
+        json!({ "manifest": after, "renamed": renamed, "again": again }),
     );
     let mut titles = vec![];
     for title in ["Meal archive", "Meals this week", "Meals this week"] {
