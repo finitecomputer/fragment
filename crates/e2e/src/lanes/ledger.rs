@@ -486,11 +486,20 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "before": before, "after": after, "charge": paid }),
     );
     let call = s.ai.calls().last().cloned();
-    s.ok(
-        "the gateway's metadata names the payer by an opaque id, never a name",
-        call.as_ref().is_some_and(|c| c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16 && u.bytes().all(|b| b.is_ascii_hexdigit()) && !owner_id.contains(u)) && c.body["reasoning_effort"] == "low"),
-        format!("{:?}", call.map(|c| c.metadata)),
-    );
+    match s.ai_through_the_node() {
+        // the box's node has no AI Gateway: its binding takes the metadata
+        // and lets it go, so no endpoint hears a payer at all
+        true => s.ok(
+            "on the box's node the gateway's metadata reaches no endpoint, and the call's own fields do",
+            call.as_ref().is_some_and(|c| c.metadata.is_null() && c.body["reasoning_effort"] == "low"),
+            format!("{:?}", call.map(|c| (c.metadata, c.body["reasoning_effort"].clone()))),
+        ),
+        false => s.ok(
+            "the gateway's metadata names the payer by an opaque id, never a name",
+            call.as_ref().is_some_and(|c| c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16 && u.bytes().all(|b| b.is_ascii_hexdigit()) && !owner_id.contains(u)) && c.body["reasoning_effort"] == "low"),
+            format!("{:?}", call.map(|c| c.metadata)),
+        ),
+    }
 
     // ---- a call that fails for good is charged nothing (nothing was held)
     s.ai.fail_next(&[400]);
@@ -1553,6 +1562,10 @@ fn embeddings_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// nothing charged or sent, and for a person. Its payer is a person of its
 /// own.
 fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    if s.whisper_is_the_boxs() {
+        s.skip("the model route's transcriptions on the Workers AI fake", "Whisper is the box's own model here (CELLD_AI_FILE): the transcribe section hears it");
+        return Ok(());
+    }
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
     let hand = &Keys::generate();
@@ -1767,7 +1780,7 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
         let aig = entries(api, &owner_id, "aig:");
         // its length as Whisper hears it; the fake decodes no audio, and
         // hears its bytes at 16 kbps
-        let seconds = match s.on_fakes() {
+        let seconds = match s.on_fakes() && !s.whisper_is_the_boxs() {
             true => (fake_heard(memo).1, fake_heard(memo).1),
             false => MEMO_SECONDS,
         };
@@ -1779,8 +1792,27 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
             json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "entries": aig }),
         );
     }
+    // the box's own Whisper hears words: a real voice, as Ogg/Opus
+    if s.whisper_is_the_boxs() {
+        let before = entries(api, &owner_id, "aig:").len();
+        let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], SPEECH)?;
+        println!("      (the box's Whisper heard: {})", r.body["text"]);
+        let heard: String = r.body["text"].as_str().unwrap_or("").to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+        s.eventually(Duration::from_secs(60), || entries(api, &owner_id, "aig:").len() > before);
+        s.ok(
+            "a real voice (11 s, Ogg/Opus) is heard on the box's own Whisper, word for word, and charged",
+            r.status == 200 && heard.split_whitespace().collect::<Vec<_>>().join(" ").contains("ask not what your country can do for you") && entries(api, &owner_id, "aig:").len() == before + 1,
+            json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>() }),
+        );
+    }
     Ok(())
 }
+
+/// A real voice: 11 s of John F. Kennedy's inaugural address (1961, a work
+/// of the US government: public domain), whisper.cpp's `samples/jfk.wav`
+/// (sha256 59dfb9a4…) as Ogg/Opus at 24 kbps, which only a real Whisper
+/// hears (`transcribe_lane`, on the box's own).
+const SPEECH: &[u8] = include_bytes!("../../fixtures/speech-jfk.ogg");
 
 #[cfg(test)]
 mod tests {

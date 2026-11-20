@@ -561,6 +561,21 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether the cell's Workers AI calls go through the node's own `ai`
+    /// binding (celld with `CELLD_AI_FILE`), the models the box does not
+    /// serve on to the fake through its `"*"`.
+    pub fn ai_through_the_node(&self) -> bool {
+        self.celld.as_ref().is_some_and(|c| c.ai_file.is_some())
+    }
+
+    /// Whether Whisper is the box's own model here (celld with a
+    /// `CELLD_AI_FILE` naming it: docs/self-host.md, "Local models on the
+    /// box's Mac"), not the fake's: it hears the audio itself.
+    pub fn whisper_is_the_boxs(&self) -> bool {
+        let file = self.celld.as_ref().and_then(|c| c.ai_file.as_deref());
+        file.is_some_and(|f| devstack::celld::ai_file_models(f).is_ok_and(|m| m.iter().any(|id| id == fragment_core::transcribe::TRANSCRIBE_MODEL)))
+    }
+
     /// Whether the local node runs computers: wrangler's always, celld's on
     /// the krun engine alone (docs/self-host.md, seam 2).
     pub fn runs_computers(&self) -> bool {
@@ -868,6 +883,9 @@ impl Suite {
             // OpenAI-compatible face as Finite Private (lanes/upstream.rs)
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
+            // on celld with CELLD_AI_FILE, the box's own models answer
+            // through the node's binding, and the rest reach the fake
+            ai_file: self.celld.as_ref().and_then(|c| c.ai_file.clone()),
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
                 Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door => Some(plain_models().to_string()),
@@ -1441,6 +1459,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let test_secret = devstack::random_hex(32);
     if let Some(c) = &celld {
         println!("runtime: celld dev ({}), its computers' engine {}", c.celld.display(), c.engine.value());
+        if let Some(f) = &c.ai_file {
+            println!("models: the box's own ({}: {}), the rest on the Workers AI fake", f.display(), devstack::celld::ai_file_models(f)?.join(", "));
+        }
     }
     // the cell's secrets: wrangler's store, or celld's node's backend, a
     // file of their values or OpenBao (celld's default)

@@ -181,7 +181,13 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
 /// account, so a local node runs without them. The model route's AI
 /// binding is one; dev and the e2e point the route at the Workers AI fake
 /// instead (`FRAGMENT_AI_URL`), and the cell never reads the binding then.
+/// A celld node with the box's own models (`Fleet::ai_file`) keeps it: its
+/// `ai` binding is local.
 const REMOTE_ONLY_BINDINGS: [&str; 1] = ["ai"];
+
+/// The gateway a box's node is told its calls go through: a node has no AI
+/// Gateway, and its `ai` binding takes the option and lets it go.
+const AI_GATEWAY_BOX: &str = "box";
 
 /// Where a project's config, as a local node runs it, is written
 /// (`write_local_config`): beside its own, so its paths resolve the same.
@@ -196,7 +202,7 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
 /// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)], keep_ai: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
@@ -207,7 +213,7 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
-    for b in REMOTE_ONLY_BINDINGS {
+    for b in REMOTE_ONLY_BINDINGS.into_iter().filter(|b| !(keep_ai && *b == "ai")) {
         obj.remove(b);
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
@@ -361,6 +367,12 @@ pub struct Fleet {
     /// the AI binding, through `ai_gateway`).
     pub ai_url: Option<String>,
     pub ai_gateway: Option<String>,
+    /// The box's own models (celld's `CELLD_AI_FILE`; `celld::CelldTools::
+    /// ai_file`), on a celld node alone: the cell's Workers AI calls go to
+    /// its node's `ai` binding (no `FRAGMENT_AI_URL`; `AI_GATEWAY_ID` is
+    /// `ai_gateway`, else `box`), which answers the file's models from the
+    /// box's endpoints and sends the rest to `ai_url`.
+    pub ai_file: Option<PathBuf>,
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
     /// every one on Workers AI), and the key of each that runs on an
@@ -548,7 +560,13 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &self.images)?;
+        write_local_config(project, &bound.cell(), &self.images, self.ai_file.is_some())?;
+        match &self.ai_file {
+            Some(file) => celld::write_node_ai_file(project, file, self.ai_url.as_deref())?,
+            None => {
+                let _ = fs::remove_file(celld::node_ai_file(project));
+            }
+        }
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -596,10 +614,13 @@ impl Fleet {
         if let Some(f) = &self.mail_from {
             vars.push(("FRAGMENT_MAIL_FROM", f.as_str()));
         }
-        if let Some(u) = &self.ai_url {
-            vars.push(("FRAGMENT_AI_URL", u.as_str()));
+        match (&self.ai_file, &self.ai_url) {
+            // the node's binding, which the box's models answer
+            (Some(_), _) => vars.push(("AI_GATEWAY_ID", self.ai_gateway.as_deref().unwrap_or(AI_GATEWAY_BOX))),
+            (None, Some(u)) => vars.push(("FRAGMENT_AI_URL", u.as_str())),
+            (None, None) => {}
         }
-        if let Some(g) = &self.ai_gateway {
+        if let (None, Some(g)) = (&self.ai_file, &self.ai_gateway) {
             vars.push(("AI_GATEWAY_ID", g.as_str()));
         }
         if let Some(m) = &self.models {
