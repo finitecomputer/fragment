@@ -108,23 +108,24 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
-## An older CLI renames an agent by its fragment.json
+## An older CLI renames by its fragment.json
 
 - **Shortcut:** a fragment's name is its cell's own (docs/api.md, "An
   agent's name and picture"), set by `PUT /api/f/{name}/face`. The CLI
-  before it, which a computer's image carries and which can lag for days,
-  renames an agent (`fragment agent --name`) by reading `GET manifest`,
-  writing `fragment.json` with a new `meta.title` and deploying. So that
-  an agent asked to rename itself still does, `GET manifest` answers a
-  fragment's title as its face's (plane.rs `manifest`), and an agent's
-  `fragment.json` written through the files route with another title is
-  its rename (publish.rs `renamed_by_git`).
-- **Risk:** someone editing an agent's `fragment.json` by hand renames it
-  to the title they leave there.
+  before it, which a computer's image carries and which can lag for days
+  (an agent runs `fragment rename` and `fragment agent --name`), renames
+  by reading `GET manifest`, writing `fragment.json` back with a new
+  `meta.title` and deploying. So that it still does, `GET manifest`
+  answers the face's title and, to an editor, a mark of the read (plane.rs
+  `manifest`, `title_read`; `MetaKey::TitleRead`), and a files write of
+  `fragment.json` naming it renames it once (`title_from_read`).
+- **Risk:** such a client writes the mark into its `fragment.json`, where
+  it stays, read by nothing once taken.
 - **Delete when:** the computer image pinned in production carries a CLI
   from this release or later, and a week of production logs shows no
-  `face.changed` event from `fragment.json`. Then `renamed_by_git` and the
-  manifest route's title go.
+  `face.changed` event from `fragment.json`. Then a Fragment step deletes
+  the `title_read` rows, and the manifest route's title and mark,
+  `title_read` and `title_from_read` go.
 
 ## A computer keeps its owner's own keys from before the move
 

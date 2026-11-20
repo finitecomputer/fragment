@@ -305,35 +305,54 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "row": row(api, &paul, &agent), "people": asked, "picture": none.status }),
     );
 
-    // an older CLI's `fragment agent --name` (the one a computer's image
-    // carries): `GET manifest` (its title its face's), its fragment.json
-    // written with the new title and its job renamed, then a deploy. It
-    // renames it, a title git holds already included; a deploy that writes
-    // no fragment.json changes nothing; an app's fragment.json names no face
-    let old_rename = |name: &str, title: &str| -> Result<(Value, bool)> {
+    // an older CLI's rename (`fragment agent --name`, `fragment rename`; the
+    // one a computer's image carries): `GET manifest` (its title its
+    // face's, and a mark of the read), its fragment.json written back with
+    // the new title, then a deploy. It renames it, back to a title git holds
+    // already too; the same write again (its key) after a rename through
+    // its face, a deploy writing no fragment.json, or the file written as
+    // git holds it (its mark taken), rename nothing
+    let old_rename = |name: &str, title: &str, key: Option<&str>| -> Result<(Value, bool, Value)> {
         let m = api.signed(&paul, "GET", &format!("/api/f/{name}/manifest"), None)?;
         // (an app with no fragment.json: one of its own)
         let mut body = if m.status == 200 { m.body.clone() } else { json!({}) };
         body["meta"]["title"] = json!(title);
-        let files = json!({ "message": "its name", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&body)?) }] });
+        let mut files = json!({ "message": "its name", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&body)?) }] });
+        if let Some(key) = key {
+            files["key"] = json!(key);
+        }
         let wrote = api.signed(&paul, "POST", &format!("/api/f/{name}/files"), Some(&files))?.status == 200;
-        Ok((m.body["meta"]["title"].clone(), wrote && api.signed(&paul, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?.status == 200))
+        let done = wrote && api.signed(&paul, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?.status == 200;
+        Ok((m.body["meta"]["title"].clone(), done, files))
     };
-    let (read, done) = old_rename(&agent, "Gus")?;
-    let first = read == "Frank" && done && row(api, &paul, &agent)["title"] == "Gus";
-    let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?.status == 200;
-    let (_, done) = old_rename(&agent, "Gus")?;
-    let again = back && done && row(api, &paul, &agent)["title"] == "Gus";
-    let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?.status == 200;
+    let reface = |name: &str, title: &str| -> Result<bool> { Ok(api.signed(&paul, "PUT", &format!("/api/f/{name}/face"), Some(&json!({ "title": title })))?.status == 200) };
+    let title_of = |name: &str| row(api, &paul, name)["title"].clone();
+    let (read, done, sent) = old_rename(&agent, "Gus", Some("legacy-rename-1"))?;
+    let first = read == "Frank" && done && title_of(&agent) == "Gus";
+    let refaced = reface(&agent, "Frank")?;
+    let (_, again, _) = old_rename(&agent, "Gus", None)?;
+    let again = refaced && again && title_of(&agent) == "Gus";
+    let replayed = reface(&agent, "Frank")?
+        && api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&sent))?.status == 200
+        && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200
+        && title_of(&agent) == "Frank";
     let unrelated = api.signed(&paul, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "a note", "files": [{ "path": "notes.md", "text": "a note\n" }] })))?.status == 200
         && api.signed(&paul, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})))?.status == 200
-        && row(api, &paul, &agent)["title"] == "Frank";
-    let app_named = api.signed(&paul, "PUT", &format!("/api/f/{app}/face"), Some(&json!({ "title": "Faces app" })))?.status == 200;
-    let (_, app_done) = old_rename(&app, "Not its name")?;
+        && title_of(&agent) == "Frank";
+    let app_first = reface(&app, "Faces app")? && old_rename(&app, "Garden app", None)?.1 && title_of(&app) == "Garden app";
+    let app_back = reface(&app, "Faces app")? && old_rename(&app, "Garden app", None)?.1 && title_of(&app) == "Garden app";
+    let raw = api.signed(&paul, "GET", &format!("/api/f/{app}/file?path=fragment.json"), None)?.text;
+    let mut rewritten: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    rewritten["meta"]["description"] = json!("an app");
+    let files = json!({ "message": "its manifest, as git holds it", "files": [{ "path": "fragment.json", "text": rewritten.to_string() }] });
+    let raw_kept = reface(&app, "Faces app")?
+        && api.signed(&paul, "POST", &format!("/api/f/{app}/files"), Some(&files))?.status == 200
+        && api.signed(&paul, "POST", &format!("/api/f/{app}/deploy"), Some(&json!({})))?.status == 200
+        && title_of(&app) == "Faces app";
     s.ok(
-        "an older CLI's rename (its manifest read, fragment.json written with the new title, deployed) renames an agent, back to the title git holds after a rename through its face too; a deploy writing no fragment.json keeps its face; an app's fragment.json names no face",
-        first && again && back && unrelated && app_named && app_done && row(api, &paul, &app)["title"] == "Faces app",
-        json!({ "read": read, "first": first, "again": again, "unrelated": unrelated, "app": row(api, &paul, &app), "events": super::site::event_kinds(api, &paul, &agent) }),
+        "an older CLI's rename (its manifest read, fragment.json written back with the new title, deployed) renames an agent and an app, back to the title git holds after a rename through its face too; its same write again after a newer rename, a deploy writing no fragment.json, and the file written as git holds it rename nothing",
+        first && again && replayed && unrelated && app_first && app_back && raw_kept,
+        json!({ "read": read, "first": first, "again": again, "replayed": replayed, "unrelated": unrelated, "app": [app_first, app_back, raw_kept], "row": row(api, &paul, &app), "events": super::site::event_kinds(api, &paul, &agent) }),
     );
 
     // its rename says its name in its job in the same request, before its
@@ -372,6 +391,23 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?;
     anyhow::ensure!(back.status == 200 && job_at(s) == "Frank helps with research.\n", "renamed Frank again: {back}");
+    // its commit landed, its answer lost, and its job unread after: the
+    // rename fails, its job renamed and its face not; the next rename, to
+    // another name, finds the name that commit wrote and renames it whole
+    s.fake.drop_commit_answers(&repo, 1);
+    s.fake.fail_read_after_lost_answer("SOUL.md");
+    let lost = rename("Frank Prime", "Frank");
+    s.fake.fail_file_read(None);
+    let lost = lost?;
+    let between = (row(api, &paul, &agent)["title"].clone(), job_at(s));
+    let other = rename("Rover", "Frank")?;
+    s.ok(
+        "a rename whose commit landed while its answer and the read after it were lost fails, its job renamed and its name not; the next rename, to another name, says it in its job whole (never \"Rover Prime\")",
+        lost.status >= 500 && between == (json!("Frank"), "Frank Prime helps with research.\n".to_string()) && other.status == 200 && job_at(s) == "Rover helps with research.\n" && row(api, &paul, &agent)["title"] == "Rover",
+        json!({ "lost": lost.to_string(), "between": between, "other": other.to_string(), "job": job_at(s) }),
+    );
+    let back = api.signed(&paul, "PUT", &format!("/api/f/{agent}/face"), Some(&json!({ "title": "Frank" })))?;
+    anyhow::ensure!(back.status == 200 && job_at(s) == "Frank helps with research.\n", "renamed Frank once more: {back}");
 
     // the CLI, as its person uses it (cli/GUIDE.md): `fragment agent
     // --name` renames it and says its new name; every reader follows, its
@@ -471,6 +507,30 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent made with no title is untitled (its label shows, and `fragment agent` says it), never called by the template's word",
         made && shown.get("title").is_none_or(Value::is_null) && status.is_null() && said.is_ok_and(|v| v["name"] == bare_label.as_str()),
         json!({ "row": shown, "status": status }),
+    );
+    // an app whose main holds an avatar.png, become an agent: its install
+    // shows that picture; an app again, none; an agent again, it again
+    let became = s.named(api, &paul, "faces-became")?;
+    let r = api.create_with(&paul, json!({ "name": became, "template": "blank", "visibility": "members" }))?;
+    anyhow::ensure!(r.status == 200, "an app to become an agent: {r}");
+    s.owned(&r.body, &paul);
+    let kind_is = |kind: &str| -> Result<bool> {
+        let manifest = if kind == "agent" { json!({ "kind": "agent", "meta": { "title": "Became" } }) } else { json!({ "meta": { "title": "Became" } }) };
+        let wrote = write(&became, "fragment.json", &manifest.to_string())?.status == 200;
+        Ok(wrote && deploy(&became)?.status == 200 && s.eventually(WAIT, || row(api, &paul, &became)["kind"] == kind))
+    };
+    let pictured = api.signed(&paul, "POST", &format!("/api/f/{became}/files"), Some(&json!({ "message": "a picture", "files": [{ "path": "avatar.png", "base64": base64::engine::general_purpose::STANDARD.encode(&orange) }] })))?.status == 200
+        && deploy(&became)?.status == 200;
+    let as_app = row(api, &paul, &became).get("picture").is_none();
+    let orange_v = hex::encode(Sha256::digest(&orange))[..12].to_string();
+    let shows = || row(api, &paul, &became)["picture"].as_str().is_some_and(|p| p.ends_with(&format!("?v={orange_v}")));
+    let as_agent = kind_is("agent")? && shows();
+    let app_again = kind_is("app")? && row(api, &paul, &became).get("picture").is_none();
+    let agent_again = kind_is("agent")? && shows();
+    s.ok(
+        "an app whose main holds an avatar.png, become an agent, shows it at that install; an app again shows none; an agent again shows it again",
+        pictured && as_app && as_agent && app_again && agent_again,
+        json!({ "steps": [pictured, as_app, as_agent, app_again, agent_again], "row": row(api, &paul, &became) }),
     );
     // its page's Open Graph title is its name, its fragment.json naming none
     let page_wrote = write(&app, "site/index.html", "<!doctype html><html><head></head><body>notes</body></html>")?.status == 200 && deploy(&app)?.status == 200;

@@ -358,37 +358,26 @@ impl FragmentCell {
         }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
+        // an older CLI's rename (plane.rs `title_from_read`) is one at a time
+        // with the face route's, its commit and its face together
+        let manifest = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.clone());
+        let _renaming = match manifest {
+            Some(_) => Some(self.renaming.lock().await),
+            None => None,
+        };
         match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
             Wrote::Commit(sha) => {
-                if let Some(bytes) = writes.iter().find(|w| w.path.as_str() == "fragment.json").and_then(|w| w.bytes.as_deref()) {
-                    self.renamed_by_git(bytes, &who, life).await?;
+                // in the life it was let in to: one ended meanwhile renames no other
+                if let Some(written) = manifest.as_deref().filter(|_| self.life().ok() == Some(life)) {
+                    if self.title_from_read(written, &who)? {
+                        self.flush_index().await;
+                    }
                 }
                 json_response(&json!({ "commit": sha }))
             }
             // nothing was expected, so nothing can conflict
             Wrote::Conflict(why) => Err(CellError::host(why)),
         }
-    }
-
-    /// An agent's `fragment.json` written with a title other than its
-    /// face's: an older CLI's `fragment agent --name`, which renames by
-    /// writing it (a computer's image carries its own CLI, which can lag for
-    /// days: the debt ledger). Its face takes that title, one rename at a
-    /// time as its face route's are, in the life the write was let in to
-    /// (one ended meanwhile renames no other); any other fragment's
-    /// `fragment.json` names nothing.
-    async fn renamed_by_git(&self, bytes: &[u8], by: &str, life: i64) -> CellResult<()> {
-        let _renaming = self.renaming.lock().await;
-        let now = self.face_now()?;
-        if now.kind != fragment_proto::FragmentKind::Agent || self.life()? != life {
-            return Ok(());
-        }
-        let Ok(written) = fragment_core::manifest::parse(bytes) else { return Ok(()) };
-        let Some(title) = written.title().map(str::trim).filter(|t| Some(*t) != now.title.as_deref() && fragment_core::face::change(Some(t), None, false).is_ok()) else { return Ok(()) };
-        self.face_is(now.kind, Some(title), now.role.as_deref(), now.picture.as_deref())?;
-        self.event("face.changed", &format!("its name is {title:?}, as its fragment.json says"), json!({ "title": title, "by": by, "from": "fragment.json" }));
-        self.flush_index().await;
-        Ok(())
     }
 
     /// `POST /api/deploy {note?}`: `live` to `main`'s tip, for editors.

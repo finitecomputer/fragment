@@ -260,7 +260,8 @@ impl FragmentCell {
             }
         }
         let by = self.caller_id(caller)?.to_string();
-        if let (FragmentKind::Agent, Some(asked)) = (now.kind, title) {
+        let job = now.kind == FragmentKind::Agent && title.is_some();
+        if let (true, Some(asked)) = (job, title) {
             self.job_says(&by, life, now.title.as_deref(), asked).await?;
             self.same_life(life, "while it was renamed")?;
         }
@@ -269,19 +270,26 @@ impl FragmentCell {
         if (title, role) != (now.title.as_deref(), now.role.as_deref()) {
             self.face_is(now.kind, title, role, now.picture.as_deref())?;
             self.event("face.changed", &format!("its name is {:?}{}", title.unwrap_or(""), role.map(|r| format!(", its role {r:?}")).unwrap_or_default()), json!({ "title": title, "role": role, "by": by }));
-            self.flush_index().await;
+        }
+        // its job says what its face does: no rename of it is in doubt
+        if job {
+            self.del_meta(MetaKey::Renaming)?;
         }
         let shown = self.face_now()?;
+        self.flush_index().await;
         json_response(&FaceChange { title: shown.title, role: shown.role, picture: shown.picture, was: None })
     }
 
     /// An agent's job (its `SOUL.md` at main's head, where its computer
-    /// reads it) says `asked` where it said its title now or the name its
-    /// first job gave it (`face::job_renamed`). Committed to the repo it
-    /// read, over the job it read (an edit meanwhile: 409, nothing
-    /// renamed). A commit whose answer is lost is looked for at main's
-    /// head: there, the rename goes on; not there, it fails as it was, and
-    /// asked again finds the job as it was or as renamed (a retry).
+    /// reads it) says `asked` where it said its title now, the name its
+    /// first job gave it, or that of a rename whose commit's answer was lost
+    /// while the job is the one that rename wrote (`MetaKey::Renaming`:
+    /// each attempt's name and its job's SHA-256, kept before its commit;
+    /// a job that is not what it wrote never says its name for it).
+    /// Committed to the repo it read, over the job it read (an edit
+    /// meanwhile: 409, nothing renamed). A commit whose answer is lost is
+    /// looked for at main's head: there, the rename goes on; not there, it
+    /// fails, its attempt kept for the next rename, whatever it asks.
     async fn job_says(&self, by: &str, life: i64, title: Option<&str>, asked: &str) -> CellResult<()> {
         use fragment_core::face::{JOB, JOB_RENAME_MAX_BYTES};
         let Some(repo) = self.meta(MetaKey::Repo)?.filter(|r| !r.is_empty()) else { return Ok(()) };
@@ -291,7 +299,13 @@ impl FragmentCell {
         let Some(file) = cs.head(&repo, &head, JOB).await?.filter(|f| f.size <= JOB_RENAME_MAX_BYTES as u64) else { return Ok(()) };
         let Some(job) = cs.read(&repo, &head, JOB, JOB_RENAME_MAX_BYTES).await?.and_then(|b| String::from_utf8(b).ok()) else { return Ok(()) };
         self.same_life(life, "while it was renamed")?;
-        let olds: Vec<&str> = title.into_iter().chain(fragment_core::face::job_first_name(&job)).collect();
+        let sha256 = |text: &str| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()));
+        let kept = self.meta(MetaKey::Renaming)?;
+        // the attempts whose job is the one here: any of them may have landed
+        let mut tried: Vec<Value> = kept.as_deref().and_then(|r| crate::json_text::<Value>(r).ok()).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let said = sha256(&job);
+        tried.retain(|t| t[1] == said.as_str());
+        let olds: Vec<&str> = title.into_iter().chain(tried.iter().filter_map(|t| t[0].as_str())).chain(fragment_core::face::job_first_name(&job)).collect();
         let Some(renamed) = fragment_core::face::job_renamed(&job, &olds, asked) else {
             // nothing to say (a retry's job says it already): served as main
             // has it, its pin following a commit whose answer was lost
@@ -300,13 +314,23 @@ impl FragmentCell {
             }
             return Ok(());
         };
+        tried.push(json!([asked, sha256(&renamed)]));
+        self.set_meta(MetaKey::Renaming, &Value::Array(tried).to_string())?;
         let path = fragment_proto::RepoPath::parse(JOB).expect("its job's path is a repo path");
         let expect = BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
         let key = format!("face:{by}:{}", js::random_hex::<16>());
         let write = crate::files::FileWrite { path, bytes: Some(renamed.clone().into_bytes()) };
         match self.commit_in(&repo, &key, &[write], &expect, &format!("its job, renamed {asked}"), by, 0).await {
             Ok(crate::files::Wrote::Commit(_)) => Ok(()),
-            Ok(crate::files::Wrote::Conflict(why)) => Err(CellError::new(ErrorCode::Conflict, format!("its job changed while it was renamed ({why}): nothing was renamed"))),
+            // not written: the attempts it may hold are the ones before
+            Ok(crate::files::Wrote::Conflict(why)) => {
+                self.same_life(life, "while it was renamed")?;
+                match &kept {
+                    Some(k) => self.set_meta(MetaKey::Renaming, k)?,
+                    None => self.del_meta(MetaKey::Renaming)?,
+                }
+                Err(CellError::new(ErrorCode::Conflict, format!("its job changed while it was renamed ({why}): nothing was renamed")))
+            }
             Err(lost) => {
                 let head = cs.branch_head(&repo, "main").await.ok().flatten();
                 let now = match &head {
