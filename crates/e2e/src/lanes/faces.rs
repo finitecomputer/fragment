@@ -163,8 +163,9 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // renamed, and given a picture, as Settings and `fragment agent` do:
-    // its face, and its avatar.png on main, with no deploy (FIN-541)
-    let live_before = api.status(&paul, &agent)?.body["pins"]["live"].clone();
+    // its face, and its avatar.png on main, with no deploy (FIN-541): live
+    // never holds that commit (a fragment with no repo yet lands its
+    // template's own deploy first)
     let (named, wrote) = set_face(api, &paul, &agent, Some("Frank"), Some(Some(&orange)), Some("face-1"))?;
     let wrote = wrote.with_context(|| format!("the face: {named}"))?;
     let shown = path_of(&orange);
@@ -172,11 +173,11 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         let r = row(api, &paul, &agent);
         r["title"] == "Frank" && r["picture"] == shown.as_str()
     });
-    let live_after = api.status(&paul, &agent)?.body["pins"]["live"].clone();
+    let live = api.status(&paul, &agent)?.body["pins"]["live"].clone();
     s.ok(
-        "renamed through its face and given a picture by its avatar.png, at once: its owner's list (what the shell draws) names it and shows its picture's address, and nothing was deployed",
-        named.status == 200 && named.body["title"] == "Frank" && wrote.status == 200 && listed && live_after == live_before,
-        json!({ "face": named.body, "files": wrote.body, "row": row(api, &paul, &agent), "live": [live_before, live_after] }),
+        "renamed through its face and given a picture by its avatar.png, at once: its owner's list (what the shell draws) names it and shows its picture's address, and its picture's commit was never deployed",
+        named.status == 200 && named.body["title"] == "Frank" && wrote.status == 200 && listed && wrote.body["commit"].is_string() && live != wrote.body["commit"],
+        json!({ "face": named.body, "files": wrote.body, "row": row(api, &paul, &agent), "live": live }),
     );
     let asked = people(api, &chat, &cookie, &agent_id);
     s.ok(
