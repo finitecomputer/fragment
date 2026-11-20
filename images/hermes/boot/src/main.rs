@@ -1191,10 +1191,16 @@ fn managed_dir() {
 }
 
 /// The platform skill shown to the profiles unless a managed skill takes
-/// its name (skills.rs, `settle_platform`).
+/// its name (skills.rs, `settle_platform`); and beside it, Hermes' bundled
+/// skills and the optional ones the owner switched on.
 fn settle_platform() -> Option<bool> {
     if let Err(e) = skills::settle_bundled(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::BUNDLED_DIR), Path::new(skills::PLATFORM_VIEW)) {
         ev!("skills.bundled_failed", { "error": e.to_string() });
+    }
+    let (bundled, optional, chosen, shown, view) = (Path::new(skills::BUNDLED_DIR), Path::new(skills::OPTIONAL_DIR), Path::new(skills::OPTIONAL_CHOSEN), Path::new(skills::OPTIONAL_SHOWN), Path::new(skills::PLATFORM_VIEW));
+    match skills::settle_optional(&skills::managed_dir(), Path::new(skills::MANIFEST), bundled, optional, chosen, shown, view) {
+        Ok(o) => ev!("skills.optional", { "shown": o.shown.len(), "missing": o.missing, "withheld": o.withheld, "failed": o.failed }),
+        Err(e) => ev!("skills.optional_failed", { "error": e.to_string() }),
     }
     let shown = skills::settle_platform(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::PLATFORM_DIR), Path::new(skills::PLATFORM_VIEW));
     if let Err(e) = &shown {
@@ -1220,12 +1226,12 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
     Some(tokio::spawn(async move {
         let _busy = busy;
         let t = Instant::now();
-        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await;
+        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::OPTIONAL_CHOSEN)).await;
         *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
         match done {
             Ok(d) => {
                 let platform = settle_platform();
-                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
+                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "optional": d.optional, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
                 // a skill added, changed or gone: the open chats list it at
                 // their next turn (nothing asked when the set is the same).
                 // Never under a hold: its databases are being copied, and a

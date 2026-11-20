@@ -81,6 +81,7 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
                 saved_at: back_to.map(|s| s.at_ms),
                 at: None,
                 unchanged: saves.unchanged(e, back_to),
+                too_big: false,
             });
         }
         (Some(_), _) => {}
@@ -93,6 +94,7 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
             saved_at: w.restored.saved_at,
             at: Some(w.restored.at),
             unchanged: w.unchanged,
+            too_big: w.too_big,
         }),
         (None, _) => {}
     }
@@ -143,10 +145,10 @@ mod tests {
         let crashed_at = c.now;
         let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
-        let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None, unchanged: true };
+        let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None, unchanged: true, too_big: false };
         assert_eq!(went_back(&c), Some(pending), "starting again: it goes back to b1");
         let r = c.come_up(generation);
-        let told = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: false, save: Some(1), saved_at, at: Some(r.at), unchanged: true };
+        let told = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: false, save: Some(1), saved_at, at: Some(r.at), unchanged: true, too_big: false };
         assert_eq!(went_back(&c), Some(told.clone()));
         // a sleep that saves, and a wake from it: the loss is still told
         c.sleep(Some("b2"));

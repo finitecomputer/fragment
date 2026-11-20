@@ -148,6 +148,9 @@ trial's end Stripe charges a card added meanwhile in the portal; with
 none it cancels the subscription (cancel, not pause: Pay again is already
 the way back for any lapsed org). One trial per person ever, for a seat
 of one.
+While it runs, its org adds no further paid seat and no offer of one is
+accepted (`fragment_core::org::seating`, 400 `trial_seat_of_one`); an
+offer waits until the org pays, and an admin's place is offered as ever.
 
 ## The operator's admin
 

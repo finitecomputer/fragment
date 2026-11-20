@@ -33,7 +33,7 @@
 //! member's going (leaving, moving, wiped) that leaves none cancels it at
 //! once.
 
-use fragment_core::org::{Departure, Status, ADMINS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
+use fragment_core::org::{self, Departure, Seating, Status, Unseated, ADMINS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
 use fragment_core::stripe::{self as core_stripe, Push, Snapshot, Subscription};
 use fragment_proto::org::{OrgMember, SeatKind};
 use serde::Serialize;
@@ -182,6 +182,25 @@ impl RegistryCell {
         Ok(())
     }
 
+    /// Whether `org` takes a paid seat `how` (`fragment_core::org::seating`):
+    /// a trial is for a seat of one (docs/billing.md, "Trials"; team trials
+    /// are not in v1), so while it runs none is added or accepted.
+    pub(super) fn seating(&self, org: &str, how: Seating) -> CellResult<()> {
+        let sub = self.org_sub(org)?.ok_or_else(|| not_found(format!("no org {org}")))?;
+        let status = sub.subscription.as_ref().and(sub.status.as_deref()).and_then(Status::parse);
+        match org::seating(status, how) {
+            Ok(()) => Ok(()),
+            Err(Unseated::NotPaying) => Err(CellError::invalid("your org pays for no seats now: buy one first (Checkout), then offer the rest").because(Reason::OrgNotPaying)),
+            Err(Unseated::TrialSeatOfOne) => {
+                let said = match how {
+                    Seating::Accept => "this org is on a trial, which is for a seat of one: its seat can be accepted once it is paid",
+                    _ => "a trial is for a seat of one; add seats once it is paid",
+                };
+                Err(CellError::invalid(said).because(Reason::TrialSeatOfOne))
+            }
+        }
+    }
+
     /// Whether `org` pays now: a subscription in good standing.
     pub(super) fn org_pays(&self, org: &str) -> CellResult<bool> {
         let sub = self.org_sub(org)?.ok_or_else(|| not_found(format!("no org {org}")))?;
@@ -256,6 +275,7 @@ impl RegistryCell {
                 Some(k) if k == b.kind && m.comped == 0 => added(&m, false),
                 Some(_) => Err(conflict(format!("{email} holds a seat here already")).because(Reason::AlreadyOffered)),
                 None => {
+                    self.seating(&org_row.id, Seating::Add)?;
                     self.check_seats_room(&org_row.id)?;
                     self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
                     if let Some(p) = &m.person {
@@ -279,12 +299,14 @@ impl RegistryCell {
             }
             Some(o) => {
                 // an admin's place offered: the seat joins it
+                self.seating(&org_row.id, Seating::Add)?;
                 self.check_seats_room(&org_row.id)?;
                 self.offer_mail_room(&org_row.id)?;
                 self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), o.id.as_str().into()])?;
                 self.member(&o.id)?
             }
             None => {
+                self.seating(&org_row.id, Seating::Add)?;
                 self.check_offer_room(&email)?;
                 self.check_seats_room(&org_row.id)?;
                 self.offer_mail_room(&org_row.id)?;

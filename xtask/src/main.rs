@@ -60,6 +60,10 @@
 //!                    (docs/wire) and its lock (crates/proto/wire.lock) from
 //!                    crates/proto, then says what it breaks of master's
 //!                    (xtask/src/wire/)
+//!   skills-catalog
+//!                    writes templates/skills/catalog/hermes.json, the Hermes
+//!                    optional skills a person can switch on, read from the
+//!                    pinned Hermes image (xtask/src/skills_catalog.rs)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -140,6 +144,7 @@ mod markdown_dom;
 mod continue_js;
 mod rollout;
 mod schema_lock;
+mod skills_catalog;
 mod wire;
 // CI's freshness of its cached builds, compiled by itself with rustc
 // (ci.yml); here for its tests alone
@@ -851,13 +856,14 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("wire") => wire::write(&devstack::repo_root()),
+        Some("skills-catalog") => skills_catalog::run(&args[1..]),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

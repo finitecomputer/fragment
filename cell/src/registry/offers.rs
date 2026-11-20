@@ -335,6 +335,12 @@ impl RegistryCell {
             let o = self.stored_org(&offer.org)?;
             return Err(CellError::invalid(format!("{} pays for nothing now: its admins buy again before anyone takes its offers", o.name)).because(Reason::OrgNotPaying));
         }
+        // a paid seat accepted is granted its included credit: while its org
+        // trials (a trial is for a seat of one), it waits until it is paid,
+        // an offer made before the trial or this rule included
+        if offer.comped == 0 && offer.seat.is_some() {
+            self.seating(&offer.org, org::Seating::Accept)?;
+        }
         match self.member_of(&who.id)? {
             Some(mine) if mine.org == offer.org => self.merge(&mine, &offer)?,
             Some(mine) => {
