@@ -224,23 +224,30 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
 /// between runs: the release before stays the one read before the first.
 /// One that could not run to its end (it could not start, or its output
 /// could not be read) is a failure like any other: whether it changed the
-/// Worker is read after.
+/// Worker is read after. A run once more that fails otherwise keeps the
+/// first's words (they say the Worker was deployed).
 fn deployed(p: &mut impl Platform, clock: &mut impl Clock) -> Wrangled {
-    let (mut pushes, mut reapplied) = (0, false);
+    let (mut pushes, mut unapplied) = (0, None);
     loop {
-        match p.deploy() {
+        let ended = match p.deploy() {
             Ok(Wrangled::PushTimedOut) if pushes + 1 < DEPLOY_TRIES => {
                 pushes += 1;
                 eprintln!("deploy: an image's push timed out (try {pushes} of {DEPLOY_TRIES}); running wrangler deploy again in {}", minutes(DEPLOY_PAUSE));
+                None
             }
-            Ok(Wrangled::SettingsUnapplied(_)) if !reapplied => {
-                reapplied = true;
+            Ok(Wrangled::SettingsUnapplied(said)) if unapplied.is_none() => {
                 eprintln!("deploy: wrangler could not apply the container settings; running wrangler deploy once more in {}, as it says to", minutes(DEPLOY_PAUSE));
+                unapplied = Some(said);
+                None
             }
-            Ok(wrangled) => return wrangled,
-            Err(e) => return Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}")),
+            Ok(wrangled) => Some(wrangled),
+            Err(e) => Some(Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}"))),
+        };
+        match (ended, &unapplied) {
+            (None, _) => clock.sleep(DEPLOY_PAUSE),
+            (Some(w @ (Wrangled::Done | Wrangled::SettingsUnapplied(_))), _) | (Some(w), None) => return w,
+            (Some(other), Some(first)) => return Wrangled::Failed(format!("{first} Run once more: {}", said(&other))),
         }
-        clock.sleep(DEPLOY_PAUSE);
     }
 }
 
@@ -707,6 +714,14 @@ mod tests {
         assert_eq!(deploy(&mut w), Outcome::Deployed);
         assert_eq!(w.ends(), (NEW.into(), NEW.into()));
         assert_eq!((count(&w, "deploy"), count(&w, "finish v-new"), count(&w, "rollback")), (2, 5, 0), "two uploads; finished on its fifth ask");
+        // review of #1411: a second run that fails otherwise keeps the
+        // first's words, which say the Worker was deployed
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        let preparing = "Timed out while preparing the container image on Cloudflare's network.";
+        w.deploys = vec![unapplied(), Wrangled::Failed(preparing.into())];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(format!("{UNAPPLIED} Run once more: {preparing}")));
+        assert_eq!(count(&w, "deploy"), 2);
     }
 
     /// A first run that made the new Worker live changes nothing a failure
@@ -738,7 +753,7 @@ mod tests {
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
         w.deploys = vec![unapplied(), Wrangled::PushTimedOut];
         let out = deploy(&mut w);
-        assert_eq!(out, Outcome::Unchanged("an image's push to the registry timed out, three times".into()));
+        assert_eq!(out, Outcome::Unchanged(format!("{UNAPPLIED} Run once more: an image's push to the registry timed out, three times")));
         assert_eq!(count(&w, "deploy"), 1 + DEPLOY_TRIES as usize, "bounded");
     }
 
