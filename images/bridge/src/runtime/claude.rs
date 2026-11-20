@@ -114,6 +114,11 @@ impl Runtime for Claude {
         MENU
     }
 
+    fn memory(&self) -> Option<super::Memory> {
+        let (config_dir, work_dir) = (self.config.config_dir.clone(), self.config.work_dir.clone());
+        Some(Arc::new(move |agent: &str| project(&config_dir, &work_dir.join(agent))))
+    }
+
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
         Box::pin(run(self.config, io))
     }
@@ -131,13 +136,20 @@ pub fn session_id(agent: &str, chat: &str, generation: u64) -> String {
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
-/// Where Claude Code keeps a session's transcript: its project directory is
+/// Where Claude Code keeps a session's transcript, in its project's
+/// directory (`project`).
+pub fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
+    project(config_dir, cwd).join(format!("{id}.jsonl"))
+}
+
+/// Claude Code's project directory for a working directory, where an
+/// agent's transcripts are (its memory of its chats: `Runtime::memory`):
 /// the working directory with every character but letters and digits a
 /// `-` (Claude Code's sessions docs; ours are well under its 200).
-pub fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
+pub fn project(config_dir: &Path, cwd: &Path) -> PathBuf {
     let project: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     assert!(project.len() <= 200, "a working directory Claude Code names whole: {project}");
-    config_dir.join("projects").join(project).join(format!("{id}.jsonl"))
+    config_dir.join("projects").join(project)
 }
 
 /// Each chat's `/new` count, by `agent|chat` (none: 0), kept in
@@ -1099,8 +1111,11 @@ async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &
     }
     let p = proc.as_mut().expect("started");
     let started = p.started;
-    if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
-        crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
+    match write(&mut p.stdin, &user_message(&message)).await {
+        Ok(()) => {
+            let _ = events.send(Event::Taken { turn: ts.turn.clone() }).await;
+        }
+        Err(e) => crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() }),
     }
     *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
 }
@@ -1612,7 +1627,6 @@ mod tests {
             routine: false,
             claim_seq: None,
             note: Some("the turn before was cut".into()),
-            forgotten: false,
             command: false,
             reply_to: None,
             quote: Some(super::super::Quote { id: "q".into(), text: "earlier".into(), own: true }),

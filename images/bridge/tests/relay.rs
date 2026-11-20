@@ -28,7 +28,7 @@ fn bound_port() -> std::net::TcpListener {
 
 fn relay(port: &std::net::TcpListener, dir: &std::path::Path) -> Box<Relay> {
     let listen = port.local_addr().unwrap();
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: true }, listener: port.try_clone().unwrap() })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: true, home: None }, listener: port.try_clone().unwrap() })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -914,7 +914,7 @@ async fn a_replys_file_is_kept_until_its_post() {
     let port = bound_port();
     let listen = port.local_addr().unwrap();
     let media = dir.join("relay-media");
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: media.clone(), media_max_bytes: 100, media_local: true };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: media.clone(), media_max_bytes: 100, media_local: true, home: None };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port.try_clone().unwrap() }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
@@ -1116,7 +1116,7 @@ async fn an_image_sent_by_url_is_fetched() {
     let dir = support::dir("relay-image-url-public");
     let port = bound_port();
     let listen = port.local_addr().unwrap();
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: false };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: false, home: None };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
