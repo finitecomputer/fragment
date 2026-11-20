@@ -472,6 +472,13 @@ enum Unstarted {
     /// container Cloudflare restored from a snapshot dead (#362), answered
     /// as a snapshot that would not start.
     Dead(String),
+    /// Overtaken as it started (entry.mjs `start`: a start after it, or a
+    /// destroy begun meanwhile, a sleep's or a wipe's): nothing of it ran
+    /// but what that destroy ends, and nothing it would restore is at
+    /// fault. Answered as a start held up (`StartBlocked`: made again, no
+    /// strike, when its lifecycle still wants it; nothing once it moved on),
+    /// its snapshot kept.
+    Overtaken,
 }
 
 impl From<CellError> for Unstarted {
@@ -1551,9 +1558,11 @@ impl ComputerCell {
         Ok(hosts)
     }
 
-    /// Sets its running start `generation`'s egress intercepts (entry.mjs
-    /// `arm`): the platform's own hosts and `hosts`, kept as armed. False:
-    /// that start was superseded.
+    /// Sets its running start `generation`'s egress intercepts again
+    /// (entry.mjs `arm`: a takeover's, or a Vault host set since it
+    /// started; its start registered them before it began, `try_start`):
+    /// the platform's own hosts and `hosts`, kept as armed. False: that
+    /// start was superseded.
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
         let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
@@ -1741,7 +1750,8 @@ impl ComputerCell {
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
         let started = self.try_start(generation, &planned).await;
-        if started.is_err() {
+        // overtaken, nothing of it is this start's to destroy or report failed
+        if started.as_ref().is_err_and(|e| !matches!(e, Unstarted::Overtaken)) {
             // what it destroys below ends as this start's failure, reported
             // by the event this answers, so the end is not a crash too: it
             // would count a second strike, and start again with no pause
@@ -1767,6 +1777,11 @@ impl ComputerCell {
                     console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
                 }
                 Event::Ready { generation }
+            }
+            Err(Unstarted::Overtaken) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Blocked);
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "overtaken": "as it started" }));
+                Event::StartBlocked { generation }
             }
             Err(Unstarted::Unusable(why)) => {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Unusable);
@@ -1864,16 +1879,21 @@ impl ComputerCell {
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
         // what its egress catches, asked before it starts (its agents' Vault's)
         let hosts = self.swap_hosts().await?;
-        // a wipe that began while this start awaited starts nothing: the
-        // check and the start are one turn (the host's start is synchronous)
+        // a wipe that began while this start awaited starts nothing: one
+        // begun before the host's start is seen here, and one begun while
+        // the host registers the intercepts is the host's to see (its
+        // destroy overtakes the start, which answers false)
         if self.wiped.get() {
             return Err(wiped_computer().into());
         }
         let started_ms = js::now_ms();
-        self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        if !self.arm(generation, &id, hosts).await? {
-            return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
+        // every intercept registered before the container starts, all at
+        // once: its guest's first call never races them (entry.mjs `start`)
+        let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
+        if self.call("start", &args).await?.as_bool() != Some(true) {
+            return Err(Unstarted::Overtaken);
         }
+        *self.armed.borrow_mut() = Some((generation, hosts));
         if self.lever_take(MetaKey::FailStarts) {
             // the lever's `fail-starts`: a start that fails with its container up
             return Err(CellError::host(format!("start {generation} failed (the test lever)")).into());

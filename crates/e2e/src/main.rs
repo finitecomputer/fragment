@@ -1013,6 +1013,13 @@ impl Suite {
         devstack::containers::drop_public_dns(&self.project)
     }
 
+    /// What the guest of `computer` wrote since its container started
+    /// (devstack::containers::guest_log): None while it is asleep.
+    pub fn guest_log(&self, computer: &str) -> Result<Option<String>> {
+        anyhow::ensure!(!self.hosted_rules && !self.on_celld(), "only a local run's computers are Docker's to read: a section that does declares Need::LocalDocker");
+        devstack::containers::guest_log(&self.project, computer)
+    }
+
     /// The queries to public DNS `sidecars` dropped since `drop_public_dns`.
     pub fn public_dns_asked(&self, sidecars: &[String]) -> Result<u64> {
         devstack::containers::public_dns_asked(sidecars)
