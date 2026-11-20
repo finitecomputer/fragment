@@ -25,8 +25,9 @@ between a runtime and the platform is the bridge (docs/bridge.md).
   starts and stops it, saves and restores `/data`, runs its egress
   intercepts, proxies its ports, and wakes it. It never reads what the
   image runs.
-- Its owner's export holds its view and its newest save that restores,
-  one an operator set aside included (docs/api.md, Export). It is deleted only with its owner, by an
+- Its owner's export holds its view, its newest save that restores, and,
+  beside it, the newest save set aside, if it keeps one (docs/api.md,
+  Export). It is deleted only with its owner, by an
   operator's wipe (docs/api.md, "Operators: wiping a person"), saves
   included. Cloudflare has no delete for a container snapshot: a wiped
   computer's is forgotten, never restored, and expires within 30 days.
@@ -523,8 +524,9 @@ the DO removes them from one started from a snapshot.
   kept apart from the saves a start may restore, so a release from
   before them restores the save chosen and lets none of them go (it
   forgets them: their archives stay in R2 until a wipe). Its
-  owner's export copies the newest save that restores, set aside or not
-  (their newest work); no start restores one, whatever fails after. A later choice may name one set
+  owner's export copies the newest save it may restore and, beside it,
+  the newest set aside (`set-aside/`: its files may be newer), however
+  many saves it took since; no start restores one, whatever fails after. A later choice may name one set
   aside, which is then restored; what an earlier choice set aside stays
   so for its time. One that won't wake is asleep after the choice, its
   strikes counted anew, so its next wake of any kind, or a restart,

@@ -378,6 +378,10 @@ struct Comp {
     id: String,
     view: Value,
     save: Option<core::SaveExported>,
+    /// The newest save set aside, beside it (`core::set_aside_path`). None
+    /// in a job stored before it was kept.
+    #[serde(default)]
+    set_aside: Option<core::SaveExported>,
     skipped: Vec<core::Skipped>,
 }
 
@@ -1728,48 +1732,53 @@ impl PrincipalCell {
             CompStep::Facts => {
                 let view = crate::computer::ask(&self.env, &id, "computer/view", &json!({})).await?;
                 let mut skipped = vec![];
-                let save = match crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await {
-                    Ok(v) if v["save"].is_object() => {
-                        let s = &v["save"];
-                        let records: Vec<Value> = s["records"].as_array().cloned().unwrap_or_default();
-                        Some(core::SaveExported {
-                            number: s["number"].as_u64().unwrap_or(0),
-                            id: s["id"].as_str().unwrap_or("").to_string(),
-                            at: s["at"].as_i64().unwrap_or(0),
-                            generation: s["generation"].as_u64().unwrap_or(0),
-                            held: s["held"] == true,
-                            records: records
-                                .into_iter()
-                                .map(|mut r| {
-                                    let dir = r["dir"].as_str().unwrap_or("/data").to_string();
-                                    r["file"] = json!(core::within(&core::save_path(&id, &dir), &core::computer_dir(&id)));
-                                    r
-                                })
-                                .collect(),
-                        })
+                // a save as the computer answers it, each record's file
+                // named by `path` (its own, or one set aside)
+                let exported = |s: &Value, path: fn(&str, &str) -> String| {
+                    let records: Vec<Value> = s["records"].as_array().cloned().unwrap_or_default();
+                    core::SaveExported {
+                        number: s["number"].as_u64().unwrap_or(0),
+                        id: s["id"].as_str().unwrap_or("").to_string(),
+                        at: s["at"].as_i64().unwrap_or(0),
+                        generation: s["generation"].as_u64().unwrap_or(0),
+                        held: s["held"] == true,
+                        records: records
+                            .into_iter()
+                            .map(|mut r| {
+                                let dir = r["dir"].as_str().unwrap_or("/data").to_string();
+                                r["file"] = json!(core::within(&path(&id, &dir), &core::computer_dir(&id)));
+                                r
+                            })
+                            .collect(),
                     }
+                };
+                let (save, set_aside) = match crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await {
+                    Ok(v) if v["save"].is_object() => (Some(exported(&v["save"], core::save_path)), v["setAside"].is_object().then(|| exported(&v["setAside"], core::set_aside_path))),
                     Ok(_) => {
                         skipped.push(core::Skipped { part: "save".into(), why: "it was never saved".into() });
-                        None
+                        (None, None)
                     }
                     Err(e) => return Err(e.into()),
                 };
-                run.job.comp = Some(Comp { id: id.clone(), view, save, skipped });
+                run.job.comp = Some(Comp { id: id.clone(), view, save, set_aside, skipped });
                 run.job.at = At::Computer { i, step: CompStep::Records { record: 0 } };
             }
             CompStep::Records { record } => {
-                let rec = run.job.comp.as_ref().and_then(|c| c.save.as_ref()).and_then(|s| s.records.get(record)).cloned();
-                let Some(rec) = rec else {
+                // its save's records, then the one set aside's, by one count
+                let comp = run.job.comp.as_ref();
+                let saves = comp.and_then(|c| c.save.as_ref()).map(|s| (s, core::save_path as fn(&str, &str) -> String)).into_iter().chain(comp.and_then(|c| c.set_aside.as_ref()).map(|s| (s, core::set_aside_path as fn(&str, &str) -> String)));
+                let rec = saves.flat_map(|(s, path)| s.records.iter().map(move |r| (r.clone(), path))).nth(record);
+                let Some((rec, path)) = rec else {
                     run.job.at = At::Computer { i, step: CompStep::Meta };
                     return Ok(());
                 };
                 let (dir, size, rid) = (rec["dir"].as_str().unwrap_or("/data").to_string(), rec["size"].as_u64().unwrap_or(0), rec["id"].as_str().unwrap_or("").to_string());
-                self.stored(run, &core::save_path(&id, &dir), Source::Save { computer: id.clone(), record: rid }, size, false).await?;
+                self.stored(run, &path(&id, &dir), Source::Save { computer: id.clone(), record: rid }, size, false).await?;
                 run.job.at = At::Computer { i, step: CompStep::Records { record: record + 1 } };
             }
             CompStep::Meta => {
                 let comp = run.job.comp.take().expect("a computer's facts before its meta");
-                let meta = core::ComputerMeta { view: comp.view, save: comp.save, skipped: comp.skipped };
+                let meta = core::ComputerMeta { view: comp.view, save: comp.save, set_aside: comp.set_aside, skipped: comp.skipped };
                 self.entry(run, &core::computer_meta_path(&id), &core::json_file(&meta), false).await?;
                 run.job.done += 1;
                 run.job.at = if i + 1 < run.job.plan().computers.len() { At::Computer { i: i + 1, step: CompStep::Facts } } else { At::End };

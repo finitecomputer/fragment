@@ -491,6 +491,12 @@ impl Saves {
         self.restored = Some(restored.clone());
         if let Some((e, unchanged, too_big)) = told {
             self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged, too_big });
+            // a notice of that life seen as it was pending named a newer
+            // save than the one it went back to: told again (Codex on the
+            // no-room PR)
+            if too_big {
+                self.seen = self.seen.min(e.generation - 1);
+            }
         }
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;
@@ -623,6 +629,14 @@ impl Saves {
         }
         assert!(self.current().is_some_and(|c| c.number == older), "its next start restores the save before it");
         Some(lost)
+    }
+
+    /// Whether a save was set aside as too big for its disk at `since_ms`
+    /// or after: the start that began then fell back past it (`too_big` is
+    /// stored before its destroy), as an isolate that comes up after that
+    /// start's own reports reads it.
+    pub fn set_aside_too_big_since(&self, since_ms: i64) -> bool {
+        self.aside.iter().any(|s| s.too_big && s.set_aside_ms.is_some_and(|at| at >= since_ms))
     }
 
     /// Whether a save newer than `back_to` was set aside as too big for its
@@ -1273,7 +1287,9 @@ mod tests {
         // b3, then b2, do not fit: each set aside, the one before at once
         for (big, next) in [("b3", "b2"), ("b2", "b1")] {
             assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some(big));
+            assert!(!c.saves.set_aside_too_big_since(c.now), "this start set none aside yet");
             let lost = c.saves.too_big(big, c.now);
+            assert!(c.saves.set_aside_too_big_since(c.now) && !c.saves.set_aside_too_big_since(c.now + 1), "this start's own, read by an isolate after it");
             assert_eq!(lost, Some(vec![]), "set aside, nothing let go of");
             let replayed = c.saves.clone();
             assert_eq!(c.saves.too_big(big, c.now + 1), None, "again: no longer the current save");
@@ -1332,6 +1348,34 @@ mod tests {
             });
         }
         assert!(matches!(c.life.phase, Phase::Failed { .. }) && c.saves.aside().is_empty(), "{:?}", c.life.phase);
+    }
+
+    /// Goal (Codex on the no-room PR): a crash's notice its owner saw while
+    /// it was pending named the save it would go back to; a start that then
+    /// went farther, that save too big for its disk, is told again, saying
+    /// so. Method: the lifecycle and its saves, as the DO drives them.
+    #[test]
+    fn a_rollback_farther_for_want_of_room_is_told_though_its_notice_was_seen() {
+        let rules = Rules::default();
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        c.apply(Event::Opened { socket: Socket::Keepalive });
+        c.apply(Event::Closed { socket: Socket::Keepalive });
+        let life = c.life.generation();
+        let g = c.crash();
+        let pending = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert!(matches!(pending, Some(ComputerNotice::WentBack { pending: true, save: Some(2), .. })), "{pending:?}");
+        assert!(c.saves.saw(life));
+        assert_eq!(c.saves.too_big("b2", c.now), Some(vec![]));
+        let s = c.apply(Event::RestoreFailed { generation: g, why: "no room".into(), older: true });
+        let s = c.owed(&s);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        assert_eq!(c.come_up(generation).save.as_deref(), Some("b1"));
+        let told = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert!(matches!(told, Some(ComputerNotice::WentBack { life: l, pending: false, save: Some(1), too_big: true, .. }) if l == life), "{told:?}");
     }
 
     /// Goal (Codex on this PR): a life's work is in the save it ended with,

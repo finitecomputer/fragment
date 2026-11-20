@@ -237,7 +237,7 @@ const START_FROM_CHECKS: [&str; 7] = [
     "an operator starts it from the older save it keeps: asleep, its strikes counted anew, its newer save set aside, and its owner told nothing more of a computer that won't wake",
     "a save it does not keep, or a body naming anything else, is refused (400); anyone else, 403",
     "`fragment operator start-from` with the operator key's file, again, changes nothing (its time set aside kept), and the log holds both, with the save set aside",
-    "its owner's export copies the newest save, the one set aside, each record as stored",
+    "its owner's export copies the save its next start restores and, beside it, the one set aside, each record as stored",
     "its next wake comes up from the save chosen, a rollback, and its owner is told where it went back to",
 ];
 
@@ -316,7 +316,7 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
         json!({ "cli": format!("{again:?}"), "logged": logged }),
     );
     // its owner's export: the newest save, the one set aside
-    let exported = exported_save(s, api, &una, &id, &newest)?;
+    let exported = exported_save(s, api, &una, &id, &older, &newest)?;
     s.ok(START_FROM_CHECKS[5], exported["ok"] == true, &exported);
     // its next wake: from save 1, a rollback, told
     let _ = wake();
@@ -333,9 +333,10 @@ fn start_from_checks(s: &mut Suite, api: &Api, operator: &Keys, home: &Path, key
 }
 
 /// `keys`' export, made and read: whether its computer `id`'s save is
-/// `save` (as the `saves` lever lists it), each of its records as stored
-/// (`{ok, export, save, records}`).
-pub(super) fn exported_save(s: &Suite, api: &Api, keys: &Keys, id: &str, save: &Value) -> Result<Value> {
+/// `save`, and the one set aside beside it `set_aside` (each as the `saves`
+/// lever lists it), each of their records as stored (`{ok, export, save,
+/// setAside, records}`).
+pub(super) fn exported_save(s: &Suite, api: &Api, keys: &Keys, id: &str, save: &Value, set_aside: &Value) -> Result<Value> {
     let pressed = api.signed(keys, "POST", "/api/export", None)?;
     let mut export = Value::Null;
     let built = s.eventually(Duration::from_secs(120), || {
@@ -354,10 +355,13 @@ pub(super) fn exported_save(s: &Suite, api: &Api, keys: &Keys, id: &str, save: &
     let root = fragment_core::export::ROOT;
     let hex = id.strip_prefix("computer:").unwrap_or("");
     let meta: Value = files.get(&format!("{root}/computers/{hex}/meta.json")).and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
-    let records = save["records"].as_array().cloned().unwrap_or_default();
-    let stored = records.iter().all(|r| files.get(&fragment_core::export::save_path(id, r["dir"].as_str().unwrap_or("/data"))).is_some_and(|b| fragment_core::blob::sha256_hex(b) == r["sha256"].as_str().unwrap_or("-")));
-    let ok = pressed.status == 200 && built && export["state"] == "ready" && meta["save"]["id"] == save["id"] && !records.is_empty() && stored;
-    Ok(json!({ "ok": ok, "export": export, "save": meta["save"], "records": records.len() }))
+    let stored = |s: &Value, path: fn(&str, &str) -> String| {
+        let records = s["records"].as_array().cloned().unwrap_or_default();
+        !records.is_empty() && records.iter().all(|r| files.get(&path(id, r["dir"].as_str().unwrap_or("/data"))).is_some_and(|b| fragment_core::blob::sha256_hex(b) == r["sha256"].as_str().unwrap_or("-")))
+    };
+    let both = stored(save, fragment_core::export::save_path) && stored(set_aside, fragment_core::export::set_aside_path);
+    let ok = pressed.status == 200 && built && export["state"] == "ready" && meta["save"]["id"] == save["id"] && meta["setAside"]["id"] == set_aside["id"] && both;
+    Ok(json!({ "ok": ok, "export": export, "save": meta["save"], "setAside": meta["setAside"], "stored": both }))
 }
 
 /// The admin's page (`/admin`) in Chrome, with an operator's own session:

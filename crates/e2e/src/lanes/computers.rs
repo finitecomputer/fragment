@@ -3303,7 +3303,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
 const ROOM_CHECKS: [&str; 4] = [
     "a start whose newest save no longer fits its disk (the lever's fail-restore) sets that save aside and comes up from the one before, at once, no strike",
     "its owner is told plainly that its newest save didn't fit, where it went back to, and that the newer files can still be exported",
-    "the save set aside is kept, its view says so, and its owner's export copies it, each record as stored",
+    "the save set aside is kept through the saves after it, its view says so, and its owner's export copies it beside the newest save, each record as stored",
     "with no save before it, a save that does not fit is a strike as before: it won't wake, nothing set aside, never started with nothing",
 ];
 
@@ -3362,10 +3362,17 @@ pub fn computer_room(s: &mut Suite, api: &Api) -> Result<()> {
             && said["text"].as_str().is_some_and(|t| t.starts_with("It went back to its save from ") && t.contains("you can still export them in Settings")),
         json!({ "notice": told, "said": said }),
     );
-    let listed = v["saves"].as_array().into_iter().flatten().find(|s| s["number"] == 2).cloned().unwrap_or(Value::Null);
-    let exported = super::admin::exported_save(s, api, &owner, &id, &newest)?;
-    s.ok(ROOM_CHECKS[2], listed["setAside"].is_i64() && exported["ok"] == true, json!({ "listed": listed, "exported": exported }));
+    // a newer save (its sleep's) kept: the one set aside is still exported
     let _ = lever_with(api, &id, json!({ "op": "fail-restore", "save": 0 }));
+    let (slept, after) = put_to_sleep(s, api, &owner, &id);
+    let kept = lever(api, &id, "saves")?.body;
+    let listed = after["saves"].as_array().into_iter().flatten().find(|s| s["number"] == 2).cloned().unwrap_or(Value::Null);
+    let exported = super::admin::exported_save(s, api, &owner, &id, &kept["saves"][0], &kept["aside"][0])?;
+    s.ok(
+        ROOM_CHECKS[2],
+        slept && kept["saves"][0]["number"] == 3 && kept["aside"][0]["id"] == newest["id"] && listed["setAside"].is_i64() && exported["ok"] == true,
+        json!({ "listed": listed, "exported": exported, "saves": kept["saves"] }),
+    );
     // with no save before it: a strike, as before
     let alone = api.person()?;
     let (lone, ok) = computer_saved(s, api, &alone, 1)?;

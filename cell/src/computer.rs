@@ -1327,7 +1327,7 @@ impl ComputerCell {
     /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
         let life = self.lifecycle()?;
-        if let Phase::Starting { generation, destroying: true, .. } = life.phase {
+        if let Phase::Starting { generation, since_ms, destroying: true } = life.phase {
             // a start that failed was destroying what it started when its
             // isolate went, and its own report (why, and whether it is a
             // strike) went with it: its container destroyed, one failure.
@@ -1342,6 +1342,13 @@ impl ComputerCell {
             self.lever_wait(MetaKey::StallTakeOver, STALL_FAILING_START_MAX_MS).await;
             if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
                 return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
+            }
+            // one that set its save aside as too big for its disk (stored
+            // before its destroy) fell back: the save before it is next, no
+            // strike, as its own report would have said (Codex on the
+            // no-room PR)
+            if self.saves()?.set_aside_too_big_since(since_ms) {
+                return Ok(Some(Event::RestoreFailed { generation, why: "its save did not fit its disk, and the isolate that saw it went before it said so".into(), older: true }));
             }
             return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
         }
@@ -3322,9 +3329,12 @@ impl ComputerCell {
                 let b: ExportAsk = body_json(&mut req).await?;
                 self.owned_by(&b.owner)?;
                 let saves = self.saves()?;
-                // set aside or not: a save set aside holds its newest work
-                let save = saves.every_save().into_iter().find(|s| !s.unusable);
-                json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
+                // and, beside it, the newest set aside: its files may be
+                // newer, and the computer never goes back to it
+                let of = |s: &Save| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records });
+                let save = saves.all().iter().find(|s| !s.unusable);
+                let set_aside = saves.aside().iter().find(|s| !s.unusable);
+                json_response(&json!({ "save": save.map(of), "setAside": set_aside.map(of) }))
             }
             "computer/export-read" => {
                 let b: ExportRead = body_json(&mut req).await?;
