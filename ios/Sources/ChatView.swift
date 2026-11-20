@@ -219,18 +219,39 @@ private struct LatestLabel: LabelStyle {
     }
 }
 
-private struct ChatRows: View {
+struct ChatRows: View {
     let session: ChatSession
     let library: Library
     let open: (FragmentSummary) -> Void
+
+    /// A finished turn's summary ("XP brewed · 22s") and the reply right
+    /// after it, its agent's, are one: the summary heads the reply in place
+    /// of its name, and has no row of its own. `folded`: the summaries'
+    /// records; `by`: each reply's summary, by its record's id.
+    static func leads(_ rows: [ChatItem], cards: [String: ToolCard]) -> (folded: Set<String>, by: [String: ToolCard]) {
+        var folded = Set<String>(), by: [String: ToolCard] = [:]
+        for (index, item) in rows.enumerated().dropLast() {
+            guard case .record(let record) = item, let card = cards[record.id], !card.running, card.words == nil,
+                  case .record(let next) = rows[index + 1], next.isMessage, next.principal == card.turn.agent, cards[next.id] == nil
+            else { continue }
+            folded.insert(record.id); by[next.id] = card
+        }
+        return (folded, by)
+    }
+
     var body: some View {
         let faces = library.agentsByIdentity
         let you = session.principal
+        let leads = Self.leads(session.rows, cards: session.activity.cards)
         ForEach(session.rows) { item in
             switch item {
+            case .record(let record) where leads.folded.contains(record.id):
+                // its summary heads the reply after it (`leads`)
+                EmptyView()
             case .record(let record):
                 let links = record.isMessage ? MessageLinks.find(in: record.text, markdown: record.principal != you) : []
                 ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal], card: session.activity.cards[record.id],
+                        lead: leads.by[record.id],
                         queued: session.activity.queued.contains(record.id),
                         links: links, opens: links.compactMap(library.fragment(linkedBy:)).reduce(into: []) { kept, app in if !kept.contains(where: { $0.name == app.name }) { kept.append(app) } },
                         api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 }, open: open)
@@ -251,6 +272,9 @@ struct ChatRow: View, Equatable {
     let isYou: Bool
     let agent: FragmentSummary?
     var card: ToolCard? = nil
+    /// The finished turn it answers, heading it in place of its agent's
+    /// name: its picture, "XP brewed · 22s", and its steps (`ChatRows.leads`).
+    var lead: ToolCard? = nil
     /// A person's message waiting for its agent's running turn (chat.js `queued`).
     var queued = false
     /// The web addresses in its words, and the fragments of theirs among
@@ -263,7 +287,7 @@ struct ChatRow: View, Equatable {
     var open: (FragmentSummary) -> Void = { _ in }
 
     nonisolated static func == (a: ChatRow, b: ChatRow) -> Bool {
-        a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment && a.card == b.card
+        a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment && a.card == b.card && a.lead == b.lead
             && a.queued == b.queued && a.links == b.links && a.opens == b.opens
     }
 
@@ -271,9 +295,11 @@ struct ChatRow: View, Equatable {
         if record.isMessage {
             let files = attachments
             VStack(alignment: .leading, spacing: 8) {
+                // over the words' held card (unseen in place), which reaches past them
+                if let lead, !isYou { WorkingIndicator(card: lead, agent: agent).zIndex(1) }
                 // a message of files alone is its files, without an empty bubble
                 if !(isYou && files.count > 0 && record.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
-                    MessageView(text: record.text, isYou: isYou, agent: agent)
+                    MessageView(text: record.text, isYou: isYou, agent: agent, named: lead == nil)
                         // an agent's words have no bubble: held, they lift on
                         // a card of the chat's own color (unseen in place),
                         // as a person's lift on theirs (FIN-442)
@@ -464,15 +490,20 @@ struct MessageView: View {
     let isYou: Bool
     var agent: FragmentSummary? = nil
     var streaming = false
+    /// An agent's: its picture and name above it (not when a turn's summary heads it).
+    var named = true
+    /// The name line: the working line's size, so a reply's head reads as its summary's.
+    @ScaledMetric(relativeTo: .subheadline) private var nameSize = 15.0
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if isYou { Spacer(minLength: 44) }
             VStack(alignment: .leading, spacing: 8) {
-                if !isYou {
-                    HStack(spacing: 7) {
-                        AgentAvatar(agent: agent, size: 22)
-                        Text(agent?.displayTitle ?? "Agent").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                if !isYou && named {
+                    HStack(spacing: 8) {
+                        // a circle, as the working line's is: the same face, working and done
+                        AgentAvatar(agent: agent, size: nameSize + 5, round: true)
+                        Text(agent?.displayTitle ?? "Agent").font(.system(size: nameSize)).foregroundStyle(.secondary)
                         // drawn by SwiftUI, never a UIKit spinner: a platform view
                         // in the lazy stack's rows was in each layout pass of a
                         // stuck one (100% CPU) seen while scrolling up mid-reply
