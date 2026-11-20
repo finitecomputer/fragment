@@ -241,7 +241,10 @@ The owner's view carries `notices` (proto's `ComputerNotice`, from
 `fragment_core::computer::notices`; their fields are docs/api.md's), the
 most pressing first. Each is derived from the Computer DO's own state
 with no clock, so every reader is told the same, and when they change the
-DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
+DO tells its owner's open pages (`/api/fragments/watch`'s `changed`), as
+it does when its phase changes (`Lifecycle::shown`: a chat with their
+agent says it is getting ready while it starts, before the start's own
+steps; its "no reply yet" waits until it is up):
 
 - `wont_wake`: its starts kept failing.
 - `disk_filling`: its disk, read (`df`) in each start that restores a

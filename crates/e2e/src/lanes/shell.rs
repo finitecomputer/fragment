@@ -1347,6 +1347,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("at a desktop's width the sidebar shows beside the chat", sidebar, "");
     s.ok("the chat frame's accessible name cannot show a tooltip over its contents; the chat's title carries it", b.eval(&page, "(() => { const f = [...document.querySelectorAll('#frames iframe')].find(f => !f.hidden); const n = document.getElementById('chat-title'); return !!f && !f.hasAttribute('title') && f.getAttribute('aria-label') === n.textContent && n.title === n.textContent; })()")? == true, "");
     let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));
+    getting_ready_ui(s, api, &mut b, &page, &session, &host, &shots)?;
     doing_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
 
     // another agent of theirs, made elsewhere (the CLI, or an agent): a row
@@ -3380,6 +3381,57 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         loading["ok"] == true,
         &loading,
     );
+    Ok(())
+}
+
+/// A message to their agent while its computer sleeps (FIN-474 P2): the
+/// chat says calmly that the agent is getting ready while its computer
+/// really starts (its owner's pages told as its phase changes), never that
+/// it slept, and never that no reply has started; then its answer. The
+/// start is slow as a dead snapshot's is (the lever's `alive-check`,
+/// frozen: a start never heard, then one from its save). Shot at 1280 and
+/// 390 px, light and dark. Starts and ends awake, at 1280 px, light.
+#[allow(clippy::too_many_arguments)]
+fn getting_ready_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, host: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let slept = shell(api, session, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})), &[])?;
+    let check = super::computers::lever_with(api, &id, json!({ "op": "alive-check", "ms": 25_000, "freeze": true }))?;
+    let said = "while you were away, could you check the tomatoes";
+    let sent = b.eval_in_frame(page, host, &format!("(() => {{ const t = document.getElementById('text'); if (!t || t.disabled) return false; t.value = {}; t.dispatchEvent(new Event('input', {{ bubbles: true }})); document.getElementById('say').requestSubmit(); return true; }})()", js(said)))?;
+    let line = "document.querySelector('.msg.working')?.textContent ?? ''";
+    let ready = s.eventually(wait, || b.eval_in_frame(page, host, &format!("({line}).endsWith(' is getting ready…')")).ok() == Some(Value::Bool(true)));
+    let starting = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?.body["phase"].clone();
+    let mut lines = vec![b.eval_in_frame(page, host, line)?];
+    for (width, height, mobile, scheme, name) in [(1280, 800, false, "light", "getting-ready-desktop"), (1280, 800, false, "dark", "getting-ready-desktop-dark"), (390, 844, true, "light", "getting-ready-phone"), (390, 844, true, "dark", "getting-ready-phone-dark")] {
+        b.viewport(page, width, height, mobile)?;
+        b.color_scheme(page, scheme)?;
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = b.screenshot(page, &shots.join(format!("{name}.png")));
+        lines.push(b.eval_in_frame(page, host, line)?);
+    }
+    b.viewport(page, 1280, 800, false)?;
+    b.color_scheme(page, "light")?;
+    s.ok(
+        "a message while its computer sleeps: the chat says \"… is getting ready…\" while it really starts, and nothing of sleeping, computers or a reply not started",
+        slept.body["phase"] == "asleep" && check.status == 200 && sent == true && ready && starting == "starting"
+            && lines.iter().all(|l| l.as_str().is_some_and(|t| t.ends_with(" is getting ready…") && !t.contains("computer") && !t.contains("sleep"))),
+        json!({ "slept": slept.body["phase"], "phase": starting, "lines": lines }),
+    );
+    let echoed = format!("[...document.querySelectorAll('.msg.agent:not(.streaming)')].some((m) => m.textContent.includes('echo:') && m.textContent.includes({}))", js(said));
+    let answered = s.eventually(std::time::Duration::from_secs(120), || b.eval_in_frame(page, host, &format!("{echoed} && !document.querySelector('.msg.working')")).ok() == Some(Value::Bool(true)));
+    for (width, height, mobile, scheme, name) in [(1280, 800, false, "light", "getting-ready-answered-desktop"), (1280, 800, false, "dark", "getting-ready-answered-desktop-dark"), (390, 844, true, "light", "getting-ready-answered-phone"), (390, 844, true, "dark", "getting-ready-answered-phone-dark")] {
+        b.viewport(page, width, height, mobile)?;
+        b.color_scheme(page, scheme)?;
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = b.screenshot(page, &shots.join(format!("{name}.png")));
+    }
+    b.viewport(page, 1280, 800, false)?;
+    b.color_scheme(page, "light")?;
+    let awake = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?.body["phase"].clone();
+    s.ok("once it is up, its agent answers, and the getting-ready line is gone", answered && awake == "awake", json!({ "phase": awake }));
     Ok(())
 }
 

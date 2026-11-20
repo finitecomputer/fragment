@@ -222,6 +222,12 @@ const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
+/// A tell to its owner's open pages waits at most this. A call to their
+/// list takes a few ms; past this the computer goes on without it, so a
+/// slow or stuck owner never holds a start, a wake's answer or a sleep
+/// (#1381), and a page that did not hear reads it again at its next change
+/// or as it reconnects.
+const TELL_MAX_MS: u64 = 3_000;
 /// The lever's `stall-failing-start` waits at most this.
 const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 /// A takeover that failed (`take_over`) is tried again by an alarm within
@@ -363,6 +369,8 @@ enum MetaKey {
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's wait before a start's owner is told (`slow-start-tell`), in ms.
+    SlowStartTell,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -412,6 +420,7 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -962,7 +971,7 @@ impl ComputerCell {
     /// `drive_with`, its answer taken as its start is owed when `answer` is
     /// asked for (an owner's restart: `drive_events`).
     async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
-        let told = self.notices()?;
+        let told = (self.notices()?, phase_told(&self.lifecycle()?));
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
         let mut refused = self.drive_events(first, answer.as_deref_mut()).await;
@@ -986,9 +995,10 @@ impl ComputerCell {
             // in which the alarm makes the start a restart owed
             self.slow_tell().await;
         }
-        // what its owner is told changed: their open pages read it again
-        // (whatever the events did, a step that failed half way included)
-        if self.notices().is_ok_and(|now| now != told) {
+        // what its owner is told changed (its notices, or its phase): their
+        // open pages read it again (whatever the events did, a step that
+        // failed half way included)
+        if self.notices().and_then(|n| Ok((n, phase_told(&self.lifecycle()?)))).is_ok_and(|now| now != told) {
             self.tell_owner().await;
         }
         refused
@@ -1129,13 +1139,30 @@ impl ComputerCell {
         }
     }
 
-    /// Tells its owner's open pages to read it again. One that did not hear
-    /// reads it as it reconnects, or at its next change: logged, never failed.
+    /// Tells its owner's open pages to read it again, within `TELL_MAX_MS`.
+    /// One that did not hear reads it as it reconnects, or at its next
+    /// change: logged, never failed.
     async fn tell_owner(&self) {
+        self.tell_owner_after(None).await;
+    }
+
+    /// `tell_owner`, a lever's wait (`lever`'s ms: `slow-start-tell`) first,
+    /// the two within `TELL_MAX_MS` together: a slow owner, as the lane makes one.
+    async fn tell_owner_after(&self, lever: Option<MetaKey>) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
-        }
+        let told = async {
+            if let Some(key) = lever {
+                self.lever_wait(key, SLOW_TELL_MAX_MS).await;
+            }
+            crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await
+        };
+        let bound = Delay::from(std::time::Duration::from_millis(TELL_MAX_MS));
+        let error = match futures_util::future::select(Box::pin(told), Box::pin(bound)).await {
+            futures_util::future::Either::Left((Ok(()), _)) => return,
+            futures_util::future::Either::Left((Err(e), _)) => e.message,
+            futures_util::future::Either::Right(_) => format!("no answer in {TELL_MAX_MS} ms: gone on without it"),
+        };
+        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": error }));
     }
 
     /// `answer`, when asked for and still empty, takes the view as its
@@ -1165,12 +1192,13 @@ impl ComputerCell {
         // unhold), or at a start or a sleep's end
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
+            let was = phase_told(&life);
             let logged = json!(event);
             let applied = event.clone();
             let now = js::now_ms();
             // an owner's restart it takes asks its start as it applies
             self.starts.borrow_mut().applying(&applied, &life, now);
-            let step = life.apply_with(event, now, &rules);
+            let mut step = life.apply_with(event, now, &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
             if let Some(ended) = step.ended {
@@ -1199,6 +1227,21 @@ impl ComputerCell {
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
+            // a start begins: its owner's open pages read it again before
+            // its steps (a chat says its agent is getting ready while it
+            // starts); every other change is told as the drive ends. Awaited,
+            // never a task of its own: background work on a lifecycle route
+            // slowed container destroys (#1343)
+            let start = step.actions.iter().find_map(|a| if let Action::Start { generation } = a { Some(*generation) } else { None });
+            if let Some(g) = start.filter(|_| phase_told(&life) != was) {
+                self.tell_owner_after(Some(MetaKey::SlowStartTell)).await;
+                // what came in as it was told (its owner's sleep, a newer
+                // wake) may have ended this start: then none is made
+                if !matches!(self.lifecycle()?.phase, Phase::Starting { generation, .. } if generation == g) {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "start": g, "superseded": "as its owner was told" }));
+                    step.actions.retain(|a| !matches!(a, Action::Start { .. }));
+                }
+            }
             refused = refused.or(step.refused.clone());
             for next in self.perform(step, until_ms, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
@@ -2664,14 +2707,10 @@ impl ComputerCell {
     fn view_unasked(&self) -> CellResult<Unasked> {
         let id = self.must(MetaKey::Id)?;
         let life = self.lifecycle()?;
-        let (phase, why) = match &life.phase {
-            // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
-            Phase::Starting { .. } => (ComputerPhase::Starting, None),
-            Phase::Awake { .. } => (ComputerPhase::Awake, None),
-            Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
+        let phase = life.shown(js::now_ms());
+        let why = match &life.phase {
+            Phase::Failed { why, .. } => Some(why.clone()),
+            _ => None,
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
@@ -2912,16 +2951,18 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "slow-snapshot", "ms": ms }));
                 Ok(json!({ "computer": id, "slowSnapshot": ms }))
             }
-            "slow-tell" => {
-                // its next restart's owner is told `ms` late (0: on time),
-                // as a slow principal answers: the window in which its alarm
-                // makes the start the restart owed (`drive_events`' answer)
-                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-tell names its ms, 0 to {SLOW_TELL_MAX_MS}")))?;
+            "slow-tell" | "slow-start-tell" => {
+                // its next restart's (or start's, within TELL_MAX_MS) owner is told `ms` late (0:
+                // on time), as a slow principal answers: the window in which
+                // its alarm makes the start the restart owed (`drive_events`'
+                // answer), or its owner's sleep ends a start before it is made
+                let key = if b.op == "slow-tell" { MetaKey::SlowTell } else { MetaKey::SlowStartTell };
+                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("{} names its ms, 0 to {SLOW_TELL_MAX_MS}", b.op)))?;
                 match ms {
-                    0 => self.delete_meta(MetaKey::SlowTell)?,
-                    ms => self.set_meta(MetaKey::SlowTell, &ms.to_string())?,
+                    0 => self.delete_meta(key)?,
+                    ms => self.set_meta(key, &ms.to_string())?,
                 }
-                console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "ms": ms }));
                 Ok(json!({ "computer": id, "slowTell": ms }))
             }
             "fail-starts" | "fail-takeover-destroys" => {
@@ -4661,4 +4702,11 @@ fn target_fragment(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/f/").or_else(|| path.strip_prefix("/api/f/"))?;
     let name = rest.split('/').next()?;
     fragment_proto::valid_fragment_name(name).then(|| name.to_string())
+}
+
+/// What its owner's pages show of its phase, and so are told of as it
+/// changes: the phase its view shows (`Lifecycle::shown`), and the stored
+/// one, as a start due (shown starting before its alarm) is made.
+fn phase_told(life: &Lifecycle) -> (std::mem::Discriminant<Phase>, ComputerPhase) {
+    (std::mem::discriminant(&life.phase), life.shown(js::now_ms()))
 }

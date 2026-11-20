@@ -369,6 +369,40 @@ fn an_agent_joining_a_fragment_wakes_it() {
     assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
 }
 
+/// Goal: the phase its owner is shown (and told of as it changes) follows
+/// a wake, a sleep, a wake that cancels a sleep, a wake heard once its stop
+/// began, and a start that kept failing; a start owed and due shows as
+/// starting before the alarm makes it.
+#[test]
+fn the_phase_shown_follows_its_wakes_and_sleeps() {
+    use fragment_proto::computer::ComputerPhase as Shown;
+    let mut l = Lifecycle::new();
+    assert_eq!(l.shown(T), Shown::Asleep);
+    let s = l.apply(Event::Wake { why: Wake::Record }, T);
+    let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("a wake starts it: {s:?}") };
+    assert_eq!(l.shown(T), Shown::Starting, "while it starts, before its guest is up");
+    l.apply(Event::Ready { generation: g }, T + 3_000);
+    assert_eq!(l.shown(T + 3_000), Shown::Awake);
+    l.apply(Event::Alarm, T + IDLE_MS);
+    assert_eq!(l.shown(T + IDLE_MS), Shown::Sleeping);
+    // a message heard before its stop began: awake again at once
+    l.apply(Event::Wake { why: Wake::Record }, T + IDLE_MS + 100);
+    assert_eq!(l.shown(T + IDLE_MS + 100), Shown::Awake, "{:?}", l.phase);
+    // heard once its stop began: its start owed once it is down, shown as starting
+    let later = T + 2 * IDLE_MS + 1_000;
+    l.apply(Event::Alarm, later);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, later + 500));
+    l.apply(Event::Saved { generation: g, seq }, later + 800);
+    l.apply(Event::Wake { why: Wake::Record }, later + 1_000);
+    assert_eq!(l.shown(later + 1_000), Shown::Sleeping, "{:?}", l.phase);
+    let s = l.apply(Event::Asleep { generation: g }, later + 5_000);
+    assert_eq!(l.shown(later + 5_000), Shown::Starting, "owed and due: {:?}", l.phase);
+    owed(&mut l, &s, later + 5_000);
+    assert_eq!(l.shown(later + 5_000), Shown::Starting);
+    let failed = Lifecycle { phase: Phase::Failed { why: "pull failed".into(), since_ms: T }, ..Lifecycle::new() };
+    assert_eq!(failed.shown(T), Shown::WontWake);
+}
+
 /// Goal: a wake racing a sleep whose stop began (its container is going)
 /// wins, and starts a new generation once the old one is gone; the old
 /// one's late reports change nothing.
