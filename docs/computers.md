@@ -25,8 +25,9 @@ between a runtime and the platform is the bridge (docs/bridge.md).
   starts and stops it, saves and restores `/data`, runs its egress
   intercepts, proxies its ports, and wakes it. It never reads what the
   image runs.
-- Its owner's export holds its view and its newest save that restores,
-  one an operator set aside included (docs/api.md, Export). It is deleted only with its owner, by an
+- Its owner's export holds its view, its newest save that restores, and,
+  beside it, the newest save set aside, if it keeps one (docs/api.md,
+  Export). It is deleted only with its owner, by an
   operator's wipe (docs/api.md, "Operators: wiping a person"), saves
   included. Cloudflare has no delete for a container snapshot: a wiped
   computer's is forgotten, never restored, and expires within 30 days.
@@ -268,7 +269,9 @@ steps; its "no reply yet" waits until it is up):
   start, told until its owner says they saw it. None when nothing was
   done on the lost life after that save (Paul, 2026-10-23). When nothing
   that may change its files ran after it (no turn, no port tab used:
-  `unchanged`), it says where it went back to and no loss.
+  `unchanged`), it says where it went back to and no loss. When its
+  newest save didn't fit its disk (`tooBig`), it says so, where it went
+  back to, and that the newer files are kept and can still be exported.
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
 - `key_paused`: a shared key's charges this last hour reached its owner's
@@ -502,13 +505,26 @@ the DO removes them from one started from a snapshot.
   (R2 answered an error) is asked again a few times within the restore
   (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
   start on one.
+- **A save too big for its disk is set aside** (Paul, 2026-11-20:
+  "rollback is preferred to being stuck"). A restore can need a little
+  more room than the life that saved it used: the sandbox runtime stops
+  one that would leave less than its floor free (2026-11-20: a computer
+  whose agent filled its 20 GB disk saved, slept, and never started
+  again, each start "restore stopped with ~203 MB free, below the
+  268435456 byte floor"). A restore that found no room
+  (`fragment_core::computer::restore_found_no_room`: the runtime's guard
+  in its own words, or the disk filling, `ENOSPC`, which the cell's host
+  names a restore's `SandboxFileError` by, and nothing else) sets its
+  save aside (`too_big`), as an operator's choice of the save before it
+  would (below), and starts again at once from that one, with no strike.
+  With no save before it, nothing is set aside: the failure is a strike
+  as any, so a computer none of whose saves fit ends `wont_wake`, never
+  started with nothing. Its owner is told it went back because its
+  newest save didn't fit its disk, where to, and that the newer files
+  are kept and can still be exported (`went_back`'s `tooBig`).
 - **An operator's start from a save** (`fragment operator start-from`;
   docs/api.md, Operators) is the way back when a save restores but fails
-  every start, as one that no longer fits its disk does: the sandbox
-  runtime stops a restore that would leave less than its floor free, a
-  failed start like any, a strike, never a save found unusable, so no
-  start falls back past it (2026-11-20: a computer whose agent filled its
-  20 GB disk saved, slept, and never started again). While it runs no
+  every start for some other reason. While it runs no
   container, an operator names a save it keeps; its next start restores
   it, and each newer save is **set aside** (`setAside`, when), and so is
   each older one past the three newest before it, so a start's fallbacks
@@ -519,9 +535,9 @@ the DO removes them from one started from a snapshot.
   kept apart from the saves a start may restore, so a release from
   before them restores the save chosen and lets none of them go (it
   forgets them: their archives stay in R2 until a wipe). Its
-  owner's export copies the newest save that restores, set aside or not
-  (their newest work); no start restores one, whatever fails after, and
-  nothing sets one aside by itself. A later choice may name one set
+  owner's export copies the newest save it may restore and, beside it,
+  the newest set aside (`set-aside/`: its files may be newer), however
+  many saves it took since; no start restores one, whatever fails after. A later choice may name one set
   aside, which is then restored; what an earlier choice set aside stays
   so for its time. One that won't wake is asleep after the choice, its
   strikes counted anew, so its next wake of any kind, or a restart,
@@ -635,7 +651,8 @@ minute), or its life ends, whichever is first.
 - `failed`: `start` (its own steps), `snapshot` (the snapshot would not
   start), `dead` (its guest never read its view within its wait: a
   snapshot that came up dead, or the `alive-check` lever),
-  `unusable` (its save would not restore), `exit` (its container stopped
+  `unusable` (its save would not restore), `no_room` (its save's restore
+  found no room on its disk: set aside), `exit` (its container stopped
   first), `deadline`, `blocked` (the container before it still ran: it
   started nothing, and the start made again counts from the same wake),
   `other`.
@@ -646,7 +663,8 @@ minute), or its life ends, whichever is first.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
   (no save yet).
 - `why`, for a restore, the first that holds: `off` (no snapshots here),
-  `restart`, `aside` (an operator set its newer saves aside), `unusable`
+  `restart`, `aside` (its newer saves were set aside: an operator's
+  choice, or too big for its disk), `unusable`
   (a newer save would not restore), `image` (the
   snapshot is of another image), `dead_snapshot` (this wake's snapshot
   start failed), `crash`, `unsaved` (its last sleep could not save),

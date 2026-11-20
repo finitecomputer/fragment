@@ -19,6 +19,19 @@ use crate::computer::lifecycle::{Event, Lifecycle, Phase};
 /// bound (proto's `limits`), whatever it happens to equal.
 pub const RESTORE_FLOOR_MAX: u64 = 1 << 28;
 
+/// Whether a restore's failure `why` is for want of room on its disk, by
+/// its words, and nothing else: the sandbox runtime's guard, which stops a
+/// restore that would leave less than its floor free ("restore stopped
+/// with ~203 MB free, below the 268435456 byte floor": production,
+/// 2026-11-20), or its disk filling under it, `ENOSPC` (the cell's host
+/// names a restore's `SandboxFileError` by its code) or the system's words
+/// for it. A restore that failed any other way (a transfer, a timeout, an
+/// archive gone) is not.
+pub fn restore_found_no_room(why: &str) -> bool {
+    let guard = why.contains("restore stopped with") && why.contains("free, below the") && why.contains("byte floor");
+    guard || why.contains("ENOSPC") || why.contains("No space left on device")
+}
+
 /// The restore's floor on a disk of `total` bytes (`RESTORE_FLOOR_MAX`).
 pub fn restore_floor(total: u64) -> u64 {
     (total / 20).min(RESTORE_FLOOR_MAX)
@@ -393,5 +406,36 @@ mod tests {
             "the home leaves out its work and all named; the work what was named under it; never an unsafe pattern"
         );
         assert_eq!(sizes_read(&["/work/".into()]), read(" --exclude='./work' --exclude='./work'", ""), "a guest naming its whole work: its work's record keeps it all, and so does its measure");
+    }
+
+    /// Goal (production, 2026-11-20): a restore that stopped for want of
+    /// room is told from every other failure by its words alone, narrowly:
+    /// the sandbox runtime's guard, as the cell hears it (alone, or under
+    /// the host's `restore '<dir>':`, or the lever's), and a disk that
+    /// filled (`ENOSPC`). Invalid: a transfer, a timeout, an archive gone,
+    /// a near miss of the guard's words, and a disk read's own.
+    #[test]
+    fn a_restore_that_found_no_room_is_told_by_its_words() {
+        let guard = "restore stopped with ~203 MB free, below the 268435456 byte floor";
+        for yes in [
+            guard.to_string(),
+            format!("restore '/data/work': {guard}"),
+            format!("{guard} (the test lever's fail-restore of save 2)"),
+            "ENOSPC: restore '/data/work': write failed".to_string(),
+            "restore '/data': No space left on device (os error 28)".to_string(),
+        ] {
+            assert!(restore_found_no_room(&yes), "{yes}");
+        }
+        for no in [
+            "BACKUP_TRANSFER: the download stopped",
+            "the restore of /data/work: no answer within 540000 ms",
+            "BACKUP_NOT_FOUND: no object",
+            "restore stopped with an error",
+            "restore '/data': EXDEV: cross-device link",
+            "the disk is 91% used",
+            "",
+        ] {
+            assert!(!restore_found_no_room(no), "{no}");
+        }
     }
 }

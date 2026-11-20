@@ -78,8 +78,10 @@ pub enum Event {
     SnapshotFailed { generation: u64, why: String },
     /// The start `generation` restored a save that is unusable (its archive
     /// is gone or corrupt, or the image's check of what it restored
-    /// failed): the DO marked it so. With an `older` save left to try, it
-    /// starts again at once from that one, no strike against it .
+    /// failed), or one whose restore found no room on its disk: the DO
+    /// marked it unusable, or set it aside (`Saves::too_big`). With an
+    /// `older` save left to try, it starts again at once from that one, no
+    /// strike against it; with none, a strike, as any failed start.
     RestoreFailed { generation: u64, why: String, older: bool },
     Opened { socket: Socket },
     Closed { socket: Socket },

@@ -172,6 +172,15 @@ pub fn save_path(id: &str, dir: &str) -> String {
     format!("{}/{}.tar.zst", computer_dir(id), if name.is_empty() { "root".to_string() } else { name })
 }
 
+/// A record of the newest save set aside (docs/computers.md, "Saves and
+/// what a wake restores"), beside the save exported: `set-aside/`, named
+/// as `save_path` names its records.
+pub fn set_aside_path(id: &str, dir: &str) -> String {
+    let file = save_path(id, dir);
+    let name = file.rsplit('/').next().expect("a save's record names a file");
+    format!("{}/set-aside/{name}", computer_dir(id))
+}
+
 /// `path` as the JSON file in `dir` names it: relative to that folder (a
 /// manifest's to the root, a meta's to its fragment's or computer's).
 pub fn within(path: &str, dir: &str) -> String {
@@ -544,6 +553,11 @@ pub struct BlobCounted {
 pub struct ComputerMeta {
     pub view: Value,
     pub save: Option<SaveExported>,
+    /// The newest save set aside, when one is kept: newer files than the
+    /// save exported may be in it (its newest save did not fit its disk,
+    /// or an operator started it from an older one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_aside: Option<SaveExported>,
     pub skipped: Vec<Skipped>,
 }
 
@@ -929,6 +943,7 @@ mod tests {
         assert_eq!(channel_path(NAME, "chat"), "fragment-export/fragments/todo--k3x9/channels/chat.jsonl");
         let id = format!("computer:{}", "ab".repeat(12));
         assert_eq!(save_path(&id, "/data"), format!("fragment-export/computers/{}/data.tar.zst", "ab".repeat(12)));
+        assert_eq!(set_aside_path(&id, "/data/work"), format!("fragment-export/computers/{}/set-aside/data-work.tar.zst", "ab".repeat(12)));
         assert_eq!(save_path(&id, "/data/work"), format!("fragment-export/computers/{}/data-work.tar.zst", "ab".repeat(12)));
         assert!(std::panic::catch_unwind(|| computer_dir("computer:../x")).is_err());
         assert!(std::panic::catch_unwind(|| fragment_dir("../x")).is_err());
