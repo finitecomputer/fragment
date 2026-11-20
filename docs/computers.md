@@ -1128,8 +1128,11 @@ gates it.
   agent: the ready file names each agent with the runtime it was made
   ready for, a Claude agent's only once a sync restored its files (a
   failed one is tried again at each read of the computer's agents, every
-  3 s), and the bridge holds the turns of an agent not ready for the
-  runtime it names, never dropping them.
+  3 s), a Hermes agent's whose profile was written while the gateway runs
+  only once the gateway serves it (`gateway_state.json`'s
+  `served_profiles`: a turn relayed before is refused, and lost), and the
+  bridge holds the turns of an agent not ready for the runtime it names,
+  never dropping them.
 
 ## Billing
 
