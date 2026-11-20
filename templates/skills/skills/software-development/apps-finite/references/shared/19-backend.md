@@ -77,8 +77,11 @@ fragment replay garden <run>                # after fixing the code
 - The database is the fragment's: it survives deploys, rollbacks and
   sleeps. Migrate in the constructor with `CREATE TABLE IF NOT EXISTS` and
   additive `ALTER TABLE`s; never drop data on start.
-- Files are the other state: `call.files.write` in a mutation,
-  `job.files.*` in a job, `this.files.read` anywhere async, at `main`.
+- Your state is your SQL. Files are what your app makes for people to
+  read, edit or keep (a document, a picture, an export):
+  `call.files.write` in a mutation, `job.files.*` in a job,
+  `this.files.read` anywhere async, at `main`. Never keep an index, a
+  setting or a log in a file.
 - An app's database has a cap (16 MiB with its ledger of mutation ids): a
   write past it is rolled back (`storage_full`).
 
