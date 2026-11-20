@@ -108,6 +108,97 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
+## An older CLI renames by its fragment.json
+
+- **Shortcut:** a fragment's name is its cell's own (docs/api.md, "An
+  agent's name and picture"), set by `PUT /api/f/{name}/face`. The CLI
+  before it, which a computer's image carries and which can lag for days
+  (an agent runs `fragment rename` and `fragment agent --name`), renames
+  by reading `GET manifest`, writing `fragment.json` back with a new
+  `meta.title` and deploying. So that it still does, `GET manifest`
+  answers the face's title and, to an editor, a mark of the read (plane.rs
+  `manifest`, `title_read`; `MetaKey::TitleRead`), and a files write of
+  `fragment.json` naming it renames it once (`title_from_read`).
+- **Risk:** such a client writes the mark into its `fragment.json`, where
+  it stays, read by nothing once taken.
+- **Delete when:** the computer image pinned in production carries a CLI
+  from this release or later, and a week of production logs shows no
+  `face.changed` event from `fragment.json`. Then a Fragment step deletes
+  the `title_read` rows, and the manifest route's title and mark,
+  `title_read` and `title_from_read` go.
+
+## A repo whose create's answer is lost can outlive its life
+
+- **Shortcut:** a blessed fragment's repo is made at its first file, by
+  its first writer's seed (`seed::Making::SeedsLater`), named by its
+  life's key (`codestorage::repo_name`). A seed that sees its life ended
+  once the repo is made records it for deletion (`end_repo_of_no_life`).
+  But when code.storage makes the repo and its answer is lost (or the
+  lookup after it fails), the seed fails with nothing recorded; a later
+  writer finds the repo by its name, while a delete or wipe before one
+  records no repo, and the repo stays (as on master since repos were
+  named by their life's key, for a chat's).
+- **Risk:** an empty repo (no commit landed in it) outlives its fragment
+  at code.storage; nothing of the person's is in it.
+- **Delete when:** a life's end reconciles its repo by its name (the
+  life's key gives it) whatever its rows say, or the seed records its
+  intent before asking code.storage.
+
+## A computer keeps its owner's own keys from before the move
+
+- **Shortcut:** a person's own keys and their sign-ins moved from their
+  computer (`own_keys`, `own_signins`) to their Vault (M16; docs/secrets.md,
+  "A person's Vault"). The tables stay, written by nothing but the test
+  levers: a computer hands its keys over at its owner's next read of it
+  or of their connections, or its agent's next call through one
+  (`ComputerCell::hand_over_logged`; never a start, an exit, a takeover or
+  its guest's request: #1343) and deletes
+  each, taken or not; the Vault takes one only where its person set or
+  removed none since (a removal is kept, `sealed` NULL). A sign-in its
+  person's Vault holds none of is asked of their computer, found by
+  `default_computer_of` (`vault::signed_in`). The release is forward only
+  (the Vault's step 4). The test levers `legacy-own-key` and
+  `legacy-sign-in` make a computer as before the move.
+- **Risk:** no rollback across this release. A computer nothing touches
+  keeps its keys owed; a Vault that does not answer leaves them owed, and
+  its agents' calls through one refused until it does. The removals the
+  Vault keeps outlive the hand-over.
+- **Delete when:** production has run this release for ten minutes (no
+  sign-in begun on a computer is under way), and a sweep that reads every
+  computer (FIN-527's) finds none holding an own key, or production has
+  logged no `"ownKeys":"handed"` line for 14 days (the log sees only
+  computers something touched: say so when cutting). Then a Computer
+  schema step drops `own_keys` and `own_signins`; `hand_over_own`,
+  `owed_own`, `computer/signed-in` and the Vault's fallback to it,
+  `computer/own-keys`' `providers`, both levers and the Vault's
+  `own-handover` go, its removals may, and `GET /api/connections` asks
+  the computer and the Vault at once (it asks the Vault after the
+  computer's hand-over until then).
+
+## A computer owes its owner's ledger its months of uses
+
+- **Shortcut:** what a person's agents used of each provider moved from
+  each computer's `uses` to the person's ledger
+  (`fragment_core::ledger::uses`; M16). The Computer's step 7 dropped
+  `uses`, keeping each month it held in the computer's `meta`
+  `uses_owed:<month>`, as the ledger reads a hand-over's rows. As its
+  owner reads its view, once an activation and in a task of its own
+  (`ComputerCell::uses_later`), the computer hands each month to its
+  owner's ledger (`uses::TakeUses`, under `<computer>:<month>`), which
+  takes it once by that id and keeps the id in its `meta`
+  (`uses_taken:<id>`); the computer forgets each month the ledger took
+  or refused, logging how many it still owes (`uses_owed`). The test
+  lever `legacy-uses` makes a month owed.
+- **Risk:** a computer nothing touches keeps owing, and its person's
+  Settings shows those months short until it hands them over. Dropped
+  instead, up to 13 months of a person's usage would be lost.
+- **Delete when:** a sweep has asked every computer and found none owing
+  (no `uses_owed:` row; the sweep FIN-527 asks for the grants' rows can
+  ask both). Then a Computer step deletes those `meta` rows, and
+  `uses_later`, `hand_over_uses`, `TakeUses`, `/take-uses` and the lever
+  go; a Ledger step may drop its `uses_taken:` rows. The log sees only
+  computers something touched, so its silence alone is not enough.
+
 ## The bridge copies the platform's file bounds; the app, an older platform's
 
 - **Shortcut:** a file's bounds are proto's `limits`, which the platform
@@ -154,6 +245,19 @@ unfinished design, not debt.
   reach.rs's two refusals and their call sites, the share sheet's lock,
   the two reasons (kept on the wire as add-only names), the census route
   and command, and the `legacy-reach` lever.
+
+## Agent fragments shared before FIN-544
+
+- **Shortcut:** an agent fragment is its owner's alone from 2026-11-18
+  (`cell/src/alone.rs`): new sharing is refused, but one shared before
+  keeps its other members, invites, link or public, so no one's settings
+  change silently. Their cleanup is Paul's call; `fragment operator reach`
+  lists them by name (`shared_past_owner`, each fragment's answer).
+- **Risk:** whoever was let in before still reads its `memories/`, and an
+  editor still steers its agent.
+- **Delete when:** they are counted and narrowed. Then drop the sheet's
+  switch for an agent's link (share.rs `alone_now`) and the
+  `legacy-visibility` lever.
 
 ## An app facet's subrequests are the account's, for the facet's life
 
@@ -369,8 +473,8 @@ unfinished design, not debt.
   so hermes-boot writes each `config.yaml` whole
   (images/hermes/boot/src/hermes.rs `profile_config`).
 - **Risk:** an agent's own `hermes config set` lasts until it sleeps.
-- **Delete when:** an agent's settings live in its `agent.json` and the
-  boot merges them into the profile's config, proven by a setting that
+- **Delete when:** an agent's settings live in the agent fragment's
+  `meta` and the boot merges them into the profile's config, proven by a setting that
   survives a wake.
 
 ## A Stop over Hermes' Relay reaches its turn through the image
@@ -429,8 +533,8 @@ unfinished design, not debt.
   `own_chat`; the CLI's `direct_label` finds the same).
 - **Risk:** an agent made another way has no home chat until one is made
   with that label; a second chat of that label may be taken instead.
-- **Delete when:** the agent fragment names its own chat (its
-  `agent.json`), and the bridge, the shell and the CLI read that.
+- **Delete when:** the agent fragment names its own chat (in its
+  `meta`), and the bridge, the shell and the CLI read that.
 
 ## A Hermes release has no rollback
 
@@ -504,18 +608,6 @@ unfinished design, not debt.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
-
-## Own keys assume one computer per person
-
-- **Shortcut:** a person has one computer (decision 13), so own keys are
-  sealed in it (cell/src/computer.rs, `own_keys`), and an own key's
-  sign-in callback finds it by `default_computer_of`, never the URL (the
-  audit's H3).
-- **Risk:** a second computer needs the keys again; a deleted one loses
-  them.
-- **Delete when:** own keys live in the person's own cell, proven by two
-  computers swapping one key, and a sign-in's computer is found from its
-  bound state alone, never the URL, with the H3 checks run against it.
 
 ## An imported connection's refresh is unproven
 
@@ -1100,14 +1192,13 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment session import` commits each batch of
   conversations as upserts on whatever head main has
-  (cli/src/session/mod.rs `commit`); only the indexes' commit is made
-  again from main when it loses its race.
+  (cli/src/session/mod.rs `commit`).
 - **Risk:** two imports of one conversation at once keep the last one's
-  file, and its index entry may name the other's copy, so the next
-  import skips a newer copy once or writes one again. Nothing is lost.
-- **Delete when:** each batch's commit is made again from main as the
-  indexes' is (keeping the newer entry), or the archive moves to an app
-  whose mutation writes both.
+  file, which may be the older copy; the indexes describe whichever file
+  stands (each entry names its file's commit). Nothing is lost:
+  importing the newer copy again replaces it.
+- **Delete when:** each batch's commit compares and swaps each file it
+  replaces, made again from main when it loses (keeping the newer).
 
 ## The computer's view carries two fixed routes beside the list
 

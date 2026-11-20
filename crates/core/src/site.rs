@@ -210,10 +210,17 @@ pub fn file_etag(last_commit: &str) -> String {
 }
 
 /// A page served with Open Graph tags: its body also follows the live
-/// commit's `fragment.json` (its `meta`), so the tag names the live pin
-/// too, and is weak (the page is made, not stored).
-pub fn page_etag(last_commit: &str, live: &str) -> String {
-    format!("W/\"{last_commit}.{live}\"")
+/// commit's `fragment.json` (its `meta`) and the fragment's name (`og`,
+/// `og_tag`), which moves with no commit, so the tag names both too, and
+/// is weak (the page is made, not stored).
+pub fn page_etag(last_commit: &str, live: &str, og: &str) -> String {
+    format!("W/\"{last_commit}.{live}.{og}\"")
+}
+
+/// A word naming the Open Graph tags a page carries (`inject_og`) beyond
+/// its live commit: its title, which its face sets with no commit.
+pub fn og_tag(title: Option<&str>) -> String {
+    format!("{:016x}", content_hash(title.unwrap_or("").as_bytes()))
 }
 
 /// A hash of bytes compiled into the cell (the browser library, the
@@ -621,19 +628,22 @@ mod tests {
     fn entity_tags() {
         let file = file_etag("3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e");
         assert_eq!(file, "\"3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e\"");
-        let page = page_etag("aaaa", "bbbb");
-        assert_eq!(page, "W/\"aaaa.bbbb\"");
+        let page = page_etag("aaaa", "bbbb", "t");
+        assert_eq!(page, "W/\"aaaa.bbbb.t\"");
         for header in [file.as_str(), &format!("W/{file}"), &format!("\"x\", {file}"), &format!(" {file} ,\"y\""), "*"] {
             assert!(not_modified(header, &file), "{header}");
         }
-        for header in ["W/\"aaaa.bbbb\"", "\"aaaa.bbbb\"", "\"zz\", W/\"aaaa.bbbb\""] {
+        for header in ["W/\"aaaa.bbbb.t\"", "\"aaaa.bbbb.t\"", "\"zz\", W/\"aaaa.bbbb.t\""] {
             assert!(not_modified(header, &page), "{header}");
         }
         for header in ["", "\"3f9a1c2e\"", "\"aaaa.cccc\"", "W/\"aaaa\"", "3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e", "**"] {
             assert!(!not_modified(header, &file) && !not_modified(header, &page), "{header}");
         }
-        // a tag names a live pin: another deploy is another tag
-        assert!(!not_modified(&page_etag("aaaa", "bbbb"), &page_etag("aaaa", "cccc")));
+        // a tag names a live pin: another deploy is another tag; and its
+        // name: a rename, with no deploy, is another tag too
+        assert!(!not_modified(&page_etag("aaaa", "bbbb", "t"), &page_etag("aaaa", "cccc", "t")));
+        assert!(!not_modified(&page_etag("aaaa", "bbbb", &og_tag(Some("Garden"))), &page_etag("aaaa", "bbbb", &og_tag(Some("Meals")))));
+        assert_ne!(og_tag(None), og_tag(Some("x")));
     }
 
     /// Goal: the build-time hash is FNV-1a 64 (so its tags are stable
@@ -652,7 +662,7 @@ mod tests {
     fn cookies_and_og() {
         assert_eq!(cookie("a=1; fragview=tok; b=2", "fragview"), Some("tok"));
         assert_eq!(cookie("a=1", "fragview"), None);
-        let meta = Meta { title: Some("T<x>".into()), role: None, description: None, image: None };
+        let meta = Meta { title: Some("T<x>".into()), description: None, image: None };
         let out = inject_og("<html><head></head></html>", "n", &meta, "https://n/__preview.svg");
         assert!(out.contains(r#"og:title" content="T&lt;x&gt;""#) && out.contains("__preview.svg"));
         assert_eq!(inject_og(&out, "n", &meta, "x"), out);
@@ -662,7 +672,7 @@ mod tests {
         // its title as every reader shows it: trimmed; none, or only spaces,
         // its label; its name in full, when that is its title, as such
         let og = |title: Option<&str>| {
-            let meta = Meta { title: title.map(str::to_string), role: None, description: None, image: None };
+            let meta = Meta { title: title.map(str::to_string), description: None, image: None };
             let out = inject_og("<head></head>", "juniper--k3x9", &meta, "x");
             out.split(r#"og:title" content=""#).nth(1).and_then(|r| r.split('"').next()).unwrap_or("").to_string()
         };

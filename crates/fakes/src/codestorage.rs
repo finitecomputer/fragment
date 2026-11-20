@@ -161,6 +161,10 @@ struct State {
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
+    /// A path whose reads fail (`read_failing`) once a commit's answer is
+    /// dropped (`fail_read_after_lost_answer`).
+    #[serde(skip)]
+    fail_after_lost: Option<String>,
     /// The next repo create is made, this many repos made after it, and
     /// its answer dropped (`lose_repo_create_answer`).
     #[serde(skip)]
@@ -231,6 +235,22 @@ struct State {
     /// and kind, else members and app.
     #[serde(skip)]
     described: BTreeMap<String, (String, String)>,
+    /// Moves' stages, by id (`seed_stage`, with `host_routes`): `open`
+    /// answers each one's manifest, and `zip` its bytes by a range alone,
+    /// as the platform's do for the agent a move is bound to.
+    #[serde(skip)]
+    stages: BTreeMap<String, Vec<u8>>,
+    /// The ranges a stage's zip answered, and their bytes in all.
+    #[serde(skip)]
+    stage_reads: (u64, u64),
+    /// The ranges copied from a stage into a fragment's blobs, and their
+    /// bytes in all (`POST …/copy`).
+    #[serde(skip)]
+    stage_copies: (u64, u64),
+    /// Copies still to answer 503 once this many more have worked
+    /// (`fail_stage_copies`): (worked first, then failing).
+    #[serde(skip)]
+    stage_copies_failing: (u32, u32),
 }
 
 struct Inner {
@@ -570,6 +590,9 @@ impl Inner {
             if let Some(answer) = self.host_blob_route(st, req) {
                 return answer;
             }
+            if let Some(answer) = stage_route(st, req) {
+                return answer;
+            }
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
                 // an unknown name is a fresh repo with no branches yet
                 let url = match st.url_of(name) {
@@ -868,6 +891,9 @@ impl Inner {
         let (old, new) = st.commit(url, Write { branch, message, author, changes: &changes, from: None });
         if let Some(left @ 1..) = st.unanswered.get_mut(url) {
             *left -= 1;
+            if let Some(path) = st.fail_after_lost.take() {
+                st.read_failing = Some(path);
+            }
             return Response::unanswered();
         }
         Response::json(
@@ -951,6 +977,63 @@ impl Inner {
             _ => Response::json(404, &json!({ "error": "not_found", "message": "no such blob" })),
         })
     }
+}
+
+/// A move's stage, as the platform answers its bound agent
+/// (docs/migrations.md, "A new agent's stage"): `open` its manifest, and
+/// `zip` one range of its bytes (206), never the whole without one. None
+/// for any other request.
+fn stage_route(st: &mut State, req: &Request) -> Option<Response> {
+    let (stage, op) = req.path.strip_prefix("/api/migrations/stages/")?.split_once('/')?;
+    let Some(zip) = st.stages.get(stage) else { return Some(Response::json(404, &json!({ "error": "not_found", "message": format!("no stage {stage}") }))) };
+    Some(match (req.method.as_str(), op) {
+        ("POST", "open") => {
+            use sha2::Digest;
+            let manifest = json!({
+                "format": "finite-stage/1", "old": stage.split('.').next().unwrap_or(stage), "phase": "p1", "attempt": 1, "layout": "finite-computer",
+                "zip_bytes": zip.len(), "zip_sha256": hex::encode(sha2::Sha256::digest(zip)), "bytes": zip.len(), "files": 0,
+            });
+            Response::json(200, &json!({ "stage": stage, "manifest": manifest }))
+        }
+        // a range into a fragment's blobs, as the platform copies it (with
+        // `keep_blobs`): never through the caller
+        ("POST", "copy") => {
+            let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
+            let (into, offset, len) = (q("into"), q("offset").parse::<u64>().ok(), q("bytes").parse::<u64>().ok());
+            let (Some(offset), Some(len)) = (offset, len) else { return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "offset and bytes are numbers" }))) };
+            if len == 0 || offset.checked_add(len).is_none_or(|end| end > zip.len() as u64) {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "past the zip's end" })));
+            }
+            if st.upload_max.is_some_and(|max| len > max) {
+                return Some(Response::json(413, &json!({ "error": "too_large", "message": "past the upload limit" })));
+            }
+            if st.stage_copies_failing.1 > 0 {
+                if st.stage_copies_failing.0 > 0 {
+                    st.stage_copies_failing.0 -= 1;
+                } else {
+                    st.stage_copies_failing.1 -= 1;
+                    return Some(problem(503, "the stage's copy is unavailable (the fake's lever)"));
+                }
+            }
+            let bytes = zip[offset as usize..(offset + len) as usize].to_vec();
+            let (sha, crc32) = (fragment_core::blob::sha256_hex(&bytes), crc32fast::hash(&bytes));
+            let Some(blobs) = st.host_blobs.as_mut() else { return Some(Response::json(404, &json!({ "error": "not_found", "message": "this host keeps no blobs" }))) };
+            blobs.insert((into, sha.clone()), bytes);
+            st.stage_copies = (st.stage_copies.0 + 1, st.stage_copies.1 + len);
+            Response::json(200, &json!({ "sha256": sha, "bytes": len, "crc32": crc32 }))
+        }
+        ("GET", "zip") => {
+            let range = req.header("range").and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            let Some((first, last)) = range.filter(|(a, b)| a <= b && *b < zip.len() as u64) else {
+                return Some(Response::json(400, &json!({ "error": "invalid_request", "message": "the fake's stage answers a range within its zip alone" })));
+            };
+            let bytes = zip[first as usize..=last as usize].to_vec();
+            st.stage_reads = (st.stage_reads.0 + 1, st.stage_reads.1 + bytes.len() as u64);
+            let total = zip.len();
+            Response::bytes(206, "application/zip", bytes).with_header("content-range", &format!("bytes {first}-{last}/{total}"))
+        }
+        _ => Response::json(404, &json!({ "error": "not_found", "message": format!("no route {} {}", req.method, req.path) })),
+    })
 }
 
 trait PemString {
@@ -1432,8 +1515,24 @@ impl CodeStorage {
         });
     }
 
+    /// Once the next commit's answer is dropped (`drop_commit_answers`),
+    /// reads of `path` answer 503 (`fail_file_read`, cleared by it): a
+    /// writer that lost its answer and cannot read back what it wrote.
+    pub fn fail_read_after_lost_answer(&self, path: &str) {
+        self.with(|st| st.fail_after_lost = Some(path.to_string()));
+    }
+
     pub fn commit_pack_count(&self) -> u32 {
         self.with(|st| st.commit_packs)
+    }
+
+    /// Every request to `repo` (a name or url), on any route, from every
+    /// caller: what code.storage was asked about it.
+    pub fn repo_requests(&self, repo: &str) -> u32 {
+        self.with(|st| {
+            let Some(url) = st.url_of(repo) else { return 0 };
+            st.requests.iter().filter(|((_, r, _), _)| *r == url).map(|(_, n)| n).sum()
+        })
     }
 
     /// Requests to `repo` (a name or url) on one route, as `"<method>
@@ -1484,6 +1583,28 @@ impl CodeStorage {
                 st.blobs_corrupt.remove(sha);
             }
         });
+    }
+
+    /// A move's stage `stage`, its zip `zip` (with `host_routes`).
+    pub fn seed_stage(&self, stage: &str, zip: Vec<u8>) {
+        self.with(|st| st.stages.insert(stage.to_string(), zip));
+    }
+
+    /// The ranges the stages' zips answered so far, and their bytes in all.
+    pub fn stage_reads(&self) -> (u64, u64) {
+        self.with(|st| st.stage_reads)
+    }
+
+    /// After `worked` more copies from a stage, the next `n` answer 503
+    /// and keep nothing: an import cut off partway.
+    pub fn fail_stage_copies(&self, worked: u32, n: u32) {
+        self.with(|st| st.stage_copies_failing = (worked, n));
+    }
+
+    /// The ranges copied from stages into fragments' blobs so far, and
+    /// their bytes in all.
+    pub fn stage_copies(&self) -> (u64, u64) {
+        self.with(|st| st.stage_copies)
     }
 
     /// What `name`'s status says it is: its visibility and its kind.

@@ -713,6 +713,14 @@ impl FragmentCell {
                 self.del_meta(MetaKey::ReachTold)?;
                 json!({ "reach": self.reaches()? })
             }
+            Some("legacy-visibility") => {
+                // an agent fragment opened by its link or public before
+                // FIN-544 (2026-11-18), as such fragments were left (alone.rs)
+                let v = body["visibility"].as_str().and_then(fragment_proto::Visibility::parse).ok_or_else(|| CellError::invalid("legacy-visibility names a visibility"))?;
+                self.set_meta(MetaKey::Visibility, v.as_str())?;
+                self.sharing_changed()?;
+                json!({ "visibility": v })
+            }
             Some("records") => {
                 // posts filled in as a member made them (channels.rs `fill_records`)
                 let channel = body["channel"].as_str().ok_or_else(|| CellError::invalid("records names a channel"))?;

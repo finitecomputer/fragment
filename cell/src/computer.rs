@@ -33,7 +33,10 @@
 //!   computer keeps no copy of); a connection's token
 //!   from WorkOS Pipes, asked for each request; an operator
 //!   key, metered; an own key its owner gave, sealed here. Each call a
-//!   provider answered is counted by agent and month (`uses`).
+//!   provider answered is counted by agent and month in its owner's
+//!   ledger (`fragment_core::ledger::uses`), sent after the answer. The
+//!   months it counted itself before (its step 7) it owes that ledger,
+//!   handed over as its owner reads its view (`uses_later`).
 //! - **Its agents' new fragments**: the fragment an agent of its was added
 //!   to tells the agent's own fragment, which posts `joined` on its `tasks`
 //!   and names this computer, and then wakes it (`Wake::Joined`; runs_on.rs).
@@ -47,6 +50,7 @@
 //!   a start) fails at its next write.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
@@ -56,13 +60,14 @@ use fragment_core::computer::{
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
+use fragment_core::ledger::uses::{self, Used};
 use fragment_core::ledger::{MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -102,11 +107,12 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 const WIPE_PAGES_PER_CALL: usize = 10;
 /// The Durable Object class a sealed own key names (`keys::scope`).
 const SEAL_CLASS: &str = "Computer";
-/// Months of uses kept (this one and the twelve before it).
-const USES_MONTHS_KEPT: u32 = 13;
-/// Use rows one month holds at most (providers × agents, with room for
-/// agents that came and went).
-const USES_ROWS_MAX: u64 = 4 * (catalog::PROVIDERS_MAX as u64) * AGENTS_MAX;
+/// After a hand-over of its owed uses failed (its owner's ledger did not
+/// answer), how long before a request tries again.
+const USES_RETRY_MS: i64 = 60_000;
+/// The `meta` keys of the months of uses it owes (its step 7):
+/// `uses_owed:<month's index>`.
+const USES_OWED: &str = "uses_owed:";
 /// How long a connection's state, as Pipes said it, is believed: the
 /// guest reads its credentials every few seconds, and asking WorkOS that
 /// often is not ours to do. The person's own read of their connections
@@ -165,7 +171,7 @@ const CHECK_UNUSABLE: i64 = 3;
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
-/// How far the `clock` lever moves a computer's uses' months, either way:
+/// How far the `clock` lever moves a computer's key hours, either way:
 /// a month's worth.
 const CLOCK_OFFSET_MAX_MS: u64 = 31 * 24 * 3600 * 1000;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
@@ -177,6 +183,12 @@ const SHIM_UNHANG: &str = "cd /usr/local/bin && { test ! -e sandbox-shim.real ||
 /// once its container is up, so it never reads its view, as a dead one's
 /// guest never does (#362).
 const SIGSTOP: f64 = 19.0;
+/// SIGKILL: what ends that stopped guest once its start is dead. Stopped,
+/// it takes no SIGTERM, so a destroy waits out the runtime's own kill;
+/// on a loaded host that ran past `DESTROY_MS` and refused the same wake's
+/// next start (the e2e `computers` lane's #362 check). A dead guest that
+/// is not stopped takes its destroy at once, as this one then does.
+const SIGKILL: f64 = 9.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
@@ -216,6 +228,12 @@ const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
+/// A tell to its owner's open pages waits at most this. A call to their
+/// list takes a few ms; past this the computer goes on without it, so a
+/// slow or stuck owner never holds a start, a wake's answer or a sleep
+/// (#1381), and a page that did not hear reads it again at its next change
+/// or as it reconnects.
+const TELL_MAX_MS: u64 = 3_000;
 /// The lever's `stall-failing-start` waits at most this.
 const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 /// A takeover that failed (`take_over`) is tried again by an alarm within
@@ -288,7 +306,8 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm held up behind one alarm's run is on time, metered as it was");
@@ -357,6 +376,8 @@ enum MetaKey {
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's wait before a start's owner is told (`slow-start-tell`), in ms.
+    SlowStartTell,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -378,6 +399,12 @@ enum MetaKey {
     /// taken when step 6 dropped them (`fragment_core::grants::Owed`): each
     /// handed over at its agent's next ask, then forgotten. None owed, no row.
     GrantsOwed,
+    /// The test lever's hold on its saves (`hold-saves`): while set, each
+    /// save waits before its backups until the lever lets it go.
+    HoldSaves,
+    /// The test lever's wait in its next let-go of a hold (`stall-unhold`),
+    /// between its look and its command, in ms.
+    StallUnhold,
 }
 
 impl MetaKey {
@@ -400,6 +427,7 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -407,6 +435,8 @@ impl MetaKey {
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
             MetaKey::GrantsOwed => "grants_owed",
+            MetaKey::HoldSaves => "hold_saves",
+            MetaKey::StallUnhold => "stall_unhold",
         }
     }
 }
@@ -462,6 +492,13 @@ pub struct ComputerCell {
     /// #1079: a deadline's alarm applied during that destroy failed the
     /// start for good, its container left running).
     taking_over: futures_util::lock::Mutex<()>,
+    /// One hold marker command at a time (`hold`, `unhold`): a touch waits
+    /// for a let-go in flight, so a let-go never lands after a newer touch;
+    /// a let-go never waits for a touch in flight, whose answer lets go
+    /// again if its sleep was cancelled (`Lifecycle`'s late `Held`).
+    /// The same turn orders a start's let-go of its snapshot's hold and
+    /// an awake save's let-go past its home (#1378).
+    marking: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -496,6 +533,11 @@ pub struct ComputerCell {
     armed: RefCell<Option<(u64, Vec<String>)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
+    /// When its owner's next look hands over the uses it owes
+    /// (`uses_later`): at once in a new activation; never again once one ran
+    /// (a lever's plant asks again); a minute on after one failed. In memory
+    /// only, shared with the task that hands them over.
+    uses_due_ms: Rc<std::cell::Cell<i64>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -513,6 +555,7 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
+            marking: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -522,6 +565,7 @@ impl DurableObject for ComputerCell {
             armed: RefCell::new(None),
             relays: RefCell::default(),
             schema,
+            uses_due_ms: Rc::new(std::cell::Cell::new(0)),
         }
     }
 
@@ -573,6 +617,34 @@ impl DurableObject for ComputerCell {
         self.keepalive_closed(&ws).await;
         Ok(())
     }
+}
+
+/// Each month of uses computer `id` owes `owner`'s ledger, handed over
+/// (`uses::TakeUses`, under `<computer>:<month>`, its rows sent as step 7
+/// kept them, unread here: the ledger reads them), and forgotten once the
+/// ledger took it: taken once by its id, so one sent again (its answer
+/// lost, the computer gone between) adds nothing twice. A month the ledger
+/// refuses (its person wiped, or rows it will never take) is said aloud
+/// whole and forgotten; one it did not answer stays owed.
+async fn hand_over_uses(sql: &SqlStorage, env: &Env, id: &str, owner: &str) -> CellResult<()> {
+    let owed: Vec<Value> = sql.exec("SELECT key, value FROM meta WHERE key LIKE 'uses_owed:%' ORDER BY key", None)?.to_array()?;
+    let mut left = owed.len();
+    // bounded by the months step 7 found (13 kept)
+    for r in owed {
+        let (Some(key), Some(value)) = (r["key"].as_str(), r["value"].as_str()) else { continue };
+        let month = key.strip_prefix(USES_OWED).and_then(|m| m.parse().ok()).map(Month).ok_or_else(|| CellError::host(format!("an owed month {key:?}")))?;
+        let take_id = serde_json::to_string(&format!("{id}:{}", month.0)).expect("a string serializes");
+        let take = format!(r#"{{"id":{take_id},"month":{},"rows":{value}}}"#, month.0);
+        match crate::ledger::asked(env, owner, <uses::TakeUses as crate::ledger::Route>::PATH, take).await {
+            Ok(_) => {}
+            Err(e) if e.refused.is_some() => console_error!("{}", json!({ "computer": id, "uses_refused": month.label(), "why": e.message, "rows": value })),
+            Err(e) => return Err(e.into()),
+        }
+        sql.exec("DELETE FROM meta WHERE key = ?", vec![key.into()])?;
+        left -= 1;
+        console_log!("{}", json!({ "computer": id, "uses_owed": left, "handed": month.label() }));
+    }
+    Ok(())
 }
 
 /// A wiped computer's answer: as no computer.
@@ -644,38 +716,9 @@ struct Asked {
     connection: bool,
 }
 
-/// `computer/used`'s body: an agent's calls a provider answered, at `at`,
-/// each with what it was charged.
-#[derive(Deserialize)]
-struct UsedAsk {
-    agent: String,
-    at: i64,
-    uses: Vec<Used>,
-}
-
-#[derive(Deserialize)]
-struct Used {
-    provider: String,
-    micros: i64,
-}
-
-/// `computer/own-key`'s body: the owner's own key for `provider`, or none.
-#[derive(Deserialize)]
-struct OwnKeyAsk {
-    provider: String,
-    key: Option<String>,
-}
-
-/// `computer/sign-in`'s body: a sign-in to `provider`, an own key's
-/// provider with a sign-in, begun.
-#[derive(Deserialize)]
-struct SignInAsk {
-    provider: String,
-}
-
-/// `computer/signed-in`'s body: the sign-in `nonce` names, back from
-/// `provider`, finished (once).
-#[derive(Deserialize)]
+/// `computer/signed-in`'s body: the sign-in `nonce` names, begun here
+/// before the move (M16) and back from `provider`, finished (once).
+#[derive(serde::Serialize, Deserialize)]
 struct SignedInAsk {
     provider: String,
     nonce: String,
@@ -729,9 +772,9 @@ struct RelayClosed {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-/// and `alive-check`'s, `freeze` is `alive-check`'s, `total` and `free`
-/// are `disk`'s.
+/// `times` is `fail-saves`', `on` is `always-on`'s and `hold-saves`', `ms`
+/// is `hang-backups`' and `alive-check`'s, `freeze` is `alive-check`'s,
+/// `total` and `free` are `disk`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -747,16 +790,27 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
-    /// `clock`'s: how far its uses' months are moved.
+    /// `clock`'s: how far its key hours are moved.
     #[serde(default, rename = "offsetMs")]
     offset_ms: Option<i64>,
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
     /// `legacy-grants`': the row it makes owed, as step 6 keeps it:
-    /// `connections` as stored, `accounts` provider → id.
+    /// `connections` as stored, `accounts` provider → id. `legacy-uses`':
+    /// the month's rows it makes owed, as step 7 keeps them.
     #[serde(default)]
     row: Option<Value>,
+    /// `legacy-own-key`'s and `legacy-sign-in`'s: an own key's provider.
+    #[serde(default)]
+    provider: Option<String>,
+    /// `legacy-own-key`'s: the key it keeps, as a release before the move
+    /// kept one.
+    #[serde(default)]
+    key: Option<String>,
+    /// `legacy-uses`': the month (`YYYY-MM`) it makes owed.
+    #[serde(default)]
+    month: Option<String>,
     /// `disk`'s read: its size and what is free, in bytes.
     #[serde(default)]
     total: Option<u64>,
@@ -764,9 +818,14 @@ struct TestLever {
     free: Option<u64>,
 }
 
+/// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
+/// (`used`: its page spoke, told `TAB_USED_EVERY_MS` apart at most; on a
+/// close, a use not told before it).
 #[derive(Deserialize)]
 struct Tab {
     open: bool,
+    #[serde(default)]
+    used: bool,
 }
 
 /// A start's line, once it ends (`start_line`; docs/computers.md, "The
@@ -921,7 +980,7 @@ impl ComputerCell {
     /// `drive_with`, its answer taken as its start is owed when `answer` is
     /// asked for (an owner's restart: `drive_events`).
     async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<Unasked>>) -> CellResult<Option<String>> {
-        let told = self.notices()?;
+        let told = (self.notices()?, phase_told(&self.lifecycle()?));
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
         let mut refused = self.drive_events(first, answer.as_deref_mut()).await;
@@ -945,9 +1004,10 @@ impl ComputerCell {
             // in which the alarm makes the start a restart owed
             self.slow_tell().await;
         }
-        // what its owner is told changed: their open pages read it again
-        // (whatever the events did, a step that failed half way included)
-        if self.notices().is_ok_and(|now| now != told) {
+        // what its owner is told changed (its notices, or its phase): their
+        // open pages read it again (whatever the events did, a step that
+        // failed half way included)
+        if self.notices().and_then(|n| Ok((n, phase_told(&self.lifecycle()?)))).is_ok_and(|now| now != told) {
             self.tell_owner().await;
         }
         refused
@@ -1088,13 +1148,30 @@ impl ComputerCell {
         }
     }
 
-    /// Tells its owner's open pages to read it again. One that did not hear
-    /// reads it as it reconnects, or at its next change: logged, never failed.
+    /// Tells its owner's open pages to read it again, within `TELL_MAX_MS`.
+    /// One that did not hear reads it as it reconnects, or at its next
+    /// change: logged, never failed.
     async fn tell_owner(&self) {
+        self.tell_owner_after(None).await;
+    }
+
+    /// `tell_owner`, a lever's wait (`lever`'s ms: `slow-start-tell`) first,
+    /// the two within `TELL_MAX_MS` together: a slow owner, as the lane makes one.
+    async fn tell_owner_after(&self, lever: Option<MetaKey>) {
         let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
-        if let Err(e) = crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await {
-            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
-        }
+        let told = async {
+            if let Some(key) = lever {
+                self.lever_wait(key, SLOW_TELL_MAX_MS).await;
+            }
+            crate::principal::ask(&self.env, &owner, &crate::principal::calls::Changed {}).await
+        };
+        let bound = Delay::from(std::time::Duration::from_millis(TELL_MAX_MS));
+        let error = match futures_util::future::select(Box::pin(told), Box::pin(bound)).await {
+            futures_util::future::Either::Left((Ok(()), _)) => return,
+            futures_util::future::Either::Left((Err(e), _)) => e.message,
+            futures_util::future::Either::Right(_) => format!("no answer in {TELL_MAX_MS} ms: gone on without it"),
+        };
+        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": error }));
     }
 
     /// `answer`, when asked for and still empty, takes the view as its
@@ -1124,9 +1201,13 @@ impl ComputerCell {
         // unhold), or at a start or a sleep's end
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
+            let was = phase_told(&life);
             let logged = json!(event);
             let applied = event.clone();
-            let step = life.apply_with(event, js::now_ms(), &rules);
+            let now = js::now_ms();
+            // an owner's restart it takes asks its start as it applies
+            self.starts.borrow_mut().applying(&applied, &life, now);
+            let mut step = life.apply_with(event, now, &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
             if let Some(ended) = step.ended {
@@ -1155,8 +1236,23 @@ impl ComputerCell {
                 }
             }
             self.alarm_at(step.alarm_ms).await?;
+            // a start begins: its owner's open pages read it again before
+            // its steps (a chat says its agent is getting ready while it
+            // starts); every other change is told as the drive ends. Awaited,
+            // never a task of its own: background work on a lifecycle route
+            // slowed container destroys (#1343)
+            let start = step.actions.iter().find_map(|a| if let Action::Start { generation } = a { Some(*generation) } else { None });
+            if let Some(g) = start.filter(|_| phase_told(&life) != was) {
+                self.tell_owner_after(Some(MetaKey::SlowStartTell)).await;
+                // what came in as it was told (its owner's sleep, a newer
+                // wake) may have ended this start: then none is made
+                if !matches!(self.lifecycle()?.phase, Phase::Starting { generation, .. } if generation == g) {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "start": g, "superseded": "as its owner was told" }));
+                    step.actions.retain(|a| !matches!(a, Action::Start { .. }));
+                }
+            }
             refused = refused.or(step.refused.clone());
-            for next in self.perform(step, until_ms).await? {
+            for next in self.perform(step, until_ms, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
             }
             // its disk, once an awake save worked (a start reads its own
@@ -1261,16 +1357,18 @@ impl ComputerCell {
     }
 
     /// Performs a step's actions: the events they report, in order, a
-    /// sleep's steps ending by `until_ms`.
-    async fn perform(&self, step: Step, until_ms: i64) -> CellResult<Vec<Event>> {
+    /// sleep's steps ending by `until_ms`. `after_held`: the step answered a
+    /// hold, so its let-go is a late answer's, which waits for the marker's
+    /// turn (`unhold`).
+    async fn perform(&self, step: Step, until_ms: i64, after_held: bool) -> CellResult<Vec<Event>> {
         let mut reported = vec![];
         for action in step.actions {
             match action {
                 Action::Start { generation } => reported.push(self.start(generation).await),
-                Action::Sleep { generation } => reported.push(self.hold(generation, true).await),
-                Action::Hold { generation } => reported.push(self.hold(generation, false).await),
+                Action::Sleep { generation } => reported.extend(self.hold(generation, true).await),
+                Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
-                Action::Unhold { generation } => self.unhold(generation).await,
+                Action::Unhold { generation } => self.unhold(generation, after_held).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
                     if !self.container_running().await {
@@ -1354,12 +1452,8 @@ impl ComputerCell {
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
-            let asked = js::now_ms();
             self.may_start(json!("restart")).await?;
             self.update_saves(|s| s.restart_fresh())?;
-            if let Ok(restarting) = self.lifecycle() {
-                self.starts.borrow_mut().asked(Woke::Restart, &restarting.phase, asked);
-            }
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
         // its answer, the view as its start was owed (`drive_events`); one
@@ -1370,6 +1464,31 @@ impl ComputerCell {
             Some(unasked) => self.asked(unasked).await,
             None => self.view().await,
         }
+    }
+
+    /// The months of uses it owes its owner's ledger (its step 7), handed
+    /// over as its owner reads its view (the shell or Settings opening),
+    /// never in that read's way: once an activation, and again a minute
+    /// after one that failed (`uses_due_ms`). Never from a request of its
+    /// life (a start, an exit, a takeover, a guest's), and never through
+    /// the request's `waitUntil`: the e2e found a takeover's container
+    /// destroy, polled within `DESTROY_MS`, running past it when the
+    /// request that took the computer over had begun one (#1343). A task
+    /// of its own, holding its own handles, which a computer gone mid-way
+    /// leaves to the next look: taken once by its id, nothing counts twice.
+    fn uses_later(&self) {
+        if self.wiped.get() || js::now_ms() < self.uses_due_ms.get() {
+            return;
+        }
+        self.uses_due_ms.set(i64::MAX);
+        let (Ok(Some(id)), Ok(Some(owner))) = (self.meta(MetaKey::Id), self.meta(MetaKey::Owner)) else { return };
+        let (sql, env, due) = (self.sql(), self.env.clone(), self.uses_due_ms.clone());
+        worker::wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = hand_over_uses(&sql, &env, &id, &owner).await {
+                console_error!("{}", json!({ "computer": id, "uses_owed": "failed", "error": e.message }));
+                due.set(js::now_ms() + USES_RETRY_MS);
+            }
+        });
     }
 
     /// Sends the awake intervals the ledger has not taken to the owner's
@@ -1409,7 +1528,7 @@ impl ComputerCell {
     /// secrets go to (`vault_usable`).
     async fn swap_hosts(&self) -> CellResult<Vec<String>> {
         let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
-        let usable = self.vault_usable(&fragments).await;
+        let usable = self.vault_usable(&fragments).await.0;
         let mut hosts = self.cfg.providers.intercepts();
         hosts.extend(usable.into_iter().flat_map(|u| u.2));
         hosts.sort_unstable();
@@ -1456,22 +1575,94 @@ impl ComputerCell {
         }
     }
 
-    /// The Vault secrets each of its agents (`fragments`) may use, as its
-    /// owner's Vault answers (vault.rs `names`). A Vault that does not
-    /// answer is logged and lends none: the catalog's credentials never
-    /// wait on it.
-    async fn vault_usable(&self, fragments: &[String]) -> Vec<crate::vault::Usable> {
+    /// The Vault secrets each of its agents (`fragments`) may use, and its
+    /// owner's own keys, as its owner's Vault answers (vault.rs `names`). A
+    /// Vault that does not answer is logged and lends none: the catalog's
+    /// other credentials never wait on it.
+    async fn vault_usable(&self, fragments: &[String]) -> crate::vault::Names {
         let owner = match self.meta(MetaKey::Owner) {
             Ok(Some(owner)) if !fragments.is_empty() => owner,
-            _ => return vec![],
+            _ => return crate::vault::Names::default(),
         };
         match crate::vault::names(&self.env, &owner, fragments).await {
-            Ok(usable) => usable,
+            Ok(names) => names,
             Err(e) => {
                 console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "names", "error": e.message }));
+                crate::vault::Names::default()
+            }
+        }
+    }
+
+    /// The `own` providers `owner` holds a key for, in their Vault (none
+    /// unless `asked`): one that does not answer is logged, and lends none.
+    async fn own_names(&self, owner: &str, asked: bool) -> Vec<String> {
+        if !asked {
+            return vec![];
+        }
+        match crate::vault::names(&self.env, owner, &[]).await {
+            Ok(names) => names.1,
+            Err(e) => {
+                console_error!("{{\"computer\":{:?},\"vault\":\"own-keys\",\"error\":{:?}}}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default(), e.message);
                 vec![]
             }
         }
+    }
+
+    /// The own keys its owner gave it before the move (M16: theirs, in
+    /// their Vault since), handed over: each opened and sent to their Vault,
+    /// one hop between the two, and never logged. The Vault takes one only
+    /// where its person set or removed none since (`vault::hand_over`); each
+    /// handed goes from here, taken or not, and one written while it went
+    /// stays. The providers taken. None held: no hop. A Vault that does not
+    /// answer leaves them owed to the next (docs/technical-debt-ledger.md,
+    /// "A computer keeps its owner's own keys from before the move").
+    async fn hand_over_own(&self) -> CellResult<Vec<String>> {
+        let mut taken = vec![];
+        // bounded: each batch deletes the rows it handed, so every key kept
+        // goes before the Vault is read (Codex, #1345); past
+        // `OWN_HANDOVER_BATCHES` batches the rest go at the next touch
+        for _ in 0..OWN_HANDOVER_BATCHES {
+            let rows = self.rows(&format!("SELECT provider, sealed, set_at FROM own_keys ORDER BY provider LIMIT {}", fragment_core::vault::SECRETS_MAX), vec![])?;
+            if rows.is_empty() {
+                break;
+            }
+            let owner = self.must(MetaKey::Owner)?;
+            let scope = crate::keys::scope(SEAL_CLASS, &self.state);
+            let text = |r: &Value, k: &str| r[k].as_str().unwrap_or_default().to_string();
+            let mut keys = Vec::with_capacity(rows.len());
+            for r in &rows {
+                let opened = crate::keys::open(&self.env, &scope, &text(r, "sealed")).await?;
+                let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
+                keys.push(crate::vault::Handed(text(r, "provider"), key, r["set_at"].as_i64().unwrap_or(0)));
+            }
+            let batch = crate::vault::hand_over(&self.env, &owner, &keys).await?;
+            for r in &rows {
+                self.exec("DELETE FROM own_keys WHERE provider = ? AND sealed = ?", vec![text(r, "provider").into(), text(r, "sealed").into()])?;
+            }
+            // its providers and counts, never a key
+            console_log!("{{\"computer\":{:?},\"ownKeys\":\"handed\",\"handed\":{},\"taken\":{:?},\"owed\":{}}}", self.meta(MetaKey::Id)?.unwrap_or_default(), rows.len(), batch, self.owed_own()?.len());
+            taken.extend(batch);
+        }
+        Ok(taken)
+    }
+
+    /// `hand_over_own`, its failure logged: those not handed stay owed.
+    /// Started only by its owner's view reads (`GET /api/computers[/{id}]`)
+    /// and connections read (`computer/own-keys`), and its agent's own call
+    /// (`credentials`): never by a start, an exit, a takeover or its guest's
+    /// request, whose work in the background slowed a frozen container's
+    /// destroy past its bound (#1343).
+    async fn hand_over_logged(&self) {
+        if let Err(e) = self.hand_over_own().await {
+            console_error!("{{\"computer\":{:?},\"ownKeys\":\"owed\",\"error\":{:?}}}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default(), e.message);
+        }
+    }
+
+    /// The providers it still holds an own key for from before the move,
+    /// owed to its owner's Vault.
+    fn owed_own(&self) -> CellResult<Vec<String>> {
+        let rows = self.rows("SELECT provider FROM own_keys ORDER BY provider", vec![])?;
+        Ok(rows.iter().filter_map(|r| r["provider"].as_str().map(str::to_string)).collect())
     }
 
     /// Whether the guest reaches code.storage through its egress
@@ -1542,6 +1733,10 @@ impl ComputerCell {
             // (#1004). Stored, so an isolate after this one knows it too.
             self.start_failing(generation);
             self.stall_failing_start().await;
+            if planned.freeze {
+                // its exit is this failure's now (`start_failing`), no crash
+                let _ = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await;
+            }
         }
         match started {
             Ok(()) => {
@@ -1714,7 +1909,12 @@ impl ComputerCell {
                 self.starts.borrow_mut().up(generation, js::now_ms());
                 // its disk, before its guest is let go (as a restore's)
                 self.read_disk(generation).await;
-                self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                // unless its owner's sleep held it meanwhile (`lets_go`), as
+                // any unhold (Codex on #1378)
+                let _marking = self.marking.lock().await;
+                if self.lifecycle()?.lets_go(generation) {
+                    self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
+                }
             }
             Restore::Nothing => {}
         }
@@ -1859,8 +2059,19 @@ impl ComputerCell {
     /// `/run/computer/held` (no claim in flight, and what it keeps copied).
     /// An image that never answers is saved anyway, recorded as not held. A
     /// sleep (`sleeping`) whose container is gone already is over; an awake
-    /// save of one fails.
-    async fn hold(&self, generation: u64, sleeping: bool) -> Event {
+    /// save of one fails. What it answers is told only while the hold it was
+    /// asked for is still under way, or nothing is (a wake cancelled its
+    /// sleep: the lifecycle lets go again): never as a newer hold's answer.
+    /// One cancelled before it began does nothing.
+    async fn hold(&self, generation: u64, sleeping: bool) -> Option<Event> {
+        let asked = self.lifecycle().ok().and_then(|l| l.saving()).filter(|s| matches!(s, Saving::Hold { .. }))?;
+        let answer = self.hold_once(generation, sleeping).await;
+        let now = self.lifecycle().ok().and_then(|l| l.saving());
+        (now == Some(asked) || now.is_none()).then_some(answer)
+    }
+
+    /// `hold`'s touch, wait and answer.
+    async fn hold_once(&self, generation: u64, sleeping: bool) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if !self.container_running().await {
@@ -1870,8 +2081,21 @@ impl ComputerCell {
             }
             return Event::SaveFailed { generation, seq: 0, why: "its container is not running".into() };
         }
+        if sleeping {
+            // a sleep closes its port tabs as it begins, before its hold,
+            // saying why (docs/computers.md, Ports): nothing a person sends
+            // after reaches the container its save holds
+            let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
+            let _ = self.call("closeTabs", &[why.into()]).await;
+        }
         let t0 = js::now_ms();
-        if let Err(e) = self.mark(&g, HOLD_MARK, MARK_EXEC_MS).await {
+        // its mark's bound counts the wait for an unhold under way (at most
+        // `UNMARK_EXEC_MS`): the hold's steps stay within `HOLD_STEPS_MS`
+        let marked = {
+            let _marking = self.marking.lock().await;
+            self.mark(&g, HOLD_MARK, (MARK_EXEC_MS - (js::now_ms() - t0)).max(1)).await
+        };
+        if let Err(e) = marked {
             // a guest the DO cannot mark is saved as it is
             console_error!("{}", json!({ "computer": id, "hold": "failed", "generation": generation, "error": e.message }));
             return Event::Held { generation, held: false };
@@ -1923,7 +2147,13 @@ impl ComputerCell {
         // its backups together within `BACKUPS_MS` (the lever's
         // `hang-backups`: its own), each given what is left
         let budget = self.meta(MetaKey::HangBackups).ok().flatten().and_then(|ms| ms.parse::<i64>().ok()).filter(|ms| (1..=BACKUPS_MS).contains(ms)).unwrap_or(BACKUPS_MS);
-        let until = js::now_ms() + budget;
+        let mut until = js::now_ms() + budget;
+        // the lever's `hold-saves`: held here, within its backups' budget,
+        // until the lever lets it go (a test posts as a sleep saves), looked
+        // at every 100 ms
+        while self.meta(MetaKey::HoldSaves).ok().flatten().is_some() && js::now_ms() < until {
+            Delay::from(std::time::Duration::from_millis(100)).await;
+        }
         // each record's stored bytes and time, by what it holds
         let mut took = json!({});
         for dir in SAVED_DIRS {
@@ -1942,6 +2172,13 @@ impl ComputerCell {
                 Ok(record) => {
                     took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     records.push(record);
+                    // its home is in, the copies its guest made under the
+                    // hold with it: an awake save lets go of its hold before
+                    // it takes its work's (`Lifecycle`'s `HomeSaved`)
+                    // (its time, at most `UNMARK_EXEC_MS`, is not the backups')
+                    if dir == "/data" {
+                        until += self.home_saved(generation, seq).await;
+                    }
                 }
                 Err(e) => {
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
@@ -1954,7 +2191,17 @@ impl ComputerCell {
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
-        match self.keep_save(generation, records, held).await {
+        // a newer save of its start was kept as this one ran (its owner's
+        // sleep, once its guest went on): never kept ahead of it
+        if self.saves().is_ok_and(|s| s.overtaken(generation, seq)) {
+            console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "overtaken": true, "ms": js::now_ms() - t0 }));
+            match self.update_saves(|s| s.let_go(records)) {
+                Ok(lost) => self.forget(lost).await,
+                Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+            }
+            return Event::SaveFailed { generation, seq, why: "a newer save was kept as it ran".into() };
+        }
+        match self.keep_save(generation, records, seq, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
@@ -1966,6 +2213,37 @@ impl ComputerCell {
                 Event::SaveFailed { generation, seq, why: e.message }
             }
         }
+    }
+
+    /// Save `seq`'s home's record is taken: told to its lifecycle as the
+    /// drive tells any event (`drive_events`: stored, one line), within the
+    /// save, and the unhold it asks for (an awake save's, once) made at once,
+    /// so its guest claims turns again while its work is copied. It asks for
+    /// nothing else: no life ends, nothing of its saves is said, and its
+    /// alarm stays the save's deadline. Answers how long its unhold took.
+    async fn home_saved(&self, generation: u64, seq: u64) -> i64 {
+        let event = Event::HomeSaved { generation, seq };
+        let logged = json!(event);
+        let applied = self.lifecycle().and_then(|mut life| {
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            // (whether it lets go, not its actions: their encoder costs the Wasm)
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "unhold": !step.actions.is_empty() }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
+            Ok(step)
+        });
+        let t = js::now_ms();
+        match applied {
+            Ok(step) => {
+                assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
+                for action in step.actions {
+                    let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone") };
+                    self.unhold(generation, true).await;
+                }
+            }
+            // held on to its end, as before: its end lets go
+            Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
+        }
+        js::now_ms() - t
     }
 
     /// What the held guest of start `g` names as left out of its save (its
@@ -1994,11 +2272,12 @@ impl ComputerCell {
         })
     }
 
-    /// A save worked: it is the newest save, and the ones it pushed out of
-    /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
-    async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
+    /// Save `seq` worked, and was not overtaken (checked just before, with
+    /// no await between): it is the newest save, and the ones it pushed out
+    /// of the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
+    async fn keep_save(&self, generation: u64, records: Vec<Value>, seq: u64, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, seq, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");
@@ -2036,14 +2315,33 @@ impl ComputerCell {
         }
     }
 
-    /// Lets go of the guest's hold: an awake save's end, or a sleep that
-    /// kept its container. A container that is gone has nothing to let go.
-    async fn unhold(&self, generation: u64) {
-        if !self.container_running().await {
+    /// Lets go of the guest's hold, within `UNMARK_EXEC_MS` (an `rm`): an
+    /// awake save past its home or at its end, or a sleep that kept its
+    /// container. A container that is gone has nothing to let go, and one a
+    /// newer hold, save or stop holds now is that one's (`Lifecycle::lets_go`:
+    /// its owner's sleep just after a wake cancelled one, or one asked as an
+    /// awake save copied its work): left as it is. It takes the marker's turn
+    /// (`marking`) for its look and its command, so a newer touch waits for
+    /// it. With the turn taken it does nothing, never waiting on a person's
+    /// path (a wake's): a touch in flight hands it to its answer's let-go.
+    /// That one (`after_held`, a late hold's answer, or an awake save's
+    /// let-go past its home, in an alarm) waits for the turn, so it lands
+    /// after a let-go in flight, whether or not that one did.
+    async fn unhold(&self, generation: u64, after_held: bool) {
+        let _marking = match after_held {
+            true => self.marking.lock().await,
+            false => match self.marking.try_lock() {
+                Some(turn) => turn,
+                None => return,
+            },
+        };
+        if !self.lifecycle().is_ok_and(|l| l.lets_go(generation)) || !self.container_running().await {
             return;
         }
+        // (the lever's `stall-unhold`: a let-go slow to land, after its look)
+        self.lever_wait(MetaKey::StallUnhold, STALL_FAILING_START_MAX_MS).await;
         let g = JsValue::from_f64(generation as f64);
-        if let Err(e) = self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await {
+        if let Err(e) = self.mark(&g, HOLD_UNMARK, UNMARK_EXEC_MS).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unhold": "failed", "generation": generation, "error": e.message }));
         }
     }
@@ -2145,10 +2443,15 @@ impl ComputerCell {
 
     /// The view, each agent's grants asked of its fragment (`grants_of`):
     /// one that does not answer is logged, and shown as it is used
-    /// meanwhile, with no provider.
+    /// meanwhile, with no provider. Whose models each may run is read from
+    /// its owner's own keys: their Vault's (`own_names`), asked beside the
+    /// grants, and any this computer still owes it from before the move. It
+    /// hands none over: a view answers lifecycle and guest requests too
+    /// (`hand_over_logged`'s callers).
     async fn asked(&self, Unasked(mut view): Unasked) -> CellResult<ComputerView> {
-        let own = self.own_key_names()?;
-        let asked = futures_util::future::join_all(view.agents.iter().map(|a| self.grants_of(&a.fragment, &a.identity, None))).await;
+        let grants = futures_util::future::join_all(view.agents.iter().map(|a| self.grants_of(&a.fragment, &a.identity, None)));
+        let (asked, mut own) = futures_util::future::join(grants, self.own_names(&view.owner, !view.agents.is_empty())).await;
+        own.extend(self.owed_own()?);
         let id = view.computer.clone();
         for (agent, grants) in view.agents.iter_mut().zip(asked) {
             let grants = grants.unwrap_or_else(|e| {
@@ -2290,7 +2593,9 @@ impl ComputerCell {
         // each agent's person's Vault's secrets bound to it, as own keys with
         // no variable (FIN-466): their hosts caught before the guest can know one
         let fragments: Vec<String> = view.agents.iter().map(|a| a.fragment.clone()).collect();
-        let usable = self.vault_usable(&fragments).await;
+        let crate::vault::Names(usable, mut own) = self.vault_usable(&fragments).await;
+        // with any it still owes its owner's Vault: never handed over from its guest's request
+        own.extend(self.owed_own()?);
         self.arm_more(usable.iter().flat_map(|u| u.2.iter().cloned()).collect()).await;
         for crate::vault::Usable(of, name, hosts) in usable {
             if let Some(agent) = view.agents.iter_mut().find(|a| a.fragment == of) {
@@ -2302,7 +2607,6 @@ impl ComputerCell {
             return Ok(view);
         }
         let states = self.connection_states(&view.owner).await;
-        let own = self.own_key_names()?;
         for agent in &mut view.agents {
             for p in catalog.providers() {
                 if !grants::allows(agent.connections.as_deref(), &p.name) {
@@ -2399,55 +2703,10 @@ impl ComputerCell {
         self.note_state(provider, if connected { ProviderState::Connected } else { state });
     }
 
-    /// The providers the owner gave an own key for.
-    fn own_key_names(&self) -> CellResult<Vec<String>> {
-        let rows = self.rows("SELECT provider FROM own_keys ORDER BY provider", vec![])?;
-        Ok(rows.iter().filter_map(|r| r["provider"].as_str().map(str::to_string)).collect())
-    }
-
-    /// The owner's own key for `provider`, opened.
-    async fn own_key(&self, provider: &str) -> CellResult<Option<String>> {
-        let rows = self.rows("SELECT sealed FROM own_keys WHERE provider = ?", vec![provider.into()])?;
-        let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let scope = crate::keys::scope(SEAL_CLASS, &self.state);
-        let opened = crate::keys::open(&self.env, &scope, &sealed).await?;
-        if let Some(resealed) = opened.resealed {
-            // only over the value opened: the owner may have set another
-            // while the store was read
-            self.exec("UPDATE own_keys SET sealed = ? WHERE provider = ? AND sealed = ?", vec![resealed.into(), provider.into(), sealed.into()])?;
-        }
-        let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
-        Ok(Some(key))
-    }
-
-    /// A sign-in to an own key's provider, begun (`fragment_core::
-    /// own_signin`): a nonce and a verifier made, the verifier kept sealed
-    /// under the nonce's hash until it expires; answers the nonce and the
-    /// verifier's challenge. Expired ones go first; with
-    /// `SIGNINS_PENDING_MAX` under way, another is refused.
-    async fn sign_in(&self, provider: &str) -> CellResult<Value> {
-        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Own || p.oauth.is_none()) {
-            return Err(CellError::invalid(format!("{provider:?} is no own key signed in to here")));
-        }
-        let now = js::now_ms();
-        self.exec("DELETE FROM own_signins WHERE expires_at <= ?", vec![now.into()])?;
-        let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
-        if pending >= own_signin::SIGNINS_PENDING_MAX as u64 {
-            return Err(CellError::new(ErrorCode::RateLimited, format!("{pending} sign-ins are under way: finish one, or wait {} minutes", own_signin::SIGNIN_TTL_MS / 60_000)));
-        }
-        let nonce = own_signin::nonce(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
-        let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
-        let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), verifier.as_bytes()).await?;
-        self.exec(
-            "INSERT INTO own_signins (nonce, provider, sealed, expires_at) VALUES (?, ?, ?, ?)",
-            vec![own_signin::nonce_key(&nonce).into(), provider.into(), sealed.into(), (now + own_signin::SIGNIN_TTL_MS).into()],
-        )?;
-        Ok(json!({ "nonce": nonce, "challenge": own_signin::challenge(&verifier) }))
-    }
-
-    /// The sign-in `nonce` names, finished: gone at once (a replay finds
-    /// nothing), and its verifier answered if it was `provider`'s and is
-    /// unexpired. Its key is set by `computer/own-key` once exchanged.
+    /// The sign-in `nonce` names, begun here before the move (M16: a
+    /// person's Vault begins them since), finished: gone at once (a replay
+    /// finds nothing), and its verifier answered if it was `provider`'s and
+    /// is unexpired. Its key goes to its person's Vault once exchanged.
     async fn signed_in(&self, provider: &str, nonce: &str) -> CellResult<String> {
         let key = own_signin::nonce_key(nonce);
         let rows = self.rows("SELECT provider, sealed, expires_at FROM own_signins WHERE nonce = ?", vec![key.as_str().into()])?;
@@ -2462,21 +2721,6 @@ impl ComputerCell {
         String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))
     }
 
-    /// A month's uses: each agent's calls to each provider and their charges.
-    fn uses(&self, month: Month) -> CellResult<ComputerUses> {
-        let rows = self.rows("SELECT provider, agent, calls, micros FROM uses WHERE month = ? ORDER BY provider, agent", vec![i64::from(month.0).into()])?;
-        let uses = rows
-            .iter()
-            .map(|r| ProviderUse {
-                provider: r["provider"].as_str().unwrap_or_default().to_string(),
-                agent: r["agent"].as_str().unwrap_or_default().to_string(),
-                calls: r["calls"].as_u64().unwrap_or(0),
-                micros: r["micros"].as_i64().unwrap_or(0),
-            })
-            .collect();
-        Ok(ComputerUses { computer: self.must(MetaKey::Id)?, month: month.label(), uses })
-    }
-
     /// The clock's offset a test fleet set (the `clock` lever); none elsewhere.
     fn offset_ms(&self) -> CellResult<i64> {
         if !self.cfg.test_hooks {
@@ -2485,17 +2729,15 @@ impl ComputerCell {
         Ok(self.meta(MetaKey::ClockOffset)?.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
-    /// Counts an agent's calls a provider answered, in `at`'s month, and
-    /// forgets months past `USES_MONTHS_KEPT`. A month already holding
-    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged). A
-    /// shared key's charge counts in its hour too: whether one reached its cap.
-    fn count_uses(&self, b: &UsedAsk) -> CellResult<bool> {
-        if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
+    /// Counts a shared key's charge in its hour (`fragment_core::key_hour`):
+    /// whether one reached its cap. What its agents used is their owner's
+    /// ledger's (`uses::count`), not counted here.
+    fn count_key_hour(&self, b: &Used) -> CellResult<bool> {
+        if b.at_ms <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
         }
         let offset = self.offset_ms()?;
-        let (at, now) = (b.at.saturating_add(offset), js::now_ms() + offset);
-        let month = Month::of(at);
+        let (at, now) = (b.at_ms.saturating_add(offset), js::now_ms() + offset);
         let mut capped = false;
         for u in &b.uses {
             let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
@@ -2510,20 +2752,7 @@ impl ComputerCell {
                     vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
                 )?;
             }
-            let m = i64::from(month.0);
-            let held = self.rows("SELECT COUNT(*) AS n FROM uses WHERE month = ?", vec![m.into()])?;
-            let exists = !self.rows("SELECT 1 FROM uses WHERE month = ? AND provider = ? AND agent = ?", vec![m.into(), u.provider.as_str().into(), b.agent.as_str().into()])?.is_empty();
-            if !exists && held.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= USES_ROWS_MAX {
-                console_error!("{}", json!({ "computer": "uses-full", "month": month.label(), "provider": u.provider, "agent": b.agent }));
-                continue;
-            }
-            self.exec(
-                "INSERT INTO uses (month, provider, agent, calls, micros) VALUES (?, ?, ?, 1, ?) ON CONFLICT (month, provider, agent) DO UPDATE SET calls = calls + 1, micros = micros + excluded.micros",
-                vec![m.into(), u.provider.as_str().into(), b.agent.as_str().into(), u.micros.into()],
-            )?;
         }
-        let oldest = i64::from(month.0.saturating_sub(USES_MONTHS_KEPT - 1));
-        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])?;
         self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
         Ok(capped)
     }
@@ -2539,14 +2768,10 @@ impl ComputerCell {
     fn view_unasked(&self) -> CellResult<Unasked> {
         let id = self.must(MetaKey::Id)?;
         let life = self.lifecycle()?;
-        let (phase, why) = match &life.phase {
-            // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
-            Phase::Starting { .. } => (ComputerPhase::Starting, None),
-            Phase::Awake { .. } => (ComputerPhase::Awake, None),
-            Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
+        let phase = life.shown(js::now_ms());
+        let why = match &life.phase {
+            Phase::Failed { why, .. } => Some(why.clone()),
+            _ => None,
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
@@ -2685,14 +2910,23 @@ impl ComputerCell {
     /// restored; `fail-saves {times}` fails its next saves (0: none more);
     /// `hang-backups {ms}` makes its container's backups never answer, as a
     /// sick one's (r4, r6), and bounds its saves' backups by `ms` (0: its
-    /// shim back); `alive-check {ms, freeze}` makes its next start wait
+    /// shim back); `hold-saves {on}` holds each save before its backups
+    /// until it is let go (`on: false`), within their budget; `alive-check
+    /// {ms, freeze}` makes its next start wait
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
     /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
-    /// past its time; `legacy-grants {agent, row?}` makes an agent's row from
+    /// past its time (its owner's Vault's, and any begun here before the
+    /// move); `legacy-grants {agent, row?}` makes an agent's row from
     /// before the grants' move owed, as step 6 keeps one its fragment had not
     /// taken (`fragment_core::grants::Owed`), then reads what is owed;
+    /// `legacy-own-key {provider, key?}` and `legacy-sign-in {provider}`
+    /// keep an own key, or begin its sign-in, as a release before the own
+    /// keys' move did (M16), here;
+    /// `legacy-uses {month?, row?}` makes a month of uses owed as step 7
+    /// keeps one (`row`: its `[{agent, provider, calls, micros}]`), handed
+    /// over at its owner's next look, then reads every month owed;
     /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
     /// `ms` (0: none), taken whether or not the deployment takes snapshots,
     /// holding its container meanwhile as the runtime's does;
@@ -2744,6 +2978,14 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
+            "hold-saves" => {
+                // its saves wait before their backups while on (off: the one
+                // waiting goes on), so a test acts as one is under way
+                let on = b.on.ok_or_else(|| CellError::invalid("hold-saves names on: true or false"))?;
+                if on { self.set_meta(MetaKey::HoldSaves, "1")? } else { self.delete_meta(MetaKey::HoldSaves)? }
+                console_log!("{}", json!({ "computer": id, "lever": "hold-saves", "on": on }));
+                Ok(json!({ "computer": id, "holdSaves": on }))
+            }
             "snapshot-bound" => {
                 // its next sleep's snapshot is given `ms`, as one after a
                 // slow save is (0: what its sleep leaves it)
@@ -2770,16 +3012,18 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "slow-snapshot", "ms": ms }));
                 Ok(json!({ "computer": id, "slowSnapshot": ms }))
             }
-            "slow-tell" => {
-                // its next restart's owner is told `ms` late (0: on time),
-                // as a slow principal answers: the window in which its alarm
-                // makes the start the restart owed (`drive_events`' answer)
-                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-tell names its ms, 0 to {SLOW_TELL_MAX_MS}")))?;
+            "slow-tell" | "slow-start-tell" => {
+                // its next restart's (or start's, within TELL_MAX_MS) owner is told `ms` late (0:
+                // on time), as a slow principal answers: the window in which
+                // its alarm makes the start the restart owed (`drive_events`'
+                // answer), or its owner's sleep ends a start before it is made
+                let key = if b.op == "slow-tell" { MetaKey::SlowTell } else { MetaKey::SlowStartTell };
+                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("{} names its ms, 0 to {SLOW_TELL_MAX_MS}", b.op)))?;
                 match ms {
-                    0 => self.delete_meta(MetaKey::SlowTell)?,
-                    ms => self.set_meta(MetaKey::SlowTell, &ms.to_string())?,
+                    0 => self.delete_meta(key)?,
+                    ms => self.set_meta(key, &ms.to_string())?,
                 }
-                console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "ms": ms }));
                 Ok(json!({ "computer": id, "slowTell": ms }))
             }
             "fail-starts" | "fail-takeover-destroys" => {
@@ -2796,21 +3040,57 @@ impl ComputerCell {
                 self.alarm_at(Some(js::now_ms() + i64::from(ms))).await?;
                 Ok(json!({ "computer": id }))
             }
-            "stall-failing-start" | "stall-takeover" => {
+            "stall-failing-start" | "stall-takeover" | "stall-unhold" => {
                 // its next start that fails waits `ms` between storing that
                 // it fails and destroying its container, or its next
-                // takeover of a start destroying, before its destroy (0: none)
-                let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
+                // takeover of a start destroying, before its destroy, or its
+                // next let-go of a hold between its look and its command (0: none)
+                let key = match b.op.as_str() {
+                    "stall-takeover" => MetaKey::StallTakeOver,
+                    "stall-unhold" => MetaKey::StallUnhold,
+                    _ => MetaKey::StallFailingStart,
+                };
                 let ms = b.ms.filter(|ms| u64::from(*ms) <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid("it names its ms, 0 to 600000"))?;
                 self.set_meta(key, &ms.to_string())?;
                 Ok(json!({ "computer": id }))
             }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
-                // minutes would leave it: its row stays, refused by its expiry
+                // minutes would leave it: its owner's Vault's, and any begun
+                // here before the move; each row stays, refused by its expiry
                 self.exec("UPDATE own_signins SET expires_at = ?", vec![js::now_ms().into()])?;
-                let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
-                Ok(json!({ "computer": id, "expiredSignIns": pending }))
+                let here = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+                let vault = crate::vault::expire_sign_ins(&self.env, &self.must(MetaKey::Owner)?).await?;
+                Ok(json!({ "computer": id, "expiredSignIns": here + vault }))
+            }
+            "legacy-own-key" | "legacy-sign-in" => {
+                // as a release before the move kept them (a computer from
+                // before it): an own key, written when given, then which it
+                // holds (never a key); or a sign-in begun here, its nonce and
+                // the provider's page to send a browser to
+                let provider = b.provider.as_deref().unwrap_or_default();
+                let row = self.cfg.providers.get(provider).filter(|p| p.kind == Kind::Own).ok_or_else(|| CellError::invalid(format!("{} names an own key's provider", b.op)))?;
+                let scope = crate::keys::scope(SEAL_CLASS, &self.state);
+                if b.op == "legacy-own-key" {
+                    if let Some(key) = &b.key {
+                        let sealed = crate::keys::seal(&self.env, &scope, key.as_bytes()).await?;
+                        self.exec(
+                            "INSERT INTO own_keys (provider, sealed, set_at) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET sealed = excluded.sealed, set_at = excluded.set_at",
+                            vec![provider.into(), sealed.into(), js::now_ms().into()],
+                        )?;
+                    }
+                    return Ok(json!({ "computer": id, "held": self.owed_own()? }));
+                }
+                let o = row.oauth.as_ref().ok_or_else(|| CellError::invalid(format!("{provider} has no sign-in")))?;
+                let nonce = own_signin::nonce(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
+                let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
+                let sealed = crate::keys::seal(&self.env, &scope, verifier.as_bytes()).await?;
+                self.exec(
+                    "INSERT INTO own_signins (nonce, provider, sealed, expires_at) VALUES (?, ?, ?, ?)",
+                    vec![own_signin::nonce_key(&nonce).into(), provider.into(), sealed.into(), (js::now_ms() + own_signin::SIGNIN_TTL_MS).into()],
+                )?;
+                let url = own_signin::authorize_url(o, &crate::connections::callback_url(self.cfg, provider), &own_signin::challenge(&verifier), &nonce);
+                Ok(json!({ "computer": id, "nonce": nonce, "url": url }))
             }
             "simplex" => {
                 // its bridge's word that its image does SimpleX (`said_simplex`), or its forgetting
@@ -2848,7 +3128,7 @@ impl ComputerCell {
                 let Some(generation) = self.lifecycle()?.running() else {
                     return Err(CellError::invalid("it is not running: wake it first"));
                 };
-                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(9.0)]).await?;
+                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await?;
                 if sent.as_bool() != Some(true) {
                     return Err(CellError::host(format!("start {generation}'s container is not running here")));
                 }
@@ -2874,6 +3154,7 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                v["heldUntil"] = json!(life.held_until_ms());
                 v["phase"] = json!(life.phase);
                 v["failures"] = json!(life.failures());
                 // a container runs for this object, whichever start's
@@ -2882,6 +3163,8 @@ impl ComputerCell {
                 v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
+                v["holdSaves"] = json!(self.meta(MetaKey::HoldSaves)?.is_some());
+                v["stallUnhold"] = json!(self.meta(MetaKey::StallUnhold)?.is_some());
                 Ok(v)
             }
             "legacy-grants" => {
@@ -2900,7 +3183,29 @@ impl ComputerCell {
                 let row = self.owed()?.0.remove(agent).map(|(_, row)| row.value());
                 Ok(json!({ "computer": id, "agent": agent, "row": row }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on or legacy-grants"))),
+            "legacy-uses" => {
+                // a month of uses from before the move, owed as step 7 keeps
+                // one (`[{agent, provider, calls, micros}]`), when named:
+                // handed over at its owner's next look, as by a computer that
+                // slept since the deploy; then every month owed
+                if let Some(rows) = b.row.as_ref().filter(|r| r.is_array()) {
+                    let month = b.month.as_deref().and_then(Month::parse).ok_or_else(|| CellError::invalid("legacy-uses names its month, YYYY-MM"))?;
+                    let key = format!("{USES_OWED}{}", month.0);
+                    self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![key.into(), rows.to_string().into()])?;
+                }
+                self.uses_due_ms.set(0);
+                let owed = self.rows("SELECT key, value FROM meta WHERE key LIKE 'uses_owed:%' ORDER BY key", vec![])?;
+                let mut months = serde_json::Map::new();
+                for r in owed {
+                    let month = r["key"].as_str().and_then(|k| k.strip_prefix(USES_OWED)).and_then(|m| m.parse().ok()).map(Month);
+                    let rows = r["value"].as_str().and_then(|v| crate::json_text::<Value>(v).ok());
+                    if let (Some(month), Some(rows)) = (month, rows) {
+                        months.insert(month.label(), rows);
+                    }
+                }
+                Ok(json!({ "computer": id, "owed": months }))
+            }
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
         }
     }
 
@@ -2929,6 +3234,7 @@ impl ComputerCell {
             "computer/view" => {
                 // its owner reading it (the shell, as it opens): a deploy since its last look is news
                 self.look_and_tell().await;
+                self.uses_later();
                 json_response(&self.view().await?)
             }
             // an operator's view of it (orgs.rs, the person page): the whole
@@ -2994,41 +3300,13 @@ impl ComputerCell {
                 json_response(&self.credentials(b).await?)
             }
             "computer/used" => {
-                let b: UsedAsk = body_json(&mut req).await?;
+                let b: Used = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
                 // a key's charge that reaches its cap: its owner's pages read again
-                if self.count_uses(&b)? {
+                if self.count_key_hour(&b)? {
                     self.tell_owner().await;
                 }
                 json_response(&json!({ "ok": true }))
-            }
-            "computer/own-key" => {
-                let b: OwnKeyAsk = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Own) {
-                    return Err(CellError::invalid(format!("{:?} is no own key's provider here", b.provider)));
-                }
-                match b.key {
-                    Some(key) => {
-                        if !crate::connections::own_key_ok(&key) {
-                            return Err(CellError::invalid("a key is a printable token"));
-                        }
-                        let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), key.as_bytes()).await?;
-                        self.exec(
-                            "INSERT INTO own_keys (provider, sealed, set_at) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET sealed = excluded.sealed, set_at = excluded.set_at",
-                            vec![b.provider.as_str().into(), sealed.into(), js::now_ms().into()],
-                        )?;
-                    }
-                    None => self.exec("DELETE FROM own_keys WHERE provider = ?", vec![b.provider.as_str().into()])?,
-                }
-                // its owner's pages read it again: whose models each agent may run
-                self.tell_owner().await;
-                json_response(&json!({ "providers": self.own_key_names()? }))
-            }
-            "computer/sign-in" => {
-                let b: SignInAsk = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                json_response(&self.sign_in(&b.provider).await?)
             }
             "computer/signed-in" => {
                 let b: SignedInAsk = body_json(&mut req).await?;
@@ -3044,7 +3322,11 @@ impl ComputerCell {
                     *self.accounts.borrow_mut() = b.accounts.unwrap_or_default();
                     self.states_told.set(self.states_told.get() + 1);
                 }
-                json_response(&json!({ "providers": self.own_key_names()? }))
+                // the own keys it kept before the move go to the Vault first;
+                // those still owed are its owner's set ones too (the router
+                // reads their Vault's after this)
+                self.hand_over_logged().await;
+                json_response(&json!({ "providers": self.owed_own()? }))
             }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
@@ -3132,7 +3414,13 @@ impl ComputerCell {
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
                 let socket = Socket::Tab;
-                self.drive(if b.open { Event::Opened { socket } } else { Event::Closed { socket } }).await?;
+                // a close that carries a use not told yet: the use, then the close
+                if b.used {
+                    self.drive(Event::TabUsed).await?;
+                }
+                if !(b.open && b.used) {
+                    self.drive(if b.open { Event::Opened { socket } } else { Event::Closed { socket } }).await?;
+                }
                 json_response(&json!({ "ok": true }))
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
@@ -3168,6 +3456,8 @@ impl ComputerCell {
                 let list = match self.owned_by(&who) {
                     Ok(()) => {
                         self.look_and_tell().await;
+                        // its owner reading it: what it kept before the move goes over first
+                        self.hand_over_logged().await;
                         vec![self.view().await?]
                     }
                     Err(e) if e.code == ErrorCode::NotFound => vec![],
@@ -3183,7 +3473,12 @@ impl ComputerCell {
         self.owned_by(&who)?;
         self.look_and_tell().await;
         match (req.method(), rest) {
-            (Method::Get, []) => json_response(&self.view().await?),
+            (Method::Get, []) => {
+                // its owner reading it: what it kept before the move goes over first
+                self.hand_over_logged().await;
+                self.uses_later();
+                json_response(&self.view().await?)
+            }
             (Method::Post, ["wake"]) => {
                 self.wake(Wake::Owner).await?;
                 json_response(&self.view().await?)
@@ -3347,8 +3642,6 @@ impl ComputerCell {
                 let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
                 json_response(&PortTicket { url: format!("{origin}/__ticket?t={ticket}&next={next}"), expires_at })
             }
-            (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
-            (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
         }
     }
@@ -3464,9 +3757,29 @@ impl ComputerCell {
         // asked for: one its owner took away is refused from their next
         // request on (its time logged)
         let catalogued = b.placeholders.iter().any(|p| self.cfg.providers.named(&p.provider, p.connection).is_some());
+        // its owner's own keys asked for are their Vault's (M16), asked
+        // beside its fragment's grants, so the swap waits on no hop more;
+        // one this computer kept before the move goes to the Vault first (a
+        // hand-over that fails is logged: the keys their Vault holds still go)
+        let mut own: Vec<&str> = b.placeholders.iter().filter_map(|p| self.cfg.providers.named(&p.provider, p.connection)).filter(|p| p.kind == Kind::Own).map(|p| p.name.as_str()).collect();
+        own.sort_unstable();
+        own.dedup();
         let asked_at = js::now_ms();
-        let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
-        let grants_ms = catalogued.then(|| js::now_ms() - asked_at);
+        let grants = async {
+            let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
+            Ok::<_, CellError>((grants, catalogued.then(|| js::now_ms() - asked_at)))
+        };
+        // each wait timed from one start (`grantsMs`, `ownMs`): asked side by
+        // side, the request waits the longer, never the two added
+        let keys = async {
+            if own.is_empty() {
+                return Ok((vec![], None));
+            }
+            self.hand_over_logged().await;
+            let keys = crate::vault::own_keys(&self.env, &owner, &own).await?;
+            Ok((keys, Some(js::now_ms() - asked_at)))
+        };
+        let ((grants, grants_ms), (keys, own_ms)) = futures_util::future::try_join(grants, keys).await?;
         let mut secrets = vec![];
         // a Vault's secret (a key's name no catalog key has) is its egress's to ask
         // the agent's person's Vault for, this agent's now that its tag says so
@@ -3498,14 +3811,17 @@ impl ComputerCell {
                     self.key_open(&provider.name)?;
                     crate::keys::operator_key(&self.env, &provider.name).await?
                 }
-                Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
+                Kind::Own => {
+                    let key = own.iter().position(|o| *o == provider.name).and_then(|i| keys[i].clone());
+                    key.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?
+                }
             };
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
                 return Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}'s credential is not a printable token", provider.name)));
             }
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
-        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms }))
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms, "ownMs": own_ms }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
@@ -3644,8 +3960,7 @@ impl ComputerCell {
         }
         let port: u16 = req.headers().get(PORT_HEADER)?.and_then(|p| p.parse().ok()).filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("name a port"))?;
         // a request to a sleeping computer's port wakes it, as a tab does
-        let life = self.lifecycle()?;
-        if !matches!(life.phase, Phase::Awake { .. }) {
+        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
             self.wake(Wake::Tab).await?;
             // only to its own start's container: still asleep (a start owed,
             // one held up), or not yet past the container before it, the one
@@ -3655,7 +3970,17 @@ impl ComputerCell {
                 return Err(CellError::new(ErrorCode::Conflict, "its computer is still starting: try again in a moment").retry_after(PORT_RETRY_MS));
             }
         }
-        let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner())]).await?;
+        // one going to sleep, read after any wait (a sleep may have begun
+        // during the wake's): woken after it, and its container, which the
+        // sleep saves, hears nothing of this request. Nothing is awaited
+        // from here until entry.mjs's `port` has read the sleeps begun,
+        // which closes one that begins as its upgrade waits
+        if matches!(self.lifecycle()?.phase, Phase::Sleeping { .. }) {
+            self.wake(Wake::Tab).await?;
+            return Ok(Response::error("its computer is going to sleep, and wakes again after: try again in a moment", 503)?);
+        }
+        let every = JsValue::from_f64(fragment_core::computer::TAB_USED_EVERY_MS as f64);
+        let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner()), every]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
         Ok(Response::from(resp))
     }
@@ -3666,46 +3991,16 @@ pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellRe
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
 }
 
-/// `computer/signed-in` as the router asks it: an own-key round trip
-/// coming back to the browser that began it, for its person, whose
-/// computer began it. It is a finished round trip, so only `of` makes one,
-/// from its `Bound`: its fields are private and it is not `Deserialize`
-/// (the computer decodes the same body as a `SignedInAsk`).
-#[derive(serde::Serialize)]
-pub(crate) struct SignedIn {
-    #[serde(skip)]
-    computer: String,
-    provider: String,
-    nonce: String,
-}
-
-impl SignedIn {
-    /// The own-key sign-in `bound` finishes, for `person`, to `provider`:
-    /// asked of the person's own computer, never one a URL names.
-    pub(crate) fn of(bound: crate::auth::Bound, person: &fragment_proto::Identity, provider: &str) -> SignedIn {
-        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::OwnKey, "an own key's callback finishes an own key's sign-in");
-        assert_eq!(person.kind, fragment_proto::IdentityKind::Person, "an own key's sign-in is a person's");
-        SignedIn { computer: fragment_core::computer::default_computer_of(&person.id), provider: provider.to_string(), nonce: bound.state().to_string() }
-    }
-
-    /// The computer it is asked of.
-    pub(crate) fn computer(&self) -> &str {
-        &self.computer
-    }
-}
-
-/// The sign-in `signed` finishes, taken from its computer (once, and gone
-/// whatever comes of it): its verifier.
-pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+/// The own-key sign-in `nonce` names, begun on `computer` (its person's)
+/// before the move, back from `provider`: taken from it (once, and gone
+/// whatever comes of it), its verifier. Only a person's sign-in their Vault
+/// holds none of is asked here (vault.rs `signed_in`).
+pub(crate) async fn signed_in(env: &Env, computer: &str, provider: &str, nonce: &str) -> CellResult<String> {
     // a Value, so `ask` stays one copy for every body (FIN-453 M7: a body
     // type of its own is about 1.4 KB more of the Wasm, for a rare call)
-    let body = serde_json::to_value(signed).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
-    let answer = ask(env, &signed.computer, "computer/signed-in", &body).await?;
-    let verifier = answer["verifier"].as_str().unwrap_or_default().to_string();
-    if !own_signin::valid_token(&verifier) {
-        return Err(CellError::host("the computer kept a sign-in with no verifier"));
-    }
-    Ok(verifier)
+    let body = serde_json::to_value(SignedInAsk { provider: provider.to_string(), nonce: nonce.to_string() }).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
+    let answer = ask(env, computer, "computer/signed-in", &body).await?;
+    Ok(answer["verifier"].as_str().unwrap_or_default().to_string())
 }
 
 /// `{image}` from a body.
@@ -4192,6 +4487,11 @@ fn vault_s(cfg: &Config, p: &Placeholder) -> bool {
     !p.connection && cfg.providers.named(&p.provider, false).is_none()
 }
 
+/// Batches of `vault::SECRETS_MAX` own keys one hand-over sends at most
+/// (`ComputerCell::hand_over_own`): far more than a catalog has ever offered
+/// own providers, one row each.
+const OWN_HANDOVER_BATCHES: usize = 16;
+
 /// Headers a hop answers for itself, never sent on.
 const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "host"];
 
@@ -4207,8 +4507,11 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// it within the minute; a person out of credit is refused, and a ledger
 /// that does not answer refuses nothing: decision 62). After the answer is
 /// handed back, each operator key's call the provider answered (under
-/// 500) is charged to the owner (`charge_keys`) and counted as the agent's
-/// (`computer/used`), in `wait_until`, never in the answer's way.
+/// 500) is charged to the owner (`charge_keys`), and every call the
+/// provider answered is counted as the agent's in its owner's ledger
+/// (`uses::Used`; a shared key's charge in its hour here too,
+/// `computer/used`), in `wait_until`, never in the answer's way: a count
+/// lost is no call slowed (Paul, 2026-11-18).
 async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -4238,12 +4541,14 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let mut signed = false;
     // whose ledger a key's call goes on, and as which agent
     let mut payer: Option<(String, String, String)> = None;
-    // how long the computer waited on the agent's fragment for what it may use
-    let mut grants_ms = None;
+    // how long the computer waited on the agent's fragment for what it may
+    // use, and on its person's Vault for their own keys, from one start
+    let (mut grants_ms, mut own_ms) = (None, None);
     if !found.is_empty() {
         let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag, "connection": p.connection })).collect();
         let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
         grants_ms = answer["grantsMs"].as_i64();
+        own_ms = answer["ownMs"].as_i64();
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
             // its kind: a connection's and a Vault secret's may share a name and a tag
@@ -4345,17 +4650,21 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
         // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
-        let uses: Vec<Value> = plan
+        let uses: Vec<uses::Use> = plan
             .wanted
             .iter()
             .filter(|p| cfg.providers.named(&p.provider, p.connection).is_some())
             .map(|p| {
                 let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
                 let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
-                json!({ "provider": p.provider, "micros": micros })
+                uses::Use { provider: p.provider.clone(), micros }
             })
             .collect();
         let at = js::now_ms();
+        // counted in its owner's ledger; a shared key's charge in its hour
+        // too, which its computer keeps
+        let charged = uses.iter().any(|u| u.micros > 0);
+        let counted = Used { agent, at_ms: at, uses };
         let rows: Vec<MeterRow> = used
             .into_iter()
             .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
@@ -4365,18 +4674,30 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             if !rows.is_empty() {
                 crate::meter::charge(&env, &owner, rows).await;
             }
-            if uses.is_empty() {
+            if counted.uses.is_empty() {
                 return;
             }
-            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
-                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
-            }
+            // side by side: a ledger slow to count never holds back the
+            // hour a shared key's cap is checked against
+            let hour = async {
+                if charged {
+                    if let Err(e) = crate::routed::ask_bytes(&env, "COMPUTER", &computer, "computer/used", &counted).await {
+                        console_error!("{}", json!({ "egress": "swap", "key_hour": e.message }));
+                    }
+                }
+            };
+            let count = async {
+                if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
+                    console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+                }
+            };
+            futures_util::future::join(hour, count).await;
         });
     }
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
-        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms }));
+        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms, "ownMs": own_ms }));
     }
     match sent {
         Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,
@@ -4442,4 +4763,11 @@ fn target_fragment(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/f/").or_else(|| path.strip_prefix("/api/f/"))?;
     let name = rest.split('/').next()?;
     fragment_proto::valid_fragment_name(name).then(|| name.to_string())
+}
+
+/// What its owner's pages show of its phase, and so are told of as it
+/// changes: the phase its view shows (`Lifecycle::shown`), and the stored
+/// one, as a start due (shown starting before its alarm) is made.
+fn phase_told(life: &Lifecycle) -> (std::mem::Discriminant<Phase>, ComputerPhase) {
+    (std::mem::discriminant(&life.phase), life.shown(js::now_ms()))
 }

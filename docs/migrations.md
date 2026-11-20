@@ -267,6 +267,7 @@ move in the routine that starts the import.
 |---|---|---|
 | `POST /api/migrations/stages/{stage}/open` | `StageOpened {stage, manifest}` | The manifest as the mover wrote it. |
 | `GET /api/migrations/stages/{stage}/zip` | the zip's bytes | `Range: bytes=…` is answered 206 with that range alone. |
+| `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=` | → `StageCopied {sha256, bytes, crc32}` | One range of the zip (a file's bytes, or a part of them: 1 to the caller's upload limit) copied on the platform into the blobs of the fragment `into`, never through the agent's computer: hashed as R2 reads it (its CRC-32 too, which the caller checks against the zip entry's own before it takes the copy for the file), then read again into `into`'s blob upload as the agent, or for its owner (`for`), which the fragment checks as its client's (editor, and the hash). The same range again is the same blob. A range past the zip is 400. |
 | `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | Harmless either way. `ok` moves it to `retiring` with no command: its old agent stays stopped until staff's `retire`, and its person reads it as done. Not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once, and its objects are kept to their keep (Deletion). |
 
 Each is the bound agent's alone (403 for anyone else), for its current
@@ -437,8 +438,20 @@ enough by hand), and `withdraw` (out of the move).
 | 90 days after the cutoff (phase 2), whatever its import did | its prefix. A phase 2 stage is the only copy left (its old agent was retired as archived), so it is kept until then: after a good import as after a failed one (for staff's retry). Its `done` ends only its reads |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |
 
-`/data` saves never hold a stage: the importer reads it by ranges into
-`/tmp`, outside the saved directories (docs/computers.md).
+A stage is never downloaded: the importer reads it in place, by ranges
+(`fragment home … stage:<stage>`), only what it imports, so neither its
+computer's disk nor its `/data` saves (docs/computers.md) ever hold it.
+An old agent's home can be larger than a new computer's whole disk.
+
+Nothing is left behind (Paul, 11-19). Beside what the import brings,
+`fragment home files --store` keeps every other file of the stage whole
+in the agent's storage (its owner's members-only fragment, the one
+`fragment offload` moves into), each large file copied there by the
+platform (`…/copy`), never through the computer, with a note where each
+was that `fragment offload --back` brings back. Only a file whose name
+says it may hold a password or key stays behind, unread, as before. Kept
+blobs bill the owner's ledger as any fragment's storage does (R2's
+price, with the margin: about $0.02 a GB a month).
 
 ## The operators' routes
 

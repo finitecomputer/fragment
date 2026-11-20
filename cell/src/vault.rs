@@ -22,10 +22,22 @@
 //!   view, and the hosts its egress catches), and, for one request, each
 //!   secret it names: filled toward one of its hosts, for an agent bound to
 //!   it. A Nostr key is never answered: the Vault signs the request.
+//! - **Its person's own keys** (M16: moved from their computer): one per
+//!   `own` provider of the catalog, its own kind (Paul, 2026-11-18), used
+//!   by each agent of theirs not narrowed from it. Its person sets or
+//!   removes one (`own_put`, from `PUT …/key` or a sign-in's finish); their
+//!   computer asks for them as a request goes (`own_keys`), beside its ask
+//!   of the agent's fragment, so the swap waits on no hop more; `names`
+//!   lists them. A sign-in to one is begun and finished here (`sign_in`,
+//!   `signed_in`). A computer hands over the keys it kept before the move
+//!   (`hand_over`), and one its person set or removed since stands.
 
 use std::cell::Cell;
 
+use fragment_core::catalog::Kind;
+use fragment_core::own_signin;
 use fragment_core::vault::{self as rules, Placing};
+use fragment_proto::computer::ProviderState;
 use fragment_proto::vault::{Place, PutSecret, Secret, SecretRemoved};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::{Deserialize, Serialize};
@@ -95,11 +107,120 @@ struct Fills {
     secrets: Vec<Filled>,
 }
 
+/// `vault/names`' answer: what each agent asked about may use (`Usable`),
+/// and the catalog's `own` providers its person holds a key for. A tuple
+/// on the wire.
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct Names(pub Vec<Usable>, pub Vec<String>);
+
+/// An own key, as its person gives one (`PUT …/key`'s body, passed on as
+/// it came) or a sign-in's exchange made it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OwnPut {
+    pub key: String,
+}
+
+/// `PUT …/key`'s answer: the own key's provider and its state, `set` or
+/// `not_set`.
+#[derive(Serialize)]
+struct OwnSet<'a> {
+    provider: &'a str,
+    state: ProviderState,
+}
+
+/// An own key a computer kept before the move, handed over (M16): its
+/// provider, the key, and when its person set it. A tuple on the wire.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Handed(pub String, pub String, pub i64);
+
+/// `vault/sign-in`'s answer: a sign-in's nonce (its round trip's state)
+/// and its verifier's S256 challenge. A tuple on the wire.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Begun(pub String, pub String);
+
 /// The secrets each of `agents` (fragments of `person`'s) may use, toward
 /// which hosts, one `Usable` each: what a computer's view lists and its
-/// egress catches.
-pub(crate) async fn names(env: &Env, person: &str, agents: &[String]) -> CellResult<Vec<Usable>> {
+/// egress catches; and the own keys `person` holds (none asked: those alone).
+pub(crate) async fn names(env: &Env, person: &str, agents: &[String]) -> CellResult<Names> {
     crate::routed::ask_object(env, "VAULT", person, "vault/names", &NamesAsk { agents: agents.to_vec() }).await
+}
+
+/// `person`'s own keys for `providers` (a catalog's `own` rows), each
+/// opened or none, in the order asked: for their agent's request their
+/// computer is swapping, never anyone else.
+pub(crate) async fn own_keys(env: &Env, person: &str, providers: &[&str]) -> CellResult<Vec<Option<String>>> {
+    crate::routed::ask_object(env, "VAULT", person, "vault/own-keys", &providers).await
+}
+
+/// Sets `person`'s own key for `provider` from `put` (an `OwnPut`), or
+/// removes it (none): the Vault checks `provider` is an own key's and the
+/// key one the swap may send. Its answer, `{provider, state}`, as it wrote
+/// it.
+pub(crate) async fn own_put(env: &Env, person: &str, provider: &str, put: &impl Serialize) -> CellResult<Vec<u8>> {
+    crate::routed::ask_bytes(env, "VAULT", person, &op_path("own", provider)?, put).await
+}
+
+/// The own keys `person`'s computer kept before the move, handed to their
+/// Vault (M16): the providers it took, each where its person had set or
+/// removed none since.
+pub(crate) async fn hand_over(env: &Env, person: &str, keys: &[Handed]) -> CellResult<Vec<String>> {
+    crate::routed::ask_object(env, "VAULT", person, "vault/own-handover", &keys).await
+}
+
+/// A sign-in to `provider`'s own key, begun in `person`'s Vault: its nonce
+/// and challenge.
+pub(crate) async fn sign_in(env: &Env, person: &str, provider: &str) -> CellResult<Begun> {
+    crate::routed::ask_object(env, "VAULT", person, &op_path("sign-in", provider)?, &()).await
+}
+
+/// Every own-key sign-in under way in `person`'s Vault put past its time
+/// (a test fleet's lever, through their computer's): how many.
+pub(crate) async fn expire_sign_ins(env: &Env, person: &str) -> CellResult<u64> {
+    crate::routed::ask_object(env, "VAULT", person, "vault/expire-sign-ins", &()).await
+}
+
+/// An own-key sign-in coming back to the browser that began it, for its
+/// person, whose Vault began it. It is a finished round trip, so only `of`
+/// makes one, from its `Bound`: its fields are private.
+pub(crate) struct SignedIn {
+    person: String,
+    provider: String,
+    nonce: String,
+}
+
+impl SignedIn {
+    /// The own-key sign-in `bound` finishes, for `person`, to `provider` (a
+    /// catalog's): asked of the person's own Vault, never one a URL names.
+    pub(crate) fn of(bound: crate::auth::Bound, person: &fragment_proto::Identity, provider: &str) -> SignedIn {
+        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::OwnKey, "an own key's callback finishes an own key's sign-in");
+        assert_eq!(person.kind, IdentityKind::Person, "an own key's sign-in is a person's");
+        SignedIn { person: person.id.clone(), provider: provider.to_string(), nonce: bound.state().to_string() }
+    }
+
+    /// The person whose sign-in it is.
+    pub(crate) fn person(&self) -> &str {
+        &self.person
+    }
+}
+
+/// The sign-in `signed` finishes, taken from its person's Vault (once, and
+/// gone whatever comes of it): its verifier. One the Vault holds none of
+/// was begun before the move, and is taken from their computer
+/// (docs/technical-debt-ledger.md, "A computer keeps its owner's own keys
+/// from before the move").
+pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+    let asked: CellResult<String> = crate::routed::ask_object(env, "VAULT", &signed.person, &op_path("signed-in", &signed.provider)?, &signed.nonce).await;
+    let verifier = match asked {
+        Err(e) if e.code == ErrorCode::NotFound => {
+            let computer = fragment_core::computer::default_computer_of(&signed.person);
+            crate::computer::signed_in(env, &computer, &signed.provider, &signed.nonce).await?
+        }
+        asked => asked?,
+    };
+    if !own_signin::valid_token(&verifier) {
+        return Err(CellError::host("a sign-in was kept with no verifier"));
+    }
+    Ok(verifier)
 }
 
 /// `ask`'s secrets in `person`'s Vault, each filled for its request, or
@@ -297,6 +418,16 @@ impl VaultCell {
             }
             ["vault", "names"] => self.names(&crate::json_body(&req.bytes().await?)?)?,
             ["vault", "fill"] => self.fill(&crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "own", provider] => self.own_put(provider, crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "own-keys"] => self.own_keys(crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "own-handover"] => self.hand_over(crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "sign-in", provider] => self.sign_in(provider).await?,
+            ["vault", "signed-in", provider] => self.signed_in(provider, &crate::json_body::<String>(&req.bytes().await?)?).await?,
+            ["vault", "expire-sign-ins"] if self.cfg.test_hooks => {
+                // as ten minutes would leave them: each row stays, refused by its expiry
+                self.sql().exec("UPDATE own_signins SET expires_at = ?", vec![SqlStorageValue::Integer(js::now_ms())])?;
+                self.count("SELECT COUNT(*) AS n FROM own_signins")?.to_string()
+            }
             _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         };
         Ok(Response::from_bytes(answer.into_bytes())?)
@@ -389,8 +520,13 @@ impl VaultCell {
         Ok(format!("{{\"secrets\":[{}]}}", texts.join(",")))
     }
 
-    /// Which secrets each of `b.agents` may use, toward which hosts: a
-    /// `Usable` each, as JSON.
+    /// `query`'s one count, `n`.
+    fn count(&self, query: &str) -> CellResult<u64> {
+        Ok(self.rows(query, vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
+    }
+
+    /// Which secrets each of `b.agents` may use, toward which hosts (a
+    /// `Usable` each), and the own keys held: `Names` as JSON.
     fn names(&self, b: &NamesAsk) -> CellResult<String> {
         let mut usable = vec![];
         for r in self.rows("SELECT name, secret FROM secrets ORDER BY name", vec![])? {
@@ -403,7 +539,150 @@ impl VaultCell {
                 usable.push(Usable(a.clone(), name.to_string(), s.hosts.clone()));
             }
         }
-        serde_json::to_string(&usable).map_err(|e| CellError::host(e.to_string()))
+        let own = self.rows("SELECT provider FROM own_keys WHERE sealed IS NOT NULL ORDER BY provider", vec![])?;
+        let own = own.iter().filter_map(|r| r["provider"].as_str().map(str::to_string)).collect();
+        serde_json::to_string(&Names(usable, own)).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// Its person's own key for `provider` set from `put`, or removed (none,
+    /// kept as removed: a computer's hand-over from before never puts one
+    /// back), with the rules of `PUT …/key`: an own key's provider, and a
+    /// key the swap may send. `OwnSet`'s JSON.
+    async fn own_put(&self, provider: &str, put: Option<OwnPut>) -> CellResult<String> {
+        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Own) {
+            return Err(CellError::invalid(format!("{provider} takes no key of yours: only an own key's provider does")));
+        }
+        let key = match put {
+            Some(put) => Some(own_signin::given(&put.key).ok_or_else(|| CellError::invalid(format!("a key is 1 to {} printable characters, with no space", own_signin::OWN_KEY_MAX_BYTES)))?),
+            None => None,
+        };
+        let state = if key.is_some() { ProviderState::Set } else { ProviderState::NotSet };
+        self.keep_own(vec![(provider.to_string(), key, js::now_ms())], false).await?;
+        serde_json::to_string(&OwnSet { provider, state }).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// The own keys a computer kept before the move (M16), each taken where
+    /// its person has set or removed none here since (`keep_own`). The
+    /// providers it took, as JSON. Taken again, it takes nothing. One no
+    /// swap could send (no provider's name, or no printable key: none such
+    /// was ever kept) is not taken, and logged by its provider alone; the
+    /// rest are (Codex, #1345: one never stops the others).
+    async fn hand_over(&self, keys: Vec<Handed>) -> CellResult<String> {
+        if keys.len() > rules::SECRETS_MAX {
+            return Err(CellError::invalid(format!("a hand-over is at most {} own keys", rules::SECRETS_MAX)));
+        }
+        let (keys, unsendable): (Vec<Handed>, Vec<Handed>) = keys.into_iter().partition(|Handed(p, k, _)| fragment_core::catalog::valid_name(p) && own_signin::key_ok(k));
+        for Handed(provider, _, _) in &unsendable {
+            console_error!("{{\"vault\":\"own-handover\",\"unsendable\":{:?}}}", provider.chars().take(64).collect::<String>());
+        }
+        let taken = self.keep_own(keys.into_iter().map(|Handed(p, k, at)| (p, Some(k), at)).collect(), true).await?;
+        serde_json::to_string(&taken).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// Own keys kept, each `(provider, key, set_at)`: sealed for this object,
+    /// or `None` kept as removed (so a hand-over never puts it back). A
+    /// hand-over's (`new_only`) only where nothing of its provider is held,
+    /// checked again in the turn that keeps it, after the seals' waits, so
+    /// what its person set meanwhile stands; and nothing once a wipe ended.
+    /// The providers kept.
+    async fn keep_own(&self, keys: Vec<(String, Option<String>, i64)>, new_only: bool) -> CellResult<Vec<String>> {
+        let held = |p: &str| -> CellResult<bool> { Ok(new_only && !self.rows("SELECT provider FROM own_keys WHERE provider = ?", vec![p.into()])?.is_empty()) };
+        let mut sealed = Vec::with_capacity(keys.len());
+        for (provider, key, set_at) in keys {
+            if held(&provider)? {
+                continue;
+            }
+            let key = match key {
+                Some(k) => Some(crate::keys::seal(&self.env, &self.scope(), k.as_bytes()).await?),
+                None => None,
+            };
+            sealed.push((provider, key, set_at));
+        }
+        if self.wiped.get() {
+            return Err(CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing"));
+        }
+        let mut kept = vec![];
+        for (provider, key, set_at) in sealed {
+            if held(&provider)? {
+                continue;
+            }
+            self.sql().exec(
+                "INSERT INTO own_keys (provider, sealed, set_at) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET sealed = excluded.sealed, set_at = excluded.set_at",
+                vec![provider.as_str().into(), key.into(), SqlStorageValue::Integer(set_at)],
+            )?;
+            kept.push(provider);
+        }
+        Ok(kept)
+    }
+
+    /// Its person's own keys for `providers`, each opened or none, as JSON:
+    /// for their computer's swap alone, which asks them as a request goes.
+    async fn own_keys(&self, providers: Vec<String>) -> CellResult<String> {
+        if providers.len() > fragment_core::swap::PLACEHOLDERS_MAX {
+            return Err(CellError::invalid(format!("ask for at most {} own keys", fragment_core::swap::PLACEHOLDERS_MAX)));
+        }
+        let mut keys: Vec<Option<String>> = Vec::with_capacity(providers.len());
+        for provider in &providers {
+            let rows = self.rows("SELECT sealed FROM own_keys WHERE provider = ? AND sealed IS NOT NULL", vec![provider.as_str().into()])?;
+            let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else {
+                keys.push(None);
+                continue;
+            };
+            let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
+            if let Some(resealed) = opened.resealed {
+                // only over the value opened: its person may have set another meanwhile
+                self.sql().exec("UPDATE own_keys SET sealed = ? WHERE provider = ? AND sealed = ?", vec![resealed.into(), provider.as_str().into(), sealed.into()])?;
+            }
+            keys.push(Some(String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?));
+        }
+        serde_json::to_string(&keys).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// A sign-in to `provider`'s own key, begun (`fragment_core::
+    /// own_signin`): a nonce and a verifier made, the verifier kept sealed
+    /// under the nonce's hash until it expires; `Begun`'s JSON. Expired ones
+    /// go first; with `SIGNINS_PENDING_MAX` under way, another is refused.
+    async fn sign_in(&self, provider: &str) -> CellResult<String> {
+        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Own || p.oauth.is_none()) {
+            return Err(CellError::invalid(format!("{provider:?} is no own key signed in to here")));
+        }
+        let nonce = own_signin::nonce(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
+        let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
+        let sealed = crate::keys::seal(&self.env, &self.scope(), verifier.as_bytes()).await?;
+        // counted and kept in one turn, after the seal's wait
+        if self.wiped.get() {
+            return Err(CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing"));
+        }
+        let now = js::now_ms();
+        self.sql().exec("DELETE FROM own_signins WHERE expires_at <= ?", vec![SqlStorageValue::Integer(now)])?;
+        let pending = self.count("SELECT COUNT(*) AS n FROM own_signins")?;
+        if pending >= own_signin::SIGNINS_PENDING_MAX as u64 {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("{pending} sign-ins are under way: finish one, or wait {} minutes", own_signin::SIGNIN_TTL_MS / 60_000)));
+        }
+        self.sql().exec(
+            "INSERT INTO own_signins (nonce, provider, sealed, expires_at) VALUES (?, ?, ?, ?)",
+            vec![own_signin::nonce_key(&nonce).into(), provider.into(), sealed.into(), SqlStorageValue::Integer(now + own_signin::SIGNIN_TTL_MS)],
+        )?;
+        let challenge = own_signin::challenge(&verifier);
+        serde_json::to_string(&Begun(nonce, challenge)).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// The sign-in `nonce` names, finished: gone at once (a replay finds
+    /// nothing), and its verifier answered (JSON) if it was `provider`'s
+    /// and is unexpired. None here at all is 404: one begun before the move
+    /// is its computer's (`signed_in`, the router's).
+    async fn signed_in(&self, provider: &str, nonce: &str) -> CellResult<String> {
+        let key = own_signin::nonce_key(nonce);
+        let rows = self.rows("SELECT provider, sealed, expires_at FROM own_signins WHERE nonce = ?", vec![key.as_str().into()])?;
+        self.sql().exec("DELETE FROM own_signins WHERE nonce = ?", vec![key.into()])?;
+        let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, "no sign-in of this one's is under way here"))?;
+        if row["provider"] != provider || row["expires_at"].as_i64().is_none_or(|t| t <= js::now_ms()) {
+            return Err(CellError::invalid("this sign-in is not one under way here (finished already, expired, or never made): connect again from settings"));
+        }
+        let sealed = row["sealed"].as_str().ok_or_else(|| CellError::host("a sign-in kept with no verifier"))?;
+        let opened = crate::keys::open(&self.env, &self.scope(), sealed).await?;
+        let verifier = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))?;
+        serde_json::to_string(&verifier).map_err(|e| CellError::host(e.to_string()))
     }
 
     /// Each secret `b` names, filled for `b.agent`'s request to `b.host`:
@@ -515,7 +794,12 @@ impl VaultCell {
     /// empty, with the row that says it was wiped, in one step. Again, it
     /// changes nothing.
     fn wipe(&self, route: &str) -> CellResult<String> {
-        let held = || -> CellResult<bool> { Ok(!self.rows("SELECT name FROM secrets LIMIT 1", vec![])?.is_empty()) };
+        // a secret, or an own key: a vault that refuses its schema may be
+        // one from before its own keys' step, with no such table (Codex, #1345)
+        let held = || -> CellResult<bool> {
+            let own = self.rows("SELECT provider FROM own_keys WHERE sealed IS NOT NULL LIMIT 1", vec![]).is_ok_and(|r| !r.is_empty());
+            Ok(own || !self.rows("SELECT name FROM secrets LIMIT 1", vec![])?.is_empty())
+        };
         match route {
             "view" => Ok(format!("{{\"wiped\":{},\"held\":{}}}", self.wiped.get(), held()?)),
             "end" => {

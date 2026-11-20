@@ -63,10 +63,12 @@ function platform() {
       for (const f of body.files) files.get(name).set(f.path, f.text);
       return { commit: "c" };
     }
-    if (method === "POST" && rest === "deploy") {
-      const role = JSON.parse(files.get(name).get("fragment.json")).meta?.role;
-      if (role) row(name).agentRole = role;
-      return {};
+    if (method === "POST" && rest === "deploy") return {};
+    // its face: its title, and an agent's role ("" takes it away)
+    if (method === "PUT" && rest === "face") {
+      if (body.title) row(name).title = body.title.trim();
+      if (body.role !== undefined) row(name).agentRole = body.role.trim() || undefined;
+      return { title: row(name).title, role: row(name).agentRole };
     }
     if (method === "GET" && rest === "members") return { members: [...members.get(name)].map((principal) => ({ principal })) };
     if (method === "PUT" && rest.startsWith("members/")) return (join(name, decodeURIComponent(rest.slice("members/".length))), {});
@@ -183,7 +185,7 @@ function madeWhole(world) {
   const id = world.computer().agents.find((a) => a.fragment === wren.name)?.identity;
   assert.ok(id, "Wren is on the computer");
   assert.ok(world.members(chats[0].name).has(id), "Wren is in its chat");
-  assert.equal(JSON.parse(world.files(wren.name).get("fragment.json")).meta.role, "Researcher", "its role");
+  assert.equal(wren.agentRole, "Researcher", "its role, its face's");
   assert.match(world.files(wren.name).get("SOUL.md"), /one of kim@e2e\.test's agents/, "its job");
   assert.equal(world.tasks(wren.name)?.get("hello")?.chat, chats[0].name, "its hello, in its chat");
 }

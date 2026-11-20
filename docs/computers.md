@@ -39,14 +39,24 @@ an image may rely on this:
 
 - **It is woken** by a record on a channel one of its agents subscribed
   to with `wake: true`, one of its agents added to a fragment, an open
-  port tab, a page's presence on a subscribed fragment (a pre-wake, held
-  a minute), or its owner. Never by its own guest's traffic.
-- **It stays awake** while a port tab is open or the guest holds its
-  keepalive socket, and `IDLE_MS` (20 minutes) after neither does. An
-  always-on seat's computer never sleeps (decision 25; docs/billing.md).
+  port tab, or its owner, also as they begin to use it in their shell: a
+  chat picked, or the launcher opened by its button or ⌘K (their own
+  wake). Never by a page acting on its own (a framed page's ask, or
+  anything a page's presence says, typing included: a page sets its
+  own), its own guest's traffic, a page loading, a tab shown again, a
+  socket reconnecting, or a timer.
+- **It stays awake** while the guest holds its keepalive socket, and
+  `IDLE_MS` (20 minutes) after what last held it: a keepalive's close, a
+  wake, or a port tab's opening, close or use (a message from its page).
+  A port tab merely open holds nothing (Paul, 2026-11-18: "an open tab,
+  without any action touching the agent, should not keep the agent awake
+  indefinitely"). An always-on seat's computer never sleeps (decision 25;
+  docs/billing.md).
 - **It is saved** when its work ends (its last keepalive or its last
-  port tab closes, and 30 s pass with no keepalive opened again), every 15 minutes while a keepalive stays
-  open, and at every sleep (below, "Saves and what a wake restores").
+  port tab closes, and 30 s pass with no keepalive opened again), every
+  15 minutes while a keepalive stays open or a port tab is in use
+  (counted from its first use since the last save), and at every sleep
+  (below, "Saves and what a wake restores").
 - **A sleep** is, in order: the hold, the save, a container snapshot
   (only after a save that worked), SIGTERM, up to 5 s for the guest to
   exit, destroy. A keepalive opened during an idle sleep's hold cancels
@@ -54,6 +64,16 @@ an image may rely on this:
   again; after `computers.unsaved_max_ms` (30 minutes unless the
   deployment says otherwise) of failed tries it sleeps unsaved, and its
   next wake is a rollback.
+- **A wake cancels an idle sleep until its stop begins.** A wake of any
+  kind during an idle sleep's hold or save keeps it awake on the
+  container it has: nothing is restored or started, and the message
+  that woke it runs there. A hold not yet answered is let go at once,
+  and the save it was for is due when work settles. A save under way
+  goes on as an awake save, holding the guest to its end (a backup cut
+  short could be neither kept nor safely forgotten), and is kept or
+  failed as one: its failure opens no unsaved window. Its owner's sleep
+  or restart is never cancelled, nor a sleep whose stop began: a wake
+  then starts it again once it is asleep.
 - **A restart** (its owner's) is a sleep that saves if it can and stops
   whether or not it did, then a fresh start: from the image and the
   newest good save, never the snapshot, which could carry what broke it
@@ -62,8 +82,9 @@ an image may rely on this:
   every path, and its owner's page follows it to awake.
 - **A stop nothing asked for, while idle, is a sleep.** A host may stop
   a container for its own reasons (its maintenance, a host short of
-  memory). One that stops while its computer is awake with nothing open
-  (no keepalive, no port tab), no save under way, all this life did in a
+  memory). One that stops while its computer is awake with no keepalive
+  open (a port tab open holds nothing; its use is work), no save under
+  way, all this life did in a
   save it made since it came up, and no message or join it was woken for
   that its guest has not taken up, has slept: no strike, no rollback,
   nothing told, and nothing starts it again, though the hold after its
@@ -107,9 +128,9 @@ an image may rely on this:
   2026-11-02), so its nine minutes and 25 seconds hold about 22 GB, more
   than a computer's 20 GB disk. Any restore that fits the disk fits the
   deadline; one that does not fit is set aside, not waited for.
-- **A start owed after its container goes** (a sleep's end with a wake
-  or a restart asked, a crash while wanted, a start that fell back past a
-  bad save) is due at once, told as `starting`: the request that saw it go
+- **A start owed after its container goes** (a sleep's end with a
+  restart asked or a wake it did not cancel, a crash while wanted, a
+  start that fell back past a bad save) is due at once, told as `starting`: the request that saw it go
   (a restart's aside) makes it, and each
   one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
   an alarm, the alarm it asks for, never the rest of the alarm that ran
@@ -220,7 +241,10 @@ The owner's view carries `notices` (proto's `ComputerNotice`, from
 `fragment_core::computer::notices`; their fields are docs/api.md's), the
 most pressing first. Each is derived from the Computer DO's own state
 with no clock, so every reader is told the same, and when they change the
-DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
+DO tells its owner's open pages (`/api/fragments/watch`'s `changed`), as
+it does when its phase changes (`Lifecycle::shown`: a chat with their
+agent says it is getting ready while it starts, before the start's own
+steps; its "no reply yet" waits until it is up):
 
 - `wont_wake`: its starts kept failing.
 - `disk_filling`: its disk, read (`df`) in each start that restores a
@@ -241,7 +265,9 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   the bound stops it.
 - `went_back`: a start went back to an older save, or will at its next
   start, told until its owner says they saw it. None when nothing was
-  done on the lost life after that save (Paul, 2026-10-23).
+  done on the lost life after that save (Paul, 2026-10-23). When nothing
+  that may change its files ran after it (no turn, no port tab used:
+  `unchanged`), it says where it went back to and no loss.
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
 - `key_paused`: a shared key's charges this last hour reached its owner's
@@ -287,9 +313,9 @@ draws them over every chat and Settings with no code of its own for any.
   failing idle computer is kept. That time is the platform's, not metered
   (docs/ledger.md, "Who pays").
 - **The agent** is told what a cut lost, and the chat when a rollback or
-  a loss of `/data` made its runtime forget it, in its next turn in each
-  chat (docs/bridge.md, "The turn after a cut one is told" and "What a
-  runtime forgot").
+  a loss of `/data`, or of its runtime's memory alone, made its runtime
+  forget it, in its next turn in each chat (docs/bridge.md, "The turn
+  after a cut one is told" and "What a runtime forgot").
 - **Getting help**: a deployment may name `support_url`, which a
   `wont_wake` notice offers beside Restart.
 
@@ -405,11 +431,14 @@ touches `/run/computer/hold`, and waits up to `HOLD_WAIT_MS` (20 s) for
 the guest to touch `/run/computer/held`: its answer that it claims
 nothing now (no claim in flight, none new while the hold exists) and has
 copied what a hot copy would tear. Then the DO saves. An awake save lets
-go after (it removes the files); a sleep keeps the hold until its
-container is gone. A guest that never answers is saved anyway, the save
-recorded as not `held`. What the guest already claimed may run on. A
-fresh container never has the files: the DO removes them from one started
-from a snapshot.
+go (it removes the files) once its home's record is taken, the rest of
+`/data` with the copies in it, and takes its work's while its guest
+works: the hold never made the work whole (what the guest already claimed
+writes to it during any save, and nothing in it is copied under the
+hold). A sleep keeps the hold until its container is gone. A guest that
+never answers is saved anyway, the save recorded as not `held`. What the
+guest already claimed may run on. A fresh container never has the files:
+the DO removes them from one started from a snapshot.
 
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the
@@ -496,8 +525,8 @@ minute), or its life ends, whichever is first.
   first), `deadline`, `blocked` (the container before it still ran: it
   started nothing, and the start made again counts from the same wake),
   `other`.
-- `woke`: what asked for the wake it answers: `record`, `presence`, `tab`,
-  `owner`, `joined`, `restart`; `itself` when nothing did (a start after a
+- `woke`: what asked for the wake it answers: `record`, `tab`, `owner`,
+  `joined`, `restart`; `itself` when nothing did (a start after a
   crash, an always-on start, or an ask an earlier isolate heard). A wake's
   fallback and retries carry its first ask.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
@@ -734,6 +763,17 @@ provider's own hosts.
   deployment, or given by its owner, and not narrowed from it), and
   `credentialEnv`, every variable of the catalog, held or not, so an image
   can pass them all through once.
+- **An own key is its person's Vault's** (M16; docs/secrets.md, "A
+  person's Vault"), its own kind, used by each agent not narrowed from
+  it. The computer asks the Vault for it at each request it swaps, beside
+  its ask of the agent's fragment (so it waits on no hop more), and for
+  which keys the person holds at each read of a view. A computer from
+  before the move held them (`own_keys`, `own_signins`): it hands its keys
+  to the Vault at its owner's next read of it or of their connections, or
+  its agent's next call through one (never a start, an exit, a takeover or
+  its guest's request), and the Vault takes one only where its person said
+  nothing since. Until then its views list the keys it still owes. A
+  sign-in begun there finishes from there.
 - **The intercept** catches the catalog's hosts on HTTPS and HTTP, sends
   on over HTTPS, and swaps each placeholder where its row says it goes
   (`swap::Plan`). It refuses the request, reaching no provider, for a
@@ -767,8 +807,13 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
-- Each call a provider answered is counted in the computer's `uses`; an
-  operator key's is charged to its agent's owner (docs/ledger.md).
+- Each call a provider answered is counted as its agent's in the owner's
+  ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
+  is charged to its agent's owner too. A computer from before kept its
+  own `uses`; its step 7 keeps the months it held as owed (`meta`
+  `uses_owed:<month>`), each handed to the owner's ledger as the owner
+  reads the computer's view (never from a start, an exit or a takeover),
+  taken once, then forgotten.
 - **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
   each secret bound to an agent, with a host, is one of its credentials,
   kind `own`, named by the secret, with no variable. Its hosts join the
@@ -776,7 +821,7 @@ provider's own hosts.
   its guest reads its view). The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
-  Vault makes. A Vault's calls are not counted in `uses`.
+  Vault makes. A Vault's calls are not counted in usage.
 
 ### An agent's own model
 
@@ -812,8 +857,16 @@ agent; their account pays.
 - Only the platform's page may frame a port, so an image's page may not
   frame its own ports either: a screen is one page, its sockets relative
   to it.
-- A WebSocket on a port holds the computer awake while open. The
-  container may speak first. A close at either end closes the other.
+- A WebSocket on a port holds the computer awake only while its page
+  speaks: its opening, and each message from the page's end (heard a
+  minute at a time), hold it `IDLE_MS`; one whose page says nothing lets
+  it sleep, and a page that stops speaking when no one is at it lets it
+  sleep under an open tab. The container may speak first; its words hold
+  nothing. A close at either end closes the other. A sleep (a restart's
+  too) closes each as it begins, before its hold, with 4000 and `asleep`
+  or `restarting` (one whose upgrade was still on its way too), so nothing
+  a page sends after reaches the container its save holds; a request to a
+  port while it sleeps wakes it after, and is answered 503.
 - **The screen** (decision 11) is a page on port 6080, one for each
   agent, at `/p/6080/?agent=<agent fragment>`. The platform carries the
   query and reads nothing in it: which desktop is the agent's, and
@@ -823,6 +876,13 @@ agent; their account pays.
   `postMessage({fragment: "screen", agent, name})`; a page takes it only
   from its parent and only for its own agent. Opened in a tab of its own,
   it names none: the computer knows an agent by its label, never its name.
+  The shell also tells the screens on view that its person is at it
+  (`{fragment: "screen", agent, active: true}`, every 30 s at most).
+  Our screen backs off to silence (`images/hermes/screen/attend.js`): no
+  key, press, pointer or touch on it or the shell for five minutes
+  pauses its stream, its last frame kept; the next one resumes it. Once
+  its sockets close (a sleep, a restart, the network), only a press or a
+  key opens them again, once each, and a computer asleep wakes for them.
 
 ## Our images
 
@@ -841,9 +901,10 @@ What our Hermes image guarantees beyond the contract:
   own fragment, so a viewer's read-only sync is not this one's. A fragment
   shared with the agent's owner it syncs with the `fragment` CLI, as its
   owner would, at the lower of their roles (cli/GUIDE.md, Sync in depth). An agent whose `agent.json` names another runtime (Claude) has no
-  profile, desktop, route or sync: the boot reads `runtime` as the bridge
-  does (`with_runtimes`), and the ready file names it at once, for the
-  bridge to run on its runtime. A start reads every agent's before it
+  profile, desktop or route: the boot reads `runtime` as the bridge
+  does (`with_runtimes`), and the ready file names it, for the bridge to
+  run on its runtime, once its own files are restored for that runtime
+  (below, "Claude Code"). A start reads every agent's before it
   writes or retires a profile, asking again until each answers, so a
   failed read never retires a Hermes agent's profile. One switched to another runtime while
   the computer runs loses its desktop within 10 s, its profile retired at
@@ -936,8 +997,8 @@ same inputs ask nothing.
 
 ### Its name, in our Hermes image
 
-An agent's name is its agent fragment's title, and its role its
-`meta.role` (docs/api.md, "An agent's name and picture"). The image tells
+An agent's name is its agent fragment's title, and its role its face's
+role (docs/api.md, "An agent's name and picture"). The image tells
 the agent both in its system prompt at every turn (`hermes::told`),
 read again every 10 s, so a rename or a new role is its next turn's,
 nothing restarted.
@@ -1089,6 +1150,23 @@ gates it.
 - **A Claude agent has no Hermes profile or desktop** (above, "One
   profile per agent of Hermes'"): its person installs and signs in from
   its chat.
+- **Its self is its fragment's, as a Hermes agent's is** (M17, FIN-542):
+  the same sync, every 60 s and at each start before the bridge runs it,
+  keeps its `SOUL.md` and its own `CLAUDE.md` in its work directory (its
+  `AGENTS.md` imports the soul), and Claude Code's auto memory for it as
+  the fragment's `memories/claude/`. Each folder keeps what was agreed
+  beside its files, so one lost alone deletes nothing, and a file deleted
+  from its work directory comes back rather than leaving the fragment. A
+  computer whose `/data` is lost or new, or an agent newly assigned to
+  it or switched to Claude, has all of it back before the bridge runs the
+  agent: the ready file names each agent with the runtime it was made
+  ready for, a Claude agent's only once a sync restored its files (a
+  failed one is tried again at each read of the computer's agents, every
+  3 s), a Hermes agent's whose profile was written while the gateway runs
+  only once the running gateway says it serves it (asked with
+  `rescan-profiles`: a turn relayed before is refused, and lost), and the
+  bridge holds the turns of an agent not ready for the runtime it names,
+  never dropping them.
 
 ## Billing
 

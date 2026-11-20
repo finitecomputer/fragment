@@ -59,7 +59,7 @@ fn runtimes() -> Runtimes {
     let home = PathBuf::from(env_or("BRIDGE_CLAUDE_HOME", "/data/claude"));
     let config = ClaudeConfig {
         bin: PathBuf::from(bin),
-        config_dir: home.join(".claude"),
+        config_dir: fragment_bridge::runtime::claude::config_dir(&home),
         home,
         work_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_WORK_DIR", "/data/work")),
         state_dir: PathBuf::from(env_or("BRIDGE_CLAUDE_STATE_DIR", "/data/bridge/claude")),
@@ -71,7 +71,7 @@ fn runtimes() -> Runtimes {
         // Anthropic's installer, or the stand-in a test image names
         installer: Some(env_or("BRIDGE_CLAUDE_INSTALLER", fragment_bridge::runtime::claude::INSTALLER)),
     };
-    r.with("claude", Box::new(Claude { config }))
+    r.with(fragment_bridge::runtime::claude::NAME, Box::new(Claude { config }))
 }
 
 /// The runtime agents that name none run (`runtime::DEFAULT`): Hermes'
@@ -97,12 +97,13 @@ fn runtime() -> Box<dyn Runtime> {
                     Some("allow") => true,
                     Some(_) => fail("BRIDGE_MEDIA_LOCAL is `allow`, or unset"),
                 },
+                home: Some(PathBuf::from(env_or("BRIDGE_RELAY_HOME", "/data/hermes"))),
             };
             // bound here, at the start: a port in use says so at once
             let listener = std::net::TcpListener::bind(listen).unwrap_or_else(|e| fail(&format!("listen {listen}: {e}")));
             Box::new(Relay { config, listener })
         }
-        "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
+        "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")), memory: Some(PathBuf::from(env_or("BRIDGE_SCRIPT_MEMORY", "/data/script"))) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
     }
 }
