@@ -286,6 +286,9 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&made, &[("index/chat.json", Some(old.as_bytes()))]);
     let left = call("sessions", json!({}))?;
     let emptied = left.body["result"]["sessions"].as_array().is_some_and(Vec::is_empty);
+    // its frames are found by URL across the browser's tabs: the first
+    // tab goes, so the archive's frame read is this one's
+    b.close(page)?;
     let old_page = history_page(&mut b)?;
     listed_shots(&mut b, &old_page, "index")?;
     let from_index = b.eval(&old_page, &format!("[...{imported}].map((r) => r.querySelector('.history-line .label').textContent)"))?;
@@ -302,6 +305,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let index_now = api.signed(&keys, "GET", &format!("/api/f/{name}/file?path=index/chat.json"), None)?;
     let index_titles: Vec<Value> = index_now.body["sessions"].as_array().into_iter().flatten().map(|e| e["title"].clone()).collect();
     let index_rewritten = Value::Array(index_titles.clone()) == json!(["A long letter", "Beans"]);
+    b.close(old_page)?;
     let fresh = history_page(&mut b)?;
     b.until(&fresh, "!!document.querySelector('.history-filter[data-filter=\"imported\"]')?.checkVisibility()", wait);
     b.click(&fresh, ".history-filter[data-filter=\"imported\"]")?;
