@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "the new image, and the save");
         // its /data at full size fills the disk but the largest image and the floor, exactly: room
         let fits = DISK - IMAGE_DISK_MAX - restore_floor(DISK);
-        let edge = (fits * 100 / 101..fits * 100 / 101 + 200).filter(|d| restore_writes(*d) <= fits).last().expect("a size that fits exactly");
+        let edge = (fits * 100 / 101..fits * 100 / 101 + 200).rev().find(|d| restore_writes(*d) <= fits).expect("a size that fits exactly");
         assert!(restore_writes(edge + 1) > fits, "the most that fits");
         assert!(s.measured(ComputerDisk { total: DISK, free: 9_000_000_000, at: T + 20, generation: 1, data: Some(edge) }));
         assert!(!s.update_waits());
