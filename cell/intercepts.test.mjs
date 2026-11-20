@@ -184,3 +184,10 @@ test("no room for the platform's own still fails, and so does any other refusal 
   const { c } = container({ fail: "https://api.example.com → swap" });
   await assert.rejects(intercept(c, egress, SWAP, false), /refused/);
 });
+
+test("a start whose container has no room for a swap host it asks starts nothing", async () => {
+  // a budget gone wrong: 32 swap hosts beside the platform's two, 132 entries
+  const c = { ...full([]), started: 0, start() { this.started++; } };
+  await assert.rejects(startIntercepted(c, { image: "stub" }, () => intercept(c, egress, hosts("s", 32), false), () => false), /no room for 1 of its swap hosts/);
+  assert.equal(c.started, 0);
+});

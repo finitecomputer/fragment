@@ -90,9 +90,14 @@ async function landed(each) {
 // `overtaken()` while they registered (a start after it, or a destroy of
 // whatever runs: a sleep's, a wipe's), answering false, whether or not one
 // failed meanwhile: an overtaken start's failure is no one's to report.
+// Nor does one whose container had no room for a swap host `intercepted()`
+// answers (`landed`): a container not yet started holds none of its own,
+// and the hosts a start asks fit its entries (`egress::armed`), so one
+// left is a budget gone wrong, never a guest started without it.
 export async function startIntercepted(c, opts, intercepted, overtaken) {
   try {
-    await intercepted();
+    const full = await intercepted();
+    if (full && full.length) throw new Error(`its container had no room for ${full.length} of its swap hosts`);
   } catch (e) {
     if (overtaken()) return false;
     throw e;
