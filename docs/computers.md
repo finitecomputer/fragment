@@ -400,9 +400,10 @@ before the container starts, at once, so the guest's first request never
 races them (`cell/intercepts.mjs`): the platform's hosts and the catalog's
 providers', asking nothing. Its agents' Vault secrets' hosts are asked of
 its owner's Vault: beside the container's start when the start holds its
-guest until it lets it go (a restore's gate, a snapshot's hold), and
-caught before that; before the start when its guest runs at once (a
-fresh start), so no guest runs with one uncaught. HTTPS to an intercepted host is
+guest until it lets it go (a restore's gate; a snapshot's hold, when its
+save was held), and caught before that; before the start when its guest
+runs at once (a fresh start, or a snapshot whose sleep's hold failed), so
+no guest runs with one uncaught. HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,

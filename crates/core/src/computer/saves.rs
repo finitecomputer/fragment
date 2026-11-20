@@ -92,8 +92,11 @@ pub struct Snapshot {
 /// What a start restores, chosen as it begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
-    /// The snapshot `id`, of the current save.
-    Snapshot { id: String },
+    /// The snapshot `id`, of the current save; `held`, whether that save's
+    /// guest answered its hold (so the snapshot holds its guest too: the
+    /// sleep held it before it took the snapshot), and not when the hold
+    /// failed and the sleep saved and snapshotted all the same.
+    Snapshot { id: String, held: bool },
     /// The image, then the current save.
     Backup,
     /// The image, with an empty `/data`: there is no save.
@@ -114,8 +117,8 @@ impl Plan {
     /// a placeholder there (FIN-466).
     pub fn vault_asked(&self) -> VaultAsked {
         match self {
-            Plan::Snapshot { .. } | Plan::Backup => VaultAsked::Beside,
-            Plan::Nothing => VaultAsked::Before,
+            Plan::Snapshot { held: true, .. } | Plan::Backup => VaultAsked::Beside,
+            Plan::Snapshot { held: false, .. } | Plan::Nothing => VaultAsked::Before,
         }
     }
 }
@@ -128,7 +131,8 @@ pub enum VaultAsked {
     Before,
     /// Beside the container's start, never in its way: the start holds its
     /// guest until it lets it go (a restore's gate; a snapshot's hold, which
-    /// the sleep put on before the snapshot), and catches the hosts first.
+    /// the sleep put on before the snapshot, when its save was held), and
+    /// catches the hosts first.
     Beside,
 }
 
@@ -290,7 +294,7 @@ impl Saves {
     pub fn plan(&self, image: Option<&str>) -> Plan {
         let Some(save) = self.current() else { return Plan::Nothing };
         match (&self.snapshot, image) {
-            (Some(s), Some(image)) if s.save == save.id && s.image == image && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone() },
+            (Some(s), Some(image)) if s.save == save.id && s.image == image && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone(), held: save.held },
             _ => Plan::Backup,
         }
     }
@@ -736,7 +740,10 @@ mod tests {
     fn a_start_asks_the_vault_beside_it_only_while_its_guest_is_held() {
         assert_eq!(Plan::Nothing.vault_asked(), VaultAsked::Before, "a fresh guest runs at once: its hosts are caught before it starts");
         assert_eq!(Plan::Backup.vault_asked(), VaultAsked::Beside, "a restore's gate holds its guest");
-        assert_eq!(Plan::Snapshot { id: "snap".into() }.vault_asked(), VaultAsked::Beside, "a snapshot's hold holds its guest");
+        assert_eq!(Plan::Snapshot { id: "snap".into(), held: true }.vault_asked(), VaultAsked::Beside, "a snapshot's hold holds its guest");
+        // a sleep whose hold failed saved and snapshotted all the same: that
+        // snapshot's guest wakes unheld, so its start asks first (Codex)
+        assert_eq!(Plan::Snapshot { id: "snap".into(), held: false }.vault_asked(), VaultAsked::Before, "a snapshot whose save was not held holds nothing");
     }
 
     use fragment_proto::computer::{ComputerNotice, ComputerSave, LifeEnd, RestoreSource};
@@ -790,7 +797,7 @@ mod tests {
         s.saved(1, rec("b0"), 0, T - 1, true);
         s.saved(1, rec("b1"), 0, T, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), held: true });
         assert_eq!(s.plan(Some("registry/stub@sha256:2")), Plan::Backup, "another image's");
         assert_eq!(s.plan(None), Plan::Backup, "snapshots off");
         let mut other = s.clone();
@@ -894,7 +901,7 @@ mod tests {
         assert_eq!(of, IMAGE);
         assert!(s.snapshotted("b1", "s1", &of));
         assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "the new image, and the save");
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() }, "pinned back, the snapshot serves again");
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), held: true }, "pinned back, the snapshot serves again");
         assert_eq!(s.image_of(2), None, "a start that has not come up runs nothing yet");
     }
 
@@ -915,7 +922,7 @@ mod tests {
         // container, so it takes no snapshot, and that is not news
         assert!(!s.save_failed(4), "the first ask saved this start");
         assert!(s.save_failed(5), "a start whose sleep saved nothing is news");
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), held: true });
         // the other order: the second's save lands while the first snapshots
         let mut s = Saves::default();
         s.saved(4, rec("b1"), 0, T, true);
@@ -923,7 +930,7 @@ mod tests {
         assert!(!s.snapshotted("b1", "s1", IMAGE), "the first's snapshot caches a save that is no longer current");
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert!(s.snapshotted("b2", "s2", IMAGE));
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s2".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s2".into(), held: true });
     }
 
     /// Goal (P7): each start that comes up says what it restored, how old
@@ -983,7 +990,7 @@ mod tests {
         c.wake();
         c.sleep(Some("b1"));
         assert!(c.saves.snapshotted("b1", "s1", IMAGE));
-        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), held: true });
         c.saves.restart_fresh();
         c.saves.restart_fresh();
         assert!(c.saves.fresh() && !c.saves.has_snapshot(), "forgotten; again, the same");
@@ -995,7 +1002,7 @@ mod tests {
         assert_eq!((r.from, r.save.as_deref()), (RestoreSource::Backup, Some("b2")));
         assert!(!c.saves.fresh());
         c.sleep(Some("b3"));
-        assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into() }, "snapshots again");
+        assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into(), held: true }, "snapshots again");
     }
 
     /// Goal: three saves are kept, newest first, each numbered; a fourth

@@ -1905,7 +1905,7 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
         let snapshot_js = match &planned.plan {
-            Restore::Snapshot { id } => JsValue::from_str(id),
+            Restore::Snapshot { id, .. } => JsValue::from_str(id),
             Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)
