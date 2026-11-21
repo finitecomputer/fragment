@@ -3,7 +3,7 @@
 use super::journal::load_state;
 use super::listing::list_main;
 use super::pass::full_name;
-use super::scan::{scan_local, Scan};
+use super::scan::{scan_local, Reader, Scan};
 use super::{Report, SyncError};
 use crate::api::Client;
 use crate::codestorage::{CodeStorage, Wants};
@@ -14,7 +14,7 @@ use std::path::Path;
 pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncError> {
     let name = &full_name(client, name)?;
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let Scan { files: local, stats, refused, .. } = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
+    let Scan { files: local, stats, refused, .. } = scan_local(dir, Some(&state), Reader::Audit).map_err(|e| SyncError::Io(e.to_string()))?;
     let storage = CodeStorage::connect(client, name, Wants::Read)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
     let listing = list_main(&storage)?;

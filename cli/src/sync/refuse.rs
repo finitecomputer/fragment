@@ -223,6 +223,26 @@ mod tests {
         assert!(read_local(&repo, "t--k3x9").is_ok());
     }
 
+    /// Goal (Codex on #1445): a pass ends its walk at a browser profile, so
+    /// nothing in it is read: a file there no one may read still gives the
+    /// refusal, which stops a watch, not an error it retries forever.
+    /// Method: a profile's temp folder holding a file with no permissions.
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_reads_nothing_past_a_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir("refuse-unread");
+        fs::write(dir.join("note.md"), b"n").unwrap();
+        let locked = dir.join("org.chromium.Chromium.zz/locked");
+        fs::create_dir_all(locked.parent().unwrap()).unwrap();
+        fs::write(&locked, b"x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(fs::read(&locked).is_err(), "the file can't be read (a test not run as root)");
+        assert!(pass_refuses(&dir), "{:?}", read_local(&dir, "t--k3x9").err());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Goal (FIN-401): `fragment sync` decides its refusal from the files
     /// it sends, so a browser profile that comes into the folder while a
     /// pass reads it (`PROFILE_CHANGES`) is refused, and nothing is sent.

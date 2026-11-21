@@ -56,7 +56,7 @@ impl Local {
 pub fn read_local(dir: &Path, name: &str) -> Result<Local, SyncError> {
     refuse_place(dir, dirs::home_dir().as_deref()).map_err(SyncError::Refused)?;
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let Scan { files, stats, refused, profile } = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
+    let Scan { files, stats, refused, profile } = scan_local(dir, Some(&state), Reader::Pass).map_err(|e| SyncError::Io(e.to_string()))?;
     if let Some(found) = profile {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         return Err(SyncError::Refused(DirRefused::BrowserProfile { dir, found }));
@@ -113,9 +113,22 @@ pub struct Scan {
     pub stats: ScanStats,
     pub refused: Vec<NotRepoPath>,
     /// the first browser profile its walk met (`browser_profile`), by its
-    /// resolved path: a pass refuses the folder for it (`read_local`), and
-    /// the audit (`verify`) reports its files as any others
+    /// resolved path: a pass's walk ends there and the pass refuses the
+    /// folder (`read_local`), its `files` partial; the audit's reads on
+    /// and reports a profile's files as any others
     pub(crate) profile: Option<PathBuf>,
+}
+
+/// Who reads the folder (`scan_local`), which says how much of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reader {
+    /// a pass (`read_local`): a size+mtime match adopts the journal's hash
+    /// (O(changes)), and the walk ends at a browser profile, so nothing in
+    /// it is read (a file there no one may read once made the refusal an
+    /// error a watch retried, and a large profile was hashed for nothing)
+    Pass,
+    /// the audit (`verify`): every file is read and hashed, a profile's too
+    Audit,
 }
 
 /// What sync sends of `dir`: its `syncable` paths, never following
@@ -130,13 +143,12 @@ pub(super) fn walk(dir: &Path) -> ignore::WalkBuilder {
     w
 }
 
-/// Walk the folder. With state, a size+mtime match adopts the cached hash
-/// (O(changes)); with verify, everything is read and hashed. Takes the
-/// `syncable` paths, never following symlinks, and honors .gitignore
-/// exactly when git would (only inside a repo). Notes the first browser
-/// profile it walks (`Scan::profile`), judged under the folder as it
-/// resolves, as `refuse_dir` judges it.
-pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<Scan> {
+/// Walk the folder, as `reader` reads it (`Reader`). Takes the `syncable`
+/// paths, never following symlinks, and honors .gitignore exactly when git
+/// would (only inside a repo). Notes the first browser profile it walks
+/// (`Scan::profile`), judged under the folder as it resolves, as
+/// `refuse_dir` judges it.
+pub fn scan_local(dir: &Path, state: Option<&SyncState>, reader: Reader) -> Result<Scan> {
     let mut out = BTreeMap::new();
     let mut refused = Vec::new();
     let mut stats = ScanStats::default();
@@ -147,7 +159,12 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
         let file = entry.file_type().is_some_and(|t| t.is_file());
         if profile.is_none() {
             let resolved = root.join(entry.path().strip_prefix(dir).unwrap_or(entry.path()));
-            profile = browser_profile(&resolved, entry.depth(), file).then_some(resolved);
+            if browser_profile(&resolved, entry.depth(), file) {
+                profile = Some(resolved);
+                if reader == Reader::Pass {
+                    break;
+                }
+            }
         }
         if !file {
             continue;
@@ -170,7 +187,7 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
             .map(|d| d.as_nanos() as i128)
             .unwrap_or(0);
         let cached = state.and_then(|s| s.files.get(&rel)).filter(|st| st.size == size && st.mtime_ns == mtime_ns);
-        let sha = if let (Some(st), false) = (cached, verify) {
+        let sha = if let (Some(st), Reader::Pass) = (cached, reader) {
             st.sha256.clone()
         } else {
             stats.hashed += 1;
@@ -193,12 +210,12 @@ mod tests {
         let dir = tmpdir("scan");
         fs::create_dir_all(dir.join("site")).unwrap();
         fs::write(dir.join("site/index.html"), b"hi").unwrap();
-        let Scan { files: l1, stats: s1, .. } = scan_local(&dir, None, false).unwrap();
+        let Scan { files: l1, stats: s1, .. } = scan_local(&dir, None, Reader::Pass).unwrap();
         assert_eq!(s1.hashed, 1);
         let mut st = SyncState { schema_version: 3, name: "x".into(), host: None, repo: None, files: BTreeMap::new() };
         let lf = l1.get("site/index.html").unwrap();
         st.files.insert(rp("site/index.html"), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
-        let s2 = scan_local(&dir, Some(&st), false).unwrap().stats;
+        let s2 = scan_local(&dir, Some(&st), Reader::Pass).unwrap().stats;
         assert_eq!(s2.hashed, 0);
         fs::remove_dir_all(&dir).ok();
     }
@@ -239,7 +256,7 @@ mod tests {
             fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
             fs::write(src.join(rel), bytes).unwrap();
         }
-        let scanned = scan_local(&src, None, true).unwrap().files;
+        let scanned = scan_local(&src, None, Reader::Audit).unwrap().files;
         assert_eq!(scanned.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
         fs::remove_dir_all(&src).ok();
     }
