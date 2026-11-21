@@ -13,7 +13,7 @@
 
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -28,6 +28,47 @@ use serde_json::{json, Value};
 use support::simplex::*;
 
 const DOOR_IMAGE: &str = "fragment-simplex-door:test";
+
+/// How far a person's burst runs ahead of the door's delivery receipts for
+/// it. A phone's app takes them back as they come, so its queue never
+/// holds many; the lab's client, sending at the API's speed, fell 129
+/// behind, and SimpleX's server holds at most 128 messages a queue: past
+/// that it refuses the door's sends (QUOTA) until the person has read them
+/// all, and its agent's handshake after one can strand them on its
+/// five-minute retry (`a_burst_against_the_real_core`). Well under the
+/// quota, as a phone's pace is (300 messages 300 ms apart: none waiting).
+const BURST_AHEAD: usize = 32;
+
+/// The person's messages the door's core has said it received (its
+/// delivery receipts, as the person's app shows them), from the events
+/// read so far, none taken.
+fn receipted(person: &Api) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    for e in person.events.iter().filter(|e| tag(e) == "chatItemsStatusesUpdated") {
+        for ci in e["chatItems"].as_array().into_iter().flatten() {
+            let item = &ci["chatItem"];
+            if item["meta"]["itemStatus"]["type"] == "sndRcvd" {
+                seen.extend(item["content"]["msgContent"]["text"].as_str().map(str::to_string));
+            }
+        }
+    }
+    seen
+}
+
+/// The person says `text`, as a phone's app would in a burst: never more
+/// than `BURST_AHEAD` messages ahead of the door's receipts, `sent` the
+/// burst so far.
+async fn say_in_burst(person: &mut Api, agent: i64, text: &str, sent: &[String]) {
+    say(person, agent, text).await;
+    let Some(behind) = sent.len().checked_sub(BURST_AHEAD) else { return };
+    let want = &sent[behind];
+    let t0 = Instant::now();
+    // bounded: 60 s
+    while !receipted(person).contains(want) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "the door's receipt of {want}, in step with the burst");
+        person.drain(Duration::from_millis(100)).await;
+    }
+}
 
 /// One save the fake door took.
 #[derive(Clone)]
@@ -393,10 +434,12 @@ async fn the_door_against_the_real_core() {
     // sent while it was down arrives then
     // 300 of them, past the link's own catch-up (256 back from the newest:
     // the review of #1430, the runner dropped what passed its queue and read
-    // back no further than that): the core's database is the queue
+    // back no further than that): the core's database is the queue. Sent
+    // as a phone's app sends a burst, in step with the door's receipts
+    // (`BURST_AHEAD`: at the API's speed it outran SimpleX's quota)
     door.with(|s| s.closed = true);
     for n in 11..=310 {
-        say(&mut person, agent, &format!("p{n}")).await;
+        say_in_burst(&mut person, agent, &format!("p{n}"), &sent[10..]).await;
         sent.push(format!("p{n}"));
     }
     // until the newest save holds all 600 (the core's chat database in it)
@@ -495,4 +538,95 @@ async fn the_door_against_the_real_core() {
     assert_eq!(got, (1..=10).map(|n| format!("r{n}")).collect::<Vec<_>>(), "every reply once, in order");
     assert!(door.with(|s| s.heads.iter().filter(|h| h.0 == "GET").all(|h| !h.2)), "no GET carried a length");
     drop(g5);
+}
+
+/// Whether a person's burst, or a phone gone offline, stalls a door's
+/// sends (the lab's crash step did, 5 of 5, on 11-20). Two ways, by
+/// `BURST_REPLIES`:
+/// - 0: the person sends `BURST_N` messages `BURST_PACE_MS` apart,
+///   reading its own events the whole time when `BURST_READ=1`, or not
+///   at all until 15 s after the burst (`BURST_READ=0`); then every
+///   delivery receipt is waited for (60 s), and one reply after (120 s);
+/// - `n`: the person's app frozen (`docker pause`: a phone offline) while
+///   its door sends it `n` replies, then back; every reply waited for (10
+///   minutes).
+/// Prints what came, when, and what the door's newest save holds of the
+/// core's sends still waiting. Lower rung: the lab's server and client.
+/// Run by hand, one at a time, e.g. `BURST_REPLIES=150 cargo test -p
+/// fragment-bridge --test door a_burst -- --ignored --nocapture`
+/// (`SIMPLEX_LAB_LOG_AGENT=1` keeps the person's SMP agent's log).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "an experiment: run by hand"]
+async fn a_burst_against_the_real_core() {
+    let var = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (n, pace, read, offline) = (var("BURST_N", 40) as usize, var("BURST_PACE_MS", 300), var("BURST_READ", 1) == 1, var("BURST_REPLIES", 0));
+    build_image();
+    let mut lab = Lab::up("burst");
+    let door = FakeDoor::start().await;
+    let g1 = start(&lab, &door, 1);
+    g1.until(Duration::from_secs(60), |s| s["ready"] == true).await;
+    let (code, _) = g1.call("POST", "/link", Some(door.mark()), None).await;
+    assert_eq!(code, 202);
+    let s = g1.until(Duration::from_secs(60), |s| s["phase"] == "inviting").await;
+    let mut person = lab.start("person", false).await;
+    let r = person.cmd(&format!("/connect {}", s["link"].as_str().expect("its invitation"))).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    g1.until(Duration::from_secs(90), |s| s["phase"] == "linked").await;
+    let agent = person.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the door, at the person's");
+    let came = |person: &Api, text: &str| person.events.iter().filter(|e| tag(e) == "newChatItems").flat_map(|e| e["chatItems"].as_array().cloned().unwrap_or_default()).any(|ci| ci["chatItem"]["content"]["msgContent"]["text"] == text);
+    let waiting = |lab: &Lab, door: &FakeDoor| -> (i64, Option<i64>) {
+        let newest = door.with(|s| s.saves.last().map(|k| k.bytes.clone())).expect("a save");
+        let path = lab.dir.join("burst-agent.db");
+        std::fs::write(&path, file_of(&newest, "sx_agent.db")).expect("written");
+        let c = rusqlite::Connection::open(&path).expect("the save's agent database");
+        let waiting = c.query_row("SELECT count(*) FROM snd_message_deliveries", [], |r| r.get(0)).expect("its deliveries");
+        (waiting, c.query_row("SELECT max(retry_int_slow) FROM snd_messages", [], |r| r.get(0)).expect("its retries"))
+    };
+    if offline > 0 {
+        let ctr = lab.container("person");
+        docker(&["pause", &ctr]).expect("paused");
+        let t0 = Instant::now();
+        for i in 0..offline {
+            g1.reply(&door, &format!("chat:o{i}"), &format!("o{i}")).await;
+        }
+        let asked_in = t0.elapsed();
+        docker(&["unpause", &ctr]).expect("unpaused");
+        let t1 = Instant::now();
+        // bounded: 600 s
+        while !(0..offline).all(|i| came(&person, &format!("o{i}"))) && t1.elapsed() < Duration::from_secs(600) {
+            person.drain(Duration::from_millis(500)).await;
+        }
+        let all = (0..offline).all(|i| came(&person, &format!("o{i}")));
+        let (sends, slow) = waiting(&lab, &door);
+        println!("OFFLINE replies={offline}: asked in {asked_in:?}; every one arrived: {all}, {:?} after the phone was back; the door's newest save: {sends} sends waiting, slowest retry {slow:?} µs", t1.elapsed());
+        return;
+    }
+    let t0 = Instant::now();
+    for i in 0..n {
+        say(&mut person, agent, &format!("b{i}")).await;
+        if read {
+            person.drain(Duration::from_millis(pace.max(1))).await;
+        } else if pace > 0 {
+            tokio::time::sleep(Duration::from_millis(pace)).await;
+        }
+    }
+    let sent_in = t0.elapsed();
+    if !read {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+    let t1 = Instant::now();
+    // bounded: 60 s
+    while receipted(&person).len() < n && t1.elapsed() < Duration::from_secs(60) {
+        person.drain(Duration::from_millis(500)).await;
+    }
+    let (receipts, receipts_in) = (receipted(&person).len(), t1.elapsed());
+    let t2 = Instant::now();
+    g1.reply(&door, "chat:after", "after").await;
+    // bounded: 120 s
+    while !came(&person, "after") && t2.elapsed() < Duration::from_secs(120) {
+        person.drain(Duration::from_millis(500)).await;
+    }
+    let reply = came(&person, "after").then(|| t2.elapsed());
+    let (sends, slow) = waiting(&lab, &door);
+    println!("BURST n={n} pace={pace}ms read={read}: sent in {sent_in:?}; receipts {receipts}/{n} in {receipts_in:?}; the reply after: {reply:?}; the door's newest save: {sends} sends waiting, slowest retry {slow:?} µs");
 }
