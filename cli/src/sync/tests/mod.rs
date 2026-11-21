@@ -48,9 +48,12 @@ pub(super) fn git_folder(tag: &str, ignored: &str) -> PathBuf {
     dir
 }
 
+/// A change made to a folder, by a test.
+pub(crate) type FolderChange = fn(&Path);
+
 /// The ways a browser profile comes into a synced folder after a pass
 /// began: one is made, or `.gitignore` stops keeping one out (`browser/`).
-pub(crate) const PROFILE_CHANGES: [(&str, fn(&Path)); 2] = [
+pub(crate) const PROFILE_CHANGES: [(&str, FolderChange); 2] = [
     ("made", |dir| {
         fs::create_dir_all(dir.join("chrome/Default")).unwrap();
         fs::write(dir.join("chrome/Default/Cookies"), b"x").unwrap();
