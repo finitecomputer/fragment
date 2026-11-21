@@ -1392,9 +1392,8 @@ pub(super) fn own_signin_moved_checks(s: &mut Suite, api: &Api, w: &Swapping, fe
     s.ok(OWN_SIGNIN_MOVED_CHECKS[1], !log.is_empty() && keys.len() >= 6 && named.is_empty(), json!({ "logBytes": log.len(), "keys": keys.len(), "named": named }));
     // the swap's own line: both waits, for a call through an own key
     let own_swap = format!("fck_{SWAP_OWN}_…");
-    let timed: Vec<Value> = log
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+    let timed: Vec<Value> = crate::logged_json(&log)
+        .into_iter()
         .filter(|v| v["egress"] == "swap" && v["credentials"].as_array().is_some_and(|c| c.iter().any(|n| n == own_swap.as_str())) && v["status"] == 200)
         .collect();
     let both = timed.iter().filter(|v| v["grantsMs"].as_i64().is_some_and(|ms| ms >= 0) && v["ownMs"].as_i64().is_some_and(|ms| ms >= 0)).count();

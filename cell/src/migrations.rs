@@ -702,7 +702,8 @@ fn read_roster(text: &str) -> CellResult<(RosterIn, Agents)> {
     Ok((r, agents))
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct MigrationsCell {
     state: State,
     env: Env,
@@ -714,6 +715,7 @@ pub struct MigrationsCell {
     changed: Rc<RefCell<Vec<String>>>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for MigrationsCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();

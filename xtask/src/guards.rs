@@ -152,8 +152,13 @@ mod tests {
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
         let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell"), ("vault.rs", "VaultCell"), ("migrations.rs", "MigrationsCell")];
+        // the admin Worker's build exports no class (cell/src/lib.rs, "Two
+        // Workers, one crate"): each is an object in the cell's build alone
+        assert!(uses(&files, "#[durable_object").is_empty(), "every class's macro is cfg'd to the cell's build");
         for (file, class) in objects {
             let text = &files[file];
+            assert!(text.contains(&format!("#[cfg_attr(not(feature = \"admin\"), durable_object)]\npub struct {class} {{")), "{class} is exported by the cell's build alone");
+            assert!(text.contains(&format!("#[cfg(not(feature = \"admin\"))]\nimpl DurableObject for {class} {{")), "{class} is an object in the cell's build alone");
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
             let fetch = text[at..].find("    async fn fetch(&self, req: Request) -> Result<Response> {\n").unwrap_or_else(|| panic!("{class} answers fetch")) + at;
             let first = text[fetch..].lines().nth(1).unwrap_or_default();
