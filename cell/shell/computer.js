@@ -596,7 +596,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         row.append(name, el("span", "storage-file-folder", f.folder), el("span", "storage-size", storageSize(f.bytes)));
         // Delete: a file of its work, awake alone (the platform removes it
         // in its container, no agent asked), asked once
-        if (c.phase === "awake" && f.path.startsWith("work/")) row.append(deleteControl(c, f));
+        // never one whose path holds a `?`: GNU lists a newline as one, so it
+        // may name another file (Codex on #1429)
+        if (c.phase === "awake" && f.path.startsWith("work/") && !f.path.includes("?")) row.append(deleteControl(c, f));
         files.append(row);
       }
       block.append(files);
@@ -622,7 +624,12 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         sure.textContent = "Deleting…";
         // its view, its Storage drawn again from it (`paintSettings`)
         api("POST", `/api/computers/${seg(c.computer)}/files/delete`, { path: f.path })
-          .then(computerIs)
+          .then((v) => {
+            computerIs(v);
+            // its view unchanged (its read after the delete did not answer in
+            // time): still drawn here, so said here (Codex on #1429)
+            if (box.isConnected) box.replaceChildren(el("span", "muted", "Deleted"));
+          })
           .catch((e) => box.replaceChildren(ask, el("span", "form-error", `Couldn't delete it: ${e?.message ?? e}`)));
       };
       box.replaceChildren(cancel, sure);

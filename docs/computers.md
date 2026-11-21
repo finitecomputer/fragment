@@ -601,16 +601,22 @@ stopped in its restore of `/data/work` with about 200 MB free).
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
   (`restore_writes`). A start's read is `df` alone and keeps the last
-  `du`.
+  `du`, unless that start restores another save (one set aside as too big
+  for its disk, or an operator's choice): the size was the save's it
+  left, so it is forgotten, and the start's `df`, after its restore, says
+  the room.
 - **What takes the disk** is read with it (`sizes_of`): the folders of
   all of `/data` (its caches too), to `SIZES_DEPTH` (4) below it, and its
   files of at least 10 MiB anywhere, each the biggest first, at most 64
   and 32, a path at most 400 bytes, 16 KiB of paths in all, and `/data`'s
-  own total. Each walk is bounded (`timeout`), each line framed by GNU's
-  `du -0` with a newline in a name read as `?` (a name can forge no line;
-  BusyBox's, the stub's, frames none, so its total is its `all` record),
-  and the whole answer within what the cell keeps of it. A read it cannot
-  use logs its exit and its length alone. Kept in a row of
+  own total. It comes after the records and the `df` (read first, so a
+  line it lists can never pass for theirs), its walks ending within
+  `SIZES_LISTED_BY_S` (24 s) of the read's start, so it never costs them
+  their read; each line framed by GNU's `du -0` with a newline in a name
+  read as `?` (a name can forge no line; BusyBox's, the stub's, frames
+  none, so its total is its `all` record), and the whole answer within
+  what the cell keeps of it. A read it cannot use logs its exit, its
+  length and the exec's error code alone. Kept in a row of
   its own (`sizes`), shown on its owner's view (`sizes`) and never on its
   guest's or an operator's, never logged: it names a person's files. Its
   view adds its folders by kind (`kinds`, `storage_kinds`): its agents'
@@ -629,7 +635,15 @@ stopped in its restore of `/data/work` with about 200 MB free).
   a path outside `/data/work`: the path is held to `work/…` with no `.` or
   `..` part (`delete_read`), and the command it runs (as root) resolves it
   and holds it to `/data/work/` again, so a link to a folder elsewhere
-  leads nowhere. Its line logs whether it deleted, never the path.
+  leads nowhere. A path with a `?` is refused, and Storage offers no
+  Delete for one: GNU's listing reads a newline in a name as `?`, so it
+  may name another file. Its line logs whether it deleted, never the path,
+  and a delete its computer did not finish says so, never the path
+  either; Storage says "Deleted" when its read after it did not answer in
+  time. A process of the computer's own that swaps a folder for a link
+  between the check and the `rm` could lead it out of the work: the
+  agent is root in its container already, and the check is against the
+  platform's mistakes, not its agent.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,

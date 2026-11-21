@@ -140,3 +140,48 @@ test("a view that lands while Settings shows draws its Storage again; the same v
   assert.equal(walk(page).filter((n) => n.dataset.storage === "").length, 1, "once");
   ui.dispose();
 });
+
+test("Delete: never on a path with a ?, asked once; a view that changes nothing says Deleted", async () => {
+  const box = new Node("div", "computer-notices");
+  const cover = Object.assign(new Node("dialog", "must-answer"), { open: false, showModal() {}, close() {} });
+  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => ({ "computer-notices": box, "must-answer": cover })[id] ?? null, createElementNS: (_, tag) => new Node(tag) };
+  globalThis.MutationObserver ??= class {
+    observe() {}
+    disconnect() {}
+  };
+  const files = [{ path: "work/a/talk.mp4", bytes: 3e9 }, { path: "work/a/odd?name", bytes: 2e9 }];
+  const c = { computer: "computer:aa", phase: "awake", generation: 3, notices: [], disk: { total: 20e9, free: 9e9, data: 14e9, room: 5e9, at: 10 }, sizes: { at: 12, total: 14e9, folders: [], files, kinds: [] } };
+  const el = (tag, cls, text) => new Node(tag, cls, text);
+  const line = (key, value) => {
+    const l = el("div", "settings-line");
+    l.append(el("span", "settings-key", key), el("span", "settings-value", value));
+    return l;
+  };
+  const section = (title, ...rows) => {
+    const s = el("section", "settings-section");
+    s.append(el("h2", "", title), ...rows);
+    return s;
+  };
+  const asked = [];
+  // its delete answers the view as it was (its read after it did not answer in time)
+  const api = (method, path, body) => (asked.push({ method, path, body }), path.endsWith("/files/delete") ? Promise.resolve(c) : new Promise(() => {}));
+  const reads = { updating: false, listFailed: false, noticesFailed: false };
+  const ui = createComputer({
+    api, el, seg: (s) => s, named: (n) => n, section, line, actionLine: line,
+    computer: () => c, notices: () => [], agents: () => new Map(), computerFailed: () => false, setupPending: () => false,
+    made: () => {}, computerIs: () => ui.renderComputer(), openScreen: () => {}, markOffer: (n) => n, reads: () => reads, load: async () => {}, openPage: () => {},
+  });
+  const page = Object.assign(new Node("main"), { root: true });
+  page.append(ui.computerSection(c));
+  const row = (path) => walk(page).find((n) => n.dataset.path === path);
+  const button = (path, action) => walk(row(path)).find((n) => n.dataset.action === action);
+  assert.ok(button("work/a/talk.mp4", "storage-delete"), "a file of its work");
+  assert.equal(button("work/a/odd?name", "storage-delete"), undefined, "never a path with a ? (a newline, as GNU lists it)");
+  button("work/a/talk.mp4", "storage-delete").onclick();
+  assert.equal(asked.length, 0, "asked first");
+  button("work/a/talk.mp4", "storage-delete-sure").onclick();
+  assert.deepEqual(asked.map((a) => [a.method, a.path, a.body]), [["POST", "/api/computers/computer:aa/files/delete", { path: "work/a/talk.mp4" }]]);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(walk(row("work/a/talk.mp4")).filter((n) => n.className === "muted").map((n) => n.textContent), ["Deleted"], "said, never left at Deleting…");
+  ui.dispose();
+});

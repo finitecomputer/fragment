@@ -164,6 +164,7 @@ const DISK_READ_MS: i64 = 5_000;
 /// answers within this, or it is not read. A walk of a 4 GB tree of 121,000
 /// files took about a second; this is what an awake save's alarm leaves.
 const SIZES_READ_MS: i64 = 30_000;
+const _: () = assert!(fragment_core::computer::SIZES_LISTED_BY_S as i64 * 1000 + 5_000 <= SIZES_READ_MS, "a size summary's listing ends with time to spare in its read, its records read before it");
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -2100,7 +2101,9 @@ impl ComputerCell {
         let (out, exit, failed) = match read {
             Ok(o) if sizes || o["exitCode"] == 0 => (o["output"].as_str().unwrap_or_default().to_string(), o["exitCode"].clone(), None),
             Ok(o) => (String::new(), o["exitCode"].clone(), None),
-            Err(e) => (String::new(), Value::Null, Some(e.message)),
+            // its code alone: a timeout's message holds the command, and its
+            // patterns name a person's files (Codex on #1426)
+            Err(e) => (String::new(), Value::Null, Some(format!("{:?}", e.code))),
         };
         let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
@@ -2121,7 +2124,7 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
             }
             // its exit and its answer's length alone: its answer names a
-            // person's files (Codex on #1426); the exec's own error, if any
+            // person's files (Codex on #1426); the exec's error's code, if any
             _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "exit": exit, "answerBytes": out.len(), "error": failed })),
         }
         disk
@@ -3703,7 +3706,11 @@ impl ComputerCell {
                     return Err(CellError::new(ErrorCode::Conflict, "it is not awake: wake it to delete a file"));
                 };
                 let argv = js::to_js(&json!(["sh", "-c", read]));
-                let out = js::from_js(&self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+                // an exec that failed (a timeout's message names the command,
+                // and so the path): its outcome unknown, said without either
+                // (Codex on #1429)
+                let unknown = |code| CellError::new(code, "its computer did not finish the delete: the file may or may not be gone (Storage says after its next save)");
+                let out = js::from_js(&self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await.map_err(|e| unknown(e.code))?).map_err(|_| unknown(ErrorCode::HostFailed))?;
                 // one line (lesson 14), never the path: it names a person's file
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "deleted": out["exitCode"] == 0, "exit": out["exitCode"], "generation": generation }));
                 match out["exitCode"].as_i64() {
