@@ -30,10 +30,33 @@ pub struct Record {
     #[serde(default)]
     pub at: i64,
     pub principal: String,
+    /// Who wrote it, as the platform stamped it (docs/chat-records.md,
+    /// "Who wrote a record"). None from a platform before the stamp, and
+    /// on a record stored before it: such a record reads as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub body: Value,
+}
+
+/// The author the platform stamps on what app code wrote: a mutation's
+/// effect or a job's step, in a fragment running its author's own code.
+pub const CODE: &str = "code";
+
+impl Record {
+    /// Whether app code wrote it (`CODE`): its words are no one's, whoever
+    /// called the code, so they carry no owner's authority and answer,
+    /// stop and command nothing.
+    pub fn by_code(&self) -> bool {
+        self.author.as_deref() == Some(CODE)
+    }
+
+    /// Whether these are `who`'s own words: written as them, not by code.
+    pub fn by(&self, who: &str) -> bool {
+        self.principal == who && !self.by_code()
+    }
 }
 
 /// A file a record carries: one of the fragment's blobs, by hash.

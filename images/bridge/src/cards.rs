@@ -42,7 +42,7 @@ pub struct Fresh {
 /// rolled back past, never runs again.
 pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record], cause: Option<&Record>, name: impl Fn(&str) -> String, now: u64) -> Result<Option<Resolved>, Unavailable> {
     let Said::PromptResponse { prompt, option, text, card } = records::said(&answer.body) else { return Ok(None) };
-    if answer.principal != agent.owner || card.as_ref().is_some_and(|c| c.agent != agent.identity) {
+    if !answer.by(&agent.owner) || card.as_ref().is_some_and(|c| c.agent != agent.identity) {
         return Ok(None);
     }
     let of = |r: &Record, kind: &str| r.principal == agent.identity && r.body["kind"] == kind;
@@ -75,7 +75,7 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     let closed = |how: Closed| records::turn_prompt_closed(turn, &prompt, how, None);
     // the first of its owner's answers given in its life wins, however late read
     let valid = |r: &&Record| {
-        r.channel == records::CHAT && r.principal == agent.owner && r.at >= asked.at && r.at < expires
+        r.channel == records::CHAT && r.by(&agent.owner) && r.at >= asked.at && r.at < expires
             && matches!(records::said(&r.body), Said::PromptResponse { prompt: p, option: o, card: c, .. } if p == prompt && c.as_ref().is_none_or(|c| c.agent == agent.identity && c.turn == turn) && options.iter().any(|x| x["id"] == o.as_str()))
     };
     match chat.iter().filter(valid).min_by_key(|r| r.seq) {
@@ -85,7 +85,7 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
-    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && r.principal == asker && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
+    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && r.by(asker) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
         return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
     }
     let cut = note::turn(work, &agent.identity, turn).ok_or(Unavailable::Corrupt)?;
@@ -116,7 +116,7 @@ mod tests {
     }
 
     fn rec(channel: &str, seq: u64, at: i64, by: &str, body: Value) -> Record {
-        Record { channel: channel.into(), seq, at, principal: by.into(), kind: "message".into(), body }
+        Record { channel: channel.into(), seq, at, principal: by.into(), author: None, kind: "message".into(), body }
     }
 
     fn response(option: &str) -> Value {
@@ -206,6 +206,9 @@ mod tests {
         }
         let stranger = Record { principal: "npub1stranger".into(), ..chat[2].clone() };
         assert_eq!(late(&work, &chat, &stranger, 20), Ok(None));
+        // FIN-615: app code's, under its owner's name, answers no card
+        let code = Record { author: Some(records::CODE.into()), ..chat[2].clone() };
+        assert_eq!(late(&work, &chat, &code, 20), Ok(None), "app code's answer");
         let second = rec("chat", 4, 21, OWNER, response("no"));
         let both = [chat.clone(), vec![second.clone()]].concat();
         assert_eq!(late(&work, &both, &second, 21), Ok(None), "the first answer won");

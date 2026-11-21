@@ -757,6 +757,10 @@ pub struct Engine {
     now: u64,
 }
 
+/// Whom a turn names as asking when app code wrote the message that
+/// started it: no one, whoever called the code.
+const CODE_SAYS: &str = "app code";
+
 /// A runtime the bridge runs: the commands it takes from its agents' owners
 /// (its menu), and what it says of itself. Never saved: a new life hears it
 /// again.
@@ -1171,7 +1175,8 @@ impl Engine {
                 // identity) and its owner ask it anything here. Another
                 // agent, though it acts for the owner and may post here,
                 // starts no routine: it would start a turn no hop counts.
-                if record.principal != agent.owner && record.principal != agent.identity {
+                // Nor does app code, whoever it names: it speaks for no one.
+                if record.by_code() || (record.principal != agent.owner && record.principal != agent.identity) {
                     crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "principal": record.principal, "why": "only the agent's owner, or its own fragment, asks it on tasks" });
                     return;
                 }
@@ -1281,15 +1286,27 @@ impl Engine {
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
-        match records::said(&record.body) {
+        let said = records::said(&record.body);
+        // App code's words (docs/chat-records.md, "Who wrote a record") are
+        // heard as a message alone, and as no one's: they answer no
+        // question, and stop and command nothing, under whoever's name.
+        let code = record.by_code();
+        if code && !matches!(said, Said::Message(_) | Said::Other) {
+            crate::ev!("said.ignored", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "why": "app code wrote it: it answers, stops and commands nothing" });
+            return;
+        }
+        match said {
             Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
                 let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
-                if hop == Some(0) && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
+                if hop == Some(0) && !code && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
                     return;
                 }
                 if let Some(hop) = hop {
-                    let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
+                    let asker_name = match code {
+                        true => CODE_SAYS.to_string(),
+                        false => view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into()),
+                    };
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
                     self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, Ask::Message);
                 }

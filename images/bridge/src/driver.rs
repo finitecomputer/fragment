@@ -1142,7 +1142,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     // follow, which reads it again from the cursor after a wait, so a card
     // is never closed for a blip. (A turn that ends between this look and
     // the engine's is a race of a few ms; its answer is passed over.)
-    let late = !tasks && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.principal == agent.owner && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
+    let late = !tasks && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.by(&agent.owner) && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
     let input = if late {
         let read = tokio::time::timeout(Duration::from_millis(limits::CARD_READ_MS_MAX), card_history(api, agent, fragment, &record)).await;
         let history = read.unwrap_or(Err(Unavailable::Read));
