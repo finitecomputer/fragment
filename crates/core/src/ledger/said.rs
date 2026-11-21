@@ -5,7 +5,7 @@
 //! told here.
 
 use fragment_proto::ledger::{Standing, Why};
-use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
+use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel, Until};
 use serde_json::{Map, Value};
 
 use crate::notice::usd;
@@ -33,17 +33,19 @@ pub fn spending_step(micros: i64) -> Option<i64> {
 
 /// The notice for an hour's spend of `micros` on shared keys, at its step
 /// (`spending_step`): the same words until it passes the next, so its
-/// person is told once a step.
-pub fn spending(micros: i64) -> Option<Notice> {
+/// person is told once a step, and gone at `until_ms`, when what it counts
+/// has aged out of the hour (`uses::spent_until`), so a page open that long
+/// drops it with no read.
+pub fn spending(micros: i64, until_ms: Option<i64>) -> Option<Notice> {
     let over = spending_step(micros)?;
     Some(Notice {
         id: "spending".into(),
         kind: "spending".into(),
         level: NoticeLevel::Info,
         title: format!("Your agents spent over {} on tools in the last hour", usd(over)),
-        text: Some("Their calls on shared keys are charged to you, at what each vendor bills.".into()),
+        text: Some("Their calls on shared keys are charged to you.".into()),
         detail: None,
-        until: None,
+        until: until_ms.map(|at| Until { at, said: "It clears".into() }),
         actions: vec![],
         must_answer: false,
         image: None,
@@ -111,11 +113,12 @@ mod tests {
         assert_eq!(spending_step(10_000_000), Some(10_000_000));
         assert_eq!(spending_step(45_000_000), Some(40_000_000));
         assert_eq!(spending_step(i64::MAX), Some(SPENDING_MICROS << 40), "an i64's largest, bounded");
-        assert!(spending(SPENDING_MICROS - 1).is_none());
-        let told = spending(12_340_000).expect("past $10");
+        assert!(spending(SPENDING_MICROS - 1, Some(1)).is_none());
+        let told = spending(12_340_000, Some(9_000)).expect("past $10");
+        assert_eq!(told.until, Some(Until { at: 9_000, said: "It clears".into() }), "gone as its spend ages out");
         assert_eq!((told.id.as_str(), told.kind.as_str(), told.level, told.title.as_str()), ("spending", "spending", NoticeLevel::Info, "Your agents spent over $10 on tools in the last hour"));
         assert!(told.actions.is_empty() && !told.must_answer);
-        assert_eq!(spending(12_340_000), spending(19_000_000), "the same step, the same words: told once");
+        assert_eq!(spending(12_340_000, Some(9_000)), spending(19_000_000, Some(9_000)), "the same step, the same words: told once");
     }
 
     #[test]

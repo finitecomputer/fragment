@@ -128,7 +128,8 @@ ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
   the hour (`spend_slots`, `uses::spend`); past $5 of them in an hour
   (`said::SPENDING_MICROS`), then each doubling, the person is told
   (`spending`, an info notice, its words the same until the next step, so
-  their pages are told once a step). Nothing pauses or is refused: agents
+  their pages are told once a step, and gone when what it counts has aged
+  out of the hour, `uses::spent_until`). Nothing pauses or is refused: agents
   stop at zero credit, and each vendor's own limit on the platform's key
   is the backstop.
 - **Moved, never dropped.** A computer counted its agents' uses itself

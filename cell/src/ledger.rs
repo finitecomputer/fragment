@@ -591,6 +591,12 @@ impl Tally for SqlStore {
         rows.first().map_or(0, |r| r.micros)
     }
 
+    fn spent_last(&self) -> Option<i64> {
+        // the slots' primary key: one row read
+        let rows: Vec<Spent> = self.rows("SELECT COALESCE(MAX(slot), -1) AS micros FROM spend_slots", vec![]);
+        rows.first().map(|r| r.micros).filter(|slot| *slot >= 0)
+    }
+
     fn forget_spend_before(&mut self, slot: i64) {
         self.exec("DELETE FROM spend_slots WHERE slot < ?", vec![SqlStorageValue::Integer(slot)]);
     }
@@ -790,7 +796,7 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
 fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
     save(store, ledger);
     store.checked()?;
-    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok(), uses::spent_hour(store, now))));
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok(), (uses::spent_hour(store, now), uses::spent_until(store, now)))));
     Ok(ledger.next_sweep_ms(now))
 }
 
@@ -898,7 +904,7 @@ impl LedgerCell {
         };
         let answer = op(&ledger, &store, now);
         store.checked()?;
-        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), uses::spent_hour(&store, now))));
+        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), (uses::spent_hour(&store, now), uses::spent_until(&store, now)))));
         if self.armed.get().is_none() {
             self.alarm_kept(ledger.next_sweep_ms(now)).await?;
         }
@@ -1067,7 +1073,7 @@ impl LedgerCell {
                 let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
                     (Some(Payer::Person(_)), Some(row)) => {
                         let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-                        ledger.said(now, self.cfg.stripe().is_ok(), uses::spent_hour(&SqlStore::new(self.sql()), now))
+                        ledger.said(now, self.cfg.stripe().is_ok(), { let store = SqlStore::new(self.sql()); (uses::spent_hour(&store, now), uses::spent_until(&store, now)) })
                     }
                     _ => vec![],
                 };
@@ -1101,7 +1107,7 @@ impl LedgerCell {
                     let now = js::now_ms() + self.offset_ms()?;
                     let store = SqlStore::new(self.sql());
                     if let Some(ledger) = stored(&store)?.1 {
-                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), uses::spent_hour(&store, now))));
+                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), (uses::spent_hour(&store, now), uses::spent_until(&store, now)))));
                         self.told();
                     }
                 }
