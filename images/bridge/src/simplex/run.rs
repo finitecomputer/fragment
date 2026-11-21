@@ -82,9 +82,9 @@ use crate::runtime::{Agent, LocalFile};
 pub const LINK_FILE: &str = "link.json";
 /// The bot API answers within this of its process starting, or the start
 /// failed (the lab: about half a second).
-const CONNECT_MS_MAX: u64 = 30_000;
+pub const CONNECT_MS_MAX: u64 = 30_000;
 /// A core is given this long to stop on SIGTERM, then killed.
-const STOP_MS_MAX: u64 = 3_000;
+pub const STOP_MS_MAX: u64 = 3_000;
 /// A core that stops on its own this often in `EXITS_WINDOW_MS` is not
 /// started again until its owner asks (a link, an unlink) or the bridge
 /// starts again.
@@ -101,13 +101,13 @@ const PULSE_MS: u64 = 3_000;
 const DRAIN_MS: u64 = 5_000;
 const TICK_MS: u64 = 100;
 /// A sync still waiting reads the core's state this often until it is `ok`.
-const RESYNC_MS: u64 = 30_000;
+pub const RESYNC_MS: u64 = 30_000;
 /// An invitation whose scan an earlier life took and did not accept is
 /// looked at again this long after, before a new one is shown beside it:
 /// one the core had queued its acceptance of is usually accepted within a
 /// moment of its start (the lab's, about 130 ms). Nothing is torn down at
 /// it (`link::Link::earlier`), so a later finish still links.
-const RECHECK_MS: u64 = 10_000;
+pub const RECHECK_MS: u64 = 10_000;
 const INBOX_MAX: usize = 256;
 const WRITER_MAX: usize = 64;
 /// What the core's last words (stderr) are kept to, for its exit's line.
@@ -706,7 +706,7 @@ pub fn dir_name_ok(fragment: &str) -> bool {
 /// preview computer, 2026-10-25: each SMP preset reset there, and the same
 /// servers answering on 5223). XFTP's servers are on 443 alone, so a file
 /// arrives only through the relay (docs/bridge.md, "SimpleX").
-fn core_args(cfg: &Config, db: &Path, dir: &Path, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
+pub fn core_args(cfg: &Config, db: &Path, dir: &Path, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), db.into(), "-p".into(), "0".into()];
     args.extend(["--files-folder".into(), dir.join("files").into(), "--temp-folder".into(), dir.join("tmp").into()]);
     for a in ["-y", "--mute", "--create-bot-display-name", name, "--create-bot-allow-files", "--smp-web-port-servers", "off"] {
@@ -727,7 +727,7 @@ fn core_args(cfg: &Config, db: &Path, dir: &Path, name: &str, socks: Option<u16>
 /// A core's process, in `dir`, its output its stderr alone: it dies with the
 /// bridge, however the bridge dies (a SIGKILL runs no handler of ours), so
 /// no core outlives it to run beside the next one's.
-fn core_command(bin: &Path, dir: &Path) -> tokio::process::Command {
+pub fn core_command(bin: &Path, dir: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     let parent = std::process::id();
     // SAFETY: only async-signal-safe calls, in the child before its exec
@@ -2694,7 +2694,7 @@ pub async fn kill_strays(cfg: &Config) {
 /// two cores started together the same one, so one agent's bridge dialed
 /// another agent's core. None until it listens; Linux's alone, as the core
 /// is (elsewhere there is no `/proc`, and no core).
-fn listening_port(pid: u32) -> Option<u16> {
+pub fn listening_port(pid: u32) -> Option<u16> {
     let inodes: BTreeSet<u64> = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten().filter_map(|e| std::fs::read_link(e.path()).ok()?.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()).collect();
     loopback_listener(&std::fs::read_to_string(format!("/proc/{pid}/net/tcp")).ok()?, &inodes)
 }
@@ -2846,6 +2846,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::DeleteConn { .. } => "delete_conn",
         Cmd::Conns { .. } => "conns",
         Cmd::Chat { .. } => "chat",
+        Cmd::ChatAfter { .. } => "chat_after",
         Cmd::Receive { .. } => "receive",
         Cmd::CancelFile { .. } => "cancel_file",
         Cmd::SendFile { .. } => "send_file",
@@ -2859,6 +2860,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::LeaveGroup { .. } => "leave_group",
         Cmd::DeleteGroup { .. } => "delete_group",
         Cmd::DeleteAddress => "delete_address",
+        Cmd::ExpireDay => "expire_day",
     }
 }
 

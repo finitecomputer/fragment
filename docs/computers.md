@@ -230,8 +230,16 @@ Not built either:
 
 - **F**, messengers outside the computer: a connector Durable Object per
   linked account holds the protocol's state, so it never rewinds.
-  Deferred (Paul, 2026-10-05: "too much of a lift for now"); SimpleX runs
-  on an always-on computer meanwhile (decision 32).
+  Deferred (Paul, 2026-10-05: "too much of a lift for now"); being built
+  since 2026-11-20, so no one needs an always-on computer for SimpleX. A
+  SimpleX door: a `lite` container per linked account, SimpleX's core and
+  the door's runner (images/simplex-door) with the bridge's own link
+  rules, its databases saved after every change as one file its door
+  keeps; a save its door knows is behind (an effect it numbered is newer)
+  forces one ratchet sync before anything is sent. The runner's protocol
+  with its door is images/simplex-door/src/door.rs. Until its Durable
+  Object and connector run it, SimpleX runs on an always-on computer
+  (decision 32).
 
 ## What its owner is told
 
