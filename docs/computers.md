@@ -636,7 +636,16 @@ stopped in its restore of `/data/work` with about 200 MB free).
   what the cell keeps of it. A read it cannot use logs its exit, its
   length and the exec's error code alone. Kept in a row of
   its own (`sizes`), shown on its owner's view (`sizes`) and never on its
-  guest's or an operator's, never logged: it names a person's files.
+  guest's or an operator's, never logged: it names a person's files. Its
+  view adds its folders by kind (`kinds`, `storage_kinds`): its agents'
+  own (all of `/data` but its work), and in its work caches, browser data
+  and downloads by their folders' names, projects the rest.
+- **Settings → Computer → Storage** (cell/shell/computer.js) draws it
+  from its owner's view, so asleep, awake and not waking alike: a bar of
+  what takes its disk by kind, the room left (red while it is told
+  filling, "Full" at none), its five biggest files by name, and when it
+  was measured; before its first read, that it is measured after its next
+  save. A view that lands while Settings is open redraws it.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,

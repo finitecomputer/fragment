@@ -495,6 +495,30 @@ pub struct ComputerSizes {
     pub total: Option<u64>,
     pub folders: Vec<SizeEntry>,
     pub files: Vec<SizeEntry>,
+    /// What its folders hold, by kind, the most first
+    /// (`fragment_core::computer::storage_kinds`): its owner's Storage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<KindSize>,
+}
+
+/// One kind of what takes a computer's disk, and the bytes it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindSize {
+    pub kind: StorageKind,
+    pub bytes: u64,
+}
+
+/// What a folder of a computer's `/data` holds, in plain words: its work's
+/// projects, downloads, browser data and caches, and its agents' own state
+/// (the rest of `/data`: docs/computers.md, "Data and the restore gate").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageKind {
+    Projects,
+    Downloads,
+    Browser,
+    Agents,
+    Caches,
 }
 
 /// One folder or file of `ComputerSizes`: its path below `/data` and the

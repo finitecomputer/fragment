@@ -2167,8 +2167,9 @@ docs/computers.md's; these routes are its owner's. A view is
 read and the room it has left (`DiskRoom`: docs/computers.md, "Room to
 restore"), its owner's view's `sizes` what takes that disk
 (`ComputerSizes`: its biggest folders and files, read after its newest
-awake save), and `roomFirst`, when true, that its update waits for room
-(docs/computers.md, "An image's share of the disk").
+awake save, with its folders by kind, `kinds`), and `roomFirst`, when
+true, that its update waits for room (docs/computers.md, "An image's
+share of the disk").
 
 | method & path | who | body → answer |
 | --- | --- | --- |
