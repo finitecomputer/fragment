@@ -470,11 +470,39 @@ pub struct ComputerView {
     /// is filling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskRoom>,
+    /// What takes its disk, as the platform read it after its newest awake
+    /// save (docs/computers.md, "Room to restore"): its biggest folders
+    /// and files. Its owner's view only; absent before the first read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<ComputerSizes>,
     /// Whether its update waits for room (docs/computers.md, "An image's
     /// share of the disk"): its save may not restore beside a newer image,
     /// or its disk is told filling. Its owner makes room first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub room_first: bool,
+}
+
+/// What takes a computer's disk (docs/computers.md, "Room to
+/// restore"): all of `/data` (`total`, allocated bytes; absent in one read
+/// before it was kept), its biggest folders to a few levels below it, its
+/// caches too, and its biggest files, each the biggest first, their paths
+/// below `/data`, read after a save at `at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSizes {
+    pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    pub folders: Vec<SizeEntry>,
+    pub files: Vec<SizeEntry>,
+}
+
+/// One folder or file of `ComputerSizes`: its path below `/data` and the
+/// bytes it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizeEntry {
+    pub path: String,
+    pub bytes: u64,
 }
 
 /// A computer's disk as the platform last read it (`df` of its container,

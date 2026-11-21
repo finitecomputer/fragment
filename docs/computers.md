@@ -623,6 +623,20 @@ stopped in its restore of `/data/work` with about 200 MB free).
   for its disk, or an operator's choice): the size was the save's it
   left, so it is forgotten, and the start's `df`, after its restore, says
   the room.
+- **What takes the disk** is read with it (`sizes_of`): the folders of
+  all of `/data` (its caches too), to `SIZES_DEPTH` (4) below it, and its
+  files of at least 10 MiB anywhere, each the biggest first, at most 64
+  and 32, a path at most 400 bytes, 16 KiB of paths in all, and `/data`'s
+  own total. It comes after the records and the `df` (read first, so a
+  line it lists can never pass for theirs), its walks ending within
+  `SIZES_LISTED_BY_S` (24 s) of the read's start, so it never costs them
+  their read; each line framed by GNU's `du -0` with a newline in a name
+  read as `?` (a name can forge no line; BusyBox's, the stub's, frames
+  none, so its total is its `all` record), and the whole answer within
+  what the cell keeps of it. A read it cannot use logs its exit, its
+  length and the exec's error code alone. Kept in a row of
+  its own (`sizes`), shown on its owner's view (`sizes`) and never on its
+  guest's or an operator's, never logged: it names a person's files.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,
