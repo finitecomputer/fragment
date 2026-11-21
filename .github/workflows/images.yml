@@ -54,6 +54,7 @@ jobs:
           ls -l /dev/loop-control /dev/loop* 2>&1 | head; lsmod | grep -w loop || echo "loop: no module listed"; grep -w loop /proc/devices || echo "loop: no block major"
           ls /sys/module/loop 2>&1 | head -3
       - run: |
+          set +e
           H="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
           docker pull -q "$H"
           v() { docker run --rm --privileged "$H" sh -c "apk add --no-cache btrfs-progs > /dev/null; $1" > /dev/null 2> err.txt; echo "$2: exit $? | $(tail -c 300 err.txt | tr '\n' ' ')"; }
