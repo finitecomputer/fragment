@@ -30,6 +30,20 @@ pub const EMAIL_BYTES_MAX: usize = 254;
 
 const FILE: &str = "accounts.json";
 const LOCK: &str = "accounts.lock";
+/// The asks an inviter's signatures answered (passkeys.rs `asked_invite`),
+/// each event's id and when: a file of its own beside the accounts, so a
+/// door of an older release reads its accounts as before, and a replay is
+/// refused across this door's restarts too.
+const ASKS: &str = "asks.json";
+/// The asks' file at most (`passkeys::ASKS_MAX` of them is some 30 KB).
+const ASKS_BYTES_MAX: u64 = 256 << 10;
+
+/// Whether an ask is answered here for the first time.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ask {
+    First,
+    Again,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -191,16 +205,47 @@ impl Store {
         Ok(out)
     }
 
+    /// The ask `id` (an event's id) at `now_s`: its first time, or again
+    /// while it is remembered (`keep_s` from its first). At most `max` are
+    /// remembered at once: past that, `Full`. Under the exclusive lock,
+    /// written before it answers.
+    pub fn ask(&self, id: &str, now_s: i64, keep_s: i64, max: usize) -> Result<Ask, StoreError> {
+        let _lock = self.lock(true)?;
+        let path = self.dir.join(ASKS);
+        let mut asks: Vec<(String, i64)> = match fs::metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(StoreError::Io { path, source: e }),
+            Ok(meta) if meta.mode() & 0o077 != 0 => return Err(StoreError::Exposed { path, mode: meta.mode() & 0o777 }),
+            Ok(meta) if meta.len() > ASKS_BYTES_MAX => return Err(StoreError::TooLarge { path }),
+            Ok(_) => serde_json::from_slice(&fs::read(&path).map_err(io(&path))?).map_err(|e| StoreError::Malformed { path: path.clone(), why: e.to_string() })?,
+        };
+        asks.retain(|(_, at)| now_s.saturating_sub(*at) <= keep_s);
+        if asks.iter().any(|(a, _)| a == id) {
+            return Ok(Ask::Again);
+        }
+        if asks.len() >= max {
+            return Err(StoreError::Full("the door remembers ASKS_MAX asks at once"));
+        }
+        asks.push((id.to_string(), now_s));
+        self.write_file(ASKS, &serde_json::to_vec(&asks).expect("asks serialize"), ASKS_BYTES_MAX)?;
+        Ok(Ask::First)
+    }
+
     fn write(&self, state: &State) -> Result<(), StoreError> {
-        let path = self.dir.join(FILE);
-        let tmp = self.dir.join(format!("{FILE}.new"));
+        self.write_file(FILE, &serde_json::to_vec(state).expect("the state serializes"), FILE_BYTES_MAX)
+    }
+
+    /// `bytes` as the file `name`, whole or not at all (a new file, synced,
+    /// renamed over the old one).
+    fn write_file(&self, name: &str, bytes: &[u8], max: u64) -> Result<(), StoreError> {
+        let path = self.dir.join(name);
+        let tmp = self.dir.join(format!("{name}.new"));
         let _ = fs::remove_file(&tmp);
-        let bytes = serde_json::to_vec(state).expect("the state serializes");
-        if bytes.len() as u64 > FILE_BYTES_MAX {
+        if bytes.len() as u64 > max {
             return Err(StoreError::TooLarge { path });
         }
         let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(io(&tmp))?;
-        f.write_all(&bytes).and_then(|_| f.sync_all()).map_err(io(&tmp))?;
+        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(io(&tmp))?;
         fs::rename(&tmp, &path).map_err(io(&path))?;
         File::open(&self.dir).and_then(|d| d.sync_all()).map_err(io(&self.dir))
     }

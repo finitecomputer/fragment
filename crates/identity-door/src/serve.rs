@@ -512,7 +512,8 @@ async fn ceremony(shared: &Shared, passkeys: &Passkeys, path: &str, req: Request
                 let Some((client, to)) = to else {
                     return Err(PasskeyError::Refused("this sign-in's client is no longer the door's: start again"));
                 };
-                eprintln!("identity-door: {} signed in by a passkey for {}", person.email, client.id);
+                // the account's subject, never its email: the door's log names no one
+                eprintln!("identity-door: {} signed in by a passkey for {}", person.subject, client.id);
                 let code = shared.codes.lock().expect("the codes' lock is never poisoned").issue(random_code(), &client.id, person, Instant::now());
                 let redirect = back(to, begun.client_state.as_deref(), Ok(code));
                 let location = redirect.headers().get(LOCATION).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();

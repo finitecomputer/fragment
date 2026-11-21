@@ -18,7 +18,8 @@
 //!   one gets an invite good for `INVITE_ASKED_TTL_S`, and one with an
 //!   account gets "sign in" and nothing else (`asked_invite`). So the
 //!   inviter can start accounts here and get into none. An ask is answered
-//!   once, within `ASK_WINDOW_S` of its signing and after the door started.
+//!   once, within `ASK_WINDOW_S` of its signing: its id is kept on the
+//!   state's disk (store.rs `ask`), so a replay is refused across restarts.
 //! - *Every later passkey* needs the account's own: a sign-in with one of
 //!   its passkeys first, or, when they are all lost, one of its recovery
 //!   codes (`RECOVERY_CODES`, shown once at enrollment, kept as their
@@ -154,11 +155,6 @@ pub struct Passkeys {
     webauthn: Webauthn,
     store: Store,
     flows: Mutex<HashMap<String, (Instant, Flow)>>,
-    /// The asks answered (each event's id) and when: replays refused.
-    asked: Mutex<HashMap<String, i64>>,
-    /// When this door started (seconds): an ask signed before it may have
-    /// been answered by the door before, whose memory of it is gone.
-    started_s: i64,
 }
 
 /// An email as an account takes it: a mailbox, trimmed and lower-cased.
@@ -169,19 +165,18 @@ pub fn email_ok(email: &str) -> Option<String> {
     ok.then_some(e)
 }
 
-/// A verified NIP-98 header's event id and signing time (its id checked
-/// against its content by the verifier, so the same ask always has it).
-fn ask_id(authorization: Option<&str>) -> Option<(String, i64)> {
+/// A verified NIP-98 header's event id (checked against its content by
+/// the verifier, so the same ask always has it): 64 hex.
+fn ask_id(authorization: Option<&str>) -> Option<String> {
     use base64::Engine;
     #[derive(serde::Deserialize)]
     struct Signed {
         id: String,
-        created_at: i64,
     }
     let b64 = authorization?.strip_prefix("Nostr ")?.trim();
     let raw = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let s: Signed = serde_json::from_slice(&raw).ok()?;
-    Some((s.id, s.created_at))
+    (s.id.len() == 64 && s.id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(s.id)
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -212,8 +207,7 @@ impl Passkeys {
     pub fn new(config: PasskeysConfig) -> Result<Passkeys, PasskeyError> {
         let webauthn = WebauthnBuilder::new(&config.rp_id, &config.origin).map_err(webauthn_error)?.rp_name(&config.rp_name).build().map_err(webauthn_error)?;
         let store = Store::open(&config.state_dir)?;
-        let started_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-        Ok(Passkeys { config, webauthn, store, flows: Mutex::new(HashMap::new()), asked: Mutex::new(HashMap::new()), started_s })
+        Ok(Passkeys { config, webauthn, store, flows: Mutex::new(HashMap::new()) })
     }
 
     fn put(&self, flow: Flow) -> Result<String, PasskeyError> {
@@ -272,9 +266,9 @@ impl Passkeys {
 
     /// An invite the inviter asked for, at `url` (the door's own for
     /// `INVITES_PATH`) with `body` (`{"email": …}`) and its
-    /// `authorization` (NIP-98): checked as the inviter's, fresh, signed
-    /// after the door started, and answered once; then a new email's
-    /// invite, or `HasAccount` for an email with one, nothing made.
+    /// `authorization` (NIP-98): checked as the inviter's, fresh, and
+    /// answered once (across restarts); then a new email's invite, or
+    /// `HasAccount` for an email with one, nothing made.
     pub fn asked_invite(&self, authorization: Option<&str>, url: &str, body: &[u8], now_s: i64) -> Result<Invited, PasskeyError> {
         let not = |why: &str| PasskeyError::NotAsked(why.to_string());
         let inviter = self.config.inviter.as_deref().ok_or_else(|| not("this door takes no asks for invites"))?;
@@ -282,11 +276,13 @@ impl Passkeys {
         if signer != inviter {
             return Err(not("not signed by this door's inviter"));
         }
-        let (id, created_at) = ask_id(authorization).ok_or_else(|| not("not a NIP-98 event"))?;
-        if created_at <= self.started_s {
-            return Err(not("asked before this door started: ask again"));
+        let id = ask_id(authorization).ok_or_else(|| not("not a NIP-98 event"))?;
+        match self.store.ask(&id, now_s, 2 * ASK_WINDOW_S, ASKS_MAX) {
+            Ok(store::Ask::First) => {}
+            Ok(store::Ask::Again) => return Err(not("this ask was answered already")),
+            Err(StoreError::Full(_)) => return Err(PasskeyError::Refused("too many invites asked at once: try again in a minute")),
+            Err(e) => return Err(e.into()),
         }
-        self.once(&id, now_s)?;
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Ask {
@@ -303,22 +299,6 @@ impl Passkeys {
             return Ok(Invited::HasAccount);
         }
         Ok(Invited::New(self.invite(&email, INVITE_ASKED_TTL_S, now_s)?))
-    }
-
-    /// An ask's event `id`, answered the first time alone, while its replay
-    /// could still pass the clock.
-    fn once(&self, id: &str, now_s: i64) -> Result<(), PasskeyError> {
-        let mut asked = self.asked.lock().expect("the asks' lock is never poisoned");
-        asked.retain(|_, at| now_s.saturating_sub(*at) <= 2 * ASK_WINDOW_S);
-        if asked.contains_key(id) {
-            return Err(PasskeyError::NotAsked("this ask was answered already".into()));
-        }
-        if asked.len() >= ASKS_MAX {
-            return Err(PasskeyError::Refused("too many invites asked at once: try again in a minute"));
-        }
-        asked.insert(id.to_string(), now_s);
-        assert!(asked.len() <= ASKS_MAX);
-        Ok(())
     }
 
     /// The email an open invite is for.
@@ -364,7 +344,8 @@ impl Passkeys {
             st.accounts.push(Account { id: account, email: email.clone(), created_at_s: now_s, passkeys: vec![passkey.clone()], recovery: hashes.clone() });
             Ok(())
         })?;
-        eprintln!("identity-door: {email} enrolled a passkey (an invite spent)");
+        // its id, never its email: the door's log names no one
+        eprintln!("identity-door: account {account} enrolled a passkey (an invite spent)");
         Ok(codes)
     }
 
@@ -449,7 +430,7 @@ impl Passkeys {
 
     /// Adds `passkey` to `account`, spending `code` (a recovery's) with it.
     fn keep(&self, account: Uuid, passkey: Passkey, code: Option<String>) -> Result<(), PasskeyError> {
-        let email = self.store.change(|st| {
+        self.store.change(|st| {
             if st.credential_taken(&passkey) {
                 return Err(PasskeyError::Refused("that passkey is already an account's"));
             }
@@ -462,9 +443,9 @@ impl Passkeys {
                 return Err(PasskeyError::Refused("this account holds as many passkeys as it may"));
             }
             a.passkeys.push(passkey.clone());
-            Ok(a.email.clone())
+            Ok(())
         })?;
-        eprintln!("identity-door: {email} added a passkey ({})", if code.is_some() { "by a recovery code" } else { "approved by its own" });
+        eprintln!("identity-door: account {account} added a passkey ({})", if code.is_some() { "by a recovery code" } else { "approved by its own" });
         Ok(())
     }
 }
@@ -540,8 +521,8 @@ mod tests {
     // Goal: the inviter's ask makes a new email's invite, good for an hour,
     // and gets an email with an account "sign in", nothing made; no ask
     // that is not the inviter's, fresh and first makes anything. Replay:
-    // the same ask twice is answered once. Restart: an ask signed before
-    // the door started is refused (its memory of asks is gone).
+    // the same ask twice is answered once. Restart: a door opened again on
+    // the same state, its inviter the same, refuses that ask too.
     #[test]
     fn asked_invites_are_the_inviters_alone() {
         let (p, d) = door("asked");
@@ -577,12 +558,16 @@ mod tests {
         assert!(refused(Some(&h), "https://home.example.com/__door/passkeys/other", &body), "another URL");
         assert!(refused(Some(&h), ASK_URL, br#"{"email":"ivy@example.com"}"#), "another body");
         assert!(refused(None, ASK_URL, &body), "unsigned");
-        let (h, body) = ask(&inviter(), "hal@example.com", p.started_s);
-        assert!(refused(Some(&h), ASK_URL, &body), "signed before the door started");
         let bad = br#"{"email":"hal@example.com","more":1}"#;
         let h2 = inviter().header("POST", ASK_URL, bad, now);
         assert!(matches!(p.asked_invite(Some(&h2), ASK_URL, bad, now), Err(PasskeyError::Refused(_))), "an ask is its email alone");
         assert!(!p.store.read().unwrap().invites.iter().any(|i| i.email.starts_with("hal") || i.email.starts_with("ivy")), "none of those made one");
+
+        // a restart: the asks answered are the state's, not the process's
+        let (h, body) = ask(&inviter(), "kai@example.com", now);
+        assert!(matches!(p.asked_invite(Some(&h), ASK_URL, &body, now), Ok(Invited::New(_))));
+        let again = Passkeys::new(p.config.clone()).unwrap();
+        assert!(matches!(again.asked_invite(Some(&h), ASK_URL, &body, now + 5), Err(PasskeyError::NotAsked(_))), "a replay after a restart");
 
         let mut no_inviter = p.config.clone();
         no_inviter.inviter = None;
@@ -599,10 +584,13 @@ mod tests {
         let (p, d) = door("asks-bounded");
         let now = clock() + 1;
         for i in 0..ASKS_MAX {
-            p.once(&format!("{i:064x}"), now).unwrap();
+            assert_eq!(p.store.ask(&format!("{i:064x}"), now, 2 * ASK_WINDOW_S, ASKS_MAX).unwrap(), store::Ask::First);
         }
-        assert!(matches!(p.once(&"f".repeat(64), now), Err(PasskeyError::Refused(_))), "full");
-        assert!(p.once(&"f".repeat(64), now + 2 * ASK_WINDOW_S + 1).is_ok(), "the old ones forgotten");
+        assert_eq!(p.store.ask(&format!("{:064x}", 7), now, 2 * ASK_WINDOW_S, ASKS_MAX).unwrap(), store::Ask::Again);
+        assert!(matches!(p.store.ask(&"f".repeat(64), now, 2 * ASK_WINDOW_S, ASKS_MAX), Err(StoreError::Full(_))), "full");
+        assert_eq!(p.store.ask(&"f".repeat(64), now + 2 * ASK_WINDOW_S + 1, 2 * ASK_WINDOW_S, ASKS_MAX).unwrap(), store::Ask::First, "the old ones forgotten");
+        let mode = std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(d.join("asks.json")).unwrap());
+        assert_eq!(mode & 0o777, 0o600, "owner-only, as the accounts");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
