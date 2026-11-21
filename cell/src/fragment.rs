@@ -83,7 +83,8 @@ pub(crate) const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct FragmentCell {
     pub(crate) state: State,
     pub(crate) raw: JsValue,
@@ -145,6 +146,7 @@ pub struct FragmentCell {
     pub(crate) schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for FragmentCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();

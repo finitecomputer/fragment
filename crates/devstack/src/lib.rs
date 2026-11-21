@@ -108,9 +108,55 @@ pub fn strip_comments(text: &str) -> String {
 
 /// A project's wrangler config, parsed.
 pub fn read_config(project: &Path) -> Result<serde_json::Value> {
-    let path = project.join("wrangler.jsonc");
-    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    read_jsonc(&project.join("wrangler.jsonc"))
+}
+
+/// A JSONC file, parsed.
+fn read_jsonc(path: &Path) -> Result<serde_json::Value> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
+}
+
+/// The admin Worker's config, beside the cell's in its project
+/// (cell/src/admin.rs).
+pub const ADMIN_CONFIG: &str = "wrangler.admin.jsonc";
+/// The cell's binding to the admin Worker (cell/wrangler.jsonc `services`).
+pub const ADMIN_BINDING: &str = "ADMIN";
+
+/// The project's admin Worker's config (`ADMIN_CONFIG`), parsed.
+pub fn read_admin_config(project: &Path) -> Result<serde_json::Value> {
+    read_jsonc(&project.join(ADMIN_CONFIG))
+}
+
+/// The cell's config and the admin Worker's, rendered for one deployment
+/// (a local node's, a deploy's) whose admin Worker is named `admin_name`:
+/// the cell's `ADMIN` binding names it; and it takes what it shares with
+/// the cell from the cell's config, so the two cannot drift: the cell's
+/// compatibility date, and every one of the cell's object bindings, by
+/// its name and class, bound to the cell's script (as `cell` names it
+/// now: render the cell's name first).
+pub fn pair_admin(cell: &mut serde_json::Value, admin: &mut serde_json::Value, admin_name: &str) -> Result<()> {
+    let cell_name = cell["name"].as_str().context("the cell's config names its Worker")?.to_string();
+    let services = cell["services"].as_array_mut().context("the cell's config binds its admin Worker (`services`)")?;
+    let [service] = services.as_mut_slice() else { bail!("the cell's config binds one service, its admin Worker, not {}", services.len()) };
+    anyhow::ensure!(service["binding"] == ADMIN_BINDING, "the cell's one service binding is {ADMIN_BINDING}, not {}", service["binding"]);
+    service["service"] = serde_json::json!(admin_name);
+    let date = cell["compatibility_date"].clone();
+    anyhow::ensure!(date.is_string(), "the cell's config names its compatibility date");
+    let mut bindings = cell["durable_objects"]["bindings"].as_array().context("the cell's config binds its objects")?.clone();
+    for b in &mut bindings {
+        let b = b.as_object_mut().context("an object binding is an object")?;
+        anyhow::ensure!(!b.contains_key("script_name"), "the cell binds its own classes, not another script's: {b:?}");
+        b.insert("script_name".into(), serde_json::json!(cell_name));
+    }
+    let a = admin.as_object_mut().context("the admin Worker's config is an object")?;
+    for key in ["compatibility_date", "durable_objects"] {
+        anyhow::ensure!(!a.contains_key(key), "the admin Worker's config names no {key}: it takes the cell's");
+    }
+    a.insert("name".into(), serde_json::json!(admin_name));
+    a.insert("compatibility_date".into(), date);
+    a.insert("durable_objects".into(), serde_json::json!({ "bindings": bindings }));
+    Ok(())
 }
 
 /// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
@@ -143,6 +189,7 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
+    fs::copy(from.join(ADMIN_CONFIG), dir.join(ADMIN_CONFIG)).with_context(|| format!("stage {ADMIN_CONFIG}"))?;
     for shim in SHIM_FILES {
         fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
     }
@@ -189,6 +236,12 @@ pub fn local_config(project: &Path) -> PathBuf {
     project.join("wrangler.local.jsonc")
 }
 
+/// Where its admin Worker's is, beside it (and its `.dev.vars`, which a
+/// node reads beside each Worker's config: both Workers get the same).
+pub fn admin_local_config(project: &Path) -> PathBuf {
+    project.join("wrangler.admin.local.jsonc")
+}
+
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in the local node's store (wrangler's,
@@ -212,6 +265,11 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
+    // the admin Worker, under its checked-in name, as the cell is
+    let mut admin = read_admin_config(project)?;
+    let admin_name = admin["name"].as_str().context("the admin Worker's config names it")?.to_string();
+    pair_admin(&mut config, &mut admin, &admin_name)?;
+    fs::write(admin_local_config(project), serde_json::to_string_pretty(&admin)?)?;
     let path = local_config(project);
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
     Ok(path)
@@ -955,7 +1013,9 @@ impl Node {
         let heard = Arc::new(front::Heard::default());
         let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
         let mut cmd = tools.wrangler()?;
-        cmd.arg("dev").arg("-c").arg(&config);
+        // the cell first, the Worker its port serves; the admin Worker
+        // beside it, in the same runtime, reached by the cell's binding
+        cmd.arg("dev").arg("-c").arg(&config).arg("-c").arg(admin_local_config(&opts.project));
         // its own port (its proxy's, which nothing here dials: the front
         // door goes to the runtime) and its inspector's, each of its own
         // picking (`0`): one picked for it and let go before it bound could
@@ -1153,6 +1213,45 @@ mod tests {
             .collect();
         beside.insert(0, "entry.mjs".into());
         assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it");
+    }
+
+    /// Goal: the admin Worker reaches every one of the cell's objects, by
+    /// the cell's own bindings' names and classes in the cell's script,
+    /// under the cell's compatibility date, and the cell's binding names
+    /// the admin, for whatever names a deployment gives the two; a config
+    /// out of that shape is refused, never guessed at. Method: the
+    /// checked-in configs, paired under a branch's names, then broken.
+    #[test]
+    fn the_admin_takes_the_cells_objects_from_the_cells_config() {
+        let cell_dir = super::cell_dir();
+        let mut cell = super::read_config(&cell_dir).unwrap();
+        cell["name"] = serde_json::json!("fragment-b");
+        let mut admin = super::read_admin_config(&cell_dir).unwrap();
+        assert!(admin.get("durable_objects").is_none() && admin.get("compatibility_date").is_none(), "the checked-in admin config names neither: the cell's are written in");
+        super::pair_admin(&mut cell, &mut admin, "fragment-b--admin").unwrap();
+        assert_eq!(cell["services"], serde_json::json!([{ "binding": super::ADMIN_BINDING, "service": "fragment-b--admin" }]));
+        assert_eq!(admin["name"], "fragment-b--admin");
+        assert_eq!(admin["compatibility_date"], cell["compatibility_date"]);
+        let ours = cell["durable_objects"]["bindings"].as_array().unwrap();
+        let theirs = admin["durable_objects"]["bindings"].as_array().unwrap();
+        assert!(ours.len() >= 8 && ours.len() == theirs.len(), "every class");
+        for (o, t) in ours.iter().zip(theirs) {
+            assert_eq!((&t["name"], &t["class_name"], &t["script_name"]), (&o["name"], &o["class_name"], &serde_json::json!("fragment-b")), "{t}");
+        }
+        assert!(admin.get("migrations").is_none(), "the admin defines no class");
+        // refused: paired twice (the admin's config already names the cell's),
+        // a cell with no binding to it, or one with another service too
+        let mut again = admin.clone();
+        assert!(super::pair_admin(&mut cell, &mut again, "fragment-b--admin").unwrap_err().to_string().contains("names no compatibility_date"));
+        let mut lone = cell.clone();
+        lone.as_object_mut().unwrap().remove("services");
+        assert!(super::pair_admin(&mut lone, &mut super::read_admin_config(&cell_dir).unwrap(), "a").is_err());
+        let mut two = cell.clone();
+        two["services"].as_array_mut().unwrap().push(serde_json::json!({ "binding": "OTHER", "service": "x" }));
+        assert!(super::pair_admin(&mut two, &mut super::read_admin_config(&cell_dir).unwrap(), "a").unwrap_err().to_string().contains("one service"));
+        let mut foreign = super::read_config(&cell_dir).unwrap();
+        foreign["durable_objects"]["bindings"][0]["script_name"] = serde_json::json!("elsewhere");
+        assert!(super::pair_admin(&mut foreign, &mut super::read_admin_config(&cell_dir).unwrap(), "a").unwrap_err().to_string().contains("its own classes"));
     }
 
 

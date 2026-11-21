@@ -48,8 +48,12 @@ computers) returns once this product works.
    Cloudflare Artifacts has a commit API), Stripe (51), and the model
    APIs a deployment names (61).
 2. **The Rust cell, ported to Workers (workers-rs), not rewritten**, with
-   thin JS shims where workers-rs lacks an API. The cell is the one
-   Worker; the CLI is Rust.
+   thin JS shims where workers-rs lacks an API. The cell is the
+   platform's Worker, and the CLI is Rust. The platform splits into
+   Workers by who uses them, so a fragment's isolate carries only what
+   fragments use (FIN-475, 2026-11-20): the operators' admin first, a
+   second Worker of the same crate (cell/src/admin.rs), since nothing
+   in the system reads from it.
 3. **Accounts.** Dev and previews run in a dev account on WorkOS's
    staging environment; production in Finite's production account on
    WorkOS's production one. CI deploys from a clean config, as a

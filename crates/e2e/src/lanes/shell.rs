@@ -3646,20 +3646,26 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
 }
 
 /// Its disk filling, as its owner sees it (docs/computers.md,
-/// `disk_filling`; Paul, 2026-11-18: "ask your agent to move big files to
-/// storage"): a read of 3.2 GB left of 20 GB, kept as a start's read is (the
-/// `disk` lever: a test fleet's computers share their host's disk, which
-/// never fills), is told over settings in those words, at 1280 and 390 px;
-/// a read with room again tells it no more. Starts and ends with nothing
-/// told.
+/// `disk_filling` and "Room to restore"; Paul, 2026-11-18: "ask your agent
+/// to move big files to storage"): a read of 20 GB with 9 GB free (its
+/// files stored compressed) whose /data restores to 14.2 GB, which leaves
+/// 2.4 GB of room beside the image and a restore's floor, kept as a read
+/// after a save is (the `disk` lever: a test fleet's computers share their
+/// host's disk, which never fills), is told over settings in those words,
+/// the room and never what is free, at 1280 and 390 px; a read with room
+/// again tells it no more. Starts and ends with nothing told.
 fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=disk_filling]')";
     // its words, over settings once they have loaded (what the shots show)
-    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (3.2 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
-    let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 3_240_662_016u64 }))?;
+    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
+    let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 9_000_000_000u64, "data": 14_200_000_000u64 }))?;
+    // its update waits for room while it is told filling (docs/computers.md,
+    // "An image's share of the disk"; Codex on #1422)
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let waits = view()["roomFirst"] == true;
     b.viewport(page, 1280, 800, false)?;
     b.reload(page)?;
     let told = b.until(page, &words, wait);
@@ -3680,14 +3686,15 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     b.color_scheme(page, "dark")?;
     b.viewport(page, 1280, 900, false)?;
     s.ok(
-        "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen",
-        filling.status == 200 && filling.body["kept"] == true && told && phone && fits == true,
-        json!({ "said": said, "lever": filling.body }),
+        "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen; its update waits for room",
+        filling.status == 200 && filling.body["kept"] == true && told && phone && fits == true && waits,
+        json!({ "said": said, "lever": filling.body, "roomFirst": waits }),
     );
-    let room = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    let room = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64, "data": 3_000_000_000u64 }))?;
     b.reload(page)?;
     let gone = b.until(page, "!document.querySelector('#computer-notices .computer-notice[data-kind=disk_filling]')", wait);
-    s.ok("a read with room again tells it no more", room.status == 200 && gone, &room.body);
+    let free = view().get("roomFirst").is_none();
+    s.ok("a read with room again tells it no more, and its update waits no more", room.status == 200 && gone && free, json!({ "lever": room.body, "roomFirst": !free }));
     Ok(())
 }
 
@@ -7210,11 +7217,13 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
 /// still asked the status for that origin navigated under the bare
 /// policy, which names only the mint's origin, and the page stayed
 /// refused the microphone. The shell knows each fragment's origin from
-/// its own page now (its `fragment-origin` meta), with no request. Valid:
-/// in a shell of its own, the app's status held, never answered, its
-/// window opened and its Reload pressed, the frame is sent at once, under
-/// the policy that names the app's own origin, and its page may use the
-/// microphone (Chrome's fake, allowed).
+/// its own page now (its `fragment-origin` meta), with no request. Only a
+/// chat's frame is lent the microphone since (the frames section,
+/// `app_microphone`), so an app's window is sent under a policy that names
+/// none. Valid: in a shell of its own, the app's status held, never
+/// answered, its window opened and its Reload pressed, the frame is sent
+/// at once, under a policy that lends no microphone, and its page is told
+/// the microphone is denied (in this Chrome, whose fake would allow it).
 fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"]")));
@@ -7234,15 +7243,15 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
     // in the same task as the press: nothing it could have waited for came
     let sent = b.eval(&shell, &format!("(() => {{ {pane}.querySelector('button[aria-label=Reload]').click(); const f = {pane}.querySelector('iframe'); return {{ src: f.hasAttribute('src'), allow: f.allow }}; }})()"))?;
-    let named = sent["src"] == true && sent["allow"] == format!("clipboard-write; microphone {}", api.site_origin(app));
+    let named = sent["src"] == true && sent["allow"] == "clipboard-write";
     let told = s.eventually(wait, || {
         let Ok(frame) = b.frame(app) else { return false };
         let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");
         let _ = b.detach(frame);
-        state.ok() == Some(json!("granted"))
+        state.ok() == Some(json!("denied"))
     });
     s.ok(
-        "an app's window opened and reloaded before its status answers loads at once, under the policy that names its own origin: its page may use the microphone",
+        "an app's window opened and reloaded before its status answers loads at once, under a policy that lends it no microphone: its page is told the microphone is denied",
         up && opened && named && told,
         json!({ "up": up, "opened": opened, "sent": sent, "told": told }),
     );
