@@ -24,6 +24,44 @@ export function untilSaid(u, now) {
 // A platform path's image (a notice's `image`) on `img`: read as the shell
 // reads the API, with its header (the session's cookie alone is no caller
 // for `/api/…`), and shown from its bytes; one that won't load goes.
+// Bytes as its notices say them (fragment_core's `notice::size`): GB to a
+// tenth, under one in whole MB (at least 1).
+export function storageSize(n) {
+  if (n >= 1e9) {
+    const tenths = Math.round((n * 10) / 1e9);
+    return `${Math.floor(tenths / 10)}.${tenths % 10} GB`;
+  }
+  return `${Math.max(1, Math.round(n / 1e6))} MB`;
+}
+
+// The kinds Storage names, in its words (proto's `StorageKind`).
+export const STORAGE_KINDS = { projects: "Projects", downloads: "Downloads", browser: "Browser data", agents: "Agents", caches: "Caches" };
+
+// Settings → Computer → Storage (docs/computers.md, "Room to restore"), as
+// its owner's view last said it: what takes its disk (`used`: all of
+// `/data` as its summary read it, else what its save keeps at full size),
+// the room left before it may not start again from that save, each kind's
+// share (what the kinds leave out of `used` as Other), its biggest files,
+// and when it was measured. Null before its first read after a save; what
+// a view carries that is not as its wire says is left out.
+export function storageParts(c) {
+  const d = c?.disk;
+  const bytes = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!d || !bytes(d.data) || !bytes(d.room)) return null;
+  const sizes = c.sizes && typeof c.sizes === "object" ? c.sizes : {};
+  const list = (l) => (Array.isArray(l) ? l : []);
+  const kinds = list(sizes.kinds).filter((k) => Object.hasOwn(STORAGE_KINDS, k?.kind) && bytes(k.bytes) && k.bytes > 0).map((k) => ({ kind: k.kind, label: STORAGE_KINDS[k.kind], bytes: k.bytes }));
+  const listed = kinds.reduce((a, k) => a + k.bytes, 0);
+  const whole = bytes(sizes.total) ? sizes.total : d.data;
+  const other = whole - listed;
+  if (other >= 1e6) kinds.push({ kind: "other", label: "Other", bytes: other });
+  const files = list(sizes.files).filter((f) => typeof f?.path === "string" && f.path && bytes(f.bytes)).slice(0, 5).map((f) => {
+    const at = f.path.lastIndexOf("/");
+    return { path: f.path, name: f.path.slice(at + 1), folder: at > 0 ? f.path.slice(0, at) : "", bytes: f.bytes };
+  });
+  return { used: Math.max(whole, listed), left: d.room, full: d.room === 0, filling: !!d.filling, kinds, files, at: Number.isFinite(sizes.at) ? sizes.at : d.at };
+}
+
 export function platformImage(img, path) {
   img.dataset.src = path;
   if (!globalThis.location || typeof fetch !== "function") return;
@@ -112,7 +150,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // buttons, painted again as the computer changes (`paintSettings`); its
   // buttons only when the restart's step changed, so a Restart now asked
   // stays until pressed or cancelled.
-  const shown = { section: null, state: null, asks: null, said: null, painted: null };
+  const shown = { section: null, state: null, asks: null, said: null, painted: null, storage: null, storageDrawn: null };
   // a button with its icon before its words; `words`, the span its words
   // are in (a named one: renderNames rewrites only its text)
   const iconed = (name, words, cls = "quiet") => {
@@ -461,6 +499,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         ? [
             stateLine(c),
             line("Version", c.version ?? c.latest ?? c.image),
+            storageBlock(c),
             ...(behind
               ? [
                   line("Latest version", c.latest),
@@ -516,6 +555,93 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     shown.section = computer;
     return computer;
   }
+  // Storage: a bar of what takes its disk by kind, the room left, the
+  // biggest files; asleep, awake or not waking alike (its view keeps it)
+  // (drawn again by `paintSettings` once a view that says otherwise lands)
+  function storageBlock(c) {
+    const parts = storageParts(c);
+    shown.storageDrawn = storageKey(c);
+    shown.storage = parts ? storageDrawn(c, parts) : line("Storage", "Measured after your computer next saves.");
+    return shown.storage;
+  }
+  // what its Storage is drawn from: its parts, and whether it is awake
+  // (its Delete buttons)
+  function storageKey(c) {
+    return JSON.stringify([storageParts(c), c?.phase === "awake"]);
+  }
+  function storageDrawn(c, parts) {
+    const block = el("div", "settings-line storage");
+    block.dataset.storage = "";
+    const head = el("div", "storage-head");
+    const left = parts.full ? "Full" : `${storageSize(parts.left)} left`;
+    head.append(el("span", "settings-key", "Storage"), el("span", parts.filling || parts.full ? "storage-left storage-low" : "storage-left", left));
+    const whole = parts.used + parts.left || 1;
+    const bar = el("div", "storage-bar");
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", `${storageSize(parts.used)} used, ${parts.full ? "full" : `${storageSize(parts.left)} left`}`);
+    const legend = el("div", "storage-legend");
+    for (const k of parts.kinds) {
+      const piece = el("span", `storage-piece storage-${k.kind}`);
+      piece.style.width = `${(100 * k.bytes) / whole}%`;
+      bar.append(piece);
+      const key = el("span", `storage-kind storage-${k.kind}`);
+      key.dataset.kind = k.kind;
+      key.append(el("span", "storage-name", k.label), el("span", "storage-size", storageSize(k.bytes)));
+      legend.append(key);
+    }
+    block.append(head, bar, legend);
+    if (parts.files.length) {
+      const files = el("div", "storage-files");
+      files.append(el("span", "storage-files-title", "Biggest files"));
+      for (const f of parts.files) {
+        const row = el("div", "storage-file");
+        row.dataset.path = f.path;
+        const name = el("span", "storage-file-name", f.name);
+        name.title = f.path;
+        row.append(name, el("span", "storage-file-folder", f.folder), el("span", "storage-size", storageSize(f.bytes)));
+        // Delete: a file of its work, awake alone (the platform removes it
+        // in its container, no agent asked), asked once
+        // never one whose path holds a `?`: GNU lists a newline as one, so it
+        // may name another file (Codex on #1429)
+        if (c.phase === "awake" && f.path.startsWith("work/") && !f.path.includes("?")) row.append(deleteControl(c, f));
+        files.append(row);
+      }
+      block.append(files);
+    }
+    const when = new Date(parts.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    block.append(el("span", "storage-at", `Measured ${when}`));
+    return block;
+  }
+  function deleteControl(c, f) {
+    const box = el("span", "storage-file-actions");
+    const ask = el("button", "quiet", "Delete");
+    ask.type = "button";
+    ask.dataset.action = "storage-delete";
+    ask.onclick = () => {
+      const cancel = el("button", "quiet", "Cancel");
+      cancel.type = "button";
+      cancel.onclick = () => box.replaceChildren(ask);
+      const sure = el("button", "danger", "Delete");
+      sure.type = "button";
+      sure.dataset.action = "storage-delete-sure";
+      sure.onclick = () => {
+        sure.disabled = cancel.disabled = true;
+        sure.textContent = "Deleting…";
+        // its view, its Storage drawn again from it (`paintSettings`)
+        api("POST", `/api/computers/${seg(c.computer)}/files/delete`, { path: f.path })
+          .then((v) => {
+            computerIs(v);
+            // its view unchanged (its read after the delete did not answer in
+            // time): still drawn here, so said here (Codex on #1429)
+            if (box.isConnected) box.replaceChildren(el("span", "muted", "Deleted"));
+          })
+          .catch((e) => box.replaceChildren(ask, el("span", "form-error", `Couldn't delete it: ${e?.message ?? e}`)));
+      };
+      box.replaceChildren(cancel, sure);
+    };
+    box.append(ask);
+    return box;
+  }
   function stateLine(c) {
     const l = line("State", stateSaid(c, active(follow.op())));
     shown.state = l.querySelector(".settings-value");
@@ -525,6 +651,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const c = computer();
     if (shown.state?.isConnected && c) shown.state.textContent = stateSaid(c, active(follow.op()));
     if (shown.asks?.isConnected && restartSaid() !== shown.painted) paintAsks(shown.asks);
+    // its Storage, as the view that landed says it (Codex on #1428)
+    if (shown.storage?.isConnected && c && storageKey(c) !== shown.storageDrawn) shown.storage.replaceWith(storageBlock(c));
   }
   // what settings' Restart says now: nothing but its button, the restart's
   // step, or why its ask failed

@@ -82,6 +82,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/computer-answer.test.mjs",
     "cell/shell-tests/computer-prewake.test.mjs",
     "cell/shell-tests/computer-state.test.mjs",
+    "cell/shell-tests/computer-storage.test.mjs",
     "cell/shell-tests/connections-names.test.mjs",
     "cell/shell-tests/frame-messages.test.mjs",
     "cell/shell-tests/frame-standin.test.mjs",
