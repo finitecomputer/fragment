@@ -537,7 +537,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let went = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let taught = super::ledger::gate_hears(s, api, &owner_id, "refused");
     let seen_went = s.upstream.seen().len();
-    let refused = say(s, 125, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let refused = say(s, 127, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let unreached = s.upstream.seen().len() == seen_went;
     let uncapped = cap(u64::from(u32::MAX))?;
     forget_gate(api, &owner_id)?;
