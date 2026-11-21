@@ -173,8 +173,9 @@ mod tests {
         let e = judged("img", Ok(()), sigpipe()).unwrap_err().to_string();
         assert!(e.starts_with("docker export of img failed (signal: 13 (SIGPIPE)) though its measure answered"), "{e}");
         assert!(judged("img", Ok(()), Ok(())).is_ok());
-        let long = format!("{}é{}", "a".repeat(10), "b".repeat(TAIL_BYTES));
-        assert_eq!(tail(&long).len(), TAIL_BYTES, "cut at a character");
+        // the cut lands inside `é` (two bytes): it moves on to the character after (Codex on #1441)
+        let long = format!("{}é{}", "a".repeat(10), "b".repeat(TAIL_BYTES - 1));
+        assert_eq!(tail(&long), "b".repeat(TAIL_BYTES - 1), "cut at a character");
         assert_eq!(tail("short"), "short");
     }
 }
