@@ -81,12 +81,14 @@ const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// location, a few hundred across the world, and a cold start), so a slow
 /// or far ledger costs a call at most this, once a minute, and one that
 /// does not answer lets the call through (decision 62).
-const GATE_WAIT_MS: u64 = fragment_core::ledger::gate::ASKING_MS.unsigned_abs();
-/// How long an ask beside a model call waits on a ledger (`may_beside`):
-/// no call waits on it, so longer than `GATE_WAIT_MS`, a slow ledger's
-/// answer still kept for the next call; within the 30 s a Worker keeps a
-/// request's `waitUntil` work alive after its answer.
-const BESIDE_WAIT_MS: u64 = 20_000;
+const GATE_WAIT_MS: u64 = 1_500;
+/// How long an ask beside a paid call waits on a ledger (`may_beside`):
+/// longer than `GATE_WAIT_MS`, a slow ledger's answer still kept for the
+/// next call; within the 30 s a Worker keeps a request's `waitUntil` work
+/// alive after its answer. The gate marks its question asked as long
+/// (`gate::ASKING_MS`, this value).
+const BESIDE_WAIT_MS: u64 = fragment_core::ledger::gate::ASKING_MS.unsigned_abs();
+const _: () = assert!(GATE_WAIT_MS < BESIDE_WAIT_MS, "an ask beside a call outlasts a call's own wait");
 
 thread_local! {
     /// What each person's ledger last answered this isolate's gate (`may`).

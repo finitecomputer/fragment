@@ -33,11 +33,11 @@ pub const STANDING_CACHE_MS: i64 = 60_000;
 /// within the window. Past it, the stale go first, then the oldest.
 pub const GATE_ENTRIES_MAX: usize = 1_024;
 
-/// How long a question asked beside a call holds the next call on it to
-/// wait for its answer (`Gate::step`), and the gate's own wait for a
-/// ledger (cell ledger.rs `GATE_WAIT_MS`, this value): an ask that never
-/// returns holds nothing longer than a cold ask would.
-pub const ASKING_MS: i64 = 1_500;
+/// How long a question is asked beside a call at most (cell ledger.rs
+/// `BESIDE_WAIT_MS`, this value), and so how long it is marked asked
+/// (`Gate::step`): every call on it meanwhile waits for an answer, each
+/// for at most the gate's own wait (`GATE_WAIT_MS`).
+pub const ASKING_MS: i64 = 20_000;
 
 const _: () = assert!(STANDING_CACHE_MS <= 60_000, "a spend learns its payer's standing within a minute");
 
@@ -130,11 +130,13 @@ impl Gate {
     /// What the ledger said to `key`, asked at `now_ms` (`None`: it did not
     /// answer, or not as a ledger does), as the spend reads it: a refusal
     /// stops it, anything else lets it start. An answer is kept; no answer
-    /// is not, so the next spend asks again.
+    /// is not, so the next spend asks again, and lets the spend start
+    /// unless another ask heard a fresh answer meanwhile (an ask beside a
+    /// call, while this one waited): that answer is this spend's too.
     pub fn heard(&mut self, key: &str, answer: Option<Result<(), Refused>>, now_ms: i64) -> Result<(), Refused> {
         // asked: the calls that waited on it go as it says, or ask again
         self.asking.retain(|(k, _)| k != key);
-        let Some(answer) = answer else { return Ok(()) };
+        let Some(answer) = answer else { return self.fresh(key, now_ms).unwrap_or(Ok(())) };
         if let Some(seen) = self.seen.iter_mut().find(|s| s.key == key) {
             (seen.at_ms, seen.answer) = (now_ms, answer);
             return answer;
@@ -226,7 +228,7 @@ mod tests {
         assert_eq!(gate.fresh("p may", 1_000), None, "no answer is no answer: asked again");
         assert!(gate.is_empty());
         assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 1_000), Err(STOPPED));
-        assert_eq!(gate.heard("p may", None, 2_000), Ok(()), "a silence lets this one start");
+        assert_eq!(gate.heard("p may", None, 1_000 + STANDING_CACHE_MS), Ok(()), "a silence lets this one start");
         assert_eq!(gate.fresh("p may", 2_000), Some(Err(STOPPED)), "and leaves the refusal heard before as it was");
     }
 
@@ -293,6 +295,26 @@ mod tests {
         assert_eq!(gate.step("r may", 5_000 + ASKING_MS), Step::GoAndAsk, "a stale ask is asked again");
         gate.forget();
         assert_eq!(gate.step("r may", 5_000 + ASKING_MS), Step::GoAndAsk, "forgotten: nothing asked");
+    }
+
+    /// A slow ledger (Codex, #1451, round 2): the question asked beside a
+    /// call stays marked for as long as that ask may run (`ASKING_MS`, its
+    /// whole wait), so a call well past the gate's own wait still waits on
+    /// an answer rather than starting; and one whose own ask heard nothing
+    /// takes the refusal the ask beside heard meanwhile, never going past
+    /// it. A silence with nothing heard lets the spend start, as ever.
+    #[test]
+    fn a_slow_ledgers_answer_holds_the_calls_that_waited_on_it() {
+        let mut gate = Gate::new();
+        assert_eq!(gate.step("p may", 1_000), Step::GoAndAsk);
+        assert_eq!(gate.step("p may", 1_000 + 1_501), Step::AskFirst, "past the gate's own wait, the ask beside still runs");
+        assert_eq!(gate.step("p may", 1_000 + ASKING_MS - 1), Step::AskFirst);
+        // the ask beside hears the refusal while a follower's own ask is out
+        assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 2_800), Err(STOPPED));
+        assert_eq!(gate.heard("p may", None, 3_000), Err(STOPPED), "the follower whose ask heard nothing takes the refusal heard meanwhile");
+        // a silence with nothing fresh heard lets the spend start
+        assert_eq!(gate.heard("q may", None, 3_000), Ok(()));
+        assert_eq!(gate.heard("p may", None, 2_800 + STANDING_CACHE_MS), Ok(()), "a refusal gone stale holds nothing");
     }
 
     /// The lever's view: the fresh answers of one person's questions, and
