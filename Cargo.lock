@@ -3096,11 +3096,13 @@ dependencies = [
  "fragment-nip98",
  "fragment-proto",
  "fragment-templates",
+ "p256",
  "proc-macro2",
  "reqwest",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "syn 2.0.119",
 ]
 

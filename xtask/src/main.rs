@@ -138,6 +138,7 @@ mod dev_agent;
 mod dns;
 mod eval_sinks;
 mod guards;
+mod home;
 mod html_sinks;
 mod image;
 mod inputs;
@@ -872,6 +873,7 @@ fn main() -> Result<()> {
         Some("skills-catalog") => skills_catalog::run(&args[1..]),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
+        Some("home") => home::home(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
