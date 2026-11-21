@@ -14,6 +14,10 @@
 //!   in the answer's way (decision 62). A call that reported no usage is
 //!   charged nothing, said aloud (`ledger.unknown-usage`).
 //!
+//! - **Nothing it adds comes back** (`answer`): each credential the swap
+//!   put on a request, an operator key or a Vault's fill, is named as its
+//!   secret wherever the answer echoes it.
+//!
 //! A fragment's own paid calls (a job's AI step, an icon's making, a
 //! card's shot) are charged through its outbox instead (meter.rs), which
 //! keeps each row in the fragment's own storage, beside what it bought,
@@ -21,6 +25,7 @@
 
 use fragment_core::ledger::{Meter, MeterBatch, MeterRow, Spend};
 use fragment_core::price::Usage;
+use futures_util::StreamExt;
 use serde_json::json;
 use worker::*;
 
@@ -84,4 +89,68 @@ pub async fn settle(env: &Env, bills: Vec<(Bill, Option<Usage>)>) {
     if let Err(e) = js::queue_send(env.as_ref(), QUEUE_BINDING, &bodies).await {
         console_error!("{}", json!({ "event": "ledger.charge-lost", "refs": refs, "message": e.message }));
     }
+}
+
+/// An answer to a request read whole to be named, every spelling of each
+/// value it echoes, up to this long (text: `secrets::read_whole`); past it,
+/// or one that streams as it is made, each value's own bytes are named as
+/// it streams.
+const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The pipe's one rule for an answer (FIN-616): nothing it put on the
+/// request comes back. Each credential the swap placed (`passes`: the
+/// operator's keys first, then a Vault's fills) is named as its secret
+/// (`{{name}}`), as a job's fetch names its own (2026-11-09: echoed values
+/// hidden), in the answer's headers and its body. The operator's keys go
+/// in a pass of their own, first, so no value a person chose cuts into one
+/// (`secrets::redact_passes`). A body read whole (up to
+/// `ANSWER_HIDDEN_MAX_BYTES`, text) has every spelling of a value named
+/// (`secrets::redact`), or its bytes, not text; past that, or one that
+/// streams as it is made (an event stream, a streamed speech's audio),
+/// each value's own bytes are named as it streams
+/// (`secrets::StreamedPasses`), a value split across pieces too.
+pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>]) -> CellResult<Response> {
+    let redact = |text: String| fragment_core::secrets::redact_passes(text, passes);
+    let headers = Headers::new();
+    for (name, value) in resp.headers().entries() {
+        headers.set(&name, &redact(value))?;
+    }
+    let status = resp.status_code();
+    // no body (a HEAD's, a 204's): its headers were all it could echo
+    if !matches!(resp.body(), ResponseBody::Stream(_)) || matches!(status, 101 | 204 | 304) {
+        return Ok(resp.with_headers(headers));
+    }
+    let kind = resp.headers().get("content-type")?.unwrap_or_default();
+    let mut stream = resp.stream()?;
+    let mut streamed = fragment_core::secrets::StreamedPasses::new(passes);
+    let mut read = vec![];
+    if fragment_core::secrets::read_whole(&kind) {
+        // bounded: each piece read adds to `read`, which stops at its cap
+        while read.len() <= ANSWER_HIDDEN_MAX_BYTES {
+            match stream.next().await {
+                Some(piece) => read.extend(piece?),
+                None => {
+                    let body = match String::from_utf8(read) {
+                        Ok(text) => redact(text).into_bytes(),
+                        Err(e) => [streamed.push(&e.into_bytes()), streamed.finish()].concat(),
+                    };
+                    headers.set("content-length", &body.len().to_string())?;
+                    return Ok(Response::from_bytes(body)?.with_status(status).with_headers(headers));
+                }
+            }
+        }
+    }
+    // a stream: what was read so far, then the rest as it comes, each named
+    let _ = headers.delete("content-length");
+    let first = streamed.push(&read);
+    let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
+        let (mut stream, mut streamed) = state?;
+        match stream.next().await {
+            Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
+            Some(Err(e)) => Some((Err(e), None)),
+            None => Some((Ok(streamed.finish()), None)),
+        }
+    });
+    let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
+    Ok(Response::from_stream(body)?.with_status(status).with_headers(headers))
 }
