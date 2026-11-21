@@ -20,7 +20,7 @@ fn bytes_of(n: usize, seed: u8) -> Vec<u8> {
 }
 
 pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("blobs", &[crate::Need::Fakes]) {
+    if !s.section("blobs", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let home = s.dir("blobs-home");
@@ -140,11 +140,14 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&api.person()?, "GET", &blob_path(&sha), None)?;
     s.ok("a stranger cannot read a blob", r.status == 403, &r);
 
-    // a new version: the old bytes go once no branch names them
+    // a new version: the old bytes go once no branch names them for the
+    // grace period (a week here too: a test lever ages them past it, and
+    // brings in the poll pass that collects)
     let v2 = bytes_of(2 * 1024 * 1024, 2);
     std::fs::write(dir.join("site/clip.bin"), &v2)?;
     s.cli(api, &home, &["deploy", &name, "--dir", &dir_s]);
-    let gone = s.eventually(Duration::from_secs(30), || api.signed(&keys, "HEAD", &blob_path(&sha), None).is_ok_and(|r| r.status == 404));
+    let aged = || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-blobs" }))).is_ok_and(|r| r.status == 200);
+    let gone = s.eventually(Duration::from_secs(30), || aged() && api.signed(&keys, "HEAD", &blob_path(&sha), None).is_ok_and(|r| r.status == 404));
     s.ok("a blob no branch names is deleted after its grace period", gone, "");
     let r = api.signed(&keys, "HEAD", &blob_path(&sha256_hex(&v2)), None)?;
     s.ok("the current version's bytes stay", r.status == 200 && r.header("content-length") == v2.len().to_string(), &r);
