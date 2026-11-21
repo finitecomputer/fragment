@@ -257,6 +257,29 @@ async fn the_stub_image() {
     eprintln!("stub: marker to following: {} ms", opened.elapsed().as_millis());
 }
 
+/// Goal (Paul, 2026-11-20: "our image update either never goes up in size,
+/// or that it's safe for all existing users somehow"): the Hermes image's
+/// share of a computer's disk, as a fresh computer reads it, is within the
+/// budget every computer's room counts (fragment_core's `IMAGE_DISK_MAX`),
+/// so no update leaves a save that restored before unable to restore.
+/// Measured as every push of an image is held to it, by the one measure
+/// (`cargo xtask image disk`, xtask/src/image/disk.rs). Valid: today's
+/// image; invalid is any image past it, which fails here. Raising the
+/// budget is Paul's word, recorded beside it.
+#[test]
+#[ignore = "needs Docker (privileged, loop devices): cargo test -p fragment-bridge --test docker -- --ignored"]
+fn the_hermes_image_fits_its_disk_budget() {
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let measured = Command::new(cargo).args(["xtask", "image", "disk", &tag]).current_dir(repo_dir()).output().expect("cargo xtask runs");
+    let said = format!("{}{}", String::from_utf8_lossy(&measured.stdout), String::from_utf8_lossy(&measured.stderr));
+    eprintln!("hermes: {}", said.lines().filter(|l| l.starts_with("image disk:") || l.starts_with("Error") || l.contains("budget")).collect::<Vec<_>>().join("\n"));
+    assert!(measured.status.success(), "the Hermes image is held to its disk budget: {said}");
+    let share: u64 = said.lines().find_map(|l| l.strip_prefix("image disk: ")?.split_whitespace().next()?.parse().ok()).expect("its share, in bytes");
+    assert!(share > 1_000_000_000, "a measure of the image: {share}");
+}
+
 /// Goal: the real Hermes image answers a chat message through its bridge
 /// with the scripted model, as the agent's profile, with every model call
 /// naming its agent; it holds at its restore gate; and SIGTERM ends it in

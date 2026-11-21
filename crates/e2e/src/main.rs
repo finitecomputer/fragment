@@ -1321,6 +1321,22 @@ pub fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
     Ok(v["data"].clone())
 }
 
+/// The lines a node's Workers logged as JSON, read from its log
+/// (`Suite::node_log`), each past the `[<worker>] ` a node of several
+/// Workers (the cell and the admin, in one `wrangler dev`) puts before
+/// every line of theirs; any other line passed over.
+pub fn logged_json(log: &str) -> Vec<Value> {
+    let worker = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    log.lines()
+        .map(str::trim)
+        .map(|l| match l.strip_prefix('[').and_then(|r| r.split_once("] ")) {
+            Some((name, line)) if worker(name) => line,
+            _ => l,
+        })
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
+}
+
 /// Whom `Suite::login` signs in as for a CLI key (its npub): the same
 /// person again when a lane signs in with it.
 pub fn cli_email(npub: &str) -> Result<String> {
@@ -1616,4 +1632,18 @@ fn finish(s: &mut Suite) -> Result<()> {
         println!("could not remove {}: {e}", s.scratch.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Goal: a Worker's JSON line is read from a node's log whether the
+    /// node runs one Worker (the line alone) or several (`[<worker>] `
+    /// before it, as wrangler writes it), and nothing else is read as one.
+    /// Method: a log of each kind of line, as written 2026-11-20.
+    #[test]
+    fn a_workers_json_lines_are_read_past_its_name() {
+        let log = "[fragment] {\"egress\":\"swap\",\"status\":200}\n{\"egress\":\"api\"}\n[fragment--admin] {\"n\":1}\n[wrangler:info] Ready on http://127.0.0.1:1\n[1,2] not a line of ours\n[Bad Name] {\"n\":2}\n  [fragment] {\"n\":3}  \n";
+        let read = super::logged_json(log);
+        assert_eq!(read, [serde_json::json!({ "egress": "swap", "status": 200 }), serde_json::json!({ "egress": "api" }), serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 3 })]);
+    }
 }

@@ -219,6 +219,27 @@ check before acting on it." A continuation is told the age of what its
 cut turn answered. A routine (its message says its hour), a command,
 and a state from before keep or tell none.
 
+### An agent is told to make room
+
+A computer whose disk fills may not start again from its save
+(docs/computers.md, "Room to restore"), so its agents make room before
+their person has to ask. The computer's view says its disk as the
+platform last read it (`disk`: its `room`, whether it is `filling`, and
+when it was read), which the bridge reads with the rest of the view. At
+each agent's next turn after a read that finds it filling, the turn
+carries one firm line, first in its note (`TurnStart::disk`,
+`note::disk`): "Your computer is almost full: only 2.4 GB of room is left
+before it can no longer start again from its save. Before anything else,
+load the disk-space-finite skill and make room: move big files you are
+not using to storage, then tell your owner what you moved." At no room
+it says the computer may not start again after it sleeps. Each agent is
+told once per read (a later turn is not told stale room while it makes
+room), and again at a newer read still filling: one after each awake
+save. Its first view counts, as each after it, and the newest read wins:
+a view read before another that answers after it changes nothing. Never
+a command's turn. Nothing of it is saved: a new life tells each agent
+again.
+
 ### What a runtime forgot
 
 A runtime's memory of a chat is on `/data`: Hermes' sessions in the

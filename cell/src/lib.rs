@@ -27,6 +27,13 @@
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
 
+// the admin Worker's build reaches a part of the crate by design (and
+// leaves the macros' imports unused), and the cell's build lints the
+// whole ("Two Workers, one crate", below)
+#![cfg_attr(feature = "admin", allow(dead_code, unused_imports))]
+
+// public: only the admin Worker's build calls its router (`fetch` below)
+pub mod admin;
 mod across;
 mod ai;
 mod address;
@@ -139,6 +146,23 @@ const SEEN_BODY_MAX_BYTES: usize = 1024;
 const LLMS_TXT: &fragment_templates::File = &fragment_templates::SKILL_MD;
 const LLMS_FULL_TXT: &fragment_templates::File = &fragment_templates::GUIDE_MD;
 
+// Two Workers, one crate (M19, FIN-475: the platform split by who uses
+// it). The cell is this crate's default build: its router (`fetch`,
+// `queue`) and every object class. The operators' admin is the same crate
+// built with the `admin` feature, a Worker of its own (admin.rs): its
+// `fetch` is the admin's router, and it exports no class, reaching the
+// cell's objects through bindings to the cell's script. Only the exports
+// differ, each cfg'd here or at its class (its export and its object
+// impl: "exported by the cell's build alone"), never the code they call:
+// link-time optimization keeps in each Wasm only what its exports reach,
+// so code only the admin reaches costs no fragment's isolate, and the
+// objects cost the admin nothing. The one
+// crate shares the cell's own callers' code (its config, errors, calls
+// and sessions) without moving it into another; what it costs is the
+// crate compiled twice per build (xtask/src/build.rs). In the admin's
+// build most of the crate is code it never reaches by design: the cell's
+// build lints all of it, the admin's router included (public above).
+#[cfg(not(feature = "admin"))]
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     // a branch deployment's queue is named for its branch after this
@@ -148,9 +172,20 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     deliveries::consume(batch, env).await
 }
 
+#[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     match route(req, &env, &ctx).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => e.response(),
+    }
+}
+
+/// The admin Worker's `fetch` (admin.rs): the requests the cell hands it.
+#[cfg(feature = "admin")]
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    match admin::route(req, &env).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -1279,6 +1314,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get | Method::Head, ["healthz"]) => Ok(Response::ok("ok")?),
         // each object class answering this release, which a deploy waits for
         (Method::Get, ["healthz", "objects"]) => routed::objects(env, cfg).await,
+        // the admin Worker's: its probe of the same, and the operators'
+        // routes it answers (admin.rs), handed to it as they came
+        (Method::Get, ["healthz", "admin"] | ["api", "admin", "health"]) => admin::forward(req, env).await,
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;

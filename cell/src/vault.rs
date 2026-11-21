@@ -339,7 +339,8 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
     json_bytes(answer)
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct VaultCell {
     state: State,
     env: Env,
@@ -348,6 +349,7 @@ pub struct VaultCell {
     wiped: Cell<bool>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for VaultCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();

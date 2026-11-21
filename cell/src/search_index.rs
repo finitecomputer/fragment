@@ -248,7 +248,8 @@ thread_local! {
     static RESIDENT: RefCell<Resident> = RefCell::default();
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct SearchIndexCell {
     state: State,
     raw: JsValue,
@@ -263,6 +264,7 @@ pub struct SearchIndexCell {
     held: std::cell::Cell<u32>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for SearchIndexCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
