@@ -156,8 +156,9 @@ chat would lose it (a mover's, 2026-11-20). The mover says so in the
 manifest (`simplex: true`, "SimpleX in a stage"), and the stage's
 `complete` makes that person's comped `seat` a `seat_always_on` before its
 zip is made: a failure is the mover's complete tried again. A paid seat,
-one always-on already, or none is left as it is. Everyone else keeps a
-`seat` that sleeps.
+one always-on already, or none is left as it is, and so is a person
+wiped since the move bound them: their stage lands as any other.
+Everyone else keeps a `seat` that sleeps.
 
 Comps the move gave before with a 30-day end lost it at the registry's
 step 12 (`0012_move_comps_open.sql`): each row whose last comp in the

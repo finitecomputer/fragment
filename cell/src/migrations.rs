@@ -580,14 +580,24 @@ fn complete<'a>(env: &'a Env, stage: &'a str, body: String) -> Waits<'a, Respons
 /// A stage that carries its owner's SimpleX chat (its manifest's
 /// `simplex`): their comped `seat` made always-on, as SimpleX runs only on
 /// a computer that stays on (FIN-492; a mover's, 2026-11-20). A seat that is
-/// paid, always-on already, or none is left as it is.
+/// paid, always-on already, or none is left as it is; so is a person wiped
+/// since the move bound them, whose stage lands as any other.
 #[inline(never)]
 fn simplex_on<'a>(env: &'a Env, person: &'a str) -> Waits<'a, ()> {
     Box::pin(async move {
         use crate::registry::calls::By;
         use crate::registry::orgs::{CompKind, Mine};
         use fragment_proto::org::SeatKind;
-        let mine = crate::ask_registry(env, &Mine { by: By::Identity(person.to_string()) }).await?.mine;
+        let mine = match crate::ask_registry(env, &Mine { by: By::Identity(person.to_string()) }).await {
+            Ok(m) => m.mine,
+            // wiped (404) or being wiped (403, registry.rs `by`): no seat to
+            // keep on, and failing would fail every complete of the stage
+            Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::Forbidden) => {
+                console_log!("migrations.simplex: {person} holds no seat to keep on: {}", e.message);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         if let Some(seat) = mine.seat.filter(|s| s.comped && s.kind == SeatKind::Seat) {
             crate::ask_registry(env, &CompKind { by: NAME.into(), seat: seat.id, kind: SeatKind::SeatAlwaysOn }).await?;
             console_log!("migrations.simplex: {person}'s comped seat made always-on");
