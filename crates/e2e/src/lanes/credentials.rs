@@ -579,6 +579,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let each = charge_for("elevenlabs:character", LONG_CHARS);
     let calls = (cap - spent + each - 1) / each;
     anyhow::ensure!((1..=6).contains(&calls), "a few long calls reach the cap: {calls}");
+    // what the hour holds once they are charged: the words name it exactly
+    let total = spent + calls * each;
     let eleven_calls = || {
         let u = api.signed(w.owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
         u["uses"].as_array().map_or(0, |l| l.iter().filter(|x| x["provider"] == "elevenlabs").map(|x| x["calls"].as_u64().unwrap_or(0)).sum::<u64>())
@@ -603,13 +605,13 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             && counted
             && paused.starts_with("fetched 429")
             && paused.contains(r#""error":"rate_limited""#)
-            && paused.contains("elevenlabs's calls are paused: $5.")
+            && paused.contains(&format!("elevenlabs's calls are paused: {} spent", fragment_core::price::dollars(total)))
             && paused.contains("they resume in about")
             && paused.contains(r#""reason":"key_paused""#)
             && paused.contains("retry_after_ms")
             && unreached
             && uncharged,
-        json!({ "spent": spent, "calls": calls, "paused": paused, "counted": counted, "uncharged": uncharged }),
+        json!({ "spent": spent, "calls": calls, "total": total, "paused": paused, "counted": counted, "uncharged": uncharged }),
     );
     s.ok(SWAP_CHECKS[40], went, &other);
     let notices = || api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None).map(|r| r.body["notices"].clone()).unwrap_or(Value::Null);
@@ -632,7 +634,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(
         SWAP_CHECKS[41],
         told.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused" && n["provider"] == "elevenlabs" && n["capMicros"] == cap && n["allowMicros"] == 4 * cap))
-            && in_chat.as_ref().is_some_and(|(shown, _, _)| *shown == json!({ "said": "ElevenLabs calls paused: $5.03 this hour", "buttons": ["Allow up to $20 an hour"] })),
+            && in_chat.as_ref().is_some_and(|(shown, _, _)| *shown == json!({ "said": format!("ElevenLabs calls paused: {} this hour", fragment_core::notice::usd(total)), "buttons": ["Allow up to $20 an hour"] })),
         json!({ "told": told, "inChat": in_chat }),
     );
     let lifted = say(s, 160, &speak(SPOKEN))?;
