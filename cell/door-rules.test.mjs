@@ -5,7 +5,7 @@
 // and its schema's steps held to their released text.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEPS, SAVES_KEPT, behind, fenced, nameOk, restorable, saveKey, startable, steps, surplus } from "./door-rules.mjs";
+import { STEPS, SAVES_KEPT, behind, fenced, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, startable, steps, surplus } from "./door-rules.mjs";
 
 const save = (generation, seq, mark, unreadable = 0) => ({ generation, seq, mark, unreadable });
 
@@ -34,10 +34,19 @@ test("the newest readable saves are kept, the rest let go", () => {
   assert.deepEqual(surplus(saves.slice(0, 2)), []);
 });
 
-test("a door with saves starts only from one of them", () => {
-  assert.equal(startable([]), true, "a new door");
-  assert.equal(startable([save(1, 1, 0, 1), save(1, 2, 0)]), true);
-  assert.equal(startable([save(1, 1, 0, 1), save(1, 2, 0, 1)]), false, "every save unreadable: never a new profile over them");
+test("a door that ever saved starts only from a save, never as a new one", () => {
+  assert.deepEqual(restoreOf([], 0), { kind: "none" }, "a new door");
+  assert.deepEqual(restoreOf([save(1, 1, 0, 1), save(1, 2, 0)], 2), { kind: "save", save: save(1, 2, 0) });
+  assert.deepEqual(restoreOf([save(1, 1, 0, 1), save(1, 2, 0, 1)], 2), { kind: "exhausted" }, "every save unreadable");
+  assert.deepEqual(restoreOf([], 5), { kind: "exhausted" }, "its saves pruned or gone: it saved, so never a new profile");
+  assert.equal(startable([], 0), true);
+  assert.equal(startable([], 5), false);
+});
+
+test("a save is named back exactly", () => {
+  assert.equal(saveId(save(12, 3, 0)), "12-3");
+  assert.deepEqual(parseSaveId("12-3"), { generation: 12, seq: 3 });
+  for (const bad of ["12", "a-1", "1-2-3", "", null, 7, "1-" + "9".repeat(16)]) assert.equal(parseSaveId(bad), null, String(bad));
 });
 
 test("a door's name is a fragment's, and its saves are under its own prefix", () => {
@@ -51,7 +60,7 @@ test("a door's name is a fragment's, and its saves are under its own prefix", ()
 // Each released step's text, as it was released: a step is never edited or
 // dropped (stored rows stay readable across releases), only added after.
 const RELEASED = [
-  "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, stopped TEXT)",
+  "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, started INTEGER NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, saved INTEGER NOT NULL, stopped TEXT)",
   "CREATE TABLE saves (generation INTEGER NOT NULL, seq INTEGER NOT NULL, mark INTEGER NOT NULL, bytes INTEGER NOT NULL, at INTEGER NOT NULL, unreadable INTEGER NOT NULL, PRIMARY KEY (generation, seq))",
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
 ];

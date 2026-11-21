@@ -22,7 +22,7 @@
 // (`/egress/…`). Its runner's protocol is images/simplex-door/src/door.rs.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { settled, startIntercepted } from "./intercepts.mjs";
-import { DELIVERIES_KEPT, behind, fenced, nameOk, restorable, saveKey, startable, steps, surplus } from "./door-rules.mjs";
+import { DELIVERIES_KEPT, behind, fenced, nameOk, parseSaveId, restoreOf, saveId, saveKey, startable, steps, surplus } from "./door-rules.mjs";
 
 const HOST = "door.fragment.internal";
 const PORT = 8080;
@@ -70,7 +70,7 @@ export class SimplexDoor extends DurableObject {
   }
 
   #door() {
-    return this.ctx.storage.sql.exec("SELECT door, agent, generation, marks, stopped FROM door WHERE id = 1").toArray()[0] ?? null;
+    return this.ctx.storage.sql.exec("SELECT door, agent, started, generation, marks, saved, stopped FROM door WHERE id = 1").toArray()[0] ?? null;
   }
 
   #saves() {
@@ -100,10 +100,10 @@ export class SimplexDoor extends DurableObject {
       // constructor), nothing else (cell/src/routed.rs `PROBED`)
       if (url.pathname === "/__probe" && request.headers.has("x-fragment-probe")) return json({ ready: true });
       if (url.pathname === "/door/lever" && request.method === "POST") return await this.#lever(await bounded(request));
-      if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore();
+      if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore(request);
       if (url.pathname === "/egress/save" && request.method === "PUT") return await this.#save(request, url);
       if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await bounded(request));
-      if (url.pathname === "/egress/unreadable" && request.method === "POST") return this.#unreadable(await bounded(request));
+      if (url.pathname === "/egress/unreadable" && request.method === "POST") return this.#unreadable(request, await bounded(request));
       return refusal(404, "not_found", `no door route ${request.method} ${url.pathname}`);
     } catch (e) {
       return refusal(e.status ?? 500, e.status ? "invalid" : "internal", String((e && e.message) || e).slice(0, 300));
@@ -129,23 +129,28 @@ export class SimplexDoor extends DurableObject {
     return this.#starting;
   }
 
+  // Each start takes a generation of its own (`started`), and each runner
+  // life within it another when it restores (`generation`: a process
+  // Docker restarts in place is a new life), so no save's key is ever
+  // reused and a life superseded is fenced off.
   async #start(why) {
     const c = this.ctx.container;
     if (!c) throw new Error("this deployment runs no doors (no container for them)");
     const d = this.#door();
     if (!d || d.stopped) return;
-    if (c.running) return this.#watch(d.generation);
-    // a door with saves starts only from one of them, never as a new one
-    if (!startable(this.#saves())) return this.#stop("no save of this door restores");
-    const generation = d.generation + 1;
-    this.ctx.storage.sql.exec("UPDATE door SET generation = ? WHERE id = 1", generation);
-    const opts = { env: { DOOR_GENERATION: String(generation), DOOR_NAME: d.agent }, enableInternet: this.env.FRAGMENT_COMPUTER_INTERNET !== "off", instance: "lite" };
+    if (c.running) return this.#watch(d.started);
+    // a door that saved starts only from a save, never as a new one
+    if (!startable(this.#saves(), d.saved)) return this.#stop("no save of this door restores");
+    const started = d.generation + 1;
+    this.ctx.storage.sql.exec("UPDATE door SET started = ?, generation = ? WHERE id = 1", started, started);
+    const opts = { env: { DOOR_GENERATION: String(started), DOOR_NAME: d.agent }, enableInternet: this.env.FRAGMENT_COMPUTER_INTERNET !== "off", instance: "lite" };
     if (c.images && c.images.door) opts.image = c.images.door;
     const egress = this.ctx.exports.DoorEgress({ props: { door: d.door } });
-    const overtaken = () => this.#door()?.generation !== generation;
+    // a stop asked while its egress registered starts nothing
+    const overtaken = () => this.#door()?.started !== started || !!this.#door()?.stopped;
     if (await startIntercepted(c, opts, () => settled(() => c.interceptOutboundHttp(HOST, egress)), overtaken)) {
-      this.#log("door.started", { generation, why });
-      this.#watch(generation);
+      this.#log("door.started", { generation: started, why });
+      this.#watch(started);
     }
   }
 
@@ -186,21 +191,39 @@ export class SimplexDoor extends DurableObject {
 
   // ---- what its runner asks (images/simplex-door/src/door.rs) ----
 
-  // The save a start restores, and whether the door numbered an effect
-  // past it; none, a new door.
-  async #restore() {
-    const d = this.#door();
-    const s = restorable(this.#saves());
-    if (!d || !s) return new Response(null, { status: 204, headers: { "x-door-mark": String(d ? d.marks : 0) } });
-    const obj = await this.env.BLOBS.get(saveKey(d.door, s.generation, s.seq));
-    if (!obj) {
-      // its file gone: never restored again, the start asks once more
+  // A runner life begins: its generation (`x-door-life`), and the save it
+  // restores (`x-door-save`, named back exactly), whether the door
+  // numbered an effect past it; none, a new door (204); or none left
+  // though it saved (410: the door stops, never a new profile).
+  async #restore(request) {
+    const started = Number(request.headers.get("x-door-generation"));
+    let d = this.#door();
+    if (!d || started !== d.started) return refusal(409, "superseded", `start ${started} is not the door's running one`);
+    const life = d.generation + 1;
+    this.ctx.storage.sql.exec("UPDATE door SET generation = ? WHERE id = 1", life);
+    // bounded: each pass marks one save unreadable, of at most the kept few
+    for (;;) {
+      const r = restoreOf(this.#saves(), d.saved);
+      if (r.kind === "none") return new Response(null, { status: 204, headers: { "x-door-mark": String(d.marks), "x-door-life": String(life) } });
+      if (r.kind === "exhausted") {
+        this.#stop("no save of this door restores");
+        // its container ended by the door, a moment after this answer: a
+        // runtime that starts an exited process again in place (local
+        // Docker) would ask on forever
+        setTimeout(() => this.ctx.container?.running && this.ctx.container.destroy().catch(() => {}), 1000);
+        return refusal(410, "exhausted", "this door saved, and no save of it restores");
+      }
+      const s = r.save;
+      const obj = await this.env.BLOBS.get(saveKey(d.door, s.generation, s.seq));
+      d = this.#door();
+      if (d.generation !== life) return refusal(409, "superseded", `life ${life} was superseded as it restored`);
+      if (obj) {
+        this.#log("door.restoring", { save: saveId(s), mark: s.mark, marks: d.marks, life });
+        return new Response(obj.body, { status: 200, headers: { "x-door-mark": String(d.marks), "x-door-behind": behind(s, d.marks) ? "1" : "0", "x-door-save": saveId(s), "x-door-life": String(life), "content-type": "application/octet-stream" } });
+      }
+      // its file gone: never given again; the one before it, if any
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", s.generation, s.seq);
-      return refusal(503, "unavailable", `save ${s.generation}-${s.seq} has no file`);
     }
-    const marks = this.#door().marks;
-    this.#log("door.restoring", { save: `${s.generation}-${s.seq}`, mark: s.mark, marks });
-    return new Response(obj.body, { status: 200, headers: { "x-door-mark": String(marks), "x-door-behind": behind(s, marks) ? "1" : "0", "content-type": "application/octet-stream" } });
   }
 
   // A save of the running start: its file, then the row that names it, the
@@ -215,20 +238,23 @@ export class SimplexDoor extends DurableObject {
     if (!(Number.isInteger(seq) && seq > 0 && Number.isInteger(mark) && mark >= 0 && mark <= d.marks && Number.isInteger(length) && length > 0)) {
       return refusal(400, "invalid", "a save names its seq, its mark (one the door numbered) and its length");
     }
+    // its key its life's own (a life's seqs never repeat), so no committed
+    // save's file is ever written over or deleted by another's upload
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM saves WHERE generation = ? AND seq = ?", generation, seq).toArray().length) return refusal(409, "taken", `save ${generation}-${seq} is taken`);
     const key = saveKey(d.door, generation, seq);
     const { readable, writable } = new FixedLengthStream(length);
     const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
     d = this.#door();
     if (fenced(generation, d.generation)) {
       await this.env.BLOBS.delete(key);
-      return refusal(409, "superseded", `start ${generation} was superseded during its save`);
+      return refusal(409, "superseded", `life ${generation} was superseded during its save`);
     }
-    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (?, ?, ?, ?, ?, 0)", generation, seq, mark, put.size, Date.now());
+    this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (?, ?, ?, ?, ?, 0)", generation, seq, mark, put.size, Date.now());
+    this.ctx.storage.sql.exec("UPDATE door SET saved = saved + 1 WHERE id = 1");
+    // the rows let go first, so no restore picks one whose file goes
     const gone = surplus(this.#saves());
-    if (gone.length) {
-      await this.env.BLOBS.delete(gone.map((s) => saveKey(d.door, s.generation, s.seq)));
-      for (const s of gone) this.ctx.storage.sql.exec("DELETE FROM saves WHERE generation = ? AND seq = ?", s.generation, s.seq);
-    }
+    for (const s of gone) this.ctx.storage.sql.exec("DELETE FROM saves WHERE generation = ? AND seq = ?", s.generation, s.seq);
+    if (gone.length) await this.env.BLOBS.delete(gone.map((s) => saveKey(d.door, s.generation, s.seq)));
     return json({ saved: `${generation}-${seq}` });
   }
 
@@ -243,11 +269,17 @@ export class SimplexDoor extends DurableObject {
     return json({ again: false }, 200, { "x-door-mark": String(mark) });
   }
 
-  // The save a start was given would not restore: never given again.
-  #unreadable(why) {
-    const s = restorable(this.#saves());
-    if (s) this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", s.generation, s.seq);
-    this.#log("door.save_unreadable", { save: s ? `${s.generation}-${s.seq}` : null, why: String(why.why ?? "").slice(0, 300) });
+  // The save a life was given would not restore: that save, named
+  // exactly, never given again (asked again, the same; from a life
+  // superseded, refused).
+  #unreadable(request, body) {
+    const life = Number(request.headers.get("x-door-generation"));
+    const d = this.#door();
+    if (!d || fenced(life, d.generation)) return refusal(409, "superseded", `life ${life} is not the door's running one`);
+    const s = parseSaveId(body.save);
+    if (!s) throw Object.assign(new Error("an unreadable save is named {save: <generation>-<seq>, why}"), { status: 400 });
+    this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", s.generation, s.seq);
+    this.#log("door.save_unreadable", { save: body.save, why: String(body.why ?? "").slice(0, 300) });
     return json({});
   }
 
@@ -258,11 +290,12 @@ export class SimplexDoor extends DurableObject {
     switch (a.op) {
       case "start": {
         if (!nameOk(a.door) || typeof a.agent !== "string" || !a.agent) throw Object.assign(new Error("start names its door and its agent"), { status: 400 });
-        if (!d) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, generation, marks, stopped) VALUES (1, ?, ?, 0, 0, NULL)", a.door, a.agent);
+        if (!d) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", a.door, a.agent);
         else this.ctx.storage.sql.exec("UPDATE door SET stopped = NULL WHERE id = 1");
-        await this.#ensure("asked");
+        // its watch first: a start that fails is tried again by it
         await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
-        return json({ started: this.#door().generation });
+        await this.#ensure("asked");
+        return json({ started: this.#door().started });
       }
       case "state": {
         let runner = null;
@@ -285,6 +318,8 @@ export class SimplexDoor extends DurableObject {
       // a planned stop: its runner saves last and ends, and is not started again
       case "stop":
         this.#stop("asked");
+        // a start under way sees the stop before it launches, or launched
+        if (this.#starting) await this.#starting.catch(() => {});
         if (this.ctx.container?.running) await this.ctx.container.signal(15);
         return json({});
       // a crash: started again, as any exit is
@@ -303,11 +338,20 @@ export class SimplexDoor extends DurableObject {
       // a save its next start cannot read: the newest readable one's file
       // replaced by bytes that are no save, then a crash
       case "corrupt": {
-        const s = restorable(this.#saves());
+        const r = restoreOf(this.#saves(), d.saved);
+        const s = r.kind === "save" ? r.save : null;
         if (!s) throw Object.assign(new Error("no save to corrupt"), { status: 409 });
         await this.env.BLOBS.put(saveKey(d.door, s.generation, s.seq), "not a save");
         if (this.ctx.container?.running) await this.ctx.container.destroy();
         return json({ corrupted: `${s.generation}-${s.seq}` });
+      }
+      // every save's file lost, then a crash: a door that saved finds none
+      // to restore, and stops (never a new profile over them)
+      case "lose": {
+        const keys = this.#saves().map((s) => saveKey(d.door, s.generation, s.seq));
+        if (keys.length) await this.env.BLOBS.delete(keys);
+        if (this.ctx.container?.running) await this.ctx.container.destroy();
+        return json({ lost: keys.length });
       }
       default:
         throw Object.assign(new Error(`no door lever ${a.op}`), { status: 400 });

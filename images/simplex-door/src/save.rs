@@ -221,18 +221,18 @@ pub fn stage(packed: &[u8], dir: &Path) -> Result<Vec<u8>, SaveError> {
         let path = stage.join(&name);
         std::fs::write(&path, &bytes).map_err(io)?;
         let tables = TABLES.iter().find(|(db, _)| *db == name).map(|(_, t)| *t).expect("each database has its tables");
-        let checked = Connection::open(&path).and_then(|c| {
-            let ok: String = c.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        let checked = Connection::open(&path).map_err(sqlite).and_then(|c| {
+            let ok: String = c.query_row("PRAGMA quick_check(1)", [], |r| r.get(0)).map_err(sqlite)?;
             let mut held = 0;
             for t in tables {
-                held += c.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [t], |r| r.get::<_, i64>(0))?;
+                held += c.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [t], |r| r.get::<_, i64>(0)).map_err(sqlite)?;
             }
             Ok((ok, held))
         });
         match checked {
             Ok((ok, held)) if ok == "ok" && held == tables.len() as i64 => {}
             Ok((said, held)) => return Err(SaveError::Corrupt(format!("{name}: {said}, {held} of its tables {tables:?}"))),
-            Err(e) => return Err(SaveError::Corrupt(format!("{name}: {e}"))),
+            Err(e) => return Err(e.within(&name)),
         }
     }
     Ok(state.expect("unpack holds the state"))
@@ -241,9 +241,31 @@ pub fn stage(packed: &[u8], dir: &Path) -> Result<Vec<u8>, SaveError> {
 /// Whether the staged chat database holds contact `contact`: a save whose
 /// link is bound to one it lacks is no save of that link.
 pub fn staged_contact(dir: &Path, contact: i64) -> Result<bool, SaveError> {
-    let c = Connection::open(dir.join(STAGE).join(DBS[0])).map_err(|e| SaveError::Corrupt(e.to_string()))?;
-    let n: i64 = c.query_row("SELECT count(*) FROM contacts WHERE contact_id = ?1", [contact], |r| r.get(0)).map_err(|e| SaveError::Corrupt(e.to_string()))?;
+    let c = Connection::open(dir.join(STAGE).join(DBS[0])).map_err(sqlite)?;
+    let n: i64 = c.query_row("SELECT count(*) FROM contacts WHERE contact_id = ?1", [contact], |r| r.get(0)).map_err(sqlite)?;
     Ok(n == 1)
+}
+
+/// What SQLite said of a staged database: its bytes' fault (no database,
+/// or a corrupt one: the save's) or this container's (its disk full, a
+/// file it could not open: `Io`, never held against the save).
+fn sqlite(e: rusqlite::Error) -> SaveError {
+    let corrupt = matches!(&e, rusqlite::Error::SqliteFailure(f, _) if matches!(f.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt));
+    if corrupt {
+        SaveError::Corrupt(e.to_string())
+    } else {
+        SaveError::Io(e.to_string())
+    }
+}
+
+impl SaveError {
+    fn within(self, name: &str) -> SaveError {
+        match self {
+            SaveError::Io(e) => SaveError::Io(format!("{name}: {e}")),
+            SaveError::Corrupt(e) => SaveError::Corrupt(format!("{name}: {e}")),
+            other => other,
+        }
+    }
 }
 
 /// The staged databases made the core's, in place of whatever was there.
@@ -512,6 +534,12 @@ mod tests {
         let bad = pack(&[(STATE, b"{}".to_vec()), (DBS[0], b"not a database at all, not even close".repeat(200)), (DBS[1], vec![])]).unwrap();
         assert!(matches!(stage(&bad, &d), Err(SaveError::Corrupt(_))), "bytes that are no SQLite");
         assert_eq!(std::fs::read(d.join(DBS[0])).unwrap(), before, "the core's database untouched");
+        // this container's disk failing (its stage no folder it can make) is
+        // its own failure, never held against the save (review of #1435)
+        let _ = std::fs::remove_dir_all(d.join(STAGE));
+        std::fs::write(d.join(STAGE), b"a file where the stage goes").unwrap();
+        assert!(matches!(stage(&good, &d), Err(SaveError::Io(_))), "a local failure is Io");
+        std::fs::remove_file(d.join(STAGE)).unwrap();
         assert_eq!(stage(&good, &d).unwrap(), b"{}");
         assert_eq!(staged_contact(&d, 3), Ok(true));
         assert_eq!(staged_contact(&d, 4), Ok(false), "a contact it lacks");

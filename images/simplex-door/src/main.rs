@@ -88,6 +88,9 @@ const STOP_MS_MAX: u64 = 8_000;
 /// The exit code of a start whose save would not restore: its door starts
 /// it from an older one.
 const UNREADABLE_EXIT: i32 = 2;
+/// The exit code of a start of a door that saved and none of whose saves
+/// restores: its door stopped itself (it starts no new profile over them).
+const EXHAUSTED_EXIT: i32 = 3;
 
 /// What each save holds beside the databases, rolled back with them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -237,7 +240,10 @@ async fn main() {
     let asks = to.clone();
     tokio::spawn(net::serve(listener, move |req, _| handle(asks.clone(), req), stop_rx));
 
-    let (kept, door_mark, behind) = restore(&door, &dir).await;
+    let (kept, door_mark, behind, life) = restore(&door, &dir).await;
+    // every call of this life carries its generation
+    let door = door.living(life);
+    let generation = life;
     save::wal(&dir).expect("the databases in WAL mode");
     let watch = save::Watch::open(&dir).expect("the databases watched");
     let core = match core::start(&cfg, &dir, &name, to.clone()).await {
@@ -279,8 +285,9 @@ async fn main() {
 
 /// The newest save, checked whole and made the core's; or none, and
 /// nothing left of an earlier life's files (the door's save is the one
-/// truth). A save that will not restore never reaches the core.
-async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
+/// truth). A save that will not restore never reaches the core. Its door
+/// gives this life its generation: the answer's last item.
+async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool, u64) {
     let t0 = Instant::now();
     let mut wait = net::Backoff::default();
     // bounded by RESTORE_MS_MAX
@@ -297,39 +304,56 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
         }
     };
     match restored {
-        Restore::None => {
+        Restore::None { life } => {
             for db in save::DBS {
                 for suffix in ["", "-wal", "-shm"] {
                     let _ = std::fs::remove_file(dir.join(format!("{db}{suffix}")));
                 }
             }
-            (Kept::default(), 0, false)
+            (Kept::default(), 0, false, life)
         }
-        Restore::Save { packed, mark, behind } => {
+        Restore::Save { packed, mark, behind, save: id, life } => {
             let kept = match staged(&packed, dir) {
                 Ok(kept) => kept,
-                Err(why) => {
-                    door.unreadable(&why).await;
+                // this container's disk, not the save: ends, the save
+                // untouched (its door starts it again)
+                Err(save::SaveError::Io(why)) => {
+                    ev!("door.restore_local_failed", { "save": id, "why": why });
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    let why = e.to_string();
+                    door.living(life).unreadable(&id, &why).await;
                     unreadable(&why)
                 }
             };
             assert!(behind || kept.mark >= mark, "a save its door says is not behind holds the door's newest mark");
             save::place(dir).expect("the staged databases placed");
-            ev!("door.restored", { "bytes": packed.len(), "mark": kept.mark, "doorMark": mark, "behind": behind });
+            ev!("door.restored", { "save": id, "bytes": packed.len(), "mark": kept.mark, "doorMark": mark, "behind": behind, "life": life });
             let newest = mark.max(kept.mark);
-            (kept, newest, behind)
+            (kept, newest, behind, life)
+        }
+        // never a new profile over saves none of which restores
+        Restore::Exhausted => {
+            ev!("door.no_save_restores");
+            std::process::exit(EXHAUSTED_EXIT);
+        }
+        Restore::Superseded => {
+            ev!("door.superseded", { "at": "restore" });
+            std::process::exit(1);
         }
     }
 }
 
 /// A save staged and checked whole (save.rs `stage`): its state, its
-/// databases, and the contact its link is bound to among them.
-fn staged(packed: &[u8], dir: &Path) -> Result<Kept, String> {
-    let state = save::stage(packed, dir).map_err(|e| e.to_string())?;
-    let kept: Kept = serde_json::from_slice(&state).map_err(|e| e.to_string())?;
+/// databases, and the contact its link is bound to among them. A failure
+/// of this container's own (`SaveError::Io`) is told apart from the save's.
+fn staged(packed: &[u8], dir: &Path) -> Result<Kept, save::SaveError> {
+    let state = save::stage(packed, dir)?;
+    let kept: Kept = serde_json::from_slice(&state).map_err(|e| save::SaveError::Corrupt(format!("its state: {e}")))?;
     if let Some(contact) = kept.link.contact() {
-        if !save::staged_contact(dir, contact).map_err(|e| e.to_string())? {
-            return Err(format!("its link's contact {contact} is not in its chat database"));
+        if !save::staged_contact(dir, contact)? {
+            return Err(save::SaveError::Corrupt(format!("its link's contact {contact} is not in its chat database")));
         }
     }
     Ok(kept)

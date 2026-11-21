@@ -2,8 +2,9 @@
 //! (images/simplex-door/Dockerfile) on the SimpleX lab's network (a local
 //! SMP server, a person's simplex-chat), with a fake door on the host in
 //! place of its Durable Object: it keeps every save, numbers every effect
-//! (its mark), says when a save is behind, and fences saves by generation,
-//! as the door's protocol says (images/simplex-door/src/door.rs).
+//! (its mark), says when a save is behind, gives each runner life a
+//! generation of its own and fences saves by it, as the door's protocol
+//! says (images/simplex-door/src/door.rs).
 //!
 //! Lower rung, labeled so: the lab's server, not SimpleX's presets, and a
 //! container per start on this machine's Docker, not Cloudflare's.
@@ -32,7 +33,10 @@ const DOOR_IMAGE: &str = "fragment-simplex-door:test";
 /// One save the fake door took.
 #[derive(Clone)]
 struct Kept {
-    generation: u64,
+    /// The start it was saved in, and its life within that start.
+    start: u64,
+    life: u64,
+    seq: u64,
     mark: u64,
     bytes: Bytes,
 }
@@ -40,8 +44,12 @@ struct Kept {
 #[derive(Default)]
 struct DoorState {
     saves: Vec<Kept>,
-    /// The generation started last: older ones' saves are refused (409).
-    generation: u64,
+    /// The start running: another's restore is refused (409).
+    started: u64,
+    /// The newest life given, and each life's start: a save of any life
+    /// but the newest, or of a start since superseded, is refused (409).
+    life: u64,
+    lives: BTreeMap<u64, u64>,
     /// The newest effect numbered.
     marks: u64,
     /// A save to restore in place of the newest (a rollback).
@@ -53,6 +61,9 @@ struct DoorState {
     refused: u64,
     /// Deliveries answered 503 meanwhile (a door that cannot take them).
     closed: bool,
+    /// Where each life's newest save is written as it is taken (the lab's
+    /// folder: a failure's evidence).
+    keep: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -123,24 +134,35 @@ impl FakeDoor {
         };
         match (method.as_str(), path.as_str()) {
             ("GET", "/save") => self.with(|s| {
+                if generation != s.started {
+                    return answer(409, &[], Bytes::new());
+                }
+                s.life += 1;
+                let life = s.life;
+                s.lives.insert(life, s.started);
                 let at = s.pinned.or(s.saves.len().checked_sub(1));
                 match at.map(|i| s.saves[i].clone()) {
-                    None => answer(204, &[], Bytes::new()),
+                    None => answer(204, &[("x-door-life", life.to_string())], Bytes::new()),
                     Some(k) => {
                         let behind = if k.mark < s.marks { "1" } else { "0" };
-                        answer(200, &[("x-door-mark", s.marks.to_string()), ("x-door-behind", behind.into())], k.bytes)
+                        let headers = [("x-door-mark", s.marks.to_string()), ("x-door-behind", behind.into()), ("x-door-life", life.to_string()), ("x-door-save", format!("{}-{}", k.life, k.seq))];
+                        answer(200, &headers, k.bytes)
                     }
                 }
             }),
             ("PUT", "/save") => self.with(|s| {
-                assert!(query.starts_with("seq="), "a save is numbered: {query}");
-                if generation < s.generation {
+                let seq: u64 = query.strip_prefix("seq=").and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("a save is numbered: {query}"));
+                if generation != s.life || s.lives.get(&generation) != Some(&s.started) {
                     s.refused += 1;
                     return answer(409, &[], Bytes::new());
                 }
-                s.saves.push(Kept { generation, mark: mark.expect("a save carries its mark"), bytes: body });
+                if let Some(dir) = &s.keep {
+                    let _ = std::fs::write(dir.join(format!("save-life{generation}.sxd")), &body);
+                }
+                s.saves.push(Kept { start: s.started, life: generation, seq, mark: mark.expect("a save carries its mark"), bytes: body });
                 answer(200, &[], Bytes::new())
             }),
+            ("POST", "/unreadable") => answer(200, &[], Bytes::new()),
             ("POST", "/deliver") => self.with(|s| {
                 if s.closed {
                     return answer(503, &[], Bytes::new());
@@ -172,7 +194,7 @@ impl Drop for Start {
 }
 
 fn start(lab: &Lab, door: &FakeDoor, generation: u64) -> Start {
-    door.with(|s| s.generation = generation);
+    door.with(|s| s.started = generation);
     let ctr = format!("{}-door-{generation}", lab.prefix);
     let _ = docker(&["rm", "-f", &ctr]);
     let (net, api, gen) = (format!("{}-net", lab.prefix), format!("DOOR_API=http://door.test:{}", door.port), format!("DOOR_GENERATION={generation}"));
@@ -331,6 +353,7 @@ async fn the_door_against_the_real_core() {
     build_image();
     let mut lab = Lab::up("door");
     let door = FakeDoor::start().await;
+    door.with(|s| s.keep = Some(lab.dir.clone()));
 
     // a new door: no save, a new profile, its first save
     let g1 = start(&lab, &door, 1);
@@ -460,7 +483,7 @@ async fn the_door_against_the_real_core() {
     g3.kill("TERM");
     assert_eq!(g3.exited(), 0, "a planned stop ends well: {}", logs(&g3.ctr));
     drop(g3);
-    let newest = door.with(|s| (s.saves.last().map(|k| (k.generation, k.mark)), s.marks));
+    let newest = door.with(|s| (s.saves.last().map(|k| (k.start, k.mark)), s.marks));
     assert_eq!(newest.0, Some((3, newest.1)), "the last save is the stop's, at the newest mark");
     let g4 = start(&lab, &door, 4);
     let s = g4.until(Duration::from_secs(60), |s| s["ready"] == true && s["syncing"] == false).await;
@@ -476,7 +499,7 @@ async fn the_door_against_the_real_core() {
 
     // superseded: a newer generation started, this one's save refused, and
     // it ends
-    door.with(|s| s.generation = 5);
+    door.with(|s| s.started = 5);
     say(&mut person, agent, "p323").await;
     sent.push("p323".into());
     assert_eq!(g4.exited(), 1, "a start superseded ends: {}", logs(&g4.ctr));

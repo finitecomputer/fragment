@@ -66,8 +66,8 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     let door = "e2e-door-simplex--k3x9";
     // a new door: no save, a new profile, its first save in the bucket
     lever(api, door, "start", json!({ "agent": "Juniper" }))?;
-    let st = until(api, door, Duration::from_secs(300), |x| ready_from(1)(x) && newest(x).0 == 1)?;
-    s.ok("a new door starts with no save, and its first save is in the bucket", generation(&st) == 1 && newest(&st) == (1, 1), &st);
+    let st = until(api, door, Duration::from_secs(300), |x| ready_from(1)(x) && newest(x).0 == generation(x))?;
+    s.ok("a new door starts with no save, and its first save is in the bucket", st["door"]["started"] == 1 && newest(&st) == (generation(&st), 1), &st);
 
     // a crash: started again (a new start) from its newest save, in step
     lever(api, door, "kill", json!({}))?;
@@ -99,6 +99,11 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     lever(api, door, "start", json!({ "agent": "Juniper" }))?;
     let st = until(api, door, Duration::from_secs(120), ready_from(stopped + 1))?;
     s.ok("started again after its stop, from its last save, in step", st["runner"]["forcedSyncs"] == 0 && newest(&st).0 >= stopped, &st);
-    lever(api, door, "stop", json!({}))?;
+
+    // every save's file lost: a door that saved finds none to restore and
+    // stops, never a new profile over them (review of #1435)
+    lever(api, door, "lose", json!({}))?;
+    let st = until(api, door, Duration::from_secs(120), |x| x["door"]["stopped"].is_string() && x["running"] == false)?;
+    s.ok("a door whose saves are all lost stops: never a new profile over them", st["door"]["stopped"] == "no save of this door restores" && st["saves"].as_array().is_some_and(|a| a.iter().all(|x| x["unreadable"] == 1)), &st);
     Ok(())
 }

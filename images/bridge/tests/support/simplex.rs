@@ -225,6 +225,8 @@ impl Drop for Lab {
             let _ = std::fs::write(self.dir.join(format!("{c}.log")), logs(&ctr));
             let _ = docker(&["rm", "-f", &ctr]);
         }
+        // the server's log too, however the test ended (a stall's evidence)
+        let _ = std::fs::write(self.dir.join("smp.log"), logs(&self.container("smp")));
         let _ = docker(&["rm", "-f", &self.container("smp")]);
         let _ = docker(&["rm", "-f", &self.container("xftp")]);
         let _ = docker(&["network", "rm", &format!("{}-net", self.prefix)]);

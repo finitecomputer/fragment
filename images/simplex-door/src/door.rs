@@ -4,15 +4,19 @@
 //! call carrying this start's generation (`GENERATION_HEADER`), which the
 //! door fences its saves by.
 //!
-//! - `GET /save`: the newest save, `MARK_HEADER` the door's newest mark,
-//!   and `BEHIND_HEADER: 1` when the save's mark is older than it; 204,
-//!   none (a new door).
+//! - `GET /save`: a life begins: the generation it is given
+//!   (`LIFE_HEADER`, every later call's), the save it restores
+//!   (`SAVE_HEADER`, named back exactly), `MARK_HEADER` the door's newest
+//!   mark, and `BEHIND_HEADER: 1` when the save's mark is older than it;
+//!   204, none (a new door); 410, none left though it saved (the runner
+//!   ends, never a new profile); 409, a newer start runs.
 //! - `PUT /save?seq=<n>`: a save, `MARK_HEADER` the newest effect it holds;
 //!   409 when a newer generation runs (this runner then ends).
 //! - `POST /deliver`: one of its owner's messages (`Delivery`), taken with a
 //!   2xx whose `MARK_HEADER` numbers it as an effect.
-//! - `POST /unreadable {why}`: the save given will not restore; the runner
-//!   then ends (exit 2) and its door starts it from an older one.
+//! - `POST /unreadable {save, why}`: the save given will not restore (its
+//!   bytes, never this container's disk); the runner then ends (exit 2)
+//!   and its door starts it from an older one.
 //!
 //! An effect is what moves a ratchet past a save: a send the door asked
 //! for, or a message delivered. The door numbers each (its mark) as it
@@ -34,6 +38,8 @@ use crate::save::UNPACKED_MAX_BYTES;
 pub const GENERATION_HEADER: &str = "x-door-generation";
 pub const MARK_HEADER: &str = "x-door-mark";
 pub const BEHIND_HEADER: &str = "x-door-behind";
+pub const LIFE_HEADER: &str = "x-door-life";
+pub const SAVE_HEADER: &str = "x-door-save";
 /// One call's wait for its whole answer.
 const CALL_MS_MAX: u64 = 30_000;
 /// A packed save is smaller than what it unpacks to (gzip never grows it by
@@ -57,12 +63,19 @@ impl std::fmt::Display for DoorError {
     }
 }
 
-/// What a start restores.
+/// What a start restores, and the generation its life is given
+/// (`LIFE_HEADER`): every call after carries that one.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Restore {
     /// No save: a new door.
-    None,
-    Save { packed: Bytes, mark: u64, behind: bool },
+    None { life: u64 },
+    /// `save` named as its door named it, to name it back if it will not
+    /// restore.
+    Save { packed: Bytes, mark: u64, behind: bool, save: String, life: u64 },
+    /// It saved, and no save of it restores: it never starts as a new door.
+    Exhausted,
+    /// A newer start runs: this one ends.
+    Superseded,
 }
 
 /// A save's answer.
@@ -91,7 +104,19 @@ pub struct Delivery<'a> {
 
 #[derive(Serialize)]
 struct Unreadable<'a> {
+    save: &'a str,
     why: &'a str,
+}
+
+/// One answer of the door's, read.
+#[derive(Default)]
+struct Answer {
+    status: StatusCode,
+    mark: Option<u64>,
+    behind: Option<bool>,
+    life: Option<u64>,
+    save: Option<String>,
+    body: Bytes,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,8 +149,15 @@ impl Door {
         Ok(Door { base, generation, client })
     }
 
-    /// One call: its status, its mark (when it names one) and its body.
-    async fn call(&self, method: Method, path: &str, headers: &[(&str, String)], body: Option<Bytes>) -> Result<(StatusCode, Option<u64>, Option<bool>, Bytes), DoorError> {
+    /// This door's calls as a life of generation `life` (its restore's).
+    pub fn living(&self, life: u64) -> Door {
+        assert!(life > 0, "a life has a generation");
+        Door { generation: life, ..self.clone() }
+    }
+
+    /// One call: its status, its mark (when it names one), the life and the
+    /// save it names, and its body.
+    async fn call(&self, method: Method, path: &str, headers: &[(&str, String)], body: Option<Bytes>) -> Result<Answer, DoorError> {
         let mut req = Request::builder().method(method).uri(self.base.url(path)).header("host", self.base.authority()).header(GENERATION_HEADER, self.generation.to_string());
         for (k, v) in headers {
             req = req.header(*k, v.as_str());
@@ -147,14 +179,16 @@ impl Door {
             // a fence is its status alone: taken from the head, whatever its
             // body does (one cut short or stalled must never read as a
             // failure to retry: the runner ends at once)
-            if status == StatusCode::CONFLICT {
-                return Ok((status, None, None, Bytes::new()));
+            if status == StatusCode::CONFLICT || status == StatusCode::GONE {
+                return Ok(Answer { status, ..Answer::default() });
             }
             let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-            let mark = header(MARK_HEADER).map(|m| m.parse::<u64>().map_err(|_| DoorError::Answer { status: status.as_u16(), body: format!("a mark that is no number: {m:?}") })).transpose()?;
+            let number = |name: &str| header(name).map(|m| m.parse::<u64>().map_err(|_| DoorError::Answer { status: status.as_u16(), body: format!("{name} that is no number: {m:?}") })).transpose();
+            let (mark, life) = (number(MARK_HEADER)?, number(LIFE_HEADER)?);
             let behind = header(BEHIND_HEADER).map(|b| b == "1");
-            let bytes = Limited::new(res.into_body(), ANSWER_MAX_BYTES).collect().await.map_err(|e| DoorError::Transport(e.to_string()))?.to_bytes();
-            Ok::<_, DoorError>((status, mark, behind, bytes))
+            let save = header(SAVE_HEADER);
+            let body = Limited::new(res.into_body(), ANSWER_MAX_BYTES).collect().await.map_err(|e| DoorError::Transport(e.to_string()))?.to_bytes();
+            Ok::<_, DoorError>(Answer { status, mark, behind, life, save, body })
         };
         match tokio::time::timeout(Duration::from_millis(CALL_MS_MAX), call).await {
             Ok(r) => r,
@@ -167,44 +201,50 @@ impl Door {
     }
 
     pub async fn restore(&self) -> Result<Restore, DoorError> {
-        let (status, mark, behind, body) = self.call(Method::GET, "/save", &[], None).await?;
-        match status {
-            StatusCode::NO_CONTENT => Ok(Restore::None),
-            StatusCode::OK => {
-                let mark = mark.ok_or_else(|| DoorError::Answer { status: 200, body: "a save with no mark".into() })?;
-                Ok(Restore::Save { packed: body, mark, behind: behind.unwrap_or(false) })
-            }
-            _ => Err(Door::refused(status, &body)),
+        let a = self.call(Method::GET, "/save", &[], None).await?;
+        let missing = |what: &str| DoorError::Answer { status: a.status.as_u16(), body: format!("a restore's answer with no {what}") };
+        match a.status {
+            StatusCode::NO_CONTENT => Ok(Restore::None { life: a.life.ok_or_else(|| missing("life"))? }),
+            StatusCode::OK => Ok(Restore::Save {
+                mark: a.mark.ok_or_else(|| missing("mark"))?,
+                behind: a.behind.unwrap_or(false),
+                save: a.save.clone().ok_or_else(|| missing("save"))?,
+                life: a.life.ok_or_else(|| missing("life"))?,
+                packed: a.body,
+            }),
+            StatusCode::GONE => Ok(Restore::Exhausted),
+            StatusCode::CONFLICT => Ok(Restore::Superseded),
+            _ => Err(Door::refused(a.status, &a.body)),
         }
     }
 
     pub async fn save(&self, seq: u64, mark: u64, packed: Vec<u8>) -> Result<Saved, DoorError> {
         assert!(seq > 0, "a save is numbered from 1 in each start");
         let headers = [("content-type", "application/octet-stream".to_string()), (MARK_HEADER, mark.to_string())];
-        let (status, _, _, body) = self.call(Method::PUT, &format!("/save?seq={seq}"), &headers, Some(Bytes::from(packed))).await?;
-        match status {
+        let a = self.call(Method::PUT, &format!("/save?seq={seq}"), &headers, Some(Bytes::from(packed))).await?;
+        match a.status {
             StatusCode::OK => Ok(Saved::Taken),
             StatusCode::CONFLICT => Ok(Saved::Superseded),
-            _ => Err(Door::refused(status, &body)),
+            _ => Err(Door::refused(a.status, &a.body)),
         }
     }
 
     /// The save this start was given will not restore (it then ends, exit
     /// 2): its door gives it no start again. Best effort: a door that does
     /// not hear it gives the same save again, and is told again.
-    pub async fn unreadable(&self, why: &str) {
-        let body = serde_json::to_vec(&Unreadable { why }).expect("a reason is JSON");
+    pub async fn unreadable(&self, save: &str, why: &str) {
+        let body = serde_json::to_vec(&Unreadable { save, why }).expect("a reason is JSON");
         let _ = self.call(Method::POST, "/unreadable", &[("content-type", "application/json".to_string())], Some(Bytes::from(body))).await;
     }
 
     /// One message delivered: its mark, the door's number for it.
     pub async fn deliver(&self, d: &Delivery<'_>) -> Result<u64, DoorError> {
         let body = serde_json::to_vec(d).expect("a delivery is JSON");
-        let (status, mark, _, answer) = self.call(Method::POST, "/deliver", &[("content-type", "application/json".to_string())], Some(Bytes::from(body))).await?;
-        match (status.is_success(), mark) {
+        let a = self.call(Method::POST, "/deliver", &[("content-type", "application/json".to_string())], Some(Bytes::from(body))).await?;
+        match (a.status.is_success(), a.mark) {
             (true, Some(m)) => Ok(m),
-            (true, None) => Err(DoorError::Answer { status: status.as_u16(), body: "a delivery taken with no mark".into() }),
-            (false, _) => Err(Door::refused(status, &answer)),
+            (true, None) => Err(DoorError::Answer { status: a.status.as_u16(), body: "a delivery taken with no mark".into() }),
+            (false, _) => Err(Door::refused(a.status, &a.body)),
         }
     }
 }
@@ -245,15 +285,23 @@ mod tests {
     async fn the_door_is_called_as_its_protocol_says() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let door = Door::new(&format!("http://{}", listener.local_addr().unwrap()), 7).unwrap();
-        let (asked, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-mark: 12\r\nx-door-behind: 1\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
+        let (asked, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-mark: 12\r\nx-door-behind: 1\r\nx-door-save: 7-3\r\nx-door-life: 8\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
         assert!(asked.starts_with("GET /save HTTP/1.1\r\n"), "{asked}");
         assert!(!asked.to_ascii_lowercase().contains("content-length"), "a GET carries no length: {asked}");
         assert!(asked.contains("x-door-generation: 7\r\n"), "{asked}");
-        assert_eq!(restored, Ok(Restore::Save { packed: Bytes::from_static(b"abc"), mark: 12, behind: true }));
-        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 204 No Content\r\n\r\n"), door.restore());
-        assert_eq!(restored, Ok(Restore::None));
-        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
-        assert!(matches!(restored, Err(DoorError::Answer { status: 200, .. })), "a save with no mark: {restored:?}");
+        assert_eq!(restored, Ok(Restore::Save { packed: Bytes::from_static(b"abc"), mark: 12, behind: true, save: "7-3".into(), life: 8 }));
+        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 204 No Content\r\nx-door-life: 9\r\n\r\n"), door.restore());
+        assert_eq!(restored, Ok(Restore::None { life: 9 }));
+        // none left though it saved; a newer start runs
+        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 410 Gone\r\ncontent-length: 0\r\n\r\n"), door.restore());
+        assert_eq!(restored, Ok(Restore::Exhausted));
+        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 409 Conflict\r\ncontent-length: 0\r\n\r\n"), door.restore());
+        assert_eq!(restored, Ok(Restore::Superseded));
+        let living = door.living(8);
+        let (asked, _) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"), living.save(1, 0, vec![1]));
+        assert!(asked.contains("x-door-generation: 8\r\n"), "a life's calls carry its generation: {asked}");
+        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-life: 8\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
+        assert!(matches!(restored, Err(DoorError::Answer { status: 200, .. })), "a save with no mark or name: {restored:?}");
 
         let (asked, saved) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"), door.save(3, 12, vec![1, 2]));
         assert!(asked.starts_with("PUT /save?seq=3 HTTP/1.1\r\n") && asked.contains("x-door-mark: 12\r\n") && asked.contains("content-length: 2\r\n"), "{asked}");

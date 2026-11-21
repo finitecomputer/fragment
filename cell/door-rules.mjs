@@ -15,7 +15,7 @@ export const DELIVERIES_KEPT = 256;
 // crates/core/migrations/schema.lock). door-rules.test.mjs holds each
 // released step to its text.
 export const STEPS = [
-  "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, stopped TEXT)",
+  "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, started INTEGER NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, saved INTEGER NOT NULL, stopped TEXT)",
   "CREATE TABLE saves (generation INTEGER NOT NULL, seq INTEGER NOT NULL, mark INTEGER NOT NULL, bytes INTEGER NOT NULL, at INTEGER NOT NULL, unreadable INTEGER NOT NULL, PRIMARY KEY (generation, seq))",
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
 ];
@@ -65,8 +65,25 @@ export function surplus(saves) {
   return saves.filter((s) => !keep.has(`${s.generation}-${s.seq}`));
 }
 
-// Whether a door may start: one with saves starts only from one of them,
-// never as a new door over them (a new profile, its link gone).
-export function startable(saves) {
-  return saves.length === 0 || restorable(saves) !== null;
+// What a start restores: none (a new door: it never saved), its newest
+// readable save, or nothing left (it saved, and none restores: it never
+// starts as a new door over them, a new profile, its link gone). `saved`
+// is how many saves it ever took, so the answer outlives pruning.
+export function restoreOf(saves, saved) {
+  const s = restorable(saves);
+  if (s) return { kind: "save", save: s };
+  return saved === 0 && saves.length === 0 ? { kind: "none" } : { kind: "exhausted" };
+}
+
+// Whether a door may start: unless it saved and nothing restores.
+export function startable(saves, saved) {
+  return restoreOf(saves, saved).kind !== "exhausted";
+}
+
+// A save's id, as a start is told it and names it back ("<generation>-<seq>").
+export const saveId = (s) => `${s.generation}-${s.seq}`;
+
+export function parseSaveId(id) {
+  const m = typeof id === "string" ? /^([0-9]{1,15})-([0-9]{1,15})$/.exec(id) : null;
+  return m ? { generation: Number(m[1]), seq: Number(m[2]) } : null;
 }
