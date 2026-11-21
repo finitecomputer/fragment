@@ -734,6 +734,8 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
     anyhow::ensure!(visit.status == 200 && visit.body["bound"] == 1, "its owner opens the move, and is bound: {visit}");
+    let seat = || api.signed(&owner, "GET", "/api/seat", None).map(|r| r.body["seat"].clone()).unwrap_or(Value::Null);
+    let comped = seat();
     let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": identity })))?;
     anyhow::ensure!(yes.status == 200, "Yes: {yes}");
     let tag = crate::Keys::generate().pubkey_hex()[..16].to_string();
@@ -780,7 +782,16 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let replay = mover.hand_off(&old, &cmd.id, all.clone())?;
     let after = vault()?;
     s.ok("the same hand-off again answers the same and changes nothing", replay.status == 200 && replay.body == again.body && after == v, format!("{} {}", replay.status, replay.body));
+    // its stage carries its owner's SimpleX chat
+    mover.simplex(true);
     mover.run_once()?;
+    mover.simplex(false);
+    let on = s.eventually(crate::lanes::billing::PUSHED, || seat()["kind"] == "seat_always_on");
+    s.ok(
+        "its stage carries its SimpleX chat: its owner's comped `seat`, which sleeps, is made always-on as it completes, which SimpleX needs",
+        comped["kind"] == "seat" && comped["comped"] == true && on && seat()["comped"] == true,
+        json!([comped, seat()]),
+    );
     let late = mover.hand_off(&old, &cmd.id, all)?;
     s.ok("once its stage is staged, its command is done: a hand-off is stale (409)", late.status == 409, format!("{} {}", late.status, late.body));
     let logged = super::vault::logs(s);
