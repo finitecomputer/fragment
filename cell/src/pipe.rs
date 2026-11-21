@@ -111,9 +111,11 @@ const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// (`secrets::StreamedPasses`), a value split across pieces too.
 pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>]) -> CellResult<Response> {
     let redact = |text: String| fragment_core::secrets::redact_passes(text, passes);
+    // appended, not set: each of several fields of one name (`set-cookie`)
+    // stays its own
     let headers = Headers::new();
     for (name, value) in resp.headers().entries() {
-        headers.set(&name, &redact(value))?;
+        headers.append(&name, &redact(value))?;
     }
     let status = resp.status_code();
     // no body (a HEAD's, a 204's): its headers were all it could echo
