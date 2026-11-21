@@ -240,7 +240,6 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
         poll_interval_s: 30,
         egress_local: false,
         job_retry_delay_s: 10,
-        blob_grace_s: None,
         upload_max_bytes: None,
         ai_url: None,
         ai_gateway: None,
@@ -262,6 +261,8 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
         computer_image,
         images: vec![],
         computer_snapshots: false,
+        // a home runs no SimpleX doors (the e2e's door lane's alone)
+        doors: false,
         computer_internet: true,
         computer_unsaved_max_ms: None,
         providers: Some("[]".into()),
