@@ -89,11 +89,11 @@ test("every intercept is in place at the start itself, all asked at once", async
   assert.deepEqual([...seen.asked].sort(), [...every].sort());
   // what had landed when the container started, not after
   assert.deepEqual([...seen.atStart].sort(), every.map((e) => e.split(" → ")[0]).sort());
-  // one round trip for them all, not one each
-  assert.equal(seen.inFlightMax, every.length);
+  // two round trips, not one each: the platform's, then the swap hosts
+  assert.equal(seen.inFlightMax, 4);
 });
 
-test("without a code.storage of its own or a swap host, the platform's two; never the backups' host, whose saves and restores grant their own", async () => {
+test("without a code.storage of its own or a swap host, the platform's two; the backups' host only when its start reserves it", async () => {
   const { c, seen } = container();
   await startIntercepted(c, {}, () => intercept(c, egress, [], false), () => false);
   assert.deepEqual(seen.asked, [`http://${API} → api`, `http://${MODEL} → model`]);
@@ -212,4 +212,20 @@ test("a registration asked again once its start is no longer the running one is 
   await assert.rejects(interceptSwap(c, egress, ["late.example.test"], live), /no longer the running one/);
   assert.deepEqual(seen.asked, ["http://late.example.test → swap", busy]);
   assert.ok(!seen.caught.has("https://late.example.test"));
+});
+
+test("a swap host never takes the room of a platform registration asked again: the swap hosts wait for the platform's to land", async () => {
+  // 22 catalog and 8 Vault hosts, and one stale host held: 4 entries left, the backups' host's 2 among them
+  const c = full([...PLATFORM, ...both(hosts("stale", 1))]);
+  let busy = true;
+  const reserve = async () => {
+    if (busy) {
+      busy = false;
+      throw new Error("the container is temporarily unavailable");
+    }
+    return c.interceptOutboundHttp("backups.sandbox.internal", egress("deny"));
+  };
+  const left = await intercept(c, egress, hosts("s", 30), false, () => true, reserve);
+  assert.ok(c.targets.has("http://backups.sandbox.internal"));
+  assert.equal(left.length, 1);
 });

@@ -39,24 +39,26 @@ function swapped(c, egress, hosts) {
 }
 
 // Registers every egress intercept of a computer's guest on container `c`,
-// all at once (one round trip, not one each): the platform's hosts, a
-// local fleet's code.storage (`codestorage`: at a loopback address the
-// container cannot reach), each of `swapHosts` (`swapped`), each
-// `ComputerEgress` with its route as `egress(route)` makes it. None
-// survives a stop: each start registers them again. Answers the swap
-// hosts left for want of room (`landed`). `live()`: whether the start
-// these are for is still the running one (`landed`). `reserve`, a start's
-// alone: the backups' host's registration, asked with the platform's,
-// before any swap host (entry.mjs `#intercept`).
-export function intercept(c, egress, swapHosts, codestorage, live, reserve) {
-  const each = [
+// in two round trips (not one each): the platform's hosts, a local
+// fleet's code.storage (`codestorage`: at a loopback address the
+// container cannot reach) and `reserve` (a start's alone: the backups'
+// host's registration, entry.mjs `#intercept`), all at once; then, once
+// every one of those has landed, each of `swapHosts` (`swapped`), each
+// `ComputerEgress` with its route as `egress(route)` makes it. The swap
+// hosts wait so that one of the platform's asked again ("temporarily
+// unavailable", `settled`) never finds them in its room (Sol on #1427).
+// None survives a stop: each start registers them again. Answers the
+// swap hosts left for want of room (`landed`). `live()`: whether the
+// start these are for is still the running one (`landed`).
+export async function intercept(c, egress, swapHosts, codestorage, live, reserve) {
+  const own = [
     { f: () => c.interceptOutboundHttp("api.fragment.internal", egress("api")) },
     { f: () => c.interceptOutboundHttp("model.fragment.internal", egress("model")) },
   ];
-  if (codestorage) each.push({ f: () => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")) });
-  if (reserve) each.push({ f: reserve });
-  each.push(...swapped(c, egress, swapHosts));
-  return landed(each, live);
+  if (codestorage) own.push({ f: () => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")) });
+  if (reserve) own.push({ f: reserve });
+  await landed(own, live);
+  return landed(swapped(c, egress, swapHosts), live);
 }
 
 // `hosts` more for the swap of a running container (a Vault secret's, set
