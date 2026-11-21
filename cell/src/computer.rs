@@ -490,7 +490,8 @@ impl From<CellError> for Unstarted {
     }
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct ComputerCell {
     state: State,
     raw: JsValue,
@@ -554,6 +555,7 @@ pub struct ComputerCell {
     uses_due_ms: Rc<std::cell::Cell<i64>>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for ComputerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -4364,7 +4366,8 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
 /// `model.fragment.internal`, or a host the swap catches (entry.mjs's
 /// `ComputerEgress`, whose props name the computer and the route). A class with a static method, as
 /// `InternalRoute` is: worker-build exports classes by name.
-#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), wasm_bindgen(wasm_bindgen = worker::wasm_bindgen))]
 pub struct ComputerEgress;
 
 /// `resp` with no header of the relay's family (`fragment_core::relay::
@@ -4386,7 +4389,7 @@ fn unrelayed(resp: Response, computer: &str, route: &str, path: &str) -> Respons
     resp.with_headers(headers)
 }
 
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "admin"), wasm_bindgen)]
 impl ComputerEgress {
     /// An XFTP relay of `computer`'s ended, having carried `bytes`: its
     /// place freed and its bytes counted (fragment_core::relay). Logged on

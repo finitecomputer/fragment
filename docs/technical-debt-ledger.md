@@ -793,6 +793,40 @@ unfinished design, not debt.
   is removed (FIN-463's debt entry). First candidates: the Migrations
   object, the export's archive builder, the Computer DO's routes.
 
+## The admin Worker deploys after the cell, not with it
+
+- **Shortcut:** a deploy is atomic for the cell (docs/MODEL.md, "Calls
+  between releases"), but the operators' admin Worker (cell/src/admin.rs)
+  deploys after it, from the same build and release, and is then probed
+  (`/healthz/admin`; xtask/src/deploy.rs). Cloudflare deploys one Worker
+  at a time, and each refuses a binding to a Worker that is not there:
+  the cell's to the admin, the admin's to the cell's classes. So the
+  admin goes second, and a deployment with none yet first gets one with
+  no object binding (`admin_bare`). Nothing in the system reads from the
+  admin, so it alone is let fall behind.
+- **Risk:** in a deploy's seconds the objects refuse the old admin's
+  calls (`deploying`); an admin deploy that fails fails the job with the
+  cell live, and the operators' routes stay down until the next deploy.
+  A class the cell adds and the admin binds in the same release would
+  make the admin's deploy fail until the cell's is live: it is, by then.
+  Deleting a branch deletes the admin first (it binds the cell's
+  classes); whether Cloudflare also refuses to delete a Worker another
+  binds as a service is untested.
+- **Delete when:** Cloudflare deploys several Workers as one, or the
+  admin moves back into the cell.
+
+## celld runs no admin Worker
+
+- **Shortcut:** `celld dev` runs one Worker, so its render drops the
+  cell's binding to the admin (crates/devstack celld.rs `DROPPED`), and
+  the cell there answers the admin's routes with a host failure saying
+  so (cell/src/admin.rs `forward`).
+- **Risk:** a self-hosted node has no admin page or admin API; CI runs
+  no celld lane (tag `celld-final`), so nothing else notices.
+- **Delete when:** celld runs a deployment's Workers together, with a
+  service binding between them and object bindings across them, or the
+  celld lane is retired.
+
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
 - **Shortcut:** wrangler's teardown removes containers by image ID (other
