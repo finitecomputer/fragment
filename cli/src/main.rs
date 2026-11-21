@@ -2716,7 +2716,7 @@ fn run(cli: Cli) -> Result<()> {
                         let warns = match st.kind {
                             fragment_proto::FragmentKind::Chat => {
                                 let members: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
-                                fragment_core::access::talks_to_owners_agent(st.kind, &members.members)
+                                fragment_core::permit::talks_to_owners_agent(st.kind, &members.members)
                             }
                             _ => false,
                         };
@@ -2729,7 +2729,7 @@ fn run(cli: Cli) -> Result<()> {
                                 println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
                                 if warns {
-                                    println!("  {}", fragment_core::access::TRUST_WARNING);
+                                    println!("  {}", fragment_core::permit::TRUST_WARNING);
                                 }
                                 return Ok(());
                             }

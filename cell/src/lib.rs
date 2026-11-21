@@ -88,7 +88,7 @@ mod subscriptions;
 mod updating;
 mod wipe;
 
-use fragment_core::access;
+use fragment_core::permit;
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
@@ -290,7 +290,7 @@ pub(crate) async fn registry_round_trip(env: &Env, path: &str, body: String) -> 
 }
 
 /// The identity a request's signed URL names in `for` (decision R17). Today
-/// only the agent's owner (`access::may_act_for`, checked in `signer_of`): a
+/// only the agent's owner (`permit::may_act_for`, checked in `signer_of`): a
 /// bare claim naming anyone else is refused, since nothing proves they asked;
 /// acting for another member will come with that proof (such as their own
 /// signed chat record). At most one, an identity.
@@ -322,7 +322,7 @@ pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> 
 }
 
 /// `signer`, honoring `for`: an agent's request acts for the identity it
-/// names, capped (the fragment decides: `fragment_core::access`).
+/// names, capped (the fragment decides: `fragment_core::permit`).
 pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
     signer_of(env, req, url, Payload::Read(body)).await
 }
@@ -330,7 +330,7 @@ pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8])
 /// The signer for any payload: a body the router read, or one it streams
 /// through unread (a blob, whose URL names its hash). `for` is inside the
 /// signed URL, and only an agent may name it, and only its own owner
-/// (`access::may_act_for`): a person acts as themselves.
+/// (`permit::may_act_for`): a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
     let (identity, key) = match caller(env, req, url, payload)? {
@@ -339,7 +339,7 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
     if let Some(named) = &acting_for {
-        fragment_core::access::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
     }
     Ok(Signed { identity, key, acting_for })
 }
@@ -627,7 +627,7 @@ pub(crate) use json_response::{json_answer, json_passed};
 /// reaches for whom it names (docs/cloudflare-v1.md, R17; today only its
 /// owner, see `acting_for`): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
-/// there (`access::listed_role`). A call decides again, live.
+/// there (`permit::listed_role`). A call decides again, live.
 async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
     let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?;
     let list = principal::calls::List::default();
@@ -639,12 +639,12 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
         .fragments
         .into_iter()
         .filter_map(|f| {
-            let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
+            let cap = permit::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
             // the asker's own view (their search's preview and unread, their
             // archiving and their dock) stays theirs, as do the listed
             // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
+            permit::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments, limits: Some(Config::from_env(env).uploads_for(agent.identity.kind)) })
@@ -1455,7 +1455,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
                 return Err(CellError::invalid("a fragment's name is <label>--<suffix>"));
             }
-            let reserved = access::reserved(method.as_ref(), rest);
+            let reserved = permit::reserved(method.as_ref(), rest);
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -1486,11 +1486,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             // its, and it shares only for its own owner, unheld (Paul,
             // 2026-10-04). Who it is decides that much here; the fragment
             // decides the rest from its owner's share there, and decides
-            // again on its own (`access::agent_shares`).
+            // again on its own (`permit::agent_shares`).
             if let (Some(reserved), Some(agent)) = (reserved, principal.as_ref().filter(|p| p.kind != IdentityKind::Person)) {
                 let for_owner = agent.acting_for.is_some() && agent.acting_for == agent.owner;
-                let sharer = access::Sharer { for_owner, held: agent.held };
-                if let Err(refusal) = access::agent_may_ask(reserved, sharer) {
+                let sharer = permit::Sharer { for_owner, held: agent.held };
+                if let Err(refusal) = permit::agent_may_ask(reserved, sharer) {
                     return Err(CellError::new(ErrorCode::Forbidden, refusal.message()));
                 }
             }

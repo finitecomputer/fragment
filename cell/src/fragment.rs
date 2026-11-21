@@ -51,7 +51,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use fragment_core::access::{self, Decision, Purpose, Standing};
+use fragment_core::permit::{self, Action, Standing, Verdict};
 use fragment_core::npub;
 use fragment_core::seed;
 use fragment_proto::{
@@ -667,21 +667,13 @@ pub(crate) fn as_themselves(standing: Standing) -> bool {
     standing.member.is_some() || standing.owns_member_agent
 }
 
-/// The caller's role for `purpose`, or the refusal and why: pure, over the
-/// visibility and standing a request read once. `needs` is the weakest
-/// role that may do it.
-pub(crate) fn decide(visibility: Visibility, standing: Standing, purpose: Purpose, needs: Role) -> CellResult<Role> {
-    let why = || match (needs, visibility) {
-        _ if standing.cap.is_some() => format!("this needs the {} role: an agent acts with the lower of its asker's role and its own (or its owner's), at most editor", needs.as_str()),
-        _ if standing.owns_member_agent && purpose == Purpose::Act => "you read this fragment through your agent's membership; acting here needs your own".to_string(),
-        (Role::Public, Visibility::Link) => "this fragment is shared by link: open it with its share link (?view=)".to_string(),
-        (Role::Public, Visibility::Members) => "this fragment is for its members only".to_string(),
-        _ => format!("this needs the {} role", needs.as_str()),
-    };
-    match access::decide(visibility, standing, purpose, needs) {
-        Decision::Allow(role) => Ok(role),
-        Decision::Unauthenticated => Err(CellError::new(ErrorCode::Unauthenticated, format!("{}; sign in or sign the request", why()))),
-        Decision::Forbidden => Err(CellError::new(ErrorCode::Forbidden, why())),
+/// The caller's role for `action`, or the refusal and why
+/// (`permit::decide`), over the visibility and standing a request read once.
+pub(crate) fn decide(visibility: Visibility, standing: Standing, action: Action) -> CellResult<Role> {
+    match permit::decide(&permit::Facts { visibility, standing, action }) {
+        Verdict::Allow(role) => Ok(role),
+        Verdict::Ask(ask) => match ask {},
+        Verdict::Refuse(refusal) => Err(CellError::new(if refusal.sign_in { ErrorCode::Unauthenticated } else { ErrorCode::Forbidden }, refusal.message())),
     }
 }
 
@@ -914,7 +906,7 @@ impl FragmentCell {
     /// An agent acting for someone (decision R17), in one statement:
     /// the asker's standing (their membership, or an agent of theirs that is
     /// a member), capped by the agent's own membership and its owner's
-    /// (`access::effective_role`).
+    /// (`permit::decide`).
     fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
         let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
         let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
@@ -933,7 +925,7 @@ impl FragmentCell {
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
         let member = role(row.role);
-        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
+        let cap = permit::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap), held: agent.held })
     }
 
@@ -953,7 +945,7 @@ impl FragmentCell {
     /// `require` over facts the request already read. A route that decides
     /// more than once reads its standing itself and calls `decide`.
     pub(crate) fn admit(&self, facts: &Facts, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
-        decide(facts.visibility, self.standing(caller, link)?, Purpose::Read, needs)
+        decide(facts.visibility, self.standing(caller, link)?, Action::Read(needs))
     }
 
     /// The caller with who they are resolved: a site request's credential,
@@ -970,7 +962,7 @@ impl FragmentCell {
     /// the fragment with `needs` (a page, a file: `public`; a blob:
     /// `viewer`): who they are is resolved only when the anonymous standing
     /// may not read, since no one sees less than that
-    /// (`access::effective_role` only adds to it). A refusal is the
+    /// (`permit::decide` only adds to it). A refusal is the
     /// resolved caller's (401 or 403).
     ///
     /// Asking the registry lets other requests run meanwhile (a deploy's
@@ -1602,7 +1594,7 @@ impl FragmentCell {
 
     fn status(&self, caller: &Caller) -> CellResult<Response> {
         let facts = self.facts()?;
-        let role = decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Viewer)?;
+        let role = decide(facts.visibility, self.standing(caller, false)?, Action::Read(Role::Viewer))?;
         let [npub, owner, inbox_token] = self.metas([MetaKey::Npub, MetaKey::Owner, MetaKey::InboxToken])?;
         json_response(&FragmentStatus {
             kind: self.kind()?,

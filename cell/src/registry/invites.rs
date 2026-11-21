@@ -246,7 +246,7 @@ impl RegistryCell {
     /// them (Paul, 2026-10-22: "It can already publish for you and edit
     /// your own stuff! Why shouldn't it be able to handle 'skyler invited
     /// me to edit a fragment, do you see it?'"), as an agent shares for its
-    /// owner (`access::agent_shares`). Any other agent is 403; a person
+    /// owner (`permit::agent_shares`). Any other agent is 403; a person
     /// naming `for`, 400.
     fn invitee_by(&self, by: &By, acting_for: Option<&str>) -> CellResult<Identity> {
         let who = self.by(by)?;

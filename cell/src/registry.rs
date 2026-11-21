@@ -598,7 +598,7 @@ impl RegistryCell {
         if agent.kind != IdentityKind::Agent || agent.owner.as_deref() != Some(by.id.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "only an agent's owner holds it"));
         }
-        if b.held.is_some_and(|r| r == Role::Public || r > fragment_core::access::AGENT_ROLE_MAX) {
+        if b.held.is_some_and(|r| r == Role::Public || r > fragment_core::permit::AGENT_ROLE_MAX) {
             return Err(CellError::invalid("an agent is held at viewer or editor"));
         }
         let held = b.held.map_or(SqlStorageValue::Null, |r| r.as_str().into());
