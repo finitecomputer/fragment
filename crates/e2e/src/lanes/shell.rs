@@ -3662,6 +3662,10 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     // its words, over settings once they have loaded (what the shots show)
     let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
     let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 9_000_000_000u64, "data": 14_200_000_000u64 }))?;
+    // its update waits for room while it is told filling (docs/computers.md,
+    // "An image's share of the disk"; Codex on #1422)
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let waits = view()["roomFirst"] == true;
     b.viewport(page, 1280, 800, false)?;
     b.reload(page)?;
     let told = b.until(page, &words, wait);
@@ -3682,14 +3686,15 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     b.color_scheme(page, "dark")?;
     b.viewport(page, 1280, 900, false)?;
     s.ok(
-        "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen",
-        filling.status == 200 && filling.body["kept"] == true && told && phone && fits == true,
-        json!({ "said": said, "lever": filling.body }),
+        "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen; its update waits for room",
+        filling.status == 200 && filling.body["kept"] == true && told && phone && fits == true && waits,
+        json!({ "said": said, "lever": filling.body, "roomFirst": waits }),
     );
     let room = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64, "data": 3_000_000_000u64 }))?;
     b.reload(page)?;
     let gone = b.until(page, "!document.querySelector('#computer-notices .computer-notice[data-kind=disk_filling]')", wait);
-    s.ok("a read with room again tells it no more", room.status == 200 && gone, &room.body);
+    let free = view().get("roomFirst").is_none();
+    s.ok("a read with room again tells it no more, and its update waits no more", room.status == 200 && gone && free, json!({ "lever": room.body, "roomFirst": !free }));
     Ok(())
 }
 
