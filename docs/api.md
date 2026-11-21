@@ -2157,7 +2157,9 @@ container. What a guest may rely on, and every behaviour below, is
 docs/computers.md's; these routes are its owner's. A view is
 `ComputerView` (`fragment_proto::computer`); its `disk` is its disk as last
 read and the room it has left (`DiskRoom`: docs/computers.md, "Room to
-restore").
+restore"), and its owner's view's `sizes` what takes that disk
+(`ComputerSizes`: its biggest folders and files, read after its newest
+awake save).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
