@@ -351,8 +351,6 @@ pub struct Fleet {
     pub egress_local: bool,
     /// The first retry delay of a failed job step (it doubles each time).
     pub job_retry_delay_s: u32,
-    /// How long a blob no branch names is kept (`None`: the cell's 7 days).
-    pub blob_grace_s: Option<u32>,
     /// One file a person may send, at most (`FRAGMENT_UPLOAD_MAX_BYTES`;
     /// `None`: the cell's default, a zone's).
     pub upload_max_bytes: Option<u64>,
@@ -581,10 +579,6 @@ impl Fleet {
         ];
         if self.egress_local {
             vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
-        }
-        let grace = self.blob_grace_s.map(|g| g.to_string());
-        if let Some(g) = &grace {
-            vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
         }
         let uploads = self.upload_max_bytes.map(|n| n.to_string());
         if let Some(n) = &uploads {

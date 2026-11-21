@@ -195,8 +195,6 @@ pub fn openrouter_deep_routing() -> Value {
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
-/// Blobs no branch names are kept this long here (7 days in production).
-pub const BLOB_GRACE_S: u32 = 4;
 /// The fleet's bound on one file a person sends (`upload_max_bytes`):
 /// below a zone's, so a test makes a file past it cheaply, and named, so
 /// the routes and the clients' checks are seen to read the deployment's
@@ -861,7 +859,6 @@ impl Suite {
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
-            blob_grace_s: Some(BLOB_GRACE_S),
             upload_max_bytes: Some(UPLOAD_MAX_BYTES),
             // the lower rung: the model route's calls go to the Workers AI fake,
             // and, shaped as the private tier, its tiers to the fake's

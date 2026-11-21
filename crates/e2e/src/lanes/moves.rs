@@ -1417,11 +1417,20 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "the agent edits it: {r}");
     let brought = run(s, &["home", "files", &source, "--layout", &layout, "--into", &name, "--json"])?;
     let file = |p: &str| api.signed(&owner, "GET", &format!("/api/f/{name}/file?path={}", crate::api::url_enc(p)), None);
-    let video = file("files/videos/trip.mp4")?;
+    // every file it says it brought reads back whole where it went
+    let (mut whole, mut bad) = (vec![], vec![]);
+    for (path, want) in &files {
+        let Some(rel) = path.strip_prefix("workspace/") else { continue };
+        match file(&format!("files/{rel}"))? {
+            r if r.status == 200 && r.bytes == *want => whole.push(rel),
+            r if r.status == 404 => {}
+            r => bad.push(format!("{rel}: {} ({} bytes)", r.status, r.bytes.len())),
+        }
+    }
     s.ok(
-        "its files come from the stage into a fragment of files, the video larger than the computer's room among them, whole",
-        brought["files"].as_u64().is_some_and(|n| n >= 3) && video.status == 200 && video.bytes == extra[0].1 && file("files/datasets/readings.csv")?.bytes == extra[2].1,
-        json!({ "brought": brought, "video": video.status }),
+        "its files come from the stage into a fragment of files, each it says it brought read back whole, the video larger than the computer's room among them",
+        brought["files"].as_u64() == Some(whole.len() as u64) && whole.len() >= 3 && bad.is_empty() && whole.contains(&"videos/trip.mp4"),
+        json!({ "brought": brought, "whole": whole, "bad": bad }),
     );
     let kept = disk_used(&home);
     s.ok("what the import keeps on the computer is within its room: the stage never came onto it", kept <= BIG_ROOM, format!("{kept} bytes"));
