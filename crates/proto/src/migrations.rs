@@ -646,6 +646,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub left_more: Option<u64>,
+    /// It carries its owner's SimpleX chat (docs/migrations.md, "SimpleX in
+    /// a stage"), which runs only on a computer that stays on: its
+    /// person's comped `seat` is made always-on as it completes.
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub simplex: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
