@@ -956,7 +956,7 @@ impl FragmentCell {
     /// The facet call that follows is an outgoing message, which the
     /// runtime's output gate holds until this write is stored, so a run the
     /// facet commits always has its pending row.
-    pub(crate) fn begin(&self, ledger_id: &str, op: &str, principal: &str, depth: u32) -> CellResult<(Pending, bool)> {
+    pub(crate) fn begin(&self, ledger_id: &str, op: &str, principal: &str, depth: u32, code: Option<&str>) -> CellResult<(Pending, bool)> {
         if let Some(p) = self.pending(ledger_id)? {
             return Ok((p, false));
         }
@@ -964,7 +964,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{PENDING_MAX} mutations are waiting for their effects to apply; retry shortly")));
         }
         let now = SqlStorageValue::Integer(js::now_ms());
-        let code = self.installed_code()?.map_or(SqlStorageValue::Null, SqlStorageValue::from);
+        let code = code.map_or(SqlStorageValue::Null, SqlStorageValue::from);
         let rows = self.rows(
             &format!("INSERT INTO pending (ledger_id, op, principal, depth, tries, next_at, at, code) VALUES (?, ?, ?, ?, 0, ?, ?, ?) RETURNING {PENDING_COLUMNS}"),
             vec![ledger_id.into(), op.into(), principal.into(), SqlStorageValue::Integer(depth.into()), now.clone(), now, code],
@@ -976,9 +976,8 @@ impl FragmentCell {
 
     /// A run that committed under a row an earlier attempt left: the row
     /// now describes this call.
-    pub(crate) fn restate(&self, p: &mut Pending, op: &str, depth: u32) -> CellResult<()> {
-        // run again, by the code installed now
-        let code = self.installed_code()?;
+    pub(crate) fn restate(&self, p: &mut Pending, op: &str, depth: u32, code: Option<String>) -> CellResult<()> {
+        // run again, by the code this call ran (read before it ran)
         let stored = code.clone().map_or(SqlStorageValue::Null, SqlStorageValue::from);
         self.exec("UPDATE pending SET op = ?, depth = ?, code = ? WHERE seq = ?", vec![op.into(), SqlStorageValue::Integer(depth.into()), stored, SqlStorageValue::Integer(p.seq)])?;
         p.op = op.to_string();
