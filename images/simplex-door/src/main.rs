@@ -306,13 +306,13 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
             (Kept::default(), 0, false)
         }
         Restore::Save { packed, mark, behind } => {
-            let state = save::stage(&packed, dir).unwrap_or_else(|e| unreadable(&e.to_string()));
-            let kept: Kept = serde_json::from_slice(&state).unwrap_or_else(|e| unreadable(&e.to_string()));
-            if let Some(contact) = kept.link.contact() {
-                if !save::staged_contact(dir, contact).unwrap_or_else(|e| unreadable(&e.to_string())) {
-                    unreadable(&format!("its link's contact {contact} is not in its chat database"));
+            let kept = match staged(&packed, dir) {
+                Ok(kept) => kept,
+                Err(why) => {
+                    door.unreadable(&why).await;
+                    unreadable(&why)
                 }
-            }
+            };
             assert!(behind || kept.mark >= mark, "a save its door says is not behind holds the door's newest mark");
             save::place(dir).expect("the staged databases placed");
             ev!("door.restored", { "bytes": packed.len(), "mark": kept.mark, "doorMark": mark, "behind": behind });
@@ -320,6 +320,19 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
             (kept, newest, behind)
         }
     }
+}
+
+/// A save staged and checked whole (save.rs `stage`): its state, its
+/// databases, and the contact its link is bound to among them.
+fn staged(packed: &[u8], dir: &Path) -> Result<Kept, String> {
+    let state = save::stage(packed, dir).map_err(|e| e.to_string())?;
+    let kept: Kept = serde_json::from_slice(&state).map_err(|e| e.to_string())?;
+    if let Some(contact) = kept.link.contact() {
+        if !save::staged_contact(dir, contact).map_err(|e| e.to_string())? {
+            return Err(format!("its link's contact {contact} is not in its chat database"));
+        }
+    }
+    Ok(kept)
 }
 
 fn unreadable(why: &str) -> ! {

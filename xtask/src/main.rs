@@ -397,6 +397,8 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        // a door's image is built only for a stack that runs them (the e2e's door lane)
+        doors: false,
         computer_internet: true,
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real

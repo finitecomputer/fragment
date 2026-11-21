@@ -660,6 +660,20 @@ unfinished design, not debt.
 - **Delete when:** the Computer DO holds a save until its export has
   copied it, with a test that saves three times mid-copy.
 
+## A SimpleX door's object is JavaScript in the cell's Worker
+
+- **Shortcut:** the door's Durable Object and its container's egress
+  (cell/door.mjs, its rules cell/door-rules.mjs) live in the cell's own
+  Worker, as JavaScript, so the Wasm every fragment loads carries none of
+  it (Paul, 2026-11-20: "pay for what you use"); the cell's Rust holds only
+  its lever and its probe. Its schema's steps are locked by its own test
+  (door-rules.test.mjs), not `schema.lock`.
+- **Risk:** every isolate of the cell still loads the module, and the
+  door deploys only with the cell.
+- **Delete when:** two Workers deploy in lockstep (M19, after its admin
+  pilot): once the admin Worker has shipped, the door's object moves to a
+  Worker of its own, bound to the cell.
+
 ## SimpleX retains the computer's root trust and rewindable state
 
 - **Shortcut:** the SimpleX door and cores (images/bridge/src/simplex)

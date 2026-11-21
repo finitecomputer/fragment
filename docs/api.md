@@ -66,6 +66,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?}`: a SimpleX door's (cell/door.mjs): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `stop`, `kill`, `rollback`, `corrupt`; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |

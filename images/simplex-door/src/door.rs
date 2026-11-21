@@ -11,6 +11,8 @@
 //!   409 when a newer generation runs (this runner then ends).
 //! - `POST /deliver`: one of its owner's messages (`Delivery`), taken with a
 //!   2xx whose `MARK_HEADER` numbers it as an effect.
+//! - `POST /unreadable {why}`: the save given will not restore; the runner
+//!   then ends (exit 2) and its door starts it from an older one.
 //!
 //! An effect is what moves a ratchet past a save: a send the door asked
 //! for, or a message delivered. The door numbers each (its mark) as it
@@ -85,6 +87,11 @@ pub struct Delivery<'a> {
     pub at: &'a str,
     /// A file it carries, named, not yet carried itself.
     pub file: Option<FileNote<'a>>,
+}
+
+#[derive(Serialize)]
+struct Unreadable<'a> {
+    why: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,6 +187,14 @@ impl Door {
             StatusCode::CONFLICT => Ok(Saved::Superseded),
             _ => Err(Door::refused(status, &body)),
         }
+    }
+
+    /// The save this start was given will not restore (it then ends, exit
+    /// 2): its door gives it no start again. Best effort: a door that does
+    /// not hear it gives the same save again, and is told again.
+    pub async fn unreadable(&self, why: &str) {
+        let body = serde_json::to_vec(&Unreadable { why }).expect("a reason is JSON");
+        let _ = self.call(Method::POST, "/unreadable", &[("content-type", "application/json".to_string())], Some(Bytes::from(body))).await;
     }
 
     /// One message delivered: its mark, the door's number for it.

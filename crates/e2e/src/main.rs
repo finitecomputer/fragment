@@ -934,6 +934,8 @@ impl Suite {
             computer_image: self.runs_computers().then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
+            // the door's image built only for a run that names its lane
+            doors: self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME)),
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
