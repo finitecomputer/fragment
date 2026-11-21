@@ -195,8 +195,6 @@ pub fn openrouter_deep_routing() -> Value {
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
-/// Blobs no branch names are kept this long here (7 days in production).
-pub const BLOB_GRACE_S: u32 = 4;
 /// The fleet's bound on one file a person sends (`upload_max_bytes`):
 /// below a zone's, so a test makes a file past it cheaply, and named, so
 /// the routes and the clients' checks are seen to read the deployment's
@@ -861,7 +859,6 @@ impl Suite {
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
-            blob_grace_s: Some(BLOB_GRACE_S),
             upload_max_bytes: Some(UPLOAD_MAX_BYTES),
             // the lower rung: the model route's calls go to the Workers AI fake,
             // and, shaped as the private tier, its tiers to the fake's
@@ -934,6 +931,8 @@ impl Suite {
             computer_image: self.runs_computers().then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
+            // the door's image built only for a run that names its lane
+            doors: self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME)),
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
@@ -1476,7 +1475,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
+            let offers = needs::Offers { levers: true, computers: true, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };

@@ -238,7 +238,7 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
 /// from the admin's own Worker through its bindings to the cell's classes.
 /// The Registry's skew hook stands in for an object of another release.
 fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex", "Vault", "Migrations"];
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex", "Vault", "Migrations", "SimplexDoor"];
     for (probed, worker) in [("/healthz/objects", "the Worker"), ("/healthz/admin", "the admin Worker")] {
         probe_cases_of(s, api, &classes, probed, worker)?;
     }

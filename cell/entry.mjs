@@ -11,6 +11,9 @@ import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBacku
 import { readAgain } from "./backup-reads.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import * as rs from "./build/index.js";
+// A SimpleX door's object and its container's egress: JavaScript of its
+// own (door.mjs), no Rust in the cell's Wasm
+export { SimplexDoor, DoorEgress } from "./door.mjs";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again

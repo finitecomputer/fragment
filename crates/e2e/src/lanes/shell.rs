@@ -1710,6 +1710,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     disk_ui(s, api, &mut b, &page, &session, &shots)?;
+    storage_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
@@ -3696,6 +3697,124 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     let free = view().get("roomFirst").is_none();
     s.ok("a read with room again tells it no more, and its update waits no more", room.status == 200 && gone && free, json!({ "lever": room.body, "roomFirst": !free }));
     Ok(())
+}
+
+/// Settings → Computer → Storage, as its owner sees it (docs/computers.md,
+/// "Room to restore"; Paul, 2026-11-20: an iPhone-style view in plain
+/// categories): its agent leaves three real files on its computer (the
+/// stub's `fill-data`: a 48 MiB download, 16 MiB of browser data, a 12 MiB
+/// cache), its awake save after that work reads what takes its disk, and
+/// Storage shows them by kind, the biggest files by name, and the room
+/// left; its disk's size a computer's (the `disk` lever, its /data as that
+/// read found it: a test fleet's computers share their host's disk), at
+/// 1280 and 390 px, light and dark, within the phone's width. Starts and
+/// ends on settings.
+fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let files = [("work/e2e/downloads/talk.mp4", 48), ("work/e2e/browser-profile/cache.bin", 16), ("work/e2e/home/.cache/pip/wheel.whl", 12)];
+    let mut posted = Vec::new();
+    for (n, (path, mib)) in files.iter().enumerate() {
+        posted.push(shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("storage-fill-{n}"), "body": { "text": format!("fill-data {path} {mib}") } })), &[])?.status);
+    }
+    let filled = || {
+        shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?limit=1000"), None, &[])
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("filled work/e2e/")))
+            .count()
+            == files.len()
+    };
+    let made = s.eventually(std::time::Duration::from_secs(60), filled);
+    // its work over, it saves awake, and reads what takes its disk
+    let listed = |v: &Value| files.iter().all(|(path, mib)| v["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == *path && f["bytes"].as_u64() == Some(mib * 1024 * 1024))));
+    let read = made && s.eventually(std::time::Duration::from_secs(180), || listed(&view()));
+    let sizes = view()["sizes"].clone();
+    // its disk a computer's: 20 GB with 15 GB free, its /data as read
+    let sized = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    let block = "document.querySelector('#settings-page [data-storage]')";
+    let drawn = format!(
+        "!!{block}?.checkVisibility() && ['downloads', 'browser', 'caches'].every((k) => {block}.querySelector(`[data-kind=${{k}}]`)) && ['talk.mp4', 'cache.bin', 'wheel.whl'].every((n) => [...{block}.querySelectorAll('.storage-file-name')].some((e) => e.textContent === n)) && /left$/.test({block}.querySelector('.storage-left').textContent)"
+    );
+    let at = |w: u32, h: u32, mobile: bool, b: &mut Browser| -> Result<(bool, Value)> {
+        b.viewport(page, w, h, mobile)?;
+        b.reload(page)?;
+        let ok = b.until(page, &drawn, wait);
+        b.eval(page, &format!("({block}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let fits = b.eval(page, &format!("({{ right: {block}?.getBoundingClientRect().right <= innerWidth + 1, wide: document.scrollingElement.scrollWidth <= innerWidth + 1 }})"))?;
+        for scheme in ["dark", "light"] {
+            b.color_scheme(page, scheme)?;
+            let _ = b.screenshot(page, &shots.join(format!("computer-storage-{w}-{scheme}.png")));
+        }
+        Ok((ok, fits))
+    };
+    let (desk, _) = at(1280, 900, false, b)?;
+    let (phone, fits) = at(390, 844, true, b)?;
+    let said = b.eval(page, &format!("{block}?.innerText"))?;
+    // the room it shows is its view's, as its notices say a size (Codex on #1428)
+    let room = view()["disk"]["room"].as_u64();
+    let left = b.eval(page, &format!("{block}?.querySelector('.storage-left')?.textContent"))?;
+    let room_said = room.is_some_and(|r| r >= 1_000_000_000 && left.as_str() == Some(&format!("{} left", storage_size(r))));
+    s.ok(
+        "Storage shows what takes its disk by kind (downloads, browser data, caches), its biggest files by name, and the room left, from its awake save's read; on a desktop and on a phone (390 px), within its width",
+        made && posted.iter().all(|st| *st == 200) && read && sized.status == 200 && desk && phone && fits["right"] == true && fits["wide"] == true && room_said,
+        json!({ "said": said, "posted": posted, "sizes": sizes, "fits": fits, "room": room, "left": left }),
+    );
+    // no room left (free below a restore's floor): Full, in red; room again after
+    let full = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 200_000_000u64 }))?;
+    b.reload(page)?;
+    let shows_full = b.until(page, &format!("{block}?.querySelector('.storage-left.storage-low')?.textContent === 'Full'"), wait);
+    // its view says none while it shows Full (Codex on #1428)
+    let none = view()["disk"]["room"].clone();
+    let again = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    b.reload(page)?;
+    let roomy = b.until(page, &format!("/ left$/.test({block}?.querySelector('.storage-left:not(.storage-low)')?.textContent)"), wait);
+    s.ok(
+        "Storage with no room left says Full, in red, and the room again once a read finds it",
+        full.status == 200 && none == 0 && shows_full && again.status == 200 && roomy,
+        json!({ "full": full.body, "room": none, "again": again.body }),
+    );
+    // Delete, on the phone: asked once, then the platform removes the file
+    // in its container, and Storage reads it again without it
+    let wheel = "work/e2e/home/.cache/pip/wheel.whl";
+    let row = format!("{block}?.querySelector('.storage-file[data-path=\"{wheel}\"]')");
+    // on screen for its shots (the Full step's reloads left the page at its top)
+    b.until(page, &format!("!!{row}"), wait);
+    b.eval(page, &format!("({row}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete]')?.click(), true)"))?;
+    let asked = b.until(page, &format!("!!{row}?.querySelector('[data-action=storage-delete-sure]')?.checkVisibility() && !{row}.querySelector('[data-action=storage-delete]')"), wait);
+    for scheme in ["dark", "light"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("computer-storage-delete-390-{scheme}.png")));
+    }
+    b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete-sure]')?.click(), true)"))?;
+    let gone_drawn = b.until(page, &format!("!!{block} && !{row}"), std::time::Duration::from_secs(60));
+    let after = view();
+    let gone = !after["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == wheel));
+    let kept = ["work/e2e/downloads/talk.mp4", "work/e2e/browser-profile/cache.bin"].iter().all(|p| after["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == *p)));
+    // a folder, and a path outside its work, are refused, touching nothing
+    let folder = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "work/e2e/downloads" })), &[])?;
+    let outside = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "../etc/passwd" })), &[])?;
+    let climbed = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "work/../bridge/state.json" })), &[])?;
+    b.color_scheme(page, "dark")?;
+    b.viewport(page, 1280, 900, false)?;
+    s.ok(
+        "Delete asks once, then the platform removes that file in its container (no agent asked), and Storage reads its disk again without it; a folder, and a path outside its work, are refused",
+        asked && gone_drawn && gone && kept && folder.status == 404 && outside.status == 400 && climbed.status == 400,
+        json!({ "files": after["sizes"]["files"], "folder": [folder.status, &folder.body], "outside": [outside.status, &outside.body], "climbed": climbed.status }),
+    );
+    Ok(())
+}
+
+/// A size as Storage and its notices say it (cell/shell/computer.js
+/// `storageSize`, fragment_core's notice size): GB to a tenth, rounded.
+fn storage_size(n: u64) -> String {
+    let tenths = (n + 50_000_000) / 100_000_000;
+    format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
 /// An update, as the person sees it (docs/computers.md, "What its owner is

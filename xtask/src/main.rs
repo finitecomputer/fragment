@@ -360,7 +360,6 @@ fn dev(args: &[String]) -> Result<()> {
         poll_interval_s: 10,
         egress_local: true,
         job_retry_delay_s: 2,
-        blob_grace_s: None,
         upload_max_bytes: None,
         // text and images: the Workers AI fake, every tier on it, unless
         // --real-agent puts the text tiers on real models
@@ -404,6 +403,8 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        // a door's image is built only for a stack that runs them (the e2e's door lane)
+        doors: false,
         computer_internet: true,
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
