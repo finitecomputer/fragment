@@ -4792,9 +4792,11 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
 /// go to no provider. An operator key's call goes through the pipe
 /// (crate::pipe): gated beside it, as the agent's model calls are (a
-/// person out of credit is refused, once this isolate has heard so), and,
-/// after the answer is handed back, each operator key's call the provider
-/// answered (under 500) charged to the owner. Every call the
+/// person out of credit is refused, once this isolate has heard so), its
+/// answer passed through the pipe's one pass (nothing it put on the
+/// request comes back), and each operator key's call charged to the owner
+/// what its vendor's answer said it used (`Provider::charged`), once the
+/// answer is read. Every call the
 /// provider answered is counted as the agent's in its owner's ledger
 /// (`uses::Used`; a shared key's charge in its hour here too,
 /// `computer/used`), in `wait_until`, never in the answer's way: a count
@@ -4929,42 +4931,75 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
-    // after the answer, never in its way
+    // one line per swap (lesson 14), naming the providers, never a tag or a value
+    if !plan.is_empty() {
+        let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
+        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms, "ownMs": own_ms }));
+    }
+    // what each key's charges read (FIN-616): a header as its vendor sent
+    // it, and a JSON pointer in the answer's one pass (`pipe::answer`)
+    let rows: Vec<&'static catalog::Provider> = keys.iter().filter_map(|p| cfg.providers.named(&p.provider, p.connection)).collect();
+    let mut pointers: Vec<String> = vec![];
+    for json in rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.json.clone()) {
+        if !pointers.contains(&json) {
+            pointers.push(json);
+        }
+    }
+    let headers_said: Vec<(String, Option<u64>)> = match &sent {
+        Ok(resp) => rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.header.clone()).map(|h| (h.clone(), resp.headers().get(&h).ok().flatten().and_then(|v| fragment_core::price::number(&v)))).collect(),
+        Err(_) => vec![],
+    };
+    let (answer, said): (CellResult<Response>, crate::pipe::Said) = match sent {
+        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => {
+            let (resp, said) = crate::pipe::answer(resp, &[operator, filled], &pointers).await?;
+            (Ok(resp), said)
+        }
+        sent => (sent, Box::pin(futures_util::future::ready(vec![None; pointers.len()]))),
+    };
+    // after the answer, never in its way: each key's call charged what its
+    // vendor said it used (`Provider::charged`), once the answer is read
     if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
-        let book = &cfg.book;
-        // what each key's call used: a call, the units of a part the book
-        // prices apart (ElevenLabs' speech by its characters, fal's images
-        // by their pixels, when its answer is a 2xx), or none (fal's
-        // polls), the row and the agent's count alike
-        let call = fragment_core::price::KeyCall { method: method.as_ref(), host: &host, path: url.path(), body: &body, status: answered };
-        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
-        // each call the provider answered is the agent's (decision 37), a key's at its price
+        let call: Option<(Vec<String>, Vec<Vec<u8>>)> = swap::call_of(method.as_ref(), &headers_in, url.path()).map(|(m, s)| (m.into_iter().map(str::to_string).collect(), s));
+        // each call the provider answered is the agent's (decision 37), a key's at its charge
         // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
-        let uses: Vec<uses::Use> = plan
-            .wanted
-            .iter()
-            .filter(|p| cfg.providers.named(&p.provider, p.connection).is_some())
-            .map(|p| {
-                let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
-                let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
-                uses::Use { provider: p.provider.clone(), micros }
-            })
-            .collect();
-        let at = js::now_ms();
-        // counted in its owner's ledger; a shared key's charge in its hour
-        // too, which its computer keeps
-        let charged = uses.iter().any(|u| u.micros > 0);
-        let counted = Used { agent, at_ms: at, uses };
-        let bill = |usage| (crate::pipe::Bill { payer: owner.clone(), reference: format!("key:{computer}:{}", js::random_hex::<12>()), agent: Some(identity.clone()), fragment: None, computer: Some(computer.to_string()) }, Some(usage));
-        let bills: Vec<_> = used.into_iter().map(|(_, usage)| bill(usage)).collect();
-        let (env, computer) = (env.clone(), computer.to_string());
+        let named: Vec<Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some()).cloned().collect();
+        let keys: Vec<Placeholder> = keys.into_iter().cloned().collect();
+        let (env, computer, method) = (env.clone(), computer.to_string(), method.as_ref().to_string());
         ctx.wait_until(async move {
-            crate::pipe::settle(&env, bills).await;
-            if counted.uses.is_empty() {
+            let numbers = said.await;
+            let said = |c: &catalog::Charge| match (&c.header, &c.json) {
+                (Some(h), _) => headers_said.iter().find(|(n, _)| n == h).and_then(|(_, v)| *v),
+                (_, Some(p)) => pointers.iter().position(|q| q == p).and_then(|i| numbers[i]),
+                (None, None) => None,
+            };
+            let charged = |p: &Placeholder| {
+                let (row, (methods, segments)) = (cfg.providers.named(&p.provider, p.connection)?, call.as_ref()?);
+                row.charged(&methods.iter().map(String::as_str).collect::<Vec<_>>(), segments, answered, said)
+            };
+            let used: Vec<(Placeholder, Option<Usage>)> = keys.into_iter().map(|p| (p.clone(), charged(&p))).collect();
+            for (p, _) in used.iter().filter(|(_, usage)| usage.is_none()) {
+                // none of its charges priced it: charged nothing, said so
+                console_log!("{}", json!({ "event": "pipe.uncharged", "provider": p.provider, "host": host, "method": method, "status": answered }));
+            }
+            let at = js::now_ms();
+            let uses: Vec<uses::Use> = named
+                .iter()
+                .map(|p| {
+                    let usage = used.iter().find(|(k, _)| k == p).and_then(|(_, u)| u.as_ref());
+                    let micros = usage.map_or(0, |u| cfg.book.price(u).map_or(0, |priced| priced.charge));
+                    uses::Use { provider: p.provider.clone(), micros }
+                })
+                .collect();
+            let bill = |usage| (crate::pipe::Bill { payer: owner.clone(), reference: format!("key:{computer}:{}", js::random_hex::<12>()), agent: Some(identity.clone()), fragment: None, computer: Some(computer.clone()) }, Some(usage));
+            crate::pipe::settle(&env, used.into_iter().filter_map(|(_, usage)| usage.map(bill)).collect()).await;
+            if uses.is_empty() {
                 return;
             }
-            // side by side: a ledger slow to count never holds back the
-            // hour a shared key's cap is checked against
+            // counted in its owner's ledger; a shared key's charge in its hour
+            // too, which its computer keeps, side by side: a ledger slow to
+            // count never holds back the hour a shared key's cap is checked against
+            let charged = uses.iter().any(|u| u.micros > 0);
+            let counted = Used { agent, at_ms: at, uses };
             let hour = async {
                 if charged {
                     if let Err(e) = crate::routed::ask_bytes(&env, "COMPUTER", &computer, "computer/used", &counted).await {
@@ -4980,15 +5015,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             futures_util::future::join(hour, count).await;
         });
     }
-    // one line per swap (lesson 14), naming the providers, never a tag or a value
-    if !plan.is_empty() {
-        let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
-        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms, "ownMs": own_ms }));
-    }
-    match sent {
-        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => crate::pipe::answer(resp, &[operator, filled]).await,
-        sent => sent,
-    }
+    answer
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

@@ -2315,7 +2315,8 @@ mod tests {
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
-            assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
+            let operator = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator);
+            assert!(operator.into_iter().all(|p| p.price.is_none() && p.charges == fragment_core::catalog::default_charges(&p.name)), "{file}: each key charged as the book says");
             // the example's tiers through OpenRouter (decision 61); a preview's on Workers AI
             let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);

@@ -573,41 +573,33 @@ unfinished design, not debt.
 - **Delete when:** the swap streams the body (its length passed on),
   proven by an upload larger than the cap.
 
-## An operator key is metered per call, not per what its vendor counts
+## An older release's key rows are priced as it priced them
 
-- **Shortcut:** the swap charges one `key` unit a call at an estimate
-  (`fragment_core::price::DEFAULT_KEYS`, sources beside it), except a
-  part of a key's calls priced by what its request says
-  (`price::KEY_PARTS`: ElevenLabs' speech by its text's characters, at
-  the multilingual models' $0.08 per 1,000 whatever the model, so Flash
-  and Turbo's $0.04 calls are charged twice their list; fal's
-  synchronous Klein runs by the pixels they ask for; xAI's X searches as
-  20 posts and a call's tokens, its synchronous images as one
-  grok-imagine-image ($0.02) a call; Google Places' photos at their own
-  list; Firecrawl's scrapes and maps by their credits; a Browser Use
-  session's start as five minutes; X's searches as ten posts).
-- **Risk:** calls charged above or below what they cost: every other
-  ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
-  is charged a minute of music; a queued fal generation (Hermes'
-  `image_generate`), an edit and every other fal model are charged
-  nothing until a queued job is settled from its result's answer, once
-  per request id; a Grok chat (its tokens not read), a deferred image, a
-  video and server-side tools other than X Search are charged nothing, a
-  grok-imagine-image-2.0 image or several images a call under their
-  cost, and an X search that fetches fewer than 20 posts over it; Google
-  Places' searches and details (their tier their field mask's, which the
-  meter does not read) and autocompletes (free in a session that ends in
-  a Details call) are charged nothing; a Firecrawl search (its returned
-  results not counted), crawl, batch scrape, extract, agent or browser
-  session is charged nothing, as are a scrape's PDF pages and other
-  add-ons; a Browser Use session is charged five minutes at its start,
-  whatever it ran, and a task its session alone, not its model's tokens;
-  X's lookups (their returned resources not counted) are charged
-  nothing, and a search that returns fewer than ten posts is charged
-  ten.
-- **Delete when:** the swap reads each answer's usage and settles the
-  vendor's own units against a hold of its worst case, each catalog row
-  naming how, proven by a lane whose upstream fake answers usage.
+- **Shortcut:** the book still prices the names the release before
+  FIN-616's charges wrote (`fragment_core::price::LEGACY_KEYS`: its per
+  call estimates and request-read parts, `elevenlabs:speech`,
+  `fal:image` and the rest), so a row it queued just before a deploy is
+  charged as it would have been.
+- **Risk:** none, but code: no release writes these names any more.
+- **Delete when:** the release after this one reaches production, so no
+  queued row of the old names is left (`REF_KEEP_MS` has passed since).
+
+## A vendor whose answer says no cost is charged an estimate
+
+- **Shortcut:** an operator key whose vendor's answers say nothing is
+  charged a call at an estimate (`price::DEFAULT_CHARGES`): Browser Use a
+  session's start as five minutes, a task on a session it has too;
+  ElevenLabs' music as a minute; Perplexity's Sonar at a search's price;
+  fal's models other than Klein, xAI's videos and deferred images (their
+  cost on a poll) and Firecrawl's crawls, batch scrapes and extracts (a
+  running total on each poll) nothing. ElevenLabs' characters are priced
+  at the multilingual models' rate, which its header doesn't tell from
+  Flash's half; X's posts at $0.005, though X bills a post read again
+  within 24 hours nothing and a user $0.010.
+- **Risk:** those calls charged above or below what they cost.
+- **Delete when:** each is read from its vendor's own report: a poll's
+  cost settled once per job (fal's queue: FIN-616's queue PR), a model's
+  price per unit for each fal model, or a vendor's billing read back.
 
 ## An imported connection's refresh is unproven
 

@@ -2241,7 +2241,7 @@ const SPOKEN_CHARS: u64 = 20;
 
 /// The quote's checks beside the swap's (FIN-448), skipped as they are.
 const QUOTE_CHECKS: [&str; 2] = [
-    "its owner quotes a speech job through the CLI (`fragment quote elevenlabs:speech 20chars`): one line, about what it costs and what is left, and the quote with --json",
+    "its owner quotes a speech job through the CLI (`fragment quote elevenlabs:character 20chars`): one line, about what it costs and what is left, and the quote with --json",
     "the speech its owner quoted, made through the swap, is charged what the quote said",
 ];
 
@@ -2254,16 +2254,16 @@ fn quote_speech(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Value> 
     std::fs::create_dir_all(&config)?;
     std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
     let chars = format!("{SPOKEN_CHARS}chars");
-    let said = s.cli(api, &home, &["quote", "elevenlabs:speech", &chars]);
+    let said = s.cli(api, &home, &["quote", "elevenlabs:character", &chars]);
     let line = String::from_utf8_lossy(&said.stdout).into_owned();
-    let quoted = s.cli_json(api, &home, &["quote", "elevenlabs:speech", &chars, "--json"])?;
+    let quoted = s.cli_json(api, &home, &["quote", "elevenlabs:character", &chars, "--json"])?;
     let total = quoted["totalMicros"].as_i64().unwrap_or(-1);
     s.ok(
         QUOTE_CHECKS[0],
         said.status.success()
             && line.lines().count() == 1
             && line.starts_with(&format!("about {}; you ", fragment_core::price::dollars(total)))
-            && quoted["items"][0]["pricedAs"] == "elevenlabs:speech"
+            && quoted["items"][0]["pricedAs"] == "elevenlabs:character"
             && quoted["items"][0]["calls"] == 1
             && total > 0,
         json!({ "said": line, "stderr": String::from_utf8_lossy(&said.stderr), "quoted": quoted }),
@@ -2683,7 +2683,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let rows = entries(api, &owner_id, &format!("key:{id}:"));
         // each speech call of the quoted size (the cap's checks make longer
         // ones too, and more of that size)
-        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:speech" && usage(r)["units"] == SPOKEN_CHARS).collect();
+        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:character" && usage(r)["units"] == SPOKEN_CHARS).collect();
         s.ok(
             QUOTE_CHECKS[1],
             !spoken.is_empty() && spoken.iter().all(|r| charged(r).is_some_and(|c| Some(c) == quoted["totalMicros"].as_i64())),

@@ -53,7 +53,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "an own key: its owner gives it, sealed in their Vault, and it is the guest's at once",
     "basic auth: the own key in its password's place, its user as it came",
     "a key that is no printable token is refused, and one sent bare (not in {key}) refused without being quoted back; taken away, the guest is given it no more",
-    "each operator key's call is charged to the agent's owner's ledger after it, as the agent, at its list price and the margin",
+    "each operator key's call its vendor answered is charged to the agent's owner's ledger after it, as the agent, what its vendor's answer said it used (or a call, where its answers say nothing), at its unit's list price and the margin; a call none of its row's charges prices, nothing",
     "this month's uses, in the owner's ledger: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
     "no one else reads them (a stranger's are their own, none), and a month is YYYY-MM",
     "a request with no placeholder goes on as it came",
@@ -67,14 +67,14 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "of several accounts at a connection, an agent that picked none is swapped its owner's default, the oldest connected: Pipes' token for that account",
     "its owner picks another account for it: its next request is swapped that account's token",
     "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
-    "a key's call the book prices by what it says (ElevenLabs' text to speech) reaches its host as it came, body and all, and is charged its text's characters, not a call",
-    "and one its provider refused (a bad request, a rate limit) made nothing: its row and the agent's count charge nothing, whatever its text",
-    "fal: a synchronous Klein run reaches its host as it came and is charged the pixels it asks for; a queued submit, made later or not, and a poll nothing",
-    "xai: a call with the x_search tool is charged an X search, and a plain chat call (its tokens not read) and any other call (a model list's) nothing",
-    "google-places: a place's photo is charged its own price, and a search and a place's details (their tier their field mask's) nothing",
-    "firecrawl: a scrape is charged its one credit, not a search's two, and a call around it (a status poll) nothing",
-    "browser-use: a new session's start is charged its five minutes, and a task on that session and a call around it (its status read) nothing",
-    "x: a search is charged ten posts, as before, and a lookup (its returned resources not counted) nothing",
+    "ElevenLabs' text to speech reaches its host as it came, body and all, and is charged the characters its answer says it billed (character-cost), not a call; a read of its music (a GET) nothing",
+    "and one its provider refused (a bad request, a rate limit) made nothing: no row, and the agent's count charges nothing",
+    "fal: a synchronous Klein run reaches its host as it came and is charged the units its answer says (x-fal-billable-units); a queued submit, whose answer says none, and a poll nothing",
+    "xai: each POST is charged the ticks its answer says it cost (usage.cost_in_usd_ticks), an X search and a plain chat alike; a read nothing",
+    "google-places: charged nothing, a search, a place's details and its photo alike (kept uncharged, 2026-11-20)",
+    "firecrawl: a scrape is charged the credits its answer says (data.metadata.creditsUsed), and a call around it nothing",
+    "browser-use: a session's start and a task's are each charged five minutes, and a call around them (a status read) nothing",
+    "x: a search is charged the posts its answer counts (meta.result_count), and a lookup whose answer counts none nothing",
     "a shared key charged its owner's hourly cap pauses: its next call is refused 429 rate_limited (reason key_paused), saying what it spent and when it resumes, reaching no provider and charged nothing",
     "while it is paused, another key's call goes on: the key pauses, not the account",
     "its owner sees it over the agent's chat: the key, and what it spent this hour",
@@ -92,15 +92,18 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "an operator key its provider echoes back reaches the guest named as its provider ({{name}}), never as the key",
 ];
 
-/// What one call of each key is charged: its list price (fragment_core::
-/// price DEFAULT_KEYS) and the 50% margin.
+/// What one call of a charge's unit is charged (`<vendor>:<unit>`).
 fn charge_of(key: &str) -> i64 {
     charge_for(key, 1)
 }
 
-/// What `units` of a key's price are charged, its margin with them.
+/// What `units` of a charge's unit (`<vendor>:<unit>`, the price book's
+/// charges for its vendor: fragment_core::price DEFAULT_CHARGES) are
+/// charged, its margin with them.
 fn charge_for(key: &str, units: i64) -> i64 {
-    let (micros, per) = fragment_core::price::default_key_price(key).expect("each operator key has a list price");
+    let (vendor, unit) = key.split_once(':').expect("a charge's unit is <vendor>:<unit>");
+    let charge = fragment_core::catalog::default_charges(vendor).into_iter().find(|c| c.unit == unit).expect("each unit has a charge");
+    let (micros, per) = (charge.price.micros, charge.price.per);
     // ceil(units × micros / per × 1.5), as the price book rounds a row
     let (n, d) = (units * micros * 3, 2 * per as i64);
     (n + d - 1) / d
@@ -114,12 +117,10 @@ const SPOKEN_CHARS: i64 = 20;
 const LONG_CHARS: i64 = 10_000;
 
 /// A fal image's request, as Hermes' `image_generate` posts it to the
-/// queue, and the pixels it asks for: one `landscape_16_9` image,
-/// 1024 × 576.
+/// queue: one `landscape_16_9` image.
 const FAL_ASK: &str = r#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
-const FAL_PIXELS: i64 = 1024 * 576;
 
-/// A Firecrawl scrape, as Hermes' `web_extract` posts it: one credit.
+/// A Firecrawl scrape, as Hermes' `web_extract` posts it.
 const FIRECRAWL_SCRAPE: &str = r#"{"url":"https://example.com/","formats":["markdown","html"]}"#;
 
 /// An X search, as Hermes' `x_search` posts it, and a plain Grok chat
@@ -478,42 +479,49 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "bad": bad.status, "bare": bare.status, "bareQuoted": bare.text.contains(SWAP_OWN_BARE), "notOwn": not_own.status, "gone": gone.status, "given": given }),
     );
 
-    // the charges: each operator key's call, at its price; and the month's counts
-    let keyed = ["perplexity", "elevenlabs", "x"];
-    // each key's call, the speech calls as its part (`price::KEY_PARTS`):
-    // the one made, and the two refused; fal's run, its queued submit and
-    // its poll; xAI's X search, chat and model list; Places' search,
-    // details and photo; Firecrawl's scrape and the GET before it; Browser
-    // Use's start, its task on that session and the GET before it; and X's
-    // lookup and the GET before it (its search is keyed's)
-    let held_rows = keyed.len() + 3 + 3 + 3 + 3 + 2 + 3 + 2;
+    // the charges: each operator key's call its vendor answered, at what its
+    // answer said (fragment_fakes upstream's `usage_of`), and the month's
+    // counts: Perplexity's search, a call; the speech's characters; Klein's
+    // units; the scrape's credit; Browser Use's two starts; X's search's
+    // posts; and xAI's two POSTs' ticks. Every other call made no row: a
+    // read, a call its vendor refused, Places', a queued submit, a lookup
+    use fragment_fakes::upstream::{FAL_UNITS, FIRECRAWL_SCRAPE_CREDITS, XAI_TICKS, X_POSTS};
+    let spoken = SPOKEN_CHARS as u64;
+    let expected: [(&str, u64, usize); 7] = [("perplexity:call", 1, 1), ("elevenlabs:character", spoken, 1), ("fal:flux-2-klein-9b", FAL_UNITS, 1), ("firecrawl:credit", FIRECRAWL_SCRAPE_CREDITS, 1), ("browser-use:session", 1, 2), ("x:post", X_POSTS, 1), ("xai:tick", XAI_TICKS, 2)];
+    let held_rows: usize = expected.iter().map(|(_, _, n)| n).sum();
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows);
     let rows = held();
     let theirs = |r: &Value| r["entry"]["row"]["agent"] == w.identity && r["entry"]["row"]["computer"] == w.id;
-    let priced = rows.len() == held_rows
-        && keyed.iter().all(|k| rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": k, "units": 1 }) && theirs(r) && charged(r) == Some(charge_of(k))));
+    let held_row = |key: &str, units: u64| rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(charge_for(key, units as i64))).count();
+    let priced = rows.len() == held_rows && expected.iter().all(|(key, units, n)| held_row(key, *units) == *n);
     s.ok(SWAP_CHECKS[17], metered && priced, json!(rows));
-    let speech = charge_for("elevenlabs:speech", SPOKEN_CHARS);
-    let spoken_row = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "elevenlabs:speech", "units": SPOKEN_CHARS }) && theirs(r) && charged(r) == Some(speech));
-    s.ok(SWAP_CHECKS[31], spoken_sent && spoken_row && speech < charge_of("elevenlabs") / 10, json!({ "seen": spoken_seen, "speech": speech, "rows": rows }));
-    let nothing = rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": "elevenlabs:speech", "units": 0 }) && theirs(r) && charged(r) == Some(0)).count();
-    // the agent's count, below, has its 4 ElevenLabs calls at the made ones' charges alone
-    s.ok(SWAP_CHECKS[32], refused_sent && nothing == 2, json!({ "said": refused_said, "rows": rows }));
-    let image = charge_for("fal:image", FAL_PIXELS);
-    let fal_made = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "fal:image", "units": FAL_PIXELS }) && theirs(r) && charged(r) == Some(image));
-    let fal_polled = rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": "fal", "units": 0 }) && theirs(r) && charged(r) == Some(0)).count() == 2;
-    s.ok(SWAP_CHECKS[33], fal_sent && fal_made && fal_polled && image < charge_of("fal"), json!({ "seen": fal_seen, "image": image, "rows": rows }));
-    let held_row = |key: &str, units: i64, micros: i64| rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(micros)).count();
-    let xai_charged = held_row("xai", 1, charge_of("xai")) == 1 && held_row("xai", 0, 0) == 2;
-    s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && xai_charged, json!({ "seen": xai_seen, "rows": rows }));
-    let photo = charge_of("google-places:photo");
-    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && held_row("google-places:photo", 1, photo) == 1 && held_row("google-places", 0, 0) == 2, json!({ "photo": photo, "rows": rows }));
-    let credit = charge_of("firecrawl:credit");
-    s.ok(SWAP_CHECKS[36], scrape_sent && held_row("firecrawl:credit", 1, credit) == 1 && held_row("firecrawl", 0, 0) == 1 && credit < charge_of("firecrawl"), json!({ "credit": credit, "rows": rows }));
-    s.ok(SWAP_CHECKS[37], session_sent && reused_sent && held_row("browser-use", 1, charge_of("browser-use")) == 1 && held_row("browser-use", 0, 0) == 2, json!({ "rows": rows }));
-    s.ok(SWAP_CHECKS[38], lookup_sent && search_sent && held_row("x", 0, 0) == 2, json!({ "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places:photo")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 3, image), ("browser-use", 3, charge_of("browser-use")), ("xai", 3, charge_of("xai")), ("x", 3, charge_of("x")), (SWAP_OWN, 1 + OWN_MOVE_CALLS, 0)];
+    let speech = charge_for("elevenlabs:character", SPOKEN_CHARS);
+    s.ok(SWAP_CHECKS[31], spoken_sent && held_row("elevenlabs:character", spoken) == 1 && speech < 150_000 / 10, json!({ "seen": spoken_seen, "speech": speech, "rows": rows }));
+    // the agent's count, below, has its 4 ElevenLabs calls at the made one's charge alone
+    s.ok(SWAP_CHECKS[32], refused_sent, json!({ "said": refused_said, "rows": rows }));
+    let image = charge_for("fal:flux-2-klein-9b", FAL_UNITS as i64);
+    s.ok(SWAP_CHECKS[33], fal_sent && held_row("fal:flux-2-klein-9b", FAL_UNITS) == 1, json!({ "seen": fal_seen, "image": image, "rows": rows }));
+    let tick = charge_for("xai:tick", XAI_TICKS as i64);
+    s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && held_row("xai:tick", XAI_TICKS) == 2, json!({ "seen": xai_seen, "tick": tick, "rows": rows }));
+    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && !rows.iter().any(|r| usage(r)["key"].as_str().is_some_and(|k| k.starts_with("google-places"))), json!({ "rows": rows }));
+    let credit = charge_for("firecrawl:credit", FIRECRAWL_SCRAPE_CREDITS as i64);
+    s.ok(SWAP_CHECKS[36], scrape_sent && held_row("firecrawl:credit", FIRECRAWL_SCRAPE_CREDITS) == 1, json!({ "credit": credit, "rows": rows }));
+    s.ok(SWAP_CHECKS[37], session_sent && reused_sent && held_row("browser-use:session", 1) == 2, json!({ "rows": rows }));
+    let posts = charge_for("x:post", X_POSTS as i64);
+    s.ok(SWAP_CHECKS[38], lookup_sent && search_sent && held_row("x:post", X_POSTS) == 1, json!({ "posts": posts, "rows": rows }));
+    let expect = [
+        (SWAP_CONNECTION, 2, 0),
+        ("perplexity", 1, charge_of("perplexity:call")),
+        ("elevenlabs", 4, speech),
+        ("google-places", 3, 0),
+        ("firecrawl", 2, credit),
+        ("fal", 3, image),
+        ("browser-use", 3, 2 * charge_of("browser-use:session")),
+        ("xai", 3, 2 * tick),
+        ("x", 3, posts),
+        (SWAP_OWN, 1 + OWN_MOVE_CALLS, 0),
+    ];
     let uses = || api.signed(w.owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
@@ -568,7 +576,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let cap = fragment_core::key_hour::KEY_HOUR_CAP;
     let of_elevenlabs = |r: &Value| usage(r)["key"].as_str().is_some_and(|k| k == "elevenlabs" || k.starts_with("elevenlabs:"));
     let spent: i64 = rows.iter().filter(|r| of_elevenlabs(r)).filter_map(charged).sum();
-    let each = charge_for("elevenlabs:speech", LONG_CHARS);
+    let each = charge_for("elevenlabs:character", LONG_CHARS);
     let calls = (cap - spent + each - 1) / each;
     anyhow::ensure!((1..=6).contains(&calls), "a few long calls reach the cap: {calls}");
     let eleven_calls = || {
