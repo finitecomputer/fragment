@@ -2288,9 +2288,12 @@ nor speak through one (`fragment_core::door`):
   step unsent (`fragment_core::door::door_route`). `connect` gives the
   door the connector's inbox secret (`x-door-secret`, a `{{SECRET}}`
   filled at the egress); the door posts its owner's messages to the
-  connector's inbox with it, as a webhook does, in order, holding at most
-  256 the inbox has not taken (past them its runner is refused and
-  delivers again later). A deployment that runs no doors (no `doors` in
+  connector's inbox with it, as a webhook does, in order, each naming the
+  door (the connector takes its own life's door's alone), holding at
+  most 256 the inbox has not taken (past them its runner is refused and
+  delivers again later). A link or unlink names the connector's number
+  for it (`n`), and one older than the newest the door was asked is 409
+  `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and

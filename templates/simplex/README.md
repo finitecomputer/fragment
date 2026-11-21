@@ -31,12 +31,14 @@ file it loads are the chat template's, linked, so no copy drifts).
   in order, one at a time; what the inbox did not take at once, the door's
   watch sends again every 30 s.
 - **The SimpleX link:** `link` asks the door for a one-time invitation and
-  keeps it for its owner alone (`state`, an owner's query: never a run's
+  keeps it, unless an unlink came after it (each numbered, `asking`, as
+  the door is told), for its owner alone (`state`, an owner's query: never a run's
   output, which every viewer reads, its agent included); `unlink` ends it.
 - **The door (the binding):** its owner binds it to their agent (`POST
   /api/f/{name}/door`, in person), which makes the agent a viewer here.
   Then `intake`, the inbox's trigger alone, publishes each text message
-  the door delivers, once by its SimpleX id (`seen`), as its owner's
+  its own door delivers (each names its door, kept at `connect`: an
+  earlier life's door is no one's here), once by its SimpleX id (`seen`), as its owner's
   words to the agent (`job.door`: `relayed` `{via: "simplex", for,
   agent}`, `to` that agent): no door key, no signature, since the
   platform knows which fragment publishes. Unbound, it tells their app
