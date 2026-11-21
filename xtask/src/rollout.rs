@@ -393,6 +393,32 @@ fn verified(p: &mut impl Platform, clock: &mut impl Clock, release: &str, old: b
     }
 }
 
+/// The admin Worker, deployed after the cell (deploy.rs; cell/src/admin.rs):
+/// its probe (`GET /healthz/admin`, through the cell, `probe`) asked until
+/// it answers `release` at every object class, for `VERIFY_LIMIT`, or why
+/// not. Nothing is rolled back for it: only the operators' routes wait on it.
+pub(crate) fn admin_verified(probe: &mut impl FnMut() -> Result<Probed>, clock: &mut impl Clock, release: &str) -> std::result::Result<(), String> {
+    let start = clock.now();
+    // bounded: VERIFY_LIMIT, a PROBE_PAUSE between asks
+    loop {
+        let last = match probe() {
+            Ok(Probed::Release(r)) if r == release => {
+                println!("deploy: the admin Worker answers {release} at every object class ({} after its deploy)", minutes(clock.now() - start));
+                return Ok(());
+            }
+            Ok(Probed::Release(other)) => format!("it answers {other}"),
+            Ok(Probed::Not(why)) => why,
+            Ok(Probed::NoRoute(_)) => "the platform has no /healthz/admin".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        let waited = clock.now() - start;
+        if waited >= VERIFY_LIMIT {
+            return Err(format!("it did not answer {release} at every object class after {} (the limit): {last}", minutes(waited)));
+        }
+        clock.sleep(PROBE_PAUSE);
+    }
+}
+
 /// The release `before` deployed again, after `why`, when it may be: the
 /// outcome either way.
 fn back(p: &mut impl Platform, clock: &mut impl Clock, before: Option<Live>, schema: &str, rollback: Result<(), String>, why: String) -> Result<Outcome> {
@@ -984,5 +1010,32 @@ mod tests {
         assert_eq!(probe_of(503, &skewed, Some(NEW)), Probed::Not(format!("Computer: 503 schema_refused: newer, Registry runs {OLD}")));
         assert_eq!(probe_of(404, &Value::Null, Some(OLD)), Probed::NoRoute(Some(OLD.into())));
         assert_eq!(probe_of(522, &Value::Null, None), Probed::Not("the probe answered 522".into()));
+    }
+
+    /// Goal: the admin Worker, deployed after the cell, counts as deployed
+    /// only once its probe answers the new release at every object class:
+    /// an old admin, a class refusing it, or no answer at all is waited
+    /// on for `VERIFY_LIMIT` and then failed, saying the last thing it
+    /// answered. Method: a scripted probe on the fake clock.
+    #[test]
+    fn the_admin_counts_only_once_it_answers_the_new_release() {
+        let mut clock = Fake(Default::default());
+        let mut answers = vec![Err(anyhow::anyhow!("GET /healthz/admin: timed out")), Ok(Probed::Release(OLD.into())), Ok(Probed::Not("Registry runs old".into())), Ok(Probed::Release(NEW.into()))].into_iter();
+        let mut asked = 0;
+        let mut probe = || {
+            asked += 1;
+            answers.next().expect("asked no more than scripted")
+        };
+        assert_eq!(admin_verified(&mut probe, &mut clock, NEW), Ok(()));
+        assert_eq!((asked, clock.now()), (4, PROBE_PAUSE * 3), "asked until it answered, a pause between");
+
+        let mut clock = Fake(Default::default());
+        let mut probe = || Ok(Probed::Release(OLD.into()));
+        let failed = admin_verified(&mut probe, &mut clock, NEW).unwrap_err();
+        assert!(failed.contains(NEW) && failed.contains(&format!("it answers {OLD}")) && failed.contains("(the limit)"), "{failed}");
+        assert!(clock.now() >= VERIFY_LIMIT && clock.now() < VERIFY_LIMIT + PROBE_PAUSE, "for the limit, no longer");
+
+        let mut probe = || Ok(Probed::NoRoute(Some(NEW.into())));
+        assert!(admin_verified(&mut probe, &mut Fake(Default::default()), NEW).unwrap_err().contains("no /healthz/admin"));
     }
 }

@@ -57,9 +57,13 @@ WORKDIR /src
 COPY images/Cargo.toml images/Cargo.lock ./
 COPY images/bridge bridge
 COPY images/hermes/boot hermes/boot
+# the SimpleX door's runner, a member of the workspace this image builds
+# none of: its manifest and an empty source, for cargo to read
+COPY images/simplex-door/Cargo.toml simplex-door/Cargo.toml
 RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=images-target,target=/src/target \
-    find bridge hermes/boot -type f -exec touch {} + \
+    mkdir -p simplex-door/src && echo 'fn main() {}' > simplex-door/src/main.rs \
+ && find bridge hermes/boot -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-bridge -p hermes-boot \
  && mkdir -p /out && cp target/release/fragment-bridge target/release/hermes-boot /out/
 

@@ -501,7 +501,12 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
             line("Version", c.version ?? c.latest ?? c.image),
             storageBlock(c),
             ...(behind
-              ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
+              ? [
+                  line("Latest version", c.latest),
+                  // its update waits for room (docs/computers.md, "An image's
+                  // share of the disk"): no restart offered to get it
+                  el("p", "muted", c.roomFirst ? "Make room first to get the latest version: ask your agent to move big files to storage." : `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`),
+                ]
               : []),
             ...(c.why ? [el("p", "settings-warning", c.why)] : []),
           ]

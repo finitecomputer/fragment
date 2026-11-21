@@ -1655,6 +1655,7 @@ mod tests {
             simplex: false,
             continues: None,
             age: None,
+            disk: None,
         };
         assert_eq!(message(&ts), "[Recent channel messages]\nthe turn before was cut\n\n[New message]\n[Replying to your previous message: \"earlier\"]\n[paul] hi\n[paul sent a file: 'a.png' (image/png). It is on your computer at: /tmp/m/a.png]");
     }

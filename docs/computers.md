@@ -230,8 +230,16 @@ Not built either:
 
 - **F**, messengers outside the computer: a connector Durable Object per
   linked account holds the protocol's state, so it never rewinds.
-  Deferred (Paul, 2026-10-05: "too much of a lift for now"); SimpleX runs
-  on an always-on computer meanwhile (decision 32).
+  Deferred (Paul, 2026-10-05: "too much of a lift for now"); being built
+  since 2026-11-20, so no one needs an always-on computer for SimpleX. A
+  SimpleX door: a `lite` container per linked account, SimpleX's core and
+  the door's runner (images/simplex-door) with the bridge's own link
+  rules, its databases saved after every change as one file its door
+  keeps; a save its door knows is behind (an effect it numbered is newer)
+  forces one ratchet sync before anything is sent. The runner's protocol
+  with its door is images/simplex-door/src/door.rs. Until its Durable
+  Object and connector run it, SimpleX runs on an always-on computer
+  (decision 32).
 
 ## What its owner is told
 
@@ -261,7 +269,9 @@ steps; its "no reply yet" waits until it is up):
   skill makes room with `fragment offload`, which removes a file only once
   its copy in a members-only fragment of the owner's reads back as it was
   (cli/GUIDE.md, "Moving files off a disk"). Both views carry the read
-  and its room (`disk`), the guest's for its agents.
+  and its room (`disk`), the guest's for its agents: each agent is told
+  firmly at its next turn after each read that finds it filling
+  (docs/bridge.md, "An agent is told to make room").
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
@@ -273,7 +283,9 @@ steps; its "no reply yet" waits until it is up):
   newest save didn't fit its disk (`tooBig`), it says so, where it went
   back to, and that the newer files are kept and can still be exported.
 - `update`: it is awake, with no keepalive open, on another version than
-  its next start runs, until its owner puts that version off.
+  its next start runs, until its owner puts that version off. While its
+  save may not restore beside the new image, it says to make room first,
+  with no Restart (`roomFirst`; below, "An image's share of the disk").
 - `key_paused`: a shared key's charges this last hour reached its owner's
   cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
   calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
@@ -545,9 +557,10 @@ the DO removes them from one started from a snapshot.
   told so (`went_back`, naming the save it went back to).
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
-  `image` the pinned image's reference, and one that fails or comes up
-  dead is forgotten as the same wake starts the image and the save. So a
-  snapshot makes a wake faster, never different.
+  `image` the pinned image's reference (or, while its update waits for
+  room, the image it ran: below, "An image's share of the disk"), and one
+  that fails or comes up dead is forgotten as the same wake starts the
+  image and the save. So a snapshot makes a wake faster, never different.
 - **What a wake restored.** Each start that comes up records which save
   it restored and how the life before it ended (the view's `restored`). A
   start that went back in time is a rollback, counted in `rollbacks`: the
@@ -661,6 +674,53 @@ production's did, "restore stopped with 261689344 bytes free, below the
 GB) predicted 36 MB of room: 43 MB, 0.26%, short. Counted as
 `room` counts it, it had none; it is told at 3 GB of room, which that
 disk reached with 3.2 GB less video, `df` reading about 5.3 GB free.
+
+### An image's share of the disk
+
+Paul, 2026-11-20: "our image update either never goes up in size, or
+that it's safe for all existing users somehow". An image sits on the same
+disk as `/data`, so an image that grew would leave every computer less
+room to restore, and a save that fit beside the old image might not fit
+beside the new one.
+
+- **A budget.** Every image is held to `IMAGE_DISK_MAX` (3.0 GB), the
+  share of a computer's disk it may take as a fresh computer reads it: its
+  files written to a fresh btrfs disk of a computer's size (`DISK_MB`)
+  with zstd, less what that disk has available. One measure does it
+  (`cargo xtask image disk <reference>`, xtask/src/image/disk.rs, reading
+  both numbers from their one definition in core), wherever an image is
+  held to it: a push (`cargo xtask image push`, the Image workflow) and
+  preview's build (`image preview --build`, CI's preview image) are
+  refused past it before anything pins them, and the Docker lane measures
+  the Hermes image on every change to it
+  (`the_hermes_image_fits_its_disk_budget`). Preview's build is pushed as
+  `unchecked-<key>` and named by its inputs (`inputs-<key>`, the tag a
+  later run reuses) only once it fits, so a retry after a refusal builds
+  and measures again. Today's
+  image measured 2.53 to 2.67 GB in five runs on a quiet box (2026-11-20;
+  production's empty computers read about 2.6 GB used), and 2.99 GB once
+  under heavy disk load, when btrfs compresses less as it writes back in a
+  hurry: the budget is that plus a little. Raising it is Paul's word alone, recorded
+  beside the constant: each GB raised is a GB less of every person's files
+  that restore.
+- **Room counts the largest image.** A computer's room (above, "Room to
+  restore") counts `IMAGE_DISK_MAX`, never the image it runs, so it is
+  told to make room while its save still restores beside any image the
+  deployment may move it to.
+- **An update waits for room.** A computer whose save may not restore
+  beside the largest image (`fits_any_image`, its disk as last read), or
+  whose disk is told filling (at the edge, a save a little bigger no
+  longer fits), stays on the image it has: a wake starts its snapshot of
+  that save on the image it was taken of, though another is pinned
+  (`Saves::update_waits`). Its `update` notice, told as ever, says to make
+  room first and offers no Restart, which would take the new image, and
+  so does Settings (its view's `roomFirst`). Its owner's restart stays on
+  its image too: it keeps the snapshot, so the restart's sleep takes one
+  and its start comes up from it, not fresh from the pinned image. Once a
+  read after a save finds room (and it is told filling no more), its next
+  wake takes the new image, and a restart is fresh again. A start with no
+  such snapshot (after a crash, or snapshots off) has no older image to
+  stay on; there the budget is what keeps it restorable.
 
 ### The start line
 

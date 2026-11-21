@@ -501,7 +501,8 @@ impl From<CellError> for Unstarted {
     }
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct ComputerCell {
     state: State,
     raw: JsValue,
@@ -569,6 +570,7 @@ pub struct ComputerCell {
     uses_due_ms: Rc<std::cell::Cell<i64>>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for ComputerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -1910,7 +1912,12 @@ impl ComputerCell {
         let (plan, save, facts) = self.update_saves(|s| {
             let plan = s.plan(snapshots);
             // its line's: why a whole restore, and whether it runs another image
-            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != reference.as_deref()));
+            // (what it runs: a snapshot's own image, `Saves::plan`)
+            let runs = match &plan {
+                Restore::Snapshot { image, .. } => Some(image.as_str()),
+                Restore::Backup | Restore::Nothing => reference.as_deref(),
+            };
+            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != runs));
             s.starting(generation, plan.source());
             let save = s.current().cloned().filter(|_| plan != Restore::Nothing);
             let bytes = save.as_ref().map(|s| s.records.iter().filter_map(|r| r["size"].as_u64()).sum());
@@ -1918,6 +1925,12 @@ impl ComputerCell {
             (plan, save, facts)
         })?;
         assert_eq!(plan == Restore::Nothing, save.is_none(), "a start restores the save there is");
+        // a snapshot runs the image it was taken of: the pinned one, or the
+        // one it ran while its update waits for room (`Saves::plan`)
+        let reference = match &plan {
+            Restore::Snapshot { image, .. } => Some(image.clone()),
+            Restore::Backup | Restore::Nothing => reference,
+        };
         // a start from a snapshot waits for its guest (#362); the lever's
         // `alive-check` makes its next start wait so, whatever it restores
         let lever = self.take_alive_check()?;
@@ -2996,6 +3009,7 @@ impl ComputerCell {
                 s.kinds = fragment_core::computer::storage_kinds(&s);
                 s
             }),
+            room_first: saves.update_waits(),
         }))
     }
 
@@ -3357,6 +3371,9 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                // when this isolate last heard its guest read its view (a
+                // test waits for its bridge to take a lever's read so)
+                v["heard"] = json!(self.heard_ms.get());
                 v["heldUntil"] = json!(life.held_until_ms());
                 v["phase"] = json!(life.phase);
                 v["failures"] = json!(life.failures());
@@ -4414,7 +4431,8 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
 /// `model.fragment.internal`, or a host the swap catches (entry.mjs's
 /// `ComputerEgress`, whose props name the computer and the route). A class with a static method, as
 /// `InternalRoute` is: worker-build exports classes by name.
-#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), wasm_bindgen(wasm_bindgen = worker::wasm_bindgen))]
 pub struct ComputerEgress;
 
 /// `resp` with no header of the relay's family (`fragment_core::relay::
@@ -4436,7 +4454,7 @@ fn unrelayed(resp: Response, computer: &str, route: &str, path: &str) -> Respons
     resp.with_headers(headers)
 }
 
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "admin"), wasm_bindgen)]
 impl ComputerEgress {
     /// An XFTP relay of `computer`'s ended, having carried `bytes`: its
     /// place freed and its bytes counted (fragment_core::relay). Logged on

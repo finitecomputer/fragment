@@ -177,7 +177,9 @@ release was deployed (`release::DEPLOYED`), which no release reads now
 
 - **The caller** calls an object only through `routed::send` and
   `send_again`, the JavaScript through `InternalRoute.request` (xtask's
-  guard holds both).
+  guard holds both). The operators' admin calls from a Worker of its
+  own (cell/src/admin.rs), through bindings to the cell's classes, a
+  caller of the cell's release once a deploy finishes.
 - **The object** checks the release before it reads the call: another
   release's, or none, is 503 `deploying`, marked
   `x-fragment-release-refused`, and nothing was done.
@@ -215,7 +217,10 @@ refusing calls that long. One it cannot finish or verify goes back to
 the version before (`wrangler rollback`, verified the same way), unless
 that release's schema (its steps, and its last Durable Object migration)
 is not its own; the job fails either way, never
-green over a mix. A platform page outlives a
+green over a mix. The admin Worker deploys after, from the same release,
+until it answers that release at every class (`/healthz/admin`); until
+then its calls are refused as another release's, and its failure fails
+the job and leaves only the operators' routes down (the debt ledger). A platform page outlives a
 deploy too, and reloads once the platform's release differs from its own
 (docs/api.md, The shell, "A new release").
 
