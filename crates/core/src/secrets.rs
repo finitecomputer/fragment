@@ -476,19 +476,24 @@ impl StreamedPasses {
     }
 }
 
+/// JSON's and text's types that stream a record at a time, never one
+/// document: each is streamed (`read_whole`).
+const STREAMED_TYPES: [&str; 7] = ["text/event-stream", "application/x-ndjson", "application/json-seq", "application/stream+json", "application/jsonl", "application/x-jsonlines", "application/jsonlines"];
+
 /// Whether an answer of `content_type` is read whole to be named, every
 /// spelling of its values (`redact`), rather than streamed a piece at a
-/// time (`Streamed`): a document, JSON, XML, a form or other text (and an
-/// answer that names no type) is read whole; anything else streams as it
-/// comes (an event stream, newline-delimited JSON or a JSON text sequence,
-/// audio, video, an image, octet-stream, a type no one listed), so a
-/// streamed speech plays as it is made and no stream waits for its end.
+/// time (`Streamed`): a document is read whole (any JSON or XML type, a
+/// form, JavaScript, other text, and an answer that names no type); a
+/// stream of records (`STREAMED_TYPES`) and anything else (audio, video,
+/// an image, octet-stream, a type no one listed) streams as it comes, so
+/// a streamed speech plays as it is made and no stream waits for its end.
 pub fn read_whole(content_type: &str) -> bool {
     let kind = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
-    let documents = ["", "application/json", "application/xml", "application/javascript", "application/x-www-form-urlencoded"];
-    let suffixed = ["+json", "+xml"].iter().any(|s| kind.starts_with("application/") && kind.ends_with(s));
-    let text = kind.starts_with("text/") && kind != "text/event-stream";
-    documents.contains(&kind.as_str()) || suffixed || text
+    if STREAMED_TYPES.contains(&kind.as_str()) {
+        return false;
+    }
+    let document = kind.is_empty() || kind.starts_with("text/") || ["json", "xml", "javascript", "x-www-form-urlencoded"].iter().any(|w| kind.starts_with("application/") && kind.contains(w));
+    document
 }
 
 #[cfg(test)]
@@ -944,10 +949,10 @@ mod tests {
     /// An answer is read whole unless it streams as it is made, or is no text.
     #[test]
     fn what_is_read_whole() {
-        for whole in ["application/json", "application/json; charset=utf-8", "text/html", "text/plain", "", "application/xml", "application/problem+json", "application/x-www-form-urlencoded"] {
+        for whole in ["application/json", "application/json; charset=utf-8", "text/html", "text/plain", "", "application/xml", "application/problem+json", "application/x-www-form-urlencoded", "application/x-amz-json-1.1"] {
             assert!(read_whole(whole), "{whole}");
         }
-        for streams in ["text/event-stream", "Text/Event-Stream; charset=utf-8", "application/x-ndjson", "application/json-seq", "audio/mpeg", "audio/ogg", "video/mp4", "image/png", "application/octet-stream", "application/grpc", "multipart/mixed"] {
+        for streams in ["text/event-stream", "Text/Event-Stream; charset=utf-8", "application/x-ndjson", "application/json-seq", "application/stream+json", "audio/mpeg", "audio/ogg", "video/mp4", "image/png", "application/octet-stream", "application/grpc", "multipart/mixed"] {
             assert!(!read_whole(streams), "{streams}");
         }
     }

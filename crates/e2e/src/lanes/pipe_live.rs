@@ -42,7 +42,7 @@ const TOOLS: [(&str, &str, Option<&str>); 5] = [
     ("x-search", "Use your x_search tool once to find two recent posts about Cloudflare Workers, then answer in one sentence.", Some("xai:tick")),
     ("speech", "Use your text_to_speech tool once to say exactly: Hello from the pipe. Then answer done.", Some("elevenlabs:character")),
     ("extract", "Use your web_extract tool once on https://example.com and tell me its title in one sentence.", Some("firecrawl:credit")),
-    ("search", "Use your web_search tool once to look up Cloudflare Durable Objects, then answer in one sentence.", Some(":")),
+    ("search", "Use your web_search tool once to look up Cloudflare Durable Objects, then answer in one sentence.", Some("search")),
     ("image", "Use your image_generate tool once to make a small plain blue square, then answer done.", None),
 ];
 
@@ -104,10 +104,18 @@ pub fn pipe_live(s: &mut Suite, api: &Api) -> Result<()> {
         let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
         let turn = turn_of(&agent, &chat_name, "chat", seq);
         let ended = within(TURN, || work_of(&records(api, &keys, &chat_name, "work"), &turn).into_iter().find(|w| w["body"]["kind"] == "turn.end"));
-        // its charge goes on after its answer: a moment for the queue
+        // its charge goes on after its answer: a moment for the queue; the
+        // rows new since (each once, a row like an earlier one too)
         let new = within(Duration::from_secs(30), || {
-            let now = rows(api, &owner_id);
-            (now.len() > before.len()).then(|| now.into_iter().filter(|r| !before.contains(r)).collect::<Vec<_>>())
+            let mut now = rows(api, &owner_id);
+            (now.len() > before.len()).then(|| {
+                for r in &before {
+                    if let Some(i) = now.iter().position(|n| n == r) {
+                        now.swap_remove(i);
+                    }
+                }
+                now
+            })
         })
         .unwrap_or_default();
         println!("      ({name}: {} new key rows {new:?}; turn ended {})", new.len(), ended.is_some());
@@ -115,7 +123,9 @@ pub fn pipe_live(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let of = |name: &str| made_rows.iter().find(|(n, _)| *n == name).map(|(_, r)| r.clone()).unwrap_or_default();
     for (name, unit) in TOOLS.iter().filter_map(|(name, _, unit)| Some((*name, (*unit)?))) {
-        let found = of(name).into_iter().find(|(key, units, charge)| key.contains(unit) && *units > 0 && *charge > 0);
+        // a web search is Perplexity's call or Firecrawl's credits, as Hermes' provider is
+        let units: &[&str] = if unit == "search" { &["perplexity:call", "firecrawl:credit"] } else { std::slice::from_ref(&unit) };
+        let found = of(name).into_iter().find(|(key, n, charge)| units.contains(&key.as_str()) && *n > 0 && *charge > 0);
         s.ok(
             &format!("(a model's choice) {name}: its call is charged its vendor's own number, in {unit}"),
             found.is_some(),
