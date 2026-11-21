@@ -79,6 +79,15 @@
         // the next build of the same image: the e2e's upgrade and rollback
         "stub-next": { "dockerfile": "../images/stub/Dockerfile", "build_context": "..", "build_vars": { "STUB_VERSION": "2" } }
       }
+    },
+    // A SimpleX door's container (cell/door.mjs): SimpleX's core and the
+    // door's runner, one per door, a `lite` instance, always on
+    {
+      "class_name": "SimplexDoor",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "door": { "dockerfile": "../images/simplex-door/Dockerfile", "build_context": ".." }
+      }
     }
   ],
   "durable_objects": {
@@ -101,7 +110,9 @@
       // A person's Vault: one object per person (vault.rs).
       { "name": "VAULT", "class_name": "Vault" },
       // The finite.computer move: one object, removable with it (migrations.rs).
-      { "name": "MIGRATIONS", "class_name": "Migrations" }
+      { "name": "MIGRATIONS", "class_name": "Migrations" },
+      // A SimpleX door: one object per door, by its name (door.mjs).
+      { "name": "SIMPLEX_DOOR", "class_name": "SimplexDoor" }
     ]
   },
   // Restarted at the move to Cloudflare: nothing on celld migrates
@@ -113,6 +124,7 @@
     { "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] },
     { "tag": "v2", "new_sqlite_classes": ["SearchIndex"] },
     { "tag": "v3", "new_sqlite_classes": ["Vault"] },
-    { "tag": "v4", "new_sqlite_classes": ["Migrations"] }
+    { "tag": "v4", "new_sqlite_classes": ["Migrations"] },
+    { "tag": "v5", "new_sqlite_classes": ["SimplexDoor"] }
   ]
 }

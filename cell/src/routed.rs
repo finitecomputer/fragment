@@ -229,10 +229,11 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("vault/") {
         Ok(Some((crate::vault::VAULT_HEADER, "1")))
-    } else if path.starts_with("index/") || path.starts_with("migrations/") {
+    } else if path.starts_with("index/") || path.starts_with("migrations/") || path.starts_with("door/") {
         // a search index is called by its fragment's supervisor alone:
         // the router never names one; the move's object is the router's
-        // alone (its routes check who asks before they call it)
+        // alone (its routes check who asks before they call it); a SimpleX
+        // door is called by the platform alone (cell/door.mjs)
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
@@ -402,7 +403,7 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 8] = [
+const PROBED: [(&str, &str, &str); 9] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
@@ -412,6 +413,8 @@ const PROBED: [(&str, &str, &str); 8] = [
     ("Vault", "VAULT", "__probe"),
     // one object, the move's (migrations.rs): its own name, as the registry's
     ("Migrations", "MIGRATIONS", crate::migrations::NAME),
+    // a SimpleX door's (cell/door.mjs): JavaScript, its own release check
+    ("SimplexDoor", "SIMPLEX_DOOR", "__probe"),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`

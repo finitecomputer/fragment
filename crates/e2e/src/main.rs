@@ -934,6 +934,8 @@ impl Suite {
             computer_image: self.runs_computers().then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
+            // the door's image built only for a run that names its lane
+            doors: self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME)),
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
@@ -1460,7 +1462,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
+            let offers = needs::Offers { levers: true, computers: true, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
