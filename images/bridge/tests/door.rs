@@ -523,6 +523,16 @@ async fn the_door_against_the_real_core() {
     person_got(&mut person, &mut got, &["r8"]).await;
     g4.reply(&door, "chat:9", "r9").await;
     person_got(&mut person, &mut got, &["r9"]).await;
+    // its save that holds r9 done, before it is superseded: a reply sent
+    // after the newest save a start restores is sent again (never lost,
+    // maybe twice: run 4 of 5 on 11-21 met it here), which is not what
+    // this step tries
+    let t0 = Instant::now();
+    // bounded: 30 s
+    while !door.with(|s| s.saves.last().is_some_and(|k| kept_of(&k.bytes)["replied"].as_array().is_some_and(|r| r.iter().any(|x| x == "chat:9")))) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "a save that holds r9 done");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     // superseded: a newer generation started, this one's save refused, and
     // it ends
