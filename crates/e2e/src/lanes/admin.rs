@@ -524,7 +524,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     for ago in [10_000, 20_000] {
         s.observability.log(now - ago, of(ours, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } })));
     }
-    s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
+    s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64, "room": 731_564_544_u64 }, "generation": 3 })));
     // its saves failed twice: the newest says why, naming a person's file
     // (its phase left out of the lines, so it counts as awake nowhere)
     let failed = |seq: u64, why: &str| json!({ "computer": saver, "event": { "event": "save_failed", "generation": 2, "seq": seq, "why": why } });

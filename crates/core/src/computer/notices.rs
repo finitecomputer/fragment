@@ -43,9 +43,9 @@ pub fn support_url_ok(url: &str) -> bool {
 ///   its agents' work), until its owner puts that version off
 ///   (`Images::later`). Never while it sleeps or starts: its next start
 ///   takes the new version anyway;
-/// - `disk_filling`: a read found its disk used past `DISK_TOLD_USED_PCT`
-///   with at most `DISK_TOLD_FREE_MAX` free, and none since found clearly
-///   more room (`disk_clear`).
+/// - `disk_filling`: a read found its disk with at most `ROOM_TOLD_MAX` of
+///   room (`disk::room`: what a restore of its save leaves), and none since
+///   found clearly more (`disk_clear`).
 pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
     let mut out = Vec::with_capacity(5);
     if let Phase::Failed { why, .. } = &life.phase {
@@ -105,7 +105,7 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
         }
     }
     if let Some(d) = saves.disk.filter(|_| saves.disk_told) {
-        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free });
+        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free, room: crate::computer::disk::room(&d) });
     }
     assert!(out.len() <= 5, "one notice of each kind at most");
     out

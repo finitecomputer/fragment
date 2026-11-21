@@ -417,7 +417,7 @@ fn simulated_interleavings_keep_the_invariants() {
                         assert_ne!(images.later.as_ref(), Some(version), "never one put off (seed {seed0})");
                         reached[10] += 1;
                     }
-                    ComputerNotice::DiskFilling { total, free } => assert!(!disk_clear(*total, *free), "a disk told filling has no clear room (seed {seed0}): {n:?}"),
+                    ComputerNotice::DiskFilling { room, .. } => assert!(*room < ROOM_CLEAR_MIN, "a disk told filling has no clear room (seed {seed0}): {n:?}"),
                     ComputerNotice::KeyPaused { .. } => panic!("a lifecycle tells no key's pause (seed {seed0})"),
                 }
             }
