@@ -354,6 +354,11 @@ class ContainerHost {
   // or a wipe's) starts nothing, answering false, and one overtaken by the
   // time its idle stop is set answers false too (that destroy ends it).
   async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs) {
+    // a start older than one begun since (it waited, on its owner's Vault
+    // say, as the newer one began) is overtaken already: it registers
+    // nothing, since its backups' refusal would replace a grant of the
+    // newer start's restore
+    if (generation < this.#generation) return false;
     this.#generation = generation;
     const destroys = this.#destroys;
     // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
