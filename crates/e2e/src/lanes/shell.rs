@@ -3777,6 +3777,9 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     // in its container, and Storage reads it again without it
     let wheel = "work/e2e/home/.cache/pip/wheel.whl";
     let row = format!("{block}?.querySelector('.storage-file[data-path=\"{wheel}\"]')");
+    // on screen for its shots (the Full step's reloads left the page at its top)
+    b.until(page, &format!("!!{row}"), wait);
+    b.eval(page, &format!("({row}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete]')?.click(), true)"))?;
     let asked = b.until(page, &format!("!!{row}?.querySelector('[data-action=storage-delete-sure]')?.checkVisibility() && !{row}.querySelector('[data-action=storage-delete]')"), wait);
     for scheme in ["dark", "light"] {
