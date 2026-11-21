@@ -51,6 +51,8 @@ words are no one's, whatever `principal` they name:
 - They answer no card or question, and stop and command nothing.
 - They start no routine on `tasks`.
 - An agent's notes tell them as "App code", never as its owner.
+- The chat's page counts none of them as anyone's answer to a card or a
+  question.
 
 What a person or an agent posts, a door relays and the platform writes
 keeps its principal's word. A record without the stamp (an older

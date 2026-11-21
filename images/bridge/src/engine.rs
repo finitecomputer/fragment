@@ -757,10 +757,6 @@ pub struct Engine {
     now: u64,
 }
 
-/// Whom a turn names as asking when app code wrote the message that
-/// started it: no one, whoever called the code.
-const CODE_SAYS: &str = "app code";
-
 /// A runtime the bridge runs: the commands it takes from its agents' owners
 /// (its menu), and what it says of itself. Never saved: a new life hears it
 /// again.
@@ -1304,7 +1300,7 @@ impl Engine {
                 }
                 if let Some(hop) = hop {
                     let asker_name = match code {
-                        true => CODE_SAYS.to_string(),
+                        true => records::CODE_SAYS.to_string(),
                         false => view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into()),
                     };
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };

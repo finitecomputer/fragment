@@ -45,6 +45,10 @@ pub struct Record {
 /// effect or a job's step, in a fragment running its author's own code.
 pub const CODE: &str = "code";
 
+/// Whom a turn names as asking when app code wrote the message that
+/// started it: no one, whoever called the code.
+pub const CODE_SAYS: &str = "app code";
+
 impl Record {
     /// Whether app code wrote it (`CODE`): its words are no one's, whoever
     /// called the code, so they carry no owner's authority and answer,
