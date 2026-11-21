@@ -2088,12 +2088,14 @@ mod tests {
             assert_eq!(admin["compatibility_date"], cell["compatibility_date"]);
             assert_eq!((&admin["workers_dev"], &admin["preview_urls"]), (&json!(false), &json!(false)));
             assert_eq!(admin["observability"], cell["observability"], "logs, never traces, as the cell's");
-            for absent in ["routes", "migrations", "secrets_store_secrets", "services", "assets", "containers", "queues"] {
+            for absent in ["routes", "migrations", "secrets_store_secrets", "services", "containers", "queues", "workflows", "ai", "images", "browser"] {
                 assert!(admin.get(absent).is_none(), "the admin has no {absent}");
             }
             let bindings = admin["durable_objects"]["bindings"].as_array().unwrap();
             assert_eq!(bindings.len(), cell["durable_objects"]["bindings"].as_array().unwrap().len());
             assert!(bindings.iter().all(|b| b["script_name"] == cell_name), "the cell's classes, in this deployment's cell: {bindings:?}");
+            assert_eq!(admin["assets"]["directory"], json!(root.join("cell/build/assets")), "the release's files, as the cell's");
+            assert!(admin.get("r2_buckets").is_none(), "no bucket: this deployment makes no move's stages");
             let bare = admin_bare(&admin);
             assert!(bare.get("durable_objects").is_none() && bare["name"] == admin_name && bare["vars"] == admin["vars"], "a first upload binds no object, and is otherwise the same");
         }
@@ -2106,6 +2108,11 @@ mod tests {
         assert_eq!(admin["secrets_store_secrets"], json!([{ "binding": "OBSERVABILITY_READ", "store_id": "0f0e0d0c", "secret_name": "fragment-observability-read" }]));
         assert!(!cell["secrets_store_secrets"].as_array().unwrap().iter().any(|b| b["binding"] == "OBSERVABILITY_READ"), "no fragment's isolate holds it");
         assert_eq!((&admin["vars"]["FRAGMENT_ACCOUNT_ID"], &admin["vars"]["FRAGMENT_WORKER_NAME"]), (&json!("acct"), &json!("fragment-p5")), "the account it reads, and the cell's lines alone");
+        // the move's stages, when the deployment makes them: staff read a move there
+        d.migrations = Some(Migrations { mover: fragment_core::npub::encode(&"a".repeat(64)), cutoff_ms: None });
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let admin = admin_config(&d, &cell, &n, "0f0e0d0c", &devstack::repo_root()).unwrap();
+        assert_eq!(admin["r2_buckets"], json!([{ "binding": "STAGE", "bucket_name": "fragment-migrations-stage-p5" }]));
     }
 
     /// Goal: no deployment's admin Worker is ever another deployment's cell
