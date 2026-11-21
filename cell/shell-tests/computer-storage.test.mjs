@@ -46,7 +46,7 @@ test("no summary yet: its size alone, all of it Other; kinds past its size widen
 });
 
 test("all of /data, its total known: what is used, Other what its kinds leave out; no room: Full", () => {
-  const c = { disk: { total: 20e9, free: 1e8, data: 15e9, room: 0, filling: true, at: 3 }, sizes: { at: 4, total: 17e9, folders: [], files: [], kinds: [{ kind: "caches", bytes: 2e9 }, { kind: "projects", bytes: 13e9 }] } };
+  const c = { disk: { total: 20e9, free: 2e8, data: 15e9, room: 0, filling: true, at: 3 }, sizes: { at: 4, total: 17e9, folders: [], files: [], kinds: [{ kind: "caches", bytes: 2e9 }, { kind: "projects", bytes: 13e9 }] } };
   const p = storageParts(c);
   assert.deepEqual([p.used, p.left, p.full, p.filling], [17e9, 0, true, true], "its caches too, which its save leaves out");
   assert.deepEqual(p.kinds.map((k) => [k.kind, k.bytes]), [["caches", 2e9], ["projects", 13e9], ["other", 2e9]]);
