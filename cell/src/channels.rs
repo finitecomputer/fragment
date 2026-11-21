@@ -154,6 +154,10 @@ pub(crate) struct Pending {
     pub depth: u32,
     /// Passing failures so far.
     pub tries: i64,
+    /// The app code that ran it (its loader id), as installed when it began:
+    /// what its records are stamped by (`code_author`). `None` on a row
+    /// from before the stamp.
+    pub code: Option<String>,
 }
 
 impl Pending {
@@ -168,7 +172,7 @@ impl Pending {
     }
 }
 
-const PENDING_COLUMNS: &str = "seq, ledger_id, op, principal, depth, tries";
+const PENDING_COLUMNS: &str = "seq, ledger_id, op, principal, depth, tries, code";
 
 fn pending_of(r: &Value) -> Pending {
     Pending {
@@ -178,6 +182,7 @@ fn pending_of(r: &Value) -> Pending {
         principal: r["principal"].as_str().expect("pending.principal is TEXT").to_string(),
         depth: r["depth"].as_u64().and_then(|d| u32::try_from(d).ok()).expect("pending.depth is a small INTEGER"),
         tries: r["tries"].as_i64().expect("pending.tries is INTEGER"),
+        code: r["code"].as_str().map(str::to_string),
     }
 }
 
@@ -423,16 +428,20 @@ impl FragmentCell {
     }
 
     /// Who wrote what this fragment's code publishes (an operation's
-    /// effect, a job's step), as its record says: its author's own code
-    /// speaks for no one (`Author::Code`). A release's code, unforked, is
-    /// the platform's, or, while it is an open door (`hosted`), that door's.
-    pub(crate) fn code_author(&self, hosted: bool) -> CellResult<Author> {
-        if hosted {
-            return Ok(Author::Door);
-        }
-        Ok(match self.blessed()? {
-            Some(_) => Author::Platform,
-            None => Author::Code,
+    /// effect, a job's step), as its record says, from the code that `ran`
+    /// it (its loader id): its author's own code speaks for no one
+    /// (`Author::Code`). A release's code, unforked and still the code
+    /// installed, is the platform's, or, while it is an open door
+    /// (`hosted`), that door's. Code that is not known, or that an install
+    /// has replaced since it ran, is its author's: the stamp never lends
+    /// a release's word to code that may not be the release's.
+    pub(crate) fn code_author(&self, ran: Option<&str>, hosted: bool) -> CellResult<Author> {
+        let installed = self.installed_code()?;
+        let release = ran.is_some_and(|r| door::blessed_template(r).is_some()) && ran == installed.as_deref();
+        Ok(match (release, hosted) {
+            (true, true) => Author::Door,
+            (true, false) => Author::Platform,
+            (false, _) => Author::Code,
         })
     }
 
@@ -955,9 +964,10 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{PENDING_MAX} mutations are waiting for their effects to apply; retry shortly")));
         }
         let now = SqlStorageValue::Integer(js::now_ms());
+        let code = self.installed_code()?.map_or(SqlStorageValue::Null, SqlStorageValue::from);
         let rows = self.rows(
-            &format!("INSERT INTO pending (ledger_id, op, principal, depth, tries, next_at, at) VALUES (?, ?, ?, ?, 0, ?, ?) RETURNING {PENDING_COLUMNS}"),
-            vec![ledger_id.into(), op.into(), principal.into(), SqlStorageValue::Integer(depth.into()), now.clone(), now],
+            &format!("INSERT INTO pending (ledger_id, op, principal, depth, tries, next_at, at, code) VALUES (?, ?, ?, ?, 0, ?, ?, ?) RETURNING {PENDING_COLUMNS}"),
+            vec![ledger_id.into(), op.into(), principal.into(), SqlStorageValue::Integer(depth.into()), now.clone(), now, code],
         )?;
         let p = pending_of(rows.first().expect("an insert answers its row"));
         assert!(p.ledger_id == ledger_id && p.tries == 0, "the new row is this mutation's");
@@ -967,9 +977,13 @@ impl FragmentCell {
     /// A run that committed under a row an earlier attempt left: the row
     /// now describes this call.
     pub(crate) fn restate(&self, p: &mut Pending, op: &str, depth: u32) -> CellResult<()> {
-        self.exec("UPDATE pending SET op = ?, depth = ? WHERE seq = ?", vec![op.into(), SqlStorageValue::Integer(depth.into()), SqlStorageValue::Integer(p.seq)])?;
+        // run again, by the code installed now
+        let code = self.installed_code()?;
+        let stored = code.clone().map_or(SqlStorageValue::Null, SqlStorageValue::from);
+        self.exec("UPDATE pending SET op = ?, depth = ?, code = ? WHERE seq = ?", vec![op.into(), SqlStorageValue::Integer(depth.into()), stored, SqlStorageValue::Integer(p.seq)])?;
         p.op = op.to_string();
         p.depth = depth;
+        p.code = code;
         Ok(())
     }
 
@@ -1000,7 +1014,7 @@ impl FragmentCell {
     pub(crate) async fn apply(&self, p: &Pending, effects: &Value) -> CellResult<Settled> {
         let (declared, hosted, author) = match self.declared_channels().and_then(|d| {
             let hosted = self.hosted_door()?;
-            let author = self.code_author(hosted.is_some())?;
+            let author = self.code_author(p.code.as_deref(), hosted.is_some())?;
             Ok((d, hosted, author))
         }) {
             Ok(all) => all,

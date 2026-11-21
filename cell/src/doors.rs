@@ -65,7 +65,7 @@ impl Binding {
 
 impl FragmentCell {
     /// The blessed template this fragment's installed code is, if any.
-    pub(crate) fn blessed(&self) -> CellResult<Option<String>> {
+    fn blessed(&self) -> CellResult<Option<String>> {
         let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
         Ok(rows.first().and_then(|r| r["loader_id"].as_str()).and_then(door::blessed_template).map(str::to_string))
     }
