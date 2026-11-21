@@ -63,6 +63,7 @@ pub mod connection_accounts;
 pub mod connection_signin;
 pub mod org;
 pub mod price;
+pub mod private_home;
 pub mod ratelimit;
 pub mod retention;
 pub mod registry;

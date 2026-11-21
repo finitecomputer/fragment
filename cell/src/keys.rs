@@ -3,7 +3,8 @@
 //! `fragment_core::secrets_store`'s): the host secret that seals values at
 //! rest, the code.storage org key, WorkOS's client id and API key, Stripe's,
 //! the keys of the models the route runs on OpenAI-compatible APIs (Finite
-//! Private's), and the operator's keys a computer's swap sends; and what is
+//! Private's), the operator's keys a computer's swap sends, and the key the
+//! admin asks the private home with; and what is
 //! derived from the
 //! host secret: the key placeholders' tags are made with (`tag_keys`).
 //! This file is the one place the cell reads them (`secret`), through a
@@ -496,6 +497,29 @@ pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &s
         None => None,
     };
     Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), form).await?.0 == 200)
+}
+
+/// The private home's door at `door` asked, by the admin, for an invite
+/// for `email` (fragment_core::private_home; docs/api.md, "A private
+/// agent"): signed by NIP-98 with the nostr key bound as
+/// `PRIVATE_HOME_KEY` (the admin Worker's alone), whose npub the door
+/// trusts. Its answer, read whole (`ANSWER_BYTES_MAX`), for
+/// `private_home::answered`; nothing of it is logged.
+pub async fn private_home_ask(env: &Env, door: &str, email: &str) -> CellResult<(u16, Value)> {
+    use fragment_core::private_home::{ask_body, ask_url, ANSWER_BYTES_MAX};
+    let key = required(env, store::PRIVATE_HOME_KEY).await?;
+    let keys = fragment_nip98::Keys::from_secret_hex(key.trim()).ok_or_else(|| CellError::host(format!("{} is no nostr key (64 hex)", store::PRIVATE_HOME_KEY)))?;
+    let (url, body) = (ask_url(door), ask_body(email));
+    let headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    headers.set("accept", "application/json")?;
+    headers.set("authorization", &keys.header("POST", &url, body.as_bytes(), js::now_ms() / 1000))?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(body.into()));
+    let a = crate::cs::fetch_all(Request::new_with_init(&url, &init)?, VENDOR_TIMEOUT, ANSWER_BYTES_MAX)
+        .await
+        .map_err(|_| CellError::new(ErrorCode::UpstreamFailed, "the private home did not answer: try again"))?;
+    Ok((a.status, if a.cut { Value::Null } else { serde_json::from_slice(&a.body).unwrap_or(Value::Null) }))
 }
 
 /// Whether the deployment binds the operator's key `name`

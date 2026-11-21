@@ -94,6 +94,7 @@ pub async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         // the finite.computer move's moves, and staff's acts on one
         (m, ["migrations", rest @ ..]) => crate::migrations::admin(env, cfg, &by, m, rest, url, &bytes).await,
         (Method::Post, ["objects", class, "wake"]) => json_answer(&crate::routed::wake(env, class, body(&bytes)?).await?),
+        (Method::Post, ["private-agent"]) => json_answer(&private_agent(env, cfg, &req, url, &bytes, by).await?),
         (Method::Get, ["log"]) => {
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;
             json_answer(&ask_registry(env, &admin::Log { before }).await?)
@@ -149,6 +150,25 @@ pub async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
+}
+
+/// `POST /api/admin/private-agent` (docs/api.md, "A private agent"): the
+/// operator's own new account at the deployment's private home, by a
+/// one-time invite its door makes when asked (signed with the key the door
+/// trusts: keys.rs `private_home_ask`); for an email that has an account
+/// there, the home to sign in at, so this deployment never gets into an
+/// account at the home. The email is the operator's own, verified at their
+/// sign-in here, never the request's (it takes no body). Noted in the
+/// operators' log.
+async fn private_agent(env: &Env, cfg: &Config, req: &Request, url: &url::Url, bytes: &[u8], by: String) -> CellResult<fragment_proto::PrivateAgent> {
+    let door = cfg.private_home_door.as_deref().ok_or_else(|| CellError::new(ErrorCode::NotFound, "this deployment names no private home"))?;
+    let view = ask_registry(env, &crate::registry::calls::View { identity: None, by: crate::orgs::signed_by(env, req, url, bytes)? }).await?;
+    let email = view.email.ok_or_else(|| CellError::invalid("a private agent is a signed-in person's, by their email: you signed in with none"))?;
+    let (status, answer) = crate::keys::private_home_ask(env, door, &email).await?;
+    let agent = fragment_core::private_home::answered(door, status, &answer).map_err(|why| CellError::new(ErrorCode::UpstreamFailed, why))?;
+    let detail = if agent.invited { "invited to a new account at the private home" } else { "has an account at the private home: to sign in" };
+    ask_registry(env, &admin::Note { by, action: "private-agent".into(), target: view.id, detail: detail.into(), request: None }).await?;
+    Ok(agent)
 }
 
 /// A person's page for operators: as the list shows them, their ledger,

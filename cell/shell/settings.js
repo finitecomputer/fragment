@@ -49,7 +49,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
   const { computerSection, connectionsSection, simplexSection, telegramSection, readTelegram } = sections;
-  const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
+  const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, privateAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
   // The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
@@ -383,7 +383,8 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   }
   // What Settings' Agents holds under its heading (`out`): each agent's
   // card, the one `kept` for it when there is one (`cardsFor`), and New
-  // agent; and the cards it holds, by agent (`cards`).
+  // agent, and Add a private agent where it is offered; and the cards it
+  // holds, by agent (`cards`).
   function agentsDrawn(linked, kept = new Map()) {
     const mine = [...getAgents().values()];
     // the models a provider the person connected offers (its own credit pays)
@@ -391,7 +392,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     const cards = cardsFor(mine, kept, (a) => cardOf(a, modeled));
     const out = [];
     if (mine.length && modeled.length) out.push(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
-    out.push(...(mine.length ? mine.flatMap((a) => cards.get(a.fragment)) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
+    out.push(...(mine.length ? mine.flatMap((a) => cards.get(a.fragment)) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []), ...privateAgentForm());
     return { out, cards };
   }
   // The roster changed (shell.js `load`): settings shown draw their Agents

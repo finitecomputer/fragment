@@ -385,6 +385,8 @@ fn dev(args: &[String]) -> Result<()> {
         }),
         // dev's glance reads no logs: it says they are not configured
         observability: None,
+        // dev has no private home: no one is offered a private agent
+        private_home: None,
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),

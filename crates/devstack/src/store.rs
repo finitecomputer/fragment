@@ -423,6 +423,9 @@ pub struct Bound {
     /// the admin Worker's alone (`admin`), so no fragment's isolate holds
     /// an account-wide log read key.
     pub observability_read: Option<String>,
+    /// The key the operators' admin signs its asks to the private home's
+    /// door with: the admin Worker's alone (`admin`), as the glance's.
+    pub private_home_key: Option<String>,
 }
 
 /// The model key's name in the store that deploy/example.jsonc's tiers
@@ -445,6 +448,7 @@ impl Bound {
             connection_secrets: vec![],
             model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
             observability_read: None,
+            private_home_key: None,
         }
     }
 
@@ -480,9 +484,11 @@ impl Bound {
 
     /// The secrets `cell` binds, each once: two bindings may name one.
     /// The operators' admin Worker's (cell/src/admin.rs): the key its
-    /// glance reads the logs with.
+    /// glance reads the logs with, and the key it asks the private home
+    /// with.
     pub fn admin(&self) -> Vec<(String, &str)> {
-        self.observability_read.iter().map(|name| (bindings::OBSERVABILITY_READ.to_string(), name.as_str())).collect()
+        let glance = self.observability_read.iter().map(|name| (bindings::OBSERVABILITY_READ.to_string(), name.as_str()));
+        glance.chain(self.private_home_key.iter().map(|name| (bindings::PRIVATE_HOME_KEY.to_string(), name.as_str()))).collect()
     }
 
     pub fn secrets(&self) -> Vec<&str> {
@@ -741,6 +747,11 @@ mod tests {
         assert_eq!(read.admin(), [("OBSERVABILITY_READ".to_string(), "fragment-observability-read")]);
         assert_eq!(read.cell(), cell, "no fragment's isolate holds it");
         assert_eq!(read.secrets().len(), cell.len(), "and the store holds it");
+        // the private home's key: the admin Worker's alone too
+        read.private_home_key = Some("fragment-private-home-key".into());
+        assert_eq!(read.admin()[1], ("PRIVATE_HOME_KEY".to_string(), "fragment-private-home-key"));
+        assert_eq!(read.cell(), cell, "no fragment's isolate holds it");
+        assert_eq!(read.secrets().len(), cell.len() + 1, "and the store holds it");
         let doubled = vec![("HOST_SECRET".to_string(), "a"), ("HOST_SECRET".to_string(), "b")];
         assert!(std::panic::catch_unwind(|| bindings_json("0f0e", &doubled)).is_err());
 

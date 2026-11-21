@@ -457,6 +457,10 @@ pub struct Suite {
     /// Workers Observability, faked: the operators' glance reads the log
     /// lines a lane plants in it.
     pub observability: Fake<fragment_fakes::observability::Observability>,
+    /// The private home's door, faked: the admin asks it for a private
+    /// agent's invite, signed with `private_home_key`.
+    pub private_door: Fake<fragment_fakes::private_door::PrivateDoor>,
+    pub private_home_key: Keys,
     org_key: String,
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
@@ -910,6 +914,7 @@ impl Suite {
                 script: OBSERVABILITY_SCRIPT.into(),
                 api_url: self.observability.node().url.clone(),
             }),
+            private_home: Some(devstack::PrivateHomeVars { door: self.private_door.node().url.clone(), key: self.private_home_key.secret_hex() }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
                 Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => format!("http://127.0.0.1:{}", self.port),
@@ -1482,6 +1487,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
     let listener = devstack::hold_port(0)?;
+    // the key the admin asks the private home's door with (`private_door`)
+    let private_home_key = Keys::generate();
     let mut s = Suite {
         only,
         except,
@@ -1515,6 +1522,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
         stripe: Fake::of(hidden, "Stripe", fragment_fakes::stripe::Stripe::start(0, STRIPE_KEY)?),
         observability: Fake::of(hidden, "Workers Observability", fragment_fakes::observability::Observability::start(OBSERVABILITY_ACCOUNT, OBSERVABILITY_KEY)?),
+        private_door: Fake::of(hidden, "the private home's door", fragment_fakes::private_door::PrivateDoor::start(private_home_key.pubkey_hex())?),
+        private_home_key,
         org_key,
         host_secret: devstack::random_hex(32),
         test_secret,

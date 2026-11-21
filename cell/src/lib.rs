@@ -879,7 +879,14 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
         }
         (Method::Get, [id]) => {
             let identity = named_identity(id)?;
-            json_answer(&ask_registry(env, &calls::View { identity, by: by() }).await?)
+            let mut view = ask_registry(env, &calls::View { identity, by: by() }).await?;
+            // a person's own view says when they may add a private agent: an
+            // operator's, on a deployment with a private home (admin.rs)
+            let cfg = Config::from_env(env);
+            if *id == "me" && cfg.private_home_door.is_some() && crate::orgs::is_operator(cfg, &view)? {
+                view.private_agents = Some(true);
+            }
+            json_answer(&view)
         }
         (Method::Post, [id, "keys"]) => {
             let identity = named_identity(id)?;

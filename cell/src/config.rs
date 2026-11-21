@@ -234,6 +234,11 @@ pub struct Config {
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
     /// its host in `x-fragment-upstream-host`, instead of to its host.
     pub swap_upstream: Option<String>,
+    /// `FRAGMENT_PRIVATE_HOME_DOOR` (the deploy config's `private_home.door`):
+    /// the private home's identity door, where an operator's admin asks for
+    /// a private agent (docs/api.md, "A private agent"). None: no one is
+    /// offered one.
+    pub private_home_door: Option<String>,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -458,6 +463,10 @@ impl Config {
             providers,
             models,
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
+            private_home_door: var(env, "FRAGMENT_PRIVATE_HOME_DOOR").map(|d| {
+                assert!(fragment_core::private_home::door_ok(&d), "FRAGMENT_PRIVATE_HOME_DOOR is the home's door, https://<host>/<path> with no trailing slash, not {d:?}");
+                d
+            }),
         }
     }
 

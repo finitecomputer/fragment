@@ -199,7 +199,7 @@ signer's key, 64 hex>]`.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, named by the proof's key; again, the same one. A key someone else holds 409; an agent making one 403; `kind: "person"` 400 (people come from sign-in) |
-| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, email?, picture?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents, subjects: [{issuer, email, linkedAt}]}`; anyone else 404 |
+| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, email?, picture?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents, subjects: [{issuer, email, linkedAt}], privateAgents?}`; `privateAgents: true` on `me` alone, for an operator on a deployment with a private home (Operators, "A private agent"), absent for everyone else; anyone else 404 |
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity, the key added (at most `KEYS_PER_IDENTITY_MAX`, revoked ones counted); a person is mailed (Mail). Held by someone else, or revoked: 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request, for good. An agent's last active key 400 |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` |
@@ -368,8 +368,32 @@ calls the same.
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: every comp, trial code, pin and ledger command; the newest 10,000 kept |
 | `POST /api/admin/objects/{class}/wake` | the same | `{id}` → `{class, id, ready: true}`: starts the platform object `id` (as Cloudflare lists it) of `class` (Registry, Principal, Ledger, Fragment, Computer) as a call would, its schema made current, and answers as a deploy's probe; refused, its `schema_refused`. An id of another class 400. Not logged: it changes nothing a call would not |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code and `/welcome?trial=<code>`; an ended code 400 |
+| `POST /api/admin/private-agent` | the same, a person signed in with an email | no body read → `PrivateAgent {url, invited}`: where their browser goes, at the deployment's private home (below). Logged (`private-agent`). No private home 404; no email 400; the home refusing or not answering 502 `upstream_failed`, its words passed on |
 
 Comps, orgs and trial codes are under Seats and orgs.
+
+### A private agent
+
+A deployment may name a **private home** (the deploy config's
+`private_home`: `FRAGMENT_PRIVATE_HOME_DOOR`, its identity door's public
+URL, and a nostr key in the store, `PRIVATE_HOME_KEY`, the admin Worker's
+alone): a Fragment of its own in a confidential sandbox, where people sign
+in with their own passkeys. While it is new, it is offered to the
+deployment's operators alone: their own `GET /api/identities/me` says
+`privateAgents: true`, and the shell's Settings shows Add a private agent.
+
+Asked (`POST /api/admin/private-agent`), the admin asks the home's door
+(`POST <door>/passkeys/invites`, NIP-98 signed with that key, the body
+`{"email": …}`: the operator's own email, as their sign-in here verified
+it, never the request's; `fragment_core::private_home`). The door trusts
+that key's npub alone. For an email with no account there it makes a
+one-time invite, good for an hour, and the operator's browser goes to it to
+make their first passkey (`invited: true`). For an email with an account
+there it makes nothing, and the browser goes to the home to sign in
+(`invited: false`). So this deployment, and whoever runs it, can start new
+accounts at the home and never get into one: every later passkey there
+needs one of the account's own. The answer is held to the door: an invite
+under its URL, or a sign-in on its origin; anything else is a 502.
 
 ## Operators: wiping a person
 

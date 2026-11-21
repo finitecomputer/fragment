@@ -330,6 +330,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         mail: Fake::absent("mail"),
         stripe: Fake::absent("Stripe"),
         observability: Fake::absent("Workers Observability"),
+        private_door: Fake::absent("the private home's door"),
+        private_home_key: Keys::generate(),
         org_key: String::new(),
         host_secret: String::new(),
         test_secret: String::new(),

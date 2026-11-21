@@ -228,6 +228,68 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
             && theirs.header("x-frame-options") == "DENY",
         &theirs,
     );
+    private_agent(s, api, &operator, &stranger)
+}
+
+/// A private agent (`POST /api/admin/private-agent`; docs/api.md, "A
+/// private agent"), the admin Worker's: the operator's own new account at
+/// the deployment's private home, by its door's invite (the door faked:
+/// crates/fakes/src/private_door.rs, which checks the ask's signature as
+/// the real one does). Valid: an operator's own view says they may add one
+/// (`privateAgents`) and anyone else's says nothing; asked, the door is
+/// asked for the operator's own email, never the request's, and its
+/// invite is where they go; an email with an account there is sent to
+/// sign in, nothing made. Replay: asked again, another invite (each ask
+/// signed afresh, so the door's replay check refuses none of ours).
+/// Invalid: anyone else is 403, the door never asked; a door that refuses
+/// is a 502 in its words. Each answered ask is in the operators' log.
+/// Hosted, its refusal alone: no home is faked there.
+fn private_agent(s: &mut Suite, api: &Api, operator: &Keys, stranger: &Keys) -> Result<()> {
+    let me = api.signed(operator, "GET", "/api/identities/me", None)?;
+    let theirs = api.signed(stranger, "GET", "/api/identities/me", None)?;
+    s.ok(
+        "an operator's own view says they may add a private agent; anyone else's says nothing of it",
+        me.status == 200 && (me.body["privateAgents"] == true || s.hosted()) && theirs.status == 200 && theirs.body.get("privateAgents").is_none(),
+        json!([me.body.get("privateAgents"), theirs.body.get("privateAgents")]),
+    );
+    let refused = api.signed(stranger, "POST", "/api/admin/private-agent", None)?;
+    if s.hosted() {
+        s.ok("anyone else is refused a private agent (403)", refused.status == 403, &refused);
+        return Ok(());
+    }
+    let door = s.private_door.node().url.clone();
+    let email = me.body["email"].as_str().unwrap_or("?").to_string();
+    s.ok("anyone else is refused (403), the home's door never asked", refused.status == 403 && s.private_door.node().asked().is_empty(), &refused);
+    let asked = api.signed(operator, "POST", "/api/admin/private-agent", Some(&json!({ "email": "someone-else@e2e.test" })))?;
+    let url = asked.body["url"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "asked, the door's invite for the operator's own email (never the request's) is where they go",
+        asked.status == 200 && asked.body["invited"] == true && url.starts_with(&format!("{door}/invite/")) && s.private_door.node().invited() == [email.clone()],
+        json!([asked.body, s.private_door.node().asked()]),
+    );
+    let again = api.signed(operator, "POST", "/api/admin/private-agent", None)?;
+    s.ok(
+        "asked again, another invite: each ask is signed afresh, so the door's replay check refuses none",
+        again.status == 200 && again.body["invited"] == true && again.body["url"] != asked.body["url"] && s.private_door.node().invited().len() == 2,
+        &again,
+    );
+    s.private_door.node().account(&email);
+    let signin = api.signed(operator, "POST", "/api/admin/private-agent", None)?;
+    s.ok(
+        "an email with an account at the home is sent there to sign in, and no invite is made: this deployment gets into no account there",
+        signin.status == 200 && signin.body == json!({ "url": format!("{door}/"), "invited": false }) && s.private_door.node().invited().len() == 2,
+        &signin,
+    );
+    s.private_door.node().fail_next(401, "not signed by this door's inviter");
+    let failed = api.signed(operator, "POST", "/api/admin/private-agent", None)?;
+    s.ok(
+        "a door that refuses is the platform's 502, in the door's words",
+        failed.status == 502 && failed.body["error"] == "upstream_failed" && failed.body["message"].as_str().is_some_and(|m| m.contains("inviter")),
+        &failed,
+    );
+    let log = api.signed(operator, "GET", "/api/admin/log", None)?;
+    let noted = log.body["entries"].as_array().into_iter().flatten().filter(|e| e["action"] == "private-agent" && e["target"] == me.body["id"]).count();
+    s.ok("each answered ask is in the operators' log, naming the operator", noted == 3, format!("{noted} entries"));
     Ok(())
 }
 
@@ -499,12 +561,54 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let log = b.until(&page, &format!("[...document.querySelectorAll('#log-rows tr')].some(r => r.textContent.includes('comp') && r.textContent.includes({email:?}))"), wait);
     s.ok("its log holds the comp, by this operator", log, "");
 
+    // ---- Add a private agent, in the operator's own shell (Settings'
+    // Agents; docs/api.md, "A private agent"): offered to them, whole at
+    // 1280 and 390; pressed, the browser goes to the home (its door faked
+    // here): the invite, or the home to sign in at when the admin lane made
+    // the operator's email an account there first
+    let offer = "[...document.querySelectorAll('#settings-page button')].find(x => x.textContent.trim() === 'Add a private agent' && x.getClientRects().length)";
+    if !s.hosted() {
+        let shell = b.open(&format!("{}/settings", api.base))?;
+        b.viewport(&shell, 1280, 800, false)?;
+        let shown = b.until(&shell, &format!("location.pathname === '/settings' && !!{offer}"), wait);
+        b.eval(&shell, &format!("({offer})?.scrollIntoView({{ block: 'center' }}), true"))?;
+        let _ = b.screenshot(&shell, &shots.join("private-agent-1280.png"));
+        b.viewport(&shell, 390, 844, true)?;
+        b.eval(&shell, &format!("({offer})?.scrollIntoView({{ block: 'center' }}), true"))?;
+        let fits = b.until(&shell, &format!("(() => {{ const r = ({offer})?.getBoundingClientRect(); return !!r && r.width > 0 && r.left >= 0 && r.right <= innerWidth; }})()"), wait);
+        let _ = b.screenshot(&shell, &shots.join("private-agent-390.png"));
+        s.ok("an operator's Settings offers Add a private agent, whole at 1280 and at 390", shown && fits, b.eval(&shell, "document.getElementById('settings-page')?.innerText ?? ''")?);
+        b.viewport(&shell, 1280, 800, false)?;
+        let door = s.private_door.node().url.clone();
+        let before = s.private_door.node().asked().len();
+        b.eval(&shell, &format!("({offer}).click(), true"))?;
+        let went = b.until(&shell, &format!("location.href.startsWith({:?})", format!("{door}/")), wait);
+        let asked = s.private_door.node().asked();
+        s.ok(
+            "pressed, the browser goes to the private home, which was asked for the operator's own email",
+            went && asked.len() == before + 1 && asked.last().map(String::as_str) == Some("operator@e2e.test"),
+            json!([b.eval(&shell, "location.href")?, asked]),
+        );
+    }
+
     // anyone else
     let other = api.sign_in(&format!("admin-page-stranger-{}@e2e.test", crate::api::now_s()))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &other)?;
     let theirs = b.open(&format!("{}/admin", api.base))?;
     let missing = b.until(&theirs, "document.readyState === 'complete' && !document.getElementById('status') && document.body.innerText.includes('no route /admin')", wait);
     s.ok("to anyone else it is the 404 of a path that is not there: nothing of the page", missing, b.eval(&theirs, "document.body.innerText")?);
+    // and their Settings offer no private agent
+    let shell = b.open(&format!("{}/settings", api.base))?;
+    b.viewport(&shell, 1280, 800, false)?;
+    let drawn = b.until(&shell, "location.pathname === '/settings' && (document.getElementById('settings-page')?.innerText ?? '').includes('None yet.')", wait);
+    let offered = b.eval(&shell, &format!("!!{offer} || (document.getElementById('settings-page')?.innerText ?? '').includes('private agent')"))?;
+    let none = "[...document.querySelectorAll('#settings-page p')].find(p => p.textContent === 'None yet.')";
+    b.eval(&shell, &format!("({none})?.scrollIntoView({{ block: 'center' }}), true"))?;
+    let _ = b.screenshot(&shell, &shots.join("no-private-agent-1280.png"));
+    b.viewport(&shell, 390, 844, true)?;
+    b.eval(&shell, &format!("({none})?.scrollIntoView({{ block: 'center' }}), true"))?;
+    let _ = b.screenshot(&shell, &shots.join("no-private-agent-390.png"));
+    s.ok("anyone else's Settings offer no private agent", drawn && offered == false, b.eval(&shell, "document.getElementById('settings-page')?.innerText ?? ''")?);
     Ok(())
 }
 

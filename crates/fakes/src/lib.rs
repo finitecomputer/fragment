@@ -18,6 +18,7 @@ pub mod observability;
 pub mod oidc;
 pub mod old_home;
 pub mod openrouter;
+pub mod private_door;
 pub mod push;
 pub mod search;
 pub mod stripe;

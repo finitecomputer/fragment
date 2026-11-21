@@ -1766,6 +1766,23 @@ pub struct IdentityView {
     /// Whether this answer made it (a registration's replay answers false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
+    /// `true` on a person's own view (`GET /api/identities/me`) when they
+    /// may add a private agent (`POST /api/admin/private-agent`): one of
+    /// the deployment's operators, on a deployment that names a private
+    /// home. Absent for everyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_agents: Option<bool>,
+}
+
+/// `POST /api/admin/private-agent`'s answer: where the operator's browser
+/// goes next, at the deployment's private home. A new account's one-time
+/// invite there (`invited`), or, for an email that has an account there,
+/// the home itself, to sign in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateAgent {
+    pub url: String,
+    pub invited: bool,
 }
 
 /// `PUT /api/f/<name>/members/<npub>` (owner)

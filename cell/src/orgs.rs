@@ -223,18 +223,24 @@ pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, 
 /// `GET /admin` the page's (shell.rs `admin_page`).
 pub(crate) async fn session_operator(env: &Env, cfg: &Config, token: String) -> CellResult<Option<String>> {
     let view = ask_registry(env, &crate::registry::calls::View { identity: None, by: By::Session(token) }).await?;
+    Ok(is_operator(cfg, &view)?.then_some(view.id))
+}
+
+/// Whether the identity `view` shows is one of the deployment's operators:
+/// listed itself, or holding a key the deployment lists (decision 59).
+pub(crate) fn is_operator(cfg: &Config, view: &fragment_proto::IdentityView) -> CellResult<bool> {
     if cfg.is_operator(None, &view.id)? {
-        return Ok(Some(view.id));
+        return Ok(true);
     }
     // bounded: an identity holds at most KEYS_PER_IDENTITY_MAX keys
     for k in view.keys.iter().filter(|k| k.revoked_at.is_none()) {
         if let Some(hex) = fragment_core::npub::parse(&k.npub) {
             if cfg.is_operator(Some(&hex), "")? {
-                return Ok(Some(view.id));
+                return Ok(true);
             }
         }
     }
-    Ok(None)
+    Ok(false)
 }
 
 /// A log page's `before`, a log entry's number when named.

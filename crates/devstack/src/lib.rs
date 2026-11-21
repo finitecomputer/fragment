@@ -480,6 +480,10 @@ pub struct Fleet {
     /// The account's Workers Logs, which the operators' glance reads (the
     /// fake in `crates/fakes`; `None`: the glance says they are not configured).
     pub observability: Option<ObservabilityVars>,
+    /// The private home (`FRAGMENT_PRIVATE_HOME_DOOR`, and the key its
+    /// door trusts, bound as a deploy binds `private_home.key`'s; `None`:
+    /// no one is offered a private agent).
+    pub private_home: Option<PrivateHomeVars>,
     /// The platform's origin (sign-in, the platform session;
     /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
     pub platform_url: String,
@@ -573,6 +577,16 @@ pub struct ObservabilityVars {
 /// deploy/example.jsonc names it.
 pub const OBSERVABILITY_READ_NAME: &str = "fragment-observability-read";
 
+/// A private home as the admin asks it: its door's URL, and the nostr key
+/// (64 hex) the admin signs with.
+pub struct PrivateHomeVars {
+    pub door: String,
+    pub key: String,
+}
+
+/// The store name devstack binds the private home's key under.
+pub const PRIVATE_HOME_KEY_NAME: &str = "fragment-private-home-key";
+
 /// The key of a slot of the model route on an OpenAI-compatible API
 /// (`fragment_core::models::SLOTS`): its secret's name in the store, bound
 /// for the slot as a deploy binds the one its config names, and its value.
@@ -599,6 +613,7 @@ impl Fleet {
         bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
         bound.observability_read = self.observability.as_ref().map(|_| OBSERVABILITY_READ_NAME.to_string());
+        bound.private_home_key = self.private_home.as_ref().map(|_| PRIVATE_HOME_KEY_NAME.to_string());
         bound
     }
 
@@ -630,6 +645,9 @@ impl Fleet {
         }
         if let (Some(name), Some(o)) = (&bound.observability_read, &self.observability) {
             values.push((name.as_str(), o.key.as_str()));
+        }
+        if let (Some(name), Some(h)) = (&bound.private_home_key, &self.private_home) {
+            values.push((name.as_str(), h.key.as_str()));
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         Ok(values)
@@ -731,6 +749,9 @@ impl Fleet {
         if let Some((mover, cutoff_ms)) = &self.migrations {
             vars.push(("FRAGMENT_MIGRATIONS_MOVER", mover.as_str()));
             vars.push(("FRAGMENT_MIGRATIONS_CUTOFF_MS", cutoff_ms.as_str()));
+        }
+        if let Some(h) = &self.private_home {
+            vars.push(("FRAGMENT_PRIVATE_HOME_DOOR", h.door.as_str()));
         }
         if let Some(o) = &self.observability {
             vars.push(("FRAGMENT_ACCOUNT_ID", o.account_id.as_str()));

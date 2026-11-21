@@ -515,6 +515,7 @@ impl RegistryCell {
             agents,
             subjects: self.subjects_of(&who.id)?,
             created,
+            private_agents: None,
         })
     }
 

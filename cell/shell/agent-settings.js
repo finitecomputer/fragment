@@ -530,6 +530,33 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     };
     return [open];
   }
+  // ---- a private agent (docs/api.md, "A private agent"), offered when
+  // the person's own view says so (`privateAgents`: an operator's, on a
+  // deployment with a private home). Asked, the platform asks the home for
+  // the person's own invite, and the browser goes there to make their
+  // passkey; one with an account there already goes there to sign in. ----
+  function privateAgentForm() {
+    if (!me()?.privateAgents) return [];
+    const open = el("button", "quiet agent-add-open");
+    open.type = "button";
+    open.append(icon("lock"), "Add a private agent");
+    const error = el("p", "form-error");
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    open.onclick = async () => {
+      open.disabled = true;
+      error.hidden = true;
+      try {
+        const { url } = await api("POST", "/api/admin/private-agent");
+        location.assign(url);
+      } catch (e) {
+        open.disabled = false;
+        error.textContent = e.message;
+        error.hidden = false;
+      }
+    };
+    return [open, error];
+  }
   // ---- an agent's settings, edited in a dialog its Edit (a pencil) opens: Settings shows
   // what they are, each its label above it, as text; its fields (each
   // written as it changes, said under them) are kept in its card, unseen,
@@ -848,5 +875,5 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       return row;
     });
   }
-  return { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption, removeAgent, removable };
+  return { faceControls, renderAgentFaces, agentSettings, addAgentForm, privateAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption, removeAgent, removable };
 }

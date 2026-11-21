@@ -85,6 +85,10 @@ struct Deployment {
     /// glance shows the registry's numbers and says the logs' are not
     /// configured.
     observability_read: Option<String>,
+    /// The deployment's private home (docs/api.md, "A private agent"):
+    /// where its operators add private agents. Without it, no one is
+    /// offered one.
+    private_home: Option<PrivateHome>,
     /// Who may grant credit, set plans, and wipe a
     /// person (npubs, or identities). The hosted e2e's `wipe` signs with an
     /// operator key among them, its file named on its command line
@@ -431,6 +435,7 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         connection_secrets,
         model_keys,
         observability_read: d.observability_read.clone(),
+        private_home_key: d.private_home.as_ref().map(|h| h.key.clone()),
     })
 }
 
@@ -453,6 +458,9 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     }
     if let Some(name) = &b.observability_read {
         named.push(("observability_read".into(), name.as_str()));
+    }
+    if let Some(name) = &b.private_home_key {
+        named.push(("private_home.key".into(), name.as_str()));
     }
     // a secret two slots name is one line, naming both
     let first_model_key = named.len();
@@ -595,6 +603,17 @@ struct Migrations {
     mover: String,
     #[serde(default)]
     cutoff_ms: Option<i64>,
+}
+
+/// A private home (`private_home`): its identity door's public URL
+/// (`FRAGMENT_PRIVATE_HOME_DOOR`; `https://<home>/__door`), and the name in
+/// the account's Secrets Store of the nostr key (64 hex) the admin signs
+/// its asks with, whose npub the home's door trusts (`passkeys.inviter`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateHome {
+    door: String,
+    key: String,
 }
 
 /// The names and hosts one deployment has.
@@ -1605,6 +1624,10 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(c) = &d.connectors {
         v.insert("FRAGMENT_CONNECTORS".into(), json!(serde_json::to_string(c)?));
     }
+    if let Some(h) = &d.private_home {
+        anyhow::ensure!(fragment_core::private_home::door_ok(&h.door), "private_home.door is the home's door, https://<host>/<path>, no query or trailing slash: not {:?}", h.door);
+        v.insert("FRAGMENT_PRIVATE_HOME_DOOR".into(), json!(h.door));
+    }
     c.insert("vars".into(), vars);
     anyhow::ensure!(!c.contains_key("secrets_store_secrets"), "cell/wrangler.jsonc binds no secrets of its own: a deployment's are bound here");
     c.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.cell()));
@@ -1958,6 +1981,7 @@ mod tests {
             workos: WorkOs { client_id: "fragment-workos-client-id".into(), api_key: "fragment-workos-api-key".into() },
             stripe: None,
             observability_read: None,
+            private_home: None,
             operators: vec![],
             migrations: None,
             ai_gateway: None,
@@ -2189,6 +2213,16 @@ mod tests {
         assert_eq!(admin["secrets_store_secrets"], json!([{ "binding": "OBSERVABILITY_READ", "store_id": "0f0e0d0c", "secret_name": "fragment-observability-read" }]));
         assert!(!cell["secrets_store_secrets"].as_array().unwrap().iter().any(|b| b["binding"] == "OBSERVABILITY_READ"), "no fragment's isolate holds it");
         assert_eq!((&admin["vars"]["FRAGMENT_ACCOUNT_ID"], &admin["vars"]["FRAGMENT_WORKER_NAME"]), (&json!("acct"), &json!("fragment-p5")), "the account it reads, and the cell's lines alone");
+        // the private home's key: the admin Worker's alone; its door, a var of both
+        let mut h = deployment(None, None);
+        h.private_home = Some(PrivateHome { door: "https://home.example.com/__door".into(), key: "fragment-private-home-key".into() });
+        let cell = worker_config(&h, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let admin = admin_config(&h, &cell, &n, "0f0e0d0c", &devstack::repo_root()).unwrap();
+        assert_eq!(admin["secrets_store_secrets"], json!([{ "binding": "PRIVATE_HOME_KEY", "store_id": "0f0e0d0c", "secret_name": "fragment-private-home-key" }]));
+        assert!(!cell["secrets_store_secrets"].as_array().unwrap().iter().any(|b| b["binding"] == "PRIVATE_HOME_KEY"), "no fragment's isolate holds it");
+        assert_eq!((&cell["vars"]["FRAGMENT_PRIVATE_HOME_DOOR"], &admin["vars"]["FRAGMENT_PRIVATE_HOME_DOOR"]), (&json!("https://home.example.com/__door"), &json!("https://home.example.com/__door")));
+        h.private_home = Some(PrivateHome { door: "http://home.example.com/__door/".into(), key: "k".into() });
+        assert!(worker_config(&h, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).is_err(), "a door on https, no trailing slash");
         // the move's stages, when the deployment makes them: staff read a move there
         d.migrations = Some(Migrations { mover: fragment_core::npub::encode(&"a".repeat(64)), cutoff_ms: None });
         let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();

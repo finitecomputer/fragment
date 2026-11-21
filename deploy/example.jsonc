@@ -90,6 +90,16 @@
   // it). Leave it out and the glance shows the registry's numbers and
   // says the logs' are not configured.
   // "observability_read": "fragment-observability-read",
+  // A private home (docs/api.md, "A private agent"): its identity door's
+  // public URL, and the name in the store of the nostr key (64 hex) the
+  // admin signs its asks with, bound to the admin Worker alone. The home's
+  // door trusts that key's npub (its `passkeys.inviter`) to start new
+  // accounts there for this deployment's operators. Leave it out and no
+  // one is offered a private agent.
+  // "private_home": {
+  //   "door": "https://home.example.com/__door",
+  //   "key": "fragment-private-home-key"
+  // },
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
   // Unified Billing, zero data retention on and its logs off. Without it,
