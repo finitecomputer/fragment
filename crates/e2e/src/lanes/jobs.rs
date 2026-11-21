@@ -1350,6 +1350,32 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
     s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
 
+    // where a run starts: one a person's call led to, at once, after its
+    // answer; one another run led to (a job's publish), from the alarm, a
+    // fresh invocation, never inside the job's own call (each Workflow made
+    // inside another's runs one level deeper: a backlog or a chain of them
+    // climbs past Cloudflare's subrequest depth limit, and a job's next
+    // call into an object fails, as a mass replay of the SimpleX door
+    // spike's did)
+    let (nest, _) = jobs_fragment(s, api, &owner, "nest", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }, { "channel": "steps", "run": "tick" }]))?;
+    api.op(&owner, &nest, "raise", "fresh", json!({}))?;
+    let r = api.op(&owner, &nest, "count_up", "nested", json!({ "n": 1 }))?;
+    super::jobs::settle(api, &owner, &nest, r.body["result"]["run"].as_i64().unwrap_or(0), &["succeeded", "held"], Duration::from_secs(30));
+    let from = |run: &Value| events(api, &owner, &nest).into_iter().find(|e| e["kind"] == "run.started" && e["data"]["run"] == run["id"]).map(|e| e["data"]["from"].clone()).unwrap_or(Value::Null);
+    let ticks = || {
+        let mut t = runs(api, &owner, &nest, "&op=tick");
+        t.sort_by_key(|r| r["id"].as_i64());
+        t
+    };
+    let started = s.eventually(Duration::from_secs(30), || ticks().len() == 2 && ticks().iter().all(|t| !from(t).is_null()));
+    let t = ticks();
+    let froms: Vec<Value> = t.iter().map(from).collect();
+    s.ok(
+        "a run a person's call led to starts at once, after its answer; one a job's publish led to starts from the alarm, never inside the job's call",
+        started && froms == [json!("answer"), json!("alarm")],
+        json!({ "ticks": t, "from": froms }),
+    );
+
     // a live commit with no app says nothing about the next code: the
     // pause outlasts it, and the next good deploy comes back paused
     s.commit(&busy_c, &[("app.mjs", None)]);

@@ -69,6 +69,7 @@ use crate::config::Config;
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
+use crate::jobs::Launched;
 use crate::routed::{Credential, Routed, Signed};
 
 pub(crate) mod calls;
@@ -132,6 +133,9 @@ pub struct FragmentCell {
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
+    /// Some of what asked for it ran inside another run (`later_nested`):
+    /// its queued runs start from the alarm.
+    pub(crate) later_nested: Cell<bool>,
     /// A test fleet's `hold-install` lever (ops.rs): whether a pending
     /// install waits (plane.rs `install_pending`), and whether one is
     /// waiting now. In memory: a life's end, which remakes its storage,
@@ -176,6 +180,7 @@ impl DurableObject for FragmentCell {
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
+            later_nested: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
@@ -1713,7 +1718,7 @@ impl FragmentCell {
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
         self.fire_cron().await?;
-        self.launch_queued().await;
+        self.launch_queued(Launched::Alarm).await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
@@ -1729,7 +1734,7 @@ impl FragmentCell {
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
-            self.launch_queued().await;
+            self.launch_queued(Launched::Alarm).await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
@@ -1756,6 +1761,24 @@ impl FragmentCell {
         if self.later_asked.replace(true) {
             return;
         }
+        self.after_answer_later();
+    }
+
+    /// `later`, asked inside another run: a Workflow's own callback (a
+    /// step, a restart), or a delivery another run sent (its hops). The
+    /// runs it queued start from the alarm, a fresh invocation, not inside
+    /// this one: a Workflow made inside another's call runs one level
+    /// deeper, so a run starting the next one each inside the last (a
+    /// replayed backlog, a chain of triggers) climbs past Cloudflare's
+    /// subrequest depth limit, and its next call into an object fails
+    /// ("Subrequest depth limit exceeded": the SimpleX door spike, a job's
+    /// call to its door).
+    pub(crate) fn later_nested(&self) {
+        self.later_nested.set(true);
+        self.later();
+    }
+
+    fn after_answer_later(&self) {
         // SAFETY: the reasoning of worker-macros' own handlers, which hand
         // the runtime `&'static self` futures: the object is never
         // destroyed while a promise it gave the runtime runs, and
@@ -1776,6 +1799,7 @@ impl FragmentCell {
         worker::Delay::from(std::time::Duration::ZERO).await;
         // a write from here on asks again: this run may read before it
         self.later_asked.set(false);
+        let nested = self.later_nested.replace(false);
         let mut laps = js::Laps::start();
         let searched = self.search_woke.replace(false);
         if searched {
@@ -1799,7 +1823,19 @@ impl FragmentCell {
         // waits on no wake
         let t0 = js::now_ms();
         let drain = async { (self.drain_deliveries().await, js::now_ms() - t0) };
-        let launch = async { (self.launch_queued().await, js::now_ms() - t0) };
+        let launch = async {
+            let launched = match nested {
+                // the alarm starts them, soon (`runs_due_at` names them due)
+                true => {
+                    if let Err(e) = self.schedule_by(js::now_ms()).await {
+                        console_error!("{}", json!({ "event": "launch.arm-failed", "code": e.code, "message": e.message }));
+                    }
+                    0
+                }
+                false => self.launch_queued(Launched::Answer).await,
+            };
+            (launched, js::now_ms() - t0)
+        };
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
