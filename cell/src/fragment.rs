@@ -69,7 +69,6 @@ use crate::config::Config;
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
-use crate::jobs::Launched;
 use crate::routed::{Credential, Routed, Signed};
 
 pub(crate) mod calls;
@@ -133,9 +132,9 @@ pub struct FragmentCell {
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
-    /// Some of what asked for it ran inside another run (`later_nested`):
-    /// its queued runs start from the alarm.
-    pub(crate) later_nested: Cell<bool>,
+    /// The alarm's pass is under way (`run.started` says where a run's
+    /// Workflow was started from).
+    pub(crate) in_alarm: Cell<bool>,
     /// A test fleet's `hold-install` lever (ops.rs): whether a pending
     /// install waits (plane.rs `install_pending`), and whether one is
     /// waiting now. In memory: a life's end, which remakes its storage,
@@ -180,7 +179,7 @@ impl DurableObject for FragmentCell {
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
-            later_nested: Cell::new(false),
+            in_alarm: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
@@ -210,7 +209,10 @@ impl DurableObject for FragmentCell {
             self.schema.refused_alarm(&self.state, due).await?;
             return Response::ok("");
         }
-        if let Err(e) = self.on_alarm().await {
+        self.in_alarm.set(true);
+        let passed = self.on_alarm().await;
+        self.in_alarm.set(false);
+        if let Err(e) = passed {
             self.event("alarm.failed", &e.message, json!({ "code": e.code }));
             // Whatever is due, a failing alarm tries again no sooner than
             // this, so a lasting failure never spins.
@@ -341,6 +343,9 @@ pub(crate) enum MetaKey {
     /// When the next pass runs (a day after the last, or within the poll
     /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
+    /// A queued run's Workflow could not be started: queued runs wait
+    /// until then to be tried again (`runs_due_at`).
+    LaunchRetryAt,
     /// When the pins last may have fallen behind the repo: a storage token
     /// was minted for it, or a move failed to follow (plane.rs `may_lag`).
     OutsideAt,
@@ -537,6 +542,7 @@ impl MetaKey {
             MetaKey::RepoOfLife => "repo_of_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
+            MetaKey::LaunchRetryAt => "launch_retry_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::TemplateTitle => "template_title",
@@ -1686,6 +1692,9 @@ impl FragmentCell {
             // what an ended life still has to clean, if anything
             return self.schedule().await;
         }
+        // queued runs first, ahead of the pass's slower work (a computer's
+        // wake among the deliveries); what the pass queues, its end starts
+        self.launch_queued().await;
         // an invite that ran out waits no more, and its owner's list is told
         // in this pass's flush (`arm` wakes the alarm at each one's expiry)
         if let Err(e) = self.drop_spent_invites().await {
@@ -1718,7 +1727,7 @@ impl FragmentCell {
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
         self.fire_cron().await?;
-        self.launch_queued(Launched::Alarm).await;
+        self.launch_queued().await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
@@ -1734,7 +1743,7 @@ impl FragmentCell {
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
-            self.launch_queued(Launched::Alarm).await;
+            self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
@@ -1761,24 +1770,7 @@ impl FragmentCell {
         if self.later_asked.replace(true) {
             return;
         }
-        self.after_answer_later();
-    }
 
-    /// `later`, asked inside another run: a Workflow's own callback (a
-    /// step, a restart), or a delivery another run sent (its hops). The
-    /// runs it queued start from the alarm, a fresh invocation, not inside
-    /// this one: a Workflow made inside another's call runs one level
-    /// deeper, so a run starting the next one each inside the last (a
-    /// replayed backlog, a chain of triggers) climbs past Cloudflare's
-    /// subrequest depth limit, and its next call into an object fails
-    /// ("Subrequest depth limit exceeded": the SimpleX door spike, a job's
-    /// call to its door).
-    pub(crate) fn later_nested(&self) {
-        self.later_nested.set(true);
-        self.later();
-    }
-
-    fn after_answer_later(&self) {
         // SAFETY: the reasoning of worker-macros' own handlers, which hand
         // the runtime `&'static self` futures: the object is never
         // destroyed while a promise it gave the runtime runs, and
@@ -1788,7 +1780,7 @@ impl FragmentCell {
     }
 
     /// After the answer: the delivery outbox drained (a computer's wakes
-    /// among it), queued runs' Workflows started, and the alarm armed for a
+    /// among it), the alarm armed for queued runs (`arm_launch`) and for a
     /// search cursor a record woke, none of which the answer waits on. Each
     /// is the alarm's too (the outbox's rows and a woken cursor stay due,
     /// queued runs stay queued), so whatever this cuts short or fails is
@@ -1799,7 +1791,6 @@ impl FragmentCell {
         worker::Delay::from(std::time::Duration::ZERO).await;
         // a write from here on asks again: this run may read before it
         self.later_asked.set(false);
-        let nested = self.later_nested.replace(false);
         let mut laps = js::Laps::start();
         let searched = self.search_woke.replace(false);
         if searched {
@@ -1823,24 +1814,12 @@ impl FragmentCell {
         // waits on no wake
         let t0 = js::now_ms();
         let drain = async { (self.drain_deliveries().await, js::now_ms() - t0) };
-        let launch = async {
-            let launched = match nested {
-                // the alarm starts them, soon (`runs_due_at` names them due)
-                true => {
-                    if let Err(e) = self.schedule_by(js::now_ms()).await {
-                        console_error!("{}", json!({ "event": "launch.arm-failed", "code": e.code, "message": e.message }));
-                    }
-                    0
-                }
-                false => self.launch_queued(Launched::Answer).await,
-            };
-            (launched, js::now_ms() - t0)
-        };
+        let launch = async { (self.arm_launch().await, js::now_ms() - t0) };
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || listed || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || launched || drained.queued + drained.woken > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "armed": launched }));
         }
     }
 

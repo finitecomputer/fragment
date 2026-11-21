@@ -1748,12 +1748,12 @@ run at its next step as its next attempt (`run.restarted`), held at the
 `RESULT_MAX_BYTES`.
 
 Every job call and trigger is a **run**: `queued`, `running`, `succeeded`,
-`held` or `blocked`. One a person or the outside started (a call, a post,
-a webhook's delivery) starts after its answer; one another run led to (a
-job's publish or call, a restart, a delivery another run sent) starts from
-the fragment's alarm a moment later, a fresh invocation, so no Workflow is
-made inside another's call (`run.started` says `from`: `answer` or
-`alarm`). Triggered runs act as the fragment (its npub) with an
+`held` or `blocked`. A run's Workflow starts from the fragment's alarm, a
+fresh invocation, a moment after the call, post, delivery or step that
+queued it, never inside that call: a Workflow made inside another call
+runs one level deeper on Cloudflare, and a chain of them climbs past its
+subrequest depth limit (`run.started` says `from`: `alarm`). A start that
+fails is tried again 10 s later. Triggered runs act as the fragment (its npub) with an
 editor's role, at a `depth`: a record appended at depth d triggers at
 d + 1 (a delivery's `x-fragment-hops`), and past `HOP_DEPTH_MAX` a run is
 `blocked` (`cycle.detected`). An operation's triggers pause themselves

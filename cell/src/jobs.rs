@@ -277,24 +277,6 @@ pub(crate) enum Admits {
     Code { inbox: InboxDecl, headers: Headers },
 }
 
-/// Where queued runs' Workflows are started from (`launch_queued`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Launched {
-    /// After a write's answer, in its own invocation (`after_answer`).
-    Answer,
-    /// The object's alarm: a fresh invocation.
-    Alarm,
-}
-
-impl Launched {
-    fn as_str(self) -> &'static str {
-        match self {
-            Launched::Answer => "answer",
-            Launched::Alarm => "alarm",
-        }
-    }
-}
-
 impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
     pub(crate) fn own_key(&self) -> CellResult<String> {
@@ -435,24 +417,42 @@ impl FragmentCell {
     }
 
     /// Starts the Workflows of queued runs, one launcher at a time, from
-    /// `from` (said in each `run.started`). A failure leaves them queued
-    /// for the alarm to try again. Answers how many it started.
-    pub(crate) async fn launch_queued(&self, from: Launched) -> usize {
+    /// the alarm alone: a fresh invocation (`run.started` says so). A
+    /// Workflow made inside another call runs one level deeper on
+    /// Cloudflare, so started from a request (a job step's callback among
+    /// them), a backlog or a chain of runs each started inside the last
+    /// climbed past its subrequest depth limit, and a job's next call into
+    /// an object failed ("Subrequest depth limit exceeded": the SimpleX
+    /// door spike's mass replay). A request arms the alarm (`arm_launch`).
+    /// A failure leaves them queued, tried again `QUEUED_RETRY_MS` later.
+    /// Answers how many it started.
+    pub(crate) async fn launch_queued(&self) -> usize {
         let _one = self.launching.lock().await;
+        // a start that cannot be made is tried again later, never at once
+        let later = || {
+            let _ = self.set_meta(MetaKey::LaunchRetryAt, &(js::now_ms() + QUEUED_RETRY_MS).to_string());
+        };
         let Ok(rows) =
             self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
         else {
+            later();
             return 0;
         };
         // most calls queue nothing: they read no more than this
         if rows.is_empty() {
             return 0;
         }
-        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else { return 0 };
+        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else {
+            later();
+            return 0;
+        };
         let mut started = 0;
         for run in rows.iter().map(run_row) {
             let (id, attempt) = (run.id, run.attempt);
-            let Ok(instance) = self.instance_id(id, attempt) else { return started };
+            let Ok(instance) = self.instance_id(id, attempt) else {
+                later();
+                return started;
+            };
             let params = json!({ "fragment": name, "incarnation": incarnation, "run": id, "attempt": attempt });
             match js::jobs_create(self.env.as_ref(), &instance, &params).await {
                 Ok(()) => {
@@ -460,11 +460,12 @@ impl FragmentCell {
                         "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND attempt = ? AND status = 'queued'",
                         vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
                     );
-                    self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt, "from": from.as_str() }));
+                    self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt, "from": if self.in_alarm.get() { "alarm" } else { "request" } }));
                     started += 1;
                 }
                 Err(e) => {
                     self.event("run.launch-failed", &format!("run #{id}: its Workflow did not start: {}", e.message), json!({ "run": id }));
+                    later();
                     let _ = self.schedule().await;
                     return started;
                 }
@@ -685,7 +686,7 @@ impl FragmentCell {
             self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
             let summary = format!("{} run #{id}: the app's code changed under attempt {attempt}; attempt {} starts on the new code", run.op, attempt + 1);
             self.event("run.restarted", &summary, json!({ "run": id, "attempt": attempt + 1 }));
-            self.later_nested();
+            self.later();
         }
         Ok(json!({ "stop": true }))
     }
@@ -800,8 +801,7 @@ impl FragmentCell {
             // lost after the step ran and its answer was kept: the Workflow tries it again
             self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
         }
-        // inside its Workflow's call: what it queued starts from the alarm
-        self.later_nested();
+        self.later();
         Ok(json!({ "kept": index }))
     }
 
@@ -1183,7 +1183,7 @@ impl FragmentCell {
         match started.await {
             Ok(0) => {}
             Ok(_) => {
-                self.launch_queued(Launched::Answer).await;
+                self.arm_launch().await;
             }
             Err(e) => self.event("woke.failed", &e.message, json!({ "code": e.code })),
         }
@@ -1391,9 +1391,37 @@ impl FragmentCell {
             .rows("SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM schedules UNION ALL SELECT MIN(next_at) AS at FROM record_schedules)", vec![])?
             .first()
             .and_then(|r| r["at"].as_i64());
-        let queued = self.count_of("SELECT COUNT(*) AS n FROM runs WHERE status = 'queued'", vec![])? > 0;
-        let retry = queued.then(|| js::now_ms() + QUEUED_RETRY_MS);
-        Ok([cron, retry].into_iter().flatten().min())
+        Ok([cron, self.launch_due_at()?].into_iter().flatten().min())
+    }
+
+    /// When queued runs' Workflows are due to start: now (the alarm starts
+    /// them, `launch_queued`), or once a start that failed may be tried
+    /// again; none queued, never.
+    fn launch_due_at(&self) -> CellResult<Option<i64>> {
+        if self.count_of("SELECT COUNT(*) AS n FROM runs WHERE status = 'queued'", vec![])? == 0 {
+            return Ok(None);
+        }
+        let retry: i64 = self.meta(MetaKey::LaunchRetryAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
+        Ok(Some(retry.max(js::now_ms())))
+    }
+
+    /// After a request that may have queued runs: the alarm armed to start
+    /// them, soon (`launch_queued`), never their Workflows here. Answers
+    /// whether it armed it.
+    pub(crate) async fn arm_launch(&self) -> bool {
+        let due = match self.launch_due_at() {
+            Ok(Some(at)) => at,
+            Ok(None) => return false,
+            Err(e) => {
+                console_error!("{}", json!({ "event": "launch.arm-failed", "code": e.code, "message": e.message }));
+                return false;
+            }
+        };
+        if let Err(e) = self.schedule_by(due).await {
+            console_error!("{}", json!({ "event": "launch.arm-failed", "code": e.code, "message": e.message }));
+            return false;
+        }
+        true
     }
 
     /// From the alarm: a running run whose Workflow ended without reporting
@@ -1628,11 +1656,6 @@ impl FragmentCell {
         // triggers is the sender's error to see, never a silent 200
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
-        // a delivery another run sent (its fetch's hops): its runs start
-        // from the alarm, not inside that run's chain of calls
-        if hops > 0 {
-            self.later_nested();
-        }
         let answered = match answer {
             Some(op) => self.inbox_answer(&op, &record, hops).await?,
             None => Answer::Platform,

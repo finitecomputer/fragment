@@ -1350,13 +1350,12 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
     s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
 
-    // where a run starts: one a person's call led to, at once, after its
-    // answer; one another run led to (a job's publish), from the alarm, a
-    // fresh invocation, never inside the job's own call (each Workflow made
-    // inside another's runs one level deeper: a backlog or a chain of them
-    // climbs past Cloudflare's subrequest depth limit, and a job's next
-    // call into an object fails, as a mass replay of the SimpleX door
-    // spike's did)
+    // where a run starts: from the alarm, a fresh invocation, a moment
+    // after what queued it, never inside that call: neither a person's
+    // call nor a job's step (each Workflow made inside another call runs
+    // one level deeper: a backlog or a chain of them climbs past
+    // Cloudflare's subrequest depth limit, and a job's next call into an
+    // object fails, as the SimpleX door spike's mass replay did)
     let (nest, _) = jobs_fragment(s, api, &owner, "nest", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }, { "channel": "steps", "run": "tick" }]))?;
     api.op(&owner, &nest, "raise", "fresh", json!({}))?;
     let r = api.op(&owner, &nest, "count_up", "nested", json!({ "n": 1 }))?;
@@ -1371,8 +1370,8 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     let t = ticks();
     let froms: Vec<Value> = t.iter().map(from).collect();
     s.ok(
-        "a run a person's call led to starts at once, after its answer; one a job's publish led to starts from the alarm, never inside the job's call",
-        started && froms == [json!("answer"), json!("alarm")],
+        "a run starts from the alarm, never inside the call that queued it: a person's call's and a job's step's alike",
+        started && froms == [json!("alarm"), json!("alarm")],
         json!({ "ticks": t, "from": froms }),
     );
 
