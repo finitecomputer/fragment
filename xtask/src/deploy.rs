@@ -1316,6 +1316,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         assert!(n.label_suffix.is_some(), "only a branch deployment makes its endpoint");
         worker_secrets.insert("FRAGMENT_STRIPE_WEBHOOK".into(), json!(secret));
     }
+    let admin_secrets = admin_worker_secrets(&worker_secrets);
     let test_secrets = match worker_secrets.is_empty() {
         false => {
             let file = SecretFile::write(dir.join("cell-secrets.json"), &Value::Object(worker_secrets))?;
@@ -1363,7 +1364,18 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     // cell"). It failing fails the job, and leaves only the operators'
     // routes down (refused as `deploying`) until the next deploy.
     let behind = |why: String| anyhow::anyhow!("deploy: the cell is deployed and every object class answers {deploy_id}, but the admin Worker {} is not: {why}. Only the operators' routes are down until a deploy finishes it: deploy again", n.admin);
-    let (status, _) = run_teed(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&admin_config)).context("could not start wrangler deploy for the admin Worker")?;
+    let mut deploy_admin = wrangler(&tools, &d.account_id)?;
+    deploy_admin.arg("deploy").arg("-c").arg(&admin_config);
+    let admin_secrets = match admin_secrets.is_empty() {
+        false => {
+            let file = SecretFile::write(dir.join("admin-secrets.json"), &Value::Object(admin_secrets))?;
+            deploy_admin.arg("--secrets-file").arg(&file.0);
+            Some(file)
+        }
+        true => None,
+    };
+    let (status, _) = run_teed(&mut deploy_admin).context("could not start wrangler deploy for the admin Worker")?;
+    drop(admin_secrets);
     if !status.success() {
         return Err(behind(format!("wrangler deploy {status}")));
     }
@@ -1586,6 +1598,15 @@ fn admin_bare(admin: &Value) -> Value {
     let mut bare = admin.clone();
     bare.as_object_mut().expect("a rendered config is an object").remove("durable_objects");
     bare
+}
+
+/// The Worker secrets the admin Worker is given beside the cell's: a
+/// preview's test secret alone, so that the admin, as the cell, knows a
+/// test fleet (`Config::test_hooks`): its mail to an e2e person's address
+/// goes nowhere rather than to the real provider (cell/src/mail.rs). The
+/// Stripe endpoint's secret is the cell's alone: no admin route reads it.
+fn admin_worker_secrets(cell: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    cell.iter().filter(|(k, _)| k.as_str() == "FRAGMENT_TEST_SECRET").map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 /// Whether the account has a Worker named `script` (its deployments read).
@@ -2113,6 +2134,21 @@ mod tests {
         let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let admin = admin_config(&d, &cell, &n, "0f0e0d0c", &devstack::repo_root()).unwrap();
         assert_eq!(admin["r2_buckets"], json!([{ "binding": "STAGE", "bucket_name": "fragment-migrations-stage-p5" }]));
+    }
+
+    /// Goal: a preview's admin Worker knows it is a test fleet, as its cell
+    /// does, so its trial and comp mail to an e2e person's address never
+    /// reaches the real provider (review of #1436), and holds no secret its
+    /// routes don't read. Method: the cell's Worker secrets, each kind.
+    #[test]
+    fn the_admin_gets_the_test_secret_and_no_other() {
+        let mut cell = serde_json::Map::new();
+        assert!(admin_worker_secrets(&cell).is_empty(), "none: none");
+        cell.insert("FRAGMENT_STRIPE_WEBHOOK".into(), json!("whsec_x"));
+        assert!(admin_worker_secrets(&cell).is_empty(), "the webhook's is the cell's alone");
+        cell.insert("FRAGMENT_TEST_SECRET".into(), json!("t"));
+        let admin = admin_worker_secrets(&cell);
+        assert_eq!(Value::Object(admin), json!({ "FRAGMENT_TEST_SECRET": "t" }));
     }
 
     /// Goal: no deployment's admin Worker is ever another deployment's cell
