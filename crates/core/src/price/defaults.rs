@@ -193,10 +193,18 @@ const NO_READ: DefaultCharge = DefaultCharge { calls: &[], header: None, json: N
 pub const DEFAULT_CHARGES: [(&str, &[DefaultCharge]); 7] = [
     // xAI: every inference answer says what it cost, its tools' calls and
     // images included, as `usage.cost_in_usd_ticks`, 10^10 ticks a dollar,
-    // a stream on its last chunk (docs.x.ai/developers/cost-tracking).
-    // Only a POST's is read: a stored response read again, a deferred
-    // image's or a video's poll says its cost again each time.
-    ("xai", &[DefaultCharge { calls: &["POST /**"], json: Some("/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ }]),
+    // a stream on its last chunk (docs.x.ai/developers/cost-tracking); a
+    // Responses stream in its last event's `response`
+    // (docs.x.ai/developers/model-capabilities/text/best-practices). Only
+    // a POST's is read: a stored response read again, a deferred image's
+    // or a video's poll says its cost again each time.
+    (
+        "xai",
+        &[
+            DefaultCharge { calls: &["POST /**"], json: Some("/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ },
+            DefaultCharge { calls: &["POST /v1/responses"], json: Some("/response/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ },
+        ],
+    ),
     // ElevenLabs: text to speech and sound effects say the characters
     // they billed, `character-cost` (elevenlabs.io/docs/api-reference/
     // introduction; its own skills read `x-character-count`), priced at
@@ -234,10 +242,11 @@ pub const DEFAULT_CHARGES: [(&str, &[DefaultCharge]); 7] = [
     // 2026-11-07). Another model's units are priced by no charge here.
     ("fal", &[DefaultCharge { calls: &["POST /fal-ai/flux-2/klein/9b"], header: Some("x-fal-billable-units"), unit: "flux-2-klein-9b", micros: 6_000, per: 1, ..NO_READ }]),
     // X API: a read is billed by the resources it returns, $0.005 a post
-    // (docs.x.com/x-api/getting-started/pricing), which an answer's
+    // (docs.x.com/x-api/getting-started/pricing), which a posts read's
     // `meta.result_count` counts: X bills a post read again within 24
-    // hours nothing, and a user $0.010.
-    ("x", &[DefaultCharge { calls: &["GET /2/**"], json: Some("/meta/result_count"), unit: "post", micros: 5_000, per: 1, ..NO_READ }]),
+    // hours nothing. A user's read ($0.010, a follower list's count of
+    // them too) is for no charge here.
+    ("x", &[DefaultCharge { calls: &["GET /2/tweets/**"], json: Some("/meta/result_count"), unit: "post", micros: 5_000, per: 1, ..NO_READ }]),
     // Perplexity's Search API: $5.00 per 1,000 requests
     // (docs.perplexity.ai/getting-started/pricing); its answer says no cost.
     ("perplexity", &[DefaultCharge { calls: &["* /**"], unit: "call", micros: 5_000_000, per: 1_000, ..NO_READ }]),

@@ -478,14 +478,17 @@ impl StreamedPasses {
 
 /// Whether an answer of `content_type` is read whole to be named, every
 /// spelling of its values (`redact`), rather than streamed a piece at a
-/// time (`Streamed`): an event stream, newline-delimited JSON, and bytes
-/// that are no text (audio, video, an image, octet-stream) stream as they
-/// come, so a streamed speech's audio plays as it is made; its bytes were
-/// never text to spell a value in.
+/// time (`Streamed`): a document, JSON, XML, a form or other text (and an
+/// answer that names no type) is read whole; anything else streams as it
+/// comes (an event stream, newline-delimited JSON or a JSON text sequence,
+/// audio, video, an image, octet-stream, a type no one listed), so a
+/// streamed speech plays as it is made and no stream waits for its end.
 pub fn read_whole(content_type: &str) -> bool {
     let kind = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
-    let streams = ["text/event-stream", "application/x-ndjson", "application/octet-stream"].contains(&kind.as_str()) || ["audio/", "video/", "image/"].iter().any(|p| kind.starts_with(p));
-    !streams
+    let documents = ["", "application/json", "application/xml", "application/javascript", "application/x-www-form-urlencoded"];
+    let suffixed = ["+json", "+xml"].iter().any(|s| kind.starts_with("application/") && kind.ends_with(s));
+    let text = kind.starts_with("text/") && kind != "text/event-stream";
+    documents.contains(&kind.as_str()) || suffixed || text
 }
 
 #[cfg(test)]
@@ -941,10 +944,10 @@ mod tests {
     /// An answer is read whole unless it streams as it is made, or is no text.
     #[test]
     fn what_is_read_whole() {
-        for whole in ["application/json", "application/json; charset=utf-8", "text/html", "text/plain", "", "application/xml"] {
+        for whole in ["application/json", "application/json; charset=utf-8", "text/html", "text/plain", "", "application/xml", "application/problem+json", "application/x-www-form-urlencoded"] {
             assert!(read_whole(whole), "{whole}");
         }
-        for streams in ["text/event-stream", "Text/Event-Stream; charset=utf-8", "application/x-ndjson", "audio/mpeg", "audio/ogg", "video/mp4", "image/png", "application/octet-stream"] {
+        for streams in ["text/event-stream", "Text/Event-Stream; charset=utf-8", "application/x-ndjson", "application/json-seq", "audio/mpeg", "audio/ogg", "video/mp4", "image/png", "application/octet-stream", "application/grpc", "multipart/mixed"] {
             assert!(!read_whole(streams), "{streams}");
         }
     }

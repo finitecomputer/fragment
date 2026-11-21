@@ -1591,7 +1591,7 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         }
     }
     if !catalog.is_empty() {
-        v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(catalog.providers())?));
+        v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(&catalog.as_configured())?));
     }
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
@@ -2317,6 +2317,9 @@ mod tests {
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
             let operator = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator);
             assert!(operator.into_iter().all(|p| p.price.is_none() && p.charges == fragment_core::catalog::default_charges(&p.name)), "{file}: each key charged as the book says");
+            let mut book = fragment_core::price::PriceBook::defaults();
+            book.keys = catalog.key_prices();
+            assert_eq!(book.validate(), Ok(()), "{file}: a book the ledger takes");
             // the example's tiers through OpenRouter (decision 61); a preview's on Workers AI
             let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
@@ -2550,7 +2553,8 @@ mod tests {
         };
         let d = with(vec![row(json!({ "key": "fragment-perplexity-api-key" }))]);
         let (catalog, keys) = catalog_of(&d).unwrap();
-        assert_eq!(catalog.get("perplexity").unwrap().price.map(|p| (p.micros, p.per)), Some((5_000_000, 1_000)), "the price book's list price");
+        let perplexity = catalog.get("perplexity").unwrap();
+        assert_eq!((perplexity.price, &perplexity.charges), (None, &fragment_core::catalog::default_charges("perplexity")), "the price book's charges, at list");
         assert_eq!(keys, vec![("perplexity".to_string(), "fragment-perplexity-api-key".to_string())]);
         assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("fragment-perplexity-api-key"), "the key's store name is the deploy's, never the cell's");
         assert!(checked(d).is_ok());
