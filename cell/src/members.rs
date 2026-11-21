@@ -543,8 +543,7 @@ impl FragmentCell {
             IdentityKind::Agent => {
                 self.agents_share()?;
                 let owner = signed.owner.as_deref();
-                let for_owner = owner.is_some() && signed.acting_for.as_deref() == owner;
-                let sharer = permit::Sharer { for_owner, held: signed.held };
+                let sharer = permit::Sharer::of(owner, signed.acting_for.as_deref(), signed.held);
                 let share = match owner {
                     Some(owner) => self.member_role(owner)?,
                     None => None,
