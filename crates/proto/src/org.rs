@@ -498,8 +498,8 @@ pub enum TroubleKind {
     WontWake,
     /// A save of it failed.
     SavesFailing,
-    /// Its disk had less than `fragment_core::computer::DISK_TOLD_FREE_MAX`
-    /// free.
+    /// Its disk had less than `fragment_core::computer::ROOM_TOLD_MAX` of
+    /// room (docs/computers.md, "Room to restore").
     DiskFilling,
 }
 

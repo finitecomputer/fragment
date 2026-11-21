@@ -189,10 +189,10 @@ const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::
 const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
 /// An awake save's disk read follows its `Saved` in the same event, once
 /// the save is listed: after the pass forgetting older saves, its hold let
-/// go (an exec), and the `df` (an exec), each bounded by the cell at 30 s
-/// at most (cell/src/computer.rs `FORGET_PASS_MS`, `MARK_EXEC_MS`,
-/// `DISK_READ_MS`), and a few seconds more.
-const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 5 + 10);
+/// go (an exec), and the `df` and `du` (an exec), each bounded by the cell
+/// at 30 s at most (cell/src/computer.rs `FORGET_PASS_MS`, `MARK_EXEC_MS`,
+/// `SIZES_READ_MS`), and a few seconds more.
+const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 30 + 10);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
 const FIRST_CALL: &str = "its guest's first call as it boots (the bridge's read of its view) is answered: no read failed and waited out a retry";
@@ -225,7 +225,7 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
-    "and its disk is read again after that awake save",
+    "and its disk is read again after that awake save, with what its /data restores to, and its owner's view shows the room that leaves",
     "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
@@ -270,7 +270,16 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         disk = lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
         disk["at"].as_i64().is_some_and(|at| at >= saved_at)
     });
-    s.ok(SAVE_CHECKS[1], read && disk["total"].as_u64().is_some_and(|t| t > 0) && view()["restored"]["generation"] == v["restored"]["generation"], json!({ "save": newest, "disk": disk }));
+    // what its /data restores to (docs/computers.md, "Room to restore"):
+    // `du` of it, a little at least (its guest's state), and the room its
+    // owner's view shows from it
+    let shown = view();
+    let room = &shown["disk"];
+    s.ok(
+        SAVE_CHECKS[1],
+        read && disk["total"].as_u64().is_some_and(|t| t > 0) && disk["data"].as_u64().is_some_and(|d| d > 0) && room["data"] == disk["data"] && room["room"].as_u64().is_some() && shown["restored"]["generation"] == v["restored"]["generation"],
+        json!({ "save": newest, "disk": disk, "view": room }),
+    );
     let all = lever(api, c.id, "saves")?.body["saves"].clone();
     let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
     s.ok(
@@ -324,6 +333,65 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         format!("{r} / {newest}"),
     );
     Ok(7)
+}
+
+/// Its agent told to make room (docs/bridge.md, "An agent is told to make
+/// room"), skipped off the stub and the fakes.
+const TOLD_CHECKS: [&str; 3] = [
+    "a read that finds its disk filling (9 GB free by df, its /data 14.2 GB at full size) reaches its guest at its next read of its view",
+    "its agent's next turn is told first, firmly, the room left and to make room with the disk-space-finite skill; the turn after is told nothing more",
+    "a read with room again, read by its guest, tells its agent nothing",
+];
+
+/// What the scripted runtime says it was told when a filling disk's line
+/// leads its note (crates/bridge's `note::disk`, at 2.4 GB of room).
+const TOLD_FILLING: &str = "(told: Your computer is almost full: only 2.4 GB of room is left before it can no longer start again from its save. Before anything else, load the disk-space-finite skill and make room";
+
+/// Its agent told to make room: a read that finds its disk filling (the
+/// `disk` lever, as a read after a save: a 20 GB disk with 9 GB free by
+/// `df` whose `/data` restores to 14.2 GB, 2.4 GB of room) reaches its
+/// guest at its next read of its view (the bridge's, a minute apart at
+/// most: the `saves` lever's `heard`), and its agent's next turn carries
+/// the line first in its note, which the stub's scripted runtime says back;
+/// the turn after carries none (once per read). A read with room again,
+/// once its guest read it, tells nothing. Starts and ends awake. Answers
+/// how many replies of its agent it added.
+fn told_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    // its bridge reads its view a minute apart (images' COMPUTER_EVERY_MS), and some
+    let reread = Duration::from_secs(60 + 30);
+    let heard = || lever(api, c.id, "saves").ok().and_then(|r| r.body["heard"].as_i64()).unwrap_or(0);
+    let replies = || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity);
+    let text = |r: &Value| r["body"]["text"].as_str().unwrap_or_default().to_string();
+    let base = replies().len();
+    let mut added = 0;
+    // one message, and its reply's words
+    let ask = |s: &mut Suite, added: &mut usize, n: u32| -> Result<String> {
+        say(n, "anything I should know?")?;
+        *added += 1;
+        let want = base + *added;
+        s.eventually(c.wake, || replies().len() >= want);
+        Ok(replies().get(want - 1).map(text).unwrap_or_default())
+    };
+    let filling = lever_with(api, c.id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 9_000_000_000u64, "data": 14_200_000_000u64 }))?;
+    let at = filling.body["disk"]["at"].as_i64().unwrap_or(i64::MAX);
+    let read = filling.status == 200 && s.eventually(reread, || heard() > at);
+    s.ok(TOLD_CHECKS[0], read && filling.body["disk"]["data"] == 14_200_000_000u64, json!({ "lever": filling.body, "heard": heard() }));
+    // its view's answer and a message race in its bridge: at most a turn passes untold
+    let mut said = vec![ask(s, &mut added, 901)?];
+    if !said[0].contains(TOLD_FILLING) {
+        said.push(ask(s, &mut added, 902)?);
+    }
+    let told = said.last().is_some_and(|t| t.contains(TOLD_FILLING));
+    said.push(ask(s, &mut added, 903)?);
+    // each turn answered: a reply that never came tells nothing (Codex on #1425)
+    let answered = said.iter().all(|t| !t.is_empty());
+    s.ok(TOLD_CHECKS[1], answered && told && !said.last().is_some_and(|t| t.contains("(told:")), json!(said));
+    let room = lever_with(api, c.id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64, "data": 3_000_000_000u64 }))?;
+    let at = room.body["disk"]["at"].as_i64().unwrap_or(i64::MAX);
+    let read = room.status == 200 && s.eventually(reread, || heard() > at);
+    let after = ask(s, &mut added, 904)?;
+    s.ok(TOLD_CHECKS[2], read && !after.is_empty() && !after.contains("(told:"), json!({ "lever": room.body, "said": after }));
+    Ok(added)
 }
 
 /// The disk checks (docs/computers.md, "What its owner is told"), each
@@ -2764,8 +2832,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
         disk_checks(s, api, &crashing)?;
+        replies_so_far += told_checks(s, api, &crashing, &|n, text| say(n, text))?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CANCEL_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(DISK_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CANCEL_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(DISK_CHECKS.iter()).chain(TOLD_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }

@@ -520,10 +520,11 @@ pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
 /// names no header. A class with a static method, because worker-build
 /// exports classes by name and a free function only as a method of the
 /// Worker's entrypoint.
-#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), wasm_bindgen(wasm_bindgen = worker::wasm_bindgen))]
 pub struct InternalRoute;
 
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "admin"), wasm_bindgen)]
 impl InternalRoute {
     pub fn request(env: JsValue, path: &str, body: &str) -> Result<worker::web_sys::Request, JsValue> {
         let env: Env = env.unchecked_into();
