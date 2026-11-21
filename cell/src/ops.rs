@@ -341,7 +341,10 @@ impl FragmentCell {
         // One call settles an id at a time: a retry that arrives while the
         // first is still running waits for it, then replays.
         let _held = self.hold(&ledger_id).await;
-        let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth)?;
+        // the code this call runs, read before it runs: what its effects are
+        // stamped by (`code_author`), whatever an install lands meanwhile
+        let code = self.installed_code()?;
+        let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth, code.as_deref())?;
         meta["run"] = pending.seq.into();
         meta["ledgerMs"] = self.ledger_kept_ms()?.into();
         let call = js::Mutation { ledger_id: &ledger_id, op: inv.op, input_sha, input: input_text, meta: &meta };
@@ -379,7 +382,7 @@ impl FragmentCell {
                 return Err(CellError::host(format!("the facet committed run {run:?}, not run {}", pending.seq)));
             }
             if !fresh {
-                self.restate(&mut pending, inv.op, inv.depth)?;
+                self.restate(&mut pending, inv.op, inv.depth, code)?;
             }
         }
         // The facet answers the run it holds for this id. That run is this
