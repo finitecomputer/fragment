@@ -71,7 +71,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "and one its provider refused (a bad request, a rate limit) made nothing: no row, and the agent's count charges nothing",
     "fal: a synchronous Klein run reaches its host as it came and is charged the units its answer says (x-fal-billable-units); a queued submit, whose answer says none, and a poll nothing",
     "xai: each POST is charged the ticks its answer says it cost (usage.cost_in_usd_ticks), an X search and a plain chat alike; a read nothing",
-    "google-places: charged nothing, a search, a place's details and its photo alike (kept uncharged, 2026-11-20)",
+    "google-places: charged nothing, a search, a place's details and its photo alike (kept uncharged, 2026-11-20); at its calls an hour from a computer (4 here), the next is refused 429 rate_limited, saying when to try again, reaching no provider",
     "firecrawl: a scrape is charged the credits its answer says (data.metadata.creditsUsed), and a call around it nothing",
     "browser-use: a session's start and a task's are each charged five minutes, and a call around them (a status read) nothing",
     "x: a search is charged the posts its answer counts (meta.result_count), and a lookup whose answer counts none nothing",
@@ -350,6 +350,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     // its photo, answered as JSON (`skipHttpRedirect`; a redirect is charged nothing)
     let said = say(s, 142, "fetch http://places.googleapis.com/v1/places/ChIJe2e/photos/AUe2e/media?maxWidthPx=400&skipHttpRedirect=true with $GOOGLE_PLACES_API_KEY in query key")?;
     let photo_sent = said.starts_with("fetched 200");
+    // its fourth call of the hour goes; the fifth is past its calls an hour
+    let fourth = say(s, 146, "fetch http://places.googleapis.com/v1/places:searchText?fields=name with $GOOGLE_PLACES_API_KEY in query key")?;
+    let places_before = s.upstream.seen().len();
+    let fifth = say(s, 147, "fetch http://places.googleapis.com/v1/places:searchText?fields=name with $GOOGLE_PLACES_API_KEY in query key")?;
+    let limited = fourth.starts_with("fetched 200")
+        && fifth.starts_with("fetched 429")
+        && fifth.contains(r#""error":"rate_limited""#)
+        && fifth.contains("google-places takes at most 4 calls an hour from this computer")
+        && fifth.contains("retry_after_ms")
+        && s.upstream.seen().len() == places_before;
 
     // Hermes' tool vendors share the existing upstream fake: each real
     // host and SDK header, with no vendor-specific response simulation.
@@ -499,7 +509,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[33], fal_sent && held_row("fal:flux-2-klein-9b", FAL_UNITS) == 1, json!({ "seen": fal_seen, "image": image, "rows": rows }));
     let tick = charge_for("xai:tick", XAI_TICKS as i64);
     s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && held_row("xai:tick", XAI_TICKS) == 2, json!({ "seen": xai_seen, "tick": tick, "rows": rows }));
-    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && !rows.iter().any(|r| usage(r)["key"].as_str().is_some_and(|k| k.starts_with("google-places"))), json!({ "rows": rows }));
+    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && limited && !rows.iter().any(|r| usage(r)["key"].as_str().is_some_and(|k| k.starts_with("google-places"))), json!({ "rows": rows, "fifth": fifth }));
     let credit = charge_for("firecrawl:credit", FIRECRAWL_SCRAPE_CREDITS as i64);
     s.ok(SWAP_CHECKS[36], scrape_sent && held_row("firecrawl:credit", FIRECRAWL_SCRAPE_CREDITS) == 1, json!({ "credit": credit, "rows": rows }));
     s.ok(SWAP_CHECKS[37], session_sent && reused_sent && held_row("browser-use:session", 1) == 2, json!({ "rows": rows }));
@@ -509,7 +519,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         (SWAP_CONNECTION, 2, 0),
         ("perplexity", 1, charge_of("perplexity:call")),
         ("elevenlabs", 4, speech),
-        ("google-places", 3, 0),
+        ("google-places", 4, 0),
         ("firecrawl", 2, credit),
         ("fal", 3, image),
         ("browser-use", 3, 2 * charge_of("browser-use:session")),

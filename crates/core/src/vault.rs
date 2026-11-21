@@ -57,6 +57,7 @@ pub fn row(name: &str, hosts: Vec<String>, placement: Placement) -> catalog::Pro
         env: vec![],
         price: None,
         charges: vec![],
+        calls_an_hour: None,
         oauth: None,
         connection_oauth: None,
         accounts_max: None,

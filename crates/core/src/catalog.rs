@@ -69,6 +69,14 @@ pub const ACCOUNTS_MAX: u8 = 25;
 pub const DENY_MAX: usize = 32;
 /// A denied call as a row names it, at most.
 pub const DENY_ENTRY_MAX_BYTES: usize = 256;
+/// A row's `calls_an_hour`, at most.
+pub const CALLS_AN_HOUR_MAX: u32 = 100_000;
+/// The operator keys held to a number of calls an hour each computer
+/// (`calls_an_hour`) unless a row names its own: Google Places, which no
+/// call is charged for (2026-11-20: kept free, rate-limited so no one
+/// calls it at very high volume). An agent's place lookups take a few
+/// calls each; 120 an hour is a lookup every 30 seconds.
+pub const DEFAULT_CALLS_AN_HOUR: [(&str, u32); 1] = [("google-places", 120)];
 /// An operator row's charges, the calls each is for, a charge's JSON
 /// pointer and its unit's name.
 pub const CHARGES_MAX: usize = 8;
@@ -520,6 +528,11 @@ pub struct Provider {
     /// `CHARGES_MAX`: named on its row, or the price book's for its name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub charges: Vec<Charge>,
+    /// The most calls an hour each computer makes on an operator key, 1 to
+    /// `CALLS_AN_HOUR_MAX`: named on its row, or the defaults' for its name
+    /// (`DEFAULT_CALLS_AN_HOUR`); none, no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls_an_hour: Option<u32>,
     /// An own key's sign-in: connected from settings, never pasted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<KeyOAuth>,
@@ -947,6 +960,12 @@ impl Catalog {
                 }
                 (_, false) => return Err(CatalogError::Charges { provider, why: format!("a {} has no charges: only an operator key is metered", p.kind.name()) }),
                 (_, true) => {}
+            }
+            match (p.kind, p.calls_an_hour) {
+                (Kind::Operator, None) => p.calls_an_hour = DEFAULT_CALLS_AN_HOUR.iter().find(|(n, _)| *n == p.name).map(|(_, max)| *max),
+                (Kind::Operator, Some(max)) if (1..=CALLS_AN_HOUR_MAX).contains(&max) => {}
+                (_, Some(_)) => return Err(CatalogError::Charges { provider, why: format!("calls_an_hour is 1 to {CALLS_AN_HOUR_MAX}, on an operator key alone") }),
+                (_, None) => {}
             }
             if let Some(o) = &p.oauth {
                 if p.kind != Kind::Own {
@@ -1668,7 +1687,14 @@ mod tests {
         assert!(c.key_prices().iter().any(|k| k.key == "xai:unit" && k.micros == 7));
         assert!(!c.key_prices().iter().any(|k| k.key == "xai:tick"), "its name's charges are replaced");
         // a vendor the book has no charges for has none
-        assert_eq!(parse(json!([row("perplexity", json!({})), row("google-places", json!({}))])).unwrap().get("google-places").unwrap().charges, vec![]);
+        let places = parse(json!([row("perplexity", json!({})), row("google-places", json!({}))])).unwrap();
+        assert_eq!(places.get("google-places").unwrap().charges, vec![]);
+        // Google Places, kept free, at most its calls an hour; a row's own wins
+        assert_eq!((places.get("google-places").unwrap().calls_an_hour, places.get("perplexity").unwrap().calls_an_hour), (Some(120), None));
+        assert_eq!(parse(json!([row("google-places", json!({ "calls_an_hour": 4 }))])).unwrap().get("google-places").unwrap().calls_an_hour, Some(4));
+        for bad in [json!(0), json!(CALLS_AN_HOUR_MAX + 1)] {
+            assert!(matches!(parse(json!([row("google-places", json!({ "calls_an_hour": bad }))])), Err(CatalogError::Charges { .. })), "{bad}");
+        }
     }
 
     /// Invalid: charges on a row that is no operator key, too many, or one

@@ -542,6 +542,10 @@ pub struct ComputerCell {
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
+    /// Each operator key's calls this hour from this computer, for its
+    /// row's `calls_an_hour` (FIN-616): this isolate's, at most a catalog's
+    /// rows; a new isolate counts again, at most a second hour's worth.
+    hourly: RefCell<BTreeMap<String, fragment_core::ratelimit::Hourly>>,
     /// The hosts its egress catches, as its running start's `arm` set them
     /// (its generation's): a guest's read of its view arms again when its
     /// agents' Vault secrets name a host more. In memory only: a new
@@ -582,6 +586,7 @@ impl DurableObject for ComputerCell {
             starts: RefCell::default(),
             armed: RefCell::new(None),
             relays: RefCell::default(),
+            hourly: RefCell::default(),
             schema,
             uses_due_ms: Rc::new(std::cell::Cell::new(0)),
         }
@@ -1075,6 +1080,18 @@ impl ComputerCell {
         let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
         let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
         Ok(said::said(&notices(&life, &self.saves()?, &self.images()?, &self.rules()), &facts))
+    }
+
+    /// Counts one call on operator key `provider` against its row's calls an
+    /// hour (`calls_an_hour`): refused, 429, with the wait to the hour's end,
+    /// past it. No row's limit, no count.
+    fn within_hour(&self, provider: &catalog::Provider) -> CellResult<()> {
+        let Some(max) = provider.calls_an_hour else { return Ok(()) };
+        let taken = self.hourly.borrow_mut().entry(provider.name.clone()).or_default().take(max, js::now_ms());
+        taken.map_err(|wait| {
+            let minutes = wait.div_euclid(60_000) + 1;
+            CellError::new(ErrorCode::RateLimited, format!("{} takes at most {max} calls an hour from this computer: try again in about {minutes} minutes", provider.name)).retry_after(wait.unsigned_abs())
+        })
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -3952,8 +3969,12 @@ impl ComputerCell {
                     };
                     self.connection_token(&owner, &provider.name, agent, grants.account(&provider.name), at).await?
                 }
-                // its call gated on its owner's standing and charged after (`egress_swap`)
-                Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
+                // its call gated on its owner's standing and charged after
+                // (`egress_swap`), within its calls an hour here
+                Kind::Operator => {
+                    self.within_hour(provider)?;
+                    crate::keys::operator_key(&self.env, &provider.name).await?
+                }
                 Kind::Own => {
                     let key = own.iter().position(|o| *o == provider.name).and_then(|i| keys[i].clone());
                     key.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?
