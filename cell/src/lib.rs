@@ -1294,8 +1294,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
         // `/skills` what their agents know and the optional skills to turn on, `/welcome` a new person's welcome
         (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["skills"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
-        // the operators' admin page: to anyone else, the 404 below
-        (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
+        // the operators' admin, its page and API, and its probe of every
+        // object class: the admin Worker's (admin.rs), handed to it as they
+        // came. It answers anyone else the 404 below, word for word.
+        (Method::Get, ["admin"] | ["healthz", "admin"]) | (_, ["api", "admin", ..]) => admin::forward(req, env).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
         (Method::Get | Method::Head, ["about"]) => shell::legal_page(&req, env, "about.html").await,
         (Method::Get | Method::Head, ["privacy"]) => shell::legal_page(&req, env, "privacy.html").await,
@@ -1314,9 +1316,6 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get | Method::Head, ["healthz"]) => Ok(Response::ok("ok")?),
         // each object class answering this release, which a deploy waits for
         (Method::Get, ["healthz", "objects"]) => routed::objects(env, cfg).await,
-        // the admin Worker's: its probe of the same, and the operators'
-        // routes it answers (admin.rs), handed to it as they came
-        (Method::Get, ["healthz", "admin"] | ["api", "admin", "health"]) => admin::forward(req, env).await,
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -1424,10 +1423,6 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "orgs", org, rest @ ..]) => {
             let (org, rest) = (org.to_string(), rest.to_vec());
             orgs::named(req, env, &url, &org, &rest).await
-        }
-        (_, ["api", "admin", rest @ ..]) => {
-            let rest = rest.to_vec();
-            orgs::admin(req, env, cfg, &url, &rest).await
         }
         // the finite.computer move's mover (migrations.rs)
         (_, ["api", "migrations", rest @ ..]) => {

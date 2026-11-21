@@ -237,9 +237,14 @@ Not built either:
   rules, its databases saved after every change as one file its door
   keeps; a save its door knows is behind (an effect it numbered is newer)
   forces one ratchet sync before anything is sent. The runner's protocol
-  with its door is images/simplex-door/src/door.rs. Until its Durable
-  Object and connector run it, SimpleX runs on an always-on computer
-  (decision 32).
+  with its door is images/simplex-door/src/door.rs; its Durable Object is
+  cell/door.mjs (each save a file in the bucket under `doors/<door>/`, a
+  row naming it, the newest three readable ones kept; a save that will
+  not restore is never given again, and a door with saves never starts as
+  a new one over them). A deployment runs doors only when its config names
+  their image (`doors`), and a local stack only for the e2e's
+  `simplex-door` lane. Until a connector runs one (the next step), SimpleX
+  runs on an always-on computer (decision 32).
 
 ## What its owner is told
 

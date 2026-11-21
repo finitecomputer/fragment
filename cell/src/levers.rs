@@ -262,6 +262,21 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             json_answer(&ask_registry(env, &hook).await?)
         }
         // the move's object is the whole deployment's, as the registry is
+        (Method::Post, ["door"]) => {
+            /// `{door, op, …}`: a lever on that SimpleX door (cell/door.mjs,
+            /// its `lever`): its object's own, its body passed on whole.
+            #[derive(Deserialize)]
+            struct TestDoor {
+                door: String,
+            }
+            let asked: TestDoor = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            check_name(&asked.door)?;
+            if cfg.levers_scoped && !levers::is_e2e_fragment(&asked.door) {
+                return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the door lever reaches e2e doors alone"));
+            }
+            let text = std::str::from_utf8(&body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
+            crate::routed::send(env, "SIMPLEX_DOOR", &asked.door, crate::routed::internal_request("door/lever", text)?).await
+        }
         (Method::Post, ["migrations"]) if cfg.levers_scoped => Err(no_route("/api/test/migrations")),
         (Method::Post, ["migrations"]) => crate::migrations::lever(env, cfg, &body).await,
         // a preview's mail goes out for real: only the fake's is a test's

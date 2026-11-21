@@ -132,9 +132,11 @@ pub fn read_admin_config(project: &Path) -> Result<serde_json::Value> {
 /// (a local node's, a deploy's) whose admin Worker is named `admin_name`:
 /// the cell's `ADMIN` binding names it; and it takes what it shares with
 /// the cell from the cell's config, so the two cannot drift: the cell's
-/// compatibility date, and every one of the cell's object bindings, by
-/// its name and class, bound to the cell's script (as `cell` names it
-/// now: render the cell's name first).
+/// compatibility date; every one of the cell's object bindings, by its
+/// name and class, bound to the cell's script (as `cell` names it now:
+/// render the cell's name first); and the bindings its routes read as the
+/// cell's did (`ADMIN_SHARES`), the move's stage bucket among them when
+/// the cell binds it.
 pub fn pair_admin(cell: &mut serde_json::Value, admin: &mut serde_json::Value, admin_name: &str) -> Result<()> {
     let cell_name = cell["name"].as_str().context("the cell's config names its Worker")?.to_string();
     let services = cell["services"].as_array_mut().context("the cell's config binds its admin Worker (`services`)")?;
@@ -149,20 +151,37 @@ pub fn pair_admin(cell: &mut serde_json::Value, admin: &mut serde_json::Value, a
         anyhow::ensure!(!b.contains_key("script_name"), "the cell binds its own classes, not another script's: {b:?}");
         b.insert("script_name".into(), serde_json::json!(cell_name));
     }
+    let stage: Vec<serde_json::Value> = cell["r2_buckets"].as_array().into_iter().flatten().filter(|b| b["binding"] == ADMIN_BUCKET).cloned().collect();
+    let shared: Vec<(&str, serde_json::Value)> = ADMIN_SHARES.iter().filter_map(|k| cell.get(*k).map(|v| (*k, v.clone()))).collect();
     let a = admin.as_object_mut().context("the admin Worker's config is an object")?;
-    for key in ["compatibility_date", "durable_objects"] {
-        anyhow::ensure!(!a.contains_key(key), "the admin Worker's config names no {key}: it takes the cell's");
+    for key in ["compatibility_date", "durable_objects", "r2_buckets"].iter().chain(&ADMIN_SHARES) {
+        anyhow::ensure!(!a.contains_key(*key), "the admin Worker's config names no {key}: it takes the cell's");
     }
     a.insert("name".into(), serde_json::json!(admin_name));
     a.insert("compatibility_date".into(), date);
     a.insert("durable_objects".into(), serde_json::json!({ "bindings": bindings }));
+    for (key, value) in shared {
+        a.insert(key.into(), value);
+    }
+    if !stage.is_empty() {
+        a.insert("r2_buckets".into(), serde_json::json!(stage));
+    }
     Ok(())
 }
 
+/// The cell's bindings the admin Worker's routes read as the cell's did,
+/// taken whole: the platform's mail (a trial code's, a comp's) and the
+/// release's files (its page, `admin.html`, read by the index both carry).
+const ADMIN_SHARES: [&str; 2] = ["send_email", "assets"];
+/// The cell's one bucket the admin reads: the move's stages, its staff's
+/// view of a move (cell/src/migrations.rs `admin`).
+const ADMIN_BUCKET: &str = "STAGE";
+
 /// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
-/// it imports from beside it (a deploy runs it from the source tree, so
-/// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 3] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs"];
+/// it imports from beside it, and theirs (a deploy runs it from the source
+/// tree, so only a staged copy can miss one:
+/// `the_staged_shim_holds_what_it_imports`).
+pub const SHIM_FILES: [&str; 5] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "door.mjs", "door-rules.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -223,6 +242,21 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
     Ok(())
 }
 
+/// The SimpleX door's container class (cell/door.mjs): in a local node's
+/// config only when it runs doors (`Fleet::doors`). `wrangler dev` builds
+/// every image its config names as it starts, and the door's (SimpleX's
+/// core and its runner, built from source) would be every stack's cost; a
+/// node without it still has the door's object, which says it runs none.
+pub const DOOR_CLASS: &str = "SimplexDoor";
+
+fn without_doors(config: &mut serde_json::Value) -> Result<()> {
+    let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) else { return Ok(()) };
+    let before = containers.len();
+    containers.retain(|c| c["class_name"] != DOOR_CLASS);
+    anyhow::ensure!(containers.len() + 1 >= before, "one door container class at most");
+    Ok(())
+}
+
 /// Bindings `wrangler dev` always runs against Cloudflare itself: it starts
 /// a remote session for them as it boots, which takes a login and an
 /// account, so a local node runs without them. The model route's AI
@@ -249,8 +283,11 @@ pub fn admin_local_config(project: &Path) -> PathBuf {
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
 /// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], doors: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    if !doors {
+        without_doors(&mut config)?;
+    }
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
         for (name, image) in images {
@@ -269,6 +306,9 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     let mut admin = read_admin_config(project)?;
     let admin_name = admin["name"].as_str().context("the admin Worker's config names it")?.to_string();
     pair_admin(&mut config, &mut admin, &admin_name)?;
+    if !admin_secrets.is_empty() {
+        admin["secrets_store_secrets"] = store::bindings_json(store::LOCAL_STORE_ID, admin_secrets);
+    }
     fs::write(admin_local_config(project), serde_json::to_string_pretty(&admin)?)?;
     let path = local_config(project);
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
@@ -471,6 +511,9 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether it runs SimpleX doors (`DOOR_CLASS`'s container, and its
+    /// image built as the node starts): the e2e's door lane's alone.
+    pub doors: bool,
     /// Whether computers reach the internet (`FRAGMENT_COMPUTER_INTERNET`,
     /// `off` when not). Locally, workerd's networking sidecar answers a
     /// container's DNS: with internet on, it asks public DNS first for
@@ -606,7 +649,7 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &self.images)?;
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.doors)?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -1202,17 +1245,31 @@ mod tests {
     /// relative imports, read, against `SHIM_FILES`.
     #[test]
     fn the_staged_shim_holds_what_it_imports() {
-        let entry = std::fs::read_to_string(super::cell_dir().join("entry.mjs")).expect("entry.mjs reads");
-        let mut beside: Vec<String> = entry
-            .lines()
-            .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
-            .filter_map(|l| l.split(" from \"./").nth(1))
-            .filter_map(|rest| rest.split('"').next())
-            .filter(|path| !path.starts_with("build/"))
-            .map(str::to_string)
-            .collect();
-        beside.insert(0, "entry.mjs".into());
-        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it");
+        let imports = |file: &str| -> Vec<String> {
+            let text = std::fs::read_to_string(super::cell_dir().join(file)).unwrap_or_else(|e| panic!("{file} reads: {e}"));
+            text.lines()
+                .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
+                .filter_map(|l| l.split(" from \"./").nth(1))
+                .filter_map(|rest| rest.split('"').next())
+                .filter(|path| !path.starts_with("build/"))
+                .map(str::to_string)
+                .collect()
+        };
+        // entry.mjs, then what each staged module imports from beside it,
+        // in the order first met (a module's own imports included: door.mjs's)
+        let mut beside = vec!["entry.mjs".to_string()];
+        let mut at = 0;
+        // bounded: each file enters once, and the cell has a handful
+        while at < beside.len() {
+            for i in imports(&beside[at]) {
+                if !beside.contains(&i) {
+                    beside.push(i);
+                }
+            }
+            at += 1;
+            assert!(at < 32, "the shim's modules are few");
+        }
+        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it, and theirs");
     }
 
     /// Goal: the admin Worker reaches every one of the cell's objects, by
@@ -1239,6 +1296,8 @@ mod tests {
             assert_eq!((&t["name"], &t["class_name"], &t["script_name"]), (&o["name"], &o["class_name"], &serde_json::json!("fragment-b")), "{t}");
         }
         assert!(admin.get("migrations").is_none(), "the admin defines no class");
+        assert_eq!((&admin["send_email"], &admin["assets"]), (&cell["send_email"], &cell["assets"]), "the mail and the release's files, as the cell's");
+        assert_eq!(admin["r2_buckets"], serde_json::json!([{ "binding": "STAGE", "bucket_name": "fragment-migrations-stage" }]), "the move's stages alone, not the blobs");
         // refused: paired twice (the admin's config already names the cell's),
         // a cell with no binding to it, or one with another service too
         let mut again = admin.clone();
