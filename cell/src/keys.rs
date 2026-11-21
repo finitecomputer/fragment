@@ -503,13 +503,14 @@ pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &s
 /// for `email` (fragment_core::private_home; docs/api.md, "A private
 /// agent"): signed by NIP-98 with the nostr key bound as
 /// `PRIVATE_HOME_KEY` (the admin Worker's alone), whose npub the door
-/// trusts. Its answer, read whole (`ANSWER_BYTES_MAX`), for
+/// trusts; each ask its own (a nonce in its body), so the door's replay
+/// check refuses none of ours. Its answer, read whole (`ANSWER_BYTES_MAX`), for
 /// `private_home::answered`; nothing of it is logged.
 pub async fn private_home_ask(env: &Env, door: &str, email: &str) -> CellResult<(u16, Value)> {
     use fragment_core::private_home::{ask_body, ask_url, ANSWER_BYTES_MAX};
     let key = required(env, store::PRIVATE_HOME_KEY).await?;
     let keys = fragment_nip98::Keys::from_secret_hex(key.trim()).ok_or_else(|| CellError::host(format!("{} is no nostr key (64 hex)", store::PRIVATE_HOME_KEY)))?;
-    let (url, body) = (ask_url(door), ask_body(email));
+    let (url, body) = (ask_url(door), ask_body(email, &js::random_hex::<16>()));
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set("accept", "application/json")?;

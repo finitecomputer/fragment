@@ -6,7 +6,7 @@
 //!
 //! An ask is let in only when signed by its inviter (NIP-98, for
 //! `<url>/passkeys/invites` and its body), fresh, and not seen before:
-//! else 401. Its body is `{"email": …}` alone (else 400). A new email
+//! else 401. Its body is `{"email": …, "nonce"?: …}` (else 400). A new email
 //! gets an invite, `<url>/invite/<64 hex>`, good for an hour; an email the
 //! door holds an account for (`account`) gets `signIn`, `<url>/`, and no
 //! invite. Lever: the next ask is refused (`fail_next`). What it was asked,
@@ -101,10 +101,10 @@ fn answer(state: &Mutex<State>, inviter: &str, door: &str, req: &Request, now_s:
     }
     s.seen.push(header);
     let email = match serde_json::from_slice::<Value>(&req.body) {
-        Ok(Value::Object(o)) if o.len() == 1 => o.get("email").and_then(Value::as_str).map(str::to_ascii_lowercase),
+        Ok(Value::Object(o)) if o.keys().all(|k| k == "email" || k == "nonce") && o.get("nonce").is_none_or(Value::is_string) => o.get("email").and_then(Value::as_str).map(str::to_ascii_lowercase),
         _ => None,
     };
-    let Some(email) = email.filter(|e| e.contains('@')) else { return refused(400, "an ask is {\"email\": …}") };
+    let Some(email) = email.filter(|e| e.contains('@')) else { return refused(400, "an ask is {\"email\": …, \"nonce\"?: …}") };
     s.asked.push(email.clone());
     if s.accounts.contains(&email) {
         return Response::json(200, &json!({ "signIn": format!("{door}/") }));
@@ -146,6 +146,8 @@ mod tests {
         let link = json_of(&r)["invite"].as_str().unwrap().to_string();
         assert!(link.starts_with("http://127.0.0.1:1/invite/") && link.len() == DOOR.len() + 8 + 64, "{link}");
         assert_eq!(answer(&state, inviter.pubkey_hex(), DOOR, &new, now).status, 401, "a replay");
+        let nonced = ask(&inviter, r#"{"email":"Ada@Example.com","nonce":"00ff"}"#, now);
+        assert_eq!(answer(&state, inviter.pubkey_hex(), DOOR, &nonced, now).status, 200, "the same second, another nonce: another ask");
         state.lock().unwrap().accounts.push("bo@example.com".into());
         let r = answer(&state, inviter.pubkey_hex(), DOOR, &ask(&inviter, r#"{"email":"bo@example.com"}"#, now), now);
         assert_eq!(json_of(&r), json!({ "signIn": "http://127.0.0.1:1/" }));
@@ -155,6 +157,6 @@ mod tests {
         state.lock().unwrap().fail_next = Some((503, "down".into()));
         assert_eq!(answer(&state, inviter.pubkey_hex(), DOOR, &ask(&inviter, r#"{"email":"cy@example.com"}"#, now), now).status, 503);
         let s = state.lock().unwrap();
-        assert_eq!((s.asked.clone(), s.invited.clone()), (vec!["ada@example.com".to_string(), "bo@example.com".into()], vec!["ada@example.com".to_string()]));
+        assert_eq!((s.asked.clone(), s.invited.clone()), (vec!["ada@example.com".to_string(), "ada@example.com".into(), "bo@example.com".into()], vec!["ada@example.com".to_string(), "ada@example.com".into()]));
     }
 }

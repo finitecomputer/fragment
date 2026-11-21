@@ -37,9 +37,14 @@ pub fn ask_url(door: &str) -> String {
     format!("{door}{INVITES_PATH}")
 }
 
-/// The ask's body: the operator's verified email, alone.
-pub fn ask_body(email: &str) -> String {
-    serde_json::json!({ "email": email }).to_string()
+/// The ask's body: the operator's verified email, and a nonce of its own
+/// (16 random bytes, hex). NIP-98 signs with no randomness and to the
+/// second, so two asks in one second would otherwise be one event, and the
+/// door answers an event once: the nonce keeps each ask its own, and an
+/// event seen twice always a replay.
+pub fn ask_body(email: &str, nonce: &str) -> String {
+    assert!(nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit()), "a nonce is 16 bytes, hex");
+    serde_json::json!({ "email": email, "nonce": nonce }).to_string()
 }
 
 /// What the door answered (`status`, its body as JSON), held to `door`: a
@@ -88,7 +93,7 @@ mod tests {
             assert!(!door_ok(bad), "{bad}");
         }
         assert_eq!(ask_url(DOOR), "https://home.example.com/__door/passkeys/invites");
-        assert_eq!(ask_body("ada@example.com"), r#"{"email":"ada@example.com"}"#);
+        assert_eq!(ask_body("ada@example.com", &"0f".repeat(16)), format!(r#"{{"email":"ada@example.com","nonce":"{}"}}"#, "0f".repeat(16)));
     }
 
     // Goal: an invite under the door's own URL, or a sign-in on its origin,

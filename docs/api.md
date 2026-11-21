@@ -384,8 +384,9 @@ deployment's operators alone: their own `GET /api/identities/me` says
 
 Asked (`POST /api/admin/private-agent`), the admin asks the home's door
 (`POST <door>/passkeys/invites`, NIP-98 signed with that key, the body
-`{"email": …}`: the operator's own email, as their sign-in here verified
-it, never the request's; `fragment_core::private_home`). The door trusts
+`{"email": …, "nonce": …}`: the operator's own email, as their sign-in
+here verified it, never the request's, and a nonce that makes each ask its
+own; `fragment_core::private_home`). The door trusts
 that key's npub alone. For an email with no account there it makes a
 one-time invite, good for an hour, and the operator's browser goes to it to
 make their first passkey (`invited: true`). For an email with an account
