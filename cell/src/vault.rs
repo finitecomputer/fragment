@@ -483,6 +483,7 @@ impl VaultCell {
         if !exists && held >= rules::SECRETS_MAX as u64 {
             return Err(CellError::invalid(format!("a vault keeps at most {} secrets: remove one first", rules::SECRETS_MAX)));
         }
+        self.room(name, &checked.hosts)?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: js::now_ms() };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec(
@@ -505,10 +506,25 @@ impl VaultCell {
         let held: Option<Secret> = rows.first().map(stored).transpose()?;
         let checked = rules::check(name, put, held.as_ref().map(|s| &s.place), &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
         let held = held.ok_or_else(|| CellError::host("the rules kept a value for a secret not held"))?;
+        self.room(name, &checked.hosts)?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: held.set_at };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec("UPDATE secrets SET secret = ? WHERE name = ?", vec![text.as_str().into(), name.into()])?;
         Ok(text)
+    }
+
+    /// Whether `name`, going to `hosts`, keeps the Vault within its hosts
+    /// (`rules::room`): read in the turn that writes it.
+    fn room(&self, name: &str, hosts: &[String]) -> CellResult<()> {
+        let (mut others, mut held) = (vec![], vec![]);
+        for r in self.rows("SELECT name, secret FROM secrets", vec![])? {
+            let s: Bound = stored(&r)?;
+            if r["name"].as_str() != Some(name) {
+                others.extend(s.hosts.iter().cloned());
+            }
+            held.extend(s.hosts);
+        }
+        rules::room(hosts, &others, &held, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))
     }
 
     /// Every secret held, by name, as `SecretList`'s JSON: the texts kept,

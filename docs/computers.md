@@ -406,7 +406,20 @@ its owner's Vault: beside the container's start when the start holds its
 guest until it lets it go (a restore's gate; a snapshot's hold, when its
 save was held), and caught before that; before the start when its guest
 runs at once (a fresh start, or a snapshot whose sleep's hold failed), so
-no guest runs with one uncaught. HTTPS to an intercepted host is
+no guest runs with one uncaught. A container takes 128 intercept
+entries, a host on HTTP and HTTPS 4: the platform's own, at most 22
+catalog hosts (a deploy refuses more) and at most 8 of a person's Vault
+fit together (`fragment_core::computer::egress`). Each start takes the
+backups' gateway's 2 entries first, before any swap host, so a save
+always has them. Its arms go one at a time, and each counts a host
+before it asks for it, beside every host its container holds already
+(stored, so a takeover counts them too): the hosts it keeps come first,
+then the catalog's, then the Vault's, as far as there is room. A swap
+host the container has no room for (it may hold registrations nothing
+counted: an overtaken start's, or a container a release before this one
+started) is left uncaught and logged, never a failed start or arm;
+only a start whose Vault hosts, asked beside it, are not all caught
+before its guest is let go fails, and the next start is fresh. HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,

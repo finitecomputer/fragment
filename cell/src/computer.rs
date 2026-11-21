@@ -408,6 +408,10 @@ enum MetaKey {
     /// The test lever's save whose restore stops for want of room
     /// (`fail-restore`): its number.
     FailRestore,
+    /// Its running start's egress (`Armed`): `[generation, {counted,
+    /// tried}]`. Stored, not in memory, so a new isolate's takeover counts
+    /// what the one before it caught.
+    Armed,
 }
 
 impl MetaKey {
@@ -438,11 +442,28 @@ impl MetaKey {
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
             MetaKey::GrantsOwed => "grants_owed",
+            MetaKey::Armed => "armed",
             MetaKey::HoldSaves => "hold_saves",
             MetaKey::StallUnhold => "stall_unhold",
             MetaKey::FailRestore => "fail_restore",
         }
     }
+}
+
+/// Its running start's egress (`MetaKey::Armed`; Sol on #1427). Each set
+/// sorted, each host once.
+#[derive(Default, serde::Serialize, Deserialize)]
+struct Armed {
+    /// What its container counts against its entries: every host asked of
+    /// it, counted before it is asked (one may land while its arm fails, or
+    /// the isolate go before it answers), and kept while it runs (an
+    /// intercept is never taken back). An arm adds only what fits beside
+    /// these (`egress::armed`), so the backups' gateway's entries stay free.
+    counted: Vec<String>,
+    /// Those its arms asked and heard back from: caught, or refused for
+    /// want of room. Never asked again while it runs; one counted but not
+    /// tried is asked again, at no more cost.
+    tried: Vec<String>,
 }
 
 /// What a start restores, as it was chosen at its beginning.
@@ -540,11 +561,10 @@ pub struct ComputerCell {
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
-    /// The hosts its egress catches, as its running start's `arm` set them
-    /// (its generation's): a guest's read of its view arms again when its
-    /// agents' Vault secrets name a host more. In memory only: a new
-    /// isolate arms again at the next read.
-    armed: RefCell<Option<(u64, Vec<String>)>>,
+    /// One arm of its egress at a time (`arm`, `arm_vault`): each counts
+    /// the hosts the one before it caught (`MetaKey::Armed`), so two never
+    /// spend the same room, the backups' gateway's included (Sol on #1427).
+    arming: futures_util::lock::Mutex<()>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
     /// When its owner's next look hands over the uses it owes
@@ -576,7 +596,7 @@ impl DurableObject for ComputerCell {
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             starts: RefCell::default(),
-            armed: RefCell::new(None),
+            arming: futures_util::lock::Mutex::new(()),
             relays: RefCell::default(),
             schema,
             uses_due_ms: Rc::new(std::cell::Cell::new(0)),
@@ -1374,8 +1394,7 @@ impl ComputerCell {
             }));
         }
         let id = self.must(MetaKey::Id)?;
-        let hosts = self.swap_hosts().await?;
-        self.arm(generation, &id, hosts).await?;
+        self.arm(generation, &id).await?;
         Ok(None)
     }
 
@@ -1564,14 +1583,59 @@ impl ComputerCell {
         hosts
     }
 
-    /// The hosts the swap intercepts: the catalog's, and each its agents'
-    /// Vault secrets go to (`vault_hosts`).
-    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
-        let mut hosts = self.catalog_hosts();
-        hosts.extend(self.vault_hosts().await);
-        hosts.sort_unstable();
-        hosts.dedup();
-        Ok(hosts)
+    /// What its running start `generation`'s egress arms (`egress::armed`):
+    /// what its container counts already, then the catalog's hosts, then
+    /// `vault`'s, within its entries. One left out (its person's from
+    /// before the cap, or, at a takeover, one its container has no room for
+    /// beside the hosts it keeps) is logged: its placeholder goes out
+    /// uncaught, and fills nothing, and the computer still runs.
+    fn egress_plan(&self, counted: Vec<String>, vault: Vec<String>) -> Vec<String> {
+        let (hosts, left_out) = fragment_core::computer::egress::armed(counted, self.catalog_hosts(), vault);
+        if !left_out.is_empty() {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "left_out": left_out.len() }));
+        }
+        hosts
+    }
+
+    /// Its running start `generation`'s egress as stored (`MetaKey::Armed`):
+    /// the hosts its container counts, and those it tried (landed, or
+    /// refused for want of room: never asked again). None for another
+    /// start's.
+    fn armed(&self, generation: u64) -> CellResult<Armed> {
+        let Some(text) = self.meta(MetaKey::Armed)? else { return Ok(Armed::default()) };
+        let (of, armed): (u64, Armed) = crate::json_text(&text).map_err(|e| CellError::host(format!("the stored armed hosts: {e}")))?;
+        Ok(if of == generation { armed } else { Armed::default() })
+    }
+
+    /// Never over a newer start's: an arm of the one before it may answer
+    /// after it began.
+    fn set_armed(&self, generation: u64, armed: &Armed) -> CellResult<()> {
+        if let Some(text) = self.meta(MetaKey::Armed)? {
+            let (of, _): (u64, Armed) = crate::json_text(&text).map_err(|e| CellError::host(format!("the stored armed hosts: {e}")))?;
+            if of > generation {
+                return Ok(());
+            }
+        }
+        let text = serde_json::to_string(&(generation, armed)).map_err(|e| CellError::host(e.to_string()))?;
+        self.set_meta(MetaKey::Armed, &text)
+    }
+
+    /// What entry.mjs's `arm` or `armSwap` answered: the swap hosts its
+    /// container had no room for (one taken over from a release before
+    /// this one may hold hosts it never stored), logged, or none when that
+    /// start was superseded.
+    fn full_of(&self, id: &str, armed: &JsValue) -> CellResult<Option<Vec<String>>> {
+        if armed.as_bool() == Some(false) {
+            return Ok(None);
+        }
+        if !armed.is_array() {
+            return Err(CellError::host("arm answers the hosts it had no room for, or false"));
+        }
+        let full: Vec<String> = js_sys::Array::from(armed).iter().filter_map(|h| h.as_string()).collect();
+        if !full.is_empty() {
+            console_error!("{}", json!({ "computer": id, "arm": "full", "left_out": full.len() }));
+        }
+        Ok(Some(full))
     }
 
     /// The hosts its agents' Vault secrets go to, as its owner's Vault
@@ -1590,14 +1654,27 @@ impl ComputerCell {
 
     /// Sets its running start `generation`'s egress intercepts again
     /// (entry.mjs `arm`: a takeover's; its start registered them before it
-    /// began, `try_start`): the platform's own hosts and `hosts`, kept as
-    /// armed. False: that start was superseded.
-    async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
+    /// began, `try_start`): the platform's own hosts, those its container
+    /// counts already, then the catalog's and its agents' Vault secrets'
+    /// as far as there is room (`egress_plan`), counted before they are asked
+    /// (one may land while another fails, or this isolate go before the
+    /// answer) and kept as tried once they are. False: that start was
+    /// superseded.
+    async fn arm(&self, generation: u64, id: &str) -> CellResult<bool> {
+        let _arming = self.arming.lock().await;
+        let before = self.armed(generation)?;
+        let hosts = self.egress_plan(before.counted.clone(), self.vault_hosts().await);
+        self.set_armed(generation, &Armed { counted: hosts.clone(), tried: before.tried.clone() })?;
         let g = JsValue::from_f64(generation as f64);
         let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
-        let done = armed.as_bool() == Some(true);
+        if armed.is_null() {
+            // not this isolate's start: nothing asked, nothing more counted
+            self.set_armed(generation, &before)?;
+            return Ok(false);
+        }
+        let done = self.full_of(id, &armed)?.is_some();
         if done {
-            *self.armed.borrow_mut() = Some((generation, hosts));
+            self.set_armed(generation, &Armed { counted: hosts.clone(), tried: hosts })?;
         }
         Ok(done)
     }
@@ -1606,7 +1683,7 @@ impl ComputerCell {
     /// since its start), its failure logged: the read goes on, and the
     /// placeholder then goes out uncaught, and fills nothing.
     async fn arm_more(&self, vault_hosts: Vec<String>) {
-        if let Err(e) = self.arm_vault(vault_hosts).await {
+        if let Err(e) = self.arm_vault(vault_hosts, false).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "error": e.message }));
         }
     }
@@ -1616,29 +1693,53 @@ impl ComputerCell {
     /// reads a placeholder reaches the swap with it: those its start asked
     /// for beside the container's start (`try_start`, whose failure this
     /// is), and any set since (its guest's view answers only after,
-    /// `guest_view`). False: its start was superseded meanwhile.
-    async fn arm_vault(&self, vault_hosts: Vec<String>) -> CellResult<bool> {
+    /// `guest_view`). Each is counted before it is asked (`arm`'s why),
+    /// beside what its container counts already (`egress_plan`). False: its start
+    /// was superseded meanwhile. `start` (its start's own, before its guest
+    /// is let go): every host a fresh container would catch for it
+    /// (`egress::armed` with nothing kept) is caught, or the start fails,
+    /// as master's arm failed, rather than let a guest go with one missing
+    /// (a read of its view during the start may have spent the room on an
+    /// older view's: the next start is fresh). Elsewhere (a read of its
+    /// view) one left is logged and goes uncaught.
+    async fn arm_vault(&self, vault_hosts: Vec<String>, start: bool) -> CellResult<bool> {
+        let _arming = self.arming.lock().await;
         let Some(generation) = self.lifecycle()?.running() else { return Ok(true) };
-        // the start's own or a takeover's, as armed: the catalog's at least
-        let armed = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-        let mut more: Vec<String> = vault_hosts.into_iter().filter(|h| !armed.contains(h)).collect();
-        more.sort_unstable();
-        more.dedup();
-        if more.is_empty() {
+        let before = self.armed(generation)?;
+        let Armed { counted, mut tried } = Armed { counted: before.counted.clone(), tried: before.tried.clone() };
+        let fresh = || fragment_core::computer::egress::armed(vec![], self.catalog_hosts(), vault_hosts.clone()).0;
+        if vault_hosts.iter().all(|h| fragment_core::computer::egress::caught(&tried, h)) {
             return Ok(true);
         }
-        let id = self.must(MetaKey::Id)?;
-        let g = JsValue::from_f64(generation as f64);
-        if self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?.as_bool() != Some(true) {
-            return Ok(false);
+        let counted = self.egress_plan(counted, vault_hosts.clone());
+        let more: Vec<String> = counted.iter().filter(|h| !tried.contains(h)).cloned().collect();
+        let mut full = vec![];
+        if !more.is_empty() {
+            self.set_armed(generation, &Armed { counted: counted.clone(), tried: tried.clone() })?;
+            let id = self.must(MetaKey::Id)?;
+            let g = JsValue::from_f64(generation as f64);
+            let answer = self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?;
+            if answer.is_null() {
+                // not this isolate's start (a new isolate's, before its
+                // takeover): nothing asked, nothing more counted
+                self.set_armed(generation, &before)?;
+                return Ok(false);
+            }
+            let Some(refused) = self.full_of(&id, &answer)? else {
+                return Ok(false);
+            };
+            tried.extend(more);
+            tried.sort_unstable();
+            tried.dedup();
+            self.set_armed(generation, &Armed { counted, tried: tried.clone() })?;
+            full = refused;
         }
-        // added to what is armed now, which another read's or its start's
-        // may have changed meanwhile
-        let mut hosts = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-        hosts.extend(more);
-        hosts.sort_unstable();
-        hosts.dedup();
-        *self.armed.borrow_mut() = Some((generation, hosts));
+        if start {
+            let missing = fresh().into_iter().filter(|h| full.contains(h) || !fragment_core::computer::egress::caught(&tried, h)).count();
+            if missing > 0 {
+                return Err(CellError::host(format!("start {generation}'s container had no room for {missing} of its hosts")));
+            }
+        }
         Ok(true)
     }
 
@@ -1942,12 +2043,11 @@ impl ComputerCell {
         // as before, so no guest ever runs with one uncaught
         // (`Plan::vault_asked`)
         let asked = planned.plan.vault_asked();
-        let mut hosts = self.catalog_hosts();
-        if asked == VaultAsked::Before {
-            hosts.extend(self.vault_hosts().await);
-            hosts.sort_unstable();
-            hosts.dedup();
-        }
+        // within its egress's entries (`caught`)
+        let hosts = match asked {
+            VaultAsked::Before => self.egress_plan(vec![], self.vault_hosts().await),
+            VaultAsked::Beside => self.catalog_hosts(),
+        };
         // a wipe that began while this start awaited starts nothing: one
         // begun before the host's start is seen here, and one begun while
         // the host registers the intercepts is the host's to see (its
@@ -1960,7 +2060,7 @@ impl ComputerCell {
         // once: its guest's first call never races them (entry.mjs `start`)
         let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
         // as armed from its start, for a read of its view during it to add to
-        *self.armed.borrow_mut() = Some((generation, hosts));
+        self.set_armed(generation, &Armed { counted: hosts.clone(), tried: hosts })?;
         // a guest held until the start lets it go (a restore's gate, a
         // snapshot's hold): its Vault hosts asked beside the start, never
         // before it, and caught before the start lets it go (any set since,
@@ -1977,7 +2077,7 @@ impl ComputerCell {
         }
         // before its guest is let go (a restore's gate, a snapshot's hold): a
         // host that will not register fails the start, as any intercept does
-        if !self.arm_vault(vault).await? {
+        if !self.arm_vault(vault, true).await? {
             return Err(Unstarted::Overtaken);
         }
         if self.lever_take(MetaKey::FailStarts) {

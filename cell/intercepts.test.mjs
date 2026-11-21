@@ -89,11 +89,11 @@ test("every intercept is in place at the start itself, all asked at once", async
   assert.deepEqual([...seen.asked].sort(), [...every].sort());
   // what had landed when the container started, not after
   assert.deepEqual([...seen.atStart].sort(), every.map((e) => e.split(" → ")[0]).sort());
-  // one round trip for them all, not one each
-  assert.equal(seen.inFlightMax, every.length);
+  // two round trips, not one each: the platform's, then the swap hosts
+  assert.equal(seen.inFlightMax, 4);
 });
 
-test("without a code.storage of its own or a swap host, the platform's two; never the backups' host, whose saves and restores grant their own", async () => {
+test("without a code.storage of its own or a swap host, the platform's two; the backups' host only when its start reserves it", async () => {
   const { c, seen } = container();
   await startIntercepted(c, {}, () => intercept(c, egress, [], false), () => false);
   assert.deepEqual(seen.asked, [`http://${API} → api`, `http://${MODEL} → model`]);
@@ -146,4 +146,86 @@ test("a Vault host its guest's view names, running, is registered alone: never t
   await interceptSwap(c, egress, ["api.vault.test"]);
   assert.deepEqual(seen.asked, ["http://api.vault.test → swap", "https://api.vault.test → swap"]);
   assert.equal(seen.started, 1, "it starts nothing");
+});
+
+// A running container with Cloudflare's rules for its 128 entries (#1427):
+// each target (a scheme and a host) two of them, one registered again none
+// more, none given back; past them, its own words. `held`: its targets.
+const LIMIT = "You can't configure more than 128 egress interceptors";
+function full(held) {
+  const targets = new Set(held);
+  const register = (scheme) => async (host) => {
+    const target = `${scheme}://${host}`;
+    if (!targets.has(target) && 2 * (targets.size + 1) > 128) throw new Error(LIMIT);
+    targets.add(target);
+  };
+  return { targets, interceptOutboundHttp: register("http"), interceptOutboundHttps: register("https") };
+}
+const hosts = (prefix, n) => Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(2, "0")}.example.test`);
+const both = (list) => list.flatMap((h) => [`http://${h}`, `https://${h}`]);
+const PLATFORM = [`http://${API}`, `http://${MODEL}`];
+
+test("a container taken over holding hosts set before: one it has no room for is left and answered, never a failed arm", async () => {
+  // the platform's two, 30 swap hosts and one stray: 126 of its 128
+  const c = full([...PLATFORM, ...both(hosts("old", 30)), "http://stray.example.test"]);
+  assert.deepEqual(await intercept(c, egress, [...hosts("old", 30), "new.example.test"], false), ["new.example.test"]);
+  assert.equal(c.targets.size * 2, 128);
+});
+
+test("two Vault hosts racing for a running container's last room: both answer, the one left named", async () => {
+  // 124 of its 128: room for one host on both schemes
+  const c = full([...PLATFORM, ...both(hosts("held", 30))]);
+  const answers = await Promise.all([interceptSwap(c, egress, ["za.example.test"]), interceptSwap(c, egress, ["zb.example.test"])]);
+  assert.deepEqual(answers, [[], ["zb.example.test"]]);
+});
+
+test("no room for the platform's own still fails, and so does any other refusal of a swap host", async () => {
+  await assert.rejects(intercept(full(both(hosts("held", 32))), egress, [], false), { message: LIMIT });
+  const { c } = container({ fail: "https://api.example.com → swap" });
+  await assert.rejects(intercept(c, egress, SWAP, false), /refused/);
+});
+
+test("a start takes the backups' host before any swap host, and one swap host with no room is left, never a failed start", async () => {
+  // a container holding registrations nothing counted (the platform's and
+  // 30 swap hosts': 124 entries): the backups' host takes 2 of the last 4
+  const c = { ...full([...PLATFORM, ...both(hosts("old", 30))]), started: 0, start() { this.started++; } };
+  const reserve = () => c.interceptOutboundHttp("backups.sandbox.internal", egress("deny"));
+  const logged = [];
+  const error = console.error;
+  console.error = (line) => logged.push(line);
+  try {
+    assert.equal(await startIntercepted(c, { image: "stub" }, () => intercept(c, egress, ["new.example.test"], false, () => true, reserve), () => false), true);
+  } finally {
+    console.error = error;
+  }
+  assert.ok(c.targets.has("http://backups.sandbox.internal"));
+  assert.ok(!c.targets.has("https://new.example.test"));
+  assert.equal(c.started, 1);
+  assert.deepEqual(logged, ['{"arm":"start","left_out":1}']);
+});
+
+test("a registration asked again once its start is no longer the running one is never sent: it would land on the next start's container", async () => {
+  const busy = "https://late.example.test → swap";
+  const { c, seen } = container({ busy });
+  // superseded as its first try came back "temporarily unavailable"
+  const live = () => !seen.asked.includes(busy);
+  await assert.rejects(interceptSwap(c, egress, ["late.example.test"], live), /no longer the running one/);
+  assert.deepEqual(seen.asked, ["http://late.example.test → swap", busy]);
+  assert.ok(!seen.caught.has("https://late.example.test"));
+});
+
+test("a swap host never takes the room of a platform registration asked again: the swap hosts wait for the platform's to land", async () => {
+  // 22 catalog and 8 Vault hosts, and one stale host held: 4 entries left, the backups' host's 2 among them
+  const c = full([...PLATFORM, ...both(hosts("stale", 1))]);
+  let busy = true;
+  const reserve = async () => {
+    if (busy) {
+      busy = false;
+      throw new Error("the container is temporarily unavailable");
+    }
+    return c.interceptOutboundHttp("backups.sandbox.internal", egress("deny"));
+  };
+  const left = await intercept(c, egress, hosts("s", 30), false, () => true, reserve);
+  assert.ok(c.targets.has("http://backups.sandbox.internal"));
+  assert.equal(left.length, 1);
 });

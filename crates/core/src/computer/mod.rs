@@ -77,6 +77,7 @@ pub mod start_line;
 
 mod awake;
 mod disk;
+pub mod egress;
 mod held;
 mod images;
 mod lifecycle;
