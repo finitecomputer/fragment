@@ -488,6 +488,16 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let carol = crate::Keys::generate();
     let c_id = s.workos.user(&Api::email_of(&carol)).id;
     mover.push(&roster("s6", vec![person(&alice_id, &[&a1, &a2, &w1]), person(&dave_id, &[&d1, &d2]), person(&c_id, &[&c1])]))?;
+    // dave is wiped before the cutoff, his move still bound to him (a wipe
+    // is an operator key's that no person holds)
+    let wiped = match s.runs("move", &[Need::Operator]) {
+        true => {
+            let dave = moved(&d1)?["person"].as_str().context("dave's move names him")?.to_string();
+            let wiper = s.wiper.clone().context("Need::Operator lends an operator key")?;
+            Some(super::billing::wipe_until_done(api, &wiper, &dave)?.0)
+        }
+        false => None,
+    };
     let cutoff = crate::MIGRATIONS_CUTOFF_MS;
     let now = lever(json!({ "op": "clock", "offsetMs": offset.get() }))?["now"].as_i64().context("the object's now")?;
     later_by(cutoff - now + 1)?;
@@ -498,7 +508,15 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2."))) && c["secrets"].is_null()) && !f_cut && state(&w1) == "withdrawn",
         format!("{p2:?} {f_cut} {}", state(&w1)),
     );
+    // each archive carries its owner's SimpleX chat
+    mover.simplex(true);
     mover.run_once()?;
+    mover.simplex(false);
+    s.ok(
+        "an archive that carries a SimpleX chat lands for someone wiped since the move bound them: they hold no seat to keep on, so its complete goes on",
+        wiped.as_ref().is_none_or(|w| w.status == 200 && w.body["state"] == "wiped") && moved(&d1)?["staged_ms"].is_i64() && objects(&format!("p2/{d1}/")).len() == 2,
+        format!("{} {} {:?}", wiped.as_ref().map(|w| w.to_string()).unwrap_or_default(), moved(&d1)?, objects(&format!("p2/{d1}/"))),
+    );
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
     s.ok("staged, then retired as archived: archived", retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "archived" && c.get("stage").is_none()) && state(&c1) == "archived" && state(&a2) == "archived", format!("{retire:?}"));
@@ -734,6 +752,8 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
     anyhow::ensure!(visit.status == 200 && visit.body["bound"] == 1, "its owner opens the move, and is bound: {visit}");
+    let seat = || api.signed(&owner, "GET", "/api/seat", None).map(|r| r.body["seat"].clone()).unwrap_or(Value::Null);
+    let comped = seat();
     let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": identity })))?;
     anyhow::ensure!(yes.status == 200, "Yes: {yes}");
     let tag = crate::Keys::generate().pubkey_hex()[..16].to_string();
@@ -780,7 +800,16 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let replay = mover.hand_off(&old, &cmd.id, all.clone())?;
     let after = vault()?;
     s.ok("the same hand-off again answers the same and changes nothing", replay.status == 200 && replay.body == again.body && after == v, format!("{} {}", replay.status, replay.body));
+    // its stage carries its owner's SimpleX chat
+    mover.simplex(true);
     mover.run_once()?;
+    mover.simplex(false);
+    let on = s.eventually(crate::lanes::billing::PUSHED, || seat()["kind"] == "seat_always_on");
+    s.ok(
+        "its stage carries its SimpleX chat: its owner's comped `seat`, which sleeps, is made always-on as it completes, which SimpleX needs",
+        comped["kind"] == "seat" && comped["comped"] == true && on && seat()["comped"] == true,
+        json!([comped, seat()]),
+    );
     let late = mover.hand_off(&old, &cmd.id, all)?;
     s.ok("once its stage is staged, its command is done: a hand-off is stale (409)", late.status == 409, format!("{} {}", late.status, late.body));
     let logged = super::vault::logs(s);
