@@ -1602,7 +1602,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
         anyhow::ensure!(!d.operators.is_empty(), "--operator-key-file names a key the deployment's operators list: its config's operators are empty");
         args.extend(["--operator-key-file".to_string(), expand(file).to_string_lossy().into_owned(), "--operators".into(), d.operators.join(",")]);
     }
-    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
+    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.doors.is_some(), "doors"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
     if !offers.is_empty() {
         args.extend(["--offers".to_string(), offers.join(",")]);
     }
@@ -1930,6 +1930,12 @@ mod tests {
             got,
             ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test", "--offers", "computers,models", "--dry-run", "--only", "computers,templates"]
         );
+        // doors too, where it names them
+        let mut doors = v.clone();
+        doors["doors"] = json!({ "image": { "dockerfile": "images/simplex-door/Dockerfile", "build_context": "." } });
+        let path = config_file("hosted-args-doors", &doors);
+        let got = args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--only", "simplex-door"]).unwrap();
+        assert_eq!(got, ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test", "--offers", "computers,doors,models", "--only", "simplex-door"]);
         // no gateway, no computers: it offers neither
         v.as_object_mut().unwrap().remove("ai_gateway");
         v.as_object_mut().unwrap().remove("computers");

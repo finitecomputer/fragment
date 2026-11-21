@@ -6,11 +6,11 @@
 //! saves are kept to the newest three; and a planned stop saves last and
 //! is not started again until asked.
 //!
-//! Lower rung, labeled so: local workerd and Docker, its containers
-//! reaching no SimpleX server (the e2e's reach none), so no link here:
-//! SimpleX itself is the lab's (images/bridge/tests/door.rs) and the
-//! hosted check's. Run by name: its stack builds the door's image
-//! (devstack::Fleet::doors).
+//! Locally on workerd and Docker, its containers reaching no SimpleX server
+//! (the e2e's reach none), so no link here: SimpleX itself is the lab's
+//! (images/bridge/tests/door.rs). Hosted, on a deployment whose config
+//! names `doors`. Run by name: a local stack builds the door's image for
+//! it alone (devstack::Fleet::doors).
 
 use std::time::{Duration, Instant};
 
@@ -60,7 +60,7 @@ fn newest(s: &Value) -> (u64, u64) {
 }
 
 pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section_by_name(NAME, &[Need::Node, Need::Levers, Need::LocalDocker], "its stack builds the door's image (SimpleX's core and its runner)") {
+    if !s.section_by_name(NAME, &[Need::Levers, Need::Doors], "its stack builds the door's image (SimpleX's core and its runner)") {
         return Ok(());
     }
     let door = "e2e-door-simplex--k3x9";
