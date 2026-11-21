@@ -71,6 +71,7 @@ mod members;
 mod meter;
 mod migrations;
 mod models;
+mod pipe;
 mod notices;
 mod ops;
 mod orgs;

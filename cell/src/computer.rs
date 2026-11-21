@@ -61,7 +61,7 @@ use fragment_core::computer::{
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
 use fragment_core::ledger::uses::{self, Used};
-use fragment_core::ledger::{MeterRow, Month, Spend};
+use fragment_core::ledger::{Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
@@ -4795,12 +4795,11 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// call its row denies (`catalog::Deny`), and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
-/// go to no provider. An operator key's call asks the gate first
-/// (ledger.rs `may`: the agent's owner's standing as this isolate heard
-/// it within the minute; a person out of credit is refused, and a ledger
-/// that does not answer refuses nothing: decision 62). After the answer is
-/// handed back, each operator key's call the provider answered (under
-/// 500) is charged to the owner (`charge_keys`), and every call the
+/// go to no provider. An operator key's call goes through the pipe
+/// (crate::pipe): gated beside it, as the agent's model calls are (a
+/// person out of credit is refused, once this isolate has heard so), and,
+/// after the answer is handed back, each operator key's call the provider
+/// answered (under 500) charged to the owner. Every call the
 /// provider answered is counted as the agent's in its owner's ledger
 /// (`uses::Used`; a shared key's charge in its hour here too,
 /// `computer/used`), in `wait_until`, never in the answer's way: a count
@@ -4927,8 +4926,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // the operator's keys among them, and the gate asked for them last
     let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some_and(|row| row.kind == Kind::Operator)).collect();
     if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
-        let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
-        crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
+        crate::pipe::gate(env, owner, None, ctx).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
@@ -4958,15 +4956,11 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         // too, which its computer keeps
         let charged = uses.iter().any(|u| u.micros > 0);
         let counted = Used { agent, at_ms: at, uses };
-        let rows: Vec<MeterRow> = used
-            .into_iter()
-            .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
-            .collect();
+        let bill = |usage| (crate::pipe::Bill { payer: owner.clone(), reference: format!("key:{computer}:{}", js::random_hex::<12>()), agent: Some(identity.clone()), fragment: None, computer: Some(computer.to_string()) }, Some(usage));
+        let bills: Vec<_> = used.into_iter().map(|(_, usage)| bill(usage)).collect();
         let (env, computer) = (env.clone(), computer.to_string());
         ctx.wait_until(async move {
-            if !rows.is_empty() {
-                crate::meter::charge(&env, &owner, rows).await;
-            }
+            crate::pipe::settle(&env, bills).await;
             if counted.uses.is_empty() {
                 return;
             }

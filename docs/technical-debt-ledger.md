@@ -703,7 +703,7 @@ unfinished design, not debt.
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
-  calls are charged after answering (cell/src/meter.rs `charge`): no
+  calls are charged after answering (cell/src/pipe.rs `settle`): no
   usage charges nothing (`ledger.unknown-usage`), a failed send is lost
   (`ledger.charge-lost`), the gate is a minute stale.
 - **Risk:** calls given away: cents, against an agent never stopped.
