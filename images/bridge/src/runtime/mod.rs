@@ -359,6 +359,10 @@ pub struct TurnStart {
     /// `note`, before a card's or a cut turn's. Its own field, as `note`
     /// set by the engine means a card's, in the cut note's place.
     pub age: Option<String>,
+    /// Its computer's disk is filling (crate::note, `disk`): told once at
+    /// each agent's next turn after each read that finds it so; the driver
+    /// puts it first in `note`.
+    pub disk: Option<String>,
     /// Its text is a command of the runtime's menu (`/<name> <args>`), said
     /// to it as it is; a message's never is.
     pub command: bool,

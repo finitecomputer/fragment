@@ -67,7 +67,8 @@ pub use signin::SESSION_TTL_MS;
 /// The fleet's one registry cell.
 pub const NAME: &str = "registry";
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct RegistryCell {
     state: State,
     /// The state as the runtime handed it (what a restart onto a newer
@@ -122,6 +123,7 @@ pub struct RegistryCell {
     schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();

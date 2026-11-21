@@ -585,6 +585,9 @@ struct Migrations {
 struct Names {
     /// `fragment` or `fragment-<branch>`: the platform Worker's.
     cell: String,
+    /// The operators' admin Worker's (cell/src/admin.rs), which the cell's
+    /// `ADMIN` binding names: the cell's and `--admin` (`admin_of`).
+    admin: String,
     jobs: String,
     deliveries: String,
     dead: String,
@@ -619,6 +622,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             let zone = d.zone.as_deref().context("a --branch deploys at <branch>.<zone>: the config names its zone")?;
             Ok(Names {
                 cell: format!("fragment-{b}"),
+                admin: admin_of(&format!("fragment-{b}")),
                 jobs: format!("fragment-jobs-{b}"),
                 deliveries: format!("fragment-deliveries-{b}"),
                 dead: format!("fragment-deliveries-dead-{b}"),
@@ -640,6 +644,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             }
             Ok(Names {
                 cell: "fragment".into(),
+                admin: admin_of("fragment"),
                 jobs: "fragment-jobs".into(),
                 deliveries: "fragment-deliveries".into(),
                 dead: "fragment-deliveries-dead".into(),
@@ -661,6 +666,16 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
         (Some(_), _, _) => bail!("a config naming platform_host or fragment_suffix deploys one deployment of its own: no --branch"),
         (None, _, _) => bail!("name a --branch (or give the config both platform_host and fragment_suffix)"),
     }
+}
+
+/// The admin Worker's name beside the cell named `cell`: `<cell>--admin`.
+/// No cell's name holds `--` (a branch's never does: `valid_branch`), so
+/// no deployment's admin is ever another's cell, which a deploy uploads
+/// over and a teardown deletes by name (`fragment-admin-preview` was the
+/// cell of a branch `admin-preview`).
+fn admin_of(cell: &str) -> String {
+    assert!(!cell.contains("--"), "a cell's name holds no `--`: {cell}");
+    format!("{cell}--admin")
 }
 
 /// The test secret's file a deploy of `branch` takes, if the config names
@@ -1008,12 +1023,7 @@ impl crate::rollout::Platform for Cloudflare<'_> {
     }
 
     fn probe(&mut self) -> Result<crate::rollout::Probed> {
-        let url = format!("{}/healthz/objects", self.platform);
-        let resp = self.http.get(&url).send().with_context(|| format!("GET {url}"))?;
-        let status = resp.status().as_u16();
-        let named = resp.headers().get("x-fragment-deploy").and_then(|v| v.to_str().ok()).map(str::to_string);
-        let body: Value = resp.json().unwrap_or(Value::Null);
-        Ok(crate::rollout::probe_of(status, &body, named.as_deref()))
+        self.probed("objects")
     }
 
     fn rollback(&mut self, to: &crate::rollout::Live) -> Result<()> {
@@ -1021,6 +1031,25 @@ impl crate::rollout::Platform for Cloudflare<'_> {
         let (status, _) = self.wrangler(&["rollback", &to.version, "--yes", "--message", &message])?;
         anyhow::ensure!(status.success(), "wrangler rollback {}: {status}", to.version);
         Ok(())
+    }
+}
+
+impl Cloudflare<'_> {
+    /// `GET /healthz/admin`: the admin Worker's probe of every object
+    /// class, through the cell (cell/src/admin.rs).
+    fn probe_admin(&self) -> Result<crate::rollout::Probed> {
+        self.probed("admin")
+    }
+
+    /// `GET /healthz/<what>`, read as a probe (`rollout::probe_of`): its
+    /// release named by its body and by the Worker that answered.
+    fn probed(&self, what: &str) -> Result<crate::rollout::Probed> {
+        let url = format!("{}/healthz/{what}", self.platform);
+        let resp = self.http.get(&url).send().with_context(|| format!("GET {url}"))?;
+        let status = resp.status().as_u16();
+        let named = resp.headers().get("x-fragment-deploy").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let body: Value = resp.json().unwrap_or(Value::Null);
+        Ok(crate::rollout::probe_of(status, &body, named.as_deref()))
     }
 }
 
@@ -1237,6 +1266,10 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let cell = worker_config(&d, &n, &store.id, &release, &devstack::repo_root())?;
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
+    let admin = admin_config(&cell, &n, &devstack::repo_root())?;
+    let admin_config = dir.join("admin.json");
+    fs::write(&admin_config, serde_json::to_string_pretty(&admin)?)?;
+    let admin_made = script_exists(&api, &n.admin)?;
     let platform_url = format!("https://{}", n.platform_host);
 
     println!("deploying {} ({deploy_id}) to {platform_url}", n.cell);
@@ -1297,6 +1330,13 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let build = devstack::cell_dir().join("build");
     let reading = devstack::built::reading(&build)?;
     devstack::built::release(&build)?;
+    if !admin_made {
+        let bare = dir.join("admin-bare.json");
+        fs::write(&bare, serde_json::to_string_pretty(&admin_bare(&admin))?)?;
+        println!("deploy: no admin Worker {} yet: making it with no object binding first, so the cell may bind it", n.admin);
+        let (status, _) = run_teed(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&bare)).context("could not start wrangler deploy for the admin Worker")?;
+        anyhow::ensure!(status.success(), "deploy: the admin Worker {} could not be made ({status}), and the cell binds it, so the cell was not deployed: nothing of it changed", n.admin);
+    }
     // `wrangler deploy` on: finished, verified at every object class, or
     // the release before back (rollout.rs)
     let mut platform = Cloudflare {
@@ -1315,9 +1355,20 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         None => Ok(()),
     };
     let outcome = crate::rollout::run(&mut platform, &mut crate::prepare::Wall::new(), deploy_id, &schema_id(&cell)?, rollback)?;
-    drop(reading);
     drop(test_secrets);
     outcome.result()?;
+    // The admin Worker, from the same build and release, once every object
+    // class answers the cell's: not atomic with the cell's, which is
+    // (docs/technical-debt-ledger.md, "The admin Worker deploys after the
+    // cell"). It failing fails the job, and leaves only the operators'
+    // routes down (refused as `deploying`) until the next deploy.
+    let behind = |why: String| anyhow::anyhow!("deploy: the cell is deployed and every object class answers {deploy_id}, but the admin Worker {} is not: {why}. Only the operators' routes are down until a deploy finishes it: deploy again", n.admin);
+    let (status, _) = run_teed(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&admin_config)).context("could not start wrangler deploy for the admin Worker")?;
+    if !status.success() {
+        return Err(behind(format!("wrangler deploy {status}")));
+    }
+    drop(reading);
+    crate::rollout::admin_verified(&mut || platform.probe_admin(), &mut crate::prepare::Wall::new(), deploy_id).map_err(behind)?;
     println!("deployed {deploy_id}, every object class answering it:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
     if test_secret.is_some() {
@@ -1325,6 +1376,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     }
     println!("  fragments     https://<name>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
     println!("  objects       curl -s {platform_url}/healthz/objects");
+    println!("  admin         {platform_url}/admin  (its Worker {}: curl -s {platform_url}/healthz/admin)", n.admin);
     Ok(())
 }
 
@@ -1491,7 +1543,54 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     c.insert("vars".into(), vars);
     anyhow::ensure!(!c.contains_key("secrets_store_secrets"), "cell/wrangler.jsonc binds no secrets of its own: a deployment's are bound here");
     c.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.cell()));
+    // its `ADMIN` binding names this deployment's admin Worker, never another's
+    devstack::pair_admin(&mut cell, &mut devstack::read_admin_config(&root.join("cell"))?, &n.admin)?;
     Ok(cell)
+}
+
+/// The admin Worker's config (cell/wrangler.admin.jsonc), rendered beside
+/// the cell's (`cell`, `worker_config`'s): the cell's objects, bound in the
+/// cell's script (devstack `pair_admin`), and the cell's variables whole,
+/// its release among them, so the objects admit its calls and its
+/// settings are the cell's (cell/src/config.rs reads both from one set);
+/// no route, no workers.dev or preview URL: the cell's binding alone
+/// reaches it. It binds no store secret.
+fn admin_config(cell: &Value, n: &Names, root: &Path) -> Result<Value> {
+    let mut cell = cell.clone();
+    let mut admin = devstack::read_admin_config(&root.join("cell"))?;
+    devstack::pair_admin(&mut cell, &mut admin, &n.admin)?;
+    let a = admin.as_object_mut().context("cell/wrangler.admin.jsonc is an object")?;
+    let main = a.get("main").and_then(Value::as_str).context("cell/wrangler.admin.jsonc names its main")?;
+    a.insert("main".into(), json!(root.join("cell").join(main)));
+    a.insert("workers_dev".into(), json!(false));
+    a.insert("preview_urls".into(), json!(false));
+    a.insert("observability".into(), cell["observability"].clone());
+    a.insert("vars".into(), cell["vars"].clone());
+    anyhow::ensure!(a.get("vars").is_some_and(Value::is_object) && a.get("observability").is_some_and(Value::is_object), "the cell's config is rendered first");
+    Ok(admin)
+}
+
+/// The admin Worker as a first deploy uploads it, before the cell binds
+/// it: Cloudflare refuses a binding to a Worker that does not exist, the
+/// cell's to the admin and the admin's to the cell's classes alike, so on
+/// a deployment that has no admin Worker yet (a new one; one deployed
+/// before it was split) it is made with no object binding, and the cell's
+/// deploy may then bind it. Its routes fail until the deploy binds its
+/// objects, after the cell's.
+fn admin_bare(admin: &Value) -> Value {
+    let mut bare = admin.clone();
+    bare.as_object_mut().expect("a rendered config is an object").remove("durable_objects");
+    bare
+}
+
+/// Whether the account has a Worker named `script` (its deployments read).
+fn script_exists(api: &crate::cloudflare::Api, script: &str) -> Result<bool> {
+    let (status, body) = api.call(reqwest::Method::GET, &format!("/workers/scripts/{script}/deployments"), None).map_err(anyhow::Error::msg)?;
+    match status {
+        404 => Ok(false),
+        200 if body["success"] == true => Ok(true),
+        _ => bail!("the Worker {script}'s deployments: {}", crate::cloudflare::errors(status, &body)),
+    }
 }
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
@@ -1577,6 +1676,12 @@ pub fn teardown(rest: &[String]) -> Result<()> {
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
+    // the admin Worker first: it binds the cell's classes, and Cloudflare
+    // deletes no class another Worker binds (one deployed before the split
+    // has none)
+    if script_exists(&crate::cloudflare::Api::from_env(&d.account_id)?, &n.admin)? {
+        ensure(wrangler(&tools, &d.account_id)?.args(["delete", "--name", &n.admin, "--force"]), "the admin Worker")?;
+    }
     // Cloudflare deletes neither first: not a Worker that still consumes a
     // queue (10064), nor a queue a Worker still binds. So its consumers go,
     // then the Worker, then its queues.
@@ -1588,7 +1693,7 @@ pub fn teardown(rest: &[String]) -> Result<()> {
     for q in [&n.deliveries, &n.dead, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q]), "a queue")?;
     }
-    println!("removed {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.cell, n.bucket, n.bucket);
+    println!("removed {} and {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.admin, n.cell, n.bucket, n.bucket);
     if d.migrations.is_some() {
         println!("its move's stage bucket {} stays too (its lifecycle rules empty it)", n.stage);
     }
@@ -1956,12 +2061,67 @@ mod tests {
         assert_eq!(ages, [("p1/".to_string(), 16), ("p2/".to_string(), 100), (String::new(), 1)]);
     }
 
+    /// Goal: a deployment's admin Worker is its own, never another's: the
+    /// cell's binding names it, it binds the cell's own classes in the
+    /// cell's script (a branch's in the branch's, never the main one's),
+    /// with the cell's variables and so its release, and it has no route
+    /// or public URL. Its first upload binds no object (`admin_bare`).
+    /// Method: a branch's and a deployment of its own's, rendered.
+    #[test]
+    fn a_deployments_admin_worker_is_its_own() {
+        for (d, branch, cell_name, admin_name) in [(deployment(None, None), Some("p5"), "fragment-p5", "fragment-p5--admin"), (deployment(Some("finite.chat"), Some("finite.place")), None, "fragment", "fragment--admin")] {
+            let n = names(&d, branch).unwrap();
+            assert_eq!((n.cell.as_str(), n.admin.as_str()), (cell_name, admin_name));
+            let root = devstack::repo_root();
+            let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &root).unwrap();
+            assert_eq!(cell["services"], json!([{ "binding": "ADMIN", "service": admin_name }]), "the cell hands its admin's routes to this deployment's");
+            let admin = admin_config(&cell, &n, &root).unwrap();
+            assert_eq!(admin["name"], admin_name);
+            assert_eq!(admin["main"], json!(root.join("cell/build/admin/index.js")));
+            assert_eq!(admin["vars"], cell["vars"], "the cell's variables whole: its release, its settings");
+            assert_eq!(admin["vars"]["FRAGMENT_DEPLOY_ID"], "abc123");
+            assert_eq!(admin["compatibility_date"], cell["compatibility_date"]);
+            assert_eq!((&admin["workers_dev"], &admin["preview_urls"]), (&json!(false), &json!(false)));
+            assert_eq!(admin["observability"], cell["observability"], "logs, never traces, as the cell's");
+            for absent in ["routes", "migrations", "secrets_store_secrets", "services", "assets", "containers", "queues"] {
+                assert!(admin.get(absent).is_none(), "the admin has no {absent}");
+            }
+            let bindings = admin["durable_objects"]["bindings"].as_array().unwrap();
+            assert_eq!(bindings.len(), cell["durable_objects"]["bindings"].as_array().unwrap().len());
+            assert!(bindings.iter().all(|b| b["script_name"] == cell_name), "the cell's classes, in this deployment's cell: {bindings:?}");
+            let bare = admin_bare(&admin);
+            assert!(bare.get("durable_objects").is_none() && bare["name"] == admin_name && bare["vars"] == admin["vars"], "a first upload binds no object, and is otherwise the same");
+        }
+    }
+
+    /// Goal: no deployment's admin Worker is ever another deployment's cell
+    /// in the same account, which a deploy would upload over and a
+    /// teardown delete (review of #1433: branch `preview`'s admin was
+    /// branch `admin-preview`'s cell, and the unbranched admin branch
+    /// `admin`'s). Method: the names of branches made to collide, and of a
+    /// deployment of its own, each admin against every cell.
+    #[test]
+    fn no_admin_worker_is_another_deployments_cell() {
+        let branches = ["preview", "admin-preview", "admin", "p5", "admin-p5", "a", "admin-a", "a-admin"];
+        let mut all: Vec<Names> = branches.iter().map(|b| names(&deployment(None, None), Some(b)).unwrap()).collect();
+        all.push(names(&deployment(Some("finite.chat"), Some("finite.place")), None).unwrap());
+        for n in &all {
+            assert!(n.admin.ends_with("--admin") && n.admin.contains("--"), "{}", n.admin);
+            for other in &all {
+                assert_ne!(n.admin, other.cell, "{}'s admin is {}'s cell", n.cell, other.cell);
+            }
+        }
+        let admins: std::collections::BTreeSet<&str> = all.iter().map(|n| n.admin.as_str()).collect();
+        assert_eq!(admins.len(), all.len(), "each deployment's admin is its own");
+        assert!(std::panic::catch_unwind(|| admin_of("fragment-a--b")).is_err(), "a cell's name never holds `--`");
+    }
+
     /// A branch is a copy of its own beside the others: every name is
     /// marked, and its hosts are single labels under the zone.
     #[test]
     fn a_branch_names_everything_for_itself() {
         let n = names(&deployment(None, None), Some("dev")).unwrap();
-        assert_eq!((n.cell.as_str(), n.bucket.as_str(), n.stage.as_str()), ("fragment-dev", "fragment-blobs-dev", "fragment-migrations-stage-dev"));
+        assert_eq!((n.cell.as_str(), n.admin.as_str(), n.bucket.as_str(), n.stage.as_str()), ("fragment-dev", "fragment-dev--admin", "fragment-blobs-dev", "fragment-migrations-stage-dev"));
         assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
 
         assert_eq!(n.platform_host, "dev.finite.place");
