@@ -137,6 +137,11 @@ struct Deployment {
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
+    /// SimpleX doors (cell/door.mjs, docs/computers.md "F"): the door's
+    /// image. Without it, no door's container is deployed, and a door's
+    /// object says this deployment runs none.
+    #[serde(default)]
+    doors: Option<Doors>,
     /// The connectors its people may link, and the exact endpoints a
     /// computer's relay carries for them (`FRAGMENT_CONNECTORS`;
     /// docs/computers.md, "Connector policy"). Without it, the cell's
@@ -197,6 +202,17 @@ enum Image {
     Pinned(Pinned),
 }
 
+/// A deployment's SimpleX doors: their image, built from the tree at every
+/// deploy (`images/simplex-door/Dockerfile`, `.`) or kept at a digest.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Doors {
+    image: Image,
+}
+
+/// The SimpleX door's container class in cell/wrangler.jsonc.
+const DOOR_CLASS: &str = "SimplexDoor";
+
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct Built {
@@ -219,7 +235,7 @@ struct Pinned {
 /// anything (prepare.rs). One built from the tree wrangler pushes and
 /// prepares itself, before it uploads the Worker.
 fn pinned_images(d: &Deployment) -> Vec<&str> {
-    let images = d.computers.iter().flat_map(|c| c.images.values());
+    let images = d.computers.iter().flat_map(|c| c.images.values()).chain(d.doors.iter().map(|doors| &doors.image));
     images
         .filter_map(|i| match i {
             Image::Pinned(p) => Some(p.image.as_str()),
@@ -734,6 +750,12 @@ pub(crate) fn secrets_of(config: &Path) -> Result<SecretsOf> {
     Ok(SecretsOf { account_id, host_secrets, named })
 }
 
+/// The container classes a rendered Worker config names, in its order:
+/// each one's application is what a deploy's `finish` checks.
+fn container_classes(cell: &Value) -> Vec<String> {
+    cell["containers"].as_array().into_iter().flatten().filter_map(|c| c["class_name"].as_str()).map(str::to_string).collect()
+}
+
 /// What the cell would refuse at its first request, refused before a
 /// deploy: the provider catalog, a default image it has, its store
 /// secrets' names, and its models (`models_of`, through `bound`).
@@ -743,8 +765,8 @@ fn checked(d: Deployment) -> Result<Deployment> {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
         }
-        if c.images.len() > crate::prepare::IMAGES_MAX {
-            bail!("computers: {} images, more than the {} a deploy prepares", c.images.len(), crate::prepare::IMAGES_MAX);
+        if c.images.len() + usize::from(d.doors.is_some()) > crate::prepare::IMAGES_MAX {
+            bail!("computers: {} images (and the doors' {}), more than the {} a deploy prepares", c.images.len(), usize::from(d.doors.is_some()), crate::prepare::IMAGES_MAX);
         }
         for (name, image) in &c.images {
             if let Image::Pinned(p) = image {
@@ -752,6 +774,11 @@ fn checked(d: Deployment) -> Result<Deployment> {
                     bail!("computers: the image {name:?} is {:?}, not one pinned by digest in this account's registry ({REGISTRY}/{}/<repository>@sha256:<64 hex>)", p.image, d.account_id);
                 }
             }
+        }
+    }
+    if let Some(Image::Pinned(p)) = d.doors.as_ref().map(|doors| &doors.image) {
+        if !pinned_ok(&p.image, &d.account_id) {
+            bail!("doors: the image is {:?}, not one pinned by digest in this account's registry ({REGISTRY}/{}/<repository>@sha256:<64 hex>)", p.image, d.account_id);
         }
     }
     if let Some(u) = d.support_url.as_deref().filter(|u| !fragment_core::computer::support_url_ok(u)) {
@@ -829,7 +856,9 @@ fn preview_image(d: &mut Deployment, digest: &str) -> Result<()> {
 /// the Worker changed. An image built from the
 /// tree is refused, by name, before anything is read, built or made.
 fn pinned_only(d: &Deployment) -> Result<()> {
-    let built: Vec<&str> = d.computers.iter().flat_map(|c| &c.images).filter(|(_, i)| matches!(i, Image::Built(_))).map(|(name, _)| name.as_str()).collect();
+    let computers = d.computers.iter().flat_map(|c| &c.images).filter(|(_, i)| matches!(i, Image::Built(_))).map(|(name, _)| name.as_str());
+    let doors = d.doors.iter().filter(|doors| matches!(doors.image, Image::Built(_))).map(|_| "the SimpleX door's");
+    let built: Vec<&str> = computers.chain(doors).collect();
     if !built.is_empty() {
         bail!(
             "--pinned-only builds no image, and this config builds {} from the tree: pin each at a digest this account's registry holds ({REGISTRY}/{}/<repository>@sha256:<64 hex>; docs/computers.md, \"Preview and production\"), or deploy it without --pinned-only where Docker runs",
@@ -1002,19 +1031,22 @@ impl crate::rollout::Platform for Cloudflare<'_> {
     }
 
     /// What `wrangler deploy` does after its upload, done for the version
-    /// live: the version read back; the Computer's container application
-    /// checked as wrangler checks it (it applies no setting of ours: the
-    /// rendered config names none, `worker_config`); the triggers deployed.
+    /// live: the version read back; each container application the rendered
+    /// config names (the Computer's, a SimpleX door's) checked as wrangler
+    /// checks it (it applies no setting of ours: the rendered config names
+    /// none, `worker_config`); the triggers deployed.
     fn finish(&mut self, id: &str) -> Result<()> {
         let version = self.read_version(id)?;
-        let computer = version["resources"]["bindings"].as_array().into_iter().flatten().find(|b| b["type"] == "durable_object_namespace" && b["class_name"] == "Computer");
-        if let Some(namespace) = computer.and_then(|b| b["namespace_id"].as_str()) {
+        let rendered: Value = serde_json::from_str(&devstack::strip_comments(&fs::read_to_string(&self.config).with_context(|| format!("read {}", self.config.display()))?)).context("the rendered config is JSON")?;
+        for class in container_classes(&rendered) {
+            let binding = version["resources"]["bindings"].as_array().into_iter().flatten().find(|b| b["type"] == "durable_object_namespace" && b["class_name"] == class.as_str());
+            let namespace = binding.and_then(|b| b["namespace_id"].as_str()).with_context(|| format!("the version binds no namespace of {class}, whose container the config names"))?;
             let (status, app) = self.api.call(reqwest::Method::GET, &format!("/containers/applications/{namespace}"), None).map_err(anyhow::Error::msg)?;
-            anyhow::ensure!(status == 200, "the Computer's container application: {}", crate::cloudflare::errors(status, &app));
+            anyhow::ensure!(status == 200, "the {class}'s container application: {}", crate::cloudflare::errors(status, &app));
             let app = &app["result"];
             anyhow::ensure!(
                 app["scheduling_policy"] == "durable_object" && app["durable_objects"]["namespace_id"] == namespace,
-                "the Computer's container application is not its namespace's, scheduled by it ({app}): fix it by hand"
+                "the {class}'s container application is not its namespace's, scheduled by it ({app}): fix it by hand"
             );
         }
         let (status, _) = self.wrangler(&["triggers", "deploy"])?;
@@ -1444,6 +1476,10 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
             }
         }
     }
+    // the SimpleX door's container, taken out to be put back with the
+    // deployment's own image, or left out: the computers' is the first
+    let containers = c["containers"].as_array_mut().context("cell/wrangler.jsonc lists its containers")?;
+    let door = containers.iter().position(|x| x["class_name"] == DOOR_CLASS).map(|i| containers.remove(i)).context("cell/wrangler.jsonc names the SimpleX door's container")?;
     // the deployment's own images in place of the e2e's stubs, or none: one
     // built from the tree, or kept at its digest
     match &d.computers {
@@ -1467,6 +1503,23 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         }
         None => {
             c.remove("containers");
+        }
+    }
+    if let Some(doors) = &d.doors {
+        let mut door = door;
+        let mut image = json!(doors.image);
+        if let Image::Built(b) = &doors.image {
+            image["dockerfile"] = json!(root.join(&b.dockerfile));
+            image["build_context"] = json!(root.join(&b.build_context));
+        }
+        door["images"] = json!({ "door": image });
+        let keys: Vec<&String> = door.as_object().context("the door's container is an object")?.keys().collect();
+        anyhow::ensure!(keys.iter().all(|k| ["class_name", "scheduling_policy", "images"].contains(&k.as_str())), "cell/wrangler.jsonc's door container names {keys:?}: one with settings wrangler applies after the upload is no deploy rollout.rs finishes");
+        match c.get_mut("containers").and_then(|x| x.as_array_mut()) {
+            Some(containers) => containers.push(door),
+            None => {
+                c.insert("containers".into(), json!([door]));
+            }
         }
     }
     let mut vars = json!({
@@ -1674,7 +1727,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
         anyhow::ensure!(!d.operators.is_empty(), "--operator-key-file names a key the deployment's operators list: its config's operators are empty");
         args.extend(["--operator-key-file".to_string(), expand(file).to_string_lossy().into_owned(), "--operators".into(), d.operators.join(",")]);
     }
-    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
+    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.doors.is_some(), "doors"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
     if !offers.is_empty() {
         args.extend(["--offers".to_string(), offers.join(",")]);
     }
@@ -1915,6 +1968,7 @@ mod tests {
             egress_allow: vec![],
             mail_from: None,
             computers: None,
+            doors: None,
             connectors: None,
             providers: vec![],
             price_book_version: None,
@@ -2007,6 +2061,12 @@ mod tests {
             got,
             ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test", "--offers", "computers,models", "--dry-run", "--only", "computers,templates"]
         );
+        // doors too, where it names them
+        let mut doors = v.clone();
+        doors["doors"] = json!({ "image": { "dockerfile": "images/simplex-door/Dockerfile", "build_context": "." } });
+        let path = config_file("hosted-args-doors", &doors);
+        let got = args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--only", "simplex-door"]).unwrap();
+        assert_eq!(got, ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test", "--offers", "computers,doors,models", "--only", "simplex-door"]);
         // no gateway, no computers: it offers neither
         v.as_object_mut().unwrap().remove("ai_gateway");
         v.as_object_mut().unwrap().remove("computers");
@@ -2502,6 +2562,53 @@ mod tests {
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
+    }
+
+    /// A deployment's SimpleX doors (cell/door.mjs): none named, no door
+    /// container deployed; the door's image built from the tree, its paths
+    /// made the repo's, beside the computers' or alone; kept at a digest,
+    /// waited for as a computer's is, and one not in this account's
+    /// registry refused.
+    #[test]
+    fn a_doors_container_is_the_configs_alone() {
+        let n = names(&deployment(None, None), Some("preview")).unwrap();
+        let classes = container_classes;
+        let plain = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert!(classes(&plain).is_empty(), "no computers and no doors: no container");
+        let mut d = deployment(None, None);
+        d.doors = Some(Doors { image: Image::Built(Built { dockerfile: "images/simplex-door/Dockerfile".into(), build_context: ".".into(), build_vars: BTreeMap::new() }) });
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(classes(&cell), vec![DOOR_CLASS.to_string()], "doors alone");
+        assert_eq!(cell["containers"][0]["images"]["door"]["dockerfile"], json!(devstack::repo_root().join("images/simplex-door/Dockerfile")));
+        let digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let pinned = format!("registry.cloudflare.com/acct/fragment-preview-door@sha256:{digest}");
+        d.doors = Some(Doors { image: Image::Pinned(Pinned { image: pinned.clone() }) });
+        assert_eq!(pinned_images(&d), vec![pinned.as_str()], "waited for as a computer's pinned image is");
+        assert!(checked(d).is_ok());
+        let mut other = deployment(None, None);
+        other.doors = Some(Doors { image: Image::Pinned(Pinned { image: format!("docker.io/x/door@sha256:{digest}") }) });
+        assert!(checked(other).is_err(), "a door's image pinned elsewhere");
+        // beside the computers': both classes, the computers' first
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        v["doors"] = json!({ "image": { "dockerfile": "images/simplex-door/Dockerfile", "build_context": "." } });
+        let both = load(&config_file("doors-and-computers", &v)).unwrap();
+        let cell = worker_config(&both, &names(&both, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(classes(&cell), vec!["Computer".to_string(), DOOR_CLASS.to_string()]);
+        // CI's deploy builds no image: a door's built from the tree is refused there too
+        let why = pinned_only(&both).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(why.contains("the SimpleX door's"), "{why}");
+        // a deploy prepares at most IMAGES_MAX images, the door's among them
+        let mut full = deployment(None, None);
+        let image = |i: usize| (format!("i{i}"), Image::Pinned(Pinned { image: format!("registry.cloudflare.com/acct/fragment-preview-{i}@sha256:{digest}") }));
+        let computers = || Some(Computers { default_image: "i0".into(), images: (0..crate::prepare::IMAGES_MAX).map(image).collect(), unsaved_max_ms: None });
+        full.computers = computers();
+        let mut with_door = deployment(None, None);
+        with_door.computers = computers();
+        assert!(checked(full).is_ok(), "{} computer images alone", crate::prepare::IMAGES_MAX);
+        with_door.doors = Some(Doors { image: Image::Pinned(Pinned { image: pinned.clone() }) });
+        let why = checked(with_door).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(why.contains(&format!("more than the {} a deploy prepares", crate::prepare::IMAGES_MAX)), "{why}");
     }
 
     /// An image kept at its digest beside one built from the tree
