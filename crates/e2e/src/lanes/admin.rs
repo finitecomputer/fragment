@@ -599,12 +599,15 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         json!({ "asked": asked.len(), "at": read["at"], "asked at": asked_at }),
     );
     // replay: within the while the read is kept, a load asks nothing and
-    // answers the same read, with when it was read
+    // answers the same read, with when it was read; the registry's numbers,
+    // read every load, count a person who joined since
+    api.person()?;
     let again = ask(operator, day)?;
+    let total = |r: &Value| r["signups"]["total"].as_u64().unwrap_or(0);
     s.ok(
-        "read again at once, the glance asks the logs nothing: the same numbers and trouble, read when they were, the registry's read anew",
-        again.status == 200 && s.observability.asked().len() == questions && again.body["logs"] == *read && again.body["at"].as_i64() >= b["at"].as_i64(),
-        json!({ "asked": s.observability.asked().len(), "logs": again.body["logs"] }),
+        "read again at once, the glance asks the logs nothing: the same numbers and trouble, read when they were, and the registry's read anew (a person who joined since counted)",
+        again.status == 200 && s.observability.asked().len() == questions && again.body["logs"] == *read && again.body["at"].as_i64() >= b["at"].as_i64() && total(&again.body) == total(b) + 1,
+        json!({ "asked": s.observability.asked().len(), "logs": again.body["logs"], "signups": [&b["signups"], &again.body["signups"]] }),
     );
     let person = ask(ivy, day)?;
     let tomorrow = ask(operator, now + 3_600_000)?;
@@ -635,15 +638,19 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         logs,
     );
     s.observability.fail_next(403, "Authentication error");
+    let before = s.observability.asked().len();
     let failed = ask(operator, day - 2)?;
+    // the read stops at the refusal: the questions in flight then, and no more
+    let asked = s.observability.asked().len() - before;
     s.ok(
-        "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown",
+        "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown; and the read stops at the refusal, never asking every question",
         failed.status == 200
             && failed.body["logs"]["state"] == "failed"
             && failed.body["logs"]["why"].as_str().is_some_and(|w| w.contains("Authentication error"))
-            && failed.body["signups"] == b["signups"]
-            && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null()),
-        &failed,
+            && failed.body["signups"] == again.body["signups"]
+            && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null())
+            && asked < questions,
+        json!({ "asked": asked, "glance": failed.body }),
     );
     Ok(())
 }

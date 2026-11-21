@@ -100,7 +100,11 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
 /// The logs' numbers for the day from `day_start`, when they were read,
 /// and why a newer read failed when they stand in for it: the cache's
 /// while fresh (`core::kept`); else read now, and kept; a read that fails
-/// stands on the cache's older one, saying why, or is that failure.
+/// stands on the cache's older one, if it is still under `LOGS_KEPT_MS`
+/// when the read has failed (a read takes seconds), saying why, or is
+/// that failure. Loads at once each read: the Cache API makes no load
+/// wait for another's (a lock would be a Durable Object's), and each is
+/// still at most `QUERIES_AT_ONCE_MAX` queries at once.
 async fn logs(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_start: i64) -> Result<(Read, i64, Option<String>), String> {
     let cache = Cache::default();
     // its shape's version: a shape this release cannot read is no kept read
@@ -118,7 +122,8 @@ async fn logs(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_s
             keep(&cache, &key, now, &read).await;
             Ok((read, now, None))
         }
-        Err(e) => match stale {
+        // judged again now: the read took its seconds
+        Err(e) => match stale.filter(|(at, _)| core::kept(*at, js::now_ms()) != core::Kept::Gone) {
             Some((at, read)) => Ok((read, at, Some(e.message))),
             None => Err(e.message),
         },
@@ -139,8 +144,13 @@ async fn kept(cache: &Cache, key: &str) -> Option<(i64, Read)> {
 }
 
 /// `read`, kept under `key` from `at`, let go by the cache after
-/// `core::LOGS_KEPT_MS`. One not kept is logged: the next load reads again.
+/// `core::LOGS_KEPT_MS`, unless the cache holds a newer read by then (a
+/// load begun later that finished first): an older read never replaces a
+/// newer one. One not kept is logged: the next load reads again.
 async fn keep(cache: &Cache, key: &str, at: i64, read: &Read) {
+    if kept(cache, key).await.is_some_and(|(newer, _)| newer > at) {
+        return;
+    }
     let kept = async {
         let body = serde_json::to_string(&(at, read)).map_err(|e| worker::Error::RustError(e.to_string()))?;
         let mut resp = Response::ok(body)?;
@@ -153,15 +163,18 @@ async fn keep(cache: &Cache, key: &str, at: i64, read: &Read) {
 }
 
 /// Every question, `core::QUERIES_AT_ONCE_MAX` at once: what the logs say,
-/// or the first counting question's failure. Why saves failed is the lines
+/// or the first counting question's failure, met as its answer comes, so
+/// no question is asked after it. Why saves failed is the lines
 /// themselves, which may run past the cell's bound on an answer: its read
 /// failing leaves the rest, and says why (`why_unread`).
 async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_start: i64) -> CellResult<Read> {
     let asked = futures_util::stream::iter(Question::ALL).map(|q| async move { (q, crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await) });
     let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: Ok(vec![]) };
     let mut kinds = Vec::with_capacity(3);
-    // bounded: one answer per question, in the questions' order
-    for (q, answered) in asked.buffered(core::QUERIES_AT_ONCE_MAX).collect::<Vec<_>>().await {
+    let mut answers = asked.buffered(core::QUERIES_AT_ONCE_MAX);
+    // bounded: one answer per question, in the questions' order; a `?`
+    // below drops the rest, unasked
+    while let Some((q, answered)) = answers.next().await {
         let why = |e: String| CellError::new(fragment_proto::ErrorCode::UpstreamFailed, format!("Workers Observability, {q:?}: {e}"));
         match q {
             Question::AwakeNow => read.awake_now = core::uniq_of(&answered?).map_err(why)?,
