@@ -26,3 +26,16 @@ export function troubleWhat(t, when) {
   const label = KINDS.find(([words]) => words.test(t.why.text))?.[1];
   return { what, why: [label, when(t.why.at), t.why.text].filter(Boolean).join(" · ") };
 }
+
+/** How old the logs' numbers are, in words: `at`, when they were read,
+ * against `now`, both the glance's own clock's (its `logs.at` and `at`,
+ * never the browser's). The admin keeps a read for two minutes
+ * (fragment_core::glance::LOGS_FRESH_MS), and longer only when a newer
+ * read fails. */
+export function ago(at, now) {
+  const minutes = Math.floor(Math.max(0, now - at) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return minutes === 1 ? "a minute ago" : `${minutes} minutes ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours === 1 ? "an hour ago" : `${hours} hours ago`;
+}
