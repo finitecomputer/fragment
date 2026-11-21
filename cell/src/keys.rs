@@ -504,9 +504,10 @@ pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &s
 /// agent"): signed by NIP-98 with the nostr key bound as
 /// `PRIVATE_HOME_KEY` (the admin Worker's alone), whose npub the door
 /// trusts; each ask its own (a nonce in its body), so the door's replay
-/// check refuses none of ours. Its answer, read whole (`ANSWER_BYTES_MAX`), for
-/// `private_home::answered`; nothing of it is logged.
-pub async fn private_home_ask(env: &Env, door: &str, email: &str) -> CellResult<(u16, Value)> {
+/// check refuses none of ours. Its answer's status and body, read whole
+/// (`ANSWER_BYTES_MAX`; one longer, none), for `private_home::answered`;
+/// nothing of it is logged.
+pub async fn private_home_ask(env: &Env, door: &str, email: &str) -> CellResult<(u16, Vec<u8>)> {
     use fragment_core::private_home::{ask_body, ask_url, ANSWER_BYTES_MAX};
     let key = required(env, store::PRIVATE_HOME_KEY).await?;
     let keys = fragment_nip98::Keys::from_secret_hex(key.trim()).ok_or_else(|| CellError::host(format!("{} is no nostr key (64 hex)", store::PRIVATE_HOME_KEY)))?;
@@ -520,7 +521,7 @@ pub async fn private_home_ask(env: &Env, door: &str, email: &str) -> CellResult<
     let a = crate::cs::fetch_all(Request::new_with_init(&url, &init)?, VENDOR_TIMEOUT, ANSWER_BYTES_MAX)
         .await
         .map_err(|_| CellError::new(ErrorCode::UpstreamFailed, "the private home did not answer: try again"))?;
-    Ok((a.status, if a.cut { Value::Null } else { serde_json::from_slice(&a.body).unwrap_or(Value::Null) }))
+    Ok((a.status, if a.cut { Vec::new() } else { a.body }))
 }
 
 /// Whether the deployment binds the operator's key `name`
