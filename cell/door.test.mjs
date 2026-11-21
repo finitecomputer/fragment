@@ -284,7 +284,8 @@ test("its connector's jobs ask only their own door, and only their asks", async 
   assert.equal(state.inbox, true);
   assert.ok(!JSON.stringify(state).includes("s3cret-of-the-inbox"), "its secret never told back");
   // link, unlink and a reply go to its runner, each under a mark of its own
-  assert.equal((await d.job("link")).status, 202);
+  assert.equal((await d.job("link", { n: 1 })).status, 202);
+  assert.equal((await d.job("link")).status, 400, "a link names its connector's number");
   assert.equal((await d.job("reply", { key: "chat:7", text: "hi" })).status, 202);
   const asks = d.c.asked.filter((a) => a.method === "POST");
   assert.deepEqual(asks.map((a) => [a.path, a.body]), [["/link", null], ["/reply", { key: "chat:7", text: "hi" }]]);
@@ -311,7 +312,7 @@ test("its owner's messages reach its connector's inbox in order, each until take
   await d.connect();
   await d.o.alarm();
   assert.deepEqual(d.posted(), ["m1"]);
-  assert.deepEqual(d.inbox.posts[0], { url: INBOX, secret: "s3cret-of-the-inbox", body: { source: "simplex", payload: { id: "m1", kind: "text", text: "text of m1", at: "2026-11-21T00:00:00Z", file: null } } }, "to its own inbox, with the secret, as a webhook's delivery");
+  assert.deepEqual(d.inbox.posts[0], { url: INBOX, secret: "s3cret-of-the-inbox", body: { source: "simplex", payload: { id: "m1", kind: "text", text: "text of m1", at: "2026-11-21T00:00:00Z", file: null, door: DOOR } } }, "to its own inbox, with the secret, as a webhook's delivery, naming its door");
   // the inbox refusing (a deploy, full): kept, and the next waits behind it
   d.inbox.status = 503;
   await d.deliver("m2");
@@ -369,10 +370,23 @@ test("a link a delivery's mark overtook is not asked again once an unlink came a
   const STALE = [409, { error: "door", message: "a stale mark: ask again under a new one" }];
   let unlinked;
   // the link's answer comes after an unlink asked meanwhile was taken
-  d.c.answers = [async () => ((unlinked = await d.job("unlink")), STALE)];
-  const linked = await d.job("link");
+  d.c.answers = [async () => ((unlinked = await d.job("unlink", { n: 2 })), STALE)];
+  const linked = await d.job("link", { n: 1 });
   assert.equal(unlinked.status, 202);
   assert.equal(linked.status, 409);
   assert.equal((await linked.json()).error, "overtaken");
   assert.deepEqual(d.c.asked.filter((a) => a.method === "POST").map((a) => a.path), ["/link", "/unlink"], "never a link after the unlink");
+});
+
+test("a link asked again after its unlink (a job's retry, a request of its own) is refused, its number older", async () => {
+  const d = door();
+  await d.connect();
+  d.c.answers = [[503, { error: "door", message: "the door is starting or stopping" }]];
+  assert.equal((await d.job("link", { n: 1 })).status, 503, "its runner starting: its job tries again later");
+  assert.equal((await d.job("unlink", { n: 2 })).status, 202);
+  const again = await d.job("link", { n: 1 });
+  assert.equal(again.status, 409);
+  assert.equal((await again.json()).error, "overtaken");
+  assert.deepEqual(d.c.asked.filter((a) => a.method === "POST").map((a) => a.path), ["/link", "/unlink"], "never a link after the unlink");
+  assert.equal((await d.job("link", { n: 3 })).status, 202, "a newer link goes");
 });

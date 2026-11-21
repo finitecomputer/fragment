@@ -19,6 +19,8 @@ register("data:text/javascript," + encodeURIComponent(HOOKS));
 const { App } = await import(new URL("../../../templates/simplex/app.mjs", import.meta.url).href);
 
 const AGENT = "npub1juniper";
+// its door, its life's, as its connect was told it
+const DOOR = "juniper-sx--k3x9--0123456789ab";
 const BOUND = { relayed: { via: "simplex", for: "npub1paul", agent: "juniper--k3x9" }, to: AGENT };
 
 // an app on a fresh store, and its door as `answers` say: each ask's
@@ -27,6 +29,7 @@ function world(answers = {}) {
   const db = new DatabaseSync(":memory:");
   const sql = { exec: (q, ...p) => { const st = db.prepare(q); const rows = /^\s*select\b|\breturning\b/i.test(q) ? st.all(...p) : (st.run(...p), []); return { toArray: () => rows }; } };
   const app = new App({ storage: { sql } }, {});
+  app.connected({ door: DOOR });
   const w = { app, asked: [], published: [], slept: [] };
   w.job = (via, door = BOUND) => ({
     via,
@@ -46,7 +49,7 @@ function world(answers = {}) {
   return w;
 }
 
-const message = (id, text = `text of ${id}`, kind = "text") => ({ id, kind, text, at: "2026-11-21T00:00:00Z", file: null });
+const message = (id, text = `text of ${id}`, kind = "text", door = DOOR) => ({ id, kind, text, at: "2026-11-21T00:00:00Z", file: null, door });
 
 test("its owner's message is published to its bound agent as theirs, once however often the door delivers it", async () => {
   const w = world();
@@ -60,6 +63,8 @@ test("its owner's message is published to its bound agent as theirs, once howeve
 test("nothing is relayed but its inbox's own message, while bound, of text", async () => {
   const w = world();
   assert.deepEqual(await w.app.intake(w.delivered(message("m1")), w.job("call")), { ignored: "only its inbox's trigger" });
+  // a door an earlier life of its name made (the review of #1450), its secret the same
+  assert.deepEqual(await w.app.intake(w.delivered(message("m0", "from before", "text", "juniper-sx--k3x9--fedcba987654")), w.job("channel")), { ignored: "not its door's" });
   assert.deepEqual(await w.app.intake(w.delivered({ text: "no id" }), w.job("channel")), { ignored: "not a message" });
   assert.deepEqual(await w.app.intake(w.delivered(message("m2")), w.job("channel", null)), { ignored: "not linked" });
   assert.deepEqual(await w.app.intake(w.delivered(message("m3", "", "voice")), w.job("channel")), { ignored: "not text" });
@@ -100,8 +105,9 @@ test("only its bound agent's replies go, never interim words, a member's call or
 });
 
 test("connect gives the door the inbox's secret as a placeholder the platform fills, never its value", async () => {
-  const w = world({ connect: [[200, { started: 1 }]] });
+  const w = world({ connect: [[200, { started: 1, door: "juniper-sx--k3x9--00112233aabb" }]] });
   assert.deepEqual(await w.app.connect({ name: "Juniper" }, w.job("call")), { connected: true, started: 1 });
+  assert.equal(w.app.get("door"), "juniper-sx--k3x9--00112233aabb", "its own door kept, as the door named it");
   assert.equal(w.asked[0].url, "https://door.fragment.internal/connect");
   assert.equal(w.asked[0].headers["x-door-secret"], "{{SIMPLEX_DOOR_SECRET}}");
   assert.deepEqual(w.asked[0].body, { name: "Juniper" });
@@ -114,6 +120,7 @@ test("the invitation for its owner's app is kept for its owner's query alone, ne
   const w = world({ link: [[202, {}]], unlink: [[202, {}]], state: [[200, { runner: { phase: "wanting" } }], [200, { runner: { link, short: "https://smp.example/i#short" } }]] });
   const out = await w.app.link({}, w.job("call"));
   assert.deepEqual(out, { invited: true });
+  assert.deepEqual(w.asked[0].body, { n: 1 }, "its link numbered to the door");
   assert.ok(!JSON.stringify(out).includes("secret-invitation"), "a run's output, which its agent reads, holds none");
   assert.equal(w.app.state().invitation.link, link);
   assert.deepEqual(await w.app.unlink({}, w.job("call")), { unlinked: true });

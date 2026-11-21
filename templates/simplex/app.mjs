@@ -102,13 +102,21 @@ export class App extends DurableObject {
   async connect({ name } = {}, job) {
     const { status, said } = await door(job, "connect", { name }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
     if (status !== 200) return { connected: false, error: `the door answered ${status}: ${String(said.message ?? "").slice(0, 200)}` };
+    // its door, its life's: a delivery from any other is no one's here
+    await job.call("connected", { door: said.door });
     return { connected: true, started: said.started };
+  }
+
+  // its owner's (its connect job's), never its agent's, a viewer here
+  connected({ door }) {
+    this.put("door", String(door));
+    return { ok: true };
   }
 
   async link(_, job) {
     // numbered: an unlink after it means its invitation is kept by no one
     const { n } = await job.call("asking", {});
-    const asked = await door(job, "link");
+    const asked = await door(job, "link", { n });
     if (asked.status !== 202) return { invited: false, why: `the door answered ${asked.status}: ${String(asked.said.message ?? "").slice(0, 200)}` };
     for (let look = 0; look < INVITE_LOOKS_MAX; look += 1) {
       await job.sleep(1000);
@@ -140,14 +148,17 @@ export class App extends DurableObject {
   }
 
   async unlink(_, job) {
-    await job.call("asking", {});
-    const { status } = await door(job, "unlink");
+    const { n } = await job.call("asking", {});
+    const { status } = await door(job, "unlink", { n });
     return { unlinked: status === 202 };
   }
 
-  // a SimpleX message taken once: the door may deliver one again (an
-  // answer from the inbox lost; its runner restored from an older save)
-  seen({ id }) {
+  // a SimpleX message taken once, from its own door alone (a door an
+  // earlier life of its name made is another's): the door may deliver one
+  // again (an answer from the inbox lost; its runner restored from an
+  // older save)
+  seen({ id, door }) {
+    if (door !== this.get("door")) return { fresh: false, other: true };
     const fresh = this.ctx.storage.sql.exec("INSERT INTO seen (id, n) VALUES (?, (SELECT coalesce(max(n), 0) + 1 FROM seen)) ON CONFLICT DO NOTHING RETURNING n", id).toArray().length === 1;
     this.ctx.storage.sql.exec("DELETE FROM seen WHERE n < (SELECT max(n) FROM seen) - ?", SEEN_MAX);
     return { fresh };
@@ -157,8 +168,10 @@ export class App extends DurableObject {
     // its inbox's trigger alone: a member who calls it relays nothing
     if (job.via !== "channel") return { ignored: "only its inbox's trigger" };
     const m = record?.body?.payload;
-    if (typeof m?.id !== "string" || !m.id || m.id.length > 64 || typeof m.text !== "string") return { ignored: "not a message" };
-    if (!(await job.call("seen", { id: m.id })).fresh) return { ignored: "taken already" };
+    if (typeof m?.id !== "string" || !m.id || m.id.length > 64 || typeof m.text !== "string" || typeof m.door !== "string") return { ignored: "not a message" };
+    const seen = await job.call("seen", { id: m.id, door: m.door });
+    if (seen.other) return { ignored: "not its door's" };
+    if (!seen.fresh) return { ignored: "taken already" };
     // its binding, as the platform tells it: no guess at which agent
     if (!job.door) {
       await tell(job, `unlinked:${m.id}`, "This chat isn't linked to your agent.");

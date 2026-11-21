@@ -72,9 +72,6 @@ export class SimplexDoor extends DurableObject {
   // its deliveries going on to its connector's inbox, one drain at a time
   #draining = null;
   #again = false;
-  // its link and unlink asks numbered: a stale one is asked again only
-  // while none newer was asked
-  #linking = 0;
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -160,7 +157,7 @@ export class SimplexDoor extends DurableObject {
     // its watch first: a start that fails is tried again by it
     await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
     await this.#ensure("asked");
-    return json({ started: this.#door().started });
+    return json({ started: this.#door().started, door });
   }
 
   // What it is: its row, its saves, its deliveries (and how many its
@@ -177,13 +174,10 @@ export class SimplexDoor extends DurableObject {
   }
 
   // An ask of its runner under a new mark, asked again under another while
-  // a later mark overtook it (a delivery's), at most `STALE_ASKS` times;
-  // still overtaken, a reply's asker tries again later (503; a reply is
-  // its key's, asked again however late). A link or unlink is asked again
-  // only while none newer was asked: one overtaken so is never made after
-  // it (an invitation after an unlink), nor asked again later (409).
-  async #ask(path, body) {
-    const turn = path === "/reply" ? null : ++this.#linking;
+  // a later mark overtook it (a delivery's), at most `STALE_ASKS` times,
+  // and only while it is `current` (a link or unlink none newer followed);
+  // still overtaken, its asker tries again later (503).
+  async #ask(path, body, current = () => true) {
     for (let n = 0; n < STALE_ASKS; n += 1) {
       const r = await this.#runner("POST", path, this.#mark(), body);
       if (r.status !== 409) return r;
@@ -193,10 +187,14 @@ export class SimplexDoor extends DurableObject {
         said = JSON.parse(text);
       } catch {}
       if (!stale(r.status, said)) return new Response(text, { status: 409, headers: { "content-type": "application/json" } });
-      if (turn !== null && turn !== this.#linking) return refusal(409, "overtaken", "a newer link or unlink was asked");
+      if (!current()) return refusal(409, "overtaken", "a newer link or unlink was asked");
     }
-    if (turn !== null) return refusal(409, "overtaken", `asked under ${STALE_ASKS} marks, each overtaken`);
     return refusal(503, "overtaken", `asked under ${STALE_ASKS} marks, each overtaken: ask again`);
+  }
+
+  // The newest link or unlink its connector numbered.
+  #asked() {
+    return this.ctx.storage.sql.exec("SELECT asked FROM inbox WHERE id = 1").one().asked;
   }
 
   // ---- what its connector's jobs ask (templates/simplex/app.mjs) ----
@@ -222,13 +220,20 @@ export class SimplexDoor extends DurableObject {
       this.#drain().catch(() => {});
       return started;
     }
-    if (!d) return refusal(409, "not_connected", "its connector's connect starts it first");
+    if (!d || !inbox) return refusal(409, "not_connected", "its connector's connect starts it first");
     if (ask === "state") return this.#state();
     if (ask === "reply") {
       const body = await bounded(request);
       return this.#ask("/reply", { key: body.key, text: body.text });
     }
-    return this.#ask(`/${ask}`);
+    // a link or unlink, numbered by its connector: one older than the
+    // newest it numbered (a retry of a link after its unlink) is refused,
+    // here and while it is asked, so none acts after a newer one
+    const { n } = await bounded(request);
+    if (!Number.isInteger(n) || n < 1) throw Object.assign(new Error(`${ask} names its number (n), its connector's`), { status: 400 });
+    if (n < this.#asked()) return refusal(409, "overtaken", "a newer link or unlink was asked");
+    this.ctx.storage.sql.exec("UPDATE inbox SET asked = ? WHERE id = 1", n);
+    return this.#ask(`/${ask}`, undefined, () => this.#asked() === n);
   }
 
   // ---- its owner's messages, on to its connector's inbox ----
@@ -261,7 +266,7 @@ export class SimplexDoor extends DurableObject {
       if (!next) return;
       let r;
       try {
-        r = await this.ctx.exports.default.fetch(to, { method: "POST", headers: { "content-type": "application/json", [INBOX_HEADER]: inbox.secret }, body: JSON.stringify({ source: "simplex", payload: JSON.parse(next.body) }) });
+        r = await this.ctx.exports.default.fetch(to, { method: "POST", headers: { "content-type": "application/json", [INBOX_HEADER]: inbox.secret }, body: JSON.stringify({ source: "simplex", payload: { ...JSON.parse(next.body), door: d.door } }) });
       } catch (e) {
         return this.#log("door.inbox_failed", { id: next.id, why: String((e && e.message) || e).slice(0, 300) });
       }
