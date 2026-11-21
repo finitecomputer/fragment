@@ -7,7 +7,11 @@
 // its own life alone), restart (each runner life a generation of its own:
 // no save's key reused, a stale life's upload never touching a committed
 // save), and its starts (a stop asked while one registers its egress
-// starts nothing; a first start that fails is tried again by its watch).
+// starts nothing; a first start that fails is tried again by its watch);
+// and its connector (D2): its jobs ask only their own door, and only
+// their asks; its owner's messages reach the connector's inbox in order,
+// each until taken, again at its watch; a deployment with no doors keeps
+// nothing; an ask a delivery's mark overtook is asked again.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
@@ -81,17 +85,40 @@ function container() {
   };
   c.monitor = () => new Promise(() => {});
   c.signal = async (n) => void c.signals.push(n);
+  // its runner: `answers`, each ask's (status, body) in turn, then 202
+  c.asked = [];
+  c.answers = [];
+  c.getTcpPort = () => ({
+    fetch: async (url, init) => {
+      c.asked.push({ method: init.method, path: new URL(url).pathname, mark: Number(init.headers["x-door-mark"]), body: init.body ? JSON.parse(init.body) : null });
+      const [status, body] = c.answers.shift() ?? [202, { done: false }];
+      return new Response(JSON.stringify(body), { status });
+    },
+  });
   return c;
 }
 
-function door() {
+const PLATFORM = "https://platform.example";
+const INBOX = `${PLATFORM}/api/f/${NAME}/inbox`;
+
+// `noDoors`: a deployment that runs none (no container for them)
+function door({ noDoors = false } = {}) {
   const st = storage();
-  const c = container();
+  const c = noDoors ? null : container();
   const blobs = bucket();
-  const ctx = { storage: st, container: c, exports: { DoorEgress: () => ({}) }, blockConcurrencyWhile: (f) => f() };
-  const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off" });
+  // the platform's front, as its inbox answers: `inbox.status`, each post kept
+  const inbox = { status: 200, posts: [] };
+  const front = { fetch: async (url, init) => (inbox.posts.push({ url, secret: init.headers["x-simplex-door-secret"], body: JSON.parse(init.body) }), new Response("{}", { status: inbox.status })) };
+  const ctx = { storage: st, container: c, exports: { DoorEgress: () => ({}), default: front }, blockConcurrencyWhile: (f) => f() };
+  const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   const call = (method, path, headers = {}, body) => o.fetch(new Request(`http://door${path}`, { method, headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
-  const d = { o, st, c, blobs, call };
+  const d = { o, st, c, blobs, call, inbox };
+  // its connector's job, as the platform sends it (its name in the header)
+  d.job = (ask, body = {}, headers = {}) => call("POST", `/job/${ask}`, { "x-fragment-door": NAME, ...headers }, JSON.stringify(body));
+  d.connect = (secret = "s3cret-of-the-inbox") => d.job("connect", { name: "Juniper" }, { "x-door-secret": secret });
+  // its runner's delivery of one of its owner's messages
+  d.deliver = (id, text = `text of ${id}`) => call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "text", text, at: "2026-11-21T00:00:00Z", file: null }));
+  d.posted = () => d.inbox.posts.map((p) => p.body.payload.id);
   d.lever = (op, more = {}) => call("POST", "/door/lever", {}, JSON.stringify({ door: NAME, op, ...more }));
   d.start = () => d.lever("start", { agent: "Juniper" });
   d.row = () => st.sql.exec("SELECT started, generation, saved, stopped FROM door").toArray()[0];
@@ -236,4 +263,83 @@ test("a first start whose egress fails to register is tried again by its watch",
   assert.equal(d.st.alarms.length, 1, "its watch set before the start was tried");
   await d.o.alarm();
   assert.deepEqual(d.c.starts.map((o) => o.env.DOOR_GENERATION), ["2"], "started by its watch");
+});
+
+test("its connector's jobs ask only their own door, and only their asks", async () => {
+  const d = door();
+  assert.equal((await d.job("link")).status, 409, "nothing asked of a door its connector never connected");
+  assert.equal((await d.call("POST", "/job/connect", { "x-door-secret": "s" }, JSON.stringify({ name: "Juniper" }))).status, 400, "no door named: refused");
+  assert.equal((await d.job("connect", { name: "Juniper" })).status, 400, "no inbox secret given: refused");
+  assert.equal(d.row(), undefined, "nothing kept from either");
+  assert.equal((await d.connect()).status, 200);
+  assert.deepEqual(d.c.starts.map((o) => o.env.DOOR_NAME), ["Juniper"], "started as its connector named it");
+  assert.equal((await d.job("state", {}, { "x-fragment-door": "other--k3x9" })).status, 409, "another connector's ask refused");
+  for (const ask of ["door/lever", "egress/save", "lever", "deliver"]) assert.equal((await d.job(ask)).status, 404, `${ask}: none of its jobs' asks`);
+  const state = await (await d.job("state")).json();
+  assert.equal(state.door.door, NAME);
+  assert.equal(state.inbox, true);
+  assert.ok(!JSON.stringify(state).includes("s3cret-of-the-inbox"), "its secret never told back");
+  // link, unlink and a reply go to its runner, each under a mark of its own
+  assert.equal((await d.job("link")).status, 202);
+  assert.equal((await d.job("reply", { key: "chat:7", text: "hi" })).status, 202);
+  const asks = d.c.asked.filter((a) => a.method === "POST");
+  assert.deepEqual(asks.map((a) => [a.path, a.body]), [["/link", null], ["/reply", { key: "chat:7", text: "hi" }]]);
+  assert.ok(asks[1].mark > asks[0].mark);
+});
+
+test("a deployment that runs no doors refuses its connector's connect and keeps nothing", async () => {
+  const d = door({ noDoors: true });
+  const r = await d.connect();
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, "no_doors");
+  assert.equal(d.row(), undefined);
+  assert.deepEqual(d.st.sql.exec("SELECT * FROM inbox").toArray(), [], "no secret kept");
+  assert.deepEqual(d.st.alarms, [], "no watch set, to wake in vain");
+});
+
+test("its owner's messages reach its connector's inbox in order, each until taken, again at its watch", async () => {
+  const d = door();
+  // a door started before its connector connected (D1's lever): its
+  // owner's message kept, then sent once it does
+  await d.start();
+  assert.equal((await d.deliver("m1")).status, 200);
+  assert.deepEqual(d.posted(), [], "no inbox to send it to yet");
+  await d.connect();
+  await d.o.alarm();
+  assert.deepEqual(d.posted(), ["m1"]);
+  assert.deepEqual(d.inbox.posts[0], { url: INBOX, secret: "s3cret-of-the-inbox", body: { source: "simplex", payload: { id: "m1", kind: "text", text: "text of m1", at: "2026-11-21T00:00:00Z", file: null } } }, "to its own inbox, with the secret, as a webhook's delivery");
+  // the inbox refusing (a deploy, full): kept, and the next waits behind it
+  d.inbox.status = 503;
+  await d.deliver("m2");
+  await d.deliver("m3");
+  await d.o.alarm();
+  const refused = d.posted().slice(1);
+  assert.ok(refused.length >= 2 && refused.every((id) => id === "m2"), `m2 asked again at its watch, m3 never before it: ${refused}`);
+  d.inbox.status = 200;
+  const before = d.posted().length;
+  await d.o.alarm();
+  assert.deepEqual(d.posted().slice(before), ["m2", "m3"], "in order, at its watch");
+  const kept = await (await d.lever("deliveries")).json();
+  assert.deepEqual(kept.map((x) => [x.id, x.sent]), [["m1", 1], ["m2", 1], ["m3", 1]]);
+  // its runner delivering one again (a start from an older save): taken once
+  assert.equal((await (await d.deliver("m2")).json()).again, true);
+  await d.o.alarm();
+  assert.equal(d.posted().length, before + 2, "nothing sent again");
+});
+
+test("an ask a delivery's mark overtook is asked again under a new one; its runner's other refusals are its asker's", async () => {
+  const d = door();
+  await d.connect();
+  const STALE = [409, { error: "door", message: "a stale mark: ask again under a new one" }];
+  d.c.answers = [STALE, [200, { done: true }]];
+  const r = await d.job("reply", { key: "chat:9", text: "hi" });
+  assert.equal(r.status, 200, "asked again, and done");
+  assert.deepEqual(d.c.asked.map((a) => a.path), ["/reply", "/reply"]);
+  assert.ok(d.c.asked[1].mark > d.c.asked[0].mark, "under a newer mark");
+  d.c.answers = [[409, { error: "door", message: "not linked" }]];
+  const unlinked = await d.job("reply", { key: "chat:10", text: "hi" });
+  assert.equal(unlinked.status, 409);
+  assert.equal((await unlinked.json()).message, "not linked", "passed on as it said it");
+  d.c.answers = [STALE, STALE, STALE];
+  assert.equal((await d.job("reply", { key: "chat:11", text: "hi" })).status, 503, "overtaken every time: its asker tries again later");
 });

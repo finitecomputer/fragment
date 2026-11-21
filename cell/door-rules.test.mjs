@@ -5,7 +5,7 @@
 // and its schema's steps held to their released text.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEPS, SAVES_KEPT, behind, fenced, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, startable, steps, surplus } from "./door-rules.mjs";
+import { STEPS, SAVES_KEPT, behind, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
 
 const save = (generation, seq, mark, unreadable = 0) => ({ generation, seq, mark, unreadable });
 
@@ -63,6 +63,8 @@ const RELEASED = [
   "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, started INTEGER NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, saved INTEGER NOT NULL, stopped TEXT)",
   "CREATE TABLE saves (generation INTEGER NOT NULL, seq INTEGER NOT NULL, mark INTEGER NOT NULL, bytes INTEGER NOT NULL, at INTEGER NOT NULL, unreadable INTEGER NOT NULL, PRIMARY KEY (generation, seq))",
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
+  "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), secret TEXT NOT NULL)",
+  "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
 ];
 
 test("the schema's released steps are as released, and taken in order", () => {
@@ -72,4 +74,19 @@ test("the schema's released steps are as released, and taken in order", () => {
   assert.deepEqual(steps(STEPS.length), []);
   assert.throws(() => steps(STEPS.length + 1));
   assert.throws(() => steps(-1));
+});
+
+test("its connector's inbox is on the platform's origin, at the door's own name", () => {
+  assert.equal(inboxUrl("https://finite.example/some/path", "pat-sx--k3x9"), "https://finite.example/api/f/pat-sx--k3x9/inbox");
+  assert.equal(inboxUrl("http://127.0.0.1:8790", "pat-sx--k3x9"), "http://127.0.0.1:8790/api/f/pat-sx--k3x9/inbox");
+  for (const bad of ["../x", "a/b", "x?y", ""]) assert.throws(() => inboxUrl("https://finite.example", bad), String(bad));
+});
+
+test("an inbox secret is a header's value; only a stale mark's refusal is asked again", () => {
+  assert.equal(secretOk("e2e5ec4e7a9f0b1c"), true);
+  for (const bad of ["", "two words", "line\nbreak", "naïve", null, 7]) assert.equal(secretOk(bad), false, JSON.stringify(bad));
+  assert.equal(stale(409, { message: "a stale mark: ask again under a new one" }), true);
+  assert.equal(stale(409, { message: "not linked" }), false);
+  assert.equal(stale(503, { message: "a stale mark: ask again under a new one" }), false);
+  assert.equal(stale(409, null), false);
 });

@@ -69,6 +69,36 @@ pub fn blessed_template(loader_id: &str) -> Option<&str> {
     loader_id.strip_prefix("blessed:")?.split_once('@').map(|(t, _)| t)
 }
 
+/// Where a SimpleX connector's jobs reach their own door (cell/door.mjs):
+/// a name of the platform's, never one on the internet.
+pub const DOOR_HOST: &str = "door.fragment.internal";
+
+/// The header that tells a door which connector asks (its name, the
+/// door's own): the platform's alone to set, over whatever a job set
+/// (cell/src/jobs.rs; cell/door.mjs reads it).
+pub const DOOR_NAME_HEADER: &str = "x-fragment-door";
+
+/// Where a job's fetch of `raw` goes, from a fragment whose installed code
+/// is the blessed template `blessed`: to its own door (the URL, `Some`)
+/// when it names `DOOR_HOST`, or out (`None`: the egress check's to judge).
+/// Only a SimpleX connector reaches a door, the one named as its fragment
+/// is (cell/src/jobs.rs): any other fragment's fetch of the door's host is
+/// refused, never sent out, as is one with a port or credentials.
+pub fn door_route(raw: &str, blessed: Option<&str>) -> Result<Option<url::Url>, String> {
+    let Ok(url) = url::Url::parse(raw) else { return Ok(None) };
+    if url.host_str().map(|h| h.trim_end_matches('.')) != Some(DOOR_HOST) {
+        return Ok(None);
+    }
+    if blessed != Some(SIMPLEX) {
+        return Err(format!("{DOOR_HOST} is a SimpleX connector's own door: no other fragment reaches it"));
+    }
+    let plain = url.scheme() == "https" && url.host_str() == Some(DOOR_HOST) && url.port().is_none() && url.username().is_empty() && url.password().is_none();
+    if !plain {
+        return Err(format!("its door is https://{DOOR_HOST}/<what it asks>, with no port or credentials"));
+    }
+    Ok(Some(url))
+}
+
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
 pub const TICKET_MS: i64 = 10 * 60_000;
@@ -248,6 +278,29 @@ mod tests {
 
     pub(crate) fn ticket() -> Ticket {
         Ticket { door: SIMPLEX.into(), act: Act::Link, agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: "0f".repeat(16), exp: 1_790_000_600_000, sig: String::new() }
+    }
+
+    /// Goal: a SimpleX connector's jobs reach their own door alone, and no
+    /// other fragment's fetch of the door's host leaves the platform.
+    /// Valid: the connector's, to the door's host. Invalid: any other
+    /// fragment's (another connector, an app, none blessed), in any
+    /// spelling of the host; the connector's with a port, credentials or
+    /// cleartext. Every other URL is the egress check's.
+    #[test]
+    fn only_a_simplex_connector_reaches_its_door() {
+        let asked = door_route("https://door.fragment.internal/reply", Some("simplex")).expect("its own door");
+        assert_eq!(asked.map(|u| u.path().to_string()).as_deref(), Some("/reply"));
+        for raw in ["https://door.fragment.internal/reply", "https://DOOR.fragment.internal/x", "https://door.fragment.internal./x", "http://door.fragment.internal:8080/x"] {
+            for blessed in [Some("telegram"), Some("chat"), None] {
+                assert!(door_route(raw, blessed).is_err(), "{raw} from {blessed:?}");
+            }
+        }
+        for raw in ["http://door.fragment.internal/x", "https://door.fragment.internal:444/x", "https://a:b@door.fragment.internal/x", "https://door.fragment.internal./x"] {
+            assert!(door_route(raw, Some("simplex")).is_err(), "{raw}");
+        }
+        for raw in ["https://api.telegram.org/bot", "https://fragment.internal/x", "https://door.fragment.internal.example.com/x", "not a url"] {
+            assert_eq!(door_route(raw, Some("simplex")), Ok(None), "{raw}: the egress check's");
+        }
     }
 
     /// Goal (security candidate 10): a relayed record lands only in a

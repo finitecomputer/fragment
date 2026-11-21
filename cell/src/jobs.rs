@@ -891,7 +891,15 @@ impl FragmentCell {
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
-        let url = egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?;
+        // a SimpleX connector's call to its own door (cell/door.mjs), never
+        // the internet's; any other fragment's fetch of the door's host is refused
+        let blessed = self.blessed().map_err(|e| StepFail::Retry(e.message))?;
+        let door = fragment_core::door::door_route(&f.url, blessed.as_deref()).map_err(permanent)?;
+        let to_door = door.is_some();
+        let url = match door {
+            Some(url) => url,
+            None => egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?,
+        };
         // a connector bound as a door that is shut sends nothing (doors.rs)
         if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
             return Err(permanent(why));
@@ -954,6 +962,13 @@ impl FragmentCell {
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
         }
         headers.set(HOPS_HEADER, &(run.depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
+        // its door is the one named as this fragment is, told so by the
+        // platform alone (whatever header the job set), and asked only its
+        // jobs' routes (`/job/…`), never its runner's or its levers'
+        let door = if to_door { Some(self.name().map_err(|e| StepFail::Retry(e.message))?) } else { None };
+        if let Some(name) = &door {
+            headers.set(fragment_core::door::DOOR_NAME_HEADER, name).map_err(|e| permanent(e.to_string()))?;
+        }
         let mut init = RequestInit::new();
         // A redirect comes back to the job as its 3xx: following it here
         // would skip the egress check for where it points.
@@ -964,10 +979,16 @@ impl FragmentCell {
             }
             init.with_body(Some(JsValue::from_str(&body)));
         }
-        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(redact(e.to_string())))?;
+        let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
+        let req = Request::new_with_init(&to, &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;
-        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
+        let deadline = Duration::from_millis(limits::FETCH_TIMEOUT_MS);
+        let answer = match &door {
+            Some(name) => crate::cs::answer_all(crate::routed::send(&self.env, "SIMPLEX_DOOR", name, req), deadline, max).await,
+            None => crate::cs::fetch_all(req, deadline, max).await,
+        };
+        let answer = answer.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
         let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
