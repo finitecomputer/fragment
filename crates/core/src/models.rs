@@ -440,8 +440,9 @@ impl Upstream {
 /// What OpenRouter's answers say each call cost (FIN-616): `usage.cost`,
 /// dollars of its credits (on every answer, a stream's on its last usage
 /// chunk: openrouter.ai/docs/cookbook/administration/usage-accounting,
-/// read 2026-11-21), as the book's units of it, nano-dollars.
-pub const OPENROUTER_COST: &str = "openrouter:nanousd";
+/// read 2026-11-21), as the book's units of it, nano-dollars: a name with a
+/// `/`, which no catalog row's charge can take (`catalog::Charge::priced_as`).
+pub const OPENROUTER_COST: &str = "openrouter/nanousd";
 /// A nano-dollar of OpenRouter's credits at list, as the book prices it:
 /// micro-dollars per nano-dollars, grossed up by OpenRouter's fee on the
 /// credits (`price::OPENROUTER_FEE_BP`), which marks up no call's cost.
@@ -869,11 +870,11 @@ impl Models {
     }
 
     /// The book's rows for what a slot's API says a call cost (FIN-616):
-    /// OpenRouter's, when a slot is on it (`Upstream::used`).
+    /// OpenRouter's (`Upstream::used`), whatever the slots, so a row queued
+    /// before a deploy that moved its slot off OpenRouter is still priced.
     pub fn cost_keys(&self) -> Vec<crate::price::KeyPrice> {
-        let on = self.slots.iter().map(|s| &s.upstream).chain([&self.embeddings.upstream]).any(|u| matches!(u, Upstream::Openai { base_url, .. } if on_openrouter(base_url)));
         let (micros, per) = OPENROUTER_COST_PRICE;
-        on.then(|| crate::price::KeyPrice { key: OPENROUTER_COST.to_string(), micros, per }).into_iter().collect()
+        vec![crate::price::KeyPrice { key: OPENROUTER_COST.to_string(), micros, per }]
     }
 
     /// The place of the slot named `name`.
@@ -2236,7 +2237,7 @@ mod tests {
         let workers = Models::defaults();
         let cf = workers.route(workers.named(Some("cheap"), None).unwrap());
         assert!(matches!(cf.upstream.used(cf.id(), &usage), Some(Usage::Tokens { .. })), "Workers AI's answer names no cost of OpenRouter's");
-        assert!(workers.cost_keys().is_empty(), "no OpenRouter slot, no row");
+        assert_eq!(workers.cost_keys(), models.cost_keys(), "the row whatever the slots: a row queued before a slot moved is priced");
     }
 
     #[test]
