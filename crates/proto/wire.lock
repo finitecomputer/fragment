@@ -70,6 +70,7 @@ bound Manifest.files range u64
 bound Manifest.left default []
 bound Manifest.left_more default null
 bound Manifest.left_more range u64
+bound Manifest.simplex default false
 bound Manifest.zip_bytes range u64
 bound Member.addedAt range i64
 bound Member.door default null
@@ -340,6 +341,7 @@ field Manifest.left optional array<LeftBehind>
 field Manifest.left_more optional integer|null
 field Manifest.old required string
 field Manifest.phase required Phase
+field Manifest.simplex optional boolean
 field Manifest.zip_bytes required integer
 field Manifest.zip_sha256 required string
 field Member.addedAt required integer

@@ -744,6 +744,7 @@ both. `manifest.json`, as the mover writes it beside the zip (last).
 | `left_more` | `integer` or `null` | optional | Paths left behind past the list, if any. |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) | required |  |
+| `simplex` | `boolean` | optional | It carries its owner's SimpleX chat (docs/migrations.md, "SimpleX in a stage"), which runs only on a computer that stays on: its person's comped `seat` is made always-on as it completes. |
 | `zip_bytes` | `integer` | required | The zip's size and SHA-256 (hex). |
 | `zip_sha256` | `string` | required |  |
 
