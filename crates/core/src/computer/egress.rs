@@ -15,8 +15,9 @@ pub const INTERCEPTS_MAX: usize = 128;
 /// What one host costs, caught on HTTP and on HTTPS.
 pub const HOST_COST: usize = 4;
 /// The platform's own: `api`, `model` and `codestorage` (a local fleet's)
-/// `.fragment.internal`, each on HTTP alone, and 2 spare (the backups'
-/// gateway, which each save and restore registers for itself).
+/// `.fragment.internal`, each on HTTP alone, and the backups' gateway,
+/// which each start takes before any swap host and each save and restore
+/// registers again for itself (cell/entry.mjs `#intercept`).
 pub const PLATFORM_COST: usize = 4 * 2;
 /// The most hosts a person's Vault sends secrets to beyond the catalog's
 /// own (a catalog host is caught already, and costs nothing more).

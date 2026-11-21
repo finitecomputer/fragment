@@ -45,13 +45,16 @@ function swapped(c, egress, hosts) {
 // `ComputerEgress` with its route as `egress(route)` makes it. None
 // survives a stop: each start registers them again. Answers the swap
 // hosts left for want of room (`landed`). `live()`: whether the start
-// these are for is still the running one (`landed`).
-export function intercept(c, egress, swapHosts, codestorage, live) {
+// these are for is still the running one (`landed`). `reserve`, a start's
+// alone: the backups' host's registration, asked with the platform's,
+// before any swap host (entry.mjs `#intercept`).
+export function intercept(c, egress, swapHosts, codestorage, live, reserve) {
   const each = [
     { f: () => c.interceptOutboundHttp("api.fragment.internal", egress("api")) },
     { f: () => c.interceptOutboundHttp("model.fragment.internal", egress("model")) },
   ];
   if (codestorage) each.push({ f: () => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")) });
+  if (reserve) each.push({ f: reserve });
   each.push(...swapped(c, egress, swapHosts));
   return landed(each, live);
 }
@@ -102,14 +105,14 @@ async function landed(each, live = () => true) {
 // `overtaken()` while they registered (a start after it, or a destroy of
 // whatever runs: a sleep's, a wipe's), answering false, whether or not one
 // failed meanwhile: an overtaken start's failure is no one's to report.
-// Nor does one whose container had no room for a swap host `intercepted()`
-// answers (`landed`): a container not yet started holds none of its own,
-// and the hosts a start asks fit its entries (`egress::armed`), so one
-// left is a budget gone wrong, never a guest started without it.
+// A swap host `intercepted()` found no room for (`landed`: a container
+// holds registrations it was asked before this start, an overtaken
+// start's) is logged, and the start goes on with it uncaught: a start
+// that failed before starting would keep them all, and fail so again.
 export async function startIntercepted(c, opts, intercepted, overtaken) {
   try {
     const full = await intercepted();
-    if (full && full.length) throw new Error(`its container had no room for ${full.length} of its swap hosts`);
+    if (full && full.length) console.error(JSON.stringify({ arm: "start", left_out: full.length }));
   } catch (e) {
     if (overtaken()) return false;
     throw e;

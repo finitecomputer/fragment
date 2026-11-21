@@ -185,11 +185,23 @@ test("no room for the platform's own still fails, and so does any other refusal 
   await assert.rejects(intercept(c, egress, SWAP, false), /refused/);
 });
 
-test("a start whose container has no room for a swap host it asks starts nothing", async () => {
-  // a budget gone wrong: 32 swap hosts beside the platform's two, 132 entries
-  const c = { ...full([]), started: 0, start() { this.started++; } };
-  await assert.rejects(startIntercepted(c, { image: "stub" }, () => intercept(c, egress, hosts("s", 32), false), () => false), /no room for 1 of its swap hosts/);
-  assert.equal(c.started, 0);
+test("a start takes the backups' host before any swap host, and one swap host with no room is left, never a failed start", async () => {
+  // a container holding registrations nothing counted (the platform's and
+  // 30 swap hosts': 124 entries): the backups' host takes 2 of the last 4
+  const c = { ...full([...PLATFORM, ...both(hosts("old", 30))]), started: 0, start() { this.started++; } };
+  const reserve = () => c.interceptOutboundHttp("backups.sandbox.internal", egress("deny"));
+  const logged = [];
+  const error = console.error;
+  console.error = (line) => logged.push(line);
+  try {
+    assert.equal(await startIntercepted(c, { image: "stub" }, () => intercept(c, egress, ["new.example.test"], false, () => true, reserve), () => false), true);
+  } finally {
+    console.error = error;
+  }
+  assert.ok(c.targets.has("http://backups.sandbox.internal"));
+  assert.ok(!c.targets.has("https://new.example.test"));
+  assert.equal(c.started, 1);
+  assert.deepEqual(logged, ['{"arm":"start","left_out":1}']);
 });
 
 test("a registration asked again once its start is no longer the running one is never sent: it would land on the next start's container", async () => {

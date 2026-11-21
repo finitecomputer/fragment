@@ -364,7 +364,8 @@ class ContainerHost {
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
-    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage, () => !overtaken()), overtaken))) return false;
+    const intercepted = () => this.#intercept(computer, swapHosts, codestorage, () => !overtaken(), () => this.#backups.intercept());
+    if (!(await startIntercepted(this.#c, opts, intercepted, overtaken))) return false;
     this.#watch(generation);
     try {
       await settled(() => this.#c.setInactivityTimeout(idleMs));
@@ -379,15 +380,19 @@ class ContainerHost {
   // Every egress intercept of `computer`'s guest, all at once (one entry
   // per host: `ComputerEgress` with the route as props; intercepts.mjs).
   // `swapHosts` are the connections' and operator keys' hosts, and on a
-  // takeover its agents' Vault secrets' too. Not the backups' host: each
-  // save and restore registers its own grant there and puts its refusal
-  // back after (the Sandbox SDK's `DirectoryBackup`), and its
-  // `intercept()`, a refusal registered again, is for beside a catch-all
-  // intercept, which a computer has none of. One registered late (a
-  // start's that was overtaken) would replace the grant of a restore under
-  // way.
-  #intercept(computer, swapHosts, codestorage, live) {
-    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, live);
+  // takeover its agents' Vault secrets' too. `reserve`, a start's alone
+  // (before its container starts): the backups' host, its refusal, which
+  // each save and restore replaces with its own grant and puts back after
+  // (the Sandbox SDK's `DirectoryBackup`). It takes that host's entries
+  // before any swap host can, so a save always has them, whatever the
+  // swap's count missed (Sol on #1427: a container counts registrations
+  // nothing can see, such as an overtaken start's, which land at the next
+  // start). Never at a takeover: a save may be under way there, and the
+  // refusal would replace its grant. A start's lands before it starts,
+  // so before any save or restore of it; an overtaken start's are all sent
+  // at once, before whatever overtakes it, and never asked again (`live`).
+  #intercept(computer, swapHosts, codestorage, live, reserve) {
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, live, reserve);
   }
 
   // Watches start `generation`'s container: its exit, for any reason, is
@@ -402,14 +407,15 @@ class ContainerHost {
   }
 
   // Whether running start `generation`'s container is still the one it
-  // armed for: not superseded, destroyed or exited since. A registration
+  // armed for: running, and not superseded, destroyed or exited since (an
+  // arm begun after its exit included). A registration
   // asked after it is (a retry, intercepts.mjs `landed`) is never sent:
   // registrations land before a start too, so it would spend the next
   // start's room (Sol on #1427).
   #live(generation) {
     const destroys = this.#destroys;
     const exits = this.#exits;
-    return () => generation === this.#generation && destroys === this.#destroys && exits === this.#exits;
+    return () => generation === this.#generation && destroys === this.#destroys && exits === this.#exits && this.#c.running;
   }
 
   #egress(computer) {
