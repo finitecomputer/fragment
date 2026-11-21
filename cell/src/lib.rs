@@ -1316,7 +1316,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get, ["healthz", "objects"]) => routed::objects(env, cfg).await,
         // the admin Worker's: its probe of the same, and the operators'
         // routes it answers (admin.rs), handed to it as they came
-        (Method::Get, ["healthz", "admin"] | ["api", "admin", "health"]) => admin::forward(req, env).await,
+        (Method::Get, ["healthz", "admin"] | ["api", "admin", "health" | "glance"]) => admin::forward(req, env).await,
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
