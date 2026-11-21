@@ -163,17 +163,20 @@ async fn keep(cache: &Cache, key: &str, at: i64, read: &Read) {
 }
 
 /// Every question, `core::QUERIES_AT_ONCE_MAX` at once: what the logs say,
-/// or the first counting question's failure, met as its answer comes, so
-/// no question is asked after it. Why saves failed is the lines
+/// or the first counting question's failure, met as soon as it comes (each
+/// answer read as it arrives, in no order: each question writes its own
+/// part, and `core::troubles` orders the trouble), so no question waits on
+/// a slower one before it, and none is asked after it. Why saves failed is the lines
 /// themselves, which may run past the cell's bound on an answer: its read
 /// failing leaves the rest, and says why (`why_unread`).
 async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_start: i64) -> CellResult<Read> {
     let asked = futures_util::stream::iter(Question::ALL).map(|q| async move { (q, crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await) });
     let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![], whys: Ok(vec![]) };
     let mut kinds = Vec::with_capacity(3);
-    let mut answers = asked.buffered(core::QUERIES_AT_ONCE_MAX);
-    // bounded: one answer per question, in the questions' order; a `?`
-    // below drops the rest, unasked
+    let mut answers = asked.buffer_unordered(core::QUERIES_AT_ONCE_MAX);
+    // bounded: one answer per question, each as it comes; a `?` below
+    // drops the rest, unasked (a question starts only on the poll after
+    // an answer, never after a refusal)
     while let Some((q, answered)) = answers.next().await {
         let why = |e: String| CellError::new(fragment_proto::ErrorCode::UpstreamFailed, format!("Workers Observability, {q:?}: {e}"));
         match q {
