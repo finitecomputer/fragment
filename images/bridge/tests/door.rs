@@ -216,10 +216,22 @@ impl Start {
         }
     }
 
-    async fn reply(&self, door: &FakeDoor, key: &str, text: &str) -> Value {
-        let (code, v) = self.call("POST", "/reply", Some(door.mark()), Some(json!({ "key": key, "text": text }))).await;
-        assert_eq!(code, 200, "the reply {key}: {v}");
-        v
+    /// A reply asked, as its door asks it: taken (202, not done), then
+    /// asked again under a new mark each time until it is done (200).
+    async fn reply(&self, door: &FakeDoor, key: &str, text: &str) {
+        let t0 = Instant::now();
+        // bounded: 60 s
+        loop {
+            let (code, v) = self.call("POST", "/reply", Some(door.mark()), Some(json!({ "key": key, "text": text }))).await;
+            match code {
+                200 => return assert_eq!(v, json!({ "done": true }), "the reply {key}"),
+                202 => assert_eq!(v, json!({ "done": false }), "the reply {key}"),
+                503 => {}
+                _ => panic!("the reply {key}: {code} {v}"),
+            }
+            assert!(t0.elapsed() < Duration::from_secs(60), "the reply {key} is done");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     fn kill(&self, signal: &str) {
@@ -365,21 +377,11 @@ async fn the_door_against_the_real_core() {
     }
     let mut got: Vec<String> = vec![];
     for n in 1..=5 {
-        assert_eq!(g1.reply(&door, &format!("chat:{n}"), &format!("r{n}")).await, json!({ "replayed": false }));
+        g1.reply(&door, &format!("chat:{n}"), &format!("r{n}")).await;
     }
-    // asked again under a new mark: while its send is under way it waits
-    // (503, ask again), then it replays, sent once
-    let t0 = Instant::now();
-    let replayed = loop {
-        let (code, v) = g1.call("POST", "/reply", Some(door.mark()), Some(json!({ "key": "chat:5", "text": "r5" }))).await;
-        if code == 200 {
-            break v;
-        }
-        assert_eq!(code, 503, "a key asked again while it is sent: {v}");
-        assert!(t0.elapsed() < Duration::from_secs(30), "the reply chat:5 ends");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    assert_eq!(replayed, json!({ "replayed": true }), "a key asked again");
+    // asked again once done, under a new mark: done, and sent once
+    let (code, v) = g1.call("POST", "/reply", Some(door.mark()), Some(json!({ "key": "chat:5", "text": "r5" }))).await;
+    assert_eq!((code, v), (200, json!({ "done": true })), "a key asked again");
     // an ask under a mark older than one the runner has seen (its request
     // overtaken): refused, for its door to ask again under a new mark
     let (code, v) = g1.call("POST", "/reply", Some(1), Some(json!({ "key": "chat:stale", "text": "never" }))).await;

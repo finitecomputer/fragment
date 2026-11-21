@@ -200,6 +200,10 @@ pub fn unpack(packed: &[u8]) -> Result<Vec<(String, Vec<u8>)>, SaveError> {
 
 /// Where a restore puts a save's databases before they are the core's.
 const STAGE: &str = "restoring";
+/// Tables each database must hold to be the core's own: a file of no
+/// tables (an empty one passes `quick_check`) is none (the core would make
+/// a new profile of it, its link pointing at no one).
+const TABLES: [(&str, [&str; 2]); 2] = [(DBS[0], ["contacts", "chat_items"]), (DBS[1], ["connections", "ratchets"])];
 
 /// A save unpacked into `dir`'s stage, each database opened and checked
 /// there (`quick_check`), nothing of the core's touched: its state's bytes,
@@ -216,14 +220,30 @@ pub fn stage(packed: &[u8], dir: &Path) -> Result<Vec<u8>, SaveError> {
         }
         let path = stage.join(&name);
         std::fs::write(&path, &bytes).map_err(io)?;
-        let checked = Connection::open(&path).and_then(|c| c.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)));
+        let tables = TABLES.iter().find(|(db, _)| *db == name).map(|(_, t)| *t).expect("each database has its tables");
+        let checked = Connection::open(&path).and_then(|c| {
+            let ok: String = c.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+            let mut held = 0;
+            for t in tables {
+                held += c.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [t], |r| r.get::<_, i64>(0))?;
+            }
+            Ok((ok, held))
+        });
         match checked {
-            Ok(ok) if ok == "ok" => {}
-            Ok(said) => return Err(SaveError::Corrupt(format!("{name}: {said}"))),
+            Ok((ok, held)) if ok == "ok" && held == tables.len() as i64 => {}
+            Ok((said, held)) => return Err(SaveError::Corrupt(format!("{name}: {said}, {held} of its tables {tables:?}"))),
             Err(e) => return Err(SaveError::Corrupt(format!("{name}: {e}"))),
         }
     }
     Ok(state.expect("unpack holds the state"))
+}
+
+/// Whether the staged chat database holds contact `contact`: a save whose
+/// link is bound to one it lacks is no save of that link.
+pub fn staged_contact(dir: &Path, contact: i64) -> Result<bool, SaveError> {
+    let c = Connection::open(dir.join(STAGE).join(DBS[0])).map_err(|e| SaveError::Corrupt(e.to_string()))?;
+    let n: i64 = c.query_row("SELECT count(*) FROM contacts WHERE contact_id = ?1", [contact], |r| r.get(0)).map_err(|e| SaveError::Corrupt(e.to_string()))?;
+    Ok(n == 1)
 }
 
 /// The staged databases made the core's, in place of whatever was there.
@@ -475,12 +495,26 @@ mod tests {
     fn a_bad_database_never_reaches_the_core() {
         let d = dir("stage");
         wal(&d).unwrap();
+        // the core's own tables, as its first start makes them
+        for (db, tables) in TABLES {
+            let c = Connection::open(d.join(db)).unwrap();
+            for t in tables {
+                c.execute_batch(&format!("CREATE TABLE {t} (contact_id INTEGER)")).unwrap();
+            }
+        }
+        Connection::open(d.join(DBS[0])).unwrap().execute("INSERT INTO contacts VALUES (3)", []).unwrap();
         let good = make(&d, &d.join("save"), b"{}").unwrap();
+        // a database of no tables (an empty file passes `quick_check`:
+        // the review of #1430), and one of bytes that are no SQLite
+        let empty = pack(&[(STATE, b"{}".to_vec()), (DBS[0], vec![]), (DBS[1], vec![])]).unwrap();
+        assert!(matches!(stage(&empty, &d), Err(SaveError::Corrupt(_))), "an empty database");
         let before = std::fs::read(d.join(DBS[0])).unwrap();
         let bad = pack(&[(STATE, b"{}".to_vec()), (DBS[0], b"not a database at all, not even close".repeat(200)), (DBS[1], vec![])]).unwrap();
         assert!(matches!(stage(&bad, &d), Err(SaveError::Corrupt(_))), "bytes that are no SQLite");
         assert_eq!(std::fs::read(d.join(DBS[0])).unwrap(), before, "the core's database untouched");
         assert_eq!(stage(&good, &d).unwrap(), b"{}");
+        assert_eq!(staged_contact(&d, 3), Ok(true));
+        assert_eq!(staged_contact(&d, 4), Ok(false), "a contact it lacks");
         place(&d).unwrap();
         assert!(!d.join(STAGE).exists());
         let n: i64 = Connection::open(d.join(DBS[1])).unwrap().query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0)).unwrap();

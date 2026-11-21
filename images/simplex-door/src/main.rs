@@ -16,7 +16,11 @@
 //!    start reads on from the cursor what any earlier life took.
 //! 3. **What the door asks** (`DOOR_HTTP`): `GET /state`; `POST /link` and
 //!    `POST /unlink`; `POST /reply {key, text}`, sent once a key. Each ask
-//!    but the state carries its mark (door.rs, "an effect").
+//!    but the state carries its mark (door.rs, "an effect"). A reply is
+//!    the runner's once taken (202, `{"done": false}`): its text waits in
+//!    the runner's state, in every save, until the core has taken each of
+//!    its parts, and only then is its key done (200, `{"done": true}`). Its
+//!    door asks again until it is.
 //! 4. **Saves** follow changes (save.rs `Due`), the core never paused; a
 //!    planned stop (SIGTERM, or another client taking its queues) stops the
 //!    core first, then saves last.
@@ -65,6 +69,9 @@ const TICK_MS: u64 = 250;
 /// Replies' keys kept, the newest: one asked again within them is not sent
 /// again (the door asks again when its answer was lost).
 const REPLIED_KEPT: usize = 64;
+/// Replies taken and not yet sent whole, at most: past it one is refused
+/// (503, ask again), never one taken let go.
+const REPLIES_MAX: usize = 32;
 const KEY_MAX_BYTES: usize = 128;
 /// A reply's body, at most: its text at the bridge's bound with every byte
 /// escaped as JSON's longest (`\u00XX`, 6 bytes), its key and framing.
@@ -89,15 +96,28 @@ struct Kept {
     /// The newest of the door's marks committed in the databases (Marks).
     #[serde(default)]
     mark: u64,
-    /// The newest replies' keys whose every part the core took or the link
-    /// holds (`REPLIED_KEPT`).
+    /// The replies taken and not yet sent whole, oldest first: each its key
+    /// and its text, sent one at a time while the link is in step.
+    #[serde(default)]
+    replies: VecDeque<Reply>,
+    /// The newest replies' keys whose every part the core took
+    /// (`REPLIED_KEPT`).
     #[serde(default)]
     replied: VecDeque<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Reply {
+    key: String,
+    text: String,
+}
+
 pub enum Msg {
     Frame(String),
-    CoreGone(String),
+    /// The core's process ended.
+    CoreExited(String),
+    /// Its bot API closed (the process may live on).
+    CoreLost,
     Asked(Asked, oneshot::Sender<Response<Body>>),
     Delivered { item: i64, mark: u64 },
     DeliveryFailed,
@@ -128,6 +148,7 @@ struct View<'a> {
     saves: u64,
     forced_syncs: u32,
     waiting: usize,
+    replies: usize,
     notices: &'a VecDeque<String>,
 }
 
@@ -142,9 +163,10 @@ struct Runner {
     core: core::Core,
     corr: u64,
     pending: BTreeMap<u64, Cmd>,
-    /// Replies taken whose parts the core has not all answered: each key,
-    /// and its sends still out. A key asked again meanwhile waits.
-    replying: Vec<(String, BTreeSet<u64>)>,
+    /// The oldest reply being sent: its sends the core has not answered,
+    /// and whether one was refused (then it is sent again, whole, once the
+    /// link is in step).
+    sending: Option<(BTreeSet<u64>, bool)>,
     /// `Input::Started` applied: asks are taken.
     up: bool,
     stopping: Option<(&'static str, Instant)>,
@@ -165,6 +187,9 @@ struct Runner {
     reading: Option<u64>,
     anchor: Option<i64>,
     seek: Option<i64>,
+    /// A seek's last full page, all past the cursor: the oldest, should the
+    /// page before it be empty.
+    held: Vec<wire::Item>,
     /// A message forwarded since the last read began, or there may be more
     /// past the last read: read on.
     poked: bool,
@@ -222,49 +247,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // the cursor is the item its door took last, which the core holds unless
-    // it expired (a read on from it then seeks)
-    let anchor = Some(kept.link.delivered).filter(|d| *d > 0);
-    let mut r = Runner {
-        door,
-        dir,
-        generation,
-        kept,
-        mark_seen: door_mark,
-        core,
-        corr: 0,
-        pending: BTreeMap::new(),
-        replying: vec![],
-        up: false,
-        stopping: None,
-        core_stop: None,
-        killed: false,
-        core_gone: false,
-        last: None,
-        page: VecDeque::new(),
-        reading: None,
-        anchor,
-        seek: None,
-        // each start reads on from its cursor once: what an earlier life took
-        poked: true,
-        full: false,
-        delivering: false,
-        delivery_wait: net::Backoff::default(),
-        delivery_at: None,
-        resync_at: None,
-        recheck_at: None,
-        due: save::Due::default(),
-        versions: watch.versions(),
-        watch,
-        events: 0,
-        saving: false,
-        seq: 0,
-        saves: 0,
-        forced_syncs: 0,
-        notices: VecDeque::new(),
-        born: Instant::now(),
-        to: to.clone(),
-    };
+    let mut r = Runner::new(door, dir, generation, kept, door_mark, core, watch, to.clone());
     // its name (a profile its database made earlier keeps the earlier one),
     // its messages' expiry, then the link's start
     r.ask(Cmd::Profile { name });
@@ -325,6 +308,11 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
         Restore::Save { packed, mark, behind } => {
             let state = save::stage(&packed, dir).unwrap_or_else(|e| unreadable(&e.to_string()));
             let kept: Kept = serde_json::from_slice(&state).unwrap_or_else(|e| unreadable(&e.to_string()));
+            if let Some(contact) = kept.link.contact() {
+                if !save::staged_contact(dir, contact).unwrap_or_else(|e| unreadable(&e.to_string())) {
+                    unreadable(&format!("its link's contact {contact} is not in its chat database"));
+                }
+            }
             assert!(behind || kept.mark >= mark, "a save its door says is not behind holds the door's newest mark");
             save::place(dir).expect("the staged databases placed");
             ev!("door.restored", { "bytes": packed.len(), "mark": kept.mark, "doorMark": mark, "behind": behind });
@@ -357,6 +345,58 @@ fn refuse(status: StatusCode, why: &str) -> Response<Body> {
 }
 
 impl Runner {
+    /// A start's runner: `kept` restored, `mark_seen` its door's newest.
+    #[allow(clippy::too_many_arguments)]
+    fn new(door: Door, dir: PathBuf, generation: u64, mut kept: Kept, mark_seen: u64, core: core::Core, watch: save::Watch, to: mpsc::Sender<Msg>) -> Runner {
+        // the cursor is the item its door took last, which the core holds
+        // unless it expired (a read on from it then seeks)
+        let anchor = Some(kept.link.delivered).filter(|d| *d > 0);
+        // the link never holds a reply's parts but the runner's own, which
+        // its state holds whole (`Kept::replies`): sent again from there
+        kept.link.outbox.clear();
+        Runner {
+            door,
+            dir,
+            generation,
+            kept,
+            mark_seen,
+            core,
+            corr: 0,
+            pending: BTreeMap::new(),
+            sending: None,
+            up: false,
+            stopping: None,
+            core_stop: None,
+            killed: false,
+            core_gone: false,
+            last: None,
+            page: VecDeque::new(),
+            reading: None,
+            anchor,
+            seek: None,
+            held: vec![],
+            // each start reads on from its cursor once: what an earlier life took
+            poked: true,
+            full: false,
+            delivering: false,
+            delivery_wait: net::Backoff::default(),
+            delivery_at: None,
+            resync_at: None,
+            recheck_at: None,
+            due: save::Due::default(),
+            versions: watch.versions(),
+            watch,
+            events: 0,
+            saving: false,
+            seq: 0,
+            saves: 0,
+            forced_syncs: 0,
+            notices: VecDeque::new(),
+            born: Instant::now(),
+            to,
+        }
+    }
+
     fn now(&self) -> u64 {
         self.born.elapsed().as_millis() as u64
     }
@@ -364,15 +404,26 @@ impl Runner {
     fn on(&mut self, m: Msg) {
         match m {
             Msg::Frame(text) => self.frame(&text),
-            Msg::CoreGone(why) => {
-                ev!("door.core_gone", { "why": why, "stopping": self.stopping.is_some() });
+            Msg::CoreExited(why) => {
+                ev!("door.core_exited", { "why": why, "stopping": self.stopping.is_some() });
                 if self.stopping.is_none() {
                     std::process::exit(1);
                 }
+                // what it never answered may or may not be in its databases:
+                // the mark moves no more (`settle`), and a reply being sent
+                // stays the runner's, sent again at the next start
                 self.core_gone = true;
                 self.pending.clear();
-                self.replying.clear();
+                self.sending = None;
                 self.reading = None;
+            }
+            // its process may live on, unheard: outside a stop the runner
+            // ends (the core with it); in one, its end is still waited for
+            Msg::CoreLost => {
+                ev!("door.core_lost", { "stopping": self.stopping.is_some() });
+                if self.stopping.is_none() {
+                    std::process::exit(1);
+                }
             }
             Msg::Asked(a, answer) => {
                 let _ = answer.send(self.asked(a));
@@ -420,7 +471,10 @@ impl Runner {
                     Cmd::React { item, on, .. } => {
                         self.kept.link.apply(Input::NotReacted { item: *item, on: *on });
                     }
-                    Cmd::Send { .. } => self.apply(Input::Failed { cmd: &cmd, what: "the core's writer was full" }),
+                    Cmd::Send { .. } => {
+                        self.apply(Input::Failed { cmd: &cmd, what: "the core's writer was full" });
+                        self.refused_send();
+                    }
                     _ => {}
                 }
             }
@@ -463,7 +517,8 @@ impl Runner {
     /// The mark moves once the link is quiet (Marks).
     fn settle(&mut self) {
         let l = &self.kept.link;
-        let quiet = self.up && self.pending.is_empty() && l.outbox.is_empty() && !l.syncing && !l.forced;
+        // a reply waiting acts later than its mark: none may wait
+        let quiet = self.up && !self.core_gone && self.pending.is_empty() && self.kept.replies.is_empty() && l.outbox.is_empty() && !l.syncing && !l.forced;
         if quiet && self.mark_seen > self.kept.mark {
             self.kept.mark = self.mark_seen;
             self.due.changed(self.now());
@@ -500,6 +555,9 @@ impl Runner {
             (Some(cmd), Resp::Error { what }) => {
                 ev!("door.refused", { "what": wire::cut(what, 200) });
                 self.apply(Input::Failed { cmd, what });
+                if let Cmd::Send { .. } = cmd {
+                    self.refused_send();
+                }
             }
             (Some(_), resp) => self.apply(Input::Said(resp)),
             (None, resp) => {
@@ -507,31 +565,57 @@ impl Runner {
                 self.apply(Input::Said(resp));
             }
         }
-        // a reply whose last part the core answered is done (the link holds
-        // any it refused, in the same save)
-        if let Some(c) = corr {
-            let mut done = vec![];
-            self.replying.retain_mut(|(key, corrs)| {
-                corrs.remove(&c);
-                let left = !corrs.is_empty();
-                if !left {
-                    done.push(std::mem::take(key));
+        // the reply being sent, its last part answered: done, or (one was
+        // refused) sent again whole once the link is in step
+        if let (Some(c), Some((corrs, refused))) = (corr, self.sending.as_mut()) {
+            if corrs.remove(&c) && corrs.is_empty() {
+                let refused = *refused;
+                self.sending = None;
+                if !refused {
+                    let done = self.kept.replies.pop_front().expect("a reply being sent is the oldest");
+                    if self.kept.replied.len() == REPLIED_KEPT {
+                        self.kept.replied.pop_front();
+                    }
+                    self.kept.replied.push_back(done.key);
+                    self.due.changed(self.now());
                 }
-                left
-            });
-            for key in done {
-                self.replied(key);
             }
         }
         self.settle();
     }
 
-    fn replied(&mut self, key: String) {
-        if self.kept.replied.len() == REPLIED_KEPT {
-            self.kept.replied.pop_front();
+    /// A send the core refused, or its writer had no room for: the link
+    /// held the part and syncs, but the reply is the runner's (its state
+    /// holds it whole), so the link holds none of it, and it is sent again.
+    fn refused_send(&mut self) {
+        self.kept.link.outbox.clear();
+        if let Some((_, refused)) = self.sending.as_mut() {
+            *refused = true;
         }
-        self.kept.replied.push_back(key);
-        self.due.changed(self.now());
+    }
+
+    /// The oldest reply waiting, to the link, once it is in step and the
+    /// core's writer has room for every part: one at a time, in order.
+    fn send_reply(&mut self) {
+        let l = &self.kept.link;
+        if self.sending.is_some() || self.core_gone || l.syncing || l.forced || l.contact().is_none() {
+            return;
+        }
+        let Some(r) = self.kept.replies.front().cloned() else { return };
+        let parts = wire::parts(&r.text).len();
+        if parts > self.core.writer.capacity() {
+            return;
+        }
+        let first = self.corr + 1;
+        self.apply(Input::Reply(&r.text));
+        let corrs: BTreeSet<u64> = (first..=self.corr).filter(|c| self.pending.contains_key(c)).collect();
+        // every part asked of the core, or the reply is sent again
+        let refused = corrs.len() != parts;
+        if corrs.is_empty() {
+            self.refused_send();
+        } else {
+            self.sending = Some((corrs, refused));
+        }
     }
 
     /// A read answered. On from the anchor: its owner's messages in it, to
@@ -545,17 +629,28 @@ impl Runner {
         items.sort_by_key(|i| i.id);
         let delivered = self.kept.link.delivered;
         let newest = items.last().map(|i| i.id);
+        let mut held: Vec<wire::Item> = vec![];
         if let Cmd::Chat { .. } = cmd {
             let oldest = items.first().map(|i| i.id);
             if items.len() >= usize::from(PAGE) && oldest.is_some_and(|o| o > delivered) {
+                self.held = items.into_iter().cloned().collect();
                 self.seek = oldest;
                 self.full = true;
                 return;
             }
             self.seek = None;
-            self.full = newest.is_some();
+            // none older than the last full page: that page is the oldest
+            held = std::mem::take(&mut self.held);
+            if items.is_empty() {
+                items = held.iter().collect();
+            }
         } else {
             self.full = items.len() >= usize::from(PAGE);
+        }
+        let newest = items.last().map(|i| i.id).or(newest);
+        if let Cmd::Chat { .. } = cmd {
+            // on forward from the oldest page, re-reading what the seek passed
+            self.full = newest.is_some();
         }
         self.anchor = newest.or(self.anchor);
         let contact = self.kept.link.contact();
@@ -575,9 +670,10 @@ impl Runner {
         ev!("door.read_failed", { "answer": wire::cut(&format!("{resp:?}"), 200) });
         self.poked = true;
         let gone = matches!(resp, Resp::Error { what } if what.contains("chatItemNotFound"));
-        if gone && matches!(asked, Some(Cmd::ChatAfter { .. })) {
+        if gone && matches!(asked, Some(Cmd::ChatAfter { .. } | Cmd::Chat { .. })) {
             self.anchor = None;
             self.seek = None;
+            self.held.clear();
         } else {
             self.delivery_at = Some(Instant::now() + Duration::from_millis(self.delivery_wait.next_ms()));
         }
@@ -596,10 +692,10 @@ impl Runner {
         if let Asked::Reply { key, .. } = &a {
             if self.kept.replied.contains(key) {
                 self.settle();
-                return answer(StatusCode::OK, r#"{"replayed":true}"#);
+                return answer(StatusCode::OK, r#"{"done":true}"#);
             }
-            if self.replying.iter().any(|(k, _)| k == key) {
-                return refuse(StatusCode::SERVICE_UNAVAILABLE, "that reply is still being sent: ask again");
+            if self.kept.replies.iter().any(|r| r.key == *key) {
+                return answer(StatusCode::ACCEPTED, r#"{"done":false}"#);
             }
         }
         // overtaken by a later mark: acted on now, it could act after a save
@@ -618,24 +714,13 @@ impl Runner {
                 if self.kept.link.contact().is_none() {
                     return refuse(StatusCode::CONFLICT, "not linked");
                 }
-                // room for every part before any is taken: in the outbox
-                // while the link syncs, else in the core's writer
-                let parts = wire::parts(&text).len();
-                let l = &self.kept.link;
-                let room = if l.syncing { link::OUTBOX_MAX.saturating_sub(l.outbox.len()) } else { self.core.writer.capacity() };
-                if parts > room {
-                    return refuse(StatusCode::SERVICE_UNAVAILABLE, "no room for that reply now: ask again");
+                if self.kept.replies.len() >= REPLIES_MAX {
+                    return refuse(StatusCode::SERVICE_UNAVAILABLE, "replies are waiting: ask again");
                 }
-                let first = self.corr + 1;
-                self.apply(Input::Reply(&text));
-                let corrs: BTreeSet<u64> = (first..=self.corr).filter(|c| self.pending.contains_key(c)).collect();
-                if corrs.is_empty() {
-                    self.replied(key);
-                } else {
-                    self.replying.push((key, corrs));
-                }
-                self.settle();
-                return answer(StatusCode::OK, r#"{"replayed":false}"#);
+                self.kept.replies.push_back(Reply { key, text });
+                self.due.changed(self.now());
+                self.send_reply();
+                return answer(StatusCode::ACCEPTED, r#"{"done":false}"#);
             }
         }
         self.settle();
@@ -664,6 +749,7 @@ impl Runner {
             saves: self.saves,
             forced_syncs: self.forced_syncs,
             waiting: self.page.len(),
+            replies: self.kept.replies.len(),
             notices: &self.notices,
         };
         net::respond(StatusCode::OK, "application/json", serde_json::to_vec(&view).expect("a view is JSON"))
@@ -700,6 +786,7 @@ impl Runner {
         if let Some((why, since)) = self.stopping {
             return self.stop(why, since);
         }
+        self.send_reply();
         self.deliver(at);
         if !self.saving && self.due.take(now) {
             self.save();
@@ -896,6 +983,165 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Kept>(&bytes).unwrap(), kept);
         let old: Kept = serde_json::from_str(r#"{"link":{"phase":"off"}}"#).unwrap();
         assert_eq!(old, Kept::default());
+    }
+
+    /// A runner on a core of the test's own (`Core::scripted`): what it
+    /// writes to the core comes out of the channel returned, and the test
+    /// answers as the core would; its door is nowhere (its calls fail).
+    fn scripted(name: &str, linked: bool) -> (Runner, mpsc::Receiver<String>) {
+        let dir = std::env::temp_dir().join(format!("door-run-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        save::wal(&dir).unwrap();
+        let watch = save::Watch::open(&dir).unwrap();
+        let (writer, writes) = mpsc::channel(64);
+        let (to, msgs) = mpsc::channel(MSGS_MAX);
+        std::mem::forget(msgs);
+        let mut kept = Kept::default();
+        if linked {
+            kept.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
+        }
+        let mut r = Runner::new(Door::new("http://127.0.0.1:9", 1).unwrap(), dir, 1, kept, 0, core::Core::scripted(writer), watch, to);
+        r.up = true;
+        (r, writes)
+    }
+
+    /// What the runner asked of the core since last read: each corr, and
+    /// its command line.
+    fn asked_of(writes: &mut mpsc::Receiver<String>) -> Vec<(u64, String)> {
+        let mut out = vec![];
+        while let Ok(f) = writes.try_recv() {
+            let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+            out.push((v["corrId"].as_str().unwrap().parse().unwrap(), v["cmd"].as_str().unwrap().to_string()));
+        }
+        out
+    }
+
+    fn item(id: i64, received: bool, text: &str) -> serde_json::Value {
+        let (dir, content) = if received { ("directRcv", "rcvMsgContent") } else { ("directSnd", "sndMsgContent") };
+        serde_json::json!({ "chatDir": { "type": dir }, "content": { "type": content, "msgContent": { "type": "text", "text": text } }, "meta": { "itemId": id, "itemSharedMsgId": format!("s{id}"), "itemTs": "2026-11-20T00:00:00Z" } })
+    }
+
+    fn sent_ok(corr: u64) -> String {
+        let info = serde_json::json!({ "type": "direct", "contact": { "contactId": 3 } });
+        serde_json::json!({ "corrId": corr.to_string(), "resp": { "type": "newChatItems", "chatItems": [{ "chatInfo": info, "chatItem": item(900 + corr as i64, false, "x") }] } }).to_string()
+    }
+
+    fn refused(corr: u64, what: &str) -> String {
+        serde_json::json!({ "corrId": corr.to_string(), "resp": { "type": "chatCmdError", "chatError": { "type": "errorAgent", "agentError": { "type": what } } } }).to_string()
+    }
+
+    fn page_of(corr: u64, ids: &[i64]) -> String {
+        let items: Vec<serde_json::Value> = ids.iter().map(|id| item(*id, true, &format!("m{id}"))).collect();
+        serde_json::json!({ "corrId": corr.to_string(), "resp": { "type": "apiChat", "chat": { "chatInfo": { "type": "direct", "contact": { "contactId": 3 } }, "chatItems": items } } }).to_string()
+    }
+
+    async fn reply_ask(r: &mut Runner, key: &str, mark: u64) -> (u16, String) {
+        let res = r.asked(Asked::Reply { key: key.into(), text: format!("text of {key}"), mark });
+        let status = res.status().as_u16();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Goal: a reply once taken is never lost (the review of #1430): taken
+    /// while the link syncs, it waits in the runner's state, its text with
+    /// it, in every save, and nothing of it in the link's outbox; it is
+    /// done only once the core has taken every part; one the core refuses
+    /// is sent again whole, never evicted, however many wait (the review's
+    /// 33 refused sends against a 32-part outbox); past its bound a reply
+    /// is refused before it is taken. Method: a scripted core, asks and
+    /// answers in turn, the state read back as a save holds it.
+    #[tokio::test]
+    async fn a_reply_taken_is_never_lost() {
+        let (mut r, mut writes) = scripted("replies", true);
+        r.kept.link.syncing = true;
+        for n in 0..REPLIES_MAX as u64 {
+            assert_eq!(reply_ask(&mut r, &format!("k{n}"), n + 1).await, (202, r#"{"done":false}"#.into()));
+        }
+        assert_eq!(reply_ask(&mut r, "k-past", 100).await.0, 503, "past its bound, refused before it is taken");
+        assert!(asked_of(&mut writes).is_empty(), "nothing is sent while the link syncs");
+        let saved: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
+        assert_eq!(saved.replies.len(), REPLIES_MAX);
+        assert_eq!(saved.replies[0], Reply { key: "k0".into(), text: "text of k0".into() }, "a save holds each waiting reply whole");
+        assert!(saved.link.outbox.is_empty());
+
+        // in step: the oldest goes, and is done only once the core took it
+        r.kept.link.syncing = false;
+        r.send_reply();
+        let sends = asked_of(&mut writes);
+        assert_eq!(sends.len(), 1, "one reply at a time: {sends:?}");
+        assert_eq!(reply_ask(&mut r, "k0", 101).await, (202, r#"{"done":false}"#.into()), "asked again while it is sent");
+        r.frame(&sent_ok(sends[0].0));
+        assert_eq!(reply_ask(&mut r, "k0", 102).await, (200, r#"{"done":true}"#.into()));
+
+        // refused by the core: the link syncs, holds none of it, and the
+        // reply waits, whole, to go again; every one of the 31 others too
+        for _ in 0..40 {
+            r.kept.link.syncing = false;
+            r.send_reply();
+            let sends = asked_of(&mut writes);
+            assert_eq!(sends.len(), 1);
+            r.frame(&refused(sends[0].0, "CMD"));
+            assert!(r.kept.link.outbox.is_empty(), "the link holds no part of a reply");
+            assert_eq!(r.kept.replies.len(), REPLIES_MAX - 1, "a refused reply is never let go");
+            assert_eq!(r.kept.replies[0].key, "k1");
+        }
+        let saved: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
+        assert_eq!(saved.replies.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), (1..REPLIES_MAX).map(|n| format!("k{n}")).collect::<Vec<_>>());
+    }
+
+    /// Goal: a backlog is read whole however it lies (the review of #1430:
+    /// with the cursor at 0 and exactly one page waiting, the seek read past
+    /// the oldest page, found nothing, and stranded it), and a seek whose
+    /// anchor is gone begins again from the newest. Method: a scripted core
+    /// answering each read.
+    #[tokio::test]
+    async fn a_backlog_of_one_page_is_read() {
+        let (mut r, mut writes) = scripted("seek", true);
+        r.deliver(Instant::now());
+        let (c, line) = asked_of(&mut writes).pop().unwrap();
+        assert_eq!(line, format!("/_get chat @3 count={PAGE}"), "no anchor: the newest page first");
+        r.frame(&page_of(c, &(1..=i64::from(PAGE)).collect::<Vec<_>>()));
+        r.deliver(Instant::now());
+        let (c, line) = asked_of(&mut writes).pop().unwrap();
+        assert_eq!(line, format!("/_get chat @3 before=1 count={PAGE}"), "a full page past the cursor: older ones may be there");
+        r.frame(&page_of(c, &[]));
+        assert_eq!(r.page.iter().map(|i| i.item).collect::<Vec<_>>(), (1..=i64::from(PAGE)).collect::<Vec<_>>(), "none older: the last full page is the oldest");
+        assert_eq!(r.anchor, Some(i64::from(PAGE)));
+
+        // a seek's anchor gone (expired): from the newest again
+        let (mut r, mut writes) = scripted("seek-gone", true);
+        r.deliver(Instant::now());
+        let (c, _) = asked_of(&mut writes).pop().unwrap();
+        r.frame(&page_of(c, &(41..=40 + i64::from(PAGE)).collect::<Vec<_>>()));
+        r.deliver(Instant::now());
+        let (c, line) = asked_of(&mut writes).pop().unwrap();
+        assert!(line.contains("before=41"), "{line}");
+        r.frame(&refused(c, "chatItemNotFound").replace("errorAgent", "errorStore").replace("agentError", "storeError"));
+        assert_eq!((r.anchor, r.seek, r.held.len(), r.poked), (None, None, 0, true), "begins again");
+    }
+
+    /// Goal: a planned stop saves only once the core's process has ended
+    /// (the review of #1430: its socket closing was taken for its end),
+    /// and the mark moves no more once the core is gone (what it never
+    /// answered may or may not be in its databases). Method: a stop, the
+    /// socket lost, then the process's end.
+    #[tokio::test]
+    async fn a_stop_saves_once_the_core_has_ended() {
+        let (mut r, _writes) = scripted("stop", true);
+        r.begin_stop("sigterm");
+        let since = Instant::now();
+        r.stop("sigterm", since);
+        assert!(r.core_stop.is_some(), "the core is asked to end");
+        r.on(Msg::CoreLost);
+        r.stop("sigterm", since);
+        assert!(!r.saving, "a socket's close is not the core's end: no save yet");
+        r.mark_seen = 5;
+        r.on(Msg::CoreExited("signal 15".into()));
+        r.settle();
+        assert_eq!(r.kept.mark, 0, "the mark moves no more once the core is gone");
+        r.stop("sigterm", since);
+        assert!(r.saving && r.last == Some(r.seq), "its last save, once it has ended");
     }
 
     /// Goal: a reply's body is taken only as `{key, text}` within bounds,

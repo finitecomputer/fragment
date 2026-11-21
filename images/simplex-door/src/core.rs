@@ -28,8 +28,9 @@ pub struct Core {
     pub spawned_ms: u64,
 }
 
-/// The core started and its bot API dialed; every frame it says, its end,
-/// and its socket's end, sent to `to`.
+/// The core started and its bot API dialed; every frame it says, its
+/// process's end (`CoreExited`), and its socket's (`CoreLost`: the process
+/// may live on), sent to `to`.
 pub async fn start(cfg: &run::Config, dir: &Path, name: &str, to: mpsc::Sender<Msg>) -> Result<Core, String> {
     let mut cmd = run::core_command(&cfg.bin, dir);
     cmd.args(run::core_args(cfg, &dir.join("sx"), dir, name, None));
@@ -55,7 +56,7 @@ pub async fn start(cfg: &run::Config, dir: &Path, name: &str, to: mpsc::Sender<M
         }
         let status = child.wait().await.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
         let last = String::from_utf8_lossy(&tail).lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
-        let _ = ended.send(Msg::CoreGone(format!("it ended ({status}): {}", wire::cut(&last, 200)))).await;
+        let _ = ended.send(Msg::CoreExited(format!("it ended ({status}): {}", wire::cut(&last, 200)))).await;
     });
     let t0 = Instant::now();
     // bounded by CONNECT_MS_MAX
@@ -92,18 +93,27 @@ pub async fn start(cfg: &run::Config, dir: &Path, name: &str, to: mpsc::Sender<M
                 },
             }
         }
-        let _ = to.send(Msg::CoreGone("its bot API closed".into())).await;
+        let _ = to.send(Msg::CoreLost).await;
     });
     Ok(Core { pid, writer, spawned_ms })
 }
 
 impl Core {
+    /// A core that is the test's own: what the runner writes to it goes to
+    /// `writer`, and no process is signalled.
+    #[cfg(test)]
+    pub fn scripted(writer: mpsc::Sender<String>) -> Core {
+        Core { pid: 0, writer, spawned_ms: 0 }
+    }
+
     /// Asks the core's process to end (SIGTERM), or ends it (SIGKILL): its
-    /// end is told as any is (`Msg::CoreGone`).
+    /// end is told as any is (`Msg::CoreExited`).
     pub fn signal(&self, kill: bool) {
         let sig = if kill { libc::SIGKILL } else { libc::SIGTERM };
         // SAFETY: a signal to the core's own process, by its pid, which this
         // runner reaps (its exit watcher) only after it has ended
-        unsafe { libc::kill(self.pid as i32, sig) };
+        if self.pid > 0 {
+            unsafe { libc::kill(self.pid as i32, sig) };
+        }
     }
 }
