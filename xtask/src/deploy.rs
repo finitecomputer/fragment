@@ -1266,7 +1266,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let cell = worker_config(&d, &n, &store.id, &release, &devstack::repo_root())?;
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
-    let admin = admin_config(&cell, &n, &devstack::repo_root())?;
+    let admin = admin_config(&d, &cell, &n, &store.id, &devstack::repo_root())?;
     let admin_config = dir.join("admin.json");
     fs::write(&admin_config, serde_json::to_string_pretty(&admin)?)?;
     let admin_made = script_exists(&api, &n.admin)?;
@@ -1554,8 +1554,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
 /// its release among them, so the objects admit its calls and its
 /// settings are the cell's (cell/src/config.rs reads both from one set);
 /// no route, no workers.dev or preview URL: the cell's binding alone
-/// reaches it. It binds no store secret.
-fn admin_config(cell: &Value, n: &Names, root: &Path) -> Result<Value> {
+/// reaches it. Its store secrets (`Bound::admin`: the logs' read key) are
+/// bound in the store `store_id`, and are the cell's no more.
+fn admin_config(d: &Deployment, cell: &Value, n: &Names, store_id: &str, root: &Path) -> Result<Value> {
     let mut cell = cell.clone();
     let mut admin = devstack::read_admin_config(&root.join("cell"))?;
     devstack::pair_admin(&mut cell, &mut admin, &n.admin)?;
@@ -1567,6 +1568,10 @@ fn admin_config(cell: &Value, n: &Names, root: &Path) -> Result<Value> {
     a.insert("observability".into(), cell["observability"].clone());
     a.insert("vars".into(), cell["vars"].clone());
     anyhow::ensure!(a.get("vars").is_some_and(Value::is_object) && a.get("observability").is_some_and(Value::is_object), "the cell's config is rendered first");
+    let bound = bound_for(d, n.label_suffix.as_deref())?;
+    if !bound.admin().is_empty() {
+        a.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.admin()));
+    }
     Ok(admin)
 }
 
@@ -2075,7 +2080,7 @@ mod tests {
             let root = devstack::repo_root();
             let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &root).unwrap();
             assert_eq!(cell["services"], json!([{ "binding": "ADMIN", "service": admin_name }]), "the cell hands its admin's routes to this deployment's");
-            let admin = admin_config(&cell, &n, &root).unwrap();
+            let admin = admin_config(&d, &cell, &n, "0f0e0d0c", &root).unwrap();
             assert_eq!(admin["name"], admin_name);
             assert_eq!(admin["main"], json!(root.join("cell/build/admin/index.js")));
             assert_eq!(admin["vars"], cell["vars"], "the cell's variables whole: its release, its settings");
@@ -2092,6 +2097,15 @@ mod tests {
             let bare = admin_bare(&admin);
             assert!(bare.get("durable_objects").is_none() && bare["name"] == admin_name && bare["vars"] == admin["vars"], "a first upload binds no object, and is otherwise the same");
         }
+        // the logs' read key: bound to the admin Worker, and the cell's no more
+        let mut d = deployment(None, None);
+        d.observability_read = Some("fragment-observability-read".into());
+        let n = names(&d, Some("p5")).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let admin = admin_config(&d, &cell, &n, "0f0e0d0c", &devstack::repo_root()).unwrap();
+        assert_eq!(admin["secrets_store_secrets"], json!([{ "binding": "OBSERVABILITY_READ", "store_id": "0f0e0d0c", "secret_name": "fragment-observability-read" }]));
+        assert!(!cell["secrets_store_secrets"].as_array().unwrap().iter().any(|b| b["binding"] == "OBSERVABILITY_READ"), "no fragment's isolate holds it");
+        assert_eq!((&admin["vars"]["FRAGMENT_ACCOUNT_ID"], &admin["vars"]["FRAGMENT_WORKER_NAME"]), (&json!("acct"), &json!("fragment-p5")), "the account it reads, and the cell's lines alone");
     }
 
     /// Goal: no deployment's admin Worker is ever another deployment's cell

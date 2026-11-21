@@ -419,7 +419,9 @@ pub struct Bound {
     /// slots may name one: Finite's tiers name the platform's OpenRouter key).
     pub model_keys: Vec<(String, String)>,
     /// A read-only key to the account's Workers Observability, which the
-    /// operators' glance reads its logs with (none: the glance says so).
+    /// operators' glance reads its logs with (none: the glance says so):
+    /// the admin Worker's alone (`admin`), so no fragment's isolate holds
+    /// an account-wide log read key.
     pub observability_read: Option<String>,
 }
 
@@ -446,7 +448,7 @@ impl Bound {
         }
     }
 
-    /// The platform Worker's: every one.
+    /// The platform Worker's: every one but the admin Worker's (`admin`).
     pub fn cell(&self) -> Vec<(String, &str)> {
         let mut bound = vec![(bindings::HOST_SECRET.to_string(), self.host_secret.as_str())];
         if let Some(previous) = &self.host_secret_previous {
@@ -466,9 +468,6 @@ impl Bound {
         for (slot, name) in &self.model_keys {
             bound.push((bindings::model_key(slot), name.as_str()));
         }
-        if let Some(name) = &self.observability_read {
-            bound.push((bindings::OBSERVABILITY_READ.to_string(), name.as_str()));
-        }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));
         }
@@ -480,9 +479,15 @@ impl Bound {
     }
 
     /// The secrets `cell` binds, each once: two bindings may name one.
+    /// The operators' admin Worker's (cell/src/admin.rs): the key its
+    /// glance reads the logs with.
+    pub fn admin(&self) -> Vec<(String, &str)> {
+        self.observability_read.iter().map(|name| (bindings::OBSERVABILITY_READ.to_string(), name.as_str())).collect()
+    }
+
     pub fn secrets(&self) -> Vec<&str> {
         let mut names: Vec<&str> = Vec::new();
-        for (_, name) in self.cell() {
+        for (_, name) in self.cell().into_iter().chain(self.admin()) {
             if !names.contains(&name) {
                 names.push(name);
             }
@@ -729,6 +734,13 @@ mod tests {
         // two slots on one key: two bindings, one secret
         assert_eq!(bound.secrets().iter().filter(|n| **n == MODEL_KEY).count(), 1);
         assert_eq!(bound.secrets().len(), cell.len() - 1);
+        // the logs' read key is the admin Worker's alone, and a secret all the same
+        assert!(bound.admin().is_empty());
+        let mut read = bound.clone();
+        read.observability_read = Some("fragment-observability-read".into());
+        assert_eq!(read.admin(), [("OBSERVABILITY_READ".to_string(), "fragment-observability-read")]);
+        assert_eq!(read.cell(), cell, "no fragment's isolate holds it");
+        assert_eq!(read.secrets().len(), cell.len(), "and the store holds it");
         let doubled = vec![("HOST_SECRET".to_string(), "a"), ("HOST_SECRET".to_string(), "b")];
         assert!(std::panic::catch_unwind(|| bindings_json("0f0e", &doubled)).is_err());
 

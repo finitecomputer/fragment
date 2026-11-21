@@ -249,7 +249,7 @@ pub fn admin_local_config(project: &Path) -> PathBuf {
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
 /// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
@@ -269,6 +269,9 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     let mut admin = read_admin_config(project)?;
     let admin_name = admin["name"].as_str().context("the admin Worker's config names it")?.to_string();
     pair_admin(&mut config, &mut admin, &admin_name)?;
+    if !admin_secrets.is_empty() {
+        admin["secrets_store_secrets"] = store::bindings_json(store::LOCAL_STORE_ID, admin_secrets);
+    }
     fs::write(admin_local_config(project), serde_json::to_string_pretty(&admin)?)?;
     let path = local_config(project);
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
@@ -606,7 +609,7 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &self.images)?;
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images)?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;

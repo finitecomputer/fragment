@@ -55,6 +55,7 @@ pub async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     crate::orgs::operator(env, cfg, &req, &url, &bytes).await?;
     match (req.method(), rest) {
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
+        (Method::Get, ["glance"]) => json_answer(&crate::glance::glance(env, cfg, &url).await?),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
 }
