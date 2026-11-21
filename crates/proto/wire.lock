@@ -9,6 +9,7 @@
 bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.at range i64
+bound ChannelRecord.author default null
 bound ChannelRecord.seq range i64
 bound Command.as default null
 bound Command.attempt range u32
@@ -164,6 +165,7 @@ field ChannelPage.more required boolean
 field ChannelPage.next required integer
 field ChannelPage.records required array<ChannelRecord>
 field ChannelRecord.at required integer
+field ChannelRecord.author optional Author|null
 field ChannelRecord.body required any
 field ChannelRecord.channel required string
 field ChannelRecord.kind required string
@@ -533,6 +535,7 @@ field migrations.zip.path.stage required string
 field search.find.query.q required string
 field vault.put.path.secret required string
 field vault.remove.path.secret required string
+other Author other
 other FragmentKind other
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft
 route channels.draft accepts nip98
@@ -751,6 +754,7 @@ route vault.remove path vault.remove.path
 route vault.remove query vault.remove.query
 route vault.remove response SecretRemoved
 type Archived out object
+type Author out enum open
 type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
@@ -954,6 +958,12 @@ type vault.put.path in object
 type vault.put.query in object
 type vault.remove.path in object
 type vault.remove.query in object
+value Author agent
+value Author code
+value Author door
+value Author other
+value Author person
+value Author platform
 value CommandKind restart
 value CommandKind retire
 value CommandKind stop_and_stage

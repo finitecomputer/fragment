@@ -834,6 +834,27 @@ the list is (cell/src/search.rs, `fragment_core::search`).
 
 A chat's newest entry is its row's `preview`.
 
+### Who wrote a record
+
+Each record says who wrote it (`author`, `Author` in docs/wire), stamped
+by the platform as it appends the record and never taken from its caller
+(FIN-615). `principal` is whom the record was written as; `author` is what
+chose its words:
+
+- `person` or `agent`: the poster's own post (an anonymous visitor's is a
+  person's).
+- `code`: a mutation's effect or a job's step, in a fragment that runs its
+  author's own code. It speaks for no one: its `principal` is whoever
+  called that code.
+- `platform`: the platform's own records (`events`, `ops`, a schedule
+  firing), and what a release's code writes while the fragment runs it
+  unforked.
+- `door`: a relay its owner opened (a connector's release code, a door's
+  signed post), or a delivery to the inbox.
+
+A record stored before the stamp has no `author`, and reads as it did. A
+reader meets an author it does not know as `other`.
+
 ### Listed records
 
 A channel that declares `listed` (Apps) puts what each member is doing on

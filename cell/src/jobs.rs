@@ -58,7 +58,7 @@ use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
-    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
+    limits, valid_secret_name, Author, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -987,9 +987,11 @@ impl FragmentCell {
         // the one check a mutation's records meet too, on its channel's
         // declaration alone
         let decl = self.declared_channel(channel).map_err(retry)?;
-        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
+        let hosted = self.hosted_door().map_err(retry)?;
+        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), hosted.as_ref()).map_err(permanent)?;
+        let author = self.code_author(hosted.is_some()).map_err(retry)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
-        let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
+        let (record, appended) = self.append_once(channel, &run.principal, author, kind, &body, (&key, i64::from(index))).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
@@ -1607,7 +1609,7 @@ impl FragmentCell {
         };
         // unkeyed: a sender's retry is a new record, so a failure of its
         // triggers is the sender's error to see, never a silent 200
-        let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
+        let record = self.append("inbox", "inbox", Author::Door, "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
         let answered = match answer {
             Some(op) => self.inbox_answer(&op, &record, hops).await?,

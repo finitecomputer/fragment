@@ -60,7 +60,7 @@ use fragment_core::access::{Purpose, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::{door, npub};
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
+    limits, valid_channel_name, valid_op_id, Author, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
@@ -219,6 +219,8 @@ struct RecordRow {
     seq: i64,
     at: i64,
     principal: String,
+    /// `None` on a record stored before the stamp (Fragment step 11).
+    author: Option<String>,
     kind: String,
     body: String,
 }
@@ -228,16 +230,24 @@ impl RecordRow {
     /// no tree built), never parsed into a value only to be written again.
     fn record(self) -> CellResult<ChannelRecord> {
         let body = RawValue::from_string(self.body).map_err(|e| CellError::host(format!("record {}#{}: its stored body is not JSON: {e}", self.channel, self.seq)))?;
-        Ok(ChannelRecord { principal: npub::display(&self.principal), channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body })
+        // only `append` writes it, and only a name `Author::parse` reads
+        let author = match self.author.as_deref() {
+            None => None,
+            Some(name) => Some(Author::parse(name).ok_or_else(|| CellError::host(format!("record {}#{}: its stored author {name:?} does not decode", self.channel, self.seq)))?),
+        };
+        Ok(ChannelRecord { principal: npub::display(&self.principal), author, channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body })
     }
 }
 
 impl FragmentCell {
-    /// Appends a record; `op` = (ledger id, index) makes it idempotent.
-    /// Answers the record, or `None` when that (op, index) already exists.
-    /// The record answered is the body given, as it was stored: nothing is
-    /// read back but its place.
-    pub(crate) fn append(&self, channel: &str, principal: &str, kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
+    /// Appends a record, as `principal`, written by `author` (the
+    /// platform's stamp: what wrote its words, never the caller's say);
+    /// `op` = (ledger id, index) makes it idempotent. Answers the record,
+    /// or `None` when that (op, index) already exists. The record answered
+    /// is the body given, as it was stored: nothing is read back but its
+    /// place.
+    pub(crate) fn append(&self, channel: &str, principal: &str, author: Author, kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
+        assert!(author != Author::Other, "the platform stamps an author it knows");
         let now = js::now_ms();
         let (op_id, idx) = match op {
             Some((id, i)) => (SqlStorageValue::from(id), SqlStorageValue::Integer(i)),
@@ -270,10 +280,10 @@ impl FragmentCell {
             (false, _) => None,
         };
         let rows = self.rows(
-            "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+            "INSERT INTO records (channel, seq, at, principal, author, kind, body, op, idx, outboxed)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING seq",
-            vec![channel.into(), SqlStorageValue::Integer(next), SqlStorageValue::Integer(now), principal.into(), kind.into(), raw.get().into(), op_id, idx],
+            vec![channel.into(), SqlStorageValue::Integer(next), SqlStorageValue::Integer(now), principal.into(), author.as_str().into(), kind.into(), raw.get().into(), op_id, idx],
         )?;
         let Some(row) = rows.first() else { return Ok(None) };
         let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
@@ -301,7 +311,7 @@ impl FragmentCell {
                 vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
             )?;
         }
-        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body: raw };
+        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
     }
@@ -331,7 +341,7 @@ impl FragmentCell {
     /// longer keeps is none. The caller checked the channel's read role.
     pub(crate) fn channel_newest(&self, channel: &str) -> CellResult<ChannelNewest> {
         let rows: Vec<RecordRow> = self.typed(
-            "SELECT r.channel, r.seq, r.at, r.principal, r.kind, r.body FROM newest n JOIN records r ON r.channel = n.channel AND r.seq = n.seq
+            "SELECT r.channel, r.seq, r.at, r.principal, r.author, r.kind, r.body FROM newest n JOIN records r ON r.channel = n.channel AND r.seq = n.seq
              WHERE n.channel = ? ORDER BY n.seq DESC LIMIT ?",
             vec![channel.into(), SqlStorageValue::Integer(limits::NEWEST_KEPT_MAX as i64)],
         )?;
@@ -412,15 +422,29 @@ impl FragmentCell {
         Ok(self.meta(MetaKey::TestPostedKept)?.and_then(|v| v.parse().ok()).unwrap_or(limits::POSTED_KEPT))
     }
 
+    /// Who wrote what this fragment's code publishes (an operation's
+    /// effect, a job's step), as its record says: its author's own code
+    /// speaks for no one (`Author::Code`). A release's code, unforked, is
+    /// the platform's, or, while it is an open door (`hosted`), that door's.
+    pub(crate) fn code_author(&self, hosted: bool) -> CellResult<Author> {
+        if hosted {
+            return Ok(Author::Door);
+        }
+        Ok(match self.blessed()? {
+            Some(_) => Author::Platform,
+            None => Author::Code,
+        })
+    }
+
     /// Appends a keyed record, or finds the one an earlier try of the same
-    /// (op, index) appended. Answers the record and whether this call
+    /// `(key, index)` appended. Answers the record and whether this call
     /// appended it.
-    pub(crate) fn append_once(&self, channel: &str, principal: &str, kind: &str, body: &Value, key: &str, index: i64) -> CellResult<(ChannelRecord, bool)> {
-        if let Some(record) = self.append(channel, principal, kind, body, Some((key, index)))? {
+    pub(crate) fn append_once(&self, channel: &str, principal: &str, author: Author, kind: &str, body: &Value, (key, index): (&str, i64)) -> CellResult<(ChannelRecord, bool)> {
+        if let Some(record) = self.append(channel, principal, author, kind, body, Some((key, index)))? {
             return Ok((record, true));
         }
         let rows: Vec<RecordRow> = self.typed(
-            "SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?",
+            "SELECT channel, seq, at, principal, author, kind, body FROM records WHERE op = ? AND idx = ?",
             vec![key.into(), SqlStorageValue::Integer(index)],
         )?;
         // the insert conflicted on (op, idx), so a row holds them, and one effect names one channel
@@ -518,8 +542,15 @@ impl FragmentCell {
         // after the last await: the life it is appended to is the one read
         self.relayed_into_owners(caller, body)?;
         let key = post_key(principal, id);
+        // its poster wrote it: a person (an anonymous visitor too), an
+        // agent, or a door it relays for (`door_checked` passed it)
+        let author = match (door::relays(body), caller.kind()) {
+            (true, _) => Author::Door,
+            (false, Some(IdentityKind::Agent)) => Author::Agent,
+            (false, Some(IdentityKind::Person) | None) => Author::Person,
+        };
         // the append and the look for an earlier one are one step (no await between)
-        let (record, appended) = match self.append(channel, principal, POST_KIND, body, Some((&key, POST_INDEX)))? {
+        let (record, appended) = match self.append(channel, principal, author, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
             None => (self.posted(&key, channel, body)?, false),
         };
@@ -687,7 +718,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own relays no one (`relayed`)"));
         }
         let own = self.own_key()?;
-        let (record, appended) = self.append_once(channel, &own, POST_KIND, body, key, POST_INDEX)?;
+        let (record, appended) = self.append_once(channel, &own, Author::Platform, POST_KIND, body, (key, POST_INDEX))?;
         self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
         Ok((record, appended))
     }
@@ -708,9 +739,12 @@ impl FragmentCell {
         if decl.post.is_none() {
             return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts")));
         }
-        if self.rows("SELECT 1 AS x FROM members WHERE principal = ?", vec![principal.into()])?.is_empty() {
+        let rows = self.rows("SELECT kind FROM members WHERE principal = ?", vec![principal.into()])?;
+        let Some(member) = rows.first() else {
             return Err(CellError::invalid(format!("{principal} is no member of this fragment")));
-        }
+        };
+        // written as its member would post them
+        let author = if member["kind"].as_str() == Some(IdentityKind::Agent.as_str()) { Author::Agent } else { Author::Person };
         let mut newest = None;
         for post in posts {
             let id = post["id"].as_str().filter(|id| valid_op_id(id)).ok_or_else(|| CellError::invalid("each record has an id matching ^[A-Za-z0-9._:-]{1,128}$"))?;
@@ -720,7 +754,7 @@ impl FragmentCell {
                 return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
             }
             let record = self
-                .append(channel, principal, POST_KIND, body, Some((&post_key(principal, id), POST_INDEX)))?
+                .append(channel, principal, author, POST_KIND, body, Some((&post_key(principal, id), POST_INDEX)))?
                 .ok_or_else(|| CellError::invalid(format!("post {id} was filled before")))?;
             self.published(&record, true, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
             newest = Some(record.seq);
@@ -733,7 +767,7 @@ impl FragmentCell {
     /// the poster reusing an id (409), as a call with another input is.
     fn posted(&self, key: &str, channel: &str, body: &Value) -> CellResult<ChannelRecord> {
         let rows: Vec<RecordRow> =
-            self.typed("SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?;
+            self.typed("SELECT channel, seq, at, principal, author, kind, body FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?;
         // the append conflicted on (op, idx), so a row holds them
         let record = rows.into_iter().next().ok_or_else(|| CellError::host(format!("post {key} conflicted, and no record holds it")))?.record()?;
         let stored: Value = crate::json_text(record.body.get()).map_err(|e| CellError::host(format!("post {key}: its stored body is not JSON: {e}")))?;
@@ -783,7 +817,7 @@ impl FragmentCell {
     /// A page of records after `after`.
     pub(crate) fn read_channel(&self, channel: &str, after: i64, limit: usize) -> CellResult<Vec<ChannelRecord>> {
         let rows: Vec<RecordRow> = self.typed(
-            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?",
+            "SELECT channel, seq, at, principal, author, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?",
             vec![channel.into(), SqlStorageValue::Integer(after), SqlStorageValue::Integer(limit.clamp(1, limits::CHANNEL_PAGE) as i64)],
         )?;
         rows.into_iter().map(RecordRow::record).collect()
@@ -879,9 +913,9 @@ impl FragmentCell {
     /// or before it, descending (`back`).
     fn read_batch(&self, channel: &str, cursor: i64, back: bool, n: usize) -> CellResult<Vec<ChannelRecord>> {
         let q = if back {
-            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?"
+            "SELECT channel, seq, at, principal, author, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?"
         } else {
-            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?"
+            "SELECT channel, seq, at, principal, author, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?"
         };
         let rows: Vec<RecordRow> = self.typed(q, vec![channel.into(), SqlStorageValue::Integer(cursor), SqlStorageValue::Integer(n as i64)])?;
         rows.into_iter().map(RecordRow::record).collect()
@@ -964,8 +998,12 @@ impl FragmentCell {
     /// failure). Each new record starts the runs its channel triggers, one
     /// hop deeper than the mutation.
     pub(crate) async fn apply(&self, p: &Pending, effects: &Value) -> CellResult<Settled> {
-        let (declared, hosted) = match self.declared_channels().and_then(|d| Ok((d, self.hosted_door()?))) {
-            Ok(both) => both,
+        let (declared, hosted, author) = match self.declared_channels().and_then(|d| {
+            let hosted = self.hosted_door()?;
+            let author = self.code_author(hosted.is_some())?;
+            Ok((d, hosted, author))
+        }) {
+            Ok(all) => all,
             Err(e) => return self.after_failure(p, e).await,
         };
         let list = match effects::decode(effects, &declared, hosted.as_ref()) {
@@ -977,7 +1015,7 @@ impl FragmentCell {
         for (i, effect) in list.into_iter().enumerate() {
             let index = i64::try_from(i).expect("a mutation has at most EFFECTS_MAX effects");
             let done = match effect {
-                Effect::Record { channel, kind, body } => self.apply_record(p, &key, index, &channel, &kind, &body).await,
+                Effect::Record { channel, kind, body } => self.apply_record(p, author, (&key, index), &channel, &kind, &body).await,
                 Effect::File { path, bytes } => {
                     writes.push(crate::files::FileWrite { path, bytes });
                     Ok(())
@@ -1000,8 +1038,8 @@ impl FragmentCell {
         Ok(Settled::Applied)
     }
 
-    async fn apply_record(&self, p: &Pending, key: &str, index: i64, channel: &str, kind: &str, body: &Value) -> CellResult<()> {
-        let (record, appended) = self.append_once(channel, &p.principal, kind, body, key, index)?;
+    async fn apply_record(&self, p: &Pending, author: Author, op: (&str, i64), channel: &str, kind: &str, body: &Value) -> CellResult<()> {
+        let (record, appended) = self.append_once(channel, &p.principal, author, kind, body, op)?;
         self.published(&record, appended, p.depth + 1, &mut js::Laps::start()).await?;
         Ok(())
     }
@@ -1026,7 +1064,7 @@ impl FragmentCell {
     /// Marks a run applied: its `ops` record and its pending row's removal
     /// are one step (no await between them), so they are stored together.
     fn mark_applied(&self, p: &Pending) -> CellResult<()> {
-        if self.append("ops", &p.principal, "mutation", &json!({ "op": p.op, "id": p.id() }), Some((&p.key(), -1)))?.is_some() {
+        if self.append("ops", &p.principal, Author::Platform, "mutation", &json!({ "op": p.op, "id": p.id() }), Some((&p.key(), -1)))?.is_some() {
             self.broadcast_changed(&p.op);
         }
         self.forget(p)
