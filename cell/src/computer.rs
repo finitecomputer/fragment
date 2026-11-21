@@ -1077,24 +1077,46 @@ impl ComputerCell {
         Ok(said::said(&notices(&life, &self.saves()?, &self.images()?, &self.rules()), &facts))
     }
 
-    /// Counts one call on operator key `provider` against its row's calls an
-    /// hour (`calls_an_hour`): refused, 429, with the wait to the hour's end,
-    /// past it. No row's limit, no count.
-    /// The count is its SQLite's (`key_calls`), so an eviction or a restart
-    /// counts on.
+    /// Operator key `provider`'s calls this hour from this computer: its
+    /// SQLite's (`key_calls`), so an eviction or a restart counts on.
+    fn key_hour(&self, provider: &str) -> CellResult<fragment_core::ratelimit::Hourly> {
+        let rows = self.rows("SELECT hour, used FROM key_calls WHERE provider = ?", vec![provider.into()])?;
+        Ok(rows.first().map_or(fragment_core::ratelimit::Hourly::default(), |r| fragment_core::ratelimit::Hourly { hour: r["hour"].as_i64().unwrap_or(0), used: r["used"].as_u64().and_then(|u| u32::try_from(u).ok()).unwrap_or(u32::MAX) }))
+    }
+
+    /// Refused, 429, with the wait to the hour's end, once this hour has had
+    /// operator key `provider`'s row's calls an hour (`calls_an_hour`) from
+    /// this computer. Nothing is counted here: a call is counted as it goes
+    /// (`called`), past its Vault, its plan and its owner's standing, so a
+    /// request refused before it is sent costs none. Calls asked side by
+    /// side pass it together: past it by those in flight at most. No row's
+    /// limit, no check.
     fn within_hour(&self, provider: &catalog::Provider) -> CellResult<()> {
         let Some(max) = provider.calls_an_hour else { return Ok(()) };
-        let rows = self.rows("SELECT hour, used FROM key_calls WHERE provider = ?", vec![provider.name.as_str().into()])?;
-        let mut hourly = rows.first().map_or(fragment_core::ratelimit::Hourly::default(), |r| fragment_core::ratelimit::Hourly { hour: r["hour"].as_i64().unwrap_or(0), used: r["used"].as_u64().and_then(|u| u32::try_from(u).ok()).unwrap_or(u32::MAX) });
-        let taken = hourly.take(max, js::now_ms());
-        self.exec(
-            "INSERT INTO key_calls (provider, hour, used) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET hour = excluded.hour, used = excluded.used",
-            vec![provider.name.as_str().into(), hourly.hour.into(), i64::from(hourly.used).into()],
-        )?;
-        taken.map_err(|wait| {
+        self.key_hour(&provider.name)?.take(max, js::now_ms()).map_err(|wait| {
             let minutes = wait.div_euclid(60_000) + 1;
             CellError::new(ErrorCode::RateLimited, format!("{} takes at most {max} calls an hour from this computer: try again in about {minutes} minutes", provider.name)).retry_after(wait.unsigned_abs())
         })
+    }
+
+    /// A call sent now on each of `providers`' keys (`egress_swap`), counted
+    /// once in the hour of each whose row has calls an hour (`within_hour`).
+    fn called(&self, mut providers: Vec<String>) -> CellResult<()> {
+        if providers.len() > swap::PLACEHOLDERS_MAX {
+            return Err(CellError::invalid(format!("a call names at most {} keys", swap::PLACEHOLDERS_MAX)));
+        }
+        providers.sort_unstable();
+        providers.dedup();
+        for row in providers.iter().filter_map(|p| self.cfg.providers.get(p)).filter(|row| row.calls_an_hour.is_some()) {
+            let mut hourly = self.key_hour(&row.name)?;
+            // sent already: counted whatever the hour has had
+            let _ = hourly.take(u32::MAX, js::now_ms());
+            self.exec(
+                "INSERT INTO key_calls (provider, hour, used) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET hour = excluded.hour, used = excluded.used",
+                vec![row.name.as_str().into(), hourly.hour.into(), i64::from(hourly.used).into()],
+            )?;
+        }
+        Ok(())
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -3422,6 +3444,13 @@ impl ComputerCell {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
             }
+            // a call on operator keys going now (`egress_swap`): its calls an hour
+            "computer/called" => {
+                let b: Value = body_json(&mut req).await?;
+                let providers: Vec<String> = b["providers"].as_array().map(|l| l.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                self.called(providers)?;
+                json_response(&json!({}))
+            }
             "computer/signed-in" => {
                 let b: SignedInAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
@@ -3975,7 +4004,8 @@ impl ComputerCell {
                     self.connection_token(&owner, &provider.name, agent, grants.account(&provider.name), at).await?
                 }
                 // its call gated on its owner's standing and charged after
-                // (`egress_swap`), within its calls an hour here
+                // (`egress_swap`), within its calls an hour here, and counted
+                // in them as it goes
                 Kind::Operator => {
                     if !counted.contains(&provider.name.as_str()) {
                         self.within_hour(provider)?;
@@ -4820,7 +4850,24 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
         crate::pipe::gate(env, owner, None, ctx).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
     }
-    let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
+    // a key whose row has calls an hour counts this call as it goes, beside
+    // it (`Computer::called`): no wait added, the vendor's being the longer
+    let mut limited: Vec<String> = keys.iter().filter_map(|p| cfg.providers.named(&p.provider, p.connection)).filter(|row| row.calls_an_hour.is_some()).map(|row| row.name.clone()).collect();
+    limited.sort_unstable();
+    limited.dedup();
+    let out = Fetch::Request(out);
+    let fetch = out.send();
+    let sent = match limited.is_empty() {
+        true => fetch.await,
+        false => {
+            let (sent, counted) = futures_util::future::join(fetch, ask(env, computer, "computer/called", &json!({ "providers": limited }))).await;
+            if let Err(e) = counted {
+                console_error!("{}", json!({ "event": "pipe.uncounted", "computer": computer, "providers": limited, "error": e.message }));
+            }
+            sent
+        }
+    };
+    let sent = sent.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {

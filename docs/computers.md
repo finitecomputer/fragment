@@ -1021,7 +1021,8 @@ provider's own hosts.
   when its owner's gate, asked beside the call as for a model call, has
   heard them refused (402, 403; docs/ledger.md, "The gate"); and one
   past its row's `calls_an_hour` from this computer (429 `rate_limited`,
-  with `retry_after_ms`: Google Places, 120 by default, uncharged). A body goes
+  with `retry_after_ms`: Google Places, 120 by default, uncharged; a call
+  is counted as it is sent, beside it, so one refused first costs none). A body goes
   as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
