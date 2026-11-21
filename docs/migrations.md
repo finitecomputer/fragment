@@ -150,6 +150,15 @@ again. A visit cut off before the mark gives it again, the registry
 answering the same comp. A guest makes no agent (decision 25), so the comp
 comes before `/move` makes the new ones.
 
+**SimpleX needs always-on.** A `seat`'s computer sleeps, and SimpleX runs
+only on one that stays on, so a mover whose stage carries their SimpleX
+chat would lose it (Fadi's, 2026-11-20). The mover says so in the
+manifest (`simplex: true`, "SimpleX in a stage"), and the stage's
+`complete` makes that person's comped `seat` a `seat_always_on` before its
+zip is made: a failure is the mover's complete tried again. A paid seat,
+one always-on already, or none is left as it is. Everyone else keeps a
+`seat` that sleeps.
+
 Comps the move gave before with a 30-day end lost it at the registry's
 step 12 (`0012_move_comps_open.sql`): each row whose last comp in the
 operators' log is Migrations', or, none logged, that Migrations added.
@@ -333,6 +342,9 @@ the files open as they are.
   read by ranges as the agent, or given up (then Link SimpleX, as before),
   so the import, and its `done`, come after by construction. It runs
   nothing then.
+- **The manifest says it carries one** (`simplex: true`), so its
+  person's comped seat is made always-on as it completes (The comp, "SimpleX
+  needs always-on").
 - **Only the owner adopts it**, from their Settings ("Keep my SimpleX
   chat"), by a door ticket the platform signs (`adopt`, docs/api.md, "An
   agent's doors"). The bridge binds its link to that contact and lets the
