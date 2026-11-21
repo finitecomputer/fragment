@@ -3332,6 +3332,9 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                // when this isolate last heard its guest read its view (a
+                // test waits for its bridge to take a lever's read so)
+                v["heard"] = json!(self.heard_ms.get());
                 v["heldUntil"] = json!(life.held_until_ms());
                 v["phase"] = json!(life.phase);
                 v["failures"] = json!(life.failures());

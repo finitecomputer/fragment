@@ -261,7 +261,9 @@ steps; its "no reply yet" waits until it is up):
   skill makes room with `fragment offload`, which removes a file only once
   its copy in a members-only fragment of the owner's reads back as it was
   (cli/GUIDE.md, "Moving files off a disk"). Both views carry the read
-  and its room (`disk`), the guest's for its agents.
+  and its room (`disk`), the guest's for its agents: each agent is told
+  firmly at its next turn after each read that finds it filling
+  (docs/bridge.md, "An agent is told to make room").
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
