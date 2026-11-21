@@ -1033,10 +1033,12 @@ impl Catalog {
     /// charge's) is refused, never priced as whichever came first.
     fn priced_once(&self) -> Result<(), CatalogError> {
         let mut seen: Vec<(String, i64, u64)> = vec![];
+        // one rate, however written: 5,000,000 per 1,000 is 5,000 per 1
+        let same = |(m, p): (i64, u64), (n, q): (i64, u64)| i128::from(m) * i128::from(q) == i128::from(n) * i128::from(p);
         for (provider, key, micros, per, old) in self.named_prices() {
             match seen.iter().find(|(k, ..)| *k == key) {
                 // an older release's estimate a call yields to the row's own price a call
-                Some((_, m, p)) if (*m, *p) != (micros, per) && !(old && key == provider) => return Err(CatalogError::Charges { provider, why: format!("{key} is priced twice, at two prices") }),
+                Some((_, m, p)) if !same((*m, *p), (micros, per)) && !(old && key == provider) => return Err(CatalogError::Charges { provider, why: format!("{key} is priced twice, at two prices") }),
                 Some(_) => {}
                 None => seen.push((key, micros, per)),
             }
@@ -1781,6 +1783,8 @@ mod tests {
         // a name priced twice is refused at two prices, never priced as whichever came first
         let twice = |a: i64, b: i64| json!([charge(json!({ "unit": "unit", "price": { "micros": a, "per": 1 } })), charge(json!({ "header": "x-units", "unit": "unit", "price": { "micros": b, "per": 1 } }))]);
         assert!(parse(row("operator", twice(5, 5))).is_ok(), "two places to read one unit, at one price");
+        let thousand = json!([charge(json!({ "unit": "unit", "price": { "micros": 5_000, "per": 1 } })), charge(json!({ "header": "x-units", "unit": "unit", "price": { "micros": 5_000_000, "per": 1_000 } }))]);
+        assert!(parse(row("operator", thousand)).is_ok(), "one rate, however written");
         assert!(refused(twice(5, 6)), "one unit at two prices");
         let speech = json!([{ "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"],
             "charges": [{ "calls": ["GET /v1/example"], "unit": "speech", "price": { "micros": 100_000, "per": 1 } }] }]);

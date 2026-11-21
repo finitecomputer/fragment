@@ -11,10 +11,10 @@ use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess,
 /// `/data/metadata/creditsUsed`), and a pointer's walk goes one level a
 /// segment.
 pub const POINTER_SEGMENTS_MAX: usize = 8;
-/// The longest event-stream line read for its number: a usage event is a
-/// few hundred bytes; a longer line (a chunk of the answer's own text) is
-/// skipped, never held.
-pub const EVENT_LINE_MAX_BYTES: usize = 64 * 1024;
+/// The longest event-stream line read for its number: a usage chunk is a
+/// few hundred bytes, but a Responses stream's last event carries its
+/// whole answer beside its usage; a longer line is skipped, never held.
+pub const EVENT_LINE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// The segments of JSON pointer `pointer` (RFC 6901), `~1` and `~0`
 /// unescaped, when it is one a meter may name: `/` first, 1 to

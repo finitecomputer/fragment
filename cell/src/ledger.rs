@@ -591,10 +591,10 @@ impl Tally for SqlStore {
         rows.first().map_or(0, |r| r.micros)
     }
 
-    fn spent_last(&self) -> Option<i64> {
-        // the slots' primary key: one row read
-        let rows: Vec<Spent> = self.rows("SELECT COALESCE(MAX(slot), -1) AS micros FROM spend_slots", vec![]);
-        rows.first().map(|r| r.micros).filter(|slot| *slot >= 0)
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)> {
+        // at most an hour's rows: older ones are forgotten as each is counted
+        let rows: Vec<Slot> = self.rows("SELECT slot, micros FROM spend_slots WHERE slot >= ? ORDER BY slot", vec![SqlStorageValue::Integer(slot)]);
+        rows.into_iter().map(|r| (r.slot, r.micros)).collect()
     }
 
     fn forget_spend_before(&mut self, slot: i64) {
@@ -615,6 +615,12 @@ struct Json {
 
 #[derive(Deserialize)]
 struct Spent {
+    micros: i64,
+}
+
+#[derive(Deserialize)]
+struct Slot {
+    slot: i64,
     micros: i64,
 }
 
@@ -1102,12 +1108,15 @@ impl LedgerCell {
                 if full > 0 {
                     console_error!("{}", json!({ "event": "ledger.uses-full", "agent": agent, "lost": full }));
                 }
-                // its spend passed a step of its notice: its person's pages told
-                if stepped {
-                    let now = js::now_ms() + self.offset_ms()?;
-                    let store = SqlStore::new(self.sql());
+                // its spend passed a step of its notice, or is past one, whose
+                // end it may have moved: its person's pages told what changed
+                // (`told` tells nothing that did not)
+                let now = js::now_ms() + self.offset_ms()?;
+                let store = SqlStore::new(self.sql());
+                let spent = uses::spent_hour(&store, now);
+                if stepped || spent >= core::said::SPENDING_MICROS {
                     if let Some(ledger) = stored(&store)?.1 {
-                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), (uses::spent_hour(&store, now), uses::spent_until(&store, now)))));
+                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), (spent, uses::spent_until(&store, now)))));
                         self.told();
                     }
                 }
