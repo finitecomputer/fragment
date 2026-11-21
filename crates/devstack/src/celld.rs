@@ -32,7 +32,12 @@ use anyhow::{bail, Context, Result};
 use crate::{boot_log, front, spawn_node, Node, NodeOptions, READY_TIMEOUT};
 
 /// What the celld render leaves out of the local config, and why.
-pub const DROPPED: [(&str, &str); 1] = [("build", "worker-build has run (cargo xtask build)")];
+pub const DROPPED: [(&str, &str); 2] = [
+    ("build", "worker-build has run (cargo xtask build)"),
+    // the cell then answers the admin's routes with a host failure saying
+    // so (cell/src/admin.rs `forward`; docs/technical-debt-ledger.md)
+    ("services", "celld runs one Worker, the cell: not the admin Worker beside it"),
+];
 
 /// The config celld runs: `wrangler.celld.jsonc`, beside the project's own
 /// (so its paths and `.dev.vars` resolve the same), the local config a node
@@ -439,7 +444,8 @@ mod tests {
     }
 
     /// Goal: celld runs the local config a wrangler node runs, its secrets
-    /// bound by name, less `build` alone: the services it does not run and
+    /// bound by name, less `build` and the binding to the admin Worker
+    /// (`DROPPED`): the services it does not run and
     /// the computers' containers stay in it, for celld binds them all. With
     /// no local config written yet, it is refused, naming the file. Replay:
     /// rendered twice, the same. Method: cell/wrangler.jsonc, through
@@ -456,15 +462,17 @@ mod tests {
         let mut config = crate::read_config(&crate::cell_dir()).unwrap();
         crate::absolute_images(&mut config, &crate::cell_dir()).unwrap();
         fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        fs::copy(crate::cell_dir().join(crate::ADMIN_CONFIG), dir.join(crate::ADMIN_CONFIG)).unwrap();
         let e = celld_config(&dir).unwrap_err().to_string();
         assert!(e.contains("wrangler.local.jsonc"), "{e}");
-        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[]).unwrap();
+        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], &[]).unwrap();
         let local = json(&crate::local_config(&dir));
         for _ in 0..2 {
             let v = json(&celld_config(&dir).unwrap());
-            assert!(v.get("build").is_none(), "build dropped");
+            assert!(v.get("build").is_none() && v.get("services").is_none(), "build and the admin's binding dropped");
+            assert!(local.get("services").is_some(), "which the local config has");
             for (k, kept) in local.as_object().unwrap() {
-                if k != "build" {
+                if !DROPPED.iter().any(|(d, _)| d == k) {
                     assert_eq!(v.get(k), Some(kept), "{k} kept as it is");
                 }
             }

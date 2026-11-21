@@ -27,6 +27,13 @@
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
 
+// the admin Worker's build reaches a part of the crate by design (and
+// leaves the macros' imports unused), and the cell's build lints the
+// whole ("Two Workers, one crate", below)
+#![cfg_attr(feature = "admin", allow(dead_code, unused_imports))]
+
+// public: only the admin Worker's build calls its router (`fetch` below)
+pub mod admin;
 mod across;
 mod ai;
 mod address;
@@ -139,6 +146,23 @@ const SEEN_BODY_MAX_BYTES: usize = 1024;
 const LLMS_TXT: &fragment_templates::File = &fragment_templates::SKILL_MD;
 const LLMS_FULL_TXT: &fragment_templates::File = &fragment_templates::GUIDE_MD;
 
+// Two Workers, one crate (M19, FIN-475: the platform split by who uses
+// it). The cell is this crate's default build: its router (`fetch`,
+// `queue`) and every object class. The operators' admin is the same crate
+// built with the `admin` feature, a Worker of its own (admin.rs): its
+// `fetch` is the admin's router, and it exports no class, reaching the
+// cell's objects through bindings to the cell's script. Only the exports
+// differ, each cfg'd here or at its class (its export and its object
+// impl: "exported by the cell's build alone"), never the code they call:
+// link-time optimization keeps in each Wasm only what its exports reach,
+// so code only the admin reaches costs no fragment's isolate, and the
+// objects cost the admin nothing. The one
+// crate shares the cell's own callers' code (its config, errors, calls
+// and sessions) without moving it into another; what it costs is the
+// crate compiled twice per build (xtask/src/build.rs). In the admin's
+// build most of the crate is code it never reaches by design: the cell's
+// build lints all of it, the admin's router included (public above).
+#[cfg(not(feature = "admin"))]
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     // a branch deployment's queue is named for its branch after this
@@ -148,9 +172,20 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     deliveries::consume(batch, env).await
 }
 
+#[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     match route(req, &env, &ctx).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => e.response(),
+    }
+}
+
+/// The admin Worker's `fetch` (admin.rs): the requests the cell hands it.
+#[cfg(feature = "admin")]
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    match admin::route(req, &env).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -1259,8 +1294,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
         // `/skills` what their agents know and the optional skills to turn on, `/welcome` a new person's welcome
         (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["skills"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
-        // the operators' admin page: to anyone else, the 404 below
-        (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
+        // the operators' admin, its page and API, and its probe of every
+        // object class: the admin Worker's (admin.rs), handed to it as they
+        // came. It answers anyone else the 404 below, word for word.
+        (Method::Get, ["admin"] | ["healthz", "admin"]) | (_, ["api", "admin", ..]) => admin::forward(req, env).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
         (Method::Get | Method::Head, ["about"]) => shell::legal_page(&req, env, "about.html").await,
         (Method::Get | Method::Head, ["privacy"]) => shell::legal_page(&req, env, "privacy.html").await,
@@ -1386,10 +1423,6 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "orgs", org, rest @ ..]) => {
             let (org, rest) = (org.to_string(), rest.to_vec());
             orgs::named(req, env, &url, &org, &rest).await
-        }
-        (_, ["api", "admin", rest @ ..]) => {
-            let rest = rest.to_vec();
-            orgs::admin(req, env, cfg, &url, &rest).await
         }
         // the finite.computer move's mover (migrations.rs)
         (_, ["api", "migrations", rest @ ..]) => {
