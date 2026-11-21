@@ -123,6 +123,14 @@ ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
   forgets it), and a month takes at most `ROWS_MAX` agent and provider
   pairs (a person's agents at each provider); a pair past that is logged
   (`ledger.uses-full`), and one held counts on.
+- **The hour's spend** (FIN-616; 2026-11-20: a notice instead of the
+  hourly key pause). Each count adds its charges to its five-minute slot of
+  the hour (`spend_slots`, `uses::spend`); past $5 of them in an hour
+  (`said::SPENDING_MICROS`), then each doubling, the person is told
+  (`spending`, an info notice, its words the same until the next step, so
+  their pages are told once a step). Nothing pauses or is refused: agents
+  stop at zero credit, and each vendor's own limit on the platform's key
+  is the backstop.
 - **Moved, never dropped.** A computer counted its agents' uses itself
   before. Its step 7 keeps each month it held as owed, and it hands each
   to its owner's ledger as its owner reads its view (`/take-uses`, under

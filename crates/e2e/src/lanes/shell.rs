@@ -4616,7 +4616,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     };
     let id = computer["computer"].as_str().unwrap_or("").to_string();
     // the uses below, and the page's month of them, in one month
-    super::computers::pin_month(api, &id, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
+    super::computers::pin_month(api, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);

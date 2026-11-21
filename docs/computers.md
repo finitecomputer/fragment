@@ -291,21 +291,13 @@ steps; its "no reply yet" waits until it is up):
   its next start runs, until its owner puts that version off. While its
   save may not restore beside the new image, it says to make room first,
   with no Restart (`roomFirst`; below, "An image's share of the disk").
-- `key_paused`: a shared key's charges this last hour reached its owner's
-  cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
-  calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
-  until `resumesAt`, which the notice counts down to. Worked out on read from
-  the computer's `key_hour`, and told as a charge reaches the cap. Its
-  button lifts the cap a step (`allowMicros`, `key_hour::next_lift`),
-  worked out by the computer from the cap it holds, so a stale page
-  changes nothing; at the most it says so.
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). Its owner reads them in words
 with the rest of what they are told (`GET /api/notices`, docs/api.md,
 Notices): the computer says each one itself (`fragment_core::computer::said`),
 with its actions' routes (Restart, OK `…/notices/seen`, Later
-`…/notices/later`, Allow `…/key-caps/{provider}`, Get help), and the shell
+`…/notices/later`, Get help), and the shell
 draws them over every chat and Settings with no code of its own for any.
 
 - **One way back: Restart** (`POST /api/computers/{id}/restart`): the

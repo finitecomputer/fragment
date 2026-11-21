@@ -9,7 +9,46 @@ use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::{Map, Value};
 
 use crate::notice::usd;
+use crate::price::USD;
 use crate::stripe::PACK_MICROS;
+
+/// What its agents' calls on shared keys cost an hour, past which their
+/// person is told (FIN-616; 2026-11-20: the hourly key pause's $5, a notice
+/// now instead of a pause), and again at each doubling.
+pub const SPENDING_MICROS: i64 = 5 * USD;
+
+/// The step an hour's spend of `micros` has passed: `SPENDING_MICROS`,
+/// then each doubling of it; none below it.
+pub fn spending_step(micros: i64) -> Option<i64> {
+    if micros < SPENDING_MICROS {
+        return None;
+    }
+    let mut at = SPENDING_MICROS;
+    // bounded: `at` doubles each pass and stays at most `micros`, an i64
+    while at <= micros / 2 {
+        at *= 2;
+    }
+    Some(at)
+}
+
+/// The notice for an hour's spend of `micros` on shared keys, at its step
+/// (`spending_step`): the same words until it passes the next, so its
+/// person is told once a step.
+pub fn spending(micros: i64) -> Option<Notice> {
+    let over = spending_step(micros)?;
+    Some(Notice {
+        id: "spending".into(),
+        kind: "spending".into(),
+        level: NoticeLevel::Info,
+        title: format!("Your agents spent over {} on tools in the last hour", usd(over)),
+        text: Some("Their calls on shared keys are charged to you, at what each vendor bills.".into()),
+        detail: None,
+        until: None,
+        actions: vec![],
+        must_answer: false,
+        image: None,
+    })
+}
 
 /// The notice for `standing`, if it is one of credit, with a pack to buy
 /// (`/api/billing/packs`, whose answer opens its Checkout) when `may_buy`.
@@ -59,6 +98,24 @@ mod tests {
         assert!(news(None, quiet), "none told yet: told");
         assert!(news(Some(&stopped), quiet), "lifted: told");
         assert!(!news(Some(quiet), quiet), "the same again: not told");
+    }
+
+    /// FIN-616: an hour's spend on shared keys past $5 is told, at the step
+    /// it passed (each doubling), in the same words until the next step;
+    /// under it, nothing.
+    #[test]
+    fn an_hours_spend_is_told_at_its_step() {
+        assert_eq!(spending_step(SPENDING_MICROS - 1), None);
+        assert_eq!(spending_step(SPENDING_MICROS), Some(5_000_000));
+        assert_eq!(spending_step(9_999_999), Some(5_000_000));
+        assert_eq!(spending_step(10_000_000), Some(10_000_000));
+        assert_eq!(spending_step(45_000_000), Some(40_000_000));
+        assert_eq!(spending_step(i64::MAX), Some(SPENDING_MICROS << 40), "an i64's largest, bounded");
+        assert!(spending(SPENDING_MICROS - 1).is_none());
+        let told = spending(12_340_000).expect("past $10");
+        assert_eq!((told.id.as_str(), told.kind.as_str(), told.level, told.title.as_str()), ("spending", "spending", NoticeLevel::Info, "Your agents spent over $10 on tools in the last hour"));
+        assert!(told.actions.is_empty() && !told.must_answer);
+        assert_eq!(spending(12_340_000), spending(19_000_000), "the same step, the same words: told once");
     }
 
     #[test]
