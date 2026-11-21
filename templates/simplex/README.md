@@ -17,7 +17,8 @@ file it loads are the chat template's, linked, so no copy drifts).
   again, for good, and removes its secrets.
 - **Its door is its own.** Its jobs reach the door at
   `https://door.fragment.internal/<ask>`, which the platform sends to the
-  door named as this fragment is, never out to the internet; no other
+  door of this fragment's life (its name and its npub's digits, so a name
+  made again reaches another), never out to the internet; no other
   fragment's fetch of that host is sent anywhere (`door_route`,
   crates/core/src/door.rs). A door is started only where the deployment
   runs doors (its config's `doors`); elsewhere `connect` says so and keeps

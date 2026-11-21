@@ -270,8 +270,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 door: String,
             }
             let asked: TestDoor = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            check_name(&asked.door)?;
-            if cfg.levers_scoped && !levers::is_e2e_fragment(&asked.door) {
+            // a connector's door (its name and its life's digits), or one
+            // the lever starts by a fragment's name alone
+            let of = fragment_core::door::door_of(&asked.door).ok_or_else(|| CellError::invalid("door: a connector's door (fragment_core::door::door_id), or a fragment's name"))?;
+            if cfg.levers_scoped && !levers::is_e2e_fragment(of) {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the door lever reaches e2e doors alone"));
             }
             let text = std::str::from_utf8(&body).map_err(|_| CellError::invalid("body: not UTF-8"))?;

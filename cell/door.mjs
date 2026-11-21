@@ -31,7 +31,7 @@
 // did not take at once.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { settled, startIntercepted } from "./intercepts.mjs";
-import { DELIVERIES_KEPT, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, fenced, inboxUrl, nameOk, parseSaveId, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
+import { DELIVERIES_KEPT, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, doorOf, fenced, inboxUrl, nameOk, parseSaveId, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
 
 const HOST = "door.fragment.internal";
 const PORT = 8080;
@@ -45,9 +45,11 @@ const BODY_MAX = 256 * 1024;
 // release is refused before anything is done.
 const RELEASE = "x-fragment-release";
 const REFUSED = "x-fragment-release-refused";
-// Which connector asks, its name the door's: the platform's to set alone
-// (fragment_core::door::DOOR_NAME_HEADER).
+// Which door is asked (its connector's name and life's digits), and the
+// connector that asks: the platform's to set alone
+// (fragment_core::door::DOOR_NAME_HEADER, CONNECTOR_HEADER).
 const DOOR_NAME_HEADER = "x-fragment-door";
+const CONNECTOR_HEADER = "x-fragment-connector";
 // The inbox secret its connector's `connect` gives, filled at the
 // platform's egress (never the connector's code's to read).
 const SECRET_HEADER = "x-door-secret";
@@ -70,6 +72,9 @@ export class SimplexDoor extends DurableObject {
   // its deliveries going on to its connector's inbox, one drain at a time
   #draining = null;
   #again = false;
+  // its link and unlink asks numbered: a stale one is asked again only
+  // while none newer was asked
+  #linking = 0;
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -173,8 +178,12 @@ export class SimplexDoor extends DurableObject {
 
   // An ask of its runner under a new mark, asked again under another while
   // a later mark overtook it (a delivery's), at most `STALE_ASKS` times;
-  // still overtaken, its asker tries again later (503).
+  // still overtaken, a reply's asker tries again later (503; a reply is
+  // its key's, asked again however late). A link or unlink is asked again
+  // only while none newer was asked: one overtaken so is never made after
+  // it (an invitation after an unlink), nor asked again later (409).
   async #ask(path, body) {
+    const turn = path === "/reply" ? null : ++this.#linking;
     for (let n = 0; n < STALE_ASKS; n += 1) {
       const r = await this.#runner("POST", path, this.#mark(), body);
       if (r.status !== 409) return r;
@@ -184,26 +193,31 @@ export class SimplexDoor extends DurableObject {
         said = JSON.parse(text);
       } catch {}
       if (!stale(r.status, said)) return new Response(text, { status: 409, headers: { "content-type": "application/json" } });
+      if (turn !== null && turn !== this.#linking) return refusal(409, "overtaken", "a newer link or unlink was asked");
     }
+    if (turn !== null) return refusal(409, "overtaken", `asked under ${STALE_ASKS} marks, each overtaken`);
     return refusal(503, "overtaken", `asked under ${STALE_ASKS} marks, each overtaken: ask again`);
   }
 
   // ---- what its connector's jobs ask (templates/simplex/app.mjs) ----
 
-  // Its connector, named as the door is (`DOOR_NAME_HEADER`, the
-  // platform's), asks: its start with the inbox's secret (`connect`), its
+  // Its connector asks (the platform names both: this door, its life's,
+  // and the connector): its start with the inbox's secret (`connect`), its
   // state, its SimpleX app's link and unlink, and a reply.
   async #job(ask, request) {
     const door = request.headers.get(DOOR_NAME_HEADER);
-    if (!nameOk(door)) return refusal(400, "invalid", "a job's ask names its door (the platform's header)");
+    const connector = request.headers.get(CONNECTOR_HEADER);
+    if (!doorOf(door, connector)) return refusal(400, "invalid", "a job's ask names its door and its connector (the platform's headers)");
     const d = this.#door();
     if (d && d.door !== door) return refusal(409, "another_door", `this door is ${d.door}`);
+    const inbox = this.ctx.storage.sql.exec("SELECT fragment FROM inbox WHERE id = 1").toArray()[0];
+    if (inbox && inbox.fragment !== connector) return refusal(409, "another_connector", `this door is ${inbox.fragment}'s`);
     if (ask === "connect") {
       const secret = request.headers.get(SECRET_HEADER);
       const body = await bounded(request);
       if (!secretOk(secret)) throw Object.assign(new Error(`connect gives its inbox's secret (${SECRET_HEADER})`), { status: 400 });
       if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them)");
-      this.ctx.storage.sql.exec("INSERT INTO inbox (id, secret) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET secret = excluded.secret", secret);
+      this.ctx.storage.sql.exec("INSERT INTO inbox (id, fragment, secret) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET secret = excluded.secret", connector, secret);
       const started = await this.#begin(door, body.name);
       this.#drain().catch(() => {});
       return started;
@@ -239,9 +253,9 @@ export class SimplexDoor extends DurableObject {
 
   async #forward() {
     const d = this.#door();
-    const inbox = this.ctx.storage.sql.exec("SELECT secret FROM inbox WHERE id = 1").toArray()[0];
+    const inbox = this.ctx.storage.sql.exec("SELECT fragment, secret FROM inbox WHERE id = 1").toArray()[0];
     if (!d || !inbox) return;
-    const to = inboxUrl(this.env.FRAGMENT_PLATFORM_URL, d.door);
+    const to = inboxUrl(this.env.FRAGMENT_PLATFORM_URL, inbox.fragment);
     for (let n = 0; n <= DELIVERIES_KEPT; n += 1) {
       const next = this.ctx.storage.sql.exec("SELECT id, body FROM deliveries WHERE sent = 0 ORDER BY mark LIMIT 1").toArray()[0];
       if (!next) return;
@@ -407,12 +421,14 @@ export class SimplexDoor extends DurableObject {
     if (!(typeof m.id === "string" && m.id.length > 0 && m.id.length <= 64 && typeof m.text === "string")) throw Object.assign(new Error("a delivery is {id, kind, text, at, file}"), { status: 400 });
     const had = this.ctx.storage.sql.exec("SELECT mark FROM deliveries WHERE id = ?", m.id).toArray()[0];
     if (had) return json({ again: true }, 200, { "x-door-mark": String(had.mark) });
+    // its inbox behind by as many as it keeps: refused, so its runner
+    // keeps its cursor on this one and delivers it again later, none lost
+    const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
+    if (unsent >= DELIVERIES_KEPT) return refusal(503, "inbox_behind", `its inbox has yet to take ${unsent}: deliver it again later`);
     const mark = this.#mark();
     this.ctx.storage.sql.exec("INSERT INTO deliveries (id, mark, body, at) VALUES (?, ?, ?, ?)", m.id, mark, JSON.stringify(m), Date.now());
-    const past = "mark <= (SELECT mark FROM deliveries ORDER BY mark DESC LIMIT 1 OFFSET ?)";
-    const dropped = this.ctx.storage.sql.exec(`SELECT count(*) AS n FROM deliveries WHERE sent = 0 AND ${past}`, DELIVERIES_KEPT).one().n;
-    if (dropped) this.#log("door.delivery_dropped", { dropped, why: `its inbox took none of the ${DELIVERIES_KEPT} after them` });
-    this.ctx.storage.sql.exec(`DELETE FROM deliveries WHERE ${past}`, DELIVERIES_KEPT);
+    // the ones its inbox took, but the newest few (each taken once by its id)
+    this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE sent = 1 AND mark <= (SELECT mark FROM deliveries WHERE sent = 1 ORDER BY mark DESC LIMIT 1 OFFSET ?)", DELIVERIES_KEPT);
     // on to its inbox once the runner has its answer; its watch is the net
     this.#drain().catch(() => {});
     return json({ again: false }, 200, { "x-door-mark": String(mark) });

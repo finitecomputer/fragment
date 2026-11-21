@@ -5,7 +5,7 @@
 // and its schema's steps held to their released text.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEPS, SAVES_KEPT, behind, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
+import { STEPS, SAVES_KEPT, behind, doorOf, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
 
 const save = (generation, seq, mark, unreadable = 0) => ({ generation, seq, mark, unreadable });
 
@@ -63,7 +63,7 @@ const RELEASED = [
   "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, started INTEGER NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, saved INTEGER NOT NULL, stopped TEXT)",
   "CREATE TABLE saves (generation INTEGER NOT NULL, seq INTEGER NOT NULL, mark INTEGER NOT NULL, bytes INTEGER NOT NULL, at INTEGER NOT NULL, unreadable INTEGER NOT NULL, PRIMARY KEY (generation, seq))",
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
-  "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), secret TEXT NOT NULL)",
+  "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), fragment TEXT NOT NULL, secret TEXT NOT NULL)",
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
 ];
 
@@ -76,7 +76,14 @@ test("the schema's released steps are as released, and taken in order", () => {
   assert.throws(() => steps(-1));
 });
 
-test("its connector's inbox is on the platform's origin, at the door's own name", () => {
+test("a connector's door is its name and its life's digits", () => {
+  assert.equal(doorOf("pat-sx--k3x9--0123456789ab", "pat-sx--k3x9"), true);
+  for (const [door, connector] of [["pat-sx--k3x9--0123456789ab", "pat-sx--k3x8"], ["pat-sx--k3x9", "pat-sx--k3x9"], ["pat-sx--k3x9--0123456789AB", "pat-sx--k3x9"], ["pat-sx--k3x9--0123", "pat-sx--k3x9"], ["x--0123456789ab", "../x"]]) {
+    assert.equal(doorOf(door, connector), false, `${door} of ${connector}`);
+  }
+});
+
+test("its connector's inbox is on the platform's origin, at the connector's name", () => {
   assert.equal(inboxUrl("https://finite.example/some/path", "pat-sx--k3x9"), "https://finite.example/api/f/pat-sx--k3x9/inbox");
   assert.equal(inboxUrl("http://127.0.0.1:8790", "pat-sx--k3x9"), "http://127.0.0.1:8790/api/f/pat-sx--k3x9/inbox");
   for (const bad of ["../x", "a/b", "x?y", ""]) assert.throws(() => inboxUrl("https://finite.example", bad), String(bad));

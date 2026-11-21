@@ -119,3 +119,19 @@ test("the invitation for its owner's app is kept for its owner's query alone, ne
   assert.deepEqual(await w.app.unlink({}, w.job("call")), { unlinked: true });
   assert.equal(w.app.state().invitation, null, "unlinked, none kept");
 });
+
+test("an invitation found after an unlink was asked is kept by no one", async () => {
+  const link = "https://simplex.chat/invitation#/?v=2-7&smp=late";
+  const w = world({ link: [[202, {}]], unlink: [[202, {}]] });
+  // an unlink asked while the link looks for its invitation
+  const answers = [async () => (await w.app.unlink({}, w.job("call")), [200, { runner: { phase: "wanting" } }]), [200, { runner: { link } }]];
+  const job = w.job("call");
+  const fetch = job.fetch;
+  job.fetch = async (url, init) => {
+    if (!url.endsWith("/state")) return fetch(url, init);
+    const [status, body] = await (typeof answers[0] === "function" ? answers.shift()() : answers.shift());
+    return { ok: true, status, json: () => body };
+  };
+  assert.deepEqual(await w.app.link({}, job), { invited: false, why: "unlinked since" });
+  assert.equal(w.app.state().invitation, null);
+});

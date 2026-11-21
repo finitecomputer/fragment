@@ -17,7 +17,7 @@
 //! `connector` (in the computers lane, whose stub agent it binds, on a
 //! stack that runs doors: `--only computers,simplex-door`): the SimpleX connector
 //! (templates/simplex) end to end on a door. Its owner's `connect` starts
-//! the door named as the connector is; no other fragment's job reaches a
+//! its life's door; no other fragment's job reaches a
 //! door; bound to the agent, its owner's message as the door's runner
 //! delivers it reaches the connector's inbox, is published there as its
 //! owner's to the agent, whose computer, asleep, wakes and answers; the
@@ -134,16 +134,35 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     // does, and its trigger takes it (bound to no agent here, it reaches no
     // one: `connector`, in the computers lane, binds one)
     let owner = api.person()?;
-    let (name, _) = connected(s, api, &owner, "sxlane")?;
-    deliver(api, &name, "sx-lane-1", "hello from simplex")?;
-    let kept = lever(api, &name, "deliveries", json!({}))?;
+    // its own name, never `<agent>-simplex` (the computer's SimpleX chat's)
+    let named = s.named(api, &owner, "sxlane")?;
+    let (name, door, _) = connected(s, api, &owner, named, SECRET)?;
+    deliver(api, &door, "sx-lane-1", "hello from simplex")?;
+    let kept = lever(api, &door, "deliveries", json!({}))?;
     let intake = newest_run(api, &owner, &name, "intake", Duration::from_secs(60));
     s.ok(
         "its owner's message reaches the connector's inbox from the door, and its inbox's trigger takes it (bound to no agent, it reaches no one)",
         kept.as_array().is_some_and(|k| k.iter().any(|d| d["id"] == "sx-lane-1" && d["sent"] == 1)) && intake["output"]["ignored"] == "not linked",
         json!({ "deliveries": kept, "intake": intake }),
     );
-    lever(api, &name, "stop", json!({}))?;
+    // its name deleted and made again by someone else (the review of
+    // #1450): their connector's door is their life's, never the earlier
+    // one's (its SimpleX link), and the earlier door's messages reach their
+    // inbox no more
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    ensure!(deleted.status == 200, "deleting the connector: {deleted}");
+    let other = api.person()?;
+    let (_, theirs, _) = connected(s, api, &other, name.clone(), "e2e-simplex-inbox-of-the-next-life-0a1b2c3d4e5f6a7b")?;
+    deliver(api, &door, "sx-lane-2", "still there?")?;
+    let old = lever(api, &door, "deliveries", json!({}))?;
+    let runs = api.signed(&other, "GET", &format!("/api/f/{name}/runs?op=intake"), None)?;
+    s.ok(
+        "its name made again by someone else: their connect starts a door of their own, and the earlier door's messages reach their chat no more",
+        theirs != door && old.as_array().is_some_and(|k| k.iter().any(|d| d["id"] == "sx-lane-2" && d["sent"] == 0)) && runs.status == 200 && runs.body["runs"].as_array().is_some_and(Vec::is_empty),
+        json!({ "theirs": theirs, "earlier": door, "deliveries": old, "runs": runs.body }),
+    );
+    lever(api, &door, "stop", json!({}))?;
+    lever(api, &theirs, "stop", json!({}))?;
     Ok(())
 }
 
@@ -181,28 +200,30 @@ fn deliver(api: &Api, door: &str, id: &str, text: &str) -> Result<Value> {
     lever(api, door, "deliver", json!({ "message": { "id": id, "kind": "text", "text": text, "at": "2026-11-21T00:00:00Z", "file": null } }))
 }
 
-/// A SimpleX connector of `owner`'s (`base` its label), its inbox's
-/// secret set, connected: its own job's connect starts the door named as
-/// it is and gives it that secret. Its name and the door's state.
-fn connected(s: &mut Suite, api: &Api, owner: &Keys, base: &str) -> Result<(String, Value)> {
-    const SECRET: &str = "e2e-simplex-inbox-5ec4e7a9f0b1c2d3e4f5061728394a5b";
-    // its own name, never `<agent>-simplex` (the computer's SimpleX chat's)
-    let name = s.named(api, owner, base)?;
+/// A SimpleX connector of `owner`'s named `name`, its inbox's `secret`
+/// set, connected: its own job's connect starts its life's door
+/// (`fragment_core::door::door_id`) and gives it that secret. Its name,
+/// its door's and the door's state.
+fn connected(s: &mut Suite, api: &Api, owner: &Keys, name: String, secret: &str) -> Result<(String, String, Value)> {
     let made = api.create_with(owner, json!({ "name": name, "template": "simplex" }))?;
     ensure!(made.status == 200, "making the SimpleX connector: {made}");
     s.owned(&made.body, owner);
-    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/SIMPLEX_DOOR_SECRET"), Some(&json!({ "value": SECRET, "hosts": [fragment_core::door::DOOR_HOST] })))?;
+    let door = fragment_core::door::door_id(&name, made.body["npub"].as_str().unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("no door for {name}: {made}"))?;
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/SIMPLEX_DOOR_SECRET"), Some(&json!({ "value": secret, "hosts": [fragment_core::door::DOOR_HOST] })))?;
     ensure!(r.status == 200, "its inbox's secret: {r}");
     let r = api.op(owner, &name, "connect", "connect", json!({ "name": "Juniper" }))?;
     let run = super::jobs::settle(api, owner, &name, r.body["result"]["run"].as_i64().unwrap_or(0), &["succeeded", "failed", "held"], Duration::from_secs(300));
-    let st = until(api, &name, Duration::from_secs(300), ready_from(1))?;
+    let st = until(api, &door, Duration::from_secs(300), ready_from(1))?;
     s.ok(
-        "its owner's connect, the connector's own job, starts the door named as the connector is and gives it the inbox's secret",
-        run["output"]["connected"] == true && st["door"]["door"] == name.as_str() && st["door"]["agent"] == "Juniper" && st["inbox"] == true,
+        "its owner's connect, the connector's own job, starts its life's own door and gives it the inbox's secret",
+        run["output"]["connected"] == true && st["door"]["door"] == door.as_str() && st["door"]["agent"] == "Juniper" && st["inbox"] == true,
         json!({ "run": run, "door": st }),
     );
-    Ok((name, st))
+    Ok((name, door, st))
 }
+
+/// The inbox's secret a run's connector is set with.
+const SECRET: &str = "e2e-simplex-inbox-5ec4e7a9f0b1c2d3e4f5061728394a5b";
 
 pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     if !s.runs_doors() {
@@ -210,7 +231,8 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
         return Ok(());
     }
     let owner = a.owner;
-    let (name, st) = connected(s, api, owner, "sxdoor")?;
+    let named = s.named(api, owner, "sxdoor")?;
+    let (name, door, st) = connected(s, api, owner, named, SECRET)?;
     let newest = |op: &str| newest_run(api, owner, &name, op, a.wake);
 
     // no other fragment's job reaches a door, whichever it names
@@ -218,9 +240,9 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     let c = s.create(api, owner, &reacher)?;
     super::app::ship(s, &c, REACHER_APP.as_bytes(), REACHER_JSON.as_bytes());
     let marks = st["door"]["marks"].clone();
-    let r = api.op(owner, &reacher, "reach", "reach", json!({ "url": format!("https://{}/state", fragment_core::door::DOOR_HOST), "door": name }))?;
+    let r = api.op(owner, &reacher, "reach", "reach", json!({ "url": format!("https://{}/state", fragment_core::door::DOOR_HOST), "door": door }))?;
     let refused = super::jobs::settle(api, owner, &reacher, r.body["result"]["run"].as_i64().unwrap_or(0), &["succeeded", "failed", "held"], a.wake);
-    let after = lever(api, &name, "state", json!({}))?;
+    let after = lever(api, &door, "state", json!({}))?;
     s.ok(
         "another fragment's job reaches no door: its fetch of the door's host fails unsent",
         refused["status"] != "succeeded" && refused["error"].as_str().is_some_and(|e| e.contains("a SimpleX connector's own door")) && after["door"]["marks"] == marks,
@@ -236,8 +258,8 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     // its owner's message, as the door's runner delivers it: on to the
     // connector's inbox, published there as theirs to their agent, which
     // wakes and answers; the answer goes to the door's runner
-    deliver(api, &name, "sx-e2e-1", "hello from simplex")?;
-    let kept = lever(api, &name, "deliveries", json!({}))?;
+    deliver(api, &door, "sx-e2e-1", "hello from simplex")?;
+    let kept = lever(api, &door, "deliveries", json!({}))?;
     let intake = newest("intake");
     let chat = || super::jobs::records(api, owner, &name, "chat");
     let relayed = chat().into_iter().find(|r| r["body"]["text"] == "hello from simplex").unwrap_or_default();
@@ -265,12 +287,12 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     // unbound by its owner: their next message reaches no one
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "unlink" })))?;
     ensure!(r.status == 200, "unbinding: {r}");
-    deliver(api, &name, "sx-e2e-2", "anyone there?")?;
+    deliver(api, &door, "sx-e2e-2", "anyone there?")?;
     let intake = newest("intake");
     let none = chat().into_iter().all(|r| r["body"]["text"] != "anyone there?");
     s.ok("unbound by its owner, their next message reaches no one", intake["output"]["ignored"] == "not linked" && none, &intake);
     // its door's container is the connector's alone to keep: let go here
-    lever(api, &name, "stop", json!({}))?;
+    lever(api, &door, "stop", json!({}))?;
     Ok(())
 }
 

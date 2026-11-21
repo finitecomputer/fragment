@@ -91,7 +91,8 @@ function container() {
   c.getTcpPort = () => ({
     fetch: async (url, init) => {
       c.asked.push({ method: init.method, path: new URL(url).pathname, mark: Number(init.headers["x-door-mark"]), body: init.body ? JSON.parse(init.body) : null });
-      const [status, body] = c.answers.shift() ?? [202, { done: false }];
+      const next = c.answers.shift() ?? [202, { done: false }];
+      const [status, body] = typeof next === "function" ? await next() : next;
       return new Response(JSON.stringify(body), { status });
     },
   });
@@ -99,6 +100,8 @@ function container() {
 }
 
 const PLATFORM = "https://platform.example";
+// a connector's door: its name (NAME) and its life's digits
+const DOOR = `${NAME}--0123456789ab`;
 const INBOX = `${PLATFORM}/api/f/${NAME}/inbox`;
 
 // `noDoors`: a deployment that runs none (no container for them)
@@ -113,8 +116,8 @@ function door({ noDoors = false } = {}) {
   const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   const call = (method, path, headers = {}, body) => o.fetch(new Request(`http://door${path}`, { method, headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
   const d = { o, st, c, blobs, call, inbox };
-  // its connector's job, as the platform sends it (its name in the header)
-  d.job = (ask, body = {}, headers = {}) => call("POST", `/job/${ask}`, { "x-fragment-door": NAME, ...headers }, JSON.stringify(body));
+  // its connector's job, as the platform sends it (the door and the connector named)
+  d.job = (ask, body = {}, headers = {}) => call("POST", `/job/${ask}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...headers }, JSON.stringify(body));
   d.connect = (secret = "s3cret-of-the-inbox") => d.job("connect", { name: "Juniper" }, { "x-door-secret": secret });
   // its runner's delivery of one of its owner's messages
   d.deliver = (id, text = `text of ${id}`) => call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "text", text, at: "2026-11-21T00:00:00Z", file: null }));
@@ -269,14 +272,15 @@ test("its connector's jobs ask only their own door, and only their asks", async 
   const d = door();
   assert.equal((await d.job("link")).status, 409, "nothing asked of a door its connector never connected");
   assert.equal((await d.call("POST", "/job/connect", { "x-door-secret": "s" }, JSON.stringify({ name: "Juniper" }))).status, 400, "no door named: refused");
+  assert.equal((await d.job("connect", { name: "Juniper" }, { "x-door-secret": "s", "x-fragment-connector": "other--k3x9" })).status, 400, "a door not its connector's: refused");
   assert.equal((await d.job("connect", { name: "Juniper" })).status, 400, "no inbox secret given: refused");
   assert.equal(d.row(), undefined, "nothing kept from either");
   assert.equal((await d.connect()).status, 200);
   assert.deepEqual(d.c.starts.map((o) => o.env.DOOR_NAME), ["Juniper"], "started as its connector named it");
-  assert.equal((await d.job("state", {}, { "x-fragment-door": "other--k3x9" })).status, 409, "another connector's ask refused");
+  assert.equal((await d.job("state", {}, { "x-fragment-door": `${NAME}--fedcba987654` })).status, 409, "another life's door: refused (its object, hosted, is another)");
   for (const ask of ["door/lever", "egress/save", "lever", "deliver"]) assert.equal((await d.job(ask)).status, 404, `${ask}: none of its jobs' asks`);
   const state = await (await d.job("state")).json();
-  assert.equal(state.door.door, NAME);
+  assert.equal(state.door.door, DOOR);
   assert.equal(state.inbox, true);
   assert.ok(!JSON.stringify(state).includes("s3cret-of-the-inbox"), "its secret never told back");
   // link, unlink and a reply go to its runner, each under a mark of its own
@@ -301,7 +305,7 @@ test("its owner's messages reach its connector's inbox in order, each until take
   const d = door();
   // a door started before its connector connected (D1's lever): its
   // owner's message kept, then sent once it does
-  await d.start();
+  await d.lever("start", { door: DOOR, agent: "Juniper" });
   assert.equal((await d.deliver("m1")).status, 200);
   assert.deepEqual(d.posted(), [], "no inbox to send it to yet");
   await d.connect();
@@ -342,4 +346,33 @@ test("an ask a delivery's mark overtook is asked again under a new one; its runn
   assert.equal((await unlinked.json()).message, "not linked", "passed on as it said it");
   d.c.answers = [STALE, STALE, STALE];
   assert.equal((await d.job("reply", { key: "chat:11", text: "hi" })).status, 503, "overtaken every time: its asker tries again later");
+});
+
+test("its inbox behind by as many as it keeps, its runner is refused, and none it took is lost", async () => {
+  const d = door();
+  await d.connect();
+  d.inbox.status = 503;
+  for (let n = 0; n < 256; n += 1) assert.equal((await d.deliver(`m${n}`)).status, 200);
+  const refused = await d.deliver("m256");
+  assert.equal(refused.status, 503, "refused: its runner keeps its cursor on it");
+  assert.equal((await refused.json()).error, "inbox_behind");
+  d.inbox.status = 200;
+  const before = d.posted().length;
+  await d.o.alarm();
+  assert.deepEqual(d.posted().slice(before), Array.from({ length: 256 }, (_, n) => `m${n}`), "every one it took, in order");
+  assert.equal((await d.deliver("m256")).status, 200, "taken once its inbox caught up");
+});
+
+test("a link a delivery's mark overtook is not asked again once an unlink came after it", async () => {
+  const d = door();
+  await d.connect();
+  const STALE = [409, { error: "door", message: "a stale mark: ask again under a new one" }];
+  let unlinked;
+  // the link's answer comes after an unlink asked meanwhile was taken
+  d.c.answers = [async () => ((unlinked = await d.job("unlink")), STALE)];
+  const linked = await d.job("link");
+  assert.equal(unlinked.status, 202);
+  assert.equal(linked.status, 409);
+  assert.equal((await linked.json()).error, "overtaken");
+  assert.deepEqual(d.c.asked.filter((a) => a.method === "POST").map((a) => a.path), ["/link", "/unlink"], "never a link after the unlink");
 });

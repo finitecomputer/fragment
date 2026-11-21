@@ -66,7 +66,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -2273,16 +2273,21 @@ nor speak through one (`fragment_core::door`):
   connectors may each be a door of one agent; an unlink leaves the agent
   a viewer. Its rules are cell/src/doors.rs's.
 - **A SimpleX connector's door** (`simplex`) is the platform's SimpleX
-  door named as the connector is (cell/door.mjs): its jobs reach it at
+  door of the connector's life (cell/door.mjs): named for its name and
+  its npub's digits (`fragment_core::door::door_id`), as its repo is, so
+  a name made again, by anyone, reaches a door of its own, never the
+  earlier one's link. Its jobs reach it at
   `https://door.fragment.internal/<ask>` (`connect`, `state`, `link`,
-  `unlink`, `reply`), which the platform sends to that door alone, the
-  connector named in `x-fragment-door` over whatever the job set; any
-  other fragment's fetch of that host fails its step unsent
-  (`fragment_core::door::door_route`). `connect` gives the door the
-  connector's inbox secret (`x-door-secret`, a `{{SECRET}}` filled at the
-  egress); the door posts its owner's messages to the connector's inbox
-  with it, as a webhook does. A deployment that runs no doors (no `doors`
-  in its config) answers `connect` 409 `no_doors` and keeps nothing.
+  `unlink`, `reply`), which the platform sends to that door alone, naming
+  it and the connector (`x-fragment-door`, `x-fragment-connector`) over
+  whatever the job set; any other fragment's fetch of that host fails its
+  step unsent (`fragment_core::door::door_route`). `connect` gives the
+  door the connector's inbox secret (`x-door-secret`, a `{{SECRET}}`
+  filled at the egress); the door posts its owner's messages to the
+  connector's inbox with it, as a webhook does, in order, holding at most
+  256 the inbox has not taken (past them its runner is refused and
+  delivers again later). A deployment that runs no doors (no `doors` in
+  its config) answers `connect` 409 `no_doors` and keeps nothing.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.

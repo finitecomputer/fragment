@@ -6,9 +6,10 @@
 // start falls back on when its newest will not restore.
 export const SAVES_KEPT = 3;
 
-// Its owner's messages the door keeps, the newest, each until its
-// connector's inbox takes it: one not taken yet is let go past them (and
-// said so, `door.delivery_dropped`).
+// Its owner's messages the door keeps: at most this many its connector's
+// inbox has yet to take (past them its runner is refused, and delivers
+// again later from its own cursor: none is let go untaken), and the newest
+// this many it took (each taken once, by its id).
 export const DELIVERIES_KEPT = 256;
 
 // An ask of its runner overtaken by a later mark (a delivery's, numbered
@@ -32,8 +33,8 @@ export const STEPS = [
   "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, started INTEGER NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, saved INTEGER NOT NULL, stopped TEXT)",
   "CREATE TABLE saves (generation INTEGER NOT NULL, seq INTEGER NOT NULL, mark INTEGER NOT NULL, bytes INTEGER NOT NULL, at INTEGER NOT NULL, unreadable INTEGER NOT NULL, PRIMARY KEY (generation, seq))",
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
-  // its connector's inbox secret, as its `connect` gave it
-  "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), secret TEXT NOT NULL)",
+  // its connector (its name, its inbox's) and the inbox's secret, as its `connect` gave it
+  "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), fragment TEXT NOT NULL, secret TEXT NOT NULL)",
   // whether its connector's inbox took it
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
 ];
@@ -50,8 +51,14 @@ export function nameOk(name) {
   return typeof name === "string" && name.length > 0 && name.length <= 96 && /^[a-z0-9-]+$/.test(name);
 }
 
+// Whether `door` is the door of the connector named `connector`: its name
+// and its life's digits (fragment_core::door::door_id).
+export function doorOf(door, connector) {
+  return nameOk(door) && nameOk(connector) && door.startsWith(`${connector}--`) && /^[0-9a-f]{12}$/.test(door.slice(connector.length + 2));
+}
+
 // Its connector's inbox: on the platform's own origin, at the connector's
-// name, which is the door's (never a name a job gave).
+// name (as the platform named it, never a job).
 export function inboxUrl(platform, door) {
   if (!nameOk(door)) throw new Error(`no door is named ${JSON.stringify(door)}`);
   return `${new URL(platform).origin}/api/f/${door}/inbox`;

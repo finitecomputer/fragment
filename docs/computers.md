@@ -245,7 +245,8 @@ Not built either:
   their image (`doors`), and a local stack only for the e2e's
   `simplex-door` lane. Its connector (templates/simplex, a hosted door as
   Telegram's is) starts it and is its only caller of the two: its jobs
-  reach the door named as the connector is, and the door posts its
+  reach the door of the connector's life (`door_id`: a name made again
+  reaches another), and the door posts its
   owner's messages to the connector's inbox as a webhook does, which
   publishes each to the bound agent; the agent's computer wakes for it as
   for any message, so it may sleep. Until Settings makes one (the next

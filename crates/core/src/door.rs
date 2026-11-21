@@ -73,10 +73,38 @@ pub fn blessed_template(loader_id: &str) -> Option<&str> {
 /// a name of the platform's, never one on the internet.
 pub const DOOR_HOST: &str = "door.fragment.internal";
 
-/// The header that tells a door which connector asks (its name, the
-/// door's own): the platform's alone to set, over whatever a job set
-/// (cell/src/jobs.rs; cell/door.mjs reads it).
+/// The headers that tell a door which door is asked (`door_id`) and the
+/// connector that asks (its name, its inbox's): the platform's alone to
+/// set, over whatever a job set (cell/src/jobs.rs; cell/door.mjs reads them).
 pub const DOOR_NAME_HEADER: &str = "x-fragment-door";
+pub const CONNECTOR_HEADER: &str = "x-fragment-connector";
+
+/// A door id's digits of its connector's life.
+pub const DOOR_LIFE_HEX: usize = 12;
+
+/// A SimpleX connector's door: its name and the first `DOOR_LIFE_HEX` hex
+/// digits of a digest of its life's own key (its npub, drawn new for each
+/// life), as its repo is named (`codestorage::repo_name`). A name made
+/// again, by anyone, never reaches a door an earlier life made, nor the
+/// SimpleX link it holds. `None`: not a fragment's name, or not a key's npub.
+pub fn door_id(fragment: &str, life: &str) -> Option<String> {
+    if !valid_fragment_name(fragment) || !crate::npub::is_identity(life) {
+        return None;
+    }
+    let digest = hex::encode(Sha256::digest(format!("fragment door life\0{life}").as_bytes()));
+    Some(format!("{fragment}--{}", &digest[..DOOR_LIFE_HEX]))
+}
+
+/// The fragment a door's id is of: a connector's (`door_id`), or, for a
+/// door the e2e's lever starts by a fragment's name alone, that name.
+pub fn door_of(id: &str) -> Option<&str> {
+    if valid_fragment_name(id) {
+        return Some(id);
+    }
+    let (fragment, life) = id.rsplit_once("--")?;
+    let digits = life.len() == DOOR_LIFE_HEX && life.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (digits && valid_fragment_name(fragment)).then_some(fragment)
+}
 
 /// Where a job's fetch of `raw` goes, from a fragment whose installed code
 /// is the blessed template `blessed`: to its own door (the URL, `Some`)
@@ -286,6 +314,27 @@ mod tests {
     /// fragment's (another connector, an app, none blessed), in any
     /// spelling of the host; the connector's with a port, credentials or
     /// cleartext. Every other URL is the egress check's.
+    /// Goal: a connector's door is its life's (the review of #1450: a name
+    /// deleted and made again by someone else, keyed by the name alone,
+    /// took over the earlier owner's door, its SimpleX link and its
+    /// messages). Valid: one life, one door, whose fragment it names back.
+    /// Invalid: another life's, the same name; a name or key that is none.
+    #[test]
+    fn a_connectors_door_is_its_lifes() {
+        let (one, two) = (crate::npub::encode(&"3b".repeat(32)), crate::npub::encode(&"5c".repeat(32)));
+        let a = door_id("juniper-sx--k3x9", &one).expect("a door");
+        assert_eq!(a, door_id("juniper-sx--k3x9", &one).unwrap(), "one life, one door");
+        assert_ne!(a, door_id("juniper-sx--k3x9", &two).unwrap(), "a name made again: another door");
+        assert!(a.starts_with("juniper-sx--k3x9--") && a.len() <= 63 + 2 + DOOR_LIFE_HEX && a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "{a}: a door's name (cell/door-rules.mjs nameOk)");
+        assert_eq!(door_of(&a), Some("juniper-sx--k3x9"));
+        assert_eq!(door_of("juniper-sx--k3x9"), Some("juniper-sx--k3x9"), "the lever's door, named as a fragment is");
+        for bad in ["juniper-sx--k3x9--0123456789AB", "juniper-sx--k3x9--0123", "juniper--0123456789ab", "../x", ""] {
+            assert_eq!(door_of(bad), None, "{bad}");
+        }
+        assert_eq!(door_id("not a name", &one), None);
+        assert_eq!(door_id("juniper-sx--k3x9", "npub1nope"), None);
+    }
+
     #[test]
     fn only_a_simplex_connector_reaches_its_door() {
         let asked = door_route("https://door.fragment.internal/reply", Some("simplex")).expect("its own door");

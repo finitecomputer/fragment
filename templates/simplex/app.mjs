@@ -3,8 +3,8 @@
 // their SimpleX app, through the platform's SimpleX door: a small
 // container of its own running SimpleX's core (cell/door.mjs,
 // images/simplex-door), which this fragment's jobs alone reach, at
-// `door.fragment.internal` (the platform sends each to the door named as
-// this fragment is, never out to the internet).
+// `door.fragment.internal` (the platform sends each to the door of this
+// fragment's life, never out to the internet).
 //
 // - Its owner, in person, sets the inbox's secret (`SIMPLEX_DOOR_SECRET`,
 //   toward door.fragment.internal), then `connect` starts the door and
@@ -106,6 +106,8 @@ export class App extends DurableObject {
   }
 
   async link(_, job) {
+    // numbered: an unlink after it means its invitation is kept by no one
+    const { n } = await job.call("asking", {});
     const asked = await door(job, "link");
     if (asked.status !== 202) return { invited: false, why: `the door answered ${asked.status}: ${String(asked.said.message ?? "").slice(0, 200)}` };
     for (let look = 0; look < INVITE_LOOKS_MAX; look += 1) {
@@ -113,22 +115,33 @@ export class App extends DurableObject {
       const { said } = await door(job, "state");
       const runner = said.runner ?? {};
       if (typeof runner.link === "string" && runner.link) {
-        await job.call("invited", { link: runner.link, ...(typeof runner.short === "string" && runner.short ? { short: runner.short } : {}) });
-        return { invited: true };
+        const { kept } = await job.call("invited", { n, link: runner.link, ...(typeof runner.short === "string" && runner.short ? { short: runner.short } : {}) });
+        return kept ? { invited: true } : { invited: false, why: "unlinked since" };
       }
     }
     return { invited: false, why: "no invitation yet" };
   }
 
-  // its owner's (its link job's), never its agent's: a viewer here
-  invited({ link, short }) {
+  // its owner's (its link and unlink jobs'), never its agent's, a viewer
+  // here: each link or unlink numbered, its invitation let go
+  asking() {
+    const n = (this.get("asked") ?? 0) + 1;
+    this.put("asked", n);
+    this.put("invitation", null);
+    return { n };
+  }
+
+  // the invitation its link `n` found, kept only while no link or unlink
+  // was asked after it
+  invited({ n, link, short }) {
+    if (this.get("asked") !== n) return { kept: false };
     this.put("invitation", { link: String(link).slice(0, 2000), short: short ? String(short).slice(0, 2000) : null, at: Date.now() });
-    return { ok: true };
+    return { kept: true };
   }
 
   async unlink(_, job) {
+    await job.call("asking", {});
     const { status } = await door(job, "unlink");
-    this.put("invitation", null);
     return { unlinked: status === 202 };
   }
 

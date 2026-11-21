@@ -962,13 +962,21 @@ impl FragmentCell {
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
         }
         headers.set(HOPS_HEADER, &(run.depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
-        // its door is the one named as this fragment is, told so by the
-        // platform alone (whatever header the job set), and asked only its
-        // jobs' routes (`/job/…`), never its runner's or its levers'
-        let door = if to_door { Some(self.name().map_err(|e| StepFail::Retry(e.message))?) } else { None };
-        if let Some(name) = &door {
-            headers.set(fragment_core::door::DOOR_NAME_HEADER, name).map_err(|e| permanent(e.to_string()))?;
-        }
+        // its door is its own life's (`door_id`: a name made again reaches
+        // another), told so by the platform alone (whatever headers the job
+        // set), and asked only its jobs' routes (`/job/…`), never its
+        // runner's or its levers'
+        let door = match to_door {
+            true => {
+                let retry = |e: CellError| StepFail::Retry(e.message);
+                let (name, life) = (self.name().map_err(retry)?, self.must(MetaKey::Npub).map_err(retry)?);
+                let id = fragment_core::door::door_id(&name, &life).ok_or_else(|| permanent(format!("{name} names no door")))?;
+                headers.set(fragment_core::door::CONNECTOR_HEADER, &name).map_err(|e| permanent(e.to_string()))?;
+                headers.set(fragment_core::door::DOOR_NAME_HEADER, &id).map_err(|e| permanent(e.to_string()))?;
+                Some(id)
+            }
+            false => None,
+        };
         let mut init = RequestInit::new();
         // A redirect comes back to the job as its 3xx: following it here
         // would skip the egress check for where it points.
