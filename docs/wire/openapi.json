@@ -1606,6 +1606,11 @@
           "phase": {
             "$ref": "#/components/schemas/Phase"
           },
+          "simplex": {
+            "default": false,
+            "description": "It carries its owner's SimpleX chat (docs/migrations.md, \"SimpleX in\na stage\"), which runs only on a computer that stays on: its\nperson's comped `seat` is made always-on as it completes.",
+            "type": "boolean"
+          },
           "zip_bytes": {
             "description": "The zip's size and SHA-256 (hex).",
             "format": "uint64",
