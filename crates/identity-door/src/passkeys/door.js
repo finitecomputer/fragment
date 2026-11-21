@@ -111,3 +111,6 @@ recover?.addEventListener("submit", (ev) => {
     say("A new passkey is made, and that code is spent.");
   });
 });
+
+// the page answers now (a test waits for this before it presses a button)
+main.dataset.ready = "1";
