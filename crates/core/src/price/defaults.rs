@@ -243,10 +243,21 @@ pub const DEFAULT_CHARGES: [(&str, &[DefaultCharge]); 7] = [
     ("fal", &[DefaultCharge { calls: &["POST /fal-ai/flux-2/klein/9b"], header: Some("x-fal-billable-units"), unit: "flux-2-klein-9b", micros: 6_000, per: 1, ..NO_READ }]),
     // X API: a read is billed by the resources it returns, $0.005 a post
     // (docs.x.com/x-api/getting-started/pricing), which a posts read's
-    // `meta.result_count` counts: X bills a post read again within 24
-    // hours nothing. A user's read ($0.010, a follower list's count of
-    // them too) is for no charge here.
-    ("x", &[DefaultCharge { calls: &["GET /2/tweets/**"], json: Some("/meta/result_count"), unit: "post", micros: 5_000, per: 1, ..NO_READ }]),
+    // `meta.result_count` counts (a search, a timeline, a user's posts or
+    // mentions, a post's quotes): X bills a post read again within 24
+    // hours nothing. A read of users ($0.010: a post's likers or
+    // reposters, a follower list) is for no charge here.
+    (
+        "x",
+        &[DefaultCharge {
+            calls: &["GET /2/tweets/search/**", "GET /2/tweets", "GET /2/tweets/*/quote_tweets", "GET /2/users/*/tweets", "GET /2/users/*/mentions", "GET /2/users/*/timelines/**"],
+            json: Some("/meta/result_count"),
+            unit: "post",
+            micros: 5_000,
+            per: 1,
+            ..NO_READ
+        }],
+    ),
     // Perplexity's Search API: $5.00 per 1,000 requests
     // (docs.perplexity.ai/getting-started/pricing); its answer says no cost.
     ("perplexity", &[DefaultCharge { calls: &["* /**"], unit: "call", micros: 5_000_000, per: 1_000, ..NO_READ }]),
