@@ -307,6 +307,7 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragment_core::models::Models, version: u32) -> fragment_core::price::PriceBook {
     let mut book = models.priced(fragment_core::price::PriceBook::defaults());
     book.keys = providers.key_prices();
+    book.keys.extend(models.cost_keys());
     book.version = book.version.max(version);
     match book.validate() {
         Ok(()) => book,

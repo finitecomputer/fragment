@@ -437,6 +437,37 @@ impl Upstream {
     }
 }
 
+/// What OpenRouter's answers say each call cost (FIN-616): `usage.cost`,
+/// dollars of its credits (on every answer, a stream's on its last usage
+/// chunk: openrouter.ai/docs/cookbook/administration/usage-accounting,
+/// read 2026-11-21), as the book's units of it, nano-dollars.
+pub const OPENROUTER_COST: &str = "openrouter:nanousd";
+/// A nano-dollar of OpenRouter's credits at list, as the book prices it:
+/// micro-dollars per nano-dollars, grossed up by OpenRouter's fee on the
+/// credits (`price::OPENROUTER_FEE_BP`), which marks up no call's cost.
+pub const OPENROUTER_COST_PRICE: (i64, u64) = ((1_000 * (crate::price::BP + crate::price::OPENROUTER_FEE_BP) / crate::price::BP) as i64, 1_000_000);
+const _: () = assert!(OPENROUTER_COST_PRICE.0 == 1_055, "a dollar of OpenRouter's credits costs $1.055");
+
+impl Upstream {
+    /// What one call on this upstream used, as its answer's `usage` says
+    /// (FIN-616): on OpenRouter, the cost it names (`OPENROUTER_COST`'s
+    /// nano-dollars, rounded to the nearest), charged as it is, never its
+    /// slot's ceiling; else, or with none, its tokens (`usage_of`), priced
+    /// at its model's row. A cost that is no finite, non-negative number of
+    /// dollars under `price::CHARGE_MAX` is none: its tokens price it.
+    pub fn used(&self, model: &str, usage: &Value) -> Option<Usage> {
+        let reported = match self {
+            Upstream::Openai { base_url, .. } if on_openrouter(base_url) => usage.get("cost").and_then(Value::as_f64),
+            _ => None,
+        };
+        let max = crate::price::CHARGE_MAX as f64 / 1e6;
+        match reported.filter(|usd| usd.is_finite() && (0.0..=max).contains(usd)) {
+            Some(usd) => Some(Usage::Key { key: OPENROUTER_COST.to_string(), units: (usd * 1e9).round() as u64 }),
+            None => usage_of(model, usage),
+        }
+    }
+}
+
 /// Whether an OpenAI-compatible API's `base_url` is OpenRouter's or one of
 /// its subdomains: by its host as `check` reads it (`catalog::row_url`,
 /// parsed and normalized: lower case, https's port 443 dropped), so no
@@ -835,6 +866,14 @@ impl Models {
             }
         }
         book
+    }
+
+    /// The book's rows for what a slot's API says a call cost (FIN-616):
+    /// OpenRouter's, when a slot is on it (`Upstream::used`).
+    pub fn cost_keys(&self) -> Vec<crate::price::KeyPrice> {
+        let on = self.slots.iter().map(|s| &s.upstream).chain([&self.embeddings.upstream]).any(|u| matches!(u, Upstream::Openai { base_url, .. } if on_openrouter(base_url)));
+        let (micros, per) = OPENROUTER_COST_PRICE;
+        on.then(|| crate::price::KeyPrice { key: OPENROUTER_COST.to_string(), micros, per }).into_iter().collect()
     }
 
     /// The place of the slot named `name`.
@@ -2165,6 +2204,41 @@ mod tests {
     /// OpenRouter, however its URL is spelled (case, port 443, a
     /// subdomain), with no ceiling, half a ceiling, or one that is not
     /// dollars from 0 to `CEILING_MAX_USD`; one id at two ceilings.
+    #[test]
+    fn an_openrouter_call_is_charged_its_own_cost() {
+        // FIN-616: an OpenRouter slot's call is charged what OpenRouter said
+        // it cost (`usage.cost`), with its credits' fee and the margin, not
+        // its ceiling; with no cost, or one that is no dollars, its tokens at
+        // the ceiling, as before; another API's `cost` is not read. Method:
+        // the Flash config's call S3 measured, a turn mostly cached.
+        let models = openrouter();
+        let defaults = PriceBook::defaults();
+        let mut book = models.priced(defaults.clone());
+        book.keys.extend(models.cost_keys());
+        assert_eq!(book.validate(), Ok(()));
+        let slot = models.route(models.named(Some("cheap"), None).unwrap());
+        let usage = json!({ "prompt_tokens": 30_000, "completion_tokens": 600, "prompt_tokens_details": { "cached_tokens": 25_000 }, "cost": 0.001234567 });
+        let used = slot.upstream.used(slot.id(), &usage).unwrap();
+        assert_eq!(used, Usage::Key { key: OPENROUTER_COST.into(), units: 1_234_567 });
+        // $0.001234567 with the 5.5% fee and the 50% margin, rounded up once
+        let paid = book.price(&used).unwrap();
+        assert_eq!((paid.list, paid.charge), (1_303, 1_954));
+        let ceiling = book.price(&usage_of(slot.id(), &usage).unwrap()).unwrap().charge;
+        assert!(paid.charge < ceiling, "less than its ceiling: {} < {ceiling}", paid.charge);
+        for none in [json!(null), json!(-0.01), json!("0.01"), json!(1e12)] {
+            let mut u = usage.clone();
+            u["cost"] = none.clone();
+            assert_eq!(slot.upstream.used(slot.id(), &u), usage_of(slot.id(), &u), "{none}: its tokens");
+        }
+        let mut no_cost = usage.clone();
+        no_cost.as_object_mut().unwrap().remove("cost");
+        assert!(matches!(slot.upstream.used(slot.id(), &no_cost), Some(Usage::Tokens { .. })));
+        let workers = Models::defaults();
+        let cf = workers.route(workers.named(Some("cheap"), None).unwrap());
+        assert!(matches!(cf.upstream.used(cf.id(), &usage), Some(Usage::Tokens { .. })), "Workers AI's answer names no cost of OpenRouter's");
+        assert!(workers.cost_keys().is_empty(), "no OpenRouter slot, no row");
+    }
+
     #[test]
     fn an_openrouter_slot_is_priced_at_its_ceiling() {
         use crate::price::{Priced, BP, OPENROUTER_FEE_BP};
