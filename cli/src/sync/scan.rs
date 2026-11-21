@@ -1,10 +1,9 @@
 //! The folder as a pass reads it: what syncs, and the scan against the journal.
 
 use super::journal::{read_state, SyncState};
-use super::refuse::refuse_dir;
+use super::refuse::{browser_profile, refuse_place, DirRefused};
 use super::report::ScanStats;
 use super::SyncError;
-use anyhow::Result;
 use fragment_core::blob::sha256_hex;
 use fragment_proto::{NotRepoPath, RepoPath};
 use std::collections::BTreeMap;
@@ -47,11 +46,12 @@ impl Local {
 
 /// Reads the folder for a pass: the journal and a scan against it. No
 /// network. Every pass reads here, a watcher's too, so a folder that
-/// becomes one sync refuses (`refuse_dir`) is refused before it is sent.
+/// becomes one sync refuses (`refuse_dir`) is refused before it is sent:
+/// its place first, then a browser profile by the scan itself.
 pub fn read_local(dir: &Path, name: &str) -> Result<Local, SyncError> {
-    refuse_dir(dir, dirs::home_dir().as_deref()).map_err(SyncError::Refused)?;
+    refuse_place(dir, dirs::home_dir().as_deref()).map_err(SyncError::Refused)?;
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let Scan { files, stats, refused } = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
+    let Scan { files, stats, refused } = scan_local(dir, Some(&state), false)?;
     Ok(Local { state, journal, files, stats, refused })
 }
 
@@ -121,12 +121,23 @@ pub(super) fn walk(dir: &Path) -> ignore::WalkBuilder {
 /// (O(changes)); with verify, everything is read and hashed. Takes the
 /// `syncable` paths, never following symlinks, and honors .gitignore
 /// exactly when git would (only inside a repo).
-pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<Scan> {
+///
+/// A browser profile among what it walks (`browser_profile`) refuses the
+/// folder (`DirRefused`). The scan decides it from the entries it takes,
+/// so a profile is never in its files while it says yes: a check of its
+/// own walk, before this one, once let a watch send a profile's `Cookies`
+/// made between the two, or one `.gitignore` stopped keeping out then.
+pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<Scan, SyncError> {
     let mut out = BTreeMap::new();
     let mut refused = Vec::new();
     let mut stats = ScanStats::default();
     for entry in walk(dir).build() {
-        let entry = entry?;
+        let entry = entry.map_err(|e| SyncError::Io(e.to_string()))?;
+        if browser_profile(&entry) {
+            let found = entry.path().strip_prefix(dir).unwrap_or(entry.path());
+            let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            return Err(SyncError::Refused(DirRefused::BrowserProfile { found: dir.join(found), dir }));
+        }
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
