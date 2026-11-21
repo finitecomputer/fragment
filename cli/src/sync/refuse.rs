@@ -47,7 +47,8 @@ impl From<DirRefused> for CodedError {
 pub fn refuse_dir(dir: &Path, home: Option<&Path>) -> Result<(), DirRefused> {
     refuse_place(dir, home)?;
     let Ok(dir) = dir.canonicalize() else { return Ok(()) };
-    match walk(&dir).max_depth(Some(3)).build().flatten().find(browser_profile) {
+    let profile = |e: &ignore::DirEntry| browser_profile(e.path(), e.depth(), e.file_type().is_some_and(|t| t.is_file()));
+    match walk(&dir).max_depth(Some(3)).build().flatten().find(profile) {
         Some(found) => Err(DirRefused::BrowserProfile { dir, found: found.into_path() }),
         None => Ok(()),
     }
@@ -71,32 +72,32 @@ pub(super) fn refuse_place(dir: &Path, home: Option<&Path>) -> Result<(), DirRef
     Ok(())
 }
 
-/// Whether an entry of a walk of the folder (`walk`) marks a browser
-/// profile in it or a subfolder: a `Default/Cookies`, a `Local State` or
-/// an `org.chromium.Chromium.*`. A profile's folder is at depth 0 or 1,
-/// so its `Default/Cookies` is at 2 or 3.
-pub(super) fn browser_profile(e: &ignore::DirEntry) -> bool {
-    let name = e.file_name().to_string_lossy();
-    let file = e.file_type().is_some_and(|t| t.is_file());
-    let in_default = e.path().parent().and_then(Path::file_name).is_some_and(|p| p == "Default");
-    let cookies = file && e.depth() <= 3 && name == "Cookies" && in_default;
-    let state = file && e.depth() <= 2 && name == "Local State";
-    let chromium = e.depth() <= 2 && name.starts_with("org.chromium.Chromium.");
+/// Whether `path`, `depth` levels into a folder sync walks (`walk`), marks
+/// a browser profile in it or a subfolder: a `Default/Cookies`, a `Local
+/// State` or an `org.chromium.Chromium.*`. A profile's folder is at depth
+/// 0 or 1, so its `Default/Cookies` is at 2 or 3. `path` is under the
+/// folder as it resolves (`canonicalize`): `.` from inside a profile's
+/// `Default` names no `Default`, and a link is the folder it leads to.
+pub(super) fn browser_profile(path: &Path, depth: usize, file: bool) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let in_default = path.parent().and_then(Path::file_name).is_some_and(|p| p == "Default");
+    let cookies = file && depth <= 3 && name == "Cookies" && in_default;
+    let state = file && depth <= 2 && name == "Local State";
+    let chromium = depth <= 2 && name.starts_with("org.chromium.Chromium.");
     cookies || state || chromium
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::scan::scan_local;
     use crate::sync::tests::{git_folder, tmpdir};
-    use crate::sync::SyncError;
+    use crate::sync::{read_local, SyncError};
     use std::fs;
 
-    /// Whether a pass's scan of `dir` refuses it for a browser profile: the
+    /// Whether a pass's read of `dir` refuses it for a browser profile: its
     /// scan decides from its own walk what `refuse_dir` decides from its.
-    fn scan_refuses(dir: &Path) -> bool {
-        matches!(scan_local(dir, None, false), Err(SyncError::Refused(DirRefused::BrowserProfile { .. })))
+    fn pass_refuses(dir: &Path) -> bool {
+        matches!(read_local(dir, "t--k3x9"), Err(SyncError::Refused(DirRefused::BrowserProfile { .. })))
     }
 
     /// The incident's folders: an agent's work folder holding its home and
@@ -164,12 +165,20 @@ mod tests {
             }
             let refused = refuse_dir(&dir, Some(&elsewhere));
             assert!(matches!(refused, Err(DirRefused::BrowserProfile { .. })), "{tag}: {refused:?}");
-            assert!(scan_refuses(&dir), "{tag}: a pass's scan refuses it too");
+            assert!(pass_refuses(&dir), "{tag}: a pass refuses it too");
         }
         let below = base.join("temp-below");
         fs::create_dir_all(below.join("work/org.chromium.Chromium.zz")).unwrap();
         assert!(matches!(refuse_dir(&below, Some(&elsewhere)), Err(DirRefused::BrowserProfile { .. })));
-        assert!(scan_refuses(&below), "an empty profile folder, in a pass's scan too");
+        assert!(pass_refuses(&below), "an empty profile folder, in a pass too");
+        // a folder is judged as it resolves (Codex on #1445): `.` from inside
+        // a profile's `Default` or its temp folder (here `sub/..`) names neither
+        for inside in ["cookies-here/Default", "chromium-temp/org.chromium.Chromium.a1b2c3"] {
+            fs::create_dir_all(base.join(inside).join("sub")).unwrap();
+            let dotted = base.join(inside).join("sub/..");
+            assert!(matches!(refuse_dir(&dotted, Some(&elsewhere)), Err(DirRefused::BrowserProfile { .. })), "{inside}");
+            assert!(pass_refuses(&dotted), "{inside}: a pass refuses it too");
+        }
         let shown = refuse_dir(&base.join("cookies-below"), Some(&elsewhere)).unwrap_err().to_string();
         assert!(shown.contains("browser profile") && shown.contains("browser-profile"), "{shown}");
     }
@@ -189,7 +198,12 @@ mod tests {
         fs::write(site.join(".cache/Default/Cookies"), b"x").unwrap();
         assert_eq!(refuse_dir(&site, Some(&home)), Ok(()));
         assert_eq!(refuse_dir(&site, None), Ok(()));
-        assert!(scan_local(&site, None, false).is_ok(), "a pass's scan passes it too");
+        assert!(read_local(&site, "t--k3x9").is_ok(), "a pass passes it too");
+        // a link named like a profile's temp folder is the folder it leads to
+        let link = root.join("org.chromium.Chromium.link");
+        std::os::unix::fs::symlink(&site, &link).unwrap();
+        assert_eq!(refuse_dir(&link, Some(&home)), Ok(()));
+        assert!(read_local(&link, "t--k3x9").is_ok(), "a pass passes it too");
         assert_eq!(refuse_dir(&root.join("not-yet"), Some(&home)), Ok(()));
         // a profile the folder's .gitignore keeps out, as the scan does
         let repo = git_folder("refuse-ignored", "browser-profile/");
@@ -198,7 +212,7 @@ mod tests {
         fs::write(repo.join("browser-profile/Default/Cookies"), b"x").unwrap();
         fs::write(repo.join("browser-profile/Local State"), b"x").unwrap();
         assert_eq!(refuse_dir(&repo, Some(&home)), Ok(()));
-        assert!(scan_local(&repo, None, false).is_ok());
+        assert!(read_local(&repo, "t--k3x9").is_ok());
         // or keeps only the profile's files out
         let repo = git_folder("refuse-ignored-files", "browser-profile/Default/*\nbrowser-profile/Local State");
         fs::create_dir_all(repo.join("browser-profile/Default")).unwrap();
@@ -206,7 +220,7 @@ mod tests {
         fs::write(repo.join("browser-profile/Local State"), b"x").unwrap();
         fs::write(repo.join("browser-profile/notes.md"), b"x").unwrap();
         assert_eq!(refuse_dir(&repo, Some(&home)), Ok(()));
-        assert!(scan_local(&repo, None, false).is_ok());
+        assert!(read_local(&repo, "t--k3x9").is_ok());
     }
 
     /// Goal (FIN-401): `fragment sync` decides its refusal from the files

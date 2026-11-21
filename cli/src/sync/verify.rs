@@ -14,7 +14,7 @@ use std::path::Path;
 pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncError> {
     let name = &full_name(client, name)?;
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let Scan { files: local, stats, refused } = scan_local(dir, Some(&state), true)?;
+    let Scan { files: local, stats, refused, .. } = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
     let storage = CodeStorage::connect(client, name, Wants::Read)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
     let listing = list_main(&storage)?;
@@ -61,6 +61,12 @@ mod tests {
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
         assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");
+        // the audit reads a folder sync refuses (Codex on #1445): a browser
+        // profile made in it is drift to report, not a reason to stop
+        fs::create_dir_all(dir.join("chrome/Default")).unwrap();
+        fs::write(dir.join("chrome/Default/Cookies"), b"x").unwrap();
+        let report = verify(&c, "t--k3x9", &dir).unwrap();
+        assert!(report.conflicts.iter().any(|c| c == "chrome/Default/Cookies: not in the repo"), "{:?}", report.conflicts);
         fs::remove_dir_all(&dir).ok();
     }
 }
