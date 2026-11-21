@@ -26,6 +26,12 @@
 //! }
 //! ```
 //!
+//! Or, in place of `provider`, the door signs people in itself, with
+//! passkeys (passkeys.rs): `"passkeys": {"rp_id": "home.example.com",
+//! "origin": "https://home.example.com", "state_dir": "/var/lib/door"}`,
+//! its `public_url` under that origin (the platform's), `rp_name`
+//! optional (default `Fragment`), no `vouched_domains`.
+//!
 //! `provider` also takes `scopes` (default `openid email profile`),
 //! `email_claim` (default `email`), `auth` (`client_secret_basic` or
 //! `client_secret_post`; default: what the provider lists) and `ca_file`
@@ -62,10 +68,20 @@ struct RawConfig {
     listen: SocketAddr,
     public_url: String,
     secret_file: PathBuf,
-    provider: RawProvider,
+    provider: Option<RawProvider>,
+    passkeys: Option<RawPasskeys>,
     #[serde(default)]
     vouched_domains: Vec<String>,
     clients: Vec<RawClient>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPasskeys {
+    rp_id: String,
+    origin: String,
+    state_dir: PathBuf,
+    rp_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +206,13 @@ pub struct ProviderConfig {
     pub ca_pem: Option<Vec<u8>>,
 }
 
+/// Who vouches for a person: an OpenID Connect provider, or their own
+/// passkey, checked by the door (passkeys.rs).
+pub enum SignIn {
+    Provider(ProviderConfig),
+    Passkeys(crate::passkeys::PasskeysConfig),
+}
+
 /// The door's configuration, checked, its secrets read.
 pub struct Config {
     pub listen: SocketAddr,
@@ -198,7 +221,7 @@ pub struct Config {
     pub public_url: Url,
     /// The door's own secret, 32 bytes or more.
     pub secret: Vec<u8>,
-    pub provider: ProviderConfig,
+    pub signin: SignIn,
     pub vouched: Vouched,
     pub clients: Vec<Client>,
 }
@@ -232,7 +255,23 @@ impl Config {
     pub fn read(path: &Path) -> Result<Config, ConfigError> {
         let raw: RawConfig = serde_json::from_slice(&read_file(path, false)?).map_err(ConfigError::Shape)?;
         let vouched = Vouched::new(&raw.vouched_domains)?;
-        let p = raw.provider;
+        let p = match (raw.provider, raw.passkeys) {
+            (Some(p), None) => p,
+            (None, Some(k)) => {
+                if vouched.any() {
+                    return Err(invalid("vouched_domains", "a passkey's account is the door's own: nothing to vouch for"));
+                }
+                let secret = read_secret(&raw.secret_file, "secret_file")?.into_bytes();
+                if raw.clients.len() > CLIENTS_MAX {
+                    return Err(invalid("clients", format!("1 to {CLIENTS_MAX} clients")));
+                }
+                let clients = raw.clients.into_iter().map(Client::of).collect::<Result<Vec<_>, _>>()?;
+                let origin = web_url(&k.origin).map_err(|why| invalid("passkeys.origin", why))?;
+                let passkeys = crate::passkeys::PasskeysConfig { rp_id: k.rp_id, origin, rp_name: k.rp_name.unwrap_or_else(|| "Fragment".into()), state_dir: k.state_dir };
+                return Config::with_passkeys(raw.listen, &raw.public_url, secret, passkeys, clients);
+            }
+            _ => return Err(invalid("provider", "exactly one of provider and passkeys")),
+        };
         let settings = Settings::parse(Vars {
             issuer: &p.issuer,
             client_id: &p.client_id,
@@ -274,7 +313,55 @@ impl Config {
         if provider.settings.email_claim != "email" && !vouched.any() {
             return Err(invalid("provider.email_claim", "a claim email_verified does not speak for is taken only beside vouched_domains"));
         }
-        Ok(Config { listen, public_url, secret, provider, vouched, clients })
+        Ok(Config { listen, public_url, secret, signin: SignIn::Provider(provider), vouched, clients })
+    }
+
+    /// A passkey door's config of checked parts: its relying party a host
+    /// name, its origin https on that name or one under it (http only on
+    /// loopback: tests), and its public URL on that origin, where its
+    /// pages run their ceremonies.
+    pub fn with_passkeys(listen: SocketAddr, public_url: &str, secret: Vec<u8>, passkeys: crate::passkeys::PasskeysConfig, clients: Vec<Client>) -> Result<Config, ConfigError> {
+        let public_url = web_url(public_url).map_err(|why| invalid("public_url", why))?;
+        if public_url.query().is_some() {
+            return Err(invalid("public_url", "the door's root: no query"));
+        }
+        if secret.len() < SECRET_MIN_BYTES {
+            return Err(invalid("secret_file", format!("at least {SECRET_MIN_BYTES} bytes (head -c 32 /dev/urandom | base64)")));
+        }
+        let rp = &passkeys.rp_id;
+        let rp_ok = !rp.is_empty() && rp.len() <= 253 && rp.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-') && !rp.starts_with('.') && !rp.ends_with('.');
+        if !rp_ok {
+            return Err(invalid("passkeys.rp_id", "a host name, lower case"));
+        }
+        let o = &passkeys.origin;
+        let host = o.host_str().unwrap_or("");
+        let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
+        if !(o.scheme() == "https" || (o.scheme() == "http" && loopback)) || o.path() != "/" {
+            return Err(invalid("passkeys.origin", "https://<host>, the platform's origin (http only on loopback)"));
+        }
+        if !loopback && host != rp && !host.ends_with(&format!(".{rp}")) {
+            return Err(invalid("passkeys.origin", "on the relying party's name or one under it"));
+        }
+        if public_url.origin() != o.origin() {
+            return Err(invalid("public_url", "on the passkeys' origin: the door's pages run its ceremonies there"));
+        }
+        if clients.is_empty() || clients.len() > CLIENTS_MAX {
+            return Err(invalid("clients", format!("1 to {CLIENTS_MAX} clients")));
+        }
+        for (i, c) in clients.iter().enumerate() {
+            if clients[..i].iter().any(|d| d.id == c.id) {
+                return Err(invalid("clients.client_id", format!("{:?} is named twice", c.id)));
+            }
+        }
+        Ok(Config { listen, public_url, secret, signin: SignIn::Passkeys(passkeys), vouched: Vouched::new(&[])?, clients })
+    }
+
+    /// The provider, when the door signs people in through one.
+    pub fn provider(&self) -> Option<&ProviderConfig> {
+        match &self.signin {
+            SignIn::Provider(p) => Some(p),
+            SignIn::Passkeys(_) => None,
+        }
     }
 
     pub fn client(&self, id: &str) -> Option<&Client> {
@@ -335,7 +422,7 @@ mod tests {
     fn reads_a_config() {
         let d = dir("reads");
         let c = Config::read(&config(&d.0, r#","vouched_domains":["example.com"]"#, 0o600)).unwrap();
-        assert_eq!(c.provider.client_secret, "s3cret", "trimmed");
+        assert_eq!(c.provider().expect("a provider's config").client_secret, "s3cret", "trimmed");
         assert_eq!(c.callback_url(), "https://door.example.com/oidc/callback");
         let client = c.client("client_a").unwrap();
         assert!(client.secret_is("secret"));

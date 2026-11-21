@@ -3,8 +3,9 @@
 //! its head within `HEAD_TIMEOUT`, a body `BODY_BYTES_MAX`).
 //!
 //! It answers the three WorkOS paths the platform calls and the provider's
-//! callback (`config::CALLBACK_PATH`), and 404 to every other (WorkOS Pipes
-//! among them: a self-hosted platform has none).
+//! callback (`config::CALLBACK_PATH`), or, a passkey door, its own pages
+//! and their ceremonies (passkeys.rs), and 404 to every other (WorkOS
+//! Pipes among them: a self-hosted platform has none).
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -25,7 +26,8 @@ use tokio::sync::{oneshot, Semaphore};
 use url::Url;
 
 use crate::codes::{random_code, Codes};
-use crate::config::{Client, Config, CALLBACK_PATH};
+use crate::config::{Client, Config, SignIn, CALLBACK_PATH};
+use crate::passkeys::{pages, PasskeyError, Passkeys};
 use crate::oidc::{self, Authorize, OidcError, Refusal, SignInSecrets, CODE_MAX};
 use crate::person::{person_of, EMAIL_BYTES_MAX};
 use crate::provider::{ClientError, ProviderClient};
@@ -46,6 +48,10 @@ pub const QUERY_BYTES_MAX: usize = 8 * 1024;
 /// The platform's state at most (its own is 64 hex digits).
 pub const STATE_BYTES_MAX: usize = 1024;
 const _: () = assert!(CONNECTION_TIMEOUT.as_millis() > 4 * oidc::FETCH_TIMEOUT_MS as u128, "a callback's four calls to the provider fit in its connection");
+/// A passkey ceremony's body at most (a credential with its attestation).
+pub const PASSKEY_BODY_BYTES_MAX: usize = 64 * 1024;
+/// An invite's link token: 64 hex digits.
+const INVITE_BYTES: usize = 64;
 /// A login hint passed on to the provider at most (an email's).
 const LOGIN_HINT_BYTES_MAX: usize = EMAIL_BYTES_MAX;
 /// The provider's own error code, passed on, at most.
@@ -58,7 +64,9 @@ const LOGOUT: &str = "/user_management/sessions/logout";
 struct Shared {
     config: Config,
     codes: Mutex<Codes>,
-    provider: ProviderClient,
+    /// The provider's client, or the door's passkeys: one of the two.
+    provider: Option<ProviderClient>,
+    passkeys: Option<Passkeys>,
     state_key: StateKey,
 }
 
@@ -80,6 +88,8 @@ pub enum StartError {
     Runtime(std::io::Error),
     #[error(transparent)]
     Client(#[from] ClientError),
+    #[error("the door's passkeys: {0}")]
+    Passkeys(#[from] PasskeyError),
 }
 
 fn bind(addr: SocketAddr) -> Result<StdListener, StartError> {
@@ -116,7 +126,11 @@ impl Door {
         let listener = bind(config.listen)?;
         let addr = listener.local_addr().map_err(|source| StartError::Bind { addr: config.listen, source })?;
         let rt = runtime()?;
-        eprintln!("identity-door: serving on http://{addr} as {}, signing people in at {}", config.public_url, config.provider.settings.issuer);
+        let by = match &config.signin {
+            SignIn::Provider(p) => format!("signing people in at {}", p.settings.issuer),
+            SignIn::Passkeys(k) => format!("signing people in by their passkeys for {}", k.rp_id),
+        };
+        eprintln!("identity-door: serving on http://{addr} as {}, {by}", config.public_url);
         let shared = Arc::new(Shared::new(config)?);
         rt.block_on(serve(listener, shared, until));
         Ok(())
@@ -138,10 +152,12 @@ impl Drop for Door {
 
 impl Shared {
     fn new(config: Config) -> Result<Shared, StartError> {
-        let p = &config.provider;
-        let provider = ProviderClient::new(p.settings.clone(), p.client_secret.clone(), p.ca_pem.as_deref())?;
+        let (provider, passkeys) = match &config.signin {
+            SignIn::Provider(p) => (Some(ProviderClient::new(p.settings.clone(), p.client_secret.clone(), p.ca_pem.as_deref())?), None),
+            SignIn::Passkeys(k) => (None, Some(Passkeys::new(k.clone())?)),
+        };
         let state_key = StateKey::of(&config.secret);
-        Ok(Shared { config, codes: Mutex::new(Codes::new()), provider, state_key })
+        Ok(Shared { config, codes: Mutex::new(Codes::new()), provider, passkeys, state_key })
     }
 }
 
@@ -197,6 +213,14 @@ async fn connection(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
 
 async fn answer(shared: &Shared, req: Request<Incoming>) -> Response<Full<Bytes>> {
     let path = req.uri().path().to_string();
+    if let Some(passkeys) = &shared.passkeys {
+        if let Some(answered) = passkey_route(shared, passkeys, req.method(), &path, &req) {
+            return answered;
+        }
+        if path.starts_with("/passkeys/") && req.method() == Method::POST {
+            return ceremony(shared, passkeys, &path, req).await;
+        }
+    }
     match (req.method(), path.as_str()) {
         (&Method::GET, AUTHORIZE) => authorize(shared, &req).await,
         (&Method::GET, CALLBACK_PATH) => callback(shared, &req).await,
@@ -267,7 +291,12 @@ async fn authorize(shared: &Shared, req: &Request<Incoming>) -> Response<Full<By
         Ok(sealed) => sealed,
         Err(refusal) => return back(callback, None, Err(("invalid_request", refusal.to_string()))),
     };
-    let provider = match shared.provider.provider().await {
+    let hint = param(&pairs, "login_hint").filter(|h| !h.is_empty() && h.len() <= LOGIN_HINT_BYTES_MAX && h.bytes().all(|b| b.is_ascii_graphic()));
+    let Some(client_of_provider) = shared.provider.as_ref() else {
+        // a passkey door: its own page signs the person in
+        return html(StatusCode::OK, pages::signin(&base_path(shared), &sealed, hint));
+    };
+    let provider = match client_of_provider.provider().await {
         Ok(provider) => provider,
         Err(refusal) => {
             eprintln!("identity-door: authorize for {}: {refusal}", client.id);
@@ -275,9 +304,8 @@ async fn authorize(shared: &Shared, req: &Request<Incoming>) -> Response<Full<By
         }
     };
     let secrets = SignInSecrets::of(&shared.config.secret, &sealed);
-    let hint = param(&pairs, "login_hint").filter(|h| !h.is_empty() && h.len() <= LOGIN_HINT_BYTES_MAX && h.bytes().all(|b| b.is_ascii_graphic()));
     let redirect_uri = shared.config.callback_url();
-    let to = oidc::authorize_url(&Authorize { endpoint: &provider.authorization_endpoint, settings: &shared.provider.settings, redirect_uri: &redirect_uri, state: &sealed, secrets: &secrets, login_hint: hint });
+    let to = oidc::authorize_url(&Authorize { endpoint: &provider.authorization_endpoint, settings: &client_of_provider.settings, redirect_uri: &redirect_uri, state: &sealed, secrets: &secrets, login_hint: hint });
     found(&to)
 }
 
@@ -298,6 +326,9 @@ fn provider_error(code: &str) -> &str {
 /// (`person::person_of`), and the browser sent back to the platform with a
 /// code of the door's own and the platform's state, or with why not.
 async fn callback(shared: &Shared, req: &Request<Incoming>) -> Response<Full<Bytes>> {
+    let Some(provider) = shared.provider.as_ref() else {
+        return page(StatusCode::NOT_FOUND, "Sign-in did not finish", "This door signs people in by their passkeys: it has no provider to come back from.");
+    };
     let pairs = match query(req) {
         Ok(pairs) => pairs,
         Err(why) => return page(StatusCode::BAD_REQUEST, "Sign-in did not finish", why),
@@ -321,7 +352,7 @@ async fn callback(shared: &Shared, req: &Request<Incoming>) -> Response<Full<Byt
         return back(to, state, Err(("invalid_request", "the sign-in provider answered no code".into())));
     };
     let secrets = SignInSecrets::of(&shared.config.secret, sealed);
-    let verified = match shared.provider.redeem(code, &shared.config.callback_url(), &secrets, now_s()).await {
+    let verified = match provider.redeem(code, &shared.config.callback_url(), &secrets, now_s()).await {
         Ok(verified) => verified,
         Err(refusal) => {
             eprintln!("identity-door: a sign-in for {} refused: {refusal}", client.id);
@@ -333,7 +364,7 @@ async fn callback(shared: &Shared, req: &Request<Incoming>) -> Response<Full<Byt
             return back(to, state, Err((error, format!("{refusal}; start the sign-in again"))));
         }
     };
-    let settings = &shared.provider.settings;
+    let settings = &provider.settings;
     let person = match person_of(&settings.issuer, &verified, &settings.email_claim, &shared.config.vouched) {
         Ok(person) => person,
         Err(refused) => {
@@ -344,6 +375,146 @@ async fn callback(shared: &Shared, req: &Request<Incoming>) -> Response<Full<Byt
     eprintln!("identity-door: {} signed in for {}", person.email, client.id);
     let code = shared.codes.lock().expect("the codes' lock is never poisoned").issue(random_code(), &client.id, person, Instant::now());
     back(to, state, Ok(code))
+}
+
+/// The door's root path on its public URL (`/__door`, or empty): where
+/// its pages find its script and ceremonies.
+fn base_path(shared: &Shared) -> String {
+    shared.config.public_url.path().trim_end_matches('/').to_string()
+}
+
+/// A passkey door's pages and script: `GET /passkeys.js`, `GET
+/// /passkeys` (add one, or recover), `GET /invite/<token>`.
+fn passkey_route(shared: &Shared, passkeys: &Passkeys, method: &Method, path: &str, _req: &Request<Incoming>) -> Option<Response<Full<Bytes>>> {
+    if method != Method::GET {
+        return None;
+    }
+    let base = base_path(shared);
+    match path {
+        "/passkeys.js" => {
+            let mut resp = bare(StatusCode::OK, Bytes::from_static(pages::SCRIPT.as_bytes()));
+            resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/javascript; charset=utf-8"));
+            Some(resp)
+        }
+        "/passkeys" => Some(html(StatusCode::OK, pages::manage(&base))),
+        _ => {
+            let invite = path.strip_prefix("/invite/")?;
+            if invite.len() != INVITE_BYTES || !invite.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(page(StatusCode::NOT_FOUND, "No such invite", "This invite is used, expired, or not this home's."));
+            }
+            Some(match passkeys.invite_email(invite, now_s()) {
+                Ok(email) => html(StatusCode::OK, pages::enroll(&base, invite, &email)),
+                Err(_) => page(StatusCode::NOT_FOUND, "No such invite", "This invite is used, expired, or not this home's."),
+            })
+        }
+    }
+}
+
+/// What a ceremony's step is sent.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Step {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    invite: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    flow: Option<String>,
+    #[serde(default)]
+    credential: Option<serde_json::Value>,
+}
+
+fn refused(e: PasskeyError) -> Response<Full<Bytes>> {
+    if e.is_refusal() {
+        json(StatusCode::BAD_REQUEST, json!({ "error": e.to_string() }))
+    } else {
+        eprintln!("identity-door: a passkey step failed: {e}");
+        json(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": "the door failed: try again" }))
+    }
+}
+
+fn need<'a>(v: &'a Option<String>, what: &'static str) -> Result<&'a str, PasskeyError> {
+    v.as_deref().filter(|s| !s.is_empty() && s.len() <= STATE_BYTES_MAX * 2).ok_or(PasskeyError::Refused(what))
+}
+
+fn credential<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> Result<T, PasskeyError> {
+    let v = v.clone().ok_or(PasskeyError::Refused("no credential"))?;
+    serde_json::from_value(v).map_err(|_| PasskeyError::Refused("that is not a passkey's answer"))
+}
+
+/// `POST /passkeys/<step>`: one step of a ceremony, JSON in and out.
+async fn ceremony(shared: &Shared, passkeys: &Passkeys, path: &str, req: Request<Incoming>) -> Response<Full<Bytes>> {
+    let content_type = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !content_type.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json")) {
+        return json(StatusCode::UNSUPPORTED_MEDIA_TYPE, json!({ "error": "a step is JSON" }));
+    }
+    let body = match Limited::new(req.into_body(), PASSKEY_BODY_BYTES_MAX).collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(_) => return json(StatusCode::PAYLOAD_TOO_LARGE, json!({ "error": "a step is at most 64 KiB" })),
+    };
+    let Ok(step) = serde_json::from_slice::<Step>(&body) else {
+        return json(StatusCode::BAD_REQUEST, json!({ "error": "not a step of this door's" }));
+    };
+    let now = now_s();
+    let answered = (|| -> Result<serde_json::Value, PasskeyError> {
+        Ok(match path {
+            "/passkeys/signin/begin" => {
+                let begun = shared.state_key.open(need(&step.state, "no sign-in to finish: start again where you began")?, now).map_err(|_| PasskeyError::Refused("this sign-in is too old: start again where you began"))?;
+                let (flow, options) = passkeys.signin_begin(begun, need(&step.email, "an email")?)?;
+                json!({ "flow": flow, "options": options })
+            }
+            "/passkeys/signin/finish" => {
+                let (begun, person) = passkeys.signin_finish(need(&step.flow, "no flow")?, &credential(&step.credential)?)?;
+                let to = shared.config.client(&begun.client_id).and_then(|c| c.redirect_uris.get(usize::from(begun.callback)).map(|u| (c, u)));
+                let Some((client, to)) = to else {
+                    return Err(PasskeyError::Refused("this sign-in's client is no longer the door's: start again"));
+                };
+                eprintln!("identity-door: {} signed in by a passkey for {}", person.email, client.id);
+                let code = shared.codes.lock().expect("the codes' lock is never poisoned").issue(random_code(), &client.id, person, Instant::now());
+                let redirect = back(to, begun.client_state.as_deref(), Ok(code));
+                let location = redirect.headers().get(LOCATION).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                json!({ "redirect": location })
+            }
+            "/passkeys/enroll/begin" => {
+                let (flow, options) = passkeys.enroll_begin(need(&step.invite, "no invite")?, now)?;
+                json!({ "flow": flow, "options": options })
+            }
+            "/passkeys/enroll/finish" => {
+                let codes = passkeys.enroll_finish(need(&step.flow, "no flow")?, &credential(&step.credential)?, now)?;
+                let next = shared.config.clients.first().and_then(|c| c.redirect_uris.first()).map(|u| format!("{}/", u.origin().ascii_serialization())).unwrap_or_default();
+                json!({ "recovery_codes": codes, "continue": next })
+            }
+            "/passkeys/add/begin" => {
+                let (flow, options) = passkeys.add_begin(need(&step.email, "an email")?)?;
+                json!({ "flow": flow, "options": options })
+            }
+            "/passkeys/add/prove" => {
+                let (flow, options) = passkeys.add_prove(need(&step.flow, "no flow")?, &credential(&step.credential)?)?;
+                json!({ "flow": flow, "options": options })
+            }
+            "/passkeys/add/finish" => {
+                passkeys.add_finish(need(&step.flow, "no flow")?, &credential(&step.credential)?)?;
+                json!({ "ok": true })
+            }
+            "/passkeys/recover/begin" => {
+                let (flow, options) = passkeys.recover_begin(need(&step.email, "an email")?, need(&step.code, "a recovery code")?)?;
+                json!({ "flow": flow, "options": options })
+            }
+            "/passkeys/recover/finish" => {
+                passkeys.recover_finish(need(&step.flow, "no flow")?, &credential(&step.credential)?)?;
+                json!({ "ok": true })
+            }
+            _ => return Err(PasskeyError::Refused("no such step")),
+        })
+    })();
+    match answered {
+        Ok(v) => json(StatusCode::OK, v),
+        Err(e) => refused(e),
+    }
 }
 
 /// A redirect to `to`.
@@ -454,6 +625,17 @@ fn bare(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
 fn json(status: StatusCode, value: serde_json::Value) -> Response<Full<Bytes>> {
     let mut resp = bare(status, Bytes::from(value.to_string()));
     resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp
+}
+
+/// A passkey page: the door's own script alone, its ceremonies to the
+/// door's own origin alone.
+fn html(status: StatusCode, html: String) -> Response<Full<Bytes>> {
+    let mut resp = bare(status, Bytes::from(html));
+    let h = resp.headers_mut();
+    h.insert(CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    h.insert("content-security-policy", HeaderValue::from_static("default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"));
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     resp
 }
 

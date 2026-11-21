@@ -65,12 +65,13 @@ mod codes;
 pub mod config;
 pub mod jws;
 pub mod oidc;
+pub mod passkeys;
 pub mod person;
 mod provider;
 mod serve;
 pub mod state;
 
 pub use codes::{CODES_MAX, CODE_TTL};
-pub use config::{Client, Config, ConfigError, ProviderConfig, CALLBACK_PATH};
+pub use config::{Client, Config, ConfigError, ProviderConfig, SignIn, CALLBACK_PATH};
 pub use person::{Person, Vouched};
 pub use serve::{Door, StartError, BODY_BYTES_MAX, CONNECTIONS_MAX};
