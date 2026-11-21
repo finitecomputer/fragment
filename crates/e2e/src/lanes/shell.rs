@@ -9140,6 +9140,8 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
 /// whatever their role, and folds it into Archived; Delete is on their own
 /// alone, asks again under its row with its name typed back and what goes,
 /// then deletes it for good; each row moves only once the list says so.
+/// Its sections and filters by access too: their own under Yours, the lent
+/// one under Shared with you, each filter keeping only what it names.
 /// Invalid: a brain shared with them (an editor) offers no Delete, and the
 /// platform refuses them its delete.
 fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
@@ -9172,6 +9174,27 @@ fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page
         "on Brains, their own brain has Archive and Delete; one shared with them as an editor has Archive and no Delete",
         shown && has(&own, "archive") && has(&own, "delete") && has(&lent, "archive") && !has(&lent, "delete"),
         json!({ "own": own, "lent": lent }),
+    );
+    // Sections and filters by access (apps-page.js `accessView`): their own
+    // under Yours, the lent one under Shared with you saying Can edit; each
+    // filter keeps only what it names, and All brings both back.
+    let section = |name: &str, key: &str| format!("!!document.querySelector({})", js(&format!("#brains-page .apps-list[data-section={key}] > .app-row[data-fragment=\"{name}\"]")));
+    let headings = "[...document.querySelectorAll('#brains-page .apps-section')].every((e) => e.checkVisibility())";
+    let pick = |b: &mut Browser, key: &str| b.eval(page, &format!("(document.querySelector('#brains-page .apps-filter[data-filter={key}]')?.click(), true)"));
+    let split = b.until(page, &format!("{} && {} && {headings} && {}?.querySelector('.app-row-meta')?.textContent === 'Can edit'", section(&mine, "yours"), section(&theirs, "shared"), row(&theirs)), wait);
+    pick(b, "view")?;
+    let view = b.until(page, &format!("!{} && !{} && document.querySelector('#brains-page .apps-filter[data-filter=view]')?.getAttribute('aria-pressed') === 'true'", live(&mine), live(&theirs)), wait);
+    pick(b, "shared")?;
+    let shared = b.until(page, &format!("!{} && {} && !document.querySelector('#brains-page .apps-section[data-section=yours]').checkVisibility()", live(&mine), section(&theirs, "shared")), wait);
+    pick(b, "yours")?;
+    let yours = b.until(page, &format!("{} && !{}", section(&mine, "yours"), live(&theirs)), wait);
+    pick(b, "all")?;
+    let all = b.until(page, &format!("{} && {}", section(&mine, "yours"), section(&theirs, "shared")), wait);
+    let _ = b.screenshot(page, &shots.join("brains-sections.png"));
+    s.ok(
+        "on Brains, their own brain is under Yours and the lent one under Shared with you (Can edit); View only, Shared with you and Yours each keep only what they name, and All both",
+        split && view && shared && yours && all,
+        b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?,
     );
     let refused = b.eval(page, &in_page("DELETE", &format!("/api/f/{theirs}"), "undefined"))?;
     let kept = api.status(&other, &theirs)?;

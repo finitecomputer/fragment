@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { listed, shelfOf, shoots, SHELVES } from "../shell/apps-page.js";
+import { accessView, ACCESS_FILTERS, listed, shelfOf, shoots, SHELVES } from "../shell/apps-page.js";
 
 const row = (kind, reach) => ({ name: `${kind}--a1b2`, kind, role: "owner", sharing: { visibility: "members", ...(reach === undefined ? {} : { reach }) } });
 
@@ -55,4 +55,51 @@ test("each shelf's visits are an ask kind of its own", async () => {
   const asks = Object.values(SHELVES).map((s) => s.ask);
   assert.equal(new Set(asks).size, asks.length);
   for (const ask of asks) assert.ok(KINDS.includes(ask), ask);
+});
+
+// Austin, 2026-11-20: their own apps apart from those shared with them, and
+// what they may edit apart from what they may only view.
+const as = (name, role) => ({ name, kind: "app", role });
+const names = (rows) => rows.map((f) => f.name);
+
+test("their own and those shared with them are two sections, each in the list's order", () => {
+  const live = [as("b", "editor"), as("a", "owner"), as("c", "viewer"), as("d", "owner")];
+  const view = accessView(live, []);
+  assert.equal(view.filter, "all");
+  assert.deepEqual(names(view.yours), ["a", "d"]);
+  assert.deepEqual(names(view.shared), ["b", "c"]);
+  assert.deepEqual(view.filters.map((f) => [f.key, f.count]), [["all", 4], ["yours", 2], ["shared", 2], ["edit", 3], ["view", 1]]);
+});
+
+test("each filter keeps only what it names, archived ones too", () => {
+  const live = [as("own", "owner"), as("edit", "editor"), as("view", "viewer")];
+  const archived = [as("old-own", "owner"), as("old-view", "viewer")];
+  const of = (filter) => { const v = accessView(live, archived, filter); return [names(v.yours), names(v.shared), names(v.archived)]; };
+  assert.deepEqual(of("yours"), [["own"], [], ["old-own"]]);
+  assert.deepEqual(of("shared"), [[], ["edit", "view"], ["old-view"]]);
+  assert.deepEqual(of("edit"), [["own"], ["edit"], ["old-own"]]);
+  assert.deepEqual(of("view"), [[], ["view"], ["old-view"]]);
+});
+
+test("with nothing shared with them there are no filters, and a filter chosen before shows everything", () => {
+  const live = [as("a", "owner"), as("b", "owner")];
+  for (const filter of ["all", "shared", "view"]) {
+    const view = accessView(live, [], filter);
+    assert.deepEqual(view.filters, [], filter);
+    assert.equal(view.filter, "all", filter);
+    assert.deepEqual(names(view.yours), ["a", "b"], filter);
+  }
+});
+
+test("one shared with them only in Archived still offers the filters", () => {
+  const view = accessView([as("a", "owner")], [as("z", "viewer")], "shared");
+  assert.equal(view.filter, "shared");
+  assert.deepEqual(names(view.archived), ["z"]);
+  assert.equal(view.filters.length, ACCESS_FILTERS.length);
+});
+
+test("a filter it does not know is All", () => {
+  const view = accessView([as("a", "owner"), as("b", "viewer")], [], "nonsense");
+  assert.equal(view.filter, "all");
+  assert.deepEqual([names(view.yours), names(view.shared)], [["a"], ["b"]]);
 });
