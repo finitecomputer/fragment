@@ -348,9 +348,9 @@ grant's `by`, the log's).
 `GET /admin` (the operators' page) answers only an operator's platform
 session; to anyone else it is the 404 a missing route is, word for word.
 Its API decides again on every call. The admin is a Worker of its own
-(cell/src/admin.rs): the cell hands it its routes as they came, and it
-decides who asks; `GET /api/admin/health` and `GET /api/admin/glance`
-are its so far, the rest the cell's until they move. `fragment operator
+(cell/src/admin.rs): the cell hands it `/admin` and every `/api/admin/…`
+route as they came, and it decides who asks. A wipe and the ledger's
+commands stay the cell's. `fragment operator
 people|person|pin|start-from|orgs|comp|uncomp|trials|health|log|credit|budget|payer`
 calls the same.
 
