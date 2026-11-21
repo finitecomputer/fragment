@@ -81,7 +81,7 @@ const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// location, a few hundred across the world, and a cold start), so a slow
 /// or far ledger costs a call at most this, once a minute, and one that
 /// does not answer lets the call through (decision 62).
-const GATE_WAIT_MS: u64 = 1_500;
+const GATE_WAIT_MS: u64 = fragment_core::ledger::gate::ASKING_MS.unsigned_abs();
 /// How long an ask beside a model call waits on a ledger (`may_beside`):
 /// no call waits on it, so longer than `GATE_WAIT_MS`, a slow ledger's
 /// answer still kept for the next call; within the 30 s a Worker keeps a
@@ -1329,7 +1329,7 @@ pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R)
 /// or undoes a call already started.
 pub async fn may_beside<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R, after: &dyn crate::models::Background) -> Result<(), LedgerError> {
     let body = serde_json::to_string(question).expect("a gate's question serializes");
-    match GATE.with(|g| g.borrow().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
+    match GATE.with(|g| g.borrow_mut().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
         Step::Go => Ok(()),
         Step::Refuse(why) => Err(why.into()),
         Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await,

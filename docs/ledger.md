@@ -249,7 +249,9 @@ answer answers it at once, a refusal refusing it before its vendor call.
 With none, it starts at once and the ledger is asked beside it, the
 answer kept for the next call. Only a question last heard refused,
 longer ago than the window, is asked first, for at most `GATE_WAIT_MS`
-(the payer may have topped up). An ask beside a call holds nothing of
+(the payer may have topped up), and so is one being asked beside another
+call now (for at most as long): a burst on a cold gate starts one call
+and waits on its answer for the rest. An ask beside a call holds nothing of
 the call's: a call started runs to its end, a stream to its `[DONE]`,
 and is charged as any call is. So a payer out of credit, or past a
 fragment's cap, may make one call more in each isolate that has not
