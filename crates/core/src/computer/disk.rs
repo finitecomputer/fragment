@@ -37,14 +37,23 @@ pub fn restore_floor(total: u64) -> u64 {
     (total / 20).min(RESTORE_FLOOR_MAX)
 }
 
-/// The most of a computer's disk its image takes, as a fresh computer's
+/// The most of a computer's disk an image may take, as a fresh computer's
 /// disk reads it (`df` as it starts, before anything is restored): its
 /// files, written to the disk as its runtime unpacks them, and the disk's
-/// own keep. An empty 20 GB btrfs disk keeps 0.55 GB for itself (its
-/// metadata twice), and our image written to it with zstd took 2.41 GB
-/// more: 2.99 GB in all (2026-11-20). Production's empty computers read
-/// about 17.4 GB free, 2.6 GB used; the larger is counted. A restore of
-/// `/data` comes on top of it.
+/// own keep. Every image is held to it (the Docker lane's
+/// `the_hermes_image_fits_its_disk_budget`, images/bridge/tests/docker.rs),
+/// so a computer's room (`room`) counts it, whichever image the deployment
+/// moves it to (Paul, 2026-11-20: "our image update either never goes up
+/// in size, or that it's safe for all existing users somehow"). Today's
+/// image measured 2.53 to 2.67 GB of a fresh 20 GB btrfs disk with zstd in
+/// five runs on a quiet box (0.55 GB of it the disk's own keep: its
+/// metadata twice), and 2.99 GB once under heavy disk load, when btrfs
+/// compresses less as it writes back in a hurry; production's empty
+/// computers read about 2.6 GB used (2026-11-20). The budget is that plus
+/// a little.
+///
+/// Raised only on Paul's word, recorded here: each GB raised is a GB less
+/// of every person's files that restore.
 pub const IMAGE_DISK_MAX: u64 = 3_000_000_000;
 
 /// What a restore writes past `/data`'s size as `du` reads it, at most,
@@ -84,6 +93,13 @@ pub fn room(d: &ComputerDisk) -> u64 {
         Some(data) => now.min(d.total.saturating_sub(IMAGE_DISK_MAX.saturating_add(floor).saturating_add(restore_writes(data)))),
         None => now,
     }
+}
+
+/// Whether a save of a `/data` as `d` last read (`data`) restores beside
+/// the largest image the deployment may move it to (`IMAGE_DISK_MAX`),
+/// with the restore's floor left: none read yet says yes, as before reads.
+pub fn fits_any_image(d: &ComputerDisk) -> bool {
+    d.data.is_none_or(|data| IMAGE_DISK_MAX.saturating_add(restore_floor(d.total)).saturating_add(restore_writes(data)) <= d.total)
 }
 
 /// Whether a disk as `d` read has at most `ROOM_TOLD_MAX` of room: its

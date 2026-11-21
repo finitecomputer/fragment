@@ -27,7 +27,9 @@ platform concept.
 
 ## Where things live
 
-- `cell/`: Rust Worker and JS shims; `cell/shell/`: platform pages.
+- `cell/`: Rust Worker and JS shims; `cell/shell/`: platform pages. The
+  same crate built with `--features admin` is the operators' admin
+  Worker (`cell/src/admin.rs`, `cell/wrangler.admin.jsonc`).
 - `cli/`: CLI; `xtask/`: build, check, dev, e2e, deployment tooling.
 - `crates/proto`: wire types; `crates/core`: pure logic and state machines;
   `crates/nip98`: authentication; `crates/templates`: release assets;

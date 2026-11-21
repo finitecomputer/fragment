@@ -475,6 +475,11 @@ pub struct ComputerView {
     /// and files. Its owner's view only; absent before the first read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sizes: Option<ComputerSizes>,
+    /// Whether its update waits for room (docs/computers.md, "An image's
+    /// share of the disk"): its save may not restore beside a newer image,
+    /// or its disk is told filling. Its owner makes room first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub room_first: bool,
 }
 
 /// What takes a computer's disk (docs/computers.md, "Room to
@@ -732,8 +737,16 @@ pub enum ComputerNotice {
     /// start runs (`version`, its view's `latest`), with no turn running.
     /// A restart takes it, and so does its next sleep and wake. Its owner
     /// may put it off (`POST …/notices/later {version}`): told no more until
-    /// a version other than that one is ready.
-    Update { version: String },
+    /// a version other than that one is ready. `roomFirst`: its save may not
+    /// restore beside the new image (docs/computers.md, "An image's share of
+    /// the disk"), so it stays on the image it has until there is room, and
+    /// its owner is asked to make room first, never to restart.
+    #[serde(rename_all = "camelCase")]
+    Update {
+        version: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        room_first: bool,
+    },
     /// Its disk is filling, as the platform last read it (`df` of its
     /// container, after a start came up and after each save, and `du` of its
     /// `/data` after an awake save): `free` of its `total` bytes are free,
@@ -920,9 +933,11 @@ mod tests {
         let quiet = ComputerNotice::WentBack { life: 4, cause: LossCause::Crash, ended_at: Some(30), pending: false, save: Some(2), saved_at: Some(20), at: Some(40), unchanged: true, too_big: false };
         assert_eq!(serde_json::to_value(&quiet).unwrap()["unchanged"], true, "told only when so");
         assert_eq!(serde_json::to_value(ComputerNotice::WontWake { why: "x".into() }).unwrap(), serde_json::json!({ "kind": "wont_wake", "why": "x" }));
-        let update = ComputerNotice::Update { version: "0123456789ab".into() };
+        let update = ComputerNotice::Update { version: "0123456789ab".into(), room_first: false };
         assert_eq!(serde_json::to_value(&update).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab" }));
-        for n in [unsaved, back, quiet, update] {
+        let waits = ComputerNotice::Update { version: "0123456789ab".into(), room_first: true };
+        assert_eq!(serde_json::to_value(&waits).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab", "roomFirst": true }));
+        for n in [unsaved, back, quiet, update, waits] {
             assert_eq!(serde_json::from_value::<ComputerNotice>(serde_json::to_value(&n).unwrap()).unwrap(), n);
         }
         // a view from before notices reads as none, at no start
