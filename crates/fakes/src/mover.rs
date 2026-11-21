@@ -50,6 +50,8 @@ pub struct Mover {
     /// The files and their bytes its manifests say the zip holds, when a
     /// lane stages a real home (`home`); a stand-in's otherwise.
     counted: Mutex<Option<(u64, u64)>>,
+    /// Whether its manifests say the zip carries a SimpleX chat.
+    simplex: Mutex<bool>,
     /// The last `seq` reported on each command.
     seqs: Mutex<BTreeMap<String, u64>>,
 }
@@ -58,7 +60,7 @@ impl Mover {
     pub fn new(base: &str, keys: Keys) -> Mover {
         let zip = fixture_zip(64 * 1024);
         let part = zip.len();
-        Mover { keys, base: base.trim_end_matches('/').to_string(), http: reqwest::blocking::Client::new(), script: Mutex::new(Script::Done), zip: Mutex::new((zip, part)), counted: Mutex::default(), seqs: Mutex::default() }
+        Mover { keys, base: base.trim_end_matches('/').to_string(), http: reqwest::blocking::Client::new(), script: Mutex::new(Script::Done), zip: Mutex::new((zip, part)), counted: Mutex::default(), simplex: Mutex::default(), seqs: Mutex::default() }
     }
 
     /// The key's npub: what the deployment's `migrations.mover` names.
@@ -82,6 +84,11 @@ impl Mover {
     pub fn home(&self, zip: Vec<u8>, part: usize, files: u64, bytes: u64) {
         self.zip(zip, part);
         *self.counted.lock().expect("the mover's counts") = Some((files, bytes));
+    }
+
+    /// Whether the next stages' manifests say they carry a SimpleX chat.
+    pub fn simplex(&self, carries: bool) {
+        *self.simplex.lock().expect("the mover's SimpleX") = carries;
     }
 
     /// The zip the next stages upload.
@@ -187,6 +194,7 @@ impl Mover {
             files,
             left: vec![LeftBehind { path: "agent/hermes-home/.env".into(), bytes: 120, why: "secret".into() }],
             left_more: None,
+            simplex: *self.simplex.lock().expect("the mover's SimpleX"),
         })
     }
 
