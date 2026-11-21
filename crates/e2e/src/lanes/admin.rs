@@ -640,7 +640,9 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     s.observability.fail_next(403, "Authentication error");
     let before = s.observability.asked().len();
     let failed = ask(operator, day - 2)?;
-    // the read stops at the refusal: the questions in flight then, and no more
+    // the read stops at the refusal: the questions in flight then, and
+    // no more (the fake records the refused one in none of them, so a read
+    // that went on records the other eight)
     let asked = s.observability.asked().len() - before;
     s.ok(
         "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown; and the read stops at the refusal, never asking every question",
@@ -649,7 +651,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
             && failed.body["logs"]["why"].as_str().is_some_and(|w| w.contains("Authentication error"))
             && failed.body["signups"] == again.body["signups"]
             && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null())
-            && asked < questions,
+            && asked + 1 < questions,
         json!({ "asked": asked, "glance": failed.body }),
     );
     Ok(())
