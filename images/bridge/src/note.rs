@@ -387,6 +387,32 @@ pub fn age(said_at: i64, now: u64, exempt: bool, continues: bool) -> Option<Stri
     Some(line)
 }
 
+/// What an agent is told at its next turn after a read finds its
+/// computer's disk filling (docs/bridge.md, "An agent is told to make
+/// room"): the room left before its save may no longer restore, in plain
+/// words, and to make room before anything else, with the skill that does
+/// it safely. At most `DISK_NOTE_MAX_BYTES`.
+pub fn disk(room: u64) -> String {
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+    let state = if room == 0 {
+        "Your computer is full: it may not start again from its save after it sleeps.".to_string()
+    } else {
+        // as its owner's notice says it (fragment_core's `notice::size`):
+        // GB to the nearest tenth, under one in whole MB, at least 1
+        let left = if room >= GB {
+            let tenths = room.saturating_mul(10).saturating_add(GB / 2) / GB;
+            format!("{}.{} GB", tenths / 10, tenths % 10)
+        } else {
+            format!("{} MB", ((room + MB / 2) / MB).max(1))
+        };
+        format!("Your computer is almost full: only {left} of room is left before it can no longer start again from its save.")
+    };
+    let line = format!("{state} Before anything else, load the disk-space-finite skill and make room: move big files you are not using to storage, then tell your owner what you moved.");
+    assert!(line.len() <= limits::DISK_NOTE_MAX_BYTES, "a disk's note is one short line: {line}");
+    line
+}
+
 /// The calls a turn asked for and never heard the end of, on one line:
 /// each may or may not have run (the computer stopped while it ran, or
 /// before), at most `NOTE_STEPS_MAX`, the rest counted.
