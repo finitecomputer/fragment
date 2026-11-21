@@ -178,7 +178,7 @@ informational. The fee is AI Gateway's on credits, so it applies to
 - **OpenRouter's price** (decision 61; FIN-616): a call on an OpenRouter
   slot is charged what OpenRouter's answer says it cost (`usage.cost`,
   dollars of its credits, a stream's on its last usage chunk), as
-  `openrouter:nanousd`, grossed up to OpenRouter's fee on the credits
+  `openrouter/nanousd`, grossed up to OpenRouter's fee on the credits
   (`OPENROUTER_FEE_BP`: $1.055 a dollar), then the margin
   (`Upstream::used`). An answer that names no cost is charged its tokens
   at the ceiling the slot routes under (`body.provider.max_price`, every
