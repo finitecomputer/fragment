@@ -59,11 +59,21 @@ fn newest(s: &Value) -> (u64, u64) {
     s["saves"].as_array().into_iter().flatten().filter(|x| x["unreadable"] == 0).map(|x| (x["generation"].as_u64().unwrap_or(0), x["seq"].as_u64().unwrap_or(0))).max().unwrap_or((0, 0))
 }
 
+/// A run's door, named as a fragment is (`<label>--<suffix>`), from the
+/// run's label for it (`Suite::name`: hosted, `e2e-<run>-door`, as a
+/// preview's door lever takes it).
+fn door_name(label: &str) -> String {
+    format!("{label}--k3x9")
+}
+
 pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section_by_name(NAME, &[Need::Levers, Need::Doors], "its stack builds the door's image (SimpleX's core and its runner)") {
         return Ok(());
     }
-    let door = "e2e-door-simplex--k3x9";
+    // the run's own door: it ends exhausted (its saves lost), so another
+    // run's on the same deployment, after it or beside it, is never this one
+    let door = door_name(&s.name("door"));
+    let door = door.as_str();
     // a new door: no save, a new profile, its first save in the bucket
     lever(api, door, "start", json!({ "agent": "Juniper" }))?;
     let st = until(api, door, Duration::from_secs(300), |x| ready_from(1)(x) && newest(x).0 == generation(x))?;
@@ -106,4 +116,24 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     let st = until(api, door, Duration::from_secs(120), |x| x["door"]["stopped"].is_string() && x["running"] == false)?;
     s.ok("a door whose saves are all lost stops: never a new profile over them", st["door"]["stopped"] == "no save of this door restores" && st["saves"].as_array().is_some_and(|a| a.iter().all(|x| x["unreadable"] == 1)), &st);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: each run its own door (the review of #1435: the lane ends with
+    /// its door exhausted, so a second run on one deployment, with its
+    /// storage kept, waited on a door that never starts again, and two at
+    /// once shared one), and a hosted one a door the preview's lever takes.
+    /// Method: two runs' labels, as a hosted suite makes them.
+    #[test]
+    fn each_run_has_a_door_of_its_own() {
+        let (one, two) = (crate::hosted::sweep::label("0149355cab", "door"), crate::hosted::sweep::label("0149355cac", "door"));
+        let (a, b) = (door_name(&one), door_name(&two));
+        assert_ne!(a, b, "two runs, two doors");
+        for d in [&a, &b] {
+            assert!(fragment_core::levers::is_e2e_fragment(d), "a preview's lever takes {d}");
+        }
+    }
 }
