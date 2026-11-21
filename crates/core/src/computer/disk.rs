@@ -213,9 +213,13 @@ const _: () = assert!(1024 + (SIZES_FOLDERS_MAX + 1 + SIZES_FILES_MAX) * SIZE_LI
 
 /// The `N\t./path` lines of `sizes_read`'s answer after `section`'s line,
 /// up to the next section's: KiB and the path below `/data` (`.` its own).
-/// Its df and records come before its first section, never among them.
+/// Its df and records come before its first section, never among them. A
+/// line is what ends in `\n`, a `\r` before it kept as the name's own.
 fn listed<'a>(out: &'a str, section: &'static str) -> impl Iterator<Item = (u64, &'a str)> {
-    out.lines().skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files" | "end")).filter_map(|l| {
+    // split on `\n` alone: `lines()` would strip a name's own trailing `\r`,
+    // listing `a.zip\r` as `a.zip` (Codex on #1429); kept, it is a control
+    // character, so the entry is left out
+    out.split('\n').skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files" | "end")).filter_map(|l| {
         let (n, path) = l.split_once('\t')?;
         Some((n.trim().parse::<u64>().ok()?, path))
     })
@@ -659,6 +663,9 @@ mod tests {
         assert!(wide.folders.iter().map(|e| e.path.len()).sum::<usize>() <= SIZES_PATHS_MAX_BYTES && wide.folders.len() == SIZES_PATHS_MAX_BYTES / SIZE_PATH_MAX_BYTES, "its paths within their bound: {}", wide.folders.len());
         // a df and a record forged in the listing (BusyBox frames no name) never pass for the real ones before it
         assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\nall 9 1\nfolders\nall 1 1\nFilesystem y\noverlay 7 7 0 0% /\nfiles\n", T, 2).map(|d| (d.total, d.free, d.data)), Some((100, 50, Some(9 * 1024))), "Codex on #1426");
+        // a name's own trailing `\r` is kept, so it never passes for another file's (Codex on #1429)
+        let cr = sizes_of("folders\n9\t./work/a/report.zip\r\n8\t./work/a\nfiles\n7\t./work/a/report.zip\r\n6\t./work/a/ok.zip\n", T).expect("a summary");
+        assert_eq!((named(&cr.folders), named(&cr.files)), (vec![("work/a".to_string(), 8 * 1024)], vec![("work/a/ok.zip".to_string(), 6 * 1024)]));
         // its df and records, before the listing, are no folder or file
         let after = sizes_of("Filesystem x\noverlay 100 50 50 50% /\nall 3 3\nfolders\n5\t./a\nfiles\n4\t./b\n", T).expect("a summary");
         assert_eq!((named(&after.folders), named(&after.files)), (vec![("a".to_string(), 5120)], vec![("b".to_string(), 4096)]));
