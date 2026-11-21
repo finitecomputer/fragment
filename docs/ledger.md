@@ -152,6 +152,17 @@ informational. The fee is AI Gateway's on credits, so it applies to
   usage kind of its own: every release's ledger prices tokens, and one
   without the row charges the video nothing (decision 62).
 
+- **What a vendor says a call cost** (FIN-616): an operator row's
+  `charges` (`catalog::Charge`, the book's defaults for its name in
+  `price::DEFAULT_CHARGES`, each with its source) name the calls each is
+  for and where its vendor's answer says what the call used: xAI's ticks
+  (`xai:tick`, 10^10 a dollar), ElevenLabs' characters, Firecrawl's
+  credits, fal's units per model, X's posts; or one call, at an estimate,
+  where its answers say nothing (Perplexity's `call`, Browser Use's
+  `session`, ElevenLabs' `music`). Each charge's unit is a book row
+  (`<provider>:<unit>`) before
+  any swap writes one, so a release mid-deploy can price it. The swap
+  reads them in the next release; until then the next paragraph holds.
 - **An operator key's call** is one `key` unit at its catalog row's
   price, else the book's (`DEFAULT_KEYS`), an estimate of a typical call
   where its vendor bills something else. A part of a key's calls the

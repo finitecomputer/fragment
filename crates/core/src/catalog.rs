@@ -67,6 +67,12 @@ pub const ACCOUNTS_MAX: u8 = 25;
 pub const DENY_MAX: usize = 32;
 /// A denied call as a row names it, at most.
 pub const DENY_ENTRY_MAX_BYTES: usize = 256;
+/// An operator row's charges, the calls each is for, a charge's JSON
+/// pointer and its unit's name.
+pub const CHARGES_MAX: usize = 8;
+pub const CHARGE_CALLS_MAX: usize = 8;
+pub const CHARGE_POINTER_MAX_BYTES: usize = 128;
+pub const CHARGE_UNIT_MAX_BYTES: usize = 32;
 
 /// What a provider's credential is (decisions 22 and 37): a `connection`
 /// (WorkOS Pipes, a short-lived token acting as the person), an `operator`
@@ -232,6 +238,76 @@ impl Deny {
 pub struct Price {
     pub micros: i64,
     pub per: u64,
+}
+
+/// One way an operator key's calls are charged (FIN-616): the calls it is
+/// for (`calls`, each named as a `deny` names one), and what one costs.
+/// Naming a `header` of the answer or a `json` pointer (RFC 6901) into its
+/// body (a JSON object read whole, or an event stream's last event naming
+/// it), it charges the whole number there of `unit`s, at `price` a unit;
+/// naming neither, it charges one. Its usage is `<provider>:<unit>`. A
+/// row's charges are tried in order: the
+/// first that is for the call and whose number its answer says is the
+/// call's, and a call none of them prices is charged nothing. What is
+/// read is config, never a code path of the vendor's own: a row names its
+/// charges, or takes the price book's for its name
+/// (`price::DEFAULT_CHARGES`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Charge {
+    pub calls: Vec<Deny>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<String>,
+    pub unit: String,
+    pub price: Price,
+}
+
+impl Charge {
+    /// The name the book prices this charge's units by, on `provider`'s
+    /// row: its `:` is in no provider's name, so it is never a row's own.
+    pub fn priced_as(&self, provider: &str) -> String {
+        format!("{provider}:{}", self.unit)
+    }
+}
+
+/// The price book's charges for operator key `name` (`price::DEFAULT_CHARGES`).
+pub fn default_charges(name: &str) -> Vec<Charge> {
+    let Some((_, charges)) = crate::price::DEFAULT_CHARGES.iter().find(|(n, _)| *n == name) else { return vec![] };
+    let charge = |c: &crate::price::DefaultCharge| Charge {
+        calls: c.calls.iter().map(|call| Deny::try_from(call.to_string()).expect("a default charge's calls are calls (the catalog's tests)")).collect(),
+        header: c.header.map(str::to_string),
+        json: c.json.map(str::to_string),
+        unit: c.unit.to_string(),
+        price: Price { micros: c.micros, per: c.per },
+    };
+    charges.iter().map(charge).collect()
+}
+
+/// A charge a row may name: 1 to `CHARGE_CALLS_MAX` calls, at most one
+/// place to read, a header's name or a pointer an answer could have, a
+/// unit of `[a-z0-9-]`, and a price in the book's bounds.
+fn check_charge(c: &Charge) -> Result<(), String> {
+    if c.calls.is_empty() || c.calls.len() > CHARGE_CALLS_MAX {
+        return Err(format!("1 to {CHARGE_CALLS_MAX} calls, not {}", c.calls.len()));
+    }
+    match (&c.header, &c.json) {
+        (None, None) => {}
+        (Some(h), None) if !h.is_empty() && h.len() <= PLACE_NAME_MAX_BYTES && h.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') => {}
+        (None, Some(p)) if p.len() <= CHARGE_POINTER_MAX_BYTES && crate::price::pointer_segments(p).is_some() => {}
+        (Some(_), None) => return Err("a header is a lower-case header name".into()),
+        (None, Some(_)) => return Err(format!("a JSON pointer is `/` then 1 to {} segments, none empty, at most {CHARGE_POINTER_MAX_BYTES} bytes", crate::price::POINTER_SEGMENTS_MAX)),
+        (Some(_), Some(_)) => return Err("a header or a json pointer, not both".into()),
+    }
+    let unit_ok = !c.unit.is_empty() && c.unit.len() <= CHARGE_UNIT_MAX_BYTES && c.unit.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !unit_ok {
+        return Err(format!("a unit is 1 to {CHARGE_UNIT_MAX_BYTES} of a-z, 0-9 and -"));
+    }
+    if !(1..=crate::price::PRICE_MAX).contains(&c.price.micros) || !(1..=crate::price::QUANTITY_MAX).contains(&c.price.per) {
+        return Err("a price is at least one micro-dollar per at least one unit, within the price book's bounds".into());
+    }
+    Ok(())
 }
 
 /// An own key the person connects through the provider's own sign-in,
@@ -439,6 +515,10 @@ pub struct Provider {
     /// never on another kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<Price>,
+    /// How an operator key's calls are charged (`Charge`), at most
+    /// `CHARGES_MAX`: named on its row, or the price book's for its name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charges: Vec<Charge>,
     /// An own key's sign-in: connected from settings, never pasted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<KeyOAuth>,
@@ -552,6 +632,8 @@ pub enum CatalogError {
     ClientAuth { provider: String, why: String },
     /// `deny` on a row that is no operator key, or more than `DENY_MAX`.
     Deny { provider: String, why: String },
+    /// Charges on a row that is no operator key, too many, or one malformed.
+    Charges { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -574,6 +656,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::AccountHost { provider, why } => write!(f, "{provider}'s account_host: {why}"),
             CatalogError::ClientAuth { provider, why } => write!(f, "{provider}'s client_auth: {why}"),
             CatalogError::Deny { provider, why } => write!(f, "{provider}'s deny: {why}"),
+            CatalogError::Charges { provider, why } => write!(f, "{provider}'s charges: {why}"),
         }
     }
 }
@@ -836,6 +919,17 @@ impl Catalog {
                 (_, Some(_)) => return Err(CatalogError::Price { provider, why: format!("a {} has no price: only an operator key is metered", p.kind.name()) }),
                 (_, None) => {}
             }
+            match (p.kind, p.charges.is_empty()) {
+                (Kind::Operator, true) => p.charges = default_charges(&p.name),
+                (Kind::Operator, false) if p.charges.len() > CHARGES_MAX => return Err(CatalogError::Charges { provider, why: format!("at most {CHARGES_MAX}, not {}", p.charges.len()) }),
+                (Kind::Operator, false) => {
+                    for c in &p.charges {
+                        check_charge(c).map_err(|why| CatalogError::Charges { provider: provider.clone(), why })?;
+                    }
+                }
+                (_, false) => return Err(CatalogError::Charges { provider, why: format!("a {} has no charges: only an operator key is metered", p.kind.name()) }),
+                (_, true) => {}
+            }
             if let Some(o) = &p.oauth {
                 if p.kind != Kind::Own {
                     return Err(CatalogError::OAuth { provider, why: format!("a {} is not signed in to: only an own key is", p.kind.name()) });
@@ -963,11 +1057,13 @@ impl Catalog {
             .collect()
     }
 
-    /// The operator keys' prices, as the price book takes them, and each
-    /// part of their calls the book prices apart (`price::KEY_PARTS`) at
-    /// the book's price, which a row's own price does not change: the swap
+    /// The operator keys' prices, as the price book takes them: each row's
+    /// per call, each of its charges' (`Charge::priced_as`), and each part
+    /// of their calls the book prices apart (`price::KEY_PARTS`) at the
+    /// book's price, which a row's own price does not change: the swap
     /// meters a part's calls as the part (`price::key_usage`) on any
-    /// operator row of its key's name.
+    /// operator row of its key's name. A name is priced once, as the first
+    /// of these names it.
     pub fn key_prices(&self) -> Vec<crate::price::KeyPrice> {
         use crate::price::{default_key_price, KeyPrice, KEY_PARTS};
         let mut prices = vec![];
@@ -975,9 +1071,15 @@ impl Catalog {
             if let Some(price) = p.price {
                 prices.push(KeyPrice { key: p.name.clone(), micros: price.micros, per: price.per });
             }
-            for part in KEY_PARTS.iter().filter(|part| part.key == p.name) {
+            let charged = p.charges.iter().map(|c| (c.priced_as(&p.name), c.price.micros, c.price.per));
+            let parts = KEY_PARTS.iter().filter(|part| part.key == p.name).map(|part| {
                 let (micros, per) = default_key_price(part.priced_as).expect("each part is priced in DEFAULT_KEYS");
-                prices.push(KeyPrice { key: part.priced_as.to_string(), micros, per });
+                (part.priced_as.to_string(), micros, per)
+            });
+            for (key, micros, per) in charged.chain(parts) {
+                if !prices.iter().any(|k: &KeyPrice| k.key == key) {
+                    prices.push(KeyPrice { key, micros, per });
+                }
             }
         }
         prices
@@ -1020,7 +1122,7 @@ mod tests {
         assert_eq!(c.get("mail").unwrap().placements[0], Placement::Basic { half: Half::Password });
         assert_eq!(c.hosts(), vec!["api.mail.test", "api.perplexity.ai", "gmail.googleapis.com", "places.googleapis.com", "www.googleapis.com"]);
         assert_eq!(c.env_names(), vec!["GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_PLACES_API_KEY", "MAIL_API_KEY", "PERPLEXITY_API_KEY"]);
-        assert_eq!(c.key_prices().iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["perplexity", "google-places", "google-places:photo"], "only operator keys are priced, with their parts");
+        assert_eq!(c.key_prices().iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["perplexity", "perplexity:call", "google-places", "google-places:photo"], "only operator keys are priced, with their parts and charges");
         // the wire form reads back as it is written
         let again = Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap();
         assert_eq!(again, c);
@@ -1041,18 +1143,20 @@ mod tests {
         };
         let priced = |c: &Catalog| c.key_prices().into_iter().map(|k| (k.key, k.micros, k.per)).collect::<Vec<_>>();
         let speech = ("elevenlabs:speech".to_string(), 80_000, 1_000);
-        assert_eq!(priced(&eleven("operator", None)), vec![("elevenlabs".to_string(), 150_000, 1), speech.clone()]);
-        assert_eq!(priced(&eleven("operator", Some(json!({ "micros": 7, "per": 1 })))), vec![("elevenlabs".to_string(), 7, 1), speech], "the row's own price is its other calls'");
+        let character = ("elevenlabs:character".to_string(), 80_000, 1_000);
+        let music = ("elevenlabs:music".to_string(), 150_000, 1);
+        assert_eq!(priced(&eleven("operator", None)), vec![("elevenlabs".to_string(), 150_000, 1), character.clone(), music.clone(), speech.clone()]);
+        assert_eq!(priced(&eleven("operator", Some(json!({ "micros": 7, "per": 1 })))), vec![("elevenlabs".to_string(), 7, 1), character, music, speech], "the row's own price is its other calls'");
         assert!(priced(&eleven("own", None)).is_empty(), "a person's own key is never metered");
         let mut book = crate::price::PriceBook::defaults();
         book.keys = eleven("operator", None).key_prices();
         assert_eq!(book.validate(), Ok(()), "a book the ledger takes");
         // FIN-445: fal's images by their pixels
         let fal = parse(json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }])).unwrap();
-        assert_eq!(priced(&fal), vec![("fal".to_string(), 6_000, 1), ("fal:image".to_string(), 6_000, 1_048_576)]);
+        assert_eq!(priced(&fal), vec![("fal".to_string(), 6_000, 1), ("fal:flux-2-klein-9b".to_string(), 6_000, 1), ("fal:image".to_string(), 6_000, 1_048_576)]);
         // xAI's chat and images apart from its X searches
         let xai = parse(json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }])).unwrap();
-        assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:image".to_string(), 20_000, 1)]);
+        assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:tick".to_string(), 1, 10_000), ("xai:image".to_string(), 20_000, 1)]);
         // Google Places' photos apart from its searches
         let places = parse(json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }])).unwrap();
         let keys: Vec<String> = priced(&places).into_iter().map(|(k, _, _)| k).collect();
@@ -1062,7 +1166,7 @@ mod tests {
         assert_eq!(priced(&firecrawl), vec![("firecrawl".to_string(), 10_000, 1), ("firecrawl:credit".to_string(), 5_000, 1)]);
         // X's searches alone: no part
         let x = parse(json!([{ "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["X_API_BEARER_TOKEN"] }])).unwrap();
-        assert_eq!(priced(&x), vec![("x".to_string(), 50_000, 1)]);
+        assert_eq!(priced(&x), vec![("x".to_string(), 50_000, 1), ("x:post".to_string(), 5_000, 1)]);
     }
 
     /// Invalid: every rule, each a typed refusal.
@@ -1468,4 +1572,76 @@ mod tests {
             assert!(!valid_host(bad), "{bad}");
         }
     }
+
+    /// FIN-616: an operator row takes the price book's charges for its
+    /// name, each parsed and in bounds (a deploy never refuses the book's
+    /// own), and the book prices each charge's name once, beside its key's
+    /// own price and parts; a row's own charges replace its name's.
+    #[test]
+    fn an_operator_row_takes_its_names_charges() {
+        for (name, defaults) in crate::price::DEFAULT_CHARGES {
+            let charges = default_charges(name);
+            assert_eq!(charges.len(), defaults.len(), "{name}");
+            for c in &charges {
+                assert_eq!(check_charge(c), Ok(()), "{name}: {c:?}");
+            }
+        }
+        let row = |name: &str, extra: serde_json::Value| {
+            let mut row = json!({ "name": name, "kind": "operator", "hosts": [format!("api.{name}.test")], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [format!("{}_KEY", name.to_uppercase().replace('-', "_"))] });
+            row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            row
+        };
+        let c = parse(json!([row("xai", json!({})), row("elevenlabs", json!({})), row("firecrawl", json!({}))])).unwrap();
+        assert_eq!(c.get("xai").unwrap().charges, default_charges("xai"));
+        assert_eq!(c.get("xai").unwrap().charges[0].priced_as("xai"), "xai:tick");
+        let priced: Vec<String> = c.key_prices().iter().map(|k| k.key.clone()).collect();
+        let once = |key: &str| priced.iter().filter(|k| *k == key).count() == 1;
+        assert!(["xai", "xai:tick", "xai:image", "elevenlabs", "elevenlabs:character", "elevenlabs:music", "elevenlabs:speech", "firecrawl", "firecrawl:credit"].iter().all(|k| once(k)), "each name priced once: {priced:?}");
+        let tick = c.key_prices().into_iter().find(|k| k.key == "xai:tick").unwrap();
+        assert_eq!((tick.micros, tick.per), (1, 10_000), "a tick is 10^-10 dollars");
+        let mut book = crate::price::PriceBook::defaults();
+        book.keys = c.key_prices();
+        assert_eq!(book.validate(), Ok(()), "the book prices every charge");
+
+        // a row's own charges are its, not its name's
+        let own = json!({ "charges": [{ "calls": ["GET /v1/**"], "header": "x-units", "unit": "unit", "price": { "micros": 7, "per": 1 } }] });
+        let c = parse(json!([row("xai", own)])).unwrap();
+        assert_eq!(c.get("xai").unwrap().charges.len(), 1);
+        assert_eq!(c.get("xai").unwrap().charges[0].header.as_deref(), Some("x-units"));
+        assert!(c.key_prices().iter().any(|k| k.key == "xai:unit" && k.micros == 7));
+        assert!(!c.key_prices().iter().any(|k| k.key == "xai:tick"), "its name's charges are replaced");
+        // a vendor the book has no charges for has none
+        assert_eq!(parse(json!([row("perplexity", json!({})), row("google-places", json!({}))])).unwrap().get("google-places").unwrap().charges, vec![]);
+    }
+
+    /// Invalid: charges on a row that is no operator key, too many, or one
+    /// malformed, each refused naming its row.
+    #[test]
+    fn a_malformed_charge_is_refused() {
+        let charge = |extra: serde_json::Value| {
+            let mut c = json!({ "calls": ["POST /v1/**"], "unit": "call", "price": { "micros": 1, "per": 1 } });
+            c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            c
+        };
+        let row = |kind: &str, charges: serde_json::Value| json!([{ "name": "vend", "kind": kind, "hosts": ["api.vend.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["VEND_KEY"], "price": { "micros": 1, "per": 1 }, "charges": charges }]);
+        assert!(parse(row("operator", json!([charge(json!({ "json": "/usage/cost", "unit": "usd" }))]))).is_ok());
+        assert!(parse(row("operator", json!([charge(json!({}))]))).is_ok(), "a call's own price");
+        let refused = |charges: serde_json::Value| matches!(parse(row("operator", charges)), Err(CatalogError::Charges { provider, .. }) if provider == "vend");
+        for bad in [
+            json!([charge(json!({ "header": "X-Units" }))]),
+            json!([charge(json!({ "header": "x-units", "json": "/a" }))]),
+            json!([charge(json!({ "json": "usage/cost" }))]),
+            json!([charge(json!({ "json": "/a/b/c/d/e/f/g/h/i" }))]),
+            json!([charge(json!({ "unit": "Credits" }))]),
+            json!([charge(json!({ "unit": "" }))]),
+            json!([charge(json!({ "calls": [] }))]),
+            json!([charge(json!({ "price": { "micros": 0, "per": 1 } }))]),
+            json!(vec![charge(json!({})); CHARGES_MAX + 1]),
+        ] {
+            assert!(refused(bad.clone()), "{bad}");
+        }
+        assert!(matches!(parse(row("own", json!([charge(json!({}))]))), Err(CatalogError::Charges { .. }) | Err(CatalogError::Price { .. })), "only an operator key is charged");
+        assert!(matches!(parse(row("operator", json!([charge(json!({ "calls": ["FETCH /x"] }))]))), Err(CatalogError::Shape(_))), "a call is one a deny could name");
+    }
+
 }

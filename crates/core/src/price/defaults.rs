@@ -110,8 +110,10 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 14 for Workers AI's DeepSeek V4.1
-/// Flash, Inkling 2 Small and Gemma 4 26B (2026-11-16), after 13 for
+/// raised it, and each still does: 15 for the operator keys' charges by
+/// their vendors' own numbers (2026-11-21, FIN-616), after 14 for Workers
+/// AI's DeepSeek V4.1 Flash, Inkling 2 Small and Gemma 4 26B (2026-11-16),
+/// after 13 for
 /// Firecrawl's credits by the call (2026-11-07), after 12 for Google Places' photos apart from its
 /// searches (2026-11-07), after 11 for
 /// xAI's chat and images apart
@@ -124,7 +126,7 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 14;
+pub const DEFAULT_BOOK_VERSION: u32 = 15;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -164,6 +166,86 @@ pub const DEFAULT_DYNAMIC_WORKERS: i64 = 2_000;
 pub const DEFAULT_BROWSER: i64 = 90_000;
 /// Cloudflare Images: $0.50 per thousand unique transformations.
 pub const DEFAULT_IMAGES: i64 = 500_000;
+
+/// One of the price book's charges for an operator key, as a catalog row
+/// names one (`catalog::Charge`, which says how each is read): the calls
+/// it is for, where its answer says the call's units (a header, or a JSON
+/// pointer), their unit, and the unit's list price, `micros` per `per`.
+#[derive(Debug, Clone, Copy)]
+pub struct DefaultCharge {
+    pub calls: &'static [&'static str],
+    pub header: Option<&'static str>,
+    pub json: Option<&'static str>,
+    pub unit: &'static str,
+    pub micros: i64,
+    pub per: u64,
+}
+
+const NO_READ: DefaultCharge = DefaultCharge { calls: &[], header: None, json: None, unit: "", micros: 0, per: 1 };
+
+/// The operator keys' charges by their vendors' own numbers (FIN-616),
+/// each vendor's answers read as its docs say (read 2026-11-21), a row of
+/// the operator kind taking its name's unless it names its own. A vendor
+/// whose answers say nothing is charged by the call, at an estimate where
+/// it bills something else. Google Places' answers say nothing, and its
+/// calls are charged nothing (2026-11-20: kept uncharged, with a rate
+/// limit of its own).
+pub const DEFAULT_CHARGES: [(&str, &[DefaultCharge]); 7] = [
+    // xAI: every inference answer says what it cost, its tools' calls and
+    // images included, as `usage.cost_in_usd_ticks`, 10^10 ticks a dollar,
+    // a stream on its last chunk (docs.x.ai/developers/cost-tracking).
+    // Only a POST's is read: a stored response read again, a deferred
+    // image's or a video's poll says its cost again each time.
+    ("xai", &[DefaultCharge { calls: &["POST /**"], json: Some("/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ }]),
+    // ElevenLabs: text to speech and sound effects say the characters
+    // they billed, `character-cost` (elevenlabs.io/docs/api-reference/
+    // introduction; its own skills read `x-character-count`), priced at
+    // the multilingual models' $0.08 per 1,000 (elevenlabs.io/pricing/api,
+    // read 2026-11-07), which the header does not tell from Flash's and
+    // Turbo's $0.04. Music says nothing: a call is taken as a minute of
+    // music, $0.15; the music skill's jingles are 15 s, its longest 5 min.
+    (
+        "elevenlabs",
+        &[
+            DefaultCharge { calls: &["* /**"], header: Some("character-cost"), unit: "character", micros: 80_000, per: 1_000, ..NO_READ },
+            DefaultCharge { calls: &["* /**"], header: Some("x-character-count"), unit: "character", micros: 80_000, per: 1_000, ..NO_READ },
+            DefaultCharge { calls: &["POST /v1/music", "POST /v1/music/stream", "POST /v1/music/detailed"], unit: "music", micros: 150_000, per: 1, ..NO_READ },
+        ],
+    ),
+    // Firecrawl: a scrape says its credits in `data.metadata.creditsUsed`
+    // (v1 and v2), a v2 search in `creditsUsed`
+    // (docs.firecrawl.dev/api-reference/v2-openapi.json; its scrape
+    // worker); a map says none and costs 1. Hobby's pay-as-you-go: $5 per
+    // 1,000 credits (firecrawl.dev/pricing). A crawl's, a batch scrape's
+    // and an extract's polls say the credits used so far, again each
+    // poll, so are not read.
+    (
+        "firecrawl",
+        &[
+            DefaultCharge { calls: &["POST /*/scrape"], json: Some("/data/metadata/creditsUsed"), unit: "credit", micros: 5_000, per: 1, ..NO_READ },
+            DefaultCharge { calls: &["POST /v2/search"], json: Some("/creditsUsed"), unit: "credit", micros: 5_000, per: 1, ..NO_READ },
+            DefaultCharge { calls: &["POST /*/map"], unit: "credit", micros: 5_000, per: 1, ..NO_READ },
+        ],
+    ),
+    // fal: each answer says its billing units, `x-fal-billable-units`, in
+    // its model's own unit (fal.ai/docs/documentation/model-apis/
+    // common-parameters), so each model is priced apart: FLUX.2 Klein 9B's
+    // "$0.006 per megapixel" (fal.ai/models/fal-ai/flux-2/klein/9b, read
+    // 2026-11-07). Another model's units are priced by no charge here.
+    ("fal", &[DefaultCharge { calls: &["POST /fal-ai/flux-2/klein/9b"], header: Some("x-fal-billable-units"), unit: "flux-2-klein-9b", micros: 6_000, per: 1, ..NO_READ }]),
+    // X API: a read is billed by the resources it returns, $0.005 a post
+    // (docs.x.com/x-api/getting-started/pricing), which an answer's
+    // `meta.result_count` counts: X bills a post read again within 24
+    // hours nothing, and a user $0.010.
+    ("x", &[DefaultCharge { calls: &["GET /2/**"], json: Some("/meta/result_count"), unit: "post", micros: 5_000, per: 1, ..NO_READ }]),
+    // Perplexity's Search API: $5.00 per 1,000 requests
+    // (docs.perplexity.ai/getting-started/pricing); its answer says no cost.
+    ("perplexity", &[DefaultCharge { calls: &["* /**"], unit: "call", micros: 5_000_000, per: 1_000, ..NO_READ }]),
+    // Browser Use: $0.02 a browser-hour (browser-use.com/pricing); its
+    // answers say a session's cost only on its reads and its stop, so a
+    // session's or a task's start is taken as five minutes.
+    ("browser-use", &[DefaultCharge { calls: &["POST /api/*/sessions", "POST /api/*/tasks", "POST /api/*/runs", "POST /api/*/browsers"], unit: "session", micros: 20_000, per: 12, ..NO_READ }]),
+];
 
 /// The operator keys' list prices per call (decision 37; Paul, 2026-10-04:
 /// Perplexity, Google Places, xAI, ElevenLabs), `(name, micros, per
@@ -297,7 +379,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 14);
+        assert_eq!(book.version, 15);
         assert_eq!(book.models.len(), 15);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
