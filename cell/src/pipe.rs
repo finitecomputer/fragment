@@ -171,24 +171,26 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>], pointe
         let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
         return Ok((Response::from_stream(body)?.with_status(status).with_headers(headers), Box::pin(futures_util::future::ready(none))));
     }
-    // its numbers read as it passes, told at its end (or where it broke)
-    let mut reader = Reading::of(fragment_core::secrets::read_whole(&kind), paths);
-    reader.push(&read);
+    // its numbers read as it passes, told at its end, where it broke, or
+    // when its guest let it go (`Telling`'s drop)
+    let mut events: Vec<fragment_core::price::Events> = paths.into_iter().map(fragment_core::price::Events::new).collect();
+    events.iter_mut().for_each(|e| e.push(&read));
     let (tell, told) = futures_channel::oneshot::channel::<Vec<Option<u64>>>();
+    let telling = Telling { events: Some(events), tell: Some(tell) };
     let first = streamed.push(&read);
-    let rest = futures_util::stream::unfold(Some((stream, streamed, reader, tell)), |state| async move {
-        let (mut stream, mut streamed, mut reader, tell) = state?;
+    let rest = futures_util::stream::unfold(Some((stream, streamed, telling)), |state| async move {
+        let (mut stream, mut streamed, mut telling) = state?;
         match stream.next().await {
             Some(Ok(piece)) => {
-                reader.push(&piece);
-                Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed, reader, tell))))
+                telling.push(&piece);
+                Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed, telling))))
             }
             Some(Err(e)) => {
-                let _ = tell.send(reader.finish());
+                telling.tell();
                 Some((Err(e), None))
             }
             None => {
-                let _ = tell.send(reader.finish());
+                telling.tell();
                 Some((Ok(streamed.finish()), None))
             }
         }
@@ -198,43 +200,29 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>], pointe
     Ok((Response::from_stream(body)?.with_status(status).with_headers(headers), said))
 }
 
-/// A document past `ANSWER_HIDDEN_MAX_BYTES` is still read for its numbers
-/// up to this long (an image's answer, its images inline): a copy of it
-/// kept to its end, past which its numbers are none.
-const ANSWER_METER_MAX_BYTES: usize = 24 * 1024 * 1024;
-
-/// How a streamed answer's numbers are read as it passes: a document's
-/// whole (a copy, to `ANSWER_METER_MAX_BYTES`), or an event stream's events.
-enum Reading {
-    Document { paths: Vec<Vec<String>>, copy: Option<Vec<u8>> },
-    Events(Vec<fragment_core::price::Events>),
+/// A streamed answer's numbers, read from its events as it passes (a
+/// document past `ANSWER_HIDDEN_MAX_BYTES` has no events: its numbers are
+/// none, the debt ledger), and told once: at its end, where it broke, or as
+/// its guest lets it go, whatever was read by then.
+struct Telling {
+    events: Option<Vec<fragment_core::price::Events>>,
+    tell: Option<futures_channel::oneshot::Sender<Vec<Option<u64>>>>,
 }
 
-impl Reading {
-    fn of(document: bool, paths: Vec<Vec<String>>) -> Reading {
-        match document {
-            true => Reading::Document { paths, copy: Some(vec![]) },
-            false => Reading::Events(paths.into_iter().map(fragment_core::price::Events::new).collect()),
-        }
-    }
-
+impl Telling {
     fn push(&mut self, piece: &[u8]) {
-        match self {
-            Reading::Document { copy, .. } => {
-                let over = copy.as_ref().is_some_and(|c| c.len() + piece.len() > ANSWER_METER_MAX_BYTES);
-                match over {
-                    true => *copy = None,
-                    false => copy.iter_mut().for_each(|c| c.extend_from_slice(piece)),
-                }
-            }
-            Reading::Events(events) => events.iter_mut().for_each(|e| e.push(piece)),
-        }
+        self.events.iter_mut().flatten().for_each(|e| e.push(piece));
     }
 
-    fn finish(self) -> Vec<Option<u64>> {
-        match self {
-            Reading::Document { paths, copy } => paths.iter().map(|p| copy.as_deref().and_then(|c| fragment_core::price::number_at(c, p))).collect(),
-            Reading::Events(events) => events.into_iter().map(fragment_core::price::Events::finish).collect(),
+    fn tell(&mut self) {
+        if let (Some(events), Some(tell)) = (self.events.take(), self.tell.take()) {
+            let _ = tell.send(events.into_iter().map(fragment_core::price::Events::finish).collect());
         }
+    }
+}
+
+impl Drop for Telling {
+    fn drop(&mut self) {
+        self.tell();
     }
 }

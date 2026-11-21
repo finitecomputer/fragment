@@ -596,6 +596,10 @@ unfinished design, not debt.
   at the multilingual models' rate, which its header doesn't tell from
   Flash's half; X's posts at $0.005, though X bills a post read again
   within 24 hours nothing and a user $0.010.
+  A Grok chat streamed without `stream_options.include_usage` names no
+  cost (the swap sends a request as it came), and an answer read whole
+  past 8 MiB (a Grok image's, its images inline) is not read for its
+  number: each is charged nothing.
 - **Risk:** those calls charged above or below what they cost.
 - **Delete when:** each is read from its vendor's own report: a poll's
   cost settled once per job (fal's queue: FIN-616's queue PR), a model's

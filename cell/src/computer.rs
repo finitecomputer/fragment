@@ -4801,8 +4801,13 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // what each key's charges read (FIN-616): a header as its vendor sent
     // it, and a JSON pointer in the answer's one pass (`pipe::answer`)
     let rows: Vec<&'static catalog::Provider> = keys.iter().filter_map(|p| cfg.providers.named(&p.provider, p.connection)).collect();
+    // a path no charge can read plainly (a row with no charges or deny
+    // takes one) is for no charge, and its row's own price a call
+    let (methods, segments) = swap::call_of(method.as_ref(), &headers_in, url.path()).unwrap_or_else(|| (vec![method.as_ref()], vec![]));
+    let for_call = |c: &&catalog::Charge| c.calls.iter().any(|d| methods.iter().any(|m| d.matches(m, &segments)));
     let mut pointers: Vec<String> = vec![];
-    for json in rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.json.clone()) {
+    // only the charges for this call: a header's charge waits on no body
+    for json in rows.iter().flat_map(|row| &row.charges).filter(for_call).filter_map(|c| c.json.clone()) {
         if !pointers.contains(&json) {
             pointers.push(json);
         }
@@ -4827,9 +4832,6 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // after the answer, never in its way: each key's call charged what its
     // vendor said it used (`Provider::charged`), once the answer is read
     if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
-        // a path no charge can read plainly (a row with no charges or deny
-        // takes one) is for no charge, and its row's own price a call
-        let (methods, segments) = swap::call_of(method.as_ref(), &headers_in, url.path()).unwrap_or_else(|| (vec![method.as_ref()], vec![]));
         let call: (Vec<String>, Vec<Vec<u8>>) = (methods.into_iter().map(str::to_string).collect(), segments);
         // each call the provider answered is the agent's (decision 37), a key's at its charge
         // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
