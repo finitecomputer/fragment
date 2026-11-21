@@ -20,7 +20,10 @@
 //!    the runner's once taken (202, `{"done": false}`): its text waits in
 //!    the runner's state, in every save, until the core has taken each of
 //!    its parts, and only then is its key done (200, `{"done": true}`). Its
-//!    door asks again until it is.
+//!    door asks again until it is. A reply is its link's: one whose link
+//!    ends first (unlinked, or its contact gone) is never sent, to that
+//!    contact or to the next, and its key is told so (410,
+//!    `{"done": false, "ended": true}`).
 //! 4. **Saves** follow changes (save.rs `Due`), the core never paused; a
 //!    planned stop (SIGTERM, or another client taking its queues) stops the
 //!    core first, then saves last.
@@ -104,12 +107,19 @@ struct Kept {
     /// (`REPLIED_KEPT`).
     #[serde(default)]
     replied: VecDeque<String>,
+    /// The newest replies' keys whose link ended before they were sent
+    /// whole (`REPLIED_KEPT`): never sent, to any contact.
+    #[serde(default)]
+    ended: VecDeque<String>,
 }
 
+/// A reply taken, for the contact its link was bound to as it was taken:
+/// sent to that contact alone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Reply {
     key: String,
     text: String,
+    contact: wire::ContactId,
 }
 
 pub enum Msg {
@@ -495,8 +505,33 @@ impl Runner {
                 Action::Save => self.due.changed(self.now()),
             }
         }
+        self.end_replies();
         if self.kept != before {
             self.due.changed(self.now());
+        }
+    }
+
+    /// The replies of a link that has ended (unlinked, its contact gone, or
+    /// bound to another since) end with it: never sent, to it or to the
+    /// next, each key told so if asked again; one being sent is let go of,
+    /// so a late answer to it completes nothing of the next link's.
+    fn end_replies(&mut self) {
+        let contact = self.kept.link.contact();
+        let ours = |r: &Reply| Some(r.contact) == contact;
+        if self.kept.replies.iter().all(ours) {
+            return;
+        }
+        if self.kept.replies.front().is_some_and(|r| !ours(r)) {
+            self.sending = None;
+        }
+        let (kept, ended): (VecDeque<Reply>, VecDeque<Reply>) = std::mem::take(&mut self.kept.replies).into_iter().partition(ours);
+        self.kept.replies = kept;
+        for r in ended {
+            ev!("door.reply_ended", { "key": r.key, "contact": r.contact });
+            if self.kept.ended.len() == REPLIED_KEPT {
+                self.kept.ended.pop_front();
+            }
+            self.kept.ended.push_back(r.key);
         }
     }
 
@@ -690,6 +725,10 @@ impl Runner {
         let stale = mark <= self.mark_seen;
         self.mark_seen = self.mark_seen.max(mark);
         if let Asked::Reply { key, .. } = &a {
+            if self.kept.ended.contains(key) {
+                self.settle();
+                return answer(StatusCode::GONE, r#"{"done":false,"ended":true}"#);
+            }
             if self.kept.replied.contains(key) {
                 self.settle();
                 return answer(StatusCode::OK, r#"{"done":true}"#);
@@ -711,13 +750,13 @@ impl Runner {
             Asked::Link { .. } => self.apply(Input::Want),
             Asked::Unlink { .. } => self.apply(Input::Unlink),
             Asked::Reply { key, text, .. } => {
-                if self.kept.link.contact().is_none() {
+                let Some(contact) = self.kept.link.contact() else {
                     return refuse(StatusCode::CONFLICT, "not linked");
-                }
+                };
                 if self.kept.replies.len() >= REPLIES_MAX {
                     return refuse(StatusCode::SERVICE_UNAVAILABLE, "replies are waiting: ask again");
                 }
-                self.kept.replies.push_back(Reply { key, text });
+                self.kept.replies.push_back(Reply { key, text, contact });
                 self.due.changed(self.now());
                 self.send_reply();
                 return answer(StatusCode::ACCEPTED, r#"{"done":false}"#);
@@ -1062,7 +1101,7 @@ mod tests {
         assert!(asked_of(&mut writes).is_empty(), "nothing is sent while the link syncs");
         let saved: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
         assert_eq!(saved.replies.len(), REPLIES_MAX);
-        assert_eq!(saved.replies[0], Reply { key: "k0".into(), text: "text of k0".into() }, "a save holds each waiting reply whole");
+        assert_eq!(saved.replies[0], Reply { key: "k0".into(), text: "text of k0".into(), contact: 3 }, "a save holds each waiting reply whole, for its link's contact");
         assert!(saved.link.outbox.is_empty());
 
         // in step: the oldest goes, and is done only once the core took it
@@ -1088,6 +1127,50 @@ mod tests {
         }
         let saved: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
         assert_eq!(saved.replies.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), (1..REPLIES_MAX).map(|n| format!("k{n}")).collect::<Vec<_>>());
+    }
+
+    /// Goal: a reply taken for one link is never sent to another (the
+    /// third review of #1430: one waiting while contact 3 synced went to
+    /// contact 4 after an unlink and a new link), whichever side ended the
+    /// link, through a save; asked again, it is told its link ended; and a
+    /// late answer to one being sent as its link ended completes nothing of
+    /// the next link's. Method: a scripted core, the link unlinked by its
+    /// owner or deleted by its contact, then linked to contact 4.
+    #[tokio::test]
+    async fn a_reply_never_outlives_its_link() {
+        for by_them in [false, true] {
+            let (mut r, mut writes) = scripted(&format!("ended-{by_them}"), true);
+            r.kept.link.syncing = true;
+            assert_eq!(reply_ask(&mut r, "old", 1).await.0, 202);
+            r.kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
+            if by_them {
+                r.frame(&serde_json::json!({ "resp": { "type": "contactDeletedByContact", "contact": { "contactId": 3 } } }).to_string());
+            } else {
+                let _ = r.asked(Asked::Unlink { mark: 2 });
+            }
+            r.kept.link.phase = Phase::Linked { contact: 4, name: "pat".into() };
+            r.kept.link.syncing = false;
+            r.kept.link.forced = false;
+            r.send_reply();
+            let sends = asked_of(&mut writes);
+            assert!(!sends.iter().any(|(_, c)| c.contains("text of old")), "never to the next contact (ended by them: {by_them}): {sends:?}");
+            assert_eq!(reply_ask(&mut r, "old", 3).await, (410, r#"{"done":false,"ended":true}"#.into()), "asked again: its link ended");
+        }
+        // a late answer to one being sent as its link ended
+        let (mut r, mut writes) = scripted("ended-late", true);
+        assert_eq!(reply_ask(&mut r, "first", 1).await.0, 202);
+        let first = asked_of(&mut writes);
+        assert_eq!(first.len(), 1, "sent at once, in step: {first:?}");
+        let _ = r.asked(Asked::Unlink { mark: 2 });
+        r.kept.link.phase = Phase::Linked { contact: 4, name: "pat".into() };
+        assert_eq!(reply_ask(&mut r, "second", 3).await.0, 202);
+        let second: Vec<(u64, String)> = asked_of(&mut writes).into_iter().filter(|(_, c)| c.contains("text of second")).collect();
+        assert_eq!(second.len(), 1, "the next link's reply, sent to it: {second:?}");
+        assert!(second[0].1.contains("@4"), "{second:?}");
+        r.frame(&sent_ok(first[0].0));
+        assert_eq!(reply_ask(&mut r, "second", 4).await, (202, r#"{"done":false}"#.into()), "a late answer completes nothing of the next link's");
+        r.frame(&sent_ok(second[0].0));
+        assert_eq!(reply_ask(&mut r, "second", 5).await, (200, r#"{"done":true}"#.into()));
     }
 
     /// Goal: a backlog is read whole however it lies (the review of #1430:
