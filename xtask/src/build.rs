@@ -25,11 +25,10 @@ pub const CELL_WASM_MAX_BYTES: u64 = 7_500_000;
 /// The most the operators' admin Worker's Wasm may be, raw: the same
 /// crate's other build (cell/src/lib.rs, "Two Workers, one crate"), which
 /// holds only what the admin's routes reach of it: 0.70 MB with its first
-/// route (2026-11-20), most of it what every caller carries (the
-/// deployment's settings, NIP-98, serde), and about 0.17 MB more with all
-/// of the admin's. Far under the cell's: a route that reaches an object's
-/// own code, not only its calls, carries that object into the admin,
-/// which this refuses.
+/// route, most of it what every caller carries (the deployment's settings,
+/// NIP-98, serde), and 1.09 MB with all of the admin's (2026-11-20). Far
+/// under the cell's: a route that reaches an object's own code, not only
+/// its calls, carries that object into the admin, which this refuses.
 pub const ADMIN_WASM_MAX_BYTES: u64 = 1_200_000;
 
 /// The admin Worker's build, in the cell's `build/` (so a build's lock,
