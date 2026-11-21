@@ -560,11 +560,16 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // (drawn again by `paintSettings` once a view that says otherwise lands)
   function storageBlock(c) {
     const parts = storageParts(c);
-    shown.storageDrawn = JSON.stringify(parts);
-    shown.storage = parts ? storageDrawn(parts) : line("Storage", "Measured after your computer next saves.");
+    shown.storageDrawn = storageKey(c);
+    shown.storage = parts ? storageDrawn(c, parts) : line("Storage", "Measured after your computer next saves.");
     return shown.storage;
   }
-  function storageDrawn(parts) {
+  // what its Storage is drawn from: its parts, and whether it is awake
+  // (its Delete buttons)
+  function storageKey(c) {
+    return JSON.stringify([storageParts(c), c?.phase === "awake"]);
+  }
+  function storageDrawn(c, parts) {
     const block = el("div", "settings-line storage");
     block.dataset.storage = "";
     const head = el("div", "storage-head");
@@ -594,6 +599,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         const name = el("span", "storage-file-name", f.name);
         name.title = f.path;
         row.append(name, el("span", "storage-file-folder", f.folder), el("span", "storage-size", storageSize(f.bytes)));
+        // Delete: a file of its work, awake alone (the platform removes it
+        // in its container, no agent asked), asked once
+        // never one whose path holds a `?`: GNU lists a newline as one, so it
+        // may name another file (Codex on #1429)
+        if (c.phase === "awake" && f.path.startsWith("work/") && !f.path.includes("?")) row.append(deleteControl(c, f));
         files.append(row);
       }
       block.append(files);
@@ -601,6 +611,36 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const when = new Date(parts.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     block.append(el("span", "storage-at", `Measured ${when}`));
     return block;
+  }
+  function deleteControl(c, f) {
+    const box = el("span", "storage-file-actions");
+    const ask = el("button", "quiet", "Delete");
+    ask.type = "button";
+    ask.dataset.action = "storage-delete";
+    ask.onclick = () => {
+      const cancel = el("button", "quiet", "Cancel");
+      cancel.type = "button";
+      cancel.onclick = () => box.replaceChildren(ask);
+      const sure = el("button", "danger", "Delete");
+      sure.type = "button";
+      sure.dataset.action = "storage-delete-sure";
+      sure.onclick = () => {
+        sure.disabled = cancel.disabled = true;
+        sure.textContent = "Deleting…";
+        // its view, its Storage drawn again from it (`paintSettings`)
+        api("POST", `/api/computers/${seg(c.computer)}/files/delete`, { path: f.path })
+          .then((v) => {
+            computerIs(v);
+            // its view unchanged (its read after the delete did not answer in
+            // time): still drawn here, so said here (Codex on #1429)
+            if (box.isConnected) box.replaceChildren(el("span", "muted", "Deleted"));
+          })
+          .catch((e) => box.replaceChildren(ask, el("span", "form-error", `Couldn't delete it: ${e?.message ?? e}`)));
+      };
+      box.replaceChildren(cancel, sure);
+    };
+    box.append(ask);
+    return box;
   }
   function stateLine(c) {
     const l = line("State", stateSaid(c, active(follow.op())));
@@ -612,7 +652,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (shown.state?.isConnected && c) shown.state.textContent = stateSaid(c, active(follow.op()));
     if (shown.asks?.isConnected && restartSaid() !== shown.painted) paintAsks(shown.asks);
     // its Storage, as the view that landed says it (Codex on #1428)
-    if (shown.storage?.isConnected && c && JSON.stringify(storageParts(c)) !== shown.storageDrawn) shown.storage.replaceWith(storageBlock(c));
+    if (shown.storage?.isConnected && c && storageKey(c) !== shown.storageDrawn) shown.storage.replaceWith(storageBlock(c));
   }
   // what settings' Restart says now: nothing but its button, the restart's
   // step, or why its ask failed
