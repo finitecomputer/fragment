@@ -93,25 +93,56 @@ pub fn copy(source: &Path, target: &Path) -> Result<(), SaveError> {
     c.backup(rusqlite::MAIN_DB, target, None).map_err(io)
 }
 
-/// The save: `state` first, then each database copied into `work` and
-/// packed. The state is read before the copies, so what it says (its
-/// cursor, its mark) the databases after it already hold.
+/// The order a save copies the databases in: the agent's, then the chat's.
+/// The core commits a message to its chat database before its agent
+/// acknowledges it to the server (and lets it go), so a chat copy made
+/// after the agent's holds every message that copy has let go. The other
+/// way round, a message taken between the two copies is in neither.
+const COPY_ORDER: [&str; 2] = [DBS[1], DBS[0]];
+
+/// The bytes a save's files take unpacked: its magic, then each file's
+/// name and length framing and its bytes. One measure for `make`, `pack`
+/// and `unpack`, so a save that packs always unpacks.
+fn framed(files: impl Iterator<Item = (usize, u64)>) -> u64 {
+    files.fold(MAGIC.len() as u64, |n, (name, len)| n + 2 + name as u64 + 8 + len)
+}
+
+/// The save: `state` first, then each database copied into `work`
+/// (`COPY_ORDER`) and packed. The state is read before the copies, so what
+/// it says (its cursor, its mark) the databases after it already hold.
 pub fn make(dir: &Path, work: &Path, state: &[u8]) -> Result<Vec<u8>, SaveError> {
+    make_within(dir, work, state, UNPACKED_MAX_BYTES)
+}
+
+fn make_within(dir: &Path, work: &Path, state: &[u8], max: u64) -> Result<Vec<u8>, SaveError> {
     std::fs::create_dir_all(work).map_err(io)?;
     let mut files: Vec<(&str, Vec<u8>)> = vec![(STATE, state.to_vec())];
-    for db in DBS {
+    for db in COPY_ORDER {
         let target = work.join(db);
         copy(&dir.join(db), &target)?;
+        // measured before it is read: a database past the bound is never
+        // held in memory
+        let len = std::fs::metadata(&target).map_err(io)?.len();
+        let total = framed(files.iter().map(|(n, b)| (n.len(), b.len() as u64)).chain([(db.len(), len)]));
+        if total > max {
+            let _ = std::fs::remove_file(&target);
+            return Err(SaveError::TooLarge(total));
+        }
         let bytes = std::fs::read(&target).map_err(io)?;
         let _ = std::fs::remove_file(&target);
         files.push((db, bytes));
     }
-    pack(&files)
+    pack_within(&files, max)
 }
 
-pub fn pack(files: &[(&str, Vec<u8>)]) -> Result<Vec<u8>, SaveError> {
-    let total: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
-    if total > UNPACKED_MAX_BYTES {
+#[cfg(test)]
+fn pack(files: &[(&str, Vec<u8>)]) -> Result<Vec<u8>, SaveError> {
+    pack_within(files, UNPACKED_MAX_BYTES)
+}
+
+fn pack_within(files: &[(&str, Vec<u8>)], max: u64) -> Result<Vec<u8>, SaveError> {
+    let total = framed(files.iter().map(|(n, b)| (n.len(), b.len() as u64)));
+    if total > max {
         return Err(SaveError::TooLarge(total));
     }
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(GZIP_LEVEL));
@@ -126,7 +157,8 @@ pub fn pack(files: &[(&str, Vec<u8>)]) -> Result<Vec<u8>, SaveError> {
     gz.finish().map_err(io)
 }
 
-/// A save's files, by name: the state and each database at most once.
+/// A save's files, by name: the state and both databases, each once, and
+/// nothing else.
 pub fn unpack(packed: &[u8]) -> Result<Vec<(String, Vec<u8>)>, SaveError> {
     let mut raw = Vec::new();
     flate2::read::GzDecoder::new(packed).take(UNPACKED_MAX_BYTES + 1).read_to_end(&mut raw).map_err(|e| SaveError::Corrupt(format!("no gzip: {e}")))?;
@@ -160,7 +192,50 @@ pub fn unpack(packed: &[u8]) -> Result<Vec<(String, Vec<u8>)>, SaveError> {
     if take(1).is_ok() {
         return Err(SaveError::Corrupt("more after its files".into()));
     }
+    if out.len() != 1 + DBS.len() {
+        return Err(SaveError::Corrupt(format!("{} of its 3 files", out.len())));
+    }
     Ok(out)
+}
+
+/// Where a restore puts a save's databases before they are the core's.
+const STAGE: &str = "restoring";
+
+/// A save unpacked into `dir`'s stage, each database opened and checked
+/// there (`quick_check`), nothing of the core's touched: its state's bytes,
+/// for the caller to read before `place` makes them the core's.
+pub fn stage(packed: &[u8], dir: &Path) -> Result<Vec<u8>, SaveError> {
+    let stage = dir.join(STAGE);
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage).map_err(io)?;
+    let mut state = None;
+    for (name, bytes) in unpack(packed)? {
+        if name == STATE {
+            state = Some(bytes);
+            continue;
+        }
+        let path = stage.join(&name);
+        std::fs::write(&path, &bytes).map_err(io)?;
+        let checked = Connection::open(&path).and_then(|c| c.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)));
+        match checked {
+            Ok(ok) if ok == "ok" => {}
+            Ok(said) => return Err(SaveError::Corrupt(format!("{name}: {said}"))),
+            Err(e) => return Err(SaveError::Corrupt(format!("{name}: {e}"))),
+        }
+    }
+    Ok(state.expect("unpack holds the state"))
+}
+
+/// The staged databases made the core's, in place of whatever was there.
+pub fn place(dir: &Path) -> Result<(), SaveError> {
+    let stage = dir.join(STAGE);
+    for db in DBS {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(dir.join(format!("{db}{suffix}")));
+        }
+        std::fs::rename(stage.join(db), dir.join(db)).map_err(io)?;
+    }
+    std::fs::remove_dir_all(&stage).map_err(io)
 }
 
 /// Each database's `data_version`, on connections of the watcher's own: it
@@ -345,6 +420,8 @@ mod tests {
     #[test]
     fn a_save_unpacks_whole_or_not_at_all() {
         let files = vec![(STATE, b"{}".to_vec()), (DBS[0], vec![7u8; 100_000]), (DBS[1], vec![9u8; 10])];
+        // a save missing a database is no save (review of #1430)
+        assert!(matches!(unpack(&pack(&files[..2]).unwrap()), Err(SaveError::Corrupt(_))), "two of three files");
         let packed = pack(&files).unwrap();
         // the gzip header's XFL: 4, "compressor used fastest algorithm"
         assert_eq!(packed[8], 4, "level {GZIP_LEVEL} is gzip's fastest");
@@ -366,9 +443,48 @@ mod tests {
         assert!(matches!(unpack(&raw(&[("../etc/passwd", b"x")], b"")), Err(SaveError::Corrupt(_))));
         assert!(matches!(unpack(&raw(&[(DBS[0], b"a"), (DBS[0], b"b")], b"")), Err(SaveError::Corrupt(_))));
         assert!(matches!(unpack(&raw(&[(STATE, b"{}"), (DBS[0], b"a"), (DBS[1], b"b")], b"!")), Err(SaveError::Corrupt(_))));
-        assert!(matches!(pack(&[(DBS[0], vec![0u8; UNPACKED_MAX_BYTES as usize + 1])]), Err(SaveError::TooLarge(_))));
         let bomb = raw(&[(DBS[0], &vec![0u8; UNPACKED_MAX_BYTES as usize + 1])], b"");
         assert!(matches!(unpack(&bomb), Err(SaveError::TooLarge(_))));
+    }
+
+    /// Goal: one bound, framing and all, for making a save and for reading
+    /// it back: a save exactly at it packs and unpacks, one byte past it is
+    /// refused both ways (review of #1430: `pack` counted the files alone),
+    /// and a database past it is refused before it is read. Method: files
+    /// sized to the bound's edge; a make under a small bound.
+    #[test]
+    fn a_save_at_its_bound_restores() {
+        let frame = framed([(STATE.len(), 2), (DBS[0].len(), 0), (DBS[1].len(), 0)].into_iter());
+        let fill = (UNPACKED_MAX_BYTES - frame) as usize;
+        let at = vec![(STATE, b"{}".to_vec()), (DBS[0], vec![0u8; fill]), (DBS[1], vec![])];
+        let back = unpack(&pack(&at).unwrap()).expect("a save at its bound restores");
+        assert_eq!(back[1].1.len(), fill);
+        let past = vec![(STATE, b"{}".to_vec()), (DBS[0], vec![0u8; fill + 1]), (DBS[1], vec![])];
+        assert!(matches!(pack(&past), Err(SaveError::TooLarge(_))));
+        let d = dir("bound");
+        wal(&d).unwrap();
+        assert!(matches!(make_within(&d, &d.join("save"), b"{}", 1_000), Err(SaveError::TooLarge(_))), "a database past the bound");
+        assert!(make_within(&d, &d.join("save"), b"{}", UNPACKED_MAX_BYTES).is_ok());
+    }
+
+    /// Goal: a save that will not restore never reaches the core: a
+    /// database of bytes that are no SQLite is refused in the stage, the
+    /// core's own files untouched; a good one is staged, then placed.
+    /// Method: both, against a directory holding a database already.
+    #[test]
+    fn a_bad_database_never_reaches_the_core() {
+        let d = dir("stage");
+        wal(&d).unwrap();
+        let good = make(&d, &d.join("save"), b"{}").unwrap();
+        let before = std::fs::read(d.join(DBS[0])).unwrap();
+        let bad = pack(&[(STATE, b"{}".to_vec()), (DBS[0], b"not a database at all, not even close".repeat(200)), (DBS[1], vec![])]).unwrap();
+        assert!(matches!(stage(&bad, &d), Err(SaveError::Corrupt(_))), "bytes that are no SQLite");
+        assert_eq!(std::fs::read(d.join(DBS[0])).unwrap(), before, "the core's database untouched");
+        assert_eq!(stage(&good, &d).unwrap(), b"{}");
+        place(&d).unwrap();
+        assert!(!d.join(STAGE).exists());
+        let n: i64 = Connection::open(d.join(DBS[1])).unwrap().query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0)).unwrap();
+        assert!(n >= 0);
     }
 
     /// Goal: while busy, saves are at least `GAP_MS_MIN` apart (the spike's

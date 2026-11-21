@@ -137,6 +137,12 @@ impl Door {
         let call = async {
             let res = self.client.request(req).await.map_err(|e| DoorError::Transport(e.to_string()))?;
             let status = res.status();
+            // a fence is its status alone: taken from the head, whatever its
+            // body does (one cut short or stalled must never read as a
+            // failure to retry: the runner ends at once)
+            if status == StatusCode::CONFLICT {
+                return Ok((status, None, None, Bytes::new()));
+            }
             let header = |name: &str| res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
             let mark = header(MARK_HEADER).map(|m| m.parse::<u64>().map_err(|_| DoorError::Answer { status: status.as_u16(), body: format!("a mark that is no number: {m:?}") })).transpose()?;
             let behind = header(BEHIND_HEADER).map(|b| b == "1");
@@ -238,6 +244,9 @@ mod tests {
         assert!(asked.starts_with("PUT /save?seq=3 HTTP/1.1\r\n") && asked.contains("x-door-mark: 12\r\n") && asked.contains("content-length: 2\r\n"), "{asked}");
         assert_eq!(saved, Ok(Saved::Taken));
         let (_, saved) = tokio::join!(one(&listener, "HTTP/1.1 409 Conflict\r\ncontent-length: 0\r\n\r\n"), door.save(4, 12, vec![1]));
+        assert_eq!(saved, Ok(Saved::Superseded));
+        // a fence whose body is cut short is a fence still (review of #1430)
+        let (_, saved) = tokio::join!(one(&listener, "HTTP/1.1 409 Conflict\r\ncontent-length: 1000\r\n\r\nabc"), door.save(4, 12, vec![1]));
         assert_eq!(saved, Ok(Saved::Superseded));
         let (_, saved) = tokio::join!(one(&listener, "HTTP/1.1 500 Oops\r\ncontent-length: 4\r\n\r\ngone"), door.save(5, 12, vec![1]));
         assert_eq!(saved, Err(DoorError::Answer { status: 500, body: "gone".into() }));

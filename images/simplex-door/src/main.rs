@@ -5,24 +5,30 @@
 //! is the I/O around them, with one peer, its door (door.rs):
 //!
 //! 1. **A start** restores the door's newest save (or none: a new door),
-//!    sets both databases to WAL mode (save.rs `wal` says why), starts the
-//!    core, and tells the link whether the save is behind (its door says
-//!    so), so a rollback forces one ratchet sync before anything is sent.
-//! 2. **Its owner's messages** go to its door one at a time, in order, each
-//!    until it is taken; the link's cursor (`delivered`) moves after, and
-//!    a start reads back to it (a core killed mid-burst committed messages
-//!    whose events died with it).
+//!    checked whole before the core sees it, sets both databases to WAL
+//!    mode (save.rs `wal` says why), starts the core, and tells the link
+//!    whether the save is behind (its door says so), so a rollback forces
+//!    one ratchet sync before anything is sent.
+//! 2. **Its owner's messages** are read on from the link's cursor
+//!    (`delivered`) a page at a time and go to its door one at a time, in
+//!    order, each until it is taken; the cursor moves after. The core's own
+//!    database is the queue: nothing waits in memory but one page, and a
+//!    start reads on from the cursor what any earlier life took.
 //! 3. **What the door asks** (`DOOR_HTTP`): `GET /state`; `POST /link` and
 //!    `POST /unlink`; `POST /reply {key, text}`, sent once a key. Each ask
 //!    but the state carries its mark (door.rs, "an effect").
-//! 4. **Saves** follow changes (save.rs `Due`), the core never paused, and
-//!    a planned stop (SIGTERM, or a gap in its deliveries) saves last.
+//! 4. **Saves** follow changes (save.rs `Due`), the core never paused; a
+//!    planned stop (SIGTERM, or another client taking its queues) stops the
+//!    core first, then saves last.
 //!
-//! **Marks.** A save's mark is the door's newest mark this runner had seen
-//! when its link was last quiet: no command asked of the core unanswered,
-//! no reply held, no sync under way. So everything a mark numbers is
-//! committed in the databases the save copies after it (an effect not yet
-//! counted only makes the door think a save behind, which costs one sync).
+//! **Marks.** An ask is taken only under a mark newer than every mark the
+//! runner has seen; an older one (its request overtaken by a later mark's)
+//! is refused, and its door asks it again under a new mark. So no ask ever
+//! acts after a save that claims a later mark. A save's mark is the newest
+//! mark seen when its link was last quiet: no command asked of the core
+//! unanswered, no reply held, no sync under way; everything it numbers is
+//! then committed in the databases the save copies after it (an effect not
+//! yet counted only makes the door think a save behind: one sync).
 //!
 //! Env: `DOOR_GENERATION` (this start's, from 1), `DOOR_NAME` (the agent's),
 //! `DOOR_API`, `DOOR_DIR`, `DOOR_CORE_BIN`, `DOOR_HTTP`, and `DOOR_SMP` (a
@@ -32,15 +38,17 @@ mod core;
 mod door;
 mod save;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fragment_bridge::ev;
+use fragment_bridge::limits::REPLY_TEXT_MAX_BYTES;
 use fragment_bridge::net::{self, Body};
-use fragment_bridge::simplex::link::{Action, Inbound, Input, Link, Notice, Phase};
-use fragment_bridge::simplex::{run, wire};
+use fragment_bridge::simplex::link::{self, Action, Inbound, Input, Link, Notice, Phase};
+use fragment_bridge::simplex::wire::{self, Cmd, Content, Resp};
+use fragment_bridge::simplex::run;
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
@@ -58,29 +66,31 @@ const TICK_MS: u64 = 250;
 /// again (the door asks again when its answer was lost).
 const REPLIED_KEPT: usize = 64;
 const KEY_MAX_BYTES: usize = 128;
-/// A reply's body, at most: the bridge's own bound on a reply's text, and
-/// its key and framing.
-const REPLY_BODY_MAX_BYTES: usize = fragment_bridge::limits::REPLY_TEXT_MAX_BYTES + 1024;
+/// A reply's body, at most: its text at the bridge's bound with every byte
+/// escaped as JSON's longest (`\u00XX`, 6 bytes), its key and framing.
+const REPLY_BODY_MAX_BYTES: usize = 6 * REPLY_TEXT_MAX_BYTES + 1024;
 const NOTICES_KEPT: usize = 16;
-/// Messages waiting to be delivered, at most: a start's catch-up's and live
-/// ones. Past it one is dropped and the runner stops once the rest are
-/// delivered (a planned stop), so its next start reads back to it.
-const DELIVERIES_MAX: usize = 2 * fragment_bridge::simplex::link::SCAN_MAX;
+/// A read on from the cursor: the link's own catch-up page.
+const PAGE: u16 = link::CATCHUP_ITEMS;
 /// A door that will not give its save for this long: the runner ends (its
 /// door starts it again).
 const RESTORE_MS_MAX: u64 = 10 * 60_000;
-/// A planned stop waits this long for the link to be quiet and its last
-/// save to be taken.
+/// A planned stop waits this long for the link to be quiet before it stops
+/// the core, and twice this for its last save to be taken.
 const STOP_MS_MAX: u64 = 8_000;
+/// The exit code of a start whose save would not restore: its door starts
+/// it from an older one.
+const UNREADABLE_EXIT: i32 = 2;
 
 /// What each save holds beside the databases, rolled back with them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Kept {
     link: Link,
-    /// The newest of the door's marks committed in the databases (`Marks`).
+    /// The newest of the door's marks committed in the databases (Marks).
     #[serde(default)]
     mark: u64,
-    /// The newest replies' keys (`REPLIED_KEPT`).
+    /// The newest replies' keys whose every part the core took or the link
+    /// holds (`REPLIED_KEPT`).
     #[serde(default)]
     replied: VecDeque<String>,
 }
@@ -91,7 +101,7 @@ pub enum Msg {
     Asked(Asked, oneshot::Sender<Response<Body>>),
     Delivered { item: i64, mark: u64 },
     DeliveryFailed,
-    SaveEnded(Result<door::Saved, String>),
+    SaveEnded { seq: u64, mark: u64, result: Result<door::Saved, String> },
     Stop(&'static str),
 }
 
@@ -126,22 +136,42 @@ struct Runner {
     dir: PathBuf,
     generation: u64,
     kept: Kept,
-    /// The newest mark seen (an ask taken, a delivery's answer, or the
-    /// door's newest at the start): `kept.mark` once the link is quiet.
+    /// The newest mark seen (an ask's, a delivery's answer, or the door's
+    /// newest at the start): `kept.mark` once the link is quiet.
     mark_seen: u64,
     core: core::Core,
     corr: u64,
-    pending: BTreeMap<u64, wire::Cmd>,
+    pending: BTreeMap<u64, Cmd>,
+    /// Replies taken whose parts the core has not all answered: each key,
+    /// and its sends still out. A key asked again meanwhile waits.
+    replying: Vec<(String, BTreeSet<u64>)>,
     /// `Input::Started` applied: asks are taken.
     up: bool,
     stopping: Option<(&'static str, Instant)>,
+    /// When a planned stop asked the core to end, whether it was killed,
+    /// and whether it has ended.
+    core_stop: Option<Instant>,
+    killed: bool,
+    core_gone: bool,
     /// The seq of the save a planned stop began: its answer ends the runner.
     last: Option<u64>,
-    deliveries: VecDeque<Inbound>,
+    /// The deliverable messages of the last read on from the cursor, oldest
+    /// first (at most `PAGE`).
+    page: VecDeque<Inbound>,
+    /// That read (its corr), while the core has not answered it: on from
+    /// `anchor` (an item this life read, which the core held then), or,
+    /// with none (a new link, or the anchor expired), a seek back from the
+    /// newest page, `seek` the oldest item it has passed, to the cursor.
+    reading: Option<u64>,
+    anchor: Option<i64>,
+    seek: Option<i64>,
+    /// A message forwarded since the last read began, or there may be more
+    /// past the last read: read on.
+    poked: bool,
+    full: bool,
     delivering: bool,
-    delivery_wait: fragment_bridge::net::Backoff,
+    delivery_wait: net::Backoff,
     delivery_at: Option<Instant>,
-    gap: bool,
     resync_at: Option<Instant>,
     recheck_at: Option<Instant>,
     due: save::Due,
@@ -192,6 +222,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // the cursor is the item its door took last, which the core holds unless
+    // it expired (a read on from it then seeks)
+    let anchor = Some(kept.link.delivered).filter(|d| *d > 0);
     let mut r = Runner {
         door,
         dir,
@@ -201,14 +234,23 @@ async fn main() {
         core,
         corr: 0,
         pending: BTreeMap::new(),
+        replying: vec![],
         up: false,
         stopping: None,
+        core_stop: None,
+        killed: false,
+        core_gone: false,
         last: None,
-        deliveries: VecDeque::new(),
+        page: VecDeque::new(),
+        reading: None,
+        anchor,
+        seek: None,
+        // each start reads on from its cursor once: what an earlier life took
+        poked: true,
+        full: false,
         delivering: false,
-        delivery_wait: fragment_bridge::net::Backoff::default(),
+        delivery_wait: net::Backoff::default(),
         delivery_at: None,
-        gap: false,
         resync_at: None,
         recheck_at: None,
         due: save::Due::default(),
@@ -225,8 +267,8 @@ async fn main() {
     };
     // its name (a profile its database made earlier keeps the earlier one),
     // its messages' expiry, then the link's start
-    r.ask(wire::Cmd::Profile { name });
-    r.ask(wire::Cmd::ExpireDay);
+    r.ask(Cmd::Profile { name });
+    r.ask(Cmd::ExpireDay);
     r.up = true;
     r.apply(Input::Started { rollback: behind });
     // each start's first save: what it restored, or the new profile
@@ -252,11 +294,12 @@ async fn main() {
     }
 }
 
-/// The newest save, unpacked in place; or none, and nothing left of an
-/// earlier life's files (the door's save is the one truth).
+/// The newest save, checked whole and made the core's; or none, and
+/// nothing left of an earlier life's files (the door's save is the one
+/// truth). A save that will not restore never reaches the core.
 async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
     let t0 = Instant::now();
-    let mut wait = fragment_bridge::net::Backoff::default();
+    let mut wait = net::Backoff::default();
     // bounded by RESTORE_MS_MAX
     let restored = loop {
         match door.restore().await {
@@ -270,38 +313,26 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool) {
             }
         }
     };
-    for db in save::DBS {
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(dir.join(format!("{db}{suffix}")));
-        }
-    }
     match restored {
-        Restore::None => (Kept::default(), 0, false),
-        Restore::Save { packed, mark, behind } => {
-            // one that will not restore: a code of its own, so its door
-            // starts it from an older one
-            let files = save::unpack(&packed).unwrap_or_else(|e| unreadable(&e.to_string()));
-            let mut kept = None;
-            for (name, bytes) in files {
-                if name == save::STATE {
-                    kept = Some(serde_json::from_slice::<Kept>(&bytes).unwrap_or_else(|e| unreadable(&e.to_string())));
-                } else {
-                    let tmp = dir.join(format!("{name}.restoring"));
-                    std::fs::write(&tmp, &bytes).expect("a database restored");
-                    std::fs::rename(&tmp, dir.join(&name)).expect("a database restored");
+        Restore::None => {
+            for db in save::DBS {
+                for suffix in ["", "-wal", "-shm"] {
+                    let _ = std::fs::remove_file(dir.join(format!("{db}{suffix}")));
                 }
             }
-            let kept = kept.unwrap_or_else(|| unreadable("no runner's state"));
-            assert!(behind || kept.mark >= mark, "a save the door says is not behind holds its newest mark");
+            (Kept::default(), 0, false)
+        }
+        Restore::Save { packed, mark, behind } => {
+            let state = save::stage(&packed, dir).unwrap_or_else(|e| unreadable(&e.to_string()));
+            let kept: Kept = serde_json::from_slice(&state).unwrap_or_else(|e| unreadable(&e.to_string()));
+            assert!(behind || kept.mark >= mark, "a save its door says is not behind holds the door's newest mark");
+            save::place(dir).expect("the staged databases placed");
             ev!("door.restored", { "bytes": packed.len(), "mark": kept.mark, "doorMark": mark, "behind": behind });
             let newest = mark.max(kept.mark);
             (kept, newest, behind)
         }
     }
 }
-
-/// The exit code of a start whose save would not restore.
-const UNREADABLE_EXIT: i32 = 2;
 
 fn unreadable(why: &str) -> ! {
     ev!("door.save_unreadable", { "why": why });
@@ -317,6 +348,14 @@ fn phase(p: &Phase) -> &'static str {
     }
 }
 
+fn answer(status: StatusCode, body: &'static str) -> Response<Body> {
+    net::respond(status, "application/json", body)
+}
+
+fn refuse(status: StatusCode, why: &str) -> Response<Body> {
+    net::refusal(status, "door", why)
+}
+
 impl Runner {
     fn now(&self) -> u64 {
         self.born.elapsed().as_millis() as u64
@@ -326,28 +365,33 @@ impl Runner {
         match m {
             Msg::Frame(text) => self.frame(&text),
             Msg::CoreGone(why) => {
-                ev!("door.core_gone", { "why": why });
-                std::process::exit(1);
+                ev!("door.core_gone", { "why": why, "stopping": self.stopping.is_some() });
+                if self.stopping.is_none() {
+                    std::process::exit(1);
+                }
+                self.core_gone = true;
+                self.pending.clear();
+                self.replying.clear();
+                self.reading = None;
             }
             Msg::Asked(a, answer) => {
                 let _ = answer.send(self.asked(a));
             }
             Msg::Delivered { item, mark } => {
-                let done = self.deliveries.pop_front().expect("a delivery is the oldest waiting");
+                let done = self.page.pop_front().expect("a delivery is the oldest read");
                 assert_eq!(done.item, item, "deliveries end in order");
                 self.delivering = false;
                 self.delivery_wait.reset();
                 self.mark_seen = self.mark_seen.max(mark);
-                if !self.gap && item > 0 {
-                    self.apply(Input::Delivered(item));
-                }
+                self.apply(Input::Delivered(item));
+                assert!(self.kept.link.contact().is_none() || self.kept.link.delivered >= item, "the cursor moves to what was delivered");
                 self.settle();
             }
             Msg::DeliveryFailed => {
                 self.delivering = false;
                 self.delivery_at = Some(Instant::now() + Duration::from_millis(self.delivery_wait.next_ms()));
             }
-            Msg::SaveEnded(r) => self.save_ended(r),
+            Msg::SaveEnded { seq, mark, result } => self.save_ended(seq, mark, result),
             Msg::Stop(why) => self.begin_stop(why),
         }
     }
@@ -359,10 +403,11 @@ impl Runner {
         }
     }
 
-    /// A command to the core, answered by its `corrId`.
-    fn ask(&mut self, cmd: wire::Cmd) {
+    /// A command to the core, answered by its `corrId`. A send its writer
+    /// has no room for is the link's to hold (as one the core refused).
+    fn ask(&mut self, cmd: Cmd) {
         self.corr += 1;
-        if matches!(cmd, wire::Cmd::Sync { force: true, .. }) {
+        if matches!(cmd, Cmd::Sync { force: true, .. }) {
             self.forced_syncs += 1;
         }
         match self.core.writer.try_send(cmd.frame(self.corr)) {
@@ -371,29 +416,27 @@ impl Runner {
             }
             Err(_) => {
                 ev!("door.unsent", { "corr": self.corr });
-                if let wire::Cmd::React { item, on, .. } = cmd {
-                    self.kept.link.apply(Input::NotReacted { item, on });
+                match &cmd {
+                    Cmd::React { item, on, .. } => {
+                        self.kept.link.apply(Input::NotReacted { item: *item, on: *on });
+                    }
+                    Cmd::Send { .. } => self.apply(Input::Failed { cmd: &cmd, what: "the core's writer was full" }),
+                    _ => {}
                 }
             }
         }
     }
 
-    /// The link's rules on `input`, and what they ask.
+    /// The link's rules on `input`, and what they ask. A message forwarded
+    /// is read on from the cursor (`read`): the forward itself only says
+    /// there is one.
     fn apply(&mut self, input: Input<'_>) {
         let before = self.kept.clone();
         let actions = self.kept.link.apply(input);
         for a in actions {
             match a {
                 Action::Ask(cmd) => self.ask(cmd),
-                Action::Forward(i) => {
-                    if self.deliveries.len() < DELIVERIES_MAX {
-                        queue(&mut self.deliveries, i, self.delivering);
-                    } else {
-                        // the next start reads back to it: no cursor moves past it
-                        ev!("door.delivery_dropped", { "item": i.item });
-                        self.gap = true;
-                    }
-                }
+                Action::Forward(_) => self.poked = true,
                 Action::Tell(n) => self.told(n),
                 Action::Save => self.due.changed(self.now()),
             }
@@ -417,7 +460,7 @@ impl Runner {
         }
     }
 
-    /// The mark moves once the link is quiet (main.rs, "Marks").
+    /// The mark moves once the link is quiet (Marks).
     fn settle(&mut self) {
         let l = &self.kept.link;
         let quiet = self.up && self.pending.is_empty() && l.outbox.is_empty() && !l.syncing && !l.forced;
@@ -435,16 +478,26 @@ impl Runner {
                 return;
             }
         };
-        let asked = frame.corr.and_then(|c| self.pending.remove(&c));
+        let corr = frame.corr;
+        let asked = corr.and_then(|c| self.pending.remove(&c));
+        // the runner's own read, never the link's (its catch-up reads too)
+        if corr.is_some() && corr == self.reading {
+            self.reading = None;
+            match (&asked, &frame.resp) {
+                (Some(cmd), Resp::Page(items)) => self.read(cmd, items),
+                (_, resp) => self.unread(&asked, resp),
+            }
+            return self.settle();
+        }
         if let Some(wire::Cmd::React { item, on, .. }) = &asked {
             self.apply(Input::Reacted { item: *item, on: *on });
         }
         match (&asked, &frame.resp) {
-            (Some(wire::Cmd::Conns { again }), wire::Resp::Conns(conns)) => {
+            (Some(Cmd::Conns { again }), Resp::Conns(conns)) => {
                 let since = self.core.spawned_ms;
                 self.apply(Input::Conns { conns, since, again: *again });
             }
-            (Some(cmd), wire::Resp::Error { what }) => {
+            (Some(cmd), Resp::Error { what }) => {
                 ev!("door.refused", { "what": wire::cut(what, 200) });
                 self.apply(Input::Failed { cmd, what });
             }
@@ -454,42 +507,106 @@ impl Runner {
                 self.apply(Input::Said(resp));
             }
         }
+        // a reply whose last part the core answered is done (the link holds
+        // any it refused, in the same save)
+        if let Some(c) = corr {
+            let mut done = vec![];
+            self.replying.retain_mut(|(key, corrs)| {
+                corrs.remove(&c);
+                let left = !corrs.is_empty();
+                if !left {
+                    done.push(std::mem::take(key));
+                }
+                left
+            });
+            for key in done {
+                self.replied(key);
+            }
+        }
         self.settle();
     }
 
-    fn asked(&mut self, a: Asked) -> Response<Body> {
-        let refuse = |status: StatusCode, why: &str| net::refusal(status, "door", why);
-        if let Asked::State = a {
-            let (link, short) = match &self.kept.link.phase {
-                Phase::Inviting { link, short, .. } => (Some(link.as_str()), short.as_deref()),
-                _ => (None, None),
-            };
-            let name = match &self.kept.link.phase {
-                Phase::Linked { name, .. } => Some(name.as_str()),
-                _ => None,
-            };
-            let view = View {
-                generation: self.generation,
-                ready: self.up && self.stopping.is_none(),
-                phase: phase(&self.kept.link.phase),
-                link,
-                short,
-                name,
-                syncing: self.kept.link.syncing,
-                delivered: self.kept.link.delivered,
-                mark: self.kept.mark,
-                saves: self.saves,
-                forced_syncs: self.forced_syncs,
-                waiting: self.deliveries.len(),
-                notices: &self.notices,
-            };
-            return net::respond(StatusCode::OK, "application/json", serde_json::to_vec(&view).expect("a view is JSON"));
+    fn replied(&mut self, key: String) {
+        if self.kept.replied.len() == REPLIED_KEPT {
+            self.kept.replied.pop_front();
         }
+        self.kept.replied.push_back(key);
+        self.due.changed(self.now());
+    }
+
+    /// A read answered. On from the anchor: its owner's messages in it, to
+    /// deliver, and its newest item the next anchor. A seek's page: while
+    /// it is full and all of it newer than the cursor, older ones may be
+    /// past it, so the seek goes on back from its oldest; else its messages
+    /// past the cursor are the oldest to deliver, and the reads go on
+    /// forward from its newest (re-reading what the seek passed, in order).
+    fn read(&mut self, cmd: &Cmd, items: &[wire::Item]) {
+        let mut items: Vec<&wire::Item> = items.iter().collect();
+        items.sort_by_key(|i| i.id);
+        let delivered = self.kept.link.delivered;
+        let newest = items.last().map(|i| i.id);
+        if let Cmd::Chat { .. } = cmd {
+            let oldest = items.first().map(|i| i.id);
+            if items.len() >= usize::from(PAGE) && oldest.is_some_and(|o| o > delivered) {
+                self.seek = oldest;
+                self.full = true;
+                return;
+            }
+            self.seek = None;
+            self.full = newest.is_some();
+        } else {
+            self.full = items.len() >= usize::from(PAGE);
+        }
+        self.anchor = newest.or(self.anchor);
+        let contact = self.kept.link.contact();
+        for item in items {
+            let theirs = item.received && Some(item.contact) == contact && item.id > delivered;
+            // a message has its sender's id; one without is no message to carry
+            if let (true, Content::Message { kind, text }, Some(id)) = (theirs, &item.content, &item.shared) {
+                self.page.push_back(Inbound { id: id.clone(), kind: kind.clone(), text: text.clone(), at: item.at.clone(), item: item.id, file: item.file.clone() });
+            }
+        }
+        assert!(self.page.len() <= usize::from(PAGE), "a page holds one read");
+    }
+
+    /// A read refused: an anchor the core no longer holds (expired, or
+    /// deleted) seeks from the newest; anything else is read again later.
+    fn unread(&mut self, asked: &Option<Cmd>, resp: &Resp) {
+        ev!("door.read_failed", { "answer": wire::cut(&format!("{resp:?}"), 200) });
+        self.poked = true;
+        let gone = matches!(resp, Resp::Error { what } if what.contains("chatItemNotFound"));
+        if gone && matches!(asked, Some(Cmd::ChatAfter { .. })) {
+            self.anchor = None;
+            self.seek = None;
+        } else {
+            self.delivery_at = Some(Instant::now() + Duration::from_millis(self.delivery_wait.next_ms()));
+        }
+    }
+
+    fn asked(&mut self, a: Asked) -> Response<Body> {
+        let mark = match &a {
+            Asked::State => return self.view(),
+            Asked::Link { mark } | Asked::Unlink { mark } | Asked::Reply { mark, .. } => *mark,
+        };
         // every mark shown is taken, whatever the ask's end: one numbering
-        // what never happened is covered by any save, and one not taken would
-        // leave every later save behind (a sync at each start)
-        let (Asked::Link { mark } | Asked::Unlink { mark } | Asked::Reply { mark, .. }) = &a else { unreachable!("the state is answered above") };
-        self.mark_seen = self.mark_seen.max(*mark);
+        // what never happened is covered by any save, and one left out
+        // would leave every later save behind (one sync at each start)
+        let stale = mark <= self.mark_seen;
+        self.mark_seen = self.mark_seen.max(mark);
+        if let Asked::Reply { key, .. } = &a {
+            if self.kept.replied.contains(key) {
+                self.settle();
+                return answer(StatusCode::OK, r#"{"replayed":true}"#);
+            }
+            if self.replying.iter().any(|(k, _)| k == key) {
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "that reply is still being sent: ask again");
+            }
+        }
+        // overtaken by a later mark: acted on now, it could act after a save
+        // that claims that later mark (Marks); its door asks again
+        if stale {
+            return refuse(StatusCode::CONFLICT, "a stale mark: ask again under a new one");
+        }
         if !self.up || self.stopping.is_some() {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the door is starting or stopping");
         }
@@ -498,24 +615,58 @@ impl Runner {
             Asked::Link { .. } => self.apply(Input::Want),
             Asked::Unlink { .. } => self.apply(Input::Unlink),
             Asked::Reply { key, text, .. } => {
-                if self.kept.replied.contains(&key) {
-                    self.settle();
-                    return net::respond(StatusCode::OK, "application/json", r#"{"replayed":true}"#);
-                }
                 if self.kept.link.contact().is_none() {
                     return refuse(StatusCode::CONFLICT, "not linked");
                 }
-                if self.kept.replied.len() == REPLIED_KEPT {
-                    self.kept.replied.pop_front();
+                // room for every part before any is taken: in the outbox
+                // while the link syncs, else in the core's writer
+                let parts = wire::parts(&text).len();
+                let l = &self.kept.link;
+                let room = if l.syncing { link::OUTBOX_MAX.saturating_sub(l.outbox.len()) } else { self.core.writer.capacity() };
+                if parts > room {
+                    return refuse(StatusCode::SERVICE_UNAVAILABLE, "no room for that reply now: ask again");
                 }
-                self.kept.replied.push_back(key);
+                let first = self.corr + 1;
                 self.apply(Input::Reply(&text));
+                let corrs: BTreeSet<u64> = (first..=self.corr).filter(|c| self.pending.contains_key(c)).collect();
+                if corrs.is_empty() {
+                    self.replied(key);
+                } else {
+                    self.replying.push((key, corrs));
+                }
                 self.settle();
-                return net::respond(StatusCode::OK, "application/json", r#"{"replayed":false}"#);
+                return answer(StatusCode::OK, r#"{"replayed":false}"#);
             }
         }
         self.settle();
-        net::respond(StatusCode::ACCEPTED, "application/json", "{}")
+        answer(StatusCode::ACCEPTED, "{}")
+    }
+
+    fn view(&self) -> Response<Body> {
+        let (link, short) = match &self.kept.link.phase {
+            Phase::Inviting { link, short, .. } => (Some(link.as_str()), short.as_deref()),
+            _ => (None, None),
+        };
+        let name = match &self.kept.link.phase {
+            Phase::Linked { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
+        let view = View {
+            generation: self.generation,
+            ready: self.up && self.stopping.is_none(),
+            phase: phase(&self.kept.link.phase),
+            link,
+            short,
+            name,
+            syncing: self.kept.link.syncing,
+            delivered: self.kept.link.delivered,
+            mark: self.kept.mark,
+            saves: self.saves,
+            forced_syncs: self.forced_syncs,
+            waiting: self.page.len(),
+            notices: &self.notices,
+        };
+        net::respond(StatusCode::OK, "application/json", serde_json::to_vec(&view).expect("a view is JSON"))
     }
 
     fn tick(&mut self) {
@@ -532,7 +683,7 @@ impl Runner {
             self.events = 0;
         }
         let at = Instant::now();
-        if self.kept.link.syncing {
+        if self.kept.link.syncing && !self.core_gone {
             let due = *self.resync_at.get_or_insert(at + Duration::from_millis(run::RESYNC_MS));
             if at >= due {
                 self.resync_at = None;
@@ -541,32 +692,48 @@ impl Runner {
         } else {
             self.resync_at = None;
         }
-        if self.recheck_at.is_some_and(|t| at >= t) {
+        if self.recheck_at.is_some_and(|t| at >= t) && !self.core_gone {
             self.recheck_at = None;
             self.apply(Input::Recheck);
         }
-        self.deliver(at);
         self.settle();
-        if self.gap && self.deliveries.is_empty() && !self.delivering {
-            self.begin_stop("gap");
-        }
         if let Some((why, since)) = self.stopping {
             return self.stop(why, since);
         }
+        self.deliver(at);
         if !self.saving && self.due.take(now) {
             self.save();
         }
     }
 
-    /// The oldest waiting message to its door, one at a time.
+    /// The oldest message read to its door, one at a time; with none in
+    /// hand, the next page read on from the cursor, when there may be one.
     fn deliver(&mut self, at: Instant) {
-        // a start's catch-up first: a live message forwarded meanwhile waits
-        // for the older ones it reads back, so the door takes them in order
-        if self.delivering || self.kept.link.scan.running || self.delivery_at.is_some_and(|t| at < t) {
+        // a start's catch-up first: the link moves no cursor while it reads
+        if self.delivering || self.reading.is_some() || self.kept.link.scan.running || self.delivery_at.is_some_and(|t| at < t) {
             return;
         }
-        // it stays the oldest waiting until its door takes it
-        let Some(i) = self.deliveries.front().cloned() else { return };
+        let Some(contact) = self.kept.link.contact() else {
+            self.page.clear();
+            return;
+        };
+        let Some(i) = self.page.front().cloned() else {
+            if self.poked || self.full {
+                self.poked = false;
+                self.full = false;
+                let read = match self.anchor {
+                    Some(after) => Cmd::ChatAfter { contact, after, count: PAGE },
+                    None => Cmd::Chat { contact, count: PAGE, before: self.seek },
+                };
+                self.ask(read);
+                if self.pending.contains_key(&self.corr) {
+                    self.reading = Some(self.corr);
+                } else {
+                    self.poked = true;
+                }
+            }
+            return;
+        };
         self.delivering = true;
         self.delivery_at = None;
         let (door, to) = (self.door.clone(), self.to.clone());
@@ -582,20 +749,45 @@ impl Runner {
         });
     }
 
-    /// A planned stop: asks refused, the link left to go quiet and what is
-    /// under way to end (at most `STOP_MS_MAX`), then one last save.
+    /// A planned stop: asks refused; once the link is quiet and what is
+    /// under way has ended (at most `STOP_MS_MAX`), the core is asked to
+    /// end, then killed past the bridge's own bound; once it has ended, its
+    /// databases still, one last save. A message the core took before it
+    /// ended is in that save, read on at the next start.
     fn stop(&mut self, why: &'static str, since: Instant) {
-        // a save under way ends first: it may have begun before the stop
         if self.saving {
             return;
         }
-        let quiet = self.pending.is_empty() && !self.delivering;
-        if !quiet && since.elapsed() < Duration::from_millis(STOP_MS_MAX) {
+        if !self.core_gone {
+            let quiet = self.pending.is_empty() && !self.delivering;
+            if !quiet && since.elapsed() < Duration::from_millis(STOP_MS_MAX) {
+                return;
+            }
+            match self.core_stop {
+                None => {
+                    ev!("door.core_stopping", { "why": why, "quiet": quiet });
+                    self.core.signal(false);
+                    self.core_stop = Some(Instant::now());
+                }
+                Some(t) if !self.killed && t.elapsed() > Duration::from_millis(run::STOP_MS_MAX) => {
+                    self.core.signal(true);
+                    self.killed = true;
+                }
+                Some(_) => {}
+            }
             return;
         }
-        ev!("door.last_save", { "why": why, "quiet": quiet });
-        self.save();
-        self.last = Some(self.seq);
+        // a last save that will not be taken ends it all the same: its door
+        // knows what the save behind it misses (Marks)
+        if since.elapsed() > Duration::from_millis(2 * STOP_MS_MAX) {
+            ev!("door.stop_unsaved", { "why": why });
+            std::process::exit(1);
+        }
+        if self.last.is_none() {
+            ev!("door.last_save", { "why": why });
+            self.save();
+            self.last = Some(self.seq);
+        }
     }
 
     fn save(&mut self) {
@@ -607,21 +799,21 @@ impl Runner {
         let (dir, door, to) = (self.dir.clone(), self.door.clone(), self.to.clone());
         tokio::spawn(async move {
             let made = tokio::task::spawn_blocking(move || save::make(&dir, &dir.join("save"), &state)).await.expect("a save's copy ran");
-            let r = match made {
+            let result = match made {
                 Ok(packed) => door.save(seq, mark, packed).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };
-            let _ = to.send(Msg::SaveEnded(r)).await;
+            let _ = to.send(Msg::SaveEnded { seq, mark, result }).await;
         });
     }
 
-    fn save_ended(&mut self, r: Result<door::Saved, String>) {
+    fn save_ended(&mut self, seq: u64, mark: u64, result: Result<door::Saved, String>) {
         self.saving = false;
-        match r {
+        match result {
             Ok(door::Saved::Taken) => {
                 self.saves += 1;
-                ev!("door.saved", { "seq": self.seq, "mark": self.kept.mark });
-                if let (Some((why, _)), true) = (self.stopping, self.last == Some(self.seq)) {
+                ev!("door.saved", { "seq": seq, "mark": mark });
+                if let (Some((why, _)), true) = (self.stopping, self.last == Some(seq)) {
                     ev!("door.stopped", { "why": why });
                     std::process::exit(0);
                 }
@@ -631,30 +823,18 @@ impl Runner {
                 std::process::exit(1);
             }
             Err(e) => {
-                ev!("door.save_failed", { "seq": self.seq, "error": e });
+                ev!("door.save_failed", { "seq": seq, "error": e });
                 self.due.failed(self.now());
-                self.last = None;
-                if self.stopping.is_some_and(|(_, since)| since.elapsed() > Duration::from_millis(2 * STOP_MS_MAX)) {
-                    std::process::exit(1);
+                if self.last == Some(seq) {
+                    self.last = None;
                 }
             }
         }
     }
 }
 
-/// A message forwarded, in its place among those waiting: by the core's
-/// own item order (one database's, so it is the order they arrived in),
-/// the one being delivered kept first.
-fn queue(deliveries: &mut VecDeque<Inbound>, i: Inbound, delivering: bool) {
-    let from = usize::from(delivering).min(deliveries.len());
-    let at = from + deliveries.range(from..).take_while(|q| q.item <= i.item).count();
-    deliveries.insert(at, i);
-    assert!(deliveries.range(from..).zip(deliveries.range(from + 1..)).all(|(a, b)| a.item <= b.item), "deliveries wait oldest first");
-}
-
 /// The door's calls, to the loop.
 async fn handle(to: mpsc::Sender<Msg>, req: Request<Incoming>) -> Response<Body> {
-    let refuse = |status: StatusCode, why: &str| net::refusal(status, "door", why);
     let mark = req.headers().get(door::MARK_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
     let asked = match (req.method().as_str(), req.uri().path(), mark) {
         ("GET", "/state", _) => Asked::State,
@@ -693,7 +873,7 @@ fn reply(body: &Bytes) -> Result<(String, String), &'static str> {
     if !key_ok {
         return Err("a reply's key is 1-128 of letters, digits, -, _, : and .");
     }
-    if r.text.trim().is_empty() || r.text.len() > fragment_bridge::limits::REPLY_TEXT_MAX_BYTES {
+    if r.text.trim().is_empty() || r.text.len() > REPLY_TEXT_MAX_BYTES {
         return Err("a reply says something, within its bound");
     }
     Ok((r.key, r.text))
@@ -718,37 +898,25 @@ mod tests {
         assert_eq!(old, Kept::default());
     }
 
-    /// Goal: deliveries go oldest first by the core's item order, however
-    /// they were forwarded (a live message during a start's catch-up comes
-    /// before the older ones it reads back: seen in the lab, 1 run in 6),
-    /// and the one being delivered stays first. Method: out of order in,
-    /// with and without one in flight.
-    #[test]
-    fn deliveries_wait_oldest_first() {
-        let m = |item: i64| Inbound { id: format!("s{item}"), kind: "text".into(), text: String::new(), at: String::new(), item, file: None };
-        let items = |q: &VecDeque<Inbound>| q.iter().map(|i| i.item).collect::<Vec<_>>();
-        let mut q = VecDeque::new();
-        for item in [30, 23, 24, 27, 25, 26] {
-            queue(&mut q, m(item), false);
-        }
-        assert_eq!(items(&q), vec![23, 24, 25, 26, 27, 30]);
-        let mut q = VecDeque::from([m(40)]);
-        queue(&mut q, m(38), true);
-        queue(&mut q, m(39), true);
-        assert_eq!(items(&q), vec![40, 38, 39], "the one in flight stays first");
-    }
-
-    /// Goal: a reply's body is taken only as `{key, text}` within bounds.
-    /// Method: valid, and each way to be invalid.
+    /// Goal: a reply's body is taken only as `{key, text}` within bounds,
+    /// and a text at its bound fits the body's bound however it is escaped
+    /// (review of #1430: 52,891 bytes of JSON-heavy text was refused 413).
+    /// Method: valid, each way to be invalid, and the worst escaping.
     #[test]
     fn a_reply_is_its_key_and_text() {
         assert_eq!(reply(&Bytes::from_static(br#"{"key":"chat:12","text":"hi"}"#)), Ok(("chat:12".into(), "hi".into())));
         for bad in [r#"{"key":"","text":"hi"}"#, r#"{"key":"a b","text":"hi"}"#, r#"{"key":"k","text":"  "}"#, r#"{"key":"k"}"#, r#"{"key":"k","text":"hi","to":"x"}"#, "nope"] {
             assert!(reply(&Bytes::from(bad)).is_err(), "{bad}");
         }
-        let long = format!(r#"{{"key":"k","text":"{}"}}"#, "x".repeat(fragment_bridge::limits::REPLY_TEXT_MAX_BYTES + 1));
+        let long = format!(r#"{{"key":"k","text":"{}"}}"#, "x".repeat(REPLY_TEXT_MAX_BYTES + 1));
         assert!(reply(&Bytes::from(long)).is_err());
         let key = format!(r#"{{"key":"{}","text":"hi"}}"#, "k".repeat(KEY_MAX_BYTES + 1));
         assert!(reply(&Bytes::from(key)).is_err());
+        for worst in ["\u{1}", "\"", "\\"] {
+            let text = format!("a{}", worst.repeat(REPLY_TEXT_MAX_BYTES - 1));
+            let body = serde_json::to_vec(&serde_json::json!({ "key": "k".repeat(KEY_MAX_BYTES), "text": text })).unwrap();
+            assert!(body.len() <= REPLY_BODY_MAX_BYTES, "{} bytes of {worst:?}", body.len());
+            assert!(reply(&Bytes::from(body)).is_ok());
+        }
     }
 }

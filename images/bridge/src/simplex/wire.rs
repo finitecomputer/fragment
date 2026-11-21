@@ -105,6 +105,10 @@ pub enum Cmd {
     /// The contact's newest `count` items, or with `before`, the `count`
     /// just older than that item (a catch-up's next page back).
     Chat { contact: ContactId, count: u16, before: Option<i64> },
+    /// The contact's `count` items just newer than item `after`, oldest
+    /// first: a SimpleX door reads its owner's messages on from its cursor
+    /// so (images/simplex-door), the core's database its queue.
+    ChatAfter { contact: ContactId, after: i64, count: u16 },
     /// Receive a file a contact sent (`/freceive`): over XFTP, once its
     /// description is ready (`FileReady`); done, `FileDone`.
     Receive { file: FileId },
@@ -274,6 +278,10 @@ impl Cmd {
                     Some(item) => format!("/_get chat @{contact} before={item} count={count}"),
                     None => format!("/_get chat @{contact} count={count}"),
                 }
+            }
+            Cmd::ChatAfter { contact, after, count } => {
+                assert!(*contact > 0 && *after >= 0 && *count > 0, "a read on names a contact, a cursor and a count");
+                format!("/_get chat @{contact} after={after} count={count}")
             }
             Cmd::Receive { file } => {
                 assert!(*file > 0, "a receive names a file");
@@ -921,6 +929,7 @@ mod tests {
         assert_eq!(Cmd::Conns { again: true }.line(), "/_get chats 1 pcc=on");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: Some(41) }.line(), "/_get chat @3 before=41 count=20");
+        assert_eq!(Cmd::ChatAfter { contact: 3, after: 41, count: 32 }.line(), "/_get chat @3 after=41 count=32");
         assert_eq!(Cmd::Receive { file: 7 }.line(), "/freceive 7");
         assert_eq!(Cmd::CancelFile { file: 7 }.line(), "/fcancel 7");
         // its answer, a receiving file cancelled: nothing waits on it (the

@@ -84,7 +84,7 @@ pub const LINK_FILE: &str = "link.json";
 /// failed (the lab: about half a second).
 pub const CONNECT_MS_MAX: u64 = 30_000;
 /// A core is given this long to stop on SIGTERM, then killed.
-const STOP_MS_MAX: u64 = 3_000;
+pub const STOP_MS_MAX: u64 = 3_000;
 /// A core that stops on its own this often in `EXITS_WINDOW_MS` is not
 /// started again until its owner asks (a link, an unlink) or the bridge
 /// starts again.
@@ -2846,6 +2846,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::DeleteConn { .. } => "delete_conn",
         Cmd::Conns { .. } => "conns",
         Cmd::Chat { .. } => "chat",
+        Cmd::ChatAfter { .. } => "chat_after",
         Cmd::Receive { .. } => "receive",
         Cmd::CancelFile { .. } => "cancel_file",
         Cmd::SendFile { .. } => "send_file",

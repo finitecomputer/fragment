@@ -19,6 +19,8 @@ futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+# SIGTERM to its core before a planned stop's last save (core.rs)
+libc = "0.2"
 # SQLite's online backup, WAL and data_version (save.rs), as Hermes' boot
 # copies its databases: built in (bundled), at the lock's pin
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "backup"] }

@@ -242,10 +242,9 @@ impl Start {
 
 }
 
-/// The runner's own state in a save (`door.json`, beside the databases),
-/// read as the runner packs it: gzip, `SXD1`, then each file's name and
-/// bytes (images/simplex-door/src/save.rs).
-fn kept_of(packed: &[u8]) -> Value {
+/// One file of a save, read as the runner packs it: gzip, `SXD1`, then
+/// each file's name and bytes (images/simplex-door/src/save.rs).
+fn file_of(packed: &[u8], want: &str) -> Vec<u8> {
     use std::io::Read;
     let mut raw = vec![];
     flate2::read::GzDecoder::new(packed).read_to_end(&mut raw).expect("a save is gzip");
@@ -258,12 +257,29 @@ fn kept_of(packed: &[u8]) -> Value {
         at += 2 + n;
         let len = u64::from_be_bytes(raw[at..at + 8].try_into().unwrap()) as usize;
         at += 8;
-        if name == "door.json" {
-            return serde_json::from_slice(&raw[at..at + len]).expect("the runner's state");
+        if name == want {
+            return raw[at..at + len].to_vec();
         }
         at += len;
     }
-    panic!("a save without the runner's state")
+    panic!("a save without {want}")
+}
+
+/// The runner's own state in a save (`door.json`).
+fn kept_of(packed: &[u8]) -> Value {
+    serde_json::from_slice(&file_of(packed, "door.json")).expect("the runner's state")
+}
+
+/// What the core's chat database in a save holds as received, in order.
+fn received_in(packed: &[u8], scratch: &std::path::Path) -> Vec<String> {
+    let path = scratch.join("save-chat.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    std::fs::write(&path, file_of(packed, "sx_chat.db")).expect("written");
+    let c = rusqlite::Connection::open(&path).expect("the save's chat database");
+    let mut q = c.prepare("SELECT item_text FROM chat_items WHERE item_sent = 0 ORDER BY chat_item_id").expect("its items");
+    q.query_map([], |r| r.get::<_, String>(0)).expect("read").map(|t| t.expect("a text")).collect()
 }
 
 fn build_image() {
@@ -278,7 +294,7 @@ fn build_image() {
 
 /// What the person received from the door, each once, in order.
 async fn person_got(person: &mut Api, seen: &mut Vec<String>, want: &[&str]) {
-    let more = received(person, Duration::from_secs(90), |got| want.iter().all(|w| seen.iter().chain(got.iter()).any(|g| g == w))).await;
+    let more = received(person, Duration::from_secs(240), |got| want.iter().all(|w| seen.iter().chain(got.iter()).any(|g| g == w))).await;
     seen.extend(more);
     for w in want {
         assert_eq!(seen.iter().filter(|g| g == w).count(), 1, "the person has {w:?} once: {seen:?}");
@@ -288,10 +304,12 @@ async fn person_got(person: &mut Api, seen: &mut Vec<String>, want: &[&str]) {
 /// Goal: a door outside any computer holds one link through everything
 /// its container meets, nothing lost or doubled either way: a new door
 /// linked by its invitation; messages each way; a reply asked again sent
-/// once; a crash (SIGKILL) mid-burst, its next start reading back from its
-/// cursor; a rollback to a save from before both bursts, healed by the one
-/// forced sync the door's "behind" asks; a planned restart (SIGTERM) whose
-/// last save leaves the next start in step, with no sync; and a start
+/// once; an ask under a stale mark refused; a crash (SIGKILL) with 300
+/// messages saved and not yet delivered, its next start reading them on
+/// from its cursor, in order; a rollback to a save from before both, healed
+/// by the one forced sync the door's "behind" asks; a planned restart
+/// (SIGTERM) as a burst arrives, its core stopped before its last save, so
+/// nothing is lost and the next start is in step with no sync; and a start
 /// superseded by a newer generation, whose save is refused, ending it.
 /// Method: the door's real image and SimpleX's real core, a person's real
 /// client, and a fake door on the host as its Durable Object would be.
@@ -349,39 +367,60 @@ async fn the_door_against_the_real_core() {
     for n in 1..=5 {
         assert_eq!(g1.reply(&door, &format!("chat:{n}"), &format!("r{n}")).await, json!({ "replayed": false }));
     }
-    // asked again under a new mark: sent once, and its mark taken all the same
-    assert_eq!(g1.reply(&door, "chat:5", "r5").await, json!({ "replayed": true }), "a key asked again");
+    // asked again under a new mark: while its send is under way it waits
+    // (503, ask again), then it replays, sent once
+    let t0 = Instant::now();
+    let replayed = loop {
+        let (code, v) = g1.call("POST", "/reply", Some(door.mark()), Some(json!({ "key": "chat:5", "text": "r5" }))).await;
+        if code == 200 {
+            break v;
+        }
+        assert_eq!(code, 503, "a key asked again while it is sent: {v}");
+        assert!(t0.elapsed() < Duration::from_secs(30), "the reply chat:5 ends");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(replayed, json!({ "replayed": true }), "a key asked again");
+    // an ask under a mark older than one the runner has seen (its request
+    // overtaken): refused, for its door to ask again under a new mark
+    let (code, v) = g1.call("POST", "/reply", Some(1), Some(json!({ "key": "chat:stale", "text": "never" }))).await;
+    assert_eq!(code, 409, "a stale mark: {v}");
     person_got(&mut person, &mut got, &["r1", "r2", "r3", "r4", "r5"]).await;
 
     // a crash with messages saved and not yet delivered (its door could
     // not take them): its next start delivers them from its cursor; and one
     // sent while it was down arrives then
+    // 300 of them, past the link's own catch-up (256 back from the newest:
+    // the review of #1430, the runner dropped what passed its queue and read
+    // back no further than that): the core's database is the queue
     door.with(|s| s.closed = true);
-    let saves = door.with(|s| s.saves.len());
-    for n in 11..=15 {
+    for n in 11..=310 {
         say(&mut person, agent, &format!("p{n}")).await;
         sent.push(format!("p{n}"));
     }
-    g1.until(Duration::from_secs(30), |s| s["waiting"].as_u64() >= Some(5)).await;
+    // until the newest save holds all 600 (the core's chat database in it)
     let t0 = Instant::now();
-    // a save after the five arrived: the debounce, then the gap
-    while door.with(|s| s.saves.len()) < saves + 1 || t0.elapsed() < Duration::from_millis(2 * 3_000 + 1_000) {
-        assert!(t0.elapsed() < Duration::from_secs(20), "the five are saved");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    loop {
+        let newest = door.with(|s| s.saves.last().map(|k| k.bytes.clone())).expect("a save");
+        let held = received_in(&newest, &lab.dir);
+        if held.last().map(String::as_str) == Some("p310") {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(180), "the 300 are saved: {} so far", held.len());
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     g1.kill("KILL");
     assert_eq!(g1.exited(), 137);
     drop(g1);
-    assert_eq!(door.texts(), sent[..10], "none of the five was delivered before the crash");
+    assert_eq!(door.texts(), sent[..10], "none of the 300 was delivered before the crash");
     door.with(|s| s.closed = false);
-    say(&mut person, agent, "p16").await;
-    sent.push("p16".into());
+    say(&mut person, agent, "p311").await;
+    sent.push("p311".into());
     let g2 = start(&lab, &door, 2);
-    let s = g2.until(Duration::from_secs(60), |s| s["ready"] == true && s["phase"] == "linked" && s["syncing"] == false).await;
+    let s = g2.until(Duration::from_secs(180), |s| s["ready"] == true && s["phase"] == "linked" && s["syncing"] == false).await;
     assert_eq!(s["forcedSyncs"], 0, "nothing moved past its save: no sync: {s}");
     let t0 = Instant::now();
     while door.texts() != sent {
-        assert!(t0.elapsed() < Duration::from_secs(60), "nothing lost in the crash: {:?}", door.texts());
+        assert!(t0.elapsed() < Duration::from_secs(180), "nothing lost in the crash: {} of {}", door.texts().len(), sent.len());
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     g2.reply(&door, "chat:6", "r6").await;
@@ -395,10 +434,10 @@ async fn the_door_against_the_real_core() {
     let g3 = start(&lab, &door, 3);
     g3.until(Duration::from_secs(60), |s| s["ready"] == true && s["forcedSyncs"] == 1).await;
     door.with(|s| s.pinned = None);
-    g3.until(Duration::from_secs(90), |s| s["syncing"] == false).await;
-    recovered(&mut person, agent, Duration::from_secs(90), || true).await;
-    say(&mut person, agent, "p17").await;
-    sent.push("p17".into());
+    g3.until(Duration::from_secs(180), |s| s["syncing"] == false).await;
+    recovered(&mut person, agent, Duration::from_secs(180), || true).await;
+    say(&mut person, agent, "p312").await;
+    sent.push("p312".into());
     let t0 = Instant::now();
     while door.texts() != sent {
         assert!(t0.elapsed() < Duration::from_secs(60), "a message after the rollback, once: {:?}", door.texts());
@@ -408,16 +447,14 @@ async fn the_door_against_the_real_core() {
     person_got(&mut person, &mut got, &["r7"]).await;
     assert_eq!(g3.state().await["forcedSyncs"], 1, "one sync, not more");
 
-    // a planned restart: its last save holds its newest mark, so the next
-    // start is in step and asks no sync
-    say(&mut person, agent, "p18").await;
-    sent.push("p18".into());
-    let t0 = Instant::now();
-    while door.texts() != sent {
-        assert!(t0.elapsed() < Duration::from_secs(60), "{:?}", door.texts());
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // a planned restart: the core stopped first, so its last save holds
+    // what the core took (a burst sent as it stops, the review of #1430)
+    // and its newest mark, and the next start is in step with no sync
     g3.reply(&door, "chat:8", "r8").await;
+    for n in 313..=322 {
+        say(&mut person, agent, &format!("p{n}")).await;
+        sent.push(format!("p{n}"));
+    }
     g3.kill("TERM");
     assert_eq!(g3.exited(), 0, "a planned stop ends well: {}", logs(&g3.ctr));
     drop(g3);
@@ -426,6 +463,11 @@ async fn the_door_against_the_real_core() {
     let g4 = start(&lab, &door, 4);
     let s = g4.until(Duration::from_secs(60), |s| s["ready"] == true && s["syncing"] == false).await;
     assert_eq!(s["forcedSyncs"], 0, "in step: no sync: {s}");
+    let t0 = Instant::now();
+    while door.texts() != sent {
+        assert!(t0.elapsed() < Duration::from_secs(60), "nothing lost in the stop: {:?}", &door.texts()[door.texts().len().saturating_sub(12)..]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     person_got(&mut person, &mut got, &["r8"]).await;
     g4.reply(&door, "chat:9", "r9").await;
     person_got(&mut person, &mut got, &["r9"]).await;
@@ -433,14 +475,14 @@ async fn the_door_against_the_real_core() {
     // superseded: a newer generation started, this one's save refused, and
     // it ends
     door.with(|s| s.generation = 5);
-    say(&mut person, agent, "p19").await;
-    sent.push("p19".into());
+    say(&mut person, agent, "p323").await;
+    sent.push("p323".into());
     assert_eq!(g4.exited(), 1, "a start superseded ends: {}", logs(&g4.ctr));
     assert!(door.with(|s| s.refused) >= 1);
     drop(g4);
     let g5 = start(&lab, &door, 5);
     g5.until(Duration::from_secs(60), |s| s["ready"] == true && s["syncing"] == false).await;
-    recovered(&mut person, agent, Duration::from_secs(90), || true).await;
+    recovered(&mut person, agent, Duration::from_secs(180), || true).await;
     let t0 = Instant::now();
     while door.texts() != sent {
         assert!(t0.elapsed() < Duration::from_secs(60), "{:?}", door.texts());

@@ -21,6 +21,7 @@ const WRITER_MAX: usize = 64;
 const STDERR_TAIL_BYTES: usize = 2_048;
 
 pub struct Core {
+    pid: u32,
     pub writer: mpsc::Sender<String>,
     /// When its process started (ms since the Unix epoch): what its chats
     /// say changed before it, an earlier life did (`Input::Conns`).
@@ -93,5 +94,16 @@ pub async fn start(cfg: &run::Config, dir: &Path, name: &str, to: mpsc::Sender<M
         }
         let _ = to.send(Msg::CoreGone("its bot API closed".into())).await;
     });
-    Ok(Core { writer, spawned_ms })
+    Ok(Core { pid, writer, spawned_ms })
+}
+
+impl Core {
+    /// Asks the core's process to end (SIGTERM), or ends it (SIGKILL): its
+    /// end is told as any is (`Msg::CoreGone`).
+    pub fn signal(&self, kill: bool) {
+        let sig = if kill { libc::SIGKILL } else { libc::SIGTERM };
+        // SAFETY: a signal to the core's own process, by its pid, which this
+        // runner reaps (its exit watcher) only after it has ended
+        unsafe { libc::kill(self.pid as i32, sig) };
+    }
 }
