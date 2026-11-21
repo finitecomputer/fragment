@@ -11,6 +11,13 @@
 //!   (`fragment-identity-door invite`). It makes a new account and nothing
 //!   else: an invite for an email that already has an account is refused,
 //!   so no invite reaches into an existing one.
+//! - *An invite asked for* by the door's inviter (`passkeys.inviter`: one
+//!   key, a platform's, that starts accounts here for its own signed-in
+//!   people): its NIP-98 signed ask at `INVITES_PATH` names an email; a new
+//!   one gets an invite good for `INVITE_ASKED_TTL_S`, and one with an
+//!   account gets "sign in" and nothing else (`asked_invite`). So the
+//!   inviter can start accounts here and get into none. An ask is answered
+//!   once, within `ASK_WINDOW_S` of its signing and after the door started.
 //! - *Every later passkey* needs the account's own: a sign-in with one of
 //!   its passkeys first, or, when they are all lost, one of its recovery
 //!   codes (`RECOVERY_CODES`, shown once at enrollment, kept as their
@@ -59,6 +66,16 @@ pub const FLOWS_MAX: usize = 256;
 pub const INVITE_TTL_S: i64 = 24 * 3600;
 /// An invite's own life, at most.
 pub const INVITE_TTL_MAX_S: i64 = 7 * 24 * 3600;
+/// Where the inviter asks for an invite, under the door's public URL.
+pub const INVITES_PATH: &str = "/passkeys/invites";
+/// An asked invite's life: its person's browser goes to it at once.
+pub const INVITE_ASKED_TTL_S: i64 = 3600;
+/// How far an ask's signing (NIP-98's `created_at`) may be from the door's
+/// clock, either way.
+pub const ASK_WINDOW_S: i64 = 60;
+/// Asks remembered at once, each for `2 * ASK_WINDOW_S` (as long as its
+/// replay could pass the clock), at most.
+pub const ASKS_MAX: usize = 256;
 /// The issuer a passkey account's subject is made under: the door's own
 /// for its relying party (person.rs), never a provider's.
 pub fn issuer_of(rp_id: &str) -> String {
@@ -75,6 +92,17 @@ pub struct PasskeysConfig {
     pub rp_name: String,
     /// The state's directory (the box's encrypted disk).
     pub state_dir: PathBuf,
+    /// The one key (64 hex) whose signed asks make invites, if any.
+    pub inviter: Option<String>,
+}
+
+/// What an inviter's ask gets.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Invited {
+    /// A new account's invite: its link's token.
+    New(String),
+    /// The email has an account here: its person signs in.
+    HasAccount,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +114,9 @@ pub enum PasskeyError {
     Store(#[from] StoreError),
     #[error("WebAuthn: {0}")]
     WebAuthn(String),
+    /// An ask for an invite that is not the inviter's, fresh and first.
+    #[error("{0}")]
+    NotAsked(String),
 }
 
 impl PasskeyError {
@@ -119,6 +150,11 @@ pub struct Passkeys {
     webauthn: Webauthn,
     store: Store,
     flows: Mutex<HashMap<String, (Instant, Flow)>>,
+    /// The asks answered (each event's id) and when: replays refused.
+    asked: Mutex<HashMap<String, i64>>,
+    /// When this door started (seconds): an ask signed before it may have
+    /// been answered by the door before, whose memory of it is gone.
+    started_s: i64,
 }
 
 /// An email as an account takes it: a mailbox, trimmed and lower-cased.
@@ -127,6 +163,21 @@ pub fn email_ok(email: &str) -> Option<String> {
     let (local, domain) = e.split_once('@')?;
     let ok = !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') && e.len() <= EMAIL_BYTES_MAX && e.bytes().all(|b| b.is_ascii_graphic()) && !domain.contains('@');
     ok.then_some(e)
+}
+
+/// A verified NIP-98 header's event id and signing time (its id checked
+/// against its content by the verifier, so the same ask always has it).
+fn ask_id(authorization: Option<&str>) -> Option<(String, i64)> {
+    use base64::Engine;
+    #[derive(serde::Deserialize)]
+    struct Signed {
+        id: String,
+        created_at: i64,
+    }
+    let b64 = authorization?.strip_prefix("Nostr ")?.trim();
+    let raw = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let s: Signed = serde_json::from_slice(&raw).ok()?;
+    Some((s.id, s.created_at))
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -157,7 +208,8 @@ impl Passkeys {
     pub fn new(config: PasskeysConfig) -> Result<Passkeys, PasskeyError> {
         let webauthn = WebauthnBuilder::new(&config.rp_id, &config.origin).map_err(webauthn_error)?.rp_name(&config.rp_name).build().map_err(webauthn_error)?;
         let store = Store::open(&config.state_dir)?;
-        Ok(Passkeys { config, webauthn, store, flows: Mutex::new(HashMap::new()) })
+        let started_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        Ok(Passkeys { config, webauthn, store, flows: Mutex::new(HashMap::new()), asked: Mutex::new(HashMap::new()), started_s })
     }
 
     fn put(&self, flow: Flow) -> Result<String, PasskeyError> {
@@ -212,6 +264,52 @@ impl Passkeys {
             Ok(())
         })?;
         Ok(t)
+    }
+
+    /// An invite the inviter asked for, at `url` (the door's own for
+    /// `INVITES_PATH`) with `body` (`{"email": …}`) and its
+    /// `authorization` (NIP-98): checked as the inviter's, fresh, signed
+    /// after the door started, and answered once; then a new email's
+    /// invite, or `HasAccount` for an email with one, nothing made.
+    pub fn asked_invite(&self, authorization: Option<&str>, url: &str, body: &[u8], now_s: i64) -> Result<Invited, PasskeyError> {
+        let not = |why: &str| PasskeyError::NotAsked(why.to_string());
+        let inviter = self.config.inviter.as_deref().ok_or_else(|| not("this door takes no asks for invites"))?;
+        let signer = fragment_nip98::verify(authorization, "POST", url, body, now_s, ASK_WINDOW_S).map_err(|e| PasskeyError::NotAsked(e.to_string()))?;
+        if signer != inviter {
+            return Err(not("not signed by this door's inviter"));
+        }
+        let (id, created_at) = ask_id(authorization).ok_or_else(|| not("not a NIP-98 event"))?;
+        if created_at <= self.started_s {
+            return Err(not("asked before this door started: ask again"));
+        }
+        self.once(&id, now_s)?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Ask {
+            email: String,
+        }
+        let ask: Ask = serde_json::from_slice(body).map_err(|_| PasskeyError::Refused("an ask is {\"email\": …}"))?;
+        let email = email_ok(&ask.email).ok_or(PasskeyError::Refused("that is not an email"))?;
+        if self.store.read()?.by_email(&email).is_some() {
+            return Ok(Invited::HasAccount);
+        }
+        Ok(Invited::New(self.invite(&email, INVITE_ASKED_TTL_S, now_s)?))
+    }
+
+    /// An ask's event `id`, answered the first time alone, while its replay
+    /// could still pass the clock.
+    fn once(&self, id: &str, now_s: i64) -> Result<(), PasskeyError> {
+        let mut asked = self.asked.lock().expect("the asks' lock is never poisoned");
+        asked.retain(|_, at| now_s.saturating_sub(*at) <= 2 * ASK_WINDOW_S);
+        if asked.contains_key(id) {
+            return Err(PasskeyError::NotAsked("this ask was answered already".into()));
+        }
+        if asked.len() >= ASKS_MAX {
+            return Err(PasskeyError::Refused("too many invites asked at once: try again in a minute"));
+        }
+        asked.insert(id.to_string(), now_s);
+        assert!(asked.len() <= ASKS_MAX);
+        Ok(())
     }
 
     /// The email an open invite is for.
@@ -366,10 +464,29 @@ impl Passkeys {
 mod tests {
     use super::*;
 
+    /// The door's inviter, and a key that is not it.
+    fn inviter() -> fragment_nip98::Keys {
+        fragment_nip98::Keys::from_secret_hex(&"11".repeat(32)).unwrap()
+    }
+    fn stranger() -> fragment_nip98::Keys {
+        fragment_nip98::Keys::from_secret_hex(&"22".repeat(32)).unwrap()
+    }
+    const ASK_URL: &str = "https://home.example.com/__door/passkeys/invites";
+
+    fn clock() -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+    }
+
+    /// An ask for `email`, signed by `by` at `at`, and its body.
+    fn ask(by: &fragment_nip98::Keys, email: &str, at: i64) -> (String, Vec<u8>) {
+        let body = serde_json::to_vec(&serde_json::json!({ "email": email })).unwrap();
+        (by.header("POST", ASK_URL, &body, at), body)
+    }
+
     fn door(name: &str) -> (Passkeys, PathBuf) {
         let d = std::env::temp_dir().join(format!("door-passkeys-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let p = Passkeys::new(PasskeysConfig { rp_id: "home.example.com".into(), origin: Url::parse("https://home.example.com").unwrap(), rp_name: "Fragment".into(), state_dir: d.clone() }).unwrap();
+        let p = Passkeys::new(PasskeysConfig { rp_id: "home.example.com".into(), origin: Url::parse("https://home.example.com").unwrap(), rp_name: "Fragment".into(), state_dir: d.clone(), inviter: Some(inviter().pubkey_hex().to_string()) }).unwrap();
         (p, d)
     }
 
@@ -408,6 +525,69 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(p.invite("cy@example.com", 3600, 1_000), Err(PasskeyError::Refused(_))), "no invite into an existing account");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    // Goal: the inviter's ask makes a new email's invite, good for an hour,
+    // and gets an email with an account "sign in", nothing made; no ask
+    // that is not the inviter's, fresh and first makes anything. Replay:
+    // the same ask twice is answered once. Restart: an ask signed before
+    // the door started is refused (its memory of asks is gone).
+    #[test]
+    fn asked_invites_are_the_inviters_alone() {
+        let (p, d) = door("asked");
+        let now = clock() + 1;
+        let (h, body) = ask(&inviter(), "Fay@Example.com", now);
+        let Ok(Invited::New(t)) = p.asked_invite(Some(&h), ASK_URL, &body, now) else { panic!("a new email's invite") };
+        assert_eq!(p.invite_email(&t, now).unwrap(), "fay@example.com");
+        assert!(p.invite_email(&t, now + INVITE_ASKED_TTL_S).is_err(), "an hour, no more");
+        assert!(matches!(p.asked_invite(Some(&h), ASK_URL, &body, now), Err(PasskeyError::NotAsked(_))), "a replay");
+
+        p.store
+            .change(|st| -> Result<(), PasskeyError> {
+                st.accounts.push(Account { id: Uuid::new_v4(), email: "gil@example.com".into(), created_at_s: 0, passkeys: vec![], recovery: vec![] });
+                Ok(())
+            })
+            .unwrap();
+        let (h, body) = ask(&inviter(), "gil@example.com", now);
+        assert_eq!(p.asked_invite(Some(&h), ASK_URL, &body, now).unwrap(), Invited::HasAccount);
+        assert!(!p.store.read().unwrap().invites.iter().any(|i| i.email == "gil@example.com"), "no invite into an existing account");
+
+        let refused = |h: Option<&str>, url: &str, body: &[u8]| matches!(p.asked_invite(h, url, body, now), Err(PasskeyError::NotAsked(_)));
+        let (h, body) = ask(&stranger(), "hal@example.com", now);
+        assert!(refused(Some(&h), ASK_URL, &body), "another key");
+        let (h, body) = ask(&inviter(), "hal@example.com", now - ASK_WINDOW_S - 1);
+        assert!(refused(Some(&h), ASK_URL, &body), "stale");
+        let (h, body) = ask(&inviter(), "hal@example.com", now);
+        assert!(refused(Some(&h), "https://home.example.com/__door/passkeys/other", &body), "another URL");
+        assert!(refused(Some(&h), ASK_URL, br#"{"email":"ivy@example.com"}"#), "another body");
+        assert!(refused(None, ASK_URL, &body), "unsigned");
+        let (h, body) = ask(&inviter(), "hal@example.com", p.started_s);
+        assert!(refused(Some(&h), ASK_URL, &body), "signed before the door started");
+        let bad = br#"{"email":"hal@example.com","more":1}"#;
+        let h2 = inviter().header("POST", ASK_URL, bad, now);
+        assert!(matches!(p.asked_invite(Some(&h2), ASK_URL, bad, now), Err(PasskeyError::Refused(_))), "an ask is its email alone");
+        assert!(!p.store.read().unwrap().invites.iter().any(|i| i.email.starts_with("hal") || i.email.starts_with("ivy")), "none of those made one");
+
+        let mut no_inviter = p.config.clone();
+        no_inviter.inviter = None;
+        let q = Passkeys::new(no_inviter).unwrap();
+        let (h, body) = ask(&inviter(), "jo@example.com", clock() + 1);
+        assert!(matches!(q.asked_invite(Some(&h), ASK_URL, &body, clock() + 1), Err(PasskeyError::NotAsked(_))), "a door with no inviter takes no asks");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    // Goal: the asks remembered are bounded, and forgotten once their
+    // replay could no longer pass the clock.
+    #[test]
+    fn asks_remembered_are_bounded() {
+        let (p, d) = door("asks-bounded");
+        let now = clock() + 1;
+        for i in 0..ASKS_MAX {
+            p.once(&format!("{i:064x}"), now).unwrap();
+        }
+        assert!(matches!(p.once(&"f".repeat(64), now), Err(PasskeyError::Refused(_))), "full");
+        assert!(p.once(&"f".repeat(64), now + 2 * ASK_WINDOW_S + 1).is_ok(), "the old ones forgotten");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

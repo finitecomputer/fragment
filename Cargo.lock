@@ -1219,7 +1219,9 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "fragment-core",
  "fragment-fakes",
+ "fragment-nip98",
  "futures-util",
  "getrandom 0.3.4",
  "hex",

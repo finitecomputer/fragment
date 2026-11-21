@@ -35,7 +35,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # passkeys (passkeys.rs): the WebAuthn relying party, Kanidm's maintained
 # crate, not a hand-rolled one; it links the system's OpenSSL
 webauthn-rs = "0.6"
+# an invite asked for by the door's inviter (passkeys.rs `asked_invite`):
+# signed by NIP-98, checked by the cell's own verifier; its key named as
+# the platform names keys (an npub or 64 hex)
+fragment-nip98 = { path = "../nip98" }
+fragment-core = { path = "../core" }
 
 [dev-dependencies]
 # the OpenID Connect provider, faked (strict, or shaped as tsidp)
 fragment-fakes = { path = "../fakes" }
+# an inviter's asks, signed with fixed keys
+fragment-nip98 = { path = "../nip98", features = ["signer"] }

@@ -388,3 +388,60 @@ fn malformed_requests_are_refused() {
     let a = get_at(r.door.addr, &format!("http://door/user_management/sessions/logout?return_to={}", enc("https://evil.example/")));
     assert_eq!((a.status, a.header("location")), (400, None));
 }
+
+/// An inviter's ask, at a passkey door at `to`, signed by `by` (or not).
+fn ask(to: SocketAddr, by: Option<&fragment_nip98::Keys>, body: &str, content_type: &str) -> Answer {
+    let url = "http://localhost/__door/passkeys/invites";
+    let auth = by.map(|k| format!("authorization: {}\r\n", k.header("POST", url, body.as_bytes(), now_s() + 1))).unwrap_or_default();
+    send(to, &format!("POST /passkeys/invites HTTP/1.1\r\nhost: localhost\r\ncontent-type: {content_type}\r\n{auth}content-length: {}\r\n\r\n{body}", body.len()))
+}
+
+// Goal: over the door's HTTP, the inviter's ask gets a new email an invite
+// whose page opens, at the door's public URL; the same ask again, an
+// unsigned one and one by another key are 401s, nothing made; an ask
+// that is not JSON is a 415; a door with no inviter has no such route.
+#[test]
+fn an_inviters_ask_makes_one_invite() {
+    use fragment_identity_door::passkeys::PasskeysConfig;
+    let inviter = fragment_nip98::Keys::from_secret_hex(&"33".repeat(32)).unwrap();
+    let stranger = fragment_nip98::Keys::from_secret_hex(&"44".repeat(32)).unwrap();
+    let start = |name: &str, with_inviter: bool| {
+        let dir = std::env::temp_dir().join(format!("door-asks-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let passkeys = PasskeysConfig {
+            rp_id: "localhost".into(),
+            origin: url::Url::parse("http://localhost").unwrap(),
+            rp_name: "Fragment".into(),
+            state_dir: dir.clone(),
+            inviter: with_inviter.then(|| inviter.pubkey_hex().to_string()),
+        };
+        let client = Client::with_secret(CLIENT, SECRET, &["http://localhost/auth/callback"]).unwrap();
+        let config = Config::with_passkeys("127.0.0.1:0".parse().unwrap(), "http://localhost/__door", DOOR_SECRET.to_vec(), passkeys, vec![client]).unwrap();
+        (Door::start(config).unwrap(), dir)
+    };
+    let (door, dir) = start("on", true);
+    let body = json!({ "email": "kit@example.com" }).to_string();
+    let url = "http://localhost/__door/passkeys/invites";
+    let header = inviter.header("POST", url, body.as_bytes(), now_s() + 1);
+    let raw = format!("POST /passkeys/invites HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\nauthorization: {header}\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+    let made = send(door.addr, &raw);
+    assert_eq!(made.status, 200, "{}", made.body);
+    let link = made.json()["invite"].as_str().unwrap().to_string();
+    assert!(link.starts_with("http://localhost/__door/invite/"), "{link}");
+    let page = get_at(door.addr, &link.replace("/__door", ""));
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("kit@example.com"));
+    assert_eq!(send(door.addr, &raw).status, 401, "the same ask twice");
+    assert_eq!(ask(door.addr, None, &json!({ "email": "lee@example.com" }).to_string(), "application/json").status, 401, "unsigned");
+    assert_eq!(ask(door.addr, Some(&stranger), &json!({ "email": "lee@example.com" }).to_string(), "application/json").status, 401, "another key");
+    assert_eq!(ask(door.addr, Some(&inviter), "email=lee@example.com", "application/x-www-form-urlencoded").status, 415);
+    let state = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+    assert!(state.contains("kit@example.com") && !state.contains("lee@example.com"), "one invite made");
+    drop(door);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let (door, dir) = start("off", false);
+    assert_eq!(ask(door.addr, Some(&inviter), &json!({ "email": "kit@example.com" }).to_string(), "application/json").status, 404);
+    drop(door);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

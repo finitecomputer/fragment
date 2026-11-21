@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures_util::future::{select, Either};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
-use hyper::header::{HeaderValue, CACHE_CONTROL, CONTENT_TYPE, LOCATION};
+use hyper::header::{HeaderValue, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::Deserialize;
@@ -27,7 +27,7 @@ use url::Url;
 
 use crate::codes::{random_code, Codes};
 use crate::config::{Client, Config, SignIn, CALLBACK_PATH};
-use crate::passkeys::{pages, PasskeyError, Passkeys};
+use crate::passkeys::{pages, Invited, PasskeyError, Passkeys, INVITES_PATH};
 use crate::oidc::{self, Authorize, OidcError, Refusal, SignInSecrets, CODE_MAX};
 use crate::person::{person_of, EMAIL_BYTES_MAX};
 use crate::provider::{ClientError, ProviderClient};
@@ -50,6 +50,8 @@ pub const STATE_BYTES_MAX: usize = 1024;
 const _: () = assert!(CONNECTION_TIMEOUT.as_millis() > 4 * oidc::FETCH_TIMEOUT_MS as u128, "a callback's four calls to the provider fit in its connection");
 /// A passkey ceremony's body at most (a credential with its attestation).
 pub const PASSKEY_BODY_BYTES_MAX: usize = 64 * 1024;
+/// An inviter's ask at most (`{"email": …}`).
+pub const ASK_BODY_BYTES_MAX: usize = 4 * 1024;
 /// An invite's link token: 64 hex digits.
 const INVITE_BYTES: usize = 64;
 /// A login hint passed on to the provider at most (an email's).
@@ -216,6 +218,9 @@ async fn answer(shared: &Shared, req: Request<Incoming>) -> Response<Full<Bytes>
     if let Some(passkeys) = &shared.passkeys {
         if let Some(answered) = passkey_route(shared, passkeys, req.method(), &path, &req) {
             return answered;
+        }
+        if path == INVITES_PATH && req.method() == Method::POST {
+            return asked_invite(shared, passkeys, req).await;
         }
         if path.starts_with("/passkeys/") && req.method() == Method::POST {
             return ceremony(shared, passkeys, &path, req).await;
@@ -444,6 +449,40 @@ fn need<'a>(v: &'a Option<String>, what: &'static str) -> Result<&'a str, Passke
 fn credential<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> Result<T, PasskeyError> {
     let v = v.clone().ok_or(PasskeyError::Refused("no credential"))?;
     serde_json::from_value(v).map_err(|_| PasskeyError::Refused("that is not a passkey's answer"))
+}
+
+/// `POST /passkeys/invites` (`INVITES_PATH`): an invite the door's inviter
+/// asks for (passkeys.rs `asked_invite`), signed by NIP-98 for the door's
+/// public URL of this path. A new email's answer is its invite's link
+/// (`invite`), an email with an account's the platform to sign in at
+/// (`signIn`); an ask not the inviter's, fresh and first is a 401, and a
+/// door with no inviter has no such route.
+async fn asked_invite(shared: &Shared, passkeys: &Passkeys, req: Request<Incoming>) -> Response<Full<Bytes>> {
+    if passkeys.config.inviter.is_none() {
+        return json(StatusCode::NOT_FOUND, json!({ "error": "not_found", "message": "this door takes no asks for invites" }));
+    }
+    let content_type = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !content_type.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json")) {
+        return json(StatusCode::UNSUPPORTED_MEDIA_TYPE, json!({ "error": "an ask is JSON" }));
+    }
+    let authorization = req.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let body = match Limited::new(req.into_body(), ASK_BODY_BYTES_MAX).collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(_) => return json(StatusCode::PAYLOAD_TOO_LARGE, json!({ "error": "an ask is at most 4 KiB" })),
+    };
+    let public = shared.config.public_url.as_str().trim_end_matches('/');
+    match passkeys.asked_invite(authorization.as_deref(), &format!("{public}{INVITES_PATH}"), &body, now_s()) {
+        Ok(Invited::New(token)) => {
+            eprintln!("identity-door: an invite for a new account, asked by the inviter");
+            json(StatusCode::OK, json!({ "invite": format!("{public}/invite/{token}") }))
+        }
+        Ok(Invited::HasAccount) => json(StatusCode::OK, json!({ "signIn": passkeys.config.origin.as_str() })),
+        Err(PasskeyError::NotAsked(why)) => {
+            eprintln!("identity-door: an ask for an invite refused: {why}");
+            json(StatusCode::UNAUTHORIZED, json!({ "error": why }))
+        }
+        Err(e) => refused(e),
+    }
 }
 
 /// `POST /passkeys/<step>`: one step of a ceremony, JSON in and out.

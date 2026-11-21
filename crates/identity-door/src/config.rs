@@ -30,7 +30,9 @@
 //! passkeys (passkeys.rs): `"passkeys": {"rp_id": "home.example.com",
 //! "origin": "https://home.example.com", "state_dir": "/var/lib/door"}`,
 //! its `public_url` under that origin (the platform's), `rp_name`
-//! optional (default `Fragment`), no `vouched_domains`.
+//! optional (default `Fragment`), no `vouched_domains`. `inviter`
+//! (optional: an npub or 64 hex) is the one key whose signed asks make
+//! invites for new accounts (`passkeys::INVITES_PATH`).
 //!
 //! `provider` also takes `scopes` (default `openid email profile`),
 //! `email_claim` (default `email`), `auth` (`client_secret_basic` or
@@ -82,6 +84,7 @@ struct RawPasskeys {
     origin: String,
     state_dir: PathBuf,
     rp_name: Option<String>,
+    inviter: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -267,7 +270,8 @@ impl Config {
                 }
                 let clients = raw.clients.into_iter().map(Client::of).collect::<Result<Vec<_>, _>>()?;
                 let origin = web_url(&k.origin).map_err(|why| invalid("passkeys.origin", why))?;
-                let passkeys = crate::passkeys::PasskeysConfig { rp_id: k.rp_id, origin, rp_name: k.rp_name.unwrap_or_else(|| "Fragment".into()), state_dir: k.state_dir };
+                let inviter = k.inviter.map(|i| fragment_core::npub::parse(&i).ok_or_else(|| invalid("passkeys.inviter", "an npub or 64 hex: the one key whose signed asks make invites"))).transpose()?;
+                let passkeys = crate::passkeys::PasskeysConfig { rp_id: k.rp_id, origin, rp_name: k.rp_name.unwrap_or_else(|| "Fragment".into()), state_dir: k.state_dir, inviter };
                 return Config::with_passkeys(raw.listen, &raw.public_url, secret, passkeys, clients);
             }
             _ => return Err(invalid("provider", "exactly one of provider and passkeys")),
@@ -456,5 +460,38 @@ mod tests {
         assert!(matches!(twice, Err(ConfigError::Invalid { field: "clients.client_id", .. })));
         let query = Config::new("127.0.0.1:0".parse().unwrap(), "https://door.example/?x", vec![7; 32], provider(), Vouched::default(), vec![a]);
         assert!(matches!(query, Err(ConfigError::Invalid { field: "public_url", .. })));
+    }
+
+    /// A passkey door's config, `inviter` given as `extra`.
+    fn passkeys_config(d: &Path, extra: &str) -> PathBuf {
+        let door = secret_file(d, "door.secret", &"d".repeat(32), 0o600);
+        let state = d.join("state");
+        let json = format!(
+            r#"{{"listen":"127.0.0.1:0","public_url":"https://home.example.com/__door","secret_file":{door:?},"passkeys":{{"rp_id":"home.example.com","origin":"https://home.example.com","state_dir":{state:?}{extra}}},"clients":[{{"client_id":"client_a","client_secret_sha256":"{SECRET_SHA256}","redirect_uris":["https://home.example.com/auth/callback"]}}]}}"#
+        );
+        let p = d.join("door.json");
+        std::fs::write(&p, json).unwrap();
+        p
+    }
+
+    /// Goal: a passkey door's inviter is one key, as the platform names
+    /// keys (an npub or 64 hex), held as hex; none means no asks; anything
+    /// else is refused at start.
+    #[test]
+    fn an_inviter_is_one_key() {
+        let d = dir("inviter");
+        let hex = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let npub = fragment_core::npub::encode(hex);
+        let inviter = |extra: &str| match Config::read(&passkeys_config(&d.0, extra)).map(|c| c.signin) {
+            Ok(SignIn::Passkeys(k)) => Ok(k.inviter),
+            Ok(SignIn::Provider(_)) => panic!("a passkey door"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(inviter("").unwrap(), None);
+        assert_eq!(inviter(&format!(r#","inviter":"{npub}""#)).unwrap().as_deref(), Some(hex));
+        assert_eq!(inviter(&format!(r#","inviter":"{}""#, hex.to_uppercase())).unwrap().as_deref(), Some(hex));
+        for bad in [r#","inviter":"npub1nope""#, r#","inviter":"""#, r#","inviter":["a","b"]"#] {
+            assert!(inviter(bad).is_err(), "{bad}");
+        }
     }
 }
