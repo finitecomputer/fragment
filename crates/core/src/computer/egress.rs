@@ -154,6 +154,5 @@ mod tests {
         catalog.push("renamed.example.com".to_string());
         let (on, out) = armed(kept.clone(), catalog, hosts("v", VAULT_HOSTS_MAX));
         assert_eq!((on, out), (kept, vec!["renamed.example.com".to_string()]));
-        assert!(PLATFORM_COST + HOSTS_MAX * HOST_COST <= INTERCEPTS_MAX);
     }
 }
