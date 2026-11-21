@@ -56,10 +56,15 @@ jobs:
       - run: |
           H="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
           docker pull -q "$H"
+          v() { docker run --rm --privileged "$H" sh -c "apk add --no-cache btrfs-progs > /dev/null; $1" > /dev/null 2> err.txt; echo "$2: exit $? | $(tail -c 300 err.txt | tr '\n' ' ')"; }
+          v 'truncate -s 20000002048 /d.img; mkfs.btrfs -q -f /d.img; dev=$(losetup -f); losetup $dev /d.img; mkdir /m; mount -o compress=zstd:3 $dev /m' "A file then attach, 20 GB"
+          v 'truncate -s 20000002048 /d.img; dev=$(losetup -f); losetup $dev /d.img; mkfs.btrfs -q -f $dev; mkdir /m; mount -o compress=zstd:3 $dev /m' "B attach then device, 20 GB"
+          v 'truncate -s 2000000000 /d.img; mkfs.btrfs -q -f /d.img; dev=$(losetup -f); losetup $dev /d.img; mkdir /m; mount -o compress=zstd:3 $dev /m' "C file then attach, 2 GB"
+          v 'truncate -s 20000002048 /d.img; mkfs.btrfs -q -f /d.img; dev=$(losetup -f); losetup $dev /d.img; mkdir /m; mount $dev /m' "D file then attach, 20 GB, no compress option"
+          v 'truncate -s 20000002048 /d.img; mkfs.btrfs -q -f /d.img; dev=$(losetup -f); losetup $dev /d.img; sync; blockdev --flushbufs $dev 2>/dev/null; mkdir /m; mount -o compress=zstd:3 $dev /m; dmesg 2>/dev/null | tail -5' "E file then attach, flushed"
           id=$(docker create --platform linux/amd64 "$H")
-          S='set -e; apk add --no-cache btrfs-progs > /dev/null; truncate -s 20000002048 /disk.img; mkfs.btrfs -q -f /disk.img > /dev/null; dev=$(losetup -f); [ -e "$dev" ] || mknod "$dev" b 7 "${dev#/dev/loop}"; losetup "$dev" /disk.img; trap '"'"'umount /m 2> /dev/null || :; losetup -d "$dev" 2> /dev/null || :'"'"' EXIT; mkdir -p /m; mount -o compress=zstd:3 "$dev" /m; mkdir -p /m/image /m/data; tar -x -C /m/image -f -; sync; btrfs filesystem sync /m > /dev/null; stat -f -c "%b %a %S" /m'
+          S='set -ex; apk add --no-cache btrfs-progs > /dev/null; truncate -s 20000002048 /disk.img; dev=$(losetup -f); [ -e "$dev" ] || mknod "$dev" b 7 "${dev#/dev/loop}"; losetup "$dev" /disk.img; trap '"'"'umount /m 2> /dev/null || :; losetup -d "$dev" 2> /dev/null || :'"'"' EXIT; mkfs.btrfs -q -f "$dev" > /dev/null; mkdir -p /m; mount -o compress=zstd:3 "$dev" /m; mkdir -p /m/image /m/data; tar -x -C /m/image -f -; cat > /dev/null; sync; btrfs filesystem sync /m > /dev/null; stat -f -c "%b %a %S" /m'
           set +e
-          docker export "$id" | docker run --rm -i --privileged "$H" sh -c "$S"
-          echo "pipe statuses: ${PIPESTATUS[*]}"
-          echo "--- each step alone, with its stderr"
-          docker run --rm --privileged "$H" sh -c 'set -x; apk add --no-cache btrfs-progs > /dev/null; echo apk=$?; truncate -s 2000000000 /d.img; losetup -f; echo losetup-f=$?; dev=$(losetup -f); ls -l /dev/loop-control $dev; [ -e "$dev" ] || mknod "$dev" b 7 "${dev#/dev/loop}"; losetup "$dev" /d.img; echo attach=$?; mkfs.btrfs -q -f "$dev"; mkdir -p /m; mount -o compress=zstd:3 "$dev" /m; echo mount=$?; umount /m; losetup -d "$dev"'
+          docker export "$id" | docker run --rm -i --privileged "$H" sh -c "$S" 2> err.txt
+          echo "B end to end, pipe statuses: ${PIPESTATUS[*]} | $(tail -c 300 err.txt | tr '\n' ' ')"
+          sudo dmesg | grep -iE "btrfs|loop" | tail -8
