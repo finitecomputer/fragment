@@ -1228,9 +1228,9 @@ mod tests {
         cell["name"] = serde_json::json!("fragment-b");
         let mut admin = super::read_admin_config(&cell_dir).unwrap();
         assert!(admin.get("durable_objects").is_none() && admin.get("compatibility_date").is_none(), "the checked-in admin config names neither: the cell's are written in");
-        super::pair_admin(&mut cell, &mut admin, "fragment-admin-b").unwrap();
-        assert_eq!(cell["services"], serde_json::json!([{ "binding": super::ADMIN_BINDING, "service": "fragment-admin-b" }]));
-        assert_eq!(admin["name"], "fragment-admin-b");
+        super::pair_admin(&mut cell, &mut admin, "fragment-b--admin").unwrap();
+        assert_eq!(cell["services"], serde_json::json!([{ "binding": super::ADMIN_BINDING, "service": "fragment-b--admin" }]));
+        assert_eq!(admin["name"], "fragment-b--admin");
         assert_eq!(admin["compatibility_date"], cell["compatibility_date"]);
         let ours = cell["durable_objects"]["bindings"].as_array().unwrap();
         let theirs = admin["durable_objects"]["bindings"].as_array().unwrap();
@@ -1242,7 +1242,7 @@ mod tests {
         // refused: paired twice (the admin's config already names the cell's),
         // a cell with no binding to it, or one with another service too
         let mut again = admin.clone();
-        assert!(super::pair_admin(&mut cell, &mut again, "fragment-admin-b").unwrap_err().to_string().contains("names no compatibility_date"));
+        assert!(super::pair_admin(&mut cell, &mut again, "fragment-b--admin").unwrap_err().to_string().contains("names no compatibility_date"));
         let mut lone = cell.clone();
         lone.as_object_mut().unwrap().remove("services");
         assert!(super::pair_admin(&mut lone, &mut super::read_admin_config(&cell_dir).unwrap(), "a").is_err());

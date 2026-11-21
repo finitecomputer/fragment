@@ -585,8 +585,8 @@ struct Migrations {
 struct Names {
     /// `fragment` or `fragment-<branch>`: the platform Worker's.
     cell: String,
-    /// `fragment-admin` or `fragment-admin-<branch>`: the operators' admin
-    /// Worker's (cell/src/admin.rs), which the cell's `ADMIN` binding names.
+    /// The operators' admin Worker's (cell/src/admin.rs), which the cell's
+    /// `ADMIN` binding names: the cell's and `--admin` (`admin_of`).
     admin: String,
     jobs: String,
     deliveries: String,
@@ -622,7 +622,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             let zone = d.zone.as_deref().context("a --branch deploys at <branch>.<zone>: the config names its zone")?;
             Ok(Names {
                 cell: format!("fragment-{b}"),
-                admin: format!("fragment-admin-{b}"),
+                admin: admin_of(&format!("fragment-{b}")),
                 jobs: format!("fragment-jobs-{b}"),
                 deliveries: format!("fragment-deliveries-{b}"),
                 dead: format!("fragment-deliveries-dead-{b}"),
@@ -644,7 +644,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             }
             Ok(Names {
                 cell: "fragment".into(),
-                admin: "fragment-admin".into(),
+                admin: admin_of("fragment"),
                 jobs: "fragment-jobs".into(),
                 deliveries: "fragment-deliveries".into(),
                 dead: "fragment-deliveries-dead".into(),
@@ -666,6 +666,16 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
         (Some(_), _, _) => bail!("a config naming platform_host or fragment_suffix deploys one deployment of its own: no --branch"),
         (None, _, _) => bail!("name a --branch (or give the config both platform_host and fragment_suffix)"),
     }
+}
+
+/// The admin Worker's name beside the cell named `cell`: `<cell>--admin`.
+/// No cell's name holds `--` (a branch's never does: `valid_branch`), so
+/// no deployment's admin is ever another's cell, which a deploy uploads
+/// over and a teardown deletes by name (`fragment-admin-preview` was the
+/// cell of a branch `admin-preview`).
+fn admin_of(cell: &str) -> String {
+    assert!(!cell.contains("--"), "a cell's name holds no `--`: {cell}");
+    format!("{cell}--admin")
 }
 
 /// The test secret's file a deploy of `branch` takes, if the config names
@@ -2059,7 +2069,7 @@ mod tests {
     /// Method: a branch's and a deployment of its own's, rendered.
     #[test]
     fn a_deployments_admin_worker_is_its_own() {
-        for (d, branch, cell_name, admin_name) in [(deployment(None, None), Some("p5"), "fragment-p5", "fragment-admin-p5"), (deployment(Some("finite.chat"), Some("finite.place")), None, "fragment", "fragment-admin")] {
+        for (d, branch, cell_name, admin_name) in [(deployment(None, None), Some("p5"), "fragment-p5", "fragment-p5--admin"), (deployment(Some("finite.chat"), Some("finite.place")), None, "fragment", "fragment--admin")] {
             let n = names(&d, branch).unwrap();
             assert_eq!((n.cell.as_str(), n.admin.as_str()), (cell_name, admin_name));
             let root = devstack::repo_root();
@@ -2084,12 +2094,34 @@ mod tests {
         }
     }
 
+    /// Goal: no deployment's admin Worker is ever another deployment's cell
+    /// in the same account, which a deploy would upload over and a
+    /// teardown delete (review of #1433: branch `preview`'s admin was
+    /// branch `admin-preview`'s cell, and the unbranched admin branch
+    /// `admin`'s). Method: the names of branches made to collide, and of a
+    /// deployment of its own, each admin against every cell.
+    #[test]
+    fn no_admin_worker_is_another_deployments_cell() {
+        let branches = ["preview", "admin-preview", "admin", "p5", "admin-p5", "a", "admin-a", "a-admin"];
+        let mut all: Vec<Names> = branches.iter().map(|b| names(&deployment(None, None), Some(b)).unwrap()).collect();
+        all.push(names(&deployment(Some("finite.chat"), Some("finite.place")), None).unwrap());
+        for n in &all {
+            assert!(n.admin.ends_with("--admin") && n.admin.contains("--"), "{}", n.admin);
+            for other in &all {
+                assert_ne!(n.admin, other.cell, "{}'s admin is {}'s cell", n.cell, other.cell);
+            }
+        }
+        let admins: std::collections::BTreeSet<&str> = all.iter().map(|n| n.admin.as_str()).collect();
+        assert_eq!(admins.len(), all.len(), "each deployment's admin is its own");
+        assert!(std::panic::catch_unwind(|| admin_of("fragment-a--b")).is_err(), "a cell's name never holds `--`");
+    }
+
     /// A branch is a copy of its own beside the others: every name is
     /// marked, and its hosts are single labels under the zone.
     #[test]
     fn a_branch_names_everything_for_itself() {
         let n = names(&deployment(None, None), Some("dev")).unwrap();
-        assert_eq!((n.cell.as_str(), n.admin.as_str(), n.bucket.as_str(), n.stage.as_str()), ("fragment-dev", "fragment-admin-dev", "fragment-blobs-dev", "fragment-migrations-stage-dev"));
+        assert_eq!((n.cell.as_str(), n.admin.as_str(), n.bucket.as_str(), n.stage.as_str()), ("fragment-dev", "fragment-dev--admin", "fragment-blobs-dev", "fragment-migrations-stage-dev"));
         assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
 
         assert_eq!(n.platform_host, "dev.finite.place");

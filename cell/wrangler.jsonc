@@ -29,7 +29,7 @@
   // The operators' admin Worker (src/admin.rs; cell/wrangler.admin.jsonc):
   // the cell hands it the admin's routes. A deploy names it for its
   // deployment, as it names this one (xtask/src/deploy.rs).
-  "services": [{ "binding": "ADMIN", "service": "fragment-admin" }],
+  "services": [{ "binding": "ADMIN", "service": "fragment--admin" }],
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs).

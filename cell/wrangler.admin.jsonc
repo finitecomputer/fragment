@@ -11,6 +11,6 @@
   // compatibility date, and every one of the cell's object bindings, by
   // its name, bound to the cell's script (a deploy's probe and an
   // operator's wake reach every class: routed.rs `objects`, `wake`).
-  "name": "fragment-admin",
+  "name": "fragment--admin",
   "main": "build/admin/index.js"
 }
