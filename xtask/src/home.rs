@@ -91,6 +91,12 @@ struct HomeConf {
     default_plan: Option<String>,
     #[serde(default)]
     operators: Vec<String>,
+    /// The one key (an npub) whose signed asks start new accounts here: a
+    /// hosted platform's that adds private agents (its `private_home.key`;
+    /// fragment docs/api.md, "A private agent"). The door trusts it alone
+    /// (`passkeys.inviter`), and for an email with an account makes nothing.
+    #[serde(default)]
+    inviter: Option<String>,
     /// Without it, the home makes no computers (its node runs none).
     #[serde(default)]
     computers: Option<Computers>,
@@ -300,11 +306,16 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
     // what runs beside celld in the home, configured
     // the door: people's own passkeys, its relying party the platform's
     // host, its state on the encrypted disk
+    let mut passkeys = json!({ "rp_id": c.platform_host, "origin": platform_url, "state_dir": format!("{STATE_IN_HOME}/door") });
+    if let Some(inviter) = &c.inviter {
+        anyhow::ensure!(fragment_core::npub::parse(inviter).is_some(), "inviter is an npub, not {inviter:?}");
+        passkeys["inviter"] = json!(inviter);
+    }
     let door = json!({
         "listen": format!("127.0.0.1:{DOOR_PORT}"),
         "public_url": door_url,
         "secret_file": format!("{SECRETS_IN_HOME}/door/secret"),
-        "passkeys": { "rp_id": c.platform_host, "origin": platform_url, "state_dir": format!("{STATE_IN_HOME}/door") },
+        "passkeys": passkeys,
         "clients": [{ "client_id": DOOR_CLIENT, "client_secret_sha256": format!("{:x}", sha2::Sha256::digest(door_client_secret.as_bytes())), "redirect_uris": [format!("{platform_url}/auth/callback")] }],
     });
     write(&release.join("door.json"), &serde_json::to_string_pretty(&door)?, false)?;
