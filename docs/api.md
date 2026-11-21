@@ -1202,7 +1202,8 @@ file's bytes before it commits the pointer and downloads them as it pulls,
 where status answers `blobMinBytes`. The site and `GET file` serve a
 pointer's bytes, with ranges. A blob no pointer at `main` or `live`, and no
 record's `attachments` (`[{"sha256": …}]`), has named for
-`FRAGMENT_BLOB_GRACE_S` is deleted, uploads never committed included.
+7 days is deleted, uploads never committed included. A test fleet keeps
+the same 7 days; its `age-blobs` lever ages a fragment's blobs past them.
 
 A page reads a blob at `__blob/<sha256>` and an editor's page uploads one
 there (`fragment.blob(file)`). It is served as the type its upload

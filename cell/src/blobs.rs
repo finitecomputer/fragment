@@ -30,6 +30,11 @@ use fragment_core::gather::Gathered;
 const POINTER_MIN_BYTES: u64 = 126;
 /// How often the collection runs at most (it runs with the poll backstop).
 const GC_EVERY_MS: i64 = 24 * 3600 * 1000;
+/// How long a blob nothing names is kept: a rollback within it still has
+/// its bytes, and an upload waits within it for its commit. A week on every
+/// fleet, a test's too (it ages blobs instead: `age_blobs`): a test fleet's
+/// 4 s once took a move's file between its upload and its commit.
+const GRACE_MS: i64 = 7 * 24 * 3600 * 1000;
 /// `__blob` answers the same bytes for a hash forever.
 const IMMUTABLE: &str = "private, max-age=31536000, immutable";
 
@@ -252,11 +257,21 @@ impl FragmentCell {
         for named in [self.cards()?.card.map(|c| c.blob), self.meta(MetaKey::Icon)?].into_iter().flatten() {
             self.exec("UPDATE blobs SET seen_at = ? WHERE sha = ?", vec![now_v.clone(), named.as_str().into()])?;
         }
-        let count = self.drop_blobs("SELECT sha FROM blobs WHERE seen_at < ? LIMIT 1000", now - self.cfg.blob_grace_ms).await?;
+        let count = self.drop_blobs("SELECT sha FROM blobs WHERE seen_at < ? LIMIT 1000", now - GRACE_MS).await?;
         if count > 0 {
             self.event("blobs.collected", &format!("{count} blob(s) no branch has named for the grace period"), json!({ "count": count }));
         }
-        self.set_meta(MetaKey::BlobsGcAt, &(now + self.cfg.blob_grace_ms.min(GC_EVERY_MS)).to_string())
+        self.set_meta(MetaKey::BlobsGcAt, &(now + GC_EVERY_MS).to_string())
+    }
+
+    /// Test fleets (`age-blobs`, ops.rs): every blob as though last seen a
+    /// grace period before it was, and the collection due at the next poll
+    /// pass, so a test sees what it keeps and deletes without waiting a
+    /// week. How many.
+    pub(crate) fn age_blobs(&self) -> CellResult<usize> {
+        let aged = self.rows("UPDATE blobs SET seen_at = seen_at - ? RETURNING sha", vec![SqlStorageValue::Integer(GRACE_MS)])?.len();
+        self.del_meta(MetaKey::BlobsGcAt)?;
+        Ok(aged)
     }
 
     /// Deletes the blobs `query` selects (it takes one parameter: the time
