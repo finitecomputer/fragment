@@ -516,6 +516,14 @@ pub enum StorageKind {
     Caches,
 }
 
+/// `POST /api/computers/{id}/files/delete`: the file its owner deletes,
+/// named by its path below `/data` as `ComputerSizes` names it (`work/…`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileAsk {
+    pub path: String,
+}
+
 /// One folder or file of `ComputerSizes`: its path below `/data` and the
 /// bytes it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

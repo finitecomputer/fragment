@@ -3754,8 +3754,6 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let room = view()["disk"]["room"].as_u64();
     let left = b.eval(page, &format!("{block}?.querySelector('.storage-left')?.textContent"))?;
     let room_said = room.is_some_and(|r| r >= 1_000_000_000 && left.as_str() == Some(&format!("{} left", storage_size(r))));
-    b.color_scheme(page, "dark")?;
-    b.viewport(page, 1280, 900, false)?;
     s.ok(
         "Storage shows what takes its disk by kind (downloads, browser data, caches), its biggest files by name, and the room left, from its awake save's read; on a desktop and on a phone (390 px), within its width",
         made && posted.iter().all(|st| *st == 200) && read && sized.status == 200 && desk && phone && fits["right"] == true && fits["wide"] == true && room_said,
@@ -3774,6 +3772,32 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
         "Storage with no room left says Full, in red, and the room again once a read finds it",
         full.status == 200 && none == 0 && shows_full && again.status == 200 && roomy,
         json!({ "full": full.body, "room": none, "again": again.body }),
+    );
+    // Delete, on the phone: asked once, then the platform removes the file
+    // in its container, and Storage reads it again without it
+    let wheel = "work/e2e/home/.cache/pip/wheel.whl";
+    let row = format!("{block}?.querySelector('.storage-file[data-path=\"{wheel}\"]')");
+    b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete]')?.click(), true)"))?;
+    let asked = b.until(page, &format!("!!{row}?.querySelector('[data-action=storage-delete-sure]')?.checkVisibility() && !{row}.querySelector('[data-action=storage-delete]')"), wait);
+    for scheme in ["dark", "light"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("computer-storage-delete-390-{scheme}.png")));
+    }
+    b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete-sure]')?.click(), true)"))?;
+    let gone_drawn = b.until(page, &format!("!!{block} && !{row}"), std::time::Duration::from_secs(60));
+    let after = view();
+    let gone = !after["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == wheel));
+    let kept = ["work/e2e/downloads/talk.mp4", "work/e2e/browser-profile/cache.bin"].iter().all(|p| after["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == *p)));
+    // a folder, and a path outside its work, are refused, touching nothing
+    let folder = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "work/e2e/downloads" })), &[])?;
+    let outside = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "../etc/passwd" })), &[])?;
+    let climbed = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "work/../bridge/state.json" })), &[])?;
+    b.color_scheme(page, "dark")?;
+    b.viewport(page, 1280, 900, false)?;
+    s.ok(
+        "Delete asks once, then the platform removes that file in its container (no agent asked), and Storage reads its disk again without it; a folder, and a path outside its work, are refused",
+        asked && gone_drawn && gone && kept && folder.status == 404 && outside.status == 400 && climbed.status == 400,
+        json!({ "files": after["sizes"]["files"], "folder": [folder.status, &folder.body], "outside": [outside.status, &outside.body], "climbed": climbed.status }),
     );
     Ok(())
 }
