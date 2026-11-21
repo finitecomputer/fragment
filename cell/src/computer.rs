@@ -4945,6 +4945,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             pointers.push(json);
         }
     }
+    // the answer's header names, never their values: an uncharged call's
+    // line says where its vendor may name a number no charge reads
+    let answer_headers: Vec<String> = sent.as_ref().map(|r| r.headers().keys().collect()).unwrap_or_default();
     let headers_said: Vec<(String, Option<u64>)> = match &sent {
         Ok(resp) => rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.header.clone()).map(|h| (h.clone(), resp.headers().get(&h).ok().flatten().and_then(|v| fragment_core::price::number(&v)))).collect(),
         Err(_) => vec![],
@@ -4979,7 +4982,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             let used: Vec<(Placeholder, Option<Usage>)> = keys.into_iter().map(|p| (p.clone(), charged(&p))).collect();
             for (p, _) in used.iter().filter(|(_, usage)| usage.is_none()) {
                 // none of its charges priced it: charged nothing, said so
-                console_log!("{}", json!({ "event": "pipe.uncharged", "provider": p.provider, "host": host, "method": method, "status": answered }));
+                console_log!("{}", json!({ "event": "pipe.uncharged", "provider": p.provider, "host": host, "method": method, "status": answered, "headers": answer_headers }));
             }
             let at = js::now_ms();
             let uses: Vec<uses::Use> = named
