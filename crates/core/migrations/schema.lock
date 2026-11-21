@@ -15,6 +15,7 @@ step Fragment 8 newest b439b2eb5ec07074
 step Fragment 9 inbox_forward_only ece226038ced1436
 step Fragment 10 face_forward_only c83644ba432a03d7
 step Fragment 11 record_author 290ff9dff6040cbf
+step Fragment 12 pending_code a323b22a2f946eb7
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -94,7 +95,7 @@ Fragment table own_commits: CREATE TABLE own_commits (sha TEXT PRIMARY KEY, dept
 Fragment table paid: CREATE TABLE paid ( key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment index paid_run: CREATE INDEX paid_run ON paid (run)
 Fragment table paused_ops: CREATE TABLE paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL)
-Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL, depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL, depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL, code TEXT)
 Fragment index pending_due: CREATE INDEX pending_due ON pending (next_at)
 Fragment table pointers: CREATE TABLE pointers ( ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path))
 Fragment table push_subs: CREATE TABLE push_subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL)
