@@ -4,7 +4,9 @@
 //! its object; a crash starts it again from its newest save, in step; a
 //! save that will not restore is passed over for the one before it; its
 //! saves are kept to the newest three; and a planned stop saves last and
-//! is not started again until asked.
+//! is not started again until asked. Then its connector (templates/simplex)
+//! on a door of its own: its connect starts it, and its owner's message
+//! goes from the door to the connector's inbox and its trigger.
 //!
 //! Locally on workerd and Docker, its containers reaching no SimpleX server
 //! (the e2e's reach none), so no link here: SimpleX itself is the lab's
@@ -126,6 +128,22 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     lever(api, door, "lose", json!({}))?;
     let st = until(api, door, Duration::from_secs(120), |x| x["door"]["stopped"].is_string() && x["running"] == false)?;
     s.ok("a door whose saves are all lost stops: never a new profile over them", st["door"]["stopped"] == "no save of this door restores" && st["saves"].as_array().is_some_and(|a| a.iter().all(|x| x["unreadable"] == 1)), &st);
+
+    // its connector (templates/simplex), on a door of its own: its owner's
+    // message goes from the door to the connector's inbox, as a webhook's
+    // does, and its trigger takes it (bound to no agent here, it reaches no
+    // one: `connector`, in the computers lane, binds one)
+    let owner = api.person()?;
+    let (name, _) = connected(s, api, &owner, "sxlane")?;
+    deliver(api, &name, "sx-lane-1", "hello from simplex")?;
+    let kept = lever(api, &name, "deliveries", json!({}))?;
+    let intake = newest_run(api, &owner, &name, "intake", Duration::from_secs(60));
+    s.ok(
+        "its owner's message reaches the connector's inbox from the door, and its inbox's trigger takes it (bound to no agent, it reaches no one)",
+        kept.as_array().is_some_and(|k| k.iter().any(|d| d["id"] == "sx-lane-1" && d["sent"] == 1)) && intake["output"]["ignored"] == "not linked",
+        json!({ "deliveries": kept, "intake": intake }),
+    );
+    lever(api, &name, "stop", json!({}))?;
     Ok(())
 }
 
@@ -152,35 +170,48 @@ export class App extends DurableObject {
 "#;
 const REACHER_JSON: &str = r#"{ "operations": { "reach": { "kind": "job" } } }"#;
 
-pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
-    if !s.runs_doors() {
-        s.skip("the SimpleX connector on a door", &format!("the stack runs no doors: a local one builds their image for a run that names their lane (cargo xtask e2e --only computers,{NAME})"));
-        return Ok(());
-    }
+/// The newest run of `op` on `name`, once it ends (within `within`).
+fn newest_run(api: &Api, owner: &Keys, name: &str, op: &str, within: Duration) -> Value {
+    let id = api.signed(owner, "GET", &format!("/api/f/{name}/runs?op={op}&limit=1"), None).ok().and_then(|r| r.body["runs"][0]["id"].as_i64()).unwrap_or(0);
+    super::jobs::settle(api, owner, name, id, &["succeeded", "failed", "held"], within)
+}
+
+/// One of its owner's messages, as the door's runner delivers it.
+fn deliver(api: &Api, door: &str, id: &str, text: &str) -> Result<Value> {
+    lever(api, door, "deliver", json!({ "message": { "id": id, "kind": "text", "text": text, "at": "2026-11-21T00:00:00Z", "file": null } }))
+}
+
+/// A SimpleX connector of `owner`'s (`base` its label), its inbox's
+/// secret set, connected: its own job's connect starts the door named as
+/// it is and gives it that secret. Its name and the door's state.
+fn connected(s: &mut Suite, api: &Api, owner: &Keys, base: &str) -> Result<(String, Value)> {
     const SECRET: &str = "e2e-simplex-inbox-5ec4e7a9f0b1c2d3e4f5061728394a5b";
-    let owner = a.owner;
     // its own name, never `<agent>-simplex` (the computer's SimpleX chat's)
-    let name = s.named(api, owner, "sxdoor")?;
+    let name = s.named(api, owner, base)?;
     let made = api.create_with(owner, json!({ "name": name, "template": "simplex" }))?;
     ensure!(made.status == 200, "making the SimpleX connector: {made}");
     s.owned(&made.body, owner);
     let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/SIMPLEX_DOOR_SECRET"), Some(&json!({ "value": SECRET, "hosts": [fragment_core::door::DOOR_HOST] })))?;
     ensure!(r.status == 200, "its inbox's secret: {r}");
-    let ran = |r: &crate::api::Reply, within: Duration| super::jobs::settle(api, owner, &name, r.body["result"]["run"].as_i64().unwrap_or(0), &["succeeded", "failed", "held"], within);
-    let newest = |op: &str| -> Value {
-        let id = api.signed(owner, "GET", &format!("/api/f/{name}/runs?op={op}&limit=1"), None).ok().and_then(|r| r.body["runs"][0]["id"].as_i64()).unwrap_or(0);
-        super::jobs::settle(api, owner, &name, id, &["succeeded", "failed", "held"], a.wake)
-    };
-
-    // its owner's connect: its job's call reaches its own door alone
     let r = api.op(owner, &name, "connect", "connect", json!({ "name": "Juniper" }))?;
-    let run = ran(&r, Duration::from_secs(300));
+    let run = super::jobs::settle(api, owner, &name, r.body["result"]["run"].as_i64().unwrap_or(0), &["succeeded", "failed", "held"], Duration::from_secs(300));
     let st = until(api, &name, Duration::from_secs(300), ready_from(1))?;
     s.ok(
         "its owner's connect, the connector's own job, starts the door named as the connector is and gives it the inbox's secret",
         run["output"]["connected"] == true && st["door"]["door"] == name.as_str() && st["door"]["agent"] == "Juniper" && st["inbox"] == true,
         json!({ "run": run, "door": st }),
     );
+    Ok((name, st))
+}
+
+pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
+    if !s.runs_doors() {
+        s.skip("the SimpleX connector on a door", &format!("the stack runs no doors: a local one builds their image for a run that names their lane (cargo xtask e2e --only computers,{NAME})"));
+        return Ok(());
+    }
+    let owner = a.owner;
+    let (name, st) = connected(s, api, owner, "sxdoor")?;
+    let newest = |op: &str| newest_run(api, owner, &name, op, a.wake);
 
     // no other fragment's job reaches a door, whichever it names
     let reacher = s.named(api, owner, "reacher")?;
@@ -205,8 +236,7 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     // its owner's message, as the door's runner delivers it: on to the
     // connector's inbox, published there as theirs to their agent, which
     // wakes and answers; the answer goes to the door's runner
-    let message = json!({ "id": "sx-e2e-1", "kind": "text", "text": "hello from simplex", "at": "2026-11-21T00:00:00Z", "file": null });
-    lever(api, &name, "deliver", json!({ "message": message }))?;
+    deliver(api, &name, "sx-e2e-1", "hello from simplex")?;
     let kept = lever(api, &name, "deliveries", json!({}))?;
     let intake = newest("intake");
     let chat = || super::jobs::records(api, owner, &name, "chat");
@@ -229,13 +259,13 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
 
     // a delivery without the inbox's secret, from anyone, starts nothing
     let url = format!("{}/api/f/{name}/inbox", api.base);
-    let forged = api.call(Call { method: "POST", url, body: Some(json!({ "payload": message }).to_string().into_bytes()), content_type: Some("application/json"), extra: vec![("x-simplex-door-secret", "not-the-secret".into())], ..Call::default() })?;
+    let forged = api.call(Call { method: "POST", url, body: Some(json!({ "payload": { "id": "sx-forged", "kind": "text", "text": "forged", "at": "2026-11-21T00:00:00Z" } }).to_string().into_bytes()), content_type: Some("application/json"), extra: vec![("x-simplex-door-secret", "not-the-secret".into())], ..Call::default() })?;
     s.ok("a delivery without the inbox's secret is refused", forged.status == 403, &forged);
 
     // unbound by its owner: their next message reaches no one
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "unlink" })))?;
     ensure!(r.status == 200, "unbinding: {r}");
-    lever(api, &name, "deliver", json!({ "message": { "id": "sx-e2e-2", "kind": "text", "text": "anyone there?", "at": "2026-11-21T00:01:00Z", "file": null } }))?;
+    deliver(api, &name, "sx-e2e-2", "anyone there?")?;
     let intake = newest("intake");
     let none = chat().into_iter().all(|r| r["body"]["text"] != "anyone there?");
     s.ok("unbound by its owner, their next message reaches no one", intake["output"]["ignored"] == "not linked" && none, &intake);
