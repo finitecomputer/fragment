@@ -974,7 +974,7 @@ impl Ledger {
     /// which no registry pushed, `seat_seq` 0, is none); and what its
     /// agents' calls on shared keys cost in the last hour, past a step
     /// (`said::spending`; `spent_hour`, `uses::spent_hour` and when it
-    /// ages out, `uses::spent_until`). An org's
+    /// falls below the first step, `uses::spent_until`). An org's
     /// ledger tells no one here.
     pub fn said(&self, now_ms: i64, sold: bool, spent_hour: (i64, Option<i64>)) -> Vec<fragment_proto::notice::Notice> {
         if self.org.is_some() {

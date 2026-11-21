@@ -33,9 +33,9 @@ pub fn spending_step(micros: i64) -> Option<i64> {
 
 /// The notice for an hour's spend of `micros` on shared keys, at its step
 /// (`spending_step`): the same words until it passes the next, so its
-/// person is told once a step, and gone at `until_ms`, when what it counts
-/// has aged out of the hour (`uses::spent_until`), so a page open that long
-/// drops it with no read.
+/// person is told once a step, and gone at `until_ms`, when the hour's
+/// spend falls below the first step (`uses::spent_until`), so a page open
+/// that long drops it with no read.
 pub fn spending(micros: i64, until_ms: Option<i64>) -> Option<Notice> {
     let over = spending_step(micros)?;
     Some(Notice {

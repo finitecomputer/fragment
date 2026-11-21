@@ -91,8 +91,9 @@ pub trait Tally {
     /// The last hour's spend, slot by slot (`spend`).
     fn add_spend(&mut self, slot: i64, micros: i64);
     fn spent_since(&self, slot: i64) -> i64;
-    /// The newest slot with spend in it, if any.
-    fn spent_last(&self) -> Option<i64>;
+    /// The slots from `slot` on with spend in them, oldest first: at most
+    /// an hour's (`SPEND_SLOTS` and now's).
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)>;
     fn forget_spend_before(&mut self, slot: i64);
 }
 
@@ -135,10 +136,26 @@ pub fn spent_hour(t: &impl Tally, now_ms: i64) -> i64 {
     t.spent_since(hour_from(now_ms))
 }
 
-/// When what the last hour's slots hold has all aged out (`spent_hour`
-/// none), if they hold any: a spending notice is told until then.
+/// When the last hour's spend falls below the notice's first step
+/// (`said::SPENDING_MICROS`), as its oldest slots age out and with no more
+/// spent: its notice is told until then, and never gone while a read would
+/// still tell one (a step down is told by the next count). None below it.
 pub fn spent_until(t: &impl Tally, now_ms: i64) -> Option<i64> {
-    t.spent_last().filter(|slot| *slot >= hour_from(now_ms)).map(|slot| (slot + SPEND_SLOTS + 1) * SPEND_SLOT_MS)
+    let step = super::said::SPENDING_MICROS;
+    if spent_hour(t, now_ms) < step {
+        return None;
+    }
+    let slots = t.spent_slots(hour_from(now_ms));
+    let mut left: i64 = slots.iter().map(|(_, m)| m).sum();
+    // bounded: at most an hour's slots
+    for (slot, micros) in slots {
+        left -= micros;
+        if left < step {
+            return Some((slot + SPEND_SLOTS + 1) * SPEND_SLOT_MS);
+        }
+    }
+    // the slots are the hour's spend: all gone, none is left
+    None
 }
 
 /// The oldest month kept at `now_ms`.
@@ -276,8 +293,8 @@ impl Tally for Memory {
         self.spend.range(slot..).map(|(_, m)| m).sum()
     }
 
-    fn spent_last(&self) -> Option<i64> {
-        self.spend.keys().next_back().copied()
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)> {
+        self.spend.range(slot..).map(|(s, m)| (*s, *m)).collect()
     }
 
     fn forget_spend_before(&mut self, slot: i64) {
@@ -350,7 +367,7 @@ mod tests {
         assert!(!spend(&mut t, &used("lead--b2", NOW, &[("github", 0)]), NOW), "nothing spent, nothing told");
         // a call an hour old still counts: the window is a whole hour of slots before now's
         assert_eq!(spent_hour(&t, NOW + 3_600_000), 10_000_000, "an hour on, the hour's charges still in it");
-        assert_eq!(spent_until(&t, NOW), Some((NOW.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS), "told until they have all aged out");
+        assert_eq!(spent_until(&t, NOW), Some((NOW.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS), "told until the hour's spend falls below its step");
         // the hour passes: its slots go, and the hour starts again
         let later = NOW + SPEND_SLOT_MS * (SPEND_SLOTS + 1);
         assert!(!spend(&mut t, &used("lead--a1", later, &[("xai", 1)]), later));
@@ -359,6 +376,26 @@ mod tests {
         // a call stamped past now counts in now's slot
         spend(&mut t, &used("lead--a1", later + CLOCK_SKEW_MS, &[("xai", 2)]), later);
         assert_eq!(spent_hour(&t, later), 3);
+    }
+
+    /// FIN-616, the review's: a spending notice ends when the hour's spend
+    /// falls below its step, not when its newest charge ages out: $6 an
+    /// hour ago and a cent since end the $5 notice as the $6 ages out.
+    /// Method: two slots, the older past the step alone.
+    #[test]
+    fn a_spending_notice_ends_as_the_spend_falls_below_its_step() {
+        let mut t = Memory::default();
+        let (early, late) = (NOW, NOW + 59 * 60_000);
+        spend(&mut t, &used("lead--a1", early, &[("xai", 6_000_000)]), early);
+        spend(&mut t, &used("lead--a1", late, &[("xai", 10_000)]), late);
+        let ends = (early.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS;
+        assert_eq!(spent_until(&t, late), Some(ends), "as the $6 ages out, not the cent");
+        assert_eq!(spent_hour(&t, ends), 10_000, "and then the cent alone is left");
+        assert_eq!(spent_until(&t, ends), None, "below the step: no notice");
+        // $12, past the $10 step: told until under $5, not under $10
+        spend(&mut t, &used("lead--a1", late, &[("xai", 5_990_000)]), late);
+        let late_ends = (late.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS;
+        assert_eq!(spent_until(&t, late), Some(late_ends), "a step down keeps the notice");
     }
 
     /// Goal: thirteen months are kept, and a month full of pairs takes no
