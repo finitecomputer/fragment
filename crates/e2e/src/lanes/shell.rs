@@ -3765,13 +3765,15 @@ fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let full = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 200_000_000u64 }))?;
     b.reload(page)?;
     let shows_full = b.until(page, &format!("{block}?.querySelector('.storage-left.storage-low')?.textContent === 'Full'"), wait);
+    // its view says none while it shows Full (Codex on #1428)
+    let none = view()["disk"]["room"].clone();
     let again = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
     b.reload(page)?;
     let roomy = b.until(page, &format!("/ left$/.test({block}?.querySelector('.storage-left:not(.storage-low)')?.textContent)"), wait);
     s.ok(
         "Storage with no room left says Full, in red, and the room again once a read finds it",
-        full.status == 200 && view()["disk"]["room"].is_u64() && shows_full && again.status == 200 && roomy,
-        json!({ "full": full.body, "again": again.body }),
+        full.status == 200 && none == 0 && shows_full && again.status == 200 && roomy,
+        json!({ "full": full.body, "room": none, "again": again.body }),
     );
     Ok(())
 }

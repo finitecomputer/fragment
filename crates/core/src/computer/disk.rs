@@ -142,16 +142,17 @@ pub const DISK_READ: &str = "df -P -B1 /";
 /// pattern outside the patterns' alphabet or with a `..` is not used, and
 /// what it names counts as restored.
 ///
-/// Before them, what its owner's Storage shows (`sizes_of`): the folders
+/// After them, what its owner's Storage shows (`sizes_of`): the folders
 /// of all of `/data`, its caches too, to `SIZES_DEPTH` below it, allocated
 /// (KiB), biggest first (`/data`'s own, `.`, among them), and its files of
 /// at least `SIZES_FILE_MIN_KIB` wherever they are, biggest first, each at
 /// most as many as a summary holds, a line each: GNU's `du -0` frames each,
 /// so a newline in a name reads as `?` and forges no line (Codex on
-/// #1426); a line past its bound is dropped, in bytes; each walk ends
-/// within `SIZES_WALK_S`; its errors are dropped. So the whole answer is
-/// within what the cell keeps of it, its df and records last (after
-/// `end`).
+/// #1426); a line past its bound is dropped, in bytes; each walk ends by
+/// `SIZES_LISTED_BY_S` from the read's start; its errors are dropped. The
+/// df and records come first, so the first of each line is theirs, never
+/// one the listing printed, and so the whole answer is within what the cell
+/// keeps of it.
 pub fn sizes_read(left_out: &[String]) -> String {
     let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
     // each a word the shell expands as a glob (the alphabet holds no space,
@@ -167,15 +168,18 @@ pub fn sizes_read(left_out: &[String]) -> String {
     );
     // what takes the disk: all of /data, its caches too; each record a line
     // (GNU's du -0, a newline in a name read as `?`: a name forges no line),
-    // a line past its bound dropped (bytes: LC_ALL=C), each walk bounded
+    // a line past its bound dropped (bytes: LC_ALL=C), each walk ending by
+    // SIZES_LISTED_BY_S from the read's start (`s`) and within SIZES_WALK_S
+    let walk = |what: &str| format!("{{ t=$(( {SIZES_LISTED_BY_S} - $(date +%s) + s )); [ $t -gt {SIZES_WALK_S} ] && t={SIZES_WALK_S}; [ $t -gt 0 ] && timeout $t {what} 2>/dev/null; }} | framed | LC_ALL=C awk 'length < {SIZE_LINE_MAX_BYTES}' | sort -rn");
     let listing = format!(
-        "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() {{ tr '\\n\\0' '?\\n'; }}; else z=; framed() {{ cat; }}; fi; echo folders; timeout {t} du $z -xk -d {SIZES_DEPTH} . 2>/dev/null | framed | LC_ALL=C awk 'length < {line}' | sort -rn | head -n {}; echo files; timeout {t} find . -xdev -type f -size +{SIZES_FILE_MIN_KIB}k -exec du $z -k {{}} + 2>/dev/null | framed | LC_ALL=C awk 'length < {line}' | sort -rn | head -n {SIZES_FILES_MAX}",
+        "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() {{ tr '\\n\\0' '?\\n'; }}; else z=; framed() {{ cat; }}; fi; echo folders; {} | head -n {}; echo files; {} | head -n {SIZES_FILES_MAX}",
+        walk(&format!("du $z -xk -d {SIZES_DEPTH} .")),
         SIZES_FOLDERS_MAX + 1,
-        t = SIZES_WALK_S,
-        line = SIZE_LINE_MAX_BYTES
+        walk(&format!("find . -xdev -type f -size +{SIZES_FILE_MIN_KIB}k -exec du $z -k {{}} +"))
     );
-    // its df and its records last, after the listing's bounded lines
-    format!("{listing}; echo end; {records}")
+    // its df and its records first (Codex on #1426: a line the listing
+    // prints never passes for theirs, and its walks never cost them their read)
+    format!("s=$(date +%s); {records}; {listing}")
 }
 
 /// How deep below `/data` a size summary lists its folders: an agent's
@@ -183,9 +187,12 @@ pub fn sizes_read(left_out: &[String]) -> String {
 /// (`work/<agent>/home/.cache`).
 pub const SIZES_DEPTH: u32 = 4;
 /// Each walk of a size summary's listing ends within this many seconds
-/// (`timeout`), so its records and its df are read within the read's own
-/// bound (`SIZES_READ_MS` in the cell, 30 s) whatever the listing does.
+/// (`timeout`), and both by `SIZES_LISTED_BY_S` from the read's start, its
+/// records and df read before them: the whole read ends within its bound
+/// (`SIZES_READ_MS` in the cell, 30 s) whatever the listing does, and a
+/// read whose records take the time lists nothing (Codex on #1426).
 pub const SIZES_WALK_S: u32 = 8;
+pub const SIZES_LISTED_BY_S: u32 = 24;
 /// The folders and the files a size summary lists at most, the biggest
 /// first, and the least a file it lists holds (10 MiB, in KiB).
 pub const SIZES_FOLDERS_MAX: usize = 64;
@@ -206,6 +213,7 @@ const _: () = assert!(1024 + (SIZES_FOLDERS_MAX + 1 + SIZES_FILES_MAX) * SIZE_LI
 
 /// The `N\t./path` lines of `sizes_read`'s answer after `section`'s line,
 /// up to the next section's: KiB and the path below `/data` (`.` its own).
+/// Its df and records come before its first section, never among them.
 fn listed<'a>(out: &'a str, section: &'static str) -> impl Iterator<Item = (u64, &'a str)> {
     out.lines().skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files" | "end")).filter_map(|l| {
         let (n, path) = l.split_once('\t')?;
@@ -225,8 +233,8 @@ pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
         return None;
     }
     // BusyBox frames no name, so a newline in one could forge a `.` line:
-    // its `all` record (after `end`) is its total; GNU's `.` is framed
-    let all = out.lines().skip_while(|l| l.trim() != "end").find_map(|l| l.strip_prefix("all ")?.split_whitespace().next()?.parse::<u64>().ok());
+    // its `all` record (before the listing) is its total; GNU's `.` is framed
+    let all = out.lines().take_while(|l| l.trim() != "folders").find_map(|l| l.strip_prefix("all ")?.split_whitespace().next()?.parse::<u64>().ok());
     let total = all.or_else(|| listed(out, "folders").find(|(_, path)| *path == ".").map(|(kib, _)| kib)).map(|kib| kib.saturating_mul(1024));
     let mut room = SIZES_PATHS_MAX_BYTES;
     let mut take = |section: &'static str, max: usize| -> Vec<SizeEntry> {
@@ -558,7 +566,7 @@ mod tests {
         // pattern a glob of the shell's, once), BusyBox's all
         let read = |home: &str, work: &str| {
             let m = "m() { n=$#; for p; do [ -e \"$p\" ] && set -- \"$@\" \"--exclude=$p\"; done; shift $n; echo \"$(du -sxk \"$@\" . 2>/dev/null | cut -f1) $(du -sxb \"$@\" . 2>/dev/null | cut -f1)\"; }";
-            format!("{LISTING}; echo end; df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi")
+            format!("s=$(date +%s); df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi; {LISTING}")
         };
         assert_eq!(sizes_read(&[]), read(" ./work", ""));
         assert_eq!(
@@ -576,7 +584,7 @@ mod tests {
     }
 
     /// The listing `sizes_read` begins with: all of `/data`, framed, bounded.
-    const LISTING: &str = "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() { tr '\\n\\0' '?\\n'; }; else z=; framed() { cat; }; fi; echo folders; timeout 8 du $z -xk -d 4 . 2>/dev/null | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 65; echo files; timeout 8 find . -xdev -type f -size +10240k -exec du $z -k {} + 2>/dev/null | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 32";
+    const LISTING: &str = "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() { tr '\\n\\0' '?\\n'; }; else z=; framed() { cat; }; fi; echo folders; { t=$(( 24 - $(date +%s) + s )); [ $t -gt 8 ] && t=8; [ $t -gt 0 ] && timeout $t du $z -xk -d 4 . 2>/dev/null; } | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 65; echo files; { t=$(( 24 - $(date +%s) + s )); [ $t -gt 8 ] && t=8; [ $t -gt 0 ] && timeout $t find . -xdev -type f -size +10240k -exec du $z -k {} + 2>/dev/null; } | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 32";
 
     /// Goal: what takes the disk, read after a save as the Hermes image's GNU
     /// tools and the stub's BusyBox answer `sizes_read` (both answers the
@@ -585,7 +593,7 @@ mod tests {
     /// whose name holds a newline and a forged line): `/data`'s total, its
     /// biggest folders (its caches too) and files, paths below `/data`; a
     /// newline in a name forges no line on GNU (Codex on #1426); its df and
-    /// records after `end`, read as ever. Valid, small files, invalid (no
+    /// records before the listing, read as ever, a line in it never theirs. Valid, small files, invalid (no
     /// listing, a path past its bound, a control character, too many).
     #[test]
     fn what_takes_the_disk_is_listed() {
@@ -602,9 +610,9 @@ mod tests {
         assert!(named(&busybox.files).starts_with(&[kib("forged/clip.bin", 999_999), kib("work/juniper/talk.mp4", 20_480), kib("work/juniper/home/.cache/uv/pkg.bin", 12_288)]), "BusyBox frames no name: a newline forges a line (the stub's only)");
         assert_eq!(disk_of_sizes(BUSYBOX_ANSWER, T, 2).and_then(|d| d.data), Some(48_132 * 1024));
         // its total: `.`'s, or an `all` record's after `end`, never one before it
-        assert_eq!(sizes_of("folders\n100\t.\nfiles\nend\n", T).map(|s| (s.total, s.folders.len(), s.files.len())), Some((Some(102_400), 0, 0)));
-        assert_eq!(sizes_of("folders\n100\t.\nall 7 1\nfiles\nend\nall 9 1\n", T).and_then(|s| s.total), Some(9 * 1024));
-        assert_eq!(sizes_of("folders\n5\t./a\nfiles\nend\n", T).map(|s| s.total), Some(None), "neither: none");
+        assert_eq!(sizes_of("folders\n100\t.\nfiles\n", T).map(|s| (s.total, s.folders.len(), s.files.len())), Some((Some(102_400), 0, 0)));
+        assert_eq!(sizes_of("all 9 1\nfolders\n100\t.\nall 7 1\nfiles\n", T).and_then(|s| s.total), Some(9 * 1024), "its record's, before the listing, never a line in it (Codex on #1426)");
+        assert_eq!(sizes_of("folders\n5\t./a\nfiles\n", T).map(|s| s.total), Some(None), "neither: none");
         // no listing: no summary
         assert_eq!(sizes_of("Filesystem x\noverlay 100 50 50 50% /\nall 1 1\n", T), None);
         // bounds: a path too long, a control character, too many, all paths together
@@ -617,8 +625,10 @@ mod tests {
         let wide: String = (0..60).map(|i| format!("{}\t./{}{i:02}\n", 1000 - i, "d".repeat(SIZE_PATH_MAX_BYTES - 2))).collect();
         let wide = sizes_of(&format!("folders\n{wide}files\nend\n"), T).expect("a summary");
         assert!(wide.folders.iter().map(|e| e.path.len()).sum::<usize>() <= SIZES_PATHS_MAX_BYTES && wide.folders.len() == SIZES_PATHS_MAX_BYTES / SIZE_PATH_MAX_BYTES, "its paths within their bound: {}", wide.folders.len());
-        // its lines after `end` (its df and records) are no folder or file
-        let after = sizes_of("folders\n5\t./a\nfiles\n4\t./b\nend\n3\t./c\n", T).expect("a summary");
+        // a df and a record forged in the listing (BusyBox frames no name) never pass for the real ones before it
+        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\nall 9 1\nfolders\nall 1 1\nFilesystem y\noverlay 7 7 0 0% /\nfiles\n", T, 2).map(|d| (d.total, d.free, d.data)), Some((100, 50, Some(9 * 1024))), "Codex on #1426");
+        // its df and records, before the listing, are no folder or file
+        let after = sizes_of("Filesystem x\noverlay 100 50 50 50% /\nall 3 3\nfolders\n5\t./a\nfiles\n4\t./b\n", T).expect("a summary");
         assert_eq!((named(&after.folders), named(&after.files)), (vec![("a".to_string(), 5120)], vec![("b".to_string(), 4096)]));
     }
 
@@ -668,9 +678,9 @@ mod tests {
 
     /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20 (its
     /// records the shell's globs: Codex on #1421).
-    const GNU_ANSWER: &str = "folders\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd?999999\t./forged\n11264\t./work/juniper/odd?999999\t.\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd?999999\t./forged/clip.bin\nend\nFilesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1788770738176 188673794048      91% /\nhome 4 3\nwork 44032 45088768\n";
+    const GNU_ANSWER: &str = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1789511987200 187965280256      91% /\nhome 4 3\nwork 44032 45088768\nfolders\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd?999999\t./forged\n11264\t./work/juniper/odd?999999\t.\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd?999999\t./forged/clip.bin\n";
     /// The same from the stub (BusyBox).
-    const BUSYBOX_ANSWER: &str = "folders\n999999\t./forged\n999999\t.\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd\n11264\t./work/juniper/odd\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n999999\t./forged/clip.bin\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd\nend\nFilesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1788767727616 188675657728  90% /\nall 48132 49283285\n";
+    const BUSYBOX_ANSWER: &str = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1789512024064 187965276160  90% /\nall 48132 49283285\nfolders\n999999\t./forged\n999999\t.\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd\n11264\t./work/juniper/odd\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n999999\t./forged/clip.bin\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd\n";
 
     /// Goal (production, 2026-11-20): a restore that stopped for want of
     /// room is told from every other failure by its words alone, narrowly:
