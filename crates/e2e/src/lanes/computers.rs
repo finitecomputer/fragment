@@ -189,10 +189,10 @@ const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::
 const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
 /// An awake save's disk read follows its `Saved` in the same event, once
 /// the save is listed: after the pass forgetting older saves, its hold let
-/// go (an exec), and the `df` (an exec), each bounded by the cell at 30 s
-/// at most (cell/src/computer.rs `FORGET_PASS_MS`, `MARK_EXEC_MS`,
-/// `DISK_READ_MS`), and a few seconds more.
-const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 5 + 10);
+/// go (an exec), and the `df` and `du` (an exec), each bounded by the cell
+/// at 30 s at most (cell/src/computer.rs `FORGET_PASS_MS`, `MARK_EXEC_MS`,
+/// `SIZES_READ_MS`), and a few seconds more.
+const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 30 + 10);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
 const FIRST_CALL: &str = "its guest's first call as it boots (the bridge's read of its view) is answered: no read failed and waited out a retry";
@@ -225,7 +225,7 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
-    "and its disk is read again after that awake save",
+    "and its disk is read again after that awake save, with what its /data restores to, and its owner's view shows the room that leaves",
     "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
@@ -270,7 +270,16 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         disk = lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
         disk["at"].as_i64().is_some_and(|at| at >= saved_at)
     });
-    s.ok(SAVE_CHECKS[1], read && disk["total"].as_u64().is_some_and(|t| t > 0) && view()["restored"]["generation"] == v["restored"]["generation"], json!({ "save": newest, "disk": disk }));
+    // what its /data restores to (docs/computers.md, "Room to restore"):
+    // `du` of it, a little at least (its guest's state), and the room its
+    // owner's view shows from it
+    let shown = view();
+    let room = &shown["disk"];
+    s.ok(
+        SAVE_CHECKS[1],
+        read && disk["total"].as_u64().is_some_and(|t| t > 0) && disk["data"].as_u64().is_some_and(|d| d > 0) && room["data"] == disk["data"] && room["room"].as_u64().is_some() && shown["restored"]["generation"] == v["restored"]["generation"],
+        json!({ "save": newest, "disk": disk, "view": room }),
+    );
     let all = lever(api, c.id, "saves")?.body["saves"].clone();
     let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
     s.ok(

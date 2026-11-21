@@ -2155,7 +2155,9 @@ A person's computer runs an image and the agent fragments assigned to it;
 the Computer Durable Object (`cell/src/computer.rs`) alone talks to its
 container. What a guest may rely on, and every behaviour below, is
 docs/computers.md's; these routes are its owner's. A view is
-`ComputerView` (`fragment_proto::computer`).
+`ComputerView` (`fragment_proto::computer`); its `disk` is its disk as last
+read and the room it has left (`DiskRoom`: docs/computers.md, "Room to
+restore").
 
 | method & path | who | body → answer |
 | --- | --- | --- |

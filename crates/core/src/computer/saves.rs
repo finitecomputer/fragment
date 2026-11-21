@@ -598,7 +598,9 @@ impl Saves {
     /// It may be one set aside before, then restorable again; what an
     /// earlier choice set aside stays so for its time. One set aside is
     /// kept, and its owner's export reads it, but no start restores it,
-    /// whatever fails. The snapshot goes unless it caches the save chosen.
+    /// whatever fails. The snapshot goes unless it caches the save chosen,
+    /// and so does the size of `/data` its last read found, which was the
+    /// save's it leaves (`ComputerDisk::data`).
     /// Answers what letting go of those set aside past their time or bound
     /// (`trim_aside`) pushed out unforgotten. Again, the same. Refused, with
     /// nothing changed, when no save of that number is kept or it was found
@@ -611,6 +613,7 @@ impl Saves {
             return Err(NotChosen::Unusable);
         }
         let id = chosen.id.clone();
+        let was = self.current().map(|s| s.id.clone());
         let mut restorable: Vec<Save> = vec![];
         for mut s in std::mem::take(&mut self.saves).into_iter().chain(std::mem::take(&mut self.aside)) {
             let restored = match s.number.cmp(&number) {
@@ -636,6 +639,14 @@ impl Saves {
         self.aside.sort_by_key(|s| std::cmp::Reverse(s.number));
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
+        }
+        // the size of /data a read found is the save's it left (Codex on
+        // #1425: a rollback told every agent its computer was still full);
+        // its next start's read, after its restore, says the room
+        if was.as_deref() != Some(id.as_str()) {
+            if let Some(d) = self.disk.as_mut() {
+                d.data = None;
+            }
         }
         let dropped = self.trim_aside(now_ms);
         assert_eq!(self.current().map(|s| s.id.as_str()), Some(id.as_str()), "its next start restores the save chosen");
@@ -732,17 +743,25 @@ impl Saves {
         self.snapshot.is_some()
     }
 
-    /// Its disk was read (`df`, after a start came up or a save): kept
-    /// when it is newer than the one kept (a late read of an earlier
-    /// moment changes nothing). Answers whether it was kept.
+    /// Its disk was read (`df` in a start, `df` and `du` after an awake
+    /// save): kept when it is newer than the one kept (a late read of an
+    /// earlier moment changes nothing), with the newest read of what its
+    /// `/data` restores to when it has none (a start's). Answers whether it
+    /// was kept.
     pub fn measured(&mut self, disk: ComputerDisk) -> bool {
         assert!(disk.total > 0 && disk.free <= disk.total, "a disk read is its size and what fits in it: {disk:?}");
         if self.disk.is_some_and(|d| d.at > disk.at) {
             return false;
         }
-        self.disk_told = if self.disk_told { !disk_clear(disk.total, disk.free) } else { disk_filling(disk.total, disk.free) };
+        let disk = ComputerDisk { data: disk.data.or(self.disk.and_then(|d| d.data)), ..disk };
+        self.disk_told = if self.disk_told { !disk_clear(&disk) } else { disk_filling(&disk) };
         self.disk = Some(disk);
         true
+    }
+
+    /// Its disk as its view shows it: as last read, and the room it has.
+    pub fn disk_view(&self) -> Option<fragment_proto::computer::DiskRoom> {
+        self.disk.map(|d| d.view(self.disk_told))
     }
 
     /// Its disk as last read.
@@ -1323,6 +1342,36 @@ mod tests {
     /// sets nothing more aside. Restart: stored and read back; one stored
     /// before reads as not too big. Method: the lifecycle and its saves, as
     /// the DO drives them.
+    /// Goal (Codex on #1425: a rollback told every agent its computer was
+    /// still full): the size of `/data` a read found after a save is that
+    /// save's. Once its next start is to restore another (one set aside as
+    /// too big for its disk, or an operator's choice), it counts no more,
+    /// and the start's own read (`df`, after its restore) says the room.
+    /// Choosing the save it is on keeps it.
+    #[test]
+    fn a_rollback_forgets_the_size_of_the_save_it_left() {
+        use crate::computer::disk::{restore_floor, room, ComputerDisk};
+        const DISK: u64 = 20_000_002_048;
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        assert!(c.saves.measured(ComputerDisk { total: DISK, free: 2_000_000_000, at: c.now, generation: 2, data: Some(18_000_000_000) }));
+        assert!(c.saves.disk_view().is_some_and(|v| v.filling && v.room == 0), "told full");
+        // the save it is on, chosen: its size kept
+        let on = c.saves.current().map(|s| s.number).expect("a save");
+        assert_eq!(c.saves.choose(on, c.now), Ok(vec![]));
+        assert_eq!(c.saves.disk().and_then(|d| d.data), Some(18_000_000_000));
+        // too big for its disk: set aside, the one before next; its size forgotten
+        assert!(c.saves.too_big("b2", c.now).is_some());
+        assert_eq!(c.saves.disk().map(|d| d.data), Some(None));
+        // the start's read after its restore: what is free says the room, and it is told no more
+        assert!(c.saves.measured(ComputerDisk { total: DISK, free: 15_000_000_000, at: c.now + 1, generation: 3, data: None }));
+        assert_eq!(c.saves.disk().map(|d| room(&d)), Some(15_000_000_000 - restore_floor(DISK)));
+        assert!(c.saves.disk_view().is_some_and(|v| !v.filling));
+    }
+
     #[test]
     fn a_save_too_big_for_its_disk_is_set_aside_and_it_starts_from_the_one_before() {
         let rules = Rules::default();
