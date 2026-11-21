@@ -23,7 +23,10 @@
 //! preview's account, its branches'), whose computers' ids are hashes of
 //! the same people.
 //!
-//! Nothing is cached: the page asks again every minute.
+//! The page asks again every minute, from each tab and operator, and the
+//! account's query API is limited per account: the admin keeps a read for
+//! `LOGS_FRESH_MS`, and, when a newer one fails, stands on it for up to
+//! `LOGS_KEPT_MS`, its age and why shown (`kept`; cell/src/glance.rs).
 
 use serde_json::Value;
 
@@ -351,6 +354,47 @@ pub fn day_start(named: Option<i64>, now_ms: i64) -> Result<i64, String> {
     }
 }
 
+/// The questions asked at once, at most: all nine at once met the
+/// account's query limit (a 429) on their own.
+pub const QUERIES_AT_ONCE_MAX: usize = 3;
+/// How long a read of the logs' numbers stands before a load reads them
+/// again: twice the page's minute, so a problem new in the logs shows
+/// within two minutes, and every tab and operator open in that time is
+/// answered from one read (2026-11-20: nine queries a load, each tab each
+/// minute, hit the account's query limit, a 429).
+pub const LOGS_FRESH_MS: i64 = 2 * 60_000;
+/// How long a read is kept to stand in for a newer one that fails (a 429,
+/// an outage), its age and the newer one's failure shown beside it.
+pub const LOGS_KEPT_MS: i64 = 3_600_000;
+const _: () = assert!(LOGS_FRESH_MS < LOGS_KEPT_MS && LOGS_KEPT_MS <= DAY_MS, "a read goes stale before it is let go, within a day");
+
+/// What a load makes of a read kept from `at`, at `now_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// Answered as it is, its age shown.
+    Fresh,
+    /// Read again; answered only when that read fails, with why.
+    Stale,
+    /// Never answered: past `LOGS_KEPT_MS`, or from a time ahead of any
+    /// clock's (not a read of ours).
+    Gone,
+}
+
+pub fn kept(at: i64, now_ms: i64) -> Kept {
+    // checked: a kept `at` is read back from the cache, so any i64
+    let Some(age) = now_ms.checked_sub(at) else { return Kept::Gone };
+    // another isolate's clock may run a little ahead of this one's
+    if age < -LOGS_FRESH_MS {
+        Kept::Gone
+    } else if age < LOGS_FRESH_MS {
+        Kept::Fresh
+    } else if age < LOGS_KEPT_MS {
+        Kept::Stale
+    } else {
+        Kept::Gone
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -609,5 +653,28 @@ mod tests {
         assert!(day_start(Some(i64::MIN), NOW).is_err(), "now minus the least i64 overflows: refused");
         assert!(day_start(Some(i64::MAX), NOW).is_err());
         assert!(day_start(Some(i64::MIN), 0).is_err());
+    }
+
+    /// Goal: a kept read is answered while fresh, read again once stale
+    /// (and stood on only if that fails), and never answered once gone or
+    /// when its time is no clock's; each boundary exact, the integers'
+    /// ends without overflow. Method: ages around each limit.
+    #[test]
+    fn a_kept_read_is_fresh_then_stale_then_gone() {
+        for (age, want) in [
+            (0, Kept::Fresh),
+            (LOGS_FRESH_MS - 1, Kept::Fresh),
+            (LOGS_FRESH_MS, Kept::Stale),
+            (LOGS_KEPT_MS - 1, Kept::Stale),
+            (LOGS_KEPT_MS, Kept::Gone),
+            (-1, Kept::Fresh),
+            (-LOGS_FRESH_MS, Kept::Fresh),
+            (-LOGS_FRESH_MS - 1, Kept::Gone),
+        ] {
+            assert_eq!(kept(NOW - age, NOW), want, "{age} ms old");
+        }
+        assert_eq!(kept(i64::MIN, NOW), Kept::Gone, "no overflow");
+        assert_eq!(kept(i64::MAX, NOW), Kept::Gone);
+        assert_eq!(kept(i64::MIN, i64::MAX), Kept::Gone);
     }
 }
