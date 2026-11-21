@@ -883,8 +883,14 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
             // a person's own view says when they may add a private agent: an
             // operator's, on a deployment with a private home (admin.rs)
             let cfg = Config::from_env(env);
-            if *id == "me" && cfg.private_home_door.is_some() && crate::orgs::is_operator(cfg, &view)? {
-                view.private_agents = Some(true);
+            if *id == "me" && cfg.private_home_door.is_some() {
+                match crate::orgs::is_operator(cfg, &view) {
+                    Ok(true) => view.private_agents = Some(true),
+                    Ok(false) => {}
+                    // an operators' list that does not read offers no one a
+                    // private agent, and fails no one's view
+                    Err(e) => console_error!("private agents offered to no one: {}", e.message),
+                }
             }
             json_answer(&view)
         }

@@ -22,13 +22,16 @@ const WHY_CHARS_MAX: usize = 200;
 const TOKEN_HEX: usize = 64;
 
 /// Whether `door` names a home's door: https (http on loopback alone, for
-/// dev and the e2e), a host, no credentials, query or fragment, and no
-/// trailing slash (its paths are put after it).
+/// dev and the e2e), a host, no credentials, query or fragment, no
+/// trailing slash (its paths are put after it), and written as a URL
+/// writes itself (a lower-case host, no default port), since the door's
+/// own links are compared with it as text.
 pub fn door_ok(door: &str) -> bool {
     let Ok(u) = Url::parse(door) else { return false };
     let loopback = matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
     let scheme = u.scheme() == "https" || (u.scheme() == "http" && loopback);
-    scheme && u.host_str().is_some() && u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() && !door.ends_with('/') && door.len() <= DOOR_BYTES_MAX
+    let canonical = u.as_str() == door || (u.path() == "/" && u.as_str() == format!("{door}/"));
+    scheme && canonical && u.host_str().is_some() && u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() && !door.ends_with('/') && door.len() <= DOOR_BYTES_MAX
 }
 
 /// The ask's URL, as it is signed (NIP-98's `u`).
@@ -85,7 +88,7 @@ pub fn answered(door: &str, status: u16, body: &[u8]) -> Result<PrivateAgent, St
     }
     if let Some(home) = said.sign_in.as_deref() {
         let to = Url::parse(home).map_err(|_| "the private home's sign-in is not a URL".to_string())?;
-        if to.origin() != at.origin() || to.query().is_some() || to.fragment().is_some() {
+        if to.scheme() != at.scheme() || to.origin() != at.origin() || to.query().is_some() || to.fragment().is_some() {
             return Err("the private home's sign-in is not on its door's origin".into());
         }
         return Ok(PrivateAgent { url: to.to_string(), invited: false });
@@ -112,7 +115,7 @@ mod tests {
         for ok in [DOOR, "https://home.example.com", "http://127.0.0.1:8803", "http://localhost:9000/__door"] {
             assert!(door_ok(ok), "{ok}");
         }
-        for bad in ["", "home.example.com", "http://home.example.com/__door", "https://home.example.com/__door/", "https://u:p@home.example.com", "https://home.example.com/?x=1", "https://home.example.com/#f", "ftp://home.example.com"] {
+        for bad in ["", "home.example.com", "http://home.example.com/__door", "https://home.example.com/__door/", "https://u:p@home.example.com", "https://home.example.com/?x=1", "https://home.example.com/#f", "ftp://home.example.com", "https://Home.Example.com/__door", "https://home.example.com:443/__door"] {
             assert!(!door_ok(bad), "{bad}");
         }
         assert_eq!(ask_url(DOOR), "https://home.example.com/__door/passkeys/invites");
@@ -135,6 +138,7 @@ mod tests {
             json!({ "signIn": "https://evil.example/" }),
             json!({ "signIn": "https://home.example.com/?next=x" }),
             json!({ "signIn": "javascript:alert(1)" }),
+            json!({ "signIn": "blob:https://home.example.com/0f0e" }),
             json!({}),
             Value::Null,
         ] {
