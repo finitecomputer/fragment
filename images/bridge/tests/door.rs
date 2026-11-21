@@ -495,12 +495,18 @@ async fn the_door_against_the_real_core() {
     person_got(&mut person, &mut got, &["r6"]).await;
 
     // a rollback to the save that held the link alone, behind both bursts:
-    // one forced sync, then each way in step, nothing delivered again
+    // one sync, then each way in step, nothing delivered again. The sync is
+    // the one the door's "behind" forces, or the core's own when a message
+    // of the person's reaches the rolled-back ratchet first (their receipt
+    // for r6, sent as the crash came: the link then waits on that one,
+    // link.rs `ContactInfo`); either way the link says it is in step
+    // (`Notice::Resynced`), which a door that never synced does not
     g2.kill("KILL");
     drop(g2);
     door.with(|s| s.pinned = Some(linked_save));
     let g3 = start(&lab, &door, 3);
-    g3.until(Duration::from_secs(60), |s| s["ready"] == true && s["forcedSyncs"] == 1).await;
+    let one_sync = |s: &Value| s["forcedSyncs"].as_u64().is_some_and(|n| n <= 1) && s["notices"].as_array().is_some_and(|n| n.iter().any(|x| x == "Resynced"));
+    g3.until(Duration::from_secs(60), |s| s["ready"] == true && one_sync(s)).await;
     door.with(|s| s.pinned = None);
     g3.until(Duration::from_secs(180), |s| s["syncing"] == false).await;
     recovered(&mut person, agent, Duration::from_secs(180), || true).await;
@@ -513,7 +519,8 @@ async fn the_door_against_the_real_core() {
     }
     g3.reply(&door, "chat:7", "r7").await;
     person_got(&mut person, &mut got, &["r7"]).await;
-    assert_eq!(g3.state().await["forcedSyncs"], 1, "one sync, not more");
+    let s = g3.state().await;
+    assert!(one_sync(&s), "one sync, the door's or the core's own, not more: {s}");
 
     // a planned restart: the core stopped first, so its last save holds
     // what the core took (a burst sent as it stops, the review of #1430)
@@ -539,6 +546,16 @@ async fn the_door_against_the_real_core() {
     person_got(&mut person, &mut got, &["r8"]).await;
     g4.reply(&door, "chat:9", "r9").await;
     person_got(&mut person, &mut got, &["r9"]).await;
+    // its save that holds r9 done, before it is superseded: a reply sent
+    // after the newest save a start restores is sent again (never lost,
+    // maybe twice: run 4 of 5 on 11-21 met it here), which is not what
+    // this step tries
+    let t0 = Instant::now();
+    // bounded: 30 s
+    while !door.with(|s| s.saves.last().is_some_and(|k| kept_of(&k.bytes)["replied"].as_array().is_some_and(|r| r.iter().any(|x| x == "chat:9")))) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "a save that holds r9 done");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     // superseded: a newer generation started, this one's save refused, and
     // it ends
