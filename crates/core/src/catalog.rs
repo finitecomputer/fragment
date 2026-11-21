@@ -985,7 +985,42 @@ impl Catalog {
                 }
             }
         }
-        Ok(Catalog { providers: rows })
+        let catalog = Catalog { providers: rows };
+        catalog.priced_once()?;
+        Ok(catalog)
+    }
+
+    /// Each name the book prices for this catalog has one price, and the
+    /// book holds them all (`price::PRICES_MAX`): a charge's unit at
+    /// another price than a name already priced (a part's, another
+    /// charge's) is refused, never priced as whichever came first.
+    fn priced_once(&self) -> Result<(), CatalogError> {
+        let mut seen: Vec<(String, i64, u64)> = vec![];
+        for (provider, key, micros, per) in self.named_prices() {
+            match seen.iter().find(|(k, ..)| *k == key) {
+                Some((_, m, p)) if (*m, *p) != (micros, per) => return Err(CatalogError::Charges { provider, why: format!("{key} is priced twice, at two prices") }),
+                Some(_) => {}
+                None => seen.push((key, micros, per)),
+            }
+        }
+        match seen.len() <= crate::price::PRICES_MAX {
+            true => Ok(()),
+            false => Err(CatalogError::TooMany(seen.len())),
+        }
+    }
+
+    /// The rows as a deployment names them (its Worker's `FRAGMENT_PROVIDERS`):
+    /// each default left out (a row's charges and calls an hour, as the
+    /// book's for its name), so the variable stays the size of its config
+    /// and the cell's parse fills them in again.
+    pub fn as_configured(&self) -> Vec<Provider> {
+        let mut rows = self.providers.clone();
+        for p in rows.iter_mut().filter(|p| p.kind == Kind::Operator) {
+            if p.charges == default_charges(&p.name) {
+                p.charges.clear();
+            }
+        }
+        rows
     }
 
     /// This catalog and a person's Vault's secrets beside it, each a row
@@ -1065,24 +1100,30 @@ impl Catalog {
     /// operator row of its key's name. A name is priced once, as the first
     /// of these names it.
     pub fn key_prices(&self) -> Vec<crate::price::KeyPrice> {
-        use crate::price::{default_key_price, KeyPrice, KEY_PARTS};
-        let mut prices = vec![];
-        for p in self.providers.iter().filter(|p| p.kind == Kind::Operator) {
-            if let Some(price) = p.price {
-                prices.push(KeyPrice { key: p.name.clone(), micros: price.micros, per: price.per });
+        let mut prices: Vec<crate::price::KeyPrice> = vec![];
+        for (_, key, micros, per) in self.named_prices() {
+            if !prices.iter().any(|k| k.key == key) {
+                prices.push(crate::price::KeyPrice { key, micros, per });
             }
+        }
+        prices
+    }
+
+    /// Every name the book prices for each operator row, by its row's
+    /// name, in `key_prices`' order, a name once or more.
+    fn named_prices(&self) -> Vec<(String, String, i64, u64)> {
+        use crate::price::{default_key_price, KEY_PARTS};
+        let mut named = vec![];
+        for p in self.providers.iter().filter(|p| p.kind == Kind::Operator) {
+            let own = p.price.map(|price| (p.name.clone(), price.micros, price.per));
             let charged = p.charges.iter().map(|c| (c.priced_as(&p.name), c.price.micros, c.price.per));
             let parts = KEY_PARTS.iter().filter(|part| part.key == p.name).map(|part| {
                 let (micros, per) = default_key_price(part.priced_as).expect("each part is priced in DEFAULT_KEYS");
                 (part.priced_as.to_string(), micros, per)
             });
-            for (key, micros, per) in charged.chain(parts) {
-                if !prices.iter().any(|k: &KeyPrice| k.key == key) {
-                    prices.push(KeyPrice { key, micros, per });
-                }
-            }
+            named.extend(own.into_iter().chain(charged).chain(parts).map(|(key, micros, per)| (p.name.clone(), key, micros, per)));
         }
-        prices
+        named
     }
 }
 
@@ -1610,6 +1651,13 @@ mod tests {
         assert_eq!(c.get("xai").unwrap().charges[0].header.as_deref(), Some("x-units"));
         assert!(c.key_prices().iter().any(|k| k.key == "xai:unit" && k.micros == 7));
         assert!(!c.key_prices().iter().any(|k| k.key == "xai:tick"), "its name's charges are replaced");
+        // as a deployment names them: defaults left out, filled in again by the cell's parse
+        let defaulted = parse(json!([row("xai", json!({})), row("elevenlabs", json!({})), row("firecrawl", json!({}))])).unwrap();
+        let configured = defaulted.as_configured();
+        assert!(configured.iter().all(|p| p.charges.is_empty()), "the book's own are left out");
+        assert_eq!(Catalog::parse(&serde_json::to_string(&configured).unwrap()).unwrap(), defaulted);
+        let mine = parse(json!([row("xai", json!({ "charges": [{ "calls": ["GET /v1/**"], "header": "x-units", "unit": "unit", "price": { "micros": 7, "per": 1 } }] }))])).unwrap();
+        assert_eq!(mine.as_configured()[0].charges.len(), 1, "a row's own are kept");
         // a vendor the book has no charges for has none
         assert_eq!(parse(json!([row("perplexity", json!({})), row("google-places", json!({}))])).unwrap().get("google-places").unwrap().charges, vec![]);
     }
@@ -1641,6 +1689,13 @@ mod tests {
             assert!(refused(bad.clone()), "{bad}");
         }
         assert!(matches!(parse(row("own", json!([charge(json!({}))]))), Err(CatalogError::Charges { .. }) | Err(CatalogError::Price { .. })), "only an operator key is charged");
+        // a name priced twice is refused at two prices, never priced as whichever came first
+        let twice = |a: i64, b: i64| json!([charge(json!({ "unit": "unit", "price": { "micros": a, "per": 1 } })), charge(json!({ "header": "x-units", "unit": "unit", "price": { "micros": b, "per": 1 } }))]);
+        assert!(parse(row("operator", twice(5, 5))).is_ok(), "two places to read one unit, at one price");
+        assert!(refused(twice(5, 6)), "one unit at two prices");
+        let speech = json!([{ "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"],
+            "charges": [{ "calls": ["GET /v1/example"], "unit": "speech", "price": { "micros": 100_000, "per": 1 } }] }]);
+        assert!(matches!(parse(speech), Err(CatalogError::Charges { provider, .. }) if provider == "elevenlabs"), "a charge's unit never takes a part's name at another price");
         assert!(matches!(parse(row("operator", json!([charge(json!({ "calls": ["FETCH /x"] }))]))), Err(CatalogError::Shape(_))), "a call is one a deny could name");
     }
 

@@ -1591,7 +1591,7 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         }
     }
     if !catalog.is_empty() {
-        v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(catalog.providers())?));
+        v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(&catalog.as_configured())?));
     }
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
@@ -2315,7 +2315,13 @@ mod tests {
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
-            assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
+            // each key's estimates at list, and its charges the book's for its name
+            assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key).is_none_or(|list| list == (k.micros, k.per))), "{file}: at list");
+            let operator = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator);
+            assert!(operator.into_iter().all(|p| p.charges == fragment_core::catalog::default_charges(&p.name)), "{file}: each key charged as the book says");
+            let mut book = fragment_core::price::PriceBook::defaults();
+            book.keys = catalog.key_prices();
+            assert_eq!(book.validate(), Ok(()), "{file}: a book the ledger takes");
             // the example's tiers through OpenRouter (decision 61); a preview's on Workers AI
             let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
