@@ -145,6 +145,28 @@ test("each runner life is a generation of its own: no save's key reused, a stale
   assert.deepEqual(d.saves().map((s) => s.id), ["2-1", "3-1"]);
 });
 
+test("an upload under way holds its key: a replay of it is refused, and superseded it lets go of its own file alone", async () => {
+  const d = door();
+  await d.start();
+  const l = life(await d.restore(1));
+  let holding, release;
+  const held = new Promise((r) => (holding = r));
+  const gate = new Promise((r) => (release = r));
+  d.blobs.uploading = async () => {
+    d.blobs.uploading = null;
+    holding();
+    await gate;
+  };
+  const first = d.save(l, 1);
+  await held;
+  assert.equal((await d.save(l, 1)).status, 409, "its replay, while it uploads, refused");
+  assert.equal(life(await d.restore(1)), l + 1, "its runner restarted meanwhile");
+  release();
+  assert.equal((await first).status, 409, "superseded during its upload");
+  for (const s of d.saves()) assert.ok(d.blobs.files.has(key(s.id)), `every save named has its file: ${s.id}`);
+  assert.deepEqual(d.saves(), [], "none of the superseded life's");
+});
+
 test("a door that saved never starts as a new one: its last file lost, it stops", async () => {
   const d = door();
   await d.start();

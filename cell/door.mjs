@@ -50,6 +50,8 @@ async function bounded(request) {
 export class SimplexDoor extends DurableObject {
   #watching = 0;
   #starting = null;
+  // the save keys an upload holds, one upload each
+  #uploading = new Set();
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -238,19 +240,25 @@ export class SimplexDoor extends DurableObject {
     if (!(Number.isInteger(seq) && seq > 0 && Number.isInteger(mark) && mark >= 0 && mark <= d.marks && Number.isInteger(length) && length > 0)) {
       return refusal(400, "invalid", "a save names its seq, its mark (one the door numbered) and its length");
     }
-    // its key its life's own (a life's seqs never repeat), so no committed
+    // its key its life's own (a life's seqs never repeat), held by one
+    // upload at a time (taken before anything awaits), so no committed
     // save's file is ever written over or deleted by another's upload
-    if (this.ctx.storage.sql.exec("SELECT 1 FROM saves WHERE generation = ? AND seq = ?", generation, seq).toArray().length) return refusal(409, "taken", `save ${generation}-${seq} is taken`);
     const key = saveKey(d.door, generation, seq);
-    const { readable, writable } = new FixedLengthStream(length);
-    const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
-    d = this.#door();
-    if (fenced(generation, d.generation)) {
-      await this.env.BLOBS.delete(key);
-      return refusal(409, "superseded", `life ${generation} was superseded during its save`);
+    if (this.#uploading.has(key) || this.ctx.storage.sql.exec("SELECT 1 FROM saves WHERE generation = ? AND seq = ?", generation, seq).toArray().length) return refusal(409, "taken", `save ${generation}-${seq} is taken`);
+    this.#uploading.add(key);
+    try {
+      const { readable, writable } = new FixedLengthStream(length);
+      const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      d = this.#door();
+      if (fenced(generation, d.generation)) {
+        await this.env.BLOBS.delete(key);
+        return refusal(409, "superseded", `life ${generation} was superseded during its save`);
+      }
+      this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (?, ?, ?, ?, ?, 0)", generation, seq, mark, put.size, Date.now());
+      this.ctx.storage.sql.exec("UPDATE door SET saved = saved + 1 WHERE id = 1");
+    } finally {
+      this.#uploading.delete(key);
     }
-    this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (?, ?, ?, ?, ?, 0)", generation, seq, mark, put.size, Date.now());
-    this.ctx.storage.sql.exec("UPDATE door SET saved = saved + 1 WHERE id = 1");
     // the rows let go first, so no restore picks one whose file goes
     const gone = surplus(this.#saves());
     for (const s of gone) this.ctx.storage.sql.exec("DELETE FROM saves WHERE generation = ? AND seq = ?", s.generation, s.seq);

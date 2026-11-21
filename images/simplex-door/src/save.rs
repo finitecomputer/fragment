@@ -246,15 +246,18 @@ pub fn staged_contact(dir: &Path, contact: i64) -> Result<bool, SaveError> {
     Ok(n == 1)
 }
 
-/// What SQLite said of a staged database: its bytes' fault (no database,
-/// or a corrupt one: the save's) or this container's (its disk full, a
-/// file it could not open: `Io`, never held against the save).
+/// What SQLite said of a staged database: this container's own failure
+/// (its disk full or failing, a file it could not open or lock, its
+/// memory: `Io`, never held against the save), or else the save's (no
+/// database, a corrupt one, one without the tables or columns a save
+/// holds: told so, so its runner never ends on it again and again).
 fn sqlite(e: rusqlite::Error) -> SaveError {
-    let corrupt = matches!(&e, rusqlite::Error::SqliteFailure(f, _) if matches!(f.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt));
-    if corrupt {
-        SaveError::Corrupt(e.to_string())
-    } else {
+    use rusqlite::ErrorCode::*;
+    let local = matches!(&e, rusqlite::Error::SqliteFailure(f, _) if matches!(f.code, CannotOpen | SystemIoFailure | DiskFull | DatabaseBusy | DatabaseLocked | OutOfMemory | ReadOnly | PermissionDenied | FileLockingProtocolFailed | NoLargeFileSupport | OperationInterrupted));
+    if local {
         SaveError::Io(e.to_string())
+    } else {
+        SaveError::Corrupt(e.to_string())
     }
 }
 
@@ -540,6 +543,21 @@ mod tests {
         std::fs::write(d.join(STAGE), b"a file where the stage goes").unwrap();
         assert!(matches!(stage(&good, &d), Err(SaveError::Io(_))), "a local failure is Io");
         std::fs::remove_file(d.join(STAGE)).unwrap();
+        assert!(matches!(sqlite(Connection::open(d.join("nowhere/x.db")).unwrap_err()), SaveError::Io(_)), "a database it cannot open is Io");
+        // a save whose tables lack the column its link is read by is the
+        // save's fault: told so, never its runner ended again and again on
+        // it (round 2 of the review of #1435)
+        let odd = dir("stage-odd");
+        wal(&odd).unwrap();
+        for (db, tables) in TABLES {
+            let c = Connection::open(odd.join(db)).unwrap();
+            for t in tables {
+                c.execute_batch(&format!("CREATE TABLE {t} (other INTEGER)")).unwrap();
+            }
+        }
+        let lacking = make(&odd, &odd.join("save"), b"{}").unwrap();
+        assert_eq!(stage(&lacking, &d).unwrap(), b"{}", "its tables are there");
+        assert!(matches!(staged_contact(&d, 3), Err(SaveError::Corrupt(_))), "a column it lacks: {:?}", staged_contact(&d, 3));
         assert_eq!(stage(&good, &d).unwrap(), b"{}");
         assert_eq!(staged_contact(&d, 3), Ok(true));
         assert_eq!(staged_contact(&d, 4), Ok(false), "a contact it lacks");
