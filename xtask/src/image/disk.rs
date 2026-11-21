@@ -25,15 +25,26 @@ pub fn disk_bytes() -> u64 {
 /// What runs in the helper, the image's files on its standard input: a
 /// fresh computer's disk on a loop device of its own (its node made when
 /// the host has none yet), the files written to it, and its `stat -f`. Its
+/// filesystem is made on the device, once attached, and mounted as btrfs by
+/// name: a runner whose kernel has not loaded btrfs (GitHub's ubuntu-26.04,
+/// `ubuntu-latest`) loads it as `mkfs.btrfs` opens `/dev/btrfs-control` for
+/// the device, where made on the file it never did, and BusyBox's `mount`,
+/// guessing among the kernel's loaded filesystems, failed "Invalid argument"
+/// (master run 44919840464; scratch runs 44924957637, 44925063145). It
+/// traces each step on its stderr (`set -x`), so a measure that fails says
+/// which step it stopped at, and reads its input to its end, so a `tar` that
+/// stops at its archive's end marker leaves `docker export` no pipe closed
+/// under it (master run 44919840464: the export died of SIGPIPE). Its
 /// loop device is let go however it ends (`trap`, each step whatever the
 /// one before did: `set -e` would end it at an `umount` of no mount), so a
 /// measure that fails leaks none on the host (Codex on #1422).
 fn script(disk: u64) -> String {
     format!(
-        "set -e; apk add --no-cache btrfs-progs > /dev/null; truncate -s {disk} /disk.img; mkfs.btrfs -q -f /disk.img > /dev/null; \
+        "set -ex; apk add --no-cache btrfs-progs > /dev/null; truncate -s {disk} /disk.img; \
          dev=$(losetup -f); [ -e \"$dev\" ] || mknod \"$dev\" b 7 \"${{dev#/dev/loop}}\"; losetup \"$dev\" /disk.img; \
-         trap 'umount /m 2> /dev/null || :; losetup -d \"$dev\" 2> /dev/null || :' EXIT; mkdir -p /m; mount -o compress=zstd:3 \"$dev\" /m; \
-         mkdir -p /m/image /m/data; tar -x -C /m/image -f -; sync; btrfs filesystem sync /m > /dev/null; stat -f -c '%b %a %S' /m"
+         trap 'umount /m 2> /dev/null || :; losetup -d \"$dev\" 2> /dev/null || :' EXIT; mkfs.btrfs -q -f \"$dev\" > /dev/null; \
+         mkdir -p /m; mount -t btrfs -o compress=zstd:3 \"$dev\" /m; \
+         mkdir -p /m/image /m/data; tar -x -C /m/image -f -; cat > /dev/null; sync; btrfs filesystem sync /m > /dev/null; stat -f -c '%b %a %S' /m"
     )
 }
 
@@ -58,13 +69,38 @@ pub fn share(reference: &str) -> Result<u64> {
         let tar = export.stdout.take().context("docker export's tar")?;
         let out = Command::new("docker").args(["run", "--rm", "-i", "--privileged", HELPER, "sh", "-c", &script(disk_bytes())]).stdin(tar).output().context("could not start docker run")?;
         let exported = export.wait()?;
-        ensure!(exported.success(), "docker export of {reference} failed ({exported}): its share is not measured");
-        ensure!(out.status.success(), "the disk's measure of {reference}: {}", said(&out));
+        judged(reference, out.status.success().then_some(()).ok_or_else(|| format!("{} ({})", tail(&said(&out)), out.status)), exported.success().then_some(()).ok_or_else(|| exported.to_string()))?;
         used(&String::from_utf8_lossy(&out.stdout))
     })();
     let _ = Command::new("docker").args(["rm", &id]).output();
     measured
 }
+
+/// A measure's verdict from its two processes: the helper's own failure
+/// first, its stderr's tail (where it stopped), whatever the export did,
+/// since an export the helper stopped reading dies of SIGPIPE, which says
+/// nothing of why (master run 44919840464 said only that); then an export
+/// that failed under a helper that answered.
+fn judged(reference: &str, helper: Result<(), String>, export: Result<(), String>) -> Result<()> {
+    if let Err(why) = helper {
+        let and = export.err().map(|e| format!("; its export then {e}")).unwrap_or_default();
+        bail!("the disk's measure of {reference} failed: {why}{and}");
+    }
+    if let Err(e) = export {
+        bail!("docker export of {reference} failed ({e}) though its measure answered: its share is not measured");
+    }
+    Ok(())
+}
+
+/// The last `TAIL_BYTES` of a stderr, cut at a character: where it stopped.
+fn tail(text: &str) -> &str {
+    let mut at = text.len().saturating_sub(TAIL_BYTES);
+    while !text.is_char_boundary(at) {
+        at += 1;
+    }
+    &text[at..]
+}
+const TAIL_BYTES: usize = 2000;
 
 /// Holds `reference` to the budget: its share, or an error past it.
 pub fn check(reference: &str) -> Result<u64> {
@@ -107,14 +143,38 @@ mod tests {
     }
 
     /// Goal (Codex on #1422): the measure lets its loop device go however
-    /// it ends, and writes the image's files to a disk of a computer's size.
+    /// it ends, and writes the image's files to a disk of a computer's size;
+    /// (master run 44919840464) on a kernel that has not loaded btrfs too.
     #[test]
     fn the_measure_lets_its_loop_device_go() {
         let s = script(disk_bytes());
         let trap = s.find("trap '").expect("a trap");
-        assert!(trap > s.find("losetup \"$dev\"").unwrap() && trap < s.find("mount -o").unwrap(), "set once the device is attached, before anything can fail");
+        assert!(trap > s.find("losetup \"$dev\"").unwrap() && trap < s.find("mkfs.btrfs").unwrap(), "set once the device is attached, before anything can fail");
         assert!(s.contains("umount /m 2> /dev/null || :; losetup -d \"$dev\" 2> /dev/null || :"), "each step of the trap runs, under set -e, whether the mount was made or not (Codex on #1422)");
         assert!(s.contains("truncate -s 20000002048 ") && s.contains("compress=zstd:3"));
         assert!(run(&[]).is_err() && run(&["a".into(), "b".into()]).is_err());
+        assert!(s.contains("set -ex;") && s.contains("tar -x -C /m/image -f -; cat > /dev/null;"), "it says where it stopped, and reads its input to its end");
+        let (attach, mkfs, mount) = (s.find("losetup \"$dev\" /disk.img").unwrap(), s.find("mkfs.btrfs -q -f \"$dev\"").unwrap(), s.find("mount -t btrfs -o compress=zstd:3 \"$dev\" /m").unwrap());
+        assert!(attach < mkfs && mkfs < mount && !s.contains("mkfs.btrfs -q -f /disk.img"), "made on the device once attached, which loads btrfs on a kernel that has not (GitHub's ubuntu-26.04), and mounted as btrfs by name");
+    }
+
+    /// Goal (master run 44919840464: "docker export … failed (signal: 13
+    /// (SIGPIPE)): its share is not measured", the helper's reason never
+    /// shown): a helper that failed is reported with its own stderr, whatever
+    /// the export did; an export that failed under a helper that answered is
+    /// reported as the export's; both fine, fine. Valid, both orders of
+    /// failure, a long stderr cut at a character.
+    #[test]
+    fn a_failed_measure_says_why() {
+        let helper = || Err("+ losetup -f\nlosetup: cannot find an unused loop device (exit status: 1)".to_string());
+        let sigpipe = || Err("signal: 13 (SIGPIPE)".to_string());
+        let e = judged("img", helper(), sigpipe()).unwrap_err().to_string();
+        assert!(e.contains("losetup: cannot find an unused loop device") && e.contains("SIGPIPE") && e.starts_with("the disk's measure of img failed"), "{e}");
+        let e = judged("img", Ok(()), sigpipe()).unwrap_err().to_string();
+        assert!(e.starts_with("docker export of img failed (signal: 13 (SIGPIPE)) though its measure answered"), "{e}");
+        assert!(judged("img", Ok(()), Ok(())).is_ok());
+        let long = format!("{}é{}", "a".repeat(10), "b".repeat(TAIL_BYTES));
+        assert_eq!(tail(&long).len(), TAIL_BYTES, "cut at a character");
+        assert_eq!(tail("short"), "short");
     }
 }
