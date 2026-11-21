@@ -13,7 +13,8 @@
 //!   so no invite reaches into an existing one.
 //! - *An invite asked for* by the door's inviter (`passkeys.inviter`: one
 //!   key, a platform's, that starts accounts here for its own signed-in
-//!   people): its NIP-98 signed ask at `INVITES_PATH` names an email; a new
+//!   people): its NIP-98 signed ask at `INVITES_PATH` names an email (and a
+//!   nonce, so two asks in one second are two events); a new
 //!   one gets an invite good for `INVITE_ASKED_TTL_S`, and one with an
 //!   account gets "sign in" and nothing else (`asked_invite`). So the
 //!   inviter can start accounts here and get into none. An ask is answered
@@ -76,6 +77,9 @@ pub const ASK_WINDOW_S: i64 = 60;
 /// Asks remembered at once, each for `2 * ASK_WINDOW_S` (as long as its
 /// replay could pass the clock), at most.
 pub const ASKS_MAX: usize = 256;
+/// An ask's nonce at most: NIP-98 signs with no randomness and to the
+/// second, so an inviter makes two asks in one second distinct by one.
+pub const NONCE_CHARS_MAX: usize = 64;
 /// The issuer a passkey account's subject is made under: the door's own
 /// for its relying party (person.rs), never a provider's.
 pub fn issuer_of(rp_id: &str) -> String {
@@ -287,8 +291,13 @@ impl Passkeys {
         #[serde(deny_unknown_fields)]
         struct Ask {
             email: String,
+            #[serde(default)]
+            nonce: Option<String>,
         }
-        let ask: Ask = serde_json::from_slice(body).map_err(|_| PasskeyError::Refused("an ask is {\"email\": …}"))?;
+        let ask: Ask = serde_json::from_slice(body).map_err(|_| PasskeyError::Refused("an ask is {\"email\": …, \"nonce\"?: …}"))?;
+        if ask.nonce.as_deref().is_some_and(|n| n.len() > NONCE_CHARS_MAX || !n.bytes().all(|b| b.is_ascii_alphanumeric())) {
+            return Err(PasskeyError::Refused("a nonce is at most 64 letters and digits"));
+        }
         let email = email_ok(&ask.email).ok_or(PasskeyError::Refused("that is not an email"))?;
         if self.store.read()?.by_email(&email).is_some() {
             return Ok(Invited::HasAccount);
@@ -542,6 +551,12 @@ mod tests {
         assert_eq!(p.invite_email(&t, now).unwrap(), "fay@example.com");
         assert!(p.invite_email(&t, now + INVITE_ASKED_TTL_S).is_err(), "an hour, no more");
         assert!(matches!(p.asked_invite(Some(&h), ASK_URL, &body, now), Err(PasskeyError::NotAsked(_))), "a replay");
+        let nonced = br#"{"email":"fay@example.com","nonce":"0a1b2c"}"#;
+        let h = inviter().header("POST", ASK_URL, nonced, now);
+        assert!(matches!(p.asked_invite(Some(&h), ASK_URL, nonced, now), Ok(Invited::New(_))), "the same second, another nonce: another ask");
+        let long = format!(r#"{{"email":"fay@example.com","nonce":"{}"}}"#, "a".repeat(NONCE_CHARS_MAX + 1));
+        let h = inviter().header("POST", ASK_URL, long.as_bytes(), now);
+        assert!(matches!(p.asked_invite(Some(&h), ASK_URL, long.as_bytes(), now), Err(PasskeyError::Refused(_))), "a nonce too long");
 
         p.store
             .change(|st| -> Result<(), PasskeyError> {

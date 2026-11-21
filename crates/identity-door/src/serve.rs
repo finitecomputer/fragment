@@ -453,7 +453,7 @@ fn credential<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> 
 
 /// `POST /passkeys/invites` (`INVITES_PATH`): an invite the door's inviter
 /// asks for (passkeys.rs `asked_invite`), signed by NIP-98 for the door's
-/// public URL of this path. A new email's answer is its invite's link
+/// public URL of this path, its body `{"email": …, "nonce"?: …}`. A new email's answer is its invite's link
 /// (`invite`), an email with an account's the platform to sign in at
 /// (`signIn`); an ask not the inviter's, fresh and first is a 401, and a
 /// door with no inviter has no such route.
