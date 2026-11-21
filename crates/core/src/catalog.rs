@@ -1022,7 +1022,43 @@ impl Catalog {
                 }
             }
         }
-        Ok(Catalog { providers: rows })
+        let catalog = Catalog { providers: rows };
+        catalog.priced_once()?;
+        Ok(catalog)
+    }
+
+    /// Each name the book prices for this catalog has one price, and the
+    /// book holds them all (`price::PRICES_MAX`): a charge's unit at
+    /// another price than a name already priced (a part's, another
+    /// charge's) is refused, never priced as whichever came first.
+    fn priced_once(&self) -> Result<(), CatalogError> {
+        let mut seen: Vec<(String, i64, u64)> = vec![];
+        for (provider, key, micros, per, old) in self.named_prices() {
+            match seen.iter().find(|(k, ..)| *k == key) {
+                // an older release's estimate a call yields to the row's own price a call
+                Some((_, m, p)) if (*m, *p) != (micros, per) && !(old && key == provider) => return Err(CatalogError::Charges { provider, why: format!("{key} is priced twice, at two prices") }),
+                Some(_) => {}
+                None => seen.push((key, micros, per)),
+            }
+        }
+        match seen.len() <= crate::price::PRICES_MAX {
+            true => Ok(()),
+            false => Err(CatalogError::TooMany(seen.len())),
+        }
+    }
+
+    /// The rows as a deployment names them (its Worker's `FRAGMENT_PROVIDERS`):
+    /// each default left out (a row's charges and calls an hour, as the
+    /// book's for its name), so the variable stays the size of its config
+    /// and the cell's parse fills them in again.
+    pub fn as_configured(&self) -> Vec<Provider> {
+        let mut rows = self.providers.clone();
+        for p in rows.iter_mut().filter(|p| p.kind == Kind::Operator) {
+            if p.charges == default_charges(&p.name) {
+                p.charges.clear();
+            }
+        }
+        rows
     }
 
     /// This catalog and a person's Vault's secrets beside it, each a row
@@ -1107,20 +1143,30 @@ impl Catalog {
     /// (`price::LEGACY_KEYS`). A name is priced once, as the first of these
     /// names it.
     pub fn key_prices(&self) -> Vec<crate::price::KeyPrice> {
-        use crate::price::{KeyPrice, LEGACY_KEYS};
-        let mut prices: Vec<KeyPrice> = vec![];
-        for p in self.providers.iter().filter(|p| p.kind == Kind::Operator) {
-            let own = p.price.map(|price| (p.name.clone(), price.micros, price.per));
-            let charged = p.charges.iter().map(|c| (c.priced_as(&p.name), c.price.micros, c.price.per));
-            let theirs = |name: &str| name == p.name || name.strip_prefix(p.name.as_str()).is_some_and(|rest| rest.starts_with(':'));
-            let legacy = LEGACY_KEYS.iter().filter(|(name, ..)| theirs(name)).map(|(name, micros, per)| (name.to_string(), *micros, *per));
-            for (key, micros, per) in own.into_iter().chain(charged).chain(legacy) {
-                if !prices.iter().any(|k| k.key == key) {
-                    prices.push(KeyPrice { key, micros, per });
-                }
+        let mut prices: Vec<crate::price::KeyPrice> = vec![];
+        for (_, key, micros, per, _) in self.named_prices() {
+            if !prices.iter().any(|k| k.key == key) {
+                prices.push(crate::price::KeyPrice { key, micros, per });
             }
         }
         prices
+    }
+
+    /// Every name the book prices for each operator row, by its row's
+    /// name, in `key_prices`' order, a name once or more: its own price a
+    /// call, its charges', and an older release's names of it (`true`:
+    /// those fill a name nothing else prices, at no price of their own).
+    fn named_prices(&self) -> Vec<(String, String, i64, u64, bool)> {
+        use crate::price::LEGACY_KEYS;
+        let mut named = vec![];
+        for p in self.providers.iter().filter(|p| p.kind == Kind::Operator) {
+            let own = p.price.map(|price| (p.name.clone(), price.micros, price.per, false));
+            let charged = p.charges.iter().map(|c| (c.priced_as(&p.name), c.price.micros, c.price.per, false));
+            let theirs = |name: &str| name == p.name || name.strip_prefix(p.name.as_str()).is_some_and(|rest| rest.starts_with(':'));
+            let legacy = LEGACY_KEYS.iter().filter(|(name, ..)| theirs(name)).map(|(name, micros, per)| (name.to_string(), *micros, *per, true));
+            named.extend(own.into_iter().chain(charged).chain(legacy).map(|(key, micros, per, old)| (p.name.clone(), key, micros, per, old)));
+        }
+        named
     }
 }
 
@@ -1199,6 +1245,7 @@ mod tests {
         let ticks = [("/usage/cost_in_usd_ticks", 1_234_500)];
         assert_eq!(call("xai", &["POST"], "/v1/responses", 200, &ticks), key("xai:tick", 1_234_500));
         assert_eq!(call("xai", &["POST"], "/v1/images/generations", 200, &ticks), key("xai:tick", 1_234_500), "an image, by its cost");
+        assert_eq!(call("xai", &["POST"], "/v1/responses", 200, &[("/response/usage/cost_in_usd_ticks", 77)]), key("xai:tick", 77), "a Responses stream, in its last event's response");
         assert_eq!(call("xai", &["GET"], "/v1/responses/r1", 200, &ticks), None, "a stored response read says its cost again: not read");
         assert_eq!(call("xai", &["POST"], "/v1/chat/completions", 200, &[]), None, "an answer that says nothing, nothing");
         assert_eq!(call("xai", &["POST"], "/v1/responses", 429, &ticks), None, "a call its vendor refused made nothing");
@@ -1686,6 +1733,13 @@ mod tests {
         assert_eq!(c.get("xai").unwrap().charges[0].header.as_deref(), Some("x-units"));
         assert!(c.key_prices().iter().any(|k| k.key == "xai:unit" && k.micros == 7));
         assert!(!c.key_prices().iter().any(|k| k.key == "xai:tick"), "its name's charges are replaced");
+        // as a deployment names them: defaults left out, filled in again by the cell's parse
+        let defaulted = parse(json!([row("xai", json!({})), row("elevenlabs", json!({})), row("firecrawl", json!({}))])).unwrap();
+        let configured = defaulted.as_configured();
+        assert!(configured.iter().all(|p| p.charges.is_empty()), "the book's own are left out");
+        assert_eq!(Catalog::parse(&serde_json::to_string(&configured).unwrap()).unwrap(), defaulted);
+        let mine = parse(json!([row("xai", json!({ "charges": [{ "calls": ["GET /v1/**"], "header": "x-units", "unit": "unit", "price": { "micros": 7, "per": 1 } }] }))])).unwrap();
+        assert_eq!(mine.as_configured()[0].charges.len(), 1, "a row's own are kept");
         // a vendor the book has no charges for has none
         let places = parse(json!([row("perplexity", json!({})), row("google-places", json!({}))])).unwrap();
         assert_eq!(places.get("google-places").unwrap().charges, vec![]);
@@ -1724,6 +1778,13 @@ mod tests {
             assert!(refused(bad.clone()), "{bad}");
         }
         assert!(matches!(parse(row("own", json!([charge(json!({}))]))), Err(CatalogError::Charges { .. }) | Err(CatalogError::Price { .. })), "only an operator key is charged");
+        // a name priced twice is refused at two prices, never priced as whichever came first
+        let twice = |a: i64, b: i64| json!([charge(json!({ "unit": "unit", "price": { "micros": a, "per": 1 } })), charge(json!({ "header": "x-units", "unit": "unit", "price": { "micros": b, "per": 1 } }))]);
+        assert!(parse(row("operator", twice(5, 5))).is_ok(), "two places to read one unit, at one price");
+        assert!(refused(twice(5, 6)), "one unit at two prices");
+        let speech = json!([{ "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"],
+            "charges": [{ "calls": ["GET /v1/example"], "unit": "speech", "price": { "micros": 100_000, "per": 1 } }] }]);
+        assert!(matches!(parse(speech), Err(CatalogError::Charges { provider, .. }) if provider == "elevenlabs"), "a charge's unit never takes a part's name at another price");
         assert!(matches!(parse(row("operator", json!([charge(json!({ "calls": ["FETCH /x"] }))]))), Err(CatalogError::Shape(_))), "a call is one a deny could name");
     }
 

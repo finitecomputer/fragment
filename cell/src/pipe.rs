@@ -122,9 +122,11 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>], pointe
     let paths: Vec<Vec<String>> = pointers.iter().map(|p| fragment_core::price::pointer_segments(p).expect("a charge's pointer is checked with its row")).collect();
     let none = vec![None; paths.len()];
     let redact = |text: String| fragment_core::secrets::redact_passes(text, passes);
+    // appended, not set: each of several fields of one name (`set-cookie`)
+    // stays its own
     let headers = Headers::new();
     for (name, value) in resp.headers().entries() {
-        headers.set(&name, &redact(value))?;
+        headers.append(&name, &redact(value))?;
     }
     let status = resp.status_code();
     // no body (a HEAD's, a 204's): its headers were all it could echo
@@ -153,27 +155,40 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>], pointe
             }
         }
     }
-    // a stream: what was read so far, then the rest as it comes, each named,
-    // its events read for the pointers as they pass, told at its end
+    // a stream: what was read so far, then the rest as it comes, each named;
+    // with nothing to read, said at once (a header's charge waits on no body)
     let _ = headers.delete("content-length");
-    let (tell, told) = futures_channel::oneshot::channel::<Vec<Option<u64>>>();
-    let mut events: Vec<fragment_core::price::Events> = paths.into_iter().map(fragment_core::price::Events::new).collect();
-    for e in &mut events {
-        e.push(&read);
+    if paths.is_empty() {
+        let first = streamed.push(&read);
+        let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
+            let (mut stream, mut streamed) = state?;
+            match stream.next().await {
+                Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
+                Some(Err(e)) => Some((Err(e), None)),
+                None => Some((Ok(streamed.finish()), None)),
+            }
+        });
+        let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
+        return Ok((Response::from_stream(body)?.with_status(status).with_headers(headers), Box::pin(futures_util::future::ready(none))));
     }
+    // its numbers read as it passes, told at its end (or where it broke)
+    let mut reader = Reading::of(fragment_core::secrets::read_whole(&kind), paths);
+    reader.push(&read);
+    let (tell, told) = futures_channel::oneshot::channel::<Vec<Option<u64>>>();
     let first = streamed.push(&read);
-    let rest = futures_util::stream::unfold(Some((stream, streamed, events, tell)), |state| async move {
-        let (mut stream, mut streamed, mut events, tell) = state?;
+    let rest = futures_util::stream::unfold(Some((stream, streamed, reader, tell)), |state| async move {
+        let (mut stream, mut streamed, mut reader, tell) = state?;
         match stream.next().await {
             Some(Ok(piece)) => {
-                for e in &mut events {
-                    e.push(&piece);
-                }
-                Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed, events, tell))))
+                reader.push(&piece);
+                Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed, reader, tell))))
             }
-            Some(Err(e)) => Some((Err(e), None)),
+            Some(Err(e)) => {
+                let _ = tell.send(reader.finish());
+                Some((Err(e), None))
+            }
             None => {
-                let _ = tell.send(events.into_iter().map(fragment_core::price::Events::finish).collect());
+                let _ = tell.send(reader.finish());
                 Some((Ok(streamed.finish()), None))
             }
         }
@@ -181,4 +196,45 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>], pointe
     let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
     let said: Said = Box::pin(async move { told.await.unwrap_or(none) });
     Ok((Response::from_stream(body)?.with_status(status).with_headers(headers), said))
+}
+
+/// A document past `ANSWER_HIDDEN_MAX_BYTES` is still read for its numbers
+/// up to this long (an image's answer, its images inline): a copy of it
+/// kept to its end, past which its numbers are none.
+const ANSWER_METER_MAX_BYTES: usize = 24 * 1024 * 1024;
+
+/// How a streamed answer's numbers are read as it passes: a document's
+/// whole (a copy, to `ANSWER_METER_MAX_BYTES`), or an event stream's events.
+enum Reading {
+    Document { paths: Vec<Vec<String>>, copy: Option<Vec<u8>> },
+    Events(Vec<fragment_core::price::Events>),
+}
+
+impl Reading {
+    fn of(document: bool, paths: Vec<Vec<String>>) -> Reading {
+        match document {
+            true => Reading::Document { paths, copy: Some(vec![]) },
+            false => Reading::Events(paths.into_iter().map(fragment_core::price::Events::new).collect()),
+        }
+    }
+
+    fn push(&mut self, piece: &[u8]) {
+        match self {
+            Reading::Document { copy, .. } => {
+                let over = copy.as_ref().is_some_and(|c| c.len() + piece.len() > ANSWER_METER_MAX_BYTES);
+                match over {
+                    true => *copy = None,
+                    false => copy.iter_mut().for_each(|c| c.extend_from_slice(piece)),
+                }
+            }
+            Reading::Events(events) => events.iter_mut().for_each(|e| e.push(piece)),
+        }
+    }
+
+    fn finish(self) -> Vec<Option<u64>> {
+        match self {
+            Reading::Document { paths, copy } => paths.iter().map(|p| copy.as_deref().and_then(|c| fragment_core::price::number_at(c, p))).collect(),
+            Reading::Events(events) => events.into_iter().map(fragment_core::price::Events::finish).collect(),
+        }
+    }
 }

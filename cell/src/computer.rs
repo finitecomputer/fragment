@@ -4835,17 +4835,23 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         Ok(resp) => rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.header.clone()).map(|h| (h.clone(), resp.headers().get(&h).ok().flatten().and_then(|v| fragment_core::price::number(&v)))).collect(),
         Err(_) => vec![],
     };
+    // an answer the pass could not read is still charged what its headers
+    // or a row's price say
+    let unread = || -> crate::pipe::Said { Box::pin(futures_util::future::ready(vec![None; pointers.len()])) };
     let (answer, said): (CellResult<Response>, crate::pipe::Said) = match sent {
-        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => {
-            let (resp, said) = crate::pipe::answer(resp, &[operator, filled], &pointers).await?;
-            (Ok(resp), said)
-        }
-        sent => (sent, Box::pin(futures_util::future::ready(vec![None; pointers.len()]))),
+        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => match crate::pipe::answer(resp, &[operator, filled], &pointers).await {
+            Ok((resp, said)) => (Ok(resp), said),
+            Err(e) => (Err(e), unread()),
+        },
+        sent => (sent, unread()),
     };
     // after the answer, never in its way: each key's call charged what its
     // vendor said it used (`Provider::charged`), once the answer is read
     if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
-        let call: Option<(Vec<String>, Vec<Vec<u8>>)> = swap::call_of(method.as_ref(), &headers_in, url.path()).map(|(m, s)| (m.into_iter().map(str::to_string).collect(), s));
+        // a path no charge can read plainly (a row with no charges or deny
+        // takes one) is for no charge, and its row's own price a call
+        let (methods, segments) = swap::call_of(method.as_ref(), &headers_in, url.path()).unwrap_or_else(|| (vec![method.as_ref()], vec![]));
+        let call: (Vec<String>, Vec<Vec<u8>>) = (methods.into_iter().map(str::to_string).collect(), segments);
         // each call the provider answered is the agent's (decision 37), a key's at its charge
         // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
         let named: Vec<Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some()).cloned().collect();
@@ -4859,7 +4865,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
                 (None, None) => None,
             };
             let charged = |p: &Placeholder| {
-                let (row, (methods, segments)) = (cfg.providers.named(&p.provider, p.connection)?, call.as_ref()?);
+                let (row, (methods, segments)) = (cfg.providers.named(&p.provider, p.connection)?, &call);
                 row.charged(&methods.iter().map(String::as_str).collect::<Vec<_>>(), segments, answered, said)
             };
             let used: Vec<(Placeholder, Option<Usage>)> = keys.into_iter().map(|p| (p.clone(), charged(&p))).collect();

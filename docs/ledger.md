@@ -128,7 +128,8 @@ ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
   the hour (`spend_slots`, `uses::spend`); past $5 of them in an hour
   (`said::SPENDING_MICROS`), then each doubling, the person is told
   (`spending`, an info notice, its words the same until the next step, so
-  their pages are told once a step). Nothing pauses or is refused: agents
+  their pages are told once a step, and gone when what it counts has aged
+  out of the hour, `uses::spent_until`). Nothing pauses or is refused: agents
   stop at zero credit, and each vendor's own limit on the platform's key
   is the backstop.
 - **Moved, never dropped.** A computer counted its agents' uses itself
@@ -187,7 +188,7 @@ informational. The fee is AI Gateway's on credits, so it applies to
 - **OpenRouter's price** (decision 61; FIN-616): a call on an OpenRouter
   slot is charged what OpenRouter's answer says it cost (`usage.cost`,
   dollars of its credits, a stream's on its last usage chunk), as
-  `openrouter:nanousd`, grossed up to OpenRouter's fee on the credits
+  `openrouter/nanousd`, grossed up to OpenRouter's fee on the credits
   (`OPENROUTER_FEE_BP`: $1.055 a dollar), then the margin
   (`Upstream::used`). An answer that names no cost is charged its tokens
   at the ceiling the slot routes under (`body.provider.max_price`, every

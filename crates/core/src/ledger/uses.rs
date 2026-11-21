@@ -91,6 +91,8 @@ pub trait Tally {
     /// The last hour's spend, slot by slot (`spend`).
     fn add_spend(&mut self, slot: i64, micros: i64);
     fn spent_since(&self, slot: i64) -> i64;
+    /// The newest slot with spend in it, if any.
+    fn spent_last(&self) -> Option<i64>;
     fn forget_spend_before(&mut self, slot: i64);
 }
 
@@ -117,13 +119,26 @@ pub fn spend(t: &mut impl Tally, u: &Used, now_ms: i64) -> bool {
     if micros > 0 {
         t.add_spend(spend_slot(u.at_ms.min(now_ms)), micros);
     }
-    t.forget_spend_before(spend_slot(now_ms) - (SPEND_SLOTS - 1));
+    t.forget_spend_before(hour_from(now_ms));
     super::said::spending_step(spent_hour(t, now_ms)) > before
+}
+
+/// The oldest slot the hour ending at `now_ms` holds: a whole hour of
+/// them before now's, so a call an hour old or less always counts (the
+/// window is an hour to an hour and five minutes).
+fn hour_from(now_ms: i64) -> i64 {
+    spend_slot(now_ms) - SPEND_SLOTS
 }
 
 /// What the last hour's slots hold, the hour ending at `now_ms`.
 pub fn spent_hour(t: &impl Tally, now_ms: i64) -> i64 {
-    t.spent_since(spend_slot(now_ms) - (SPEND_SLOTS - 1))
+    t.spent_since(hour_from(now_ms))
+}
+
+/// When what the last hour's slots hold has all aged out (`spent_hour`
+/// none), if they hold any: a spending notice is told until then.
+pub fn spent_until(t: &impl Tally, now_ms: i64) -> Option<i64> {
+    t.spent_last().filter(|slot| *slot >= hour_from(now_ms)).map(|slot| (slot + SPEND_SLOTS + 1) * SPEND_SLOT_MS)
 }
 
 /// The oldest month kept at `now_ms`.
@@ -261,6 +276,10 @@ impl Tally for Memory {
         self.spend.range(slot..).map(|(_, m)| m).sum()
     }
 
+    fn spent_last(&self) -> Option<i64> {
+        self.spend.keys().next_back().copied()
+    }
+
     fn forget_spend_before(&mut self, slot: i64) {
         self.spend.retain(|s, _| *s >= slot);
     }
@@ -329,8 +348,11 @@ mod tests {
         assert!(!spend(&mut t, &used("lead--b2", NOW, &[("xai", 4_000_000)]), NOW), "$9: the same step, told no more");
         assert!(spend(&mut t, &used("lead--b2", NOW, &[("xai", 1_000_000)]), NOW), "$10: the next step, told");
         assert!(!spend(&mut t, &used("lead--b2", NOW, &[("github", 0)]), NOW), "nothing spent, nothing told");
+        // a call an hour old still counts: the window is a whole hour of slots before now's
+        assert_eq!(spent_hour(&t, NOW + 3_600_000), 10_000_000, "an hour on, the hour's charges still in it");
+        assert_eq!(spent_until(&t, NOW), Some((NOW.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS), "told until they have all aged out");
         // the hour passes: its slots go, and the hour starts again
-        let later = NOW + SPEND_SLOT_MS * SPEND_SLOTS;
+        let later = NOW + SPEND_SLOT_MS * (SPEND_SLOTS + 1);
         assert!(!spend(&mut t, &used("lead--a1", later, &[("xai", 1)]), later));
         assert_eq!(spent_hour(&t, later), 1, "an hour on, only its own");
         assert_eq!(t.spend.len(), 1, "the older slots forgotten");
