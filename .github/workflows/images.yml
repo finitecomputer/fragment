@@ -39,25 +39,26 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # scratch branch only, never merged: the first btrfs mount on a fresh
-  # runner, by how it is reached
+  # scratch branch only, never merged: `cargo xtask image disk` itself, on a
+  # fresh runner, master's and the fix's
   diag:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04]
-        mode: [b-first, modprobe-then-a, a-first]
+        ref: [master, t3/disk-measure-says-why]
     runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
       - run: |
           set +e
-          echo "btrfs before: $(lsmod | grep -cw '^btrfs') $(ls -d /sys/module/btrfs 2>&1)"
+          echo "btrfs before: $(ls -d /sys/module/btrfs 2>&1)"
           H="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
           docker pull -q "$H"
-          [ "${{ matrix.mode }}" = modprobe-then-a ] && { sudo modprobe btrfs; echo "modprobe: $?"; }
-          A='truncate -s 20000002048 /d.img; mkfs.btrfs -q -f /d.img; dev=$(losetup -f); losetup $dev /d.img; mkdir /m; mount -o compress=zstd:3 $dev /m'
-          B='truncate -s 20000002048 /d.img; dev=$(losetup -f); losetup $dev /d.img; mkfs.btrfs -q -f $dev; mkdir /m; mount -o compress=zstd:3 $dev /m'
-          case "${{ matrix.mode }}" in b-first) X="$B";; *) X="$A";; esac
-          docker run --rm --privileged "$H" sh -c "apk add --no-cache btrfs-progs > /dev/null; $X" > /dev/null 2> err.txt; echo "${{ matrix.mode }} first mount: exit $? | $(tail -c 300 err.txt | tr '\n' ' ')"
-          echo "btrfs after: $(lsmod | grep -w '^btrfs')"
-          sudo dmesg | grep -iE "btrfs|zstd" | head -8
+          cargo build -q -p xtask 2>&1 | tail -3
+          cargo xtask image disk "$H" > out.txt 2>&1; echo "${{ matrix.ref }} on ${{ matrix.os }}: exit $?"
+          tail -c 1500 out.txt
