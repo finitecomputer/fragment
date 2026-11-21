@@ -601,7 +601,10 @@ stopped in its restore of `/data/work` with about 200 MB free).
   little more (a small file sits in its metadata), and a big file's
   restore writes a little more than it, so 1% more is counted
   (`restore_writes`). A start's read is `df` alone and keeps the last
-  `du`.
+  `du`, unless that start restores another save (one set aside as too big
+  for its disk, or an operator's choice): the size was the save's it
+  left, so it is forgotten, and the start's `df`, after its restore, says
+  the room.
 - **Its room** (`fragment_core::computer::room`) is the least of what is
   free now and what a restore of that `/data` leaves beside
   `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,
