@@ -97,8 +97,10 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
         // never a cut of what the owner chose
         return Err(Unavailable::Budget);
     }
-    // the turn app code's words started was asked by no one, whoever they name
-    let asker_name = if cause.is_some_and(Record::by_code) { records::CODE_SAYS.to_string() } else { name(asker) };
+    // the turn app code's words started was asked by no one, whoever they
+    // name: as its start says, or its cause, should the start be older
+    let by_code = start.body["code"] == true || cause.is_some_and(Record::by_code);
+    let asker_name = if by_code { records::CODE_SAYS.to_string() } else { name(asker) };
     let note = note::late(&cut, &asker_name, cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
@@ -182,6 +184,11 @@ mod tests {
         let code = Record { author: Some(records::CODE.into()), ..chat[0].clone() };
         let by_code = resolve(&agent(), &chat[2], &work, &chat, Some(&code), name, 20).unwrap().unwrap().fresh.unwrap();
         assert!(by_code.note.contains("It was answering app code: “Publish my draft") && !by_code.note.contains("Robin"), "{}", by_code.note);
+        // and its start says so when its cause cannot be read (round two of #1444)
+        let mut coded = work.clone();
+        coded[0].body["code"] = json!(true);
+        let unread = resolve(&agent(), &chat[2], &coded, &chat, None, name, 20).unwrap().unwrap().fresh.unwrap();
+        assert!(unread.note.contains("It was answering app code; what they asked is not in this chat's record.") && !unread.note.contains("Robin"), "{}", unread.note);
     }
 
     /// Goal (the rollback's double run): only a closure the late path wrote

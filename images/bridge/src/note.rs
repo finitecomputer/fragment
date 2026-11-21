@@ -774,7 +774,7 @@ mod tests {
 
         fn start(&mut self, by: &str, turn: &str, seq: u64) -> u64 {
             let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq };
-            self.post(by, turn_start(turn, "npub1paul", by, &cause, LIFE))
+            self.post(by, turn_start(turn, "npub1paul", false, by, &cause, LIFE))
         }
 
         fn end(&mut self, by: &str, turn: &str, outcome: Outcome) -> u64 {
@@ -1118,7 +1118,7 @@ mod tests {
         // a forged start (another principal naming this agent) is no turn of its
         let mut w = Work::default();
         let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 };
-        w.post("npub1mallory", turn_start("forged", "npub1paul", ME, &cause, LIFE));
+        w.post("npub1mallory", turn_start("forged", "npub1paul", false, ME, &cause, LIFE));
         w.post("npub1mallory", turn_end("forged", &Outcome::Error(LOST.into())));
         let n = w.start(ME, "n", 2);
         assert_eq!(previous(w.before(n), ME, true), Before::Kept);
@@ -1232,12 +1232,12 @@ mod tests {
         w.end(ME, "t3", Outcome::Idle);
         // a routine that said nothing, between messages 8 and 11
         let routine = Cause { fragment: "juniper--k3x9".into(), channel: "tasks".into(), seq: 1 };
-        for (at, body) in [(95, turn_start("t4", OWNER, ME, &routine, LIFE)), (96, turn_step("t4", 1, &step("terminal", "touch done", true))), (97, turn_end("t4", &Outcome::Idle))] {
+        for (at, body) in [(95, turn_start("t4", OWNER, false, ME, &routine, LIFE)), (96, turn_step("t4", 1, &step("terminal", "touch done", true))), (97, turn_end("t4", &Outcome::Idle))] {
             w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), author: None, kind: "message".into(), body });
         }
         // the cut turn a continuation answers, started by the message after
         // these (the cut note's): never told here
-        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 130, principal: ME.into(), author: None, kind: "message".into(), body: turn_start("cut", OWNER, ME, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 14 }, LIFE) });
+        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 130, principal: ME.into(), author: None, kind: "message".into(), body: turn_start("cut", OWNER, false, ME, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 14 }, LIFE) });
         w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 131, principal: ME.into(), author: None, kind: "message".into(), body: turn_step("cut", 1, &step("terminal", "the cut one", true)) });
         let (said, begins) = exchanges(&chat, ME, OWNER, 15, i64::MAX);
         assert!(begins, "the records reach back to its join");
@@ -1331,7 +1331,7 @@ mod tests {
         w.post(ME, turn_step("cut", 1, &step("terminal", "rm -rf x", true)));
         w.end(ME, "cut", Outcome::Error(LOST.into()));
         let routine = Cause { fragment: "juniper--k3x9".into(), channel: "tasks".into(), seq: 1 };
-        for (at, body) in [(35, turn_start("rcut", OWNER, ME, &routine, LIFE)), (36, turn_step("rcut", 1, &step("terminal", "touch x", true))), (37, turn_end("rcut", &Outcome::Error(LOST.into())))] {
+        for (at, body) in [(35, turn_start("rcut", OWNER, false, ME, &routine, LIFE)), (36, turn_step("rcut", 1, &step("terminal", "touch x", true))), (37, turn_end("rcut", &Outcome::Error(LOST.into())))] {
             w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), author: None, kind: "message".into(), body });
         }
         let (said, _) = exchanges(&chat, ME, OWNER, 0, i64::MAX);

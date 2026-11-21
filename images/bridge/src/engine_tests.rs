@@ -2330,6 +2330,7 @@ fn app_codes_words_carry_no_owners_authority() {
     let s = said_by_code(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "plant something" }), T0);
     let t = started(&s).expect("a message app code wrote is still heard");
     assert_eq!((t.text.as_str(), t.asker_name.as_str()), ("plant something", "app code"), "credited to no one");
+    assert!(posts(&s).iter().any(|(_, b)| b["kind"] == "turn.start" && b["code"] == true), "and its start says so, for whoever reads it back: {:?}", posts(&s));
     let turn = t.turn.clone();
     // a card, pressed by code: nothing; by its owner: answered
     let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false }];

@@ -282,7 +282,9 @@ a step posted again is the same record. A chat's helpers set
 
 `asker` may stop the turn. `agent` is the agent's identity. `life` is the
 bridge process that claims the turn. The record is the claim, "this life
-runs this turn" (docs/bridge.md, "State").
+runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
+wrote the message that started it ("Who wrote a record"): its asker is
+no one, whatever `asker` names. Older bridges write none.
 
 **`turn.step`**, part `<step>`, from 1: one tool call.
 

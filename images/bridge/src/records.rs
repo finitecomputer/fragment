@@ -568,10 +568,15 @@ pub struct Cause {
 /// platform answers the same id and body again as a replay and another
 /// body as 409, so with the life in the body this life's own retry is a
 /// replay and any other life's claim of the turn is a 409.
-pub fn turn_start(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &str) -> Value {
+pub fn turn_start(turn: &str, asker: &str, by_code: bool, agent: &str, cause: &Cause, life: &str) -> Value {
     assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
-    json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
-        "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life })
+    let mut start = json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
+        "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life });
+    // app code wrote what started it: its asker is no one (`Record::by_code`)
+    if by_code {
+        start["code"] = json!(true);
+    }
+    start
 }
 
 /// What a step does, whatever its runtime calls the tool: a page shows each
@@ -1240,7 +1245,8 @@ mod tests {
     fn bodies_are_the_docs() {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
-        assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
+        assert_eq!(turn_start("t", "npub1p", false, "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
+        assert_eq!(turn_start("t", "npub1p", true, "npub1a", &c, life)["code"], json!(true), "app code's words started it: said on its start");
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }), "no words: they are a reply");
         assert_eq!(reply("Let me look.", "t", &[], 1, false), json!({ "text": "Let me look.", "turn": "t" }));
