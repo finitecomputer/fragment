@@ -515,7 +515,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "an archive that carries a SimpleX chat lands for someone wiped since the move bound them: they hold no seat to keep on, so its complete goes on",
         wiped.as_ref().is_none_or(|w| w.status == 200 && w.body["state"] == "wiped") && moved(&d1)?["staged_ms"].is_i64() && objects(&format!("p2/{d1}/")).len() == 2,
-        format!("{wiped:?} {} {:?}", moved(&d1)?, objects(&format!("p2/{d1}/"))),
+        format!("{} {} {:?}", wiped.as_ref().map(|w| w.to_string()).unwrap_or_default(), moved(&d1)?, objects(&format!("p2/{d1}/"))),
     );
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
