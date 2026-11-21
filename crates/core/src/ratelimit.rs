@@ -11,8 +11,8 @@ const HOUR_MS: i64 = 3_600_000;
 /// its calls in it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Hourly {
-    hour: i64,
-    used: u32,
+    pub hour: i64,
+    pub used: u32,
 }
 
 impl Hourly {

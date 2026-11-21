@@ -605,9 +605,11 @@ mod tests {
         assert_eq!(computer.transaction(|db| migrate::migrate(db, &seven, 0)), Ok(Ran::Made { version: 7 }));
         computer.harness("INSERT INTO key_hour (provider, slot, micros) VALUES ('elevenlabs', 1, 5000000)");
         computer.harness("INSERT INTO key_caps (provider, micros) VALUES ('elevenlabs', 20000000)");
-        assert_eq!(computer.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 7, version: 8 }));
+        let newest = COMPUTER.steps.len() as u32;
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 7, version: newest }));
         assert_eq!(computer.count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('key_hour', 'key_caps')"), 0, "both gone");
-        assert_eq!(computer.transaction(|db| migrate::migrate(db, &COMPUTER, 200)), Ok(Ran::Current { version: 8 }));
-        assert_eq!(computer.transaction(|db| migrate::migrate(db, &seven, 300)), Err(SchemaError::Newer { class: "Computer", held: 8, known: 7 }));
+        assert_eq!(computer.columns("key_calls"), ["provider", "hour", "used"], "step 9: each key's calls this hour");
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &COMPUTER, 200)), Ok(Ran::Current { version: newest }));
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &seven, 300)), Err(SchemaError::Newer { class: "Computer", held: newest, known: 7 }));
     }
 }

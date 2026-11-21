@@ -542,10 +542,6 @@ pub struct ComputerCell {
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
-    /// Each operator key's calls this hour from this computer, for its
-    /// row's `calls_an_hour` (FIN-616): this isolate's, at most a catalog's
-    /// rows; a new isolate counts again, at most a second hour's worth.
-    hourly: RefCell<BTreeMap<String, fragment_core::ratelimit::Hourly>>,
     /// The hosts its egress catches, as its running start's `arm` set them
     /// (its generation's): a guest's read of its view arms again when its
     /// agents' Vault secrets name a host more. In memory only: a new
@@ -586,7 +582,6 @@ impl DurableObject for ComputerCell {
             starts: RefCell::default(),
             armed: RefCell::new(None),
             relays: RefCell::default(),
-            hourly: RefCell::default(),
             schema,
             uses_due_ms: Rc::new(std::cell::Cell::new(0)),
         }
@@ -1085,9 +1080,17 @@ impl ComputerCell {
     /// Counts one call on operator key `provider` against its row's calls an
     /// hour (`calls_an_hour`): refused, 429, with the wait to the hour's end,
     /// past it. No row's limit, no count.
+    /// The count is its SQLite's (`key_calls`), so an eviction or a restart
+    /// counts on.
     fn within_hour(&self, provider: &catalog::Provider) -> CellResult<()> {
         let Some(max) = provider.calls_an_hour else { return Ok(()) };
-        let taken = self.hourly.borrow_mut().entry(provider.name.clone()).or_default().take(max, js::now_ms());
+        let rows = self.rows("SELECT hour, used FROM key_calls WHERE provider = ?", vec![provider.name.as_str().into()])?;
+        let mut hourly = rows.first().map_or(fragment_core::ratelimit::Hourly::default(), |r| fragment_core::ratelimit::Hourly { hour: r["hour"].as_i64().unwrap_or(0), used: r["used"].as_u64().and_then(|u| u32::try_from(u).ok()).unwrap_or(u32::MAX) });
+        let taken = hourly.take(max, js::now_ms());
+        self.exec(
+            "INSERT INTO key_calls (provider, hour, used) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET hour = excluded.hour, used = excluded.used",
+            vec![provider.name.as_str().into(), hourly.hour.into(), i64::from(hourly.used).into()],
+        )?;
         taken.map_err(|wait| {
             let minutes = wait.div_euclid(60_000) + 1;
             CellError::new(ErrorCode::RateLimited, format!("{} takes at most {max} calls an hour from this computer: try again in about {minutes} minutes", provider.name)).retry_after(wait.unsigned_abs())
@@ -3945,6 +3948,8 @@ impl ComputerCell {
         };
         let ((grants, grants_ms), (keys, own_ms)) = futures_util::future::try_join(grants, keys).await?;
         let mut secrets = vec![];
+        // each operator key counted once a request, whatever tags name it
+        let mut counted: Vec<&str> = vec![];
         // a Vault's secret (a key's name no catalog key has) is its egress's to ask
         // the agent's person's Vault for, this agent's now that its tag says so
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
@@ -3972,7 +3977,10 @@ impl ComputerCell {
                 // its call gated on its owner's standing and charged after
                 // (`egress_swap`), within its calls an hour here
                 Kind::Operator => {
-                    self.within_hour(provider)?;
+                    if !counted.contains(&provider.name.as_str()) {
+                        self.within_hour(provider)?;
+                        counted.push(&provider.name);
+                    }
                     crate::keys::operator_key(&self.env, &provider.name).await?
                 }
                 Kind::Own => {
