@@ -152,7 +152,7 @@ comes before `/move` makes the new ones.
 
 **SimpleX needs always-on.** A `seat`'s computer sleeps, and SimpleX runs
 only on one that stays on, so a mover whose stage carries their SimpleX
-chat would lose it (Fadi's, 2026-11-20). The mover says so in the
+chat would lose it (a mover's, 2026-11-20). The mover says so in the
 manifest (`simplex: true`, "SimpleX in a stage"), and the stage's
 `complete` makes that person's comped `seat` a `seat_always_on` before its
 zip is made: a failure is the mover's complete tried again. A paid seat,

@@ -579,7 +579,7 @@ fn complete<'a>(env: &'a Env, stage: &'a str, body: String) -> Waits<'a, Respons
 
 /// A stage that carries its owner's SimpleX chat (its manifest's
 /// `simplex`): their comped `seat` made always-on, as SimpleX runs only on
-/// a computer that stays on (FIN-492; Fadi's, 2026-11-20). A seat that is
+/// a computer that stays on (FIN-492; a mover's, 2026-11-20). A seat that is
 /// paid, always-on already, or none is left as it is.
 #[inline(never)]
 fn simplex_on<'a>(env: &'a Env, person: &'a str) -> Waits<'a, ()> {
