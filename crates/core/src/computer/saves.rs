@@ -361,6 +361,12 @@ impl Saves {
     /// the image and the newest good save (or, past one that fails its
     /// check, an older one). Again, the same.
     pub fn restart_fresh(&mut self) {
+        // while its update waits for room, a restart stays on its image
+        // too, from its snapshot (the restart's sleep takes one): fresh
+        // from the pinned image, its save may not restore (Codex on #1422)
+        if self.update_waits() {
+            return;
+        }
         self.snapshot = None;
         self.fresh = true;
     }
@@ -1046,15 +1052,23 @@ mod tests {
         let mut restarted = s.clone();
         restarted.fresh = true;
         assert_eq!(restarted.plan(Some(NEXT)), Plan::Backup);
+        // its owner's restart while it waits: it stays on its image, from its snapshot (Codex on #1422)
+        let mut restart = s.clone();
+        restart.restart_fresh();
+        assert!(!restart.fresh() && restart.has_snapshot(), "no fresh start while its update waits");
+        assert_eq!(restart.plan(Some(NEXT)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
+        assert!(restart.snapshotted("b1", "s2", IMAGE) && restart.plan(Some(NEXT)) == Plan::Snapshot { id: "s2".into(), image: IMAGE.into(), held: true }, "the restart's sleep's snapshot, on its own image");
         // snapshots off: the save
         assert_eq!(s.plan(None), Plan::Backup);
         // room made, but not yet past where it is told no more: it still waits
         assert!(s.measured(read(fits - ROOM_CLEAR_MIN, T + 60)));
         assert!(s.update_waits(), "told until a read finds 4 GB of room");
-        // past it: the update is taken
+        // past it: the update is taken, and a restart is fresh again
         assert!(s.measured(read(edge - 5_000_000_000, T + 70)));
         assert!(!s.update_waits());
         assert_eq!(s.plan(Some(NEXT)), Plan::Backup);
+        s.restart_fresh();
+        assert!(s.fresh() && !s.has_snapshot());
     }
 
     /// Goal (docs/computers.md, Lifecycle): the second ask of a

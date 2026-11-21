@@ -25,13 +25,14 @@ pub fn disk_bytes() -> u64 {
 /// What runs in the helper, the image's files on its standard input: a
 /// fresh computer's disk on a loop device of its own (its node made when
 /// the host has none yet), the files written to it, and its `stat -f`. Its
-/// loop device is let go however it ends (`trap`), so a measure that fails
-/// leaks none on the host (Codex on #1422).
+/// loop device is let go however it ends (`trap`, each step whatever the
+/// one before did: `set -e` would end it at an `umount` of no mount), so a
+/// measure that fails leaks none on the host (Codex on #1422).
 fn script(disk: u64) -> String {
     format!(
         "set -e; apk add --no-cache btrfs-progs > /dev/null; truncate -s {disk} /disk.img; mkfs.btrfs -q -f /disk.img > /dev/null; \
          dev=$(losetup -f); [ -e \"$dev\" ] || mknod \"$dev\" b 7 \"${{dev#/dev/loop}}\"; losetup \"$dev\" /disk.img; \
-         trap 'umount /m 2> /dev/null; losetup -d \"$dev\" 2> /dev/null' EXIT; mkdir -p /m; mount -o compress=zstd:3 \"$dev\" /m; \
+         trap 'umount /m 2> /dev/null || :; losetup -d \"$dev\" 2> /dev/null || :' EXIT; mkdir -p /m; mount -o compress=zstd:3 \"$dev\" /m; \
          mkdir -p /m/image /m/data; tar -x -C /m/image -f -; sync; btrfs filesystem sync /m > /dev/null; stat -f -c '%b %a %S' /m"
     )
 }
@@ -112,7 +113,8 @@ mod tests {
         let s = script(disk_bytes());
         let trap = s.find("trap '").expect("a trap");
         assert!(trap > s.find("losetup \"$dev\"").unwrap() && trap < s.find("mount -o").unwrap(), "set once the device is attached, before anything can fail");
-        assert!(s.contains("losetup -d \"$dev\"") && s.contains("truncate -s 20000002048 ") && s.contains("compress=zstd:3"));
+        assert!(s.contains("umount /m 2> /dev/null || :; losetup -d \"$dev\" 2> /dev/null || :"), "each step of the trap runs, under set -e, whether the mount was made or not (Codex on #1422)");
+        assert!(s.contains("truncate -s 20000002048 ") && s.contains("compress=zstd:3"));
         assert!(run(&[]).is_err() && run(&["a".into(), "b".into()]).is_err());
     }
 }

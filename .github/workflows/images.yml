@@ -128,6 +128,9 @@ jobs:
               - images/Cargo.toml
               - images/Cargo.lock
               - .github/workflows/images.yml
+              # the measure the Docker lane holds the Hermes image to its
+              # disk budget with (cargo xtask image disk; Codex on #1422)
+              - xtask/src/image/disk.rs
               # the Hermes image's other inputs, its CLI stage's (#715):
               # xtask/src/image/preview.rs `INPUTS`, which a host test
               # holds this list and the paths above to

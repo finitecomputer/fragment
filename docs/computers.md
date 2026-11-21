@@ -657,8 +657,10 @@ beside the new one.
   preview's build (`image preview --build`, CI's preview image) are
   refused past it before anything pins them, and the Docker lane measures
   the Hermes image on every change to it
-  (`the_hermes_image_fits_its_disk_budget`). An input-keyed preview image
-  reused is not measured again: it was when it was built. Today's
+  (`the_hermes_image_fits_its_disk_budget`). Preview's build is pushed as
+  `unchecked-<key>` and named by its inputs (`inputs-<key>`, the tag a
+  later run reuses) only once it fits, so a retry after a refusal builds
+  and measures again. Today's
   image measured 2.53 to 2.67 GB in five runs on a quiet box (2026-11-20;
   production's empty computers read about 2.6 GB used), and 2.99 GB once
   under heavy disk load, when btrfs compresses less as it writes back in a
@@ -676,12 +678,13 @@ beside the new one.
   that save on the image it was taken of, though another is pinned
   (`Saves::update_waits`). Its `update` notice, told as ever, says to make
   room first and offers no Restart, which would take the new image, and
-  so does Settings (its view's `roomFirst`). Once a read after a save
-  finds room (and it is told filling no more), its next wake takes the
-  new image. A start with no
-  such snapshot (after a crash, or its owner's restart: those restore the
-  save, from the pinned image) has no older image to stay on; there the
-  budget is what keeps it restorable.
+  so does Settings (its view's `roomFirst`). Its owner's restart stays on
+  its image too: it keeps the snapshot, so the restart's sleep takes one
+  and its start comes up from it, not fresh from the pinned image. Once a
+  read after a save finds room (and it is told filling no more), its next
+  wake takes the new image, and a restart is fresh again. A start with no
+  such snapshot (after a crash, or snapshots off) has no older image to
+  stay on; there the budget is what keeps it restorable.
 
 ### The start line
 

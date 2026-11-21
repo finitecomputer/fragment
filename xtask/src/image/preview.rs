@@ -70,11 +70,17 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     let needs_build = found.is_none();
     let mut reference = found;
     if reference.is_none() && build {
-        // held to the disk budget before its preview deploy pins it (disk.rs;
-        // an input-keyed image reused was, when it was built)
-        let built = push(&inputs, &tools)?;
+        // built under a tag of its own, and named by its inputs only once it
+        // fits the disk budget (disk.rs): a retry after a refusal finds no
+        // input-keyed image, so it builds and measures again, never reusing
+        // one unmeasured (Codex on #1422)
+        let unchecked = parse(&[
+            "push".into(), "hermes".into(), "--repository".into(), REPOSITORY.into(),
+            "--tag".into(), format!("unchecked-{key}"),
+        ], |name| std::env::var(name).ok())?;
+        let built = push(&unchecked, &tools)?;
         super::disk::check(&built)?;
-        reference = Some(built);
+        reference = Some(named(&inputs, &built, &tools)?);
     }
     if build {
         let reference = reference.as_deref().expect("reused or built the input-keyed image");
@@ -89,6 +95,24 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     let digest = reference.as_deref().map(|r| r.split_once('@').expect("pinned").1.to_string());
     fs::write(output, serde_json::to_vec(&Resolution { key, digest, build: needs_build })?)?;
     Ok(())
+}
+
+/// Names `built` (pushed as `unchecked-<key>`, its share of the disk
+/// measured and within the budget) by its inputs: skopeo copies it within
+/// the account's registry, its digest kept (`--preserve-digests`), and the
+/// tag read back holds that digest. The reference the deploy pins.
+fn named(inputs: &Request, built: &str, tools: &devstack::Tools) -> Result<String> {
+    let dir = devstack::repo_root().join("target/image-preview");
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let auth = login(tools, &inputs.account, None, &["--push", "--pull"], dir.join("name.json"))?;
+    let mut cmd = Command::new("skopeo");
+    cmd.args(["--command-timeout", "5m", "copy", "--all", "--preserve-digests", "--authfile"]).arg(&auth.0);
+    cmd.arg(format!("docker://{built}")).arg(format!("docker://{}", inputs.tagged())).stdin(Stdio::null());
+    crate::run(&mut cmd)?;
+    let found = existing(inputs, tools)?.with_context(|| format!("{} is not there once named", inputs.tagged()))?;
+    anyhow::ensure!(found == built, "{} is {found}, not the measured {built}", inputs.tag);
+    Ok(found)
 }
 
 /// Waits until Cloudflare has prepared `reference` on the account's
