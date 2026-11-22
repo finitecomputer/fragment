@@ -345,6 +345,19 @@ impl FragmentCell {
         // stamped by (`code_author`), whatever an install lands meanwhile
         let code = self.installed_code()?;
         let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth, code.as_deref())?;
+        // A row an earlier attempt left: until this call's answer says whose
+        // run the facet holds (that attempt's, replayed, or this one's), the
+        // code that wrote it is not known, so the row names none meanwhile.
+        // A reply lost now stamps its effects app code's (`code_author`),
+        // never a release's word; the answer puts back the code it names.
+        let earlier = match fresh {
+            true => None,
+            false => {
+                let earlier = pending.code.clone();
+                self.pending_code(&mut pending, None)?;
+                earlier
+            }
+        };
         meta["run"] = pending.seq.into();
         meta["ledgerMs"] = self.ledger_kept_ms()?.into();
         let call = js::Mutation { ledger_id: &ledger_id, op: inv.op, input_sha, input: input_text, meta: &meta };
@@ -369,8 +382,10 @@ impl FragmentCell {
         let ran = match answer {
             Answer::Ran(ran) => ran,
             Answer::Refused(why) => {
-                if fresh {
-                    self.forget(&pending)?;
+                // nothing ran: a run the facet holds is the earlier attempt's
+                match fresh {
+                    true => self.forget(&pending)?,
+                    false => self.pending_code(&mut pending, earlier)?,
                 }
                 return Err(refused(why, inv.op));
             }
@@ -384,6 +399,9 @@ impl FragmentCell {
             if !fresh {
                 self.restate(&mut pending, inv.op, inv.depth, code)?;
             }
+        } else if !fresh {
+            // the earlier attempt's run, replayed: its code wrote it
+            self.pending_code(&mut pending, earlier)?;
         }
         // The facet answers the run it holds for this id. That run is this
         // row's when it just committed, or when an earlier try of it has not

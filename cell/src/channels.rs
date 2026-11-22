@@ -986,6 +986,15 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// Records the code that wrote a pending row's run (`Pending::code`):
+    /// `None` while it is not known.
+    pub(crate) fn pending_code(&self, p: &mut Pending, code: Option<String>) -> CellResult<()> {
+        let stored = code.clone().map_or(SqlStorageValue::Null, SqlStorageValue::from);
+        self.exec("UPDATE pending SET code = ? WHERE seq = ?", vec![stored, SqlStorageValue::Integer(p.seq)])?;
+        p.code = code;
+        Ok(())
+    }
+
     /// Drops a pending row: its run settled, or never committed.
     pub(crate) fn forget(&self, p: &Pending) -> CellResult<()> {
         self.exec("DELETE FROM pending WHERE seq = ?", vec![SqlStorageValue::Integer(p.seq)])
