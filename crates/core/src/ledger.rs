@@ -247,6 +247,14 @@ impl<'de> serde::Deserializer<'de> for &mut FieldNames {
     }
 }
 
+/// The minute a fragment counts a request in (cell/src/meter.rs): now's
+/// (`now`), but above every minute it closed into a row or folded already,
+/// and never below its open count's. A clock step back then keeps counting
+/// into the open minute, and every count is in a minute a fold takes.
+pub fn request_minute(now: i64, closed: i64, folded: i64, open: Option<i64>) -> i64 {
+    now.max(closed + 1).max(folded + 1).max(open.unwrap_or(i64::MIN))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterRow {

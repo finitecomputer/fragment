@@ -142,12 +142,8 @@ impl FragmentCell {
     async fn count_request_once(&self) -> CellResult<()> {
         let Some(life) = self.meta(MetaKey::CreatedAt)? else { return Ok(()) };
         let closed: i64 = self.meta(MetaKey::MeterClosed)?.and_then(|v| v.parse().ok()).unwrap_or(-1);
-        // above every minute closed or folded, even after a clock step back:
-        // a count is always one a fold will take
-        let minute = (js::now_ms() / MINUTE_MS).max(closed + 1).max(self.folded_minute()? + 1);
         let mut open = self.open_count(&life).await?;
-        // nor below the open one: a step back keeps counting into it
-        let minute = open.as_ref().map_or(minute, |o| minute.max(o.minute));
+        let minute = fragment_core::ledger::request_minute(js::now_ms() / MINUTE_MS, closed, self.folded_minute()?, open.as_ref().map(|o| o.minute));
         if let Some(earlier) = open.as_ref().filter(|o| o.minute != minute) {
             // its key is overwritten below, so it needs no delete
             self.fold_open(earlier)?;

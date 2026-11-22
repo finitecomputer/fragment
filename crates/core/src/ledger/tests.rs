@@ -1420,3 +1420,17 @@ fn a_seat_that_ends_or_comes_back_is_news_though_its_standing_holds() {
     assert!(said::news(Some(&without), &back), "the seat back: Buy credit is back, news too");
     assert!(!said::news(Some(&with_buy), &back), "the same notices as before: nothing new");
 }
+
+/// A request's minute (cell/src/meter.rs): now's; above the minutes closed
+/// and folded; and after a clock step back, the open one's, never one the
+/// fold marker has passed (where its count would be dropped).
+#[test]
+fn a_request_counts_in_now_s_minute_or_the_open_one_after_a_step_back() {
+    assert_eq!(request_minute(100, -1, -1, None), 100, "now's minute");
+    assert_eq!(request_minute(100, 100, 99, None), 101, "above the minute closed");
+    assert_eq!(request_minute(100, 98, 100, None), 101, "above the minute folded");
+    assert_eq!(request_minute(100, 98, 99, Some(100)), 100, "the open minute, while it is now's");
+    assert_eq!(request_minute(101, 98, 99, Some(100)), 101, "a later minute's request opens it");
+    // the clock steps back from the open minute 101 to 100, both floors below
+    assert_eq!(request_minute(100, 98, 99, Some(101)), 101, "a step back keeps counting into the open minute");
+}
