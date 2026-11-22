@@ -522,7 +522,7 @@ impl FragmentCell {
         let mut taken: Vec<String> = vec![];
         let mut runs = Vec::with_capacity(rows.len());
         for run in rows.iter().map(run_row) {
-            if let (Via::Channel, Some(trigger)) = (run.via, run.trigger.as_deref()) {
+            if let (true, Some(trigger)) = (run.via == Via::Channel, run.trigger.as_deref()) {
                 let key = fragment_core::manifest::ordered_key(trigger, &run.op);
                 if ordered.contains(&key) {
                     if held_back || taken.contains(&key) {
