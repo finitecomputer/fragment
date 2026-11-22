@@ -254,7 +254,11 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
         codestorage_url: format!("https://{}{GIT_PATH}", c.platform_host),
         host_suffix: c.fragment_suffix.clone(),
         host_label_suffix: None,
-        poll_interval_s: 30,
+        // the cell's own default (Cloudflare's): a fragment pushed to in
+        // the last day polls its code store this often, and a home's
+        // freshly made fragments otherwise woke every 30 s for a day, each
+        // wake a write to the bucket and no cell ever idle enough to evict
+        poll_interval_s: 300,
         egress_local: false,
         job_retry_delay_s: 10,
         upload_max_bytes: None,
