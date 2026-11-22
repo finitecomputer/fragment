@@ -145,8 +145,6 @@ pub struct FragmentCell {
     /// await before its `createBatch`; another finding one leaves its runs
     /// queued for the alarm's next pass.
     pub(crate) launching: Cell<bool>,
-    /// A card's shot is under way beside the alarm's pass (`card_beside`).
-    pub(crate) card_shooting: Cell<bool>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
@@ -186,7 +184,6 @@ impl DurableObject for FragmentCell {
             test_hold_install: Cell::new((false, false)),
             test_hold_launch: Cell::new((false, false)),
             launching: Cell::new(false),
-            card_shooting: Cell::new(false),
             dw_noted: RefCell::new(None),
             schema,
         }
@@ -1691,9 +1688,9 @@ impl FragmentCell {
     /// backstop (while the pins may lag), the blob collection, running runs
     /// checked, and the storage sample. The next pass is a day away, or
     /// within the poll interval while the fragment is busy (`arm`), and
-    /// soon when runs were queued meanwhile (`launch_due_at`). The delivery
-    /// outbox drains beside it (`deliveries_beside`), and last a preview card
-    /// due is shot beside it (`card_beside`). Then it re-arms.
+    /// soon when runs were queued meanwhile (`launch_due_at`): a run queued
+    /// while this pass works waits for its end. Last, a preview card due is
+    /// shot (card.rs). Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1724,7 +1721,7 @@ impl FragmentCell {
         // after its seed: an agent's notice waits until its template is in
         // (`Stage::joins_wait`)
         self.flush_joined().await;
-        self.deliveries_beside();
+        self.drain_deliveries().await;
         if let Err(e) = self.flush_meters(false).await {
             self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
         }
@@ -1750,47 +1747,10 @@ impl FragmentCell {
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
-        self.card_beside();
-        self.schedule().await
-    }
-
-    /// The delivery outbox drained beside the alarm's pass, never inside it:
-    /// a computer's wake waits on its start, and a run queued meanwhile
-    /// (started from the alarm alone, `launch_queued`) would wait on it. Its
-    /// rows are claimed as it takes them (deliveries.rs `drain_deliveries`),
-    /// so another drain, the next pass's or a request's, skips them; its end
-    /// arms the alarm for what is left or failed.
-    fn deliveries_beside(&self) {
-        // SAFETY: as `later`'s: the object outlives a promise `waitUntil` holds
-        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
-        self.state.wait_until(async move {
-            cell.drain_deliveries().await;
-            if let Err(e) = cell.schedule().await {
-                console_error!("{}", json!({ "event": "deliveries.arm-failed", "code": e.code, "message": e.message }));
-            }
-        });
-    }
-
-    /// A card's shot, beside the alarm's pass and never inside it: the
-    /// browser may take a minute, and an object runs one alarm at a time,
-    /// so a run queued meanwhile (started from the alarm alone,
-    /// `launch_queued`) would wait on it. One shot at a time; while it is
-    /// under way it is not due (`arm`), and its end arms the alarm again.
-    fn card_beside(&self) {
-        if self.card_shooting.replace(true) {
-            return;
+        if let Err(e) = self.drain_card().await {
+            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
         }
-        // SAFETY: as `later`'s: the object outlives a promise `waitUntil` holds
-        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
-        self.state.wait_until(async move {
-            if let Err(e) = cell.drain_card().await {
-                cell.event("card.drain-failed", &e.message, json!({ "code": e.code }));
-            }
-            cell.card_shooting.set(false);
-            if let Err(e) = cell.schedule().await {
-                console_error!("{}", json!({ "event": "card.arm-failed", "code": e.code, "message": e.message }));
-            }
-        });
+        self.schedule().await
     }
 
     /// Arms the alarm for the earliest due work.
@@ -1866,10 +1826,7 @@ impl FragmentCell {
     /// than `min_ms` from now. A busy fragment's next pass comes within the
     /// poll interval: a pass further off is brought in (plane.rs `busy`).
     async fn arm(&self, also: Option<i64>, min_ms: i64) -> CellResult<()> {
-        // while a card's shot is under way an ended life's clearing waits
-        // for it (`drain_ended`): asked again no sooner than this, its end
-        // arms the alarm sooner
-        let ended = self.ended_due_at()?.map(|at| if self.card_shooting.get() { at.max(js::now_ms() + ALARM_RETRY_MS) } else { at });
+        let ended = self.ended_due_at()?;
         let [created_at, poll_at] = self.metas([MetaKey::CreatedAt, MetaKey::PollAt])?;
         if created_at.is_none() {
             // no life: an ended one's cleanup is all that comes due
@@ -1886,8 +1843,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let card = if self.card_shooting.get() { None } else { self.card_due_at()? };
-        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, card, self.invites_due_at()?, ended, also];
+        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
         let now = js::now_ms();
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(now + min_ms);
