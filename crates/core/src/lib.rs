@@ -12,6 +12,7 @@
 
 pub mod access;
 pub mod across;
+pub mod alarm;
 pub mod address;
 pub mod backoff;
 pub mod blob;

@@ -78,6 +78,15 @@ pub const HOPS_HEADER: &str = "x-fragment-hops";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+
+/// A launch under way (`launch_queued`), ended however it returns.
+struct Launching<'a>(&'a std::cell::Cell<bool>);
+
+impl Drop for Launching<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
 /// The attempt (replays count) at which a change of the app's code under
 /// a run holds it rather than starting it over, so code that keeps
 /// changing cannot spin it.
@@ -87,7 +96,8 @@ const CODE_CHANGED_ATTEMPTS_MAX: u32 = 8;
 /// often a held one looks again.
 const TEST_HOLD_MAX_MS: u64 = 20_000;
 const TEST_HOLD_POLL_MS: u64 = 50;
-const LAUNCH_BATCH: usize = 25;
+/// Queued runs started a pass, in one `createBatch` (which takes at most 100).
+const LAUNCH_BATCH: usize = 100;
 /// Running runs checked against their Workflow per alarm, once they are this old.
 const RECONCILE_BATCH: i64 = 25;
 const RECONCILE_AFTER_MS: i64 = 60_000;
@@ -331,8 +341,8 @@ impl FragmentCell {
         Ok(true)
     }
 
-    /// Records a run: queued to start, or blocked. The caller launches
-    /// queued runs (`launch_queued`) once it is done writing.
+    /// Records a run: queued to start, or blocked. The alarm starts queued
+    /// runs (`launch_queued`), armed once the caller is done writing.
     pub(crate) fn start_run(&self, r: NewRun<'_>) -> CellResult<Started> {
         if let Some((id, sha)) = r.call {
             let prior = self.rows("SELECT id, status, input_sha FROM runs WHERE principal = ? AND call_id = ?", vec![r.principal.into(), id.into()])?;
@@ -416,43 +426,75 @@ impl FragmentCell {
         Ok(format!("{}-a{attempt}", self.run_key(run)?))
     }
 
-    /// Starts the Workflows of queued runs, one launcher at a time. A
-    /// failure leaves them queued for the alarm to try again. Answers how
-    /// many it started.
+    /// Starts the Workflows of queued runs (at most `LAUNCH_BATCH`), from
+    /// the alarm alone and as its first call out (`alarm`), all in one
+    /// `createBatch`, with nothing awaited before it. A Workflow keeps the
+    /// subrequest budget of the call that made it, and on Cloudflare a call
+    /// a busy object makes after an await may take another request's deeper
+    /// budget: started behind other calls, runs lost 2 hops a generation
+    /// until a job's next call into an object failed ("Subrequest depth
+    /// limit exceeded") or `createBatch` made nothing (the D2b depth spike;
+    /// xtask/src/guards.rs holds the order). A request arms the alarm
+    /// (`arm_launch`). A failure leaves them queued, tried again
+    /// `QUEUED_RETRY_MS` later. Answers how many it started.
     pub(crate) async fn launch_queued(&self) -> usize {
-        let _one = self.launching.lock().await;
+        // a release that may not read this storage starts nothing, and an
+        // ended life has nothing to start
+        if self.schema.refused() || !matches!(self.meta(MetaKey::CreatedAt), Ok(Some(_))) {
+            return 0;
+        }
+        // one launcher at a time, held with no await
+        if self.launching.replace(true) {
+            return 0;
+        }
+        let _one = Launching(&self.launching);
+        // a start that cannot be made is tried again later, never at once
+        let later = || {
+            let _ = self.set_meta(MetaKey::LaunchRetryAt, &(js::now_ms() + QUEUED_RETRY_MS).to_string());
+        };
+        let retry: i64 = self.meta(MetaKey::LaunchRetryAt).ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if retry > js::now_ms() {
+            return 0;
+        }
         let Ok(rows) =
             self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
         else {
+            later();
             return 0;
         };
-        // most calls queue nothing: they read no more than this
+        // most passes queue nothing: they read no more than this
         if rows.is_empty() {
             return 0;
         }
-        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else { return 0 };
-        let mut started = 0;
+        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else {
+            later();
+            return 0;
+        };
+        let mut runs = Vec::with_capacity(rows.len());
         for run in rows.iter().map(run_row) {
-            let (id, attempt) = (run.id, run.attempt);
-            let Ok(instance) = self.instance_id(id, attempt) else { return started };
-            let params = json!({ "fragment": name, "incarnation": incarnation, "run": id, "attempt": attempt });
-            match js::jobs_create(self.env.as_ref(), &instance, &params).await {
-                Ok(()) => {
-                    let _ = self.exec(
-                        "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND attempt = ? AND status = 'queued'",
-                        vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
-                    );
-                    self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt }));
-                    started += 1;
-                }
-                Err(e) => {
-                    self.event("run.launch-failed", &format!("run #{id}: its Workflow did not start: {}", e.message), json!({ "run": id }));
-                    let _ = self.schedule().await;
-                    return started;
-                }
-            }
+            let Ok(instance) = self.instance_id(run.id, run.attempt) else {
+                later();
+                return 0;
+            };
+            let params = json!({ "fragment": name, "incarnation": incarnation, "run": run.id, "attempt": run.attempt });
+            runs.push((instance, params, run));
         }
-        started
+        let items: Vec<(&str, &Value)> = runs.iter().map(|(instance, params, _)| (instance.as_str(), params)).collect();
+        if let Err(e) = js::jobs_create_batch(self.env.as_ref(), &items).await {
+            let ids: Vec<i64> = runs.iter().map(|(_, _, run)| run.id).collect();
+            self.event("run.launch-failed", &format!("{} queued runs: their Workflows did not start: {}", ids.len(), e.message), json!({ "runs": ids }));
+            later();
+            return 0;
+        }
+        for (_, _, run) in &runs {
+            let (id, attempt) = (run.id, run.attempt);
+            let _ = self.exec(
+                "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND attempt = ? AND status = 'queued'",
+                vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
+            );
+            self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt }));
+        }
+        runs.len()
     }
 
     /// The run a Workflow callback is for, if it is of this fragment's
@@ -1164,7 +1206,7 @@ impl FragmentCell {
         match started.await {
             Ok(0) => {}
             Ok(_) => {
-                self.launch_queued().await;
+                self.arm_launch().await;
             }
             Err(e) => self.event("woke.failed", &e.message, json!({ "code": e.code })),
         }
@@ -1372,9 +1414,37 @@ impl FragmentCell {
             .rows("SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM schedules UNION ALL SELECT MIN(next_at) AS at FROM record_schedules)", vec![])?
             .first()
             .and_then(|r| r["at"].as_i64());
-        let queued = self.count_of("SELECT COUNT(*) AS n FROM runs WHERE status = 'queued'", vec![])? > 0;
-        let retry = queued.then(|| js::now_ms() + QUEUED_RETRY_MS);
-        Ok([cron, retry].into_iter().flatten().min())
+        Ok([cron, self.launch_due_at()?].into_iter().flatten().min())
+    }
+
+    /// When queued runs' Workflows are due to start: now (the alarm starts
+    /// them, `launch_queued`), or once a start that failed may be tried
+    /// again; none queued, never.
+    fn launch_due_at(&self) -> CellResult<Option<i64>> {
+        if self.count_of("SELECT COUNT(*) AS n FROM runs WHERE status = 'queued'", vec![])? == 0 {
+            return Ok(None);
+        }
+        let retry: i64 = self.meta(MetaKey::LaunchRetryAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
+        Ok(Some(retry.max(js::now_ms())))
+    }
+
+    /// After a request that may have queued runs: the alarm armed to start
+    /// them, soon (`launch_queued`), never their Workflows here. Answers
+    /// whether it armed it.
+    pub(crate) async fn arm_launch(&self) -> bool {
+        let due = match self.launch_due_at() {
+            Ok(Some(at)) => at,
+            Ok(None) => return false,
+            Err(e) => {
+                console_error!("{}", json!({ "event": "launch.arm-failed", "code": e.code, "message": e.message }));
+                return false;
+            }
+        };
+        if let Err(e) = self.schedule_by(due).await {
+            console_error!("{}", json!({ "event": "launch.arm-failed", "code": e.code, "message": e.message }));
+            return false;
+        }
+        true
     }
 
     /// From the alarm: a running run whose Workflow ended without reporting

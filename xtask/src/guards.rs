@@ -326,4 +326,39 @@ mod tests {
         assert_eq!(file_bounds("let size = 100_000_000; // bytes"), 1);
         assert_eq!(file_bounds("let sha = \"9f1e8a\"; let x = \"1e8ab\";"), 0, "an exponent's spelling inside a hash");
     }
+
+    /// Goal: a run's Workflow is made with a fresh subrequest budget (the
+    /// D2b depth spike on Cloudflare: a Workflow keeps the budget of the
+    /// call that made it, and a call a busy object makes after it awaited
+    /// may take another request's deeper one; runs started behind other
+    /// calls lost 2 hops a generation, until a run's call into another
+    /// object failed or `createBatch` made nothing). So queued runs start
+    /// from the alarm alone, its first call out, all in one `createBatch`:
+    /// `launch_queued` is called once, by the alarm, as its first await,
+    /// and its own first await is that batch. Method: the cell's source,
+    /// read; a line comment is not code.
+    #[test]
+    fn queued_runs_start_first_in_the_alarm() {
+        let files = cell_sources();
+        let code = |text: &str| text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        // a function's code, from its signature to its closing brace at its indent
+        let body = |file: &str, sig: &str| -> String {
+            let text = code(&files[file]);
+            let at = text.find(sig).unwrap_or_else(|| panic!("{file} has {sig}"));
+            let end = text[at..].find("\n    }\n").unwrap_or_else(|| panic!("{sig} ends"));
+            text[at..at + end].to_string()
+        };
+        let before_first_await = |f: &str| f[..f.find(".await").expect("it awaits")].to_string();
+        assert_eq!(
+            uses(&files, "launch_queued("),
+            BTreeMap::from([("fragment.rs".to_string(), 1), ("jobs.rs".to_string(), 1)]),
+            "made in jobs.rs, called by the alarm alone: a request arms the alarm (`arm_launch`)"
+        );
+        let alarm = before_first_await(&body("fragment.rs", "async fn alarm(&self) -> Result<Response> {"));
+        assert!(alarm.trim_end().ends_with("self.launch_queued()"), "the alarm's first await is the launch:\n{alarm}");
+        let launch = before_first_await(&body("jobs.rs", "pub(crate) async fn launch_queued(&self) -> usize {"));
+        let last = launch.lines().last().unwrap_or_default();
+        assert!(last.contains("js::jobs_create_batch("), "the launch's first await is its one createBatch:\n{launch}");
+        assert_eq!(uses(&files, "js::jobs_create_batch("), only("jobs.rs", 1), "and no other Workflow is made");
+    }
 }
