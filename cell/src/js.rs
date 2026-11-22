@@ -368,13 +368,18 @@ fn jobs(env: &JsValue) -> CellResult<JsValue> {
     binding(env, "JOBS", "workflows")
 }
 
-/// Starts a job's Workflow instance; an instance that already exists is
-/// left as it is, so starting twice is harmless.
-pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) -> CellResult<()> {
-    let item = Object::new();
-    set(&item, "id", id);
-    set(&item, "params", to_js(params));
-    await_js(call(&jobs(env)?, "createBatch", &[Array::of1(&item).into()]), "createBatch").await?;
+/// Starts jobs' Workflow instances, `(id, params)` each, in one
+/// `createBatch` (at most 100); an instance that already exists is left
+/// as it is, so starting twice is harmless.
+pub async fn jobs_create_batch(env: &JsValue, items: &[(&str, &serde_json::Value)]) -> CellResult<()> {
+    let batch = Array::new();
+    for (id, params) in items {
+        let item = Object::new();
+        set(&item, "id", *id);
+        set(&item, "params", to_js(params));
+        batch.push(&item);
+    }
+    await_js(call(&jobs(env)?, "createBatch", &[batch.into()]), "createBatch").await?;
     Ok(())
 }
 
