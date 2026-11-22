@@ -67,6 +67,13 @@ const OPENBAO_ADDR: &str = "http://127.0.0.1:8200";
 /// (its encrypted disk).
 const SECRETS_IN_HOME: &str = "/run/fragment-home/secrets";
 const STATE_IN_HOME: &str = "/var/lib/fragment-home";
+/// Where the home's image holds this release (sandcastle's entry.sh `R`).
+const RELEASE_IN_HOME: &str = "/opt/fragment-home/release";
+/// What the release names in place of the fragment tree it was rendered
+/// from (a computer image's build context, which a home never builds: its
+/// images are preloaded by their content key): no path of the rendering
+/// machine reaches the image, so two machines render the same release.
+const SOURCE_IN_HOME: &str = "/opt/fragment-home/source";
 const GIT_PREFIX_IN_HOME: &str = "/opt/macrofiche/git-2.55.0";
 const CODESTORE_ORG: &str = "fragment-home";
 
@@ -289,6 +296,11 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
     let obj = config.as_object_mut().context("a config is an object")?;
     anyhow::ensure!(!obj.contains_key("vars"), "cell/wrangler.jsonc names no vars of its own");
     obj.insert("vars".into(), Value::Object(vars));
+    // when the release was made, from its inputs rather than the clock, so
+    // the same inputs render the same release (and so the same image and
+    // PCR0): SOURCE_DATE_EPOCH, else the fragment tree's HEAD commit time
+    let made_at = made_at(&devstack::cell_dir())?;
+    obj.get_mut("vars").and_then(Value::as_object_mut).context("its vars")?.insert("FRAGMENT_DEPLOYED_AT".into(), Value::String(made_at.to_string()));
     // the AI binding the local render drops (wrangler dev would open a
     // remote session for it): celld binds it, every call rejecting, "this
     // node has no Workers AI" (docs/self-host.md), as a node without it
@@ -354,6 +366,7 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
     // the platform's own name, for the stack's calls to its own URL: this
     // home's Caddy
     write(&release.join("hosts"), &format!("127.0.0.1 {}\n", c.platform_host), false)?;
+    in_home_paths(&release, &devstack::cell_dir())?;
     let id = tree_sha(&release)?;
     write(&release.join("release-id"), &format!("{id}\n"), false)?;
     let names: Vec<String> = walk_names(&sealed)?;
@@ -417,6 +430,40 @@ fn walk_names(dir: &Path) -> Result<Vec<String>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// `SOURCE_DATE_EPOCH` (whole seconds), else the commit time of the tree's
+/// HEAD: when the release was made, the same for the same inputs.
+fn made_at(cell_dir: &Path) -> Result<u64> {
+    if let Ok(v) = std::env::var("SOURCE_DATE_EPOCH") {
+        return v.trim().parse().with_context(|| format!("SOURCE_DATE_EPOCH {v:?}: whole seconds"));
+    }
+    let out = std::process::Command::new("git").arg("-C").arg(cell_dir).args(["log", "-1", "--format=%ct", "HEAD"]).output().context("git log")?;
+    anyhow::ensure!(out.status.success(), "the fragment tree's HEAD commit time: {}", String::from_utf8_lossy(&out.stderr).trim());
+    String::from_utf8_lossy(&out.stdout).trim().parse().context("a commit time is whole seconds")
+}
+
+/// The rendered configs name the release's own directory and the fragment
+/// tree's by their paths on the rendering machine; in the home they are
+/// `RELEASE_IN_HOME` and `SOURCE_IN_HOME`, the same on every machine.
+fn in_home_paths(release: &Path, cell_dir: &Path) -> Result<()> {
+    let release_at = fs::canonicalize(release)?.to_string_lossy().into_owned();
+    let tree_at = fs::canonicalize(cell_dir.join(".."))?.to_string_lossy().into_owned();
+    let cell = release.join("cell");
+    let mut files = vec![cell.join("wrangler.home.jsonc"), cell.join("wrangler.jsonc")];
+    if let Ok(dir) = fs::read_dir(cell.join(".wrangler/images")) {
+        files.extend(dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "Dockerfile")));
+    }
+    for f in files.into_iter().filter(|f| f.exists()) {
+        let text = fs::read_to_string(&f).with_context(|| format!("read {}", f.display()))?;
+        // the release's path first: it may lie inside the tree's
+        let given = release.to_string_lossy();
+        let moved = text.replace(&release_at, RELEASE_IN_HOME).replace(given.as_ref(), RELEASE_IN_HOME).replace(&format!("{tree_at}/cell/.."), SOURCE_IN_HOME).replace(&tree_at, SOURCE_IN_HOME);
+        if moved != text {
+            fs::write(&f, moved).with_context(|| format!("write {}", f.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// The home's front door, Caddy: TLS ended here, in the home, with
@@ -531,6 +578,26 @@ mod tests {
         assert!(f.contains("handle_path /__git/* {\n\t\treverse_proxy 127.0.0.1:8792"), "the code store, which the CLI reaches");
         assert_eq!(f.matches("handle_path").count(), 2, "on the platform's host alone, no fragment's");
         assert!(!f.contains("proxy_protocol"), "forwarded untouched: no PROXY header taken");
+    }
+
+    // Goal: a rendered release names no path of the machine that rendered
+    // it: its own directory and the fragment tree's become the home's fixed
+    // ones in its configs and image files, and the rest is untouched.
+    #[test]
+    fn a_release_names_no_path_of_the_rendering_machine() {
+        let root = std::env::temp_dir().join(format!("home-paths-{}", std::process::id()));
+        let (tree, release) = (root.join("tree"), root.join("out/release"));
+        fs::create_dir_all(tree.join("cell")).unwrap();
+        fs::create_dir_all(release.join("cell/.wrangler/images")).unwrap();
+        let (r, t) = (fs::canonicalize(&release).unwrap(), fs::canonicalize(&tree).unwrap());
+        let config = format!(r#"{{"dockerfile": "{r}/cell/.wrangler/images/stub.Dockerfile", "context": "{t}/cell/..", "file": "{t}/cell/../images/stub/Dockerfile", "keep": "/elsewhere"}}"#, r = r.display(), t = t.display());
+        fs::write(release.join("cell/wrangler.home.jsonc"), &config).unwrap();
+        fs::write(release.join("cell/.wrangler/images/stub.Dockerfile"), format!("LABEL dev.fragment.project=\"{}/cell\"\n", r.display())).unwrap();
+        in_home_paths(&release, &tree.join("cell")).unwrap();
+        let got = fs::read_to_string(release.join("cell/wrangler.home.jsonc")).unwrap();
+        assert_eq!(got, r#"{"dockerfile": "/opt/fragment-home/release/cell/.wrangler/images/stub.Dockerfile", "context": "/opt/fragment-home/source", "file": "/opt/fragment-home/source/images/stub/Dockerfile", "keep": "/elsewhere"}"#);
+        assert_eq!(fs::read_to_string(release.join("cell/.wrangler/images/stub.Dockerfile")).unwrap(), "LABEL dev.fragment.project=\"/opt/fragment-home/release/cell\"\n");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     // Goal: behind a parent's SNI router, the front door takes the PROXY
