@@ -132,11 +132,6 @@ pub struct FragmentCell {
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
-    /// The alarm's pass is under way (`run.started` says where a run's
-    /// Workflow was started from).
-    pub(crate) in_alarm: Cell<bool>,
-    /// A card's shot is under way beside the alarm's pass (`card_beside`).
-    pub(crate) card_shooting: Cell<bool>,
     /// Records whose runs are being made (jobs.rs `Admitting`).
     pub(crate) admitting: Cell<u32>,
     /// A test fleet's `hold-install` lever (ops.rs): whether a pending
@@ -144,9 +139,18 @@ pub struct FragmentCell {
     /// waiting now. In memory: a life's end, which remakes its storage,
     /// leaves it as the test set it.
     pub(crate) test_hold_install: Cell<(bool, bool)>,
-    /// Serializes `launch_queued`: two at once would each start a queued
-    /// run's Workflow and say so.
-    pub(crate) launching: futures_util::lock::Mutex<()>,
+    /// A test fleet's `hold-launch` lever (ops.rs): whether a launch's
+    /// batch, made, waits before it is written (jobs.rs `launch_queued`),
+    /// and whether one is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_launch: Cell<(bool, bool)>,
+    /// A test fleet's `hold-card` lever (ops.rs): whether the alarm's pass
+    /// waits where it chooses its card's shot (`on_alarm`), and whether one
+    /// is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_card: Cell<(bool, bool)>,
+    /// A launch is under way (`launch_queued`): one at a time, without an
+    /// await before its `createBatch`; another finding one leaves its runs
+    /// queued for the alarm's next pass.
+    pub(crate) launching: Cell<bool>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
@@ -183,11 +187,11 @@ impl DurableObject for FragmentCell {
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
-            in_alarm: Cell::new(false),
-            card_shooting: Cell::new(false),
             admitting: Cell::new(0),
             test_hold_install: Cell::new((false, false)),
-            launching: futures_util::lock::Mutex::new(()),
+            test_hold_launch: Cell::new((false, false)),
+            test_hold_card: Cell::new((false, false)),
+            launching: Cell::new(false),
             dw_noted: RefCell::new(None),
             schema,
         }
@@ -207,6 +211,11 @@ impl DurableObject for FragmentCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // Queued runs' Workflows start first, before anything here calls out
+        // (`launch_queued`; xtask/src/guards.rs holds this order). The alarm
+        // begins with a fresh subrequest budget, and a Workflow keeps the
+        // budget of the call that made it.
+        self.launch_queued().await;
         if self.schema.refused() {
             // a delete's cleanup goes on, refused or not: it ends in its
             // storage's release, which makes the fragment current (ended.rs)
@@ -215,10 +224,7 @@ impl DurableObject for FragmentCell {
             self.schema.refused_alarm(&self.state, due).await?;
             return Response::ok("");
         }
-        self.in_alarm.set(true);
-        let passed = self.on_alarm().await;
-        self.in_alarm.set(false);
-        if let Err(e) = passed {
+        if let Err(e) = self.on_alarm().await {
             self.event("alarm.failed", &e.message, json!({ "code": e.code }));
             // Whatever is due, a failing alarm tries again no sooner than
             // this, so a lasting failure never spins.
@@ -1691,24 +1697,23 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
-    /// life was made since; then the life's index, search, joined and
-    /// delivery outboxes, due schedules (the code's and its records'), queued runs, and the pass: the
-    /// trims, the poll backstop (while the pins may lag), the blob
-    /// collection, running runs checked, and the storage sample. The next
-    /// pass is a day away, or within the poll interval while the fragment
-    /// is busy (`arm`). Last, a preview card due is shot (card.rs): the
-    /// seconds a browser takes hold up only the work that comes due
-    /// meanwhile. Then it re-arms.
+    /// After queued runs' starts (`alarm`), the alarm runs an ended life's
+    /// cleanup (ended.rs) whether or not a life was made since; then the
+    /// life's index, search, joined and delivery outboxes, due schedules
+    /// (the code's and its records'), and the pass: the trims, the poll
+    /// backstop (while the pins may lag), the blob collection, running runs
+    /// checked, and the storage sample. The next pass is a day away, or
+    /// within the poll interval while the fragment is busy (`arm`), and
+    /// soon when runs were queued meanwhile (`launch_due_at`): a run queued
+    /// while this pass works waits for its end. Last, a preview card due is
+    /// shot (card.rs), unless runs were queued meanwhile: they start first,
+    /// in the next pass. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
             // what an ended life still has to clean, if anything
             return self.schedule().await;
         }
-        // queued runs first, ahead of the pass's slower work (a computer's
-        // wake among the deliveries); what the pass queues, its end starts
-        self.launch_queued().await;
         // an invite that ran out waits no more, and its owner's list is told
         // in this pass's flush (`arm` wakes the alarm at each one's expiry)
         if let Err(e) = self.drop_spent_invites().await {
@@ -1741,7 +1746,6 @@ impl FragmentCell {
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
         self.fire_cron().await?;
-        self.launch_queued().await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
@@ -1757,34 +1761,22 @@ impl FragmentCell {
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
-            self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
-        self.card_beside();
-        self.schedule().await
-    }
-
-    /// A card's shot, beside the alarm's pass and never inside it: the
-    /// browser may take a minute, and an object runs one alarm at a time,
-    /// so a run queued meanwhile (started from the alarm alone,
-    /// `launch_queued`) would wait on it. One shot at a time; while it is
-    /// under way it is not due (`arm`), and its end arms the alarm again.
-    fn card_beside(&self) {
-        if self.card_shooting.replace(true) {
-            return;
+        if self.cfg.test_hooks {
+            self.held_card().await;
         }
-        // SAFETY: as `later`'s: the object outlives a promise `waitUntil` holds
-        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
-        self.state.wait_until(async move {
-            if let Err(e) = cell.drain_card().await {
-                cell.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+        // A run queued while this pass worked starts before a card's shot
+        // (a browser's seconds, which an object's next alarm waits for): the
+        // shot waits for the next pass, armed at once, which starts the run
+        // first (`launch_queued`) and shoots then, with nothing queued.
+        if !self.launch_waiting()? {
+            if let Err(e) = self.drain_card().await {
+                self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
             }
-            cell.card_shooting.set(false);
-            if let Err(e) = cell.schedule().await {
-                console_error!("{}", json!({ "event": "card.arm-failed", "code": e.code, "message": e.message }));
-            }
-        });
+        }
+        self.schedule().await
     }
 
     /// Arms the alarm for the earliest due work.
@@ -1804,7 +1796,6 @@ impl FragmentCell {
         if self.later_asked.replace(true) {
             return;
         }
-
         // SAFETY: the reasoning of worker-macros' own handlers, which hand
         // the runtime `&'static self` futures: the object is never
         // destroyed while a promise it gave the runtime runs, and
@@ -1878,8 +1869,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let card = if self.card_shooting.get() { None } else { self.card_due_at()? };
-        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, card, self.invites_due_at()?, ended, also];
+        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
         let now = js::now_ms();
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(now + min_ms);

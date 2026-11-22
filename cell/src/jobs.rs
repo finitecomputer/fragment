@@ -78,6 +78,16 @@ pub const HOPS_HEADER: &str = "x-fragment-hops";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+
+/// A launch under way (`launch_queued`), ended however it returns.
+struct Launching<'a>(&'a std::cell::Cell<bool>);
+
+impl Drop for Launching<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 /// A record's runs being made (`fire_channel`): its ordered triggers' runs
 /// stored with the record, the owner's standing not yet read. While any
 /// is, no ordered trigger's run starts, so none starts before that answer
@@ -127,7 +137,8 @@ const CODE_CHANGED_ATTEMPTS_MAX: u32 = 8;
 /// often a held one looks again.
 const TEST_HOLD_MAX_MS: u64 = 20_000;
 const TEST_HOLD_POLL_MS: u64 = 50;
-const LAUNCH_BATCH: usize = 25;
+/// Queued runs started a pass, in one `createBatch` (which takes at most 100).
+const LAUNCH_BATCH: usize = 100;
 /// Running runs checked against their Workflow per alarm, once they are this old.
 const RECONCILE_BATCH: i64 = 25;
 const RECONCILE_AFTER_MS: i64 = 60_000;
@@ -371,8 +382,8 @@ impl FragmentCell {
         Ok(true)
     }
 
-    /// Records a run: queued to start, or blocked. The caller launches
-    /// queued runs (`launch_queued`) once it is done writing.
+    /// Records a run: queued to start, or blocked. The alarm starts queued
+    /// runs (`launch_queued`), armed once the caller is done writing.
     pub(crate) fn start_run(&self, r: NewRun<'_>) -> CellResult<Started> {
         if let Some((id, sha)) = r.call {
             let prior = self.rows("SELECT id, status, input_sha FROM runs WHERE principal = ? AND call_id = ?", vec![r.principal.into(), id.into()])?;
@@ -456,20 +467,29 @@ impl FragmentCell {
         Ok(format!("{}-a{attempt}", self.run_key(run)?))
     }
 
-    /// Starts the Workflows of queued runs, one launcher at a time, from
-    /// the alarm alone: a fresh invocation (`run.started` says so). A
-    /// Workflow made inside another call runs one level deeper on
-    /// Cloudflare, so started from a request (a job step's callback among
-    /// them), a backlog or a chain of runs each started inside the last
-    /// climbed past its subrequest depth limit, and a job's next call into
-    /// an object failed ("Subrequest depth limit exceeded": the SimpleX
-    /// door spike's mass replay). A request arms the alarm (`arm_launch`).
-    /// A failure leaves them queued, tried again `QUEUED_RETRY_MS` later.
-    /// Answers how many it started.
+    /// Starts the Workflows of queued runs (at most `LAUNCH_BATCH`), from
+    /// the alarm alone and as its first call out (`alarm`), all in one
+    /// `createBatch`, with nothing awaited before it. A Workflow keeps the
+    /// subrequest budget of the call that made it, and on Cloudflare a call
+    /// a busy object makes after an await may take another request's deeper
+    /// budget: started behind other calls, runs lost 2 hops a generation
+    /// until a job's next call into an object failed ("Subrequest depth
+    /// limit exceeded") or `createBatch` made nothing (the D2b depth spike;
+    /// xtask/src/guards.rs holds the order). A request arms the alarm
+    /// (`arm_launch`). A failure leaves them queued, tried again
+    /// `QUEUED_RETRY_MS` later. Answers how many it started.
     pub(crate) async fn launch_queued(&self) -> usize {
-        let _one = self.launching.lock().await;
-        // a start that cannot be made is tried again later, never at once,
-        // nor before then by another launch in this pass or the next
+        // a release that may not read this storage starts nothing, and an
+        // ended life has nothing to start
+        if self.schema.refused() || !matches!(self.meta(MetaKey::CreatedAt), Ok(Some(_))) {
+            return 0;
+        }
+        // one launcher at a time, held with no await
+        if self.launching.replace(true) {
+            return 0;
+        }
+        let _one = Launching(&self.launching);
+        // a start that cannot be made is tried again later, never at once
         let later = || {
             let _ = self.set_meta(MetaKey::LaunchRetryAt, &(js::now_ms() + QUEUED_RETRY_MS).to_string());
         };
@@ -481,7 +501,7 @@ impl FragmentCell {
             later();
             return 0;
         };
-        // most calls queue nothing: they read no more than this
+        // most passes queue nothing: they read no more than this
         if rows.is_empty() {
             return 0;
         }
@@ -489,57 +509,65 @@ impl FragmentCell {
             later();
             return 0;
         };
-        let mut started = 0;
         // a record's runs being made: no ordered trigger's run starts until
-        // they are (`Admitting`; its request asks for a launch after)
-        let held_back = match self.admitting.get() {
-            0 => vec![],
-            _ => match self.ordered_triggers() {
-                Ok(o) => o,
-                Err(_) => {
-                    later();
-                    return 0;
-                }
-            },
+        // they are (`Admitting`; its request arms the launch after)
+        let Ok(ordered) = self.ordered_triggers() else {
+            later();
+            return 0;
         };
+        let held_back = self.admitting.get() > 0;
+        // one run of an ordered trigger a batch: the read above is one look
+        // (`launchable`: none of it running, none queued for an earlier
+        // record), so only two looking first at once could both be in it
+        let mut taken: Vec<String> = vec![];
+        let mut runs = Vec::with_capacity(rows.len());
         for run in rows.iter().map(run_row) {
-            let (id, attempt) = (run.id, run.attempt);
-            if run.via == Via::Channel && run.trigger.as_deref().is_some_and(|t| held_back.contains(&fragment_core::manifest::ordered_key(t, &run.op))) {
-                continue;
-            }
-            // still its turn: one launched earlier in this batch (an
-            // ordered trigger's run before it) holds it back now
-            match self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE id = ? AND {}", launchable()), vec![SqlStorageValue::Integer(id)]) {
-                Ok(1) => {}
-                Ok(_) => continue,
-                Err(_) => {
-                    later();
-                    return started;
+            if let (Via::Channel, Some(trigger)) = (run.via, run.trigger.as_deref()) {
+                let key = fragment_core::manifest::ordered_key(trigger, &run.op);
+                if ordered.contains(&key) {
+                    if held_back || taken.contains(&key) {
+                        continue;
+                    }
+                    taken.push(key);
                 }
             }
-            let Ok(instance) = self.instance_id(id, attempt) else {
+            let Ok(instance) = self.instance_id(run.id, run.attempt) else {
                 later();
-                return started;
+                return 0;
             };
-            let params = json!({ "fragment": name, "incarnation": incarnation, "run": id, "attempt": attempt });
-            match js::jobs_create(self.env.as_ref(), &instance, &params).await {
-                Ok(()) => {
-                    let _ = self.exec(
-                        "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND attempt = ? AND status = 'queued'",
-                        vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
-                    );
-                    self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt, "from": if self.in_alarm.get() { "alarm" } else { "request" } }));
-                    started += 1;
-                }
-                Err(e) => {
-                    self.event("run.launch-failed", &format!("run #{id}: its Workflow did not start: {}", e.message), json!({ "run": id }));
-                    later();
-                    let _ = self.schedule().await;
-                    return started;
-                }
-            }
+            let params = json!({ "fragment": name, "incarnation": incarnation, "run": run.id, "attempt": run.attempt });
+            runs.push((instance, params, run));
         }
-        started
+        // each held back for its turn: nothing to start
+        if runs.is_empty() {
+            return 0;
+        }
+        let items: Vec<(&str, &Value)> = runs.iter().map(|(instance, params, _)| (instance.as_str(), params)).collect();
+        let made = js::jobs_create_batch(self.env.as_ref(), &items).await;
+        if self.cfg.test_hooks {
+            self.held_launch().await;
+        }
+        // a life ended, or made again, while the batch was asked: nothing is
+        // written into the next (its runs' ids start again from 1, ended.rs),
+        // and its Workflows stop at their first call (`current_run`)
+        if self.meta(MetaKey::CreatedAt).ok().flatten().as_deref() != Some(incarnation.as_str()) {
+            return 0;
+        }
+        if let Err(e) = made {
+            let ids: Vec<i64> = runs.iter().map(|(_, _, run)| run.id).collect();
+            self.event("run.launch-failed", &format!("{} queued runs: their Workflows did not start: {}", ids.len(), e.message), json!({ "runs": ids }));
+            later();
+            return 0;
+        }
+        for (_, _, run) in &runs {
+            let (id, attempt) = (run.id, run.attempt);
+            let _ = self.exec(
+                "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND attempt = ? AND status = 'queued'",
+                vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
+            );
+            self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt }));
+        }
+        runs.len()
     }
 
     /// The run a Workflow callback is for, if it is of this fragment's
@@ -759,6 +787,39 @@ impl FragmentCell {
             self.later();
         }
         Ok(json!({ "stop": true }))
+    }
+
+    /// Whether queued runs wait to start now (`launch_due_at`, no failed
+    /// start's retry pending): the alarm's pass then leaves its card's shot
+    /// for the next pass, which starts them first.
+    pub(crate) fn launch_waiting(&self) -> CellResult<bool> {
+        Ok(self.launch_due_at()?.is_some_and(|at| at <= js::now_ms()))
+    }
+
+    /// Test fleets: waits while `hold-card` is on, at most
+    /// `TEST_HOLD_MAX_MS`, the alarm's pass where it chooses its card's shot.
+    pub(crate) async fn held_card(&self) {
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if !self.test_hold_card.get().0 {
+                break;
+            }
+            self.test_hold_card.set((true, true));
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        self.test_hold_card.set((self.test_hold_card.get().0, false));
+    }
+
+    /// Test fleets: waits while `hold-launch` is on, at most
+    /// `TEST_HOLD_MAX_MS`, a batch made and not yet written (`waiting`).
+    async fn held_launch(&self) {
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if !self.test_hold_launch.get().0 {
+                break;
+            }
+            self.test_hold_launch.set((true, true));
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        self.test_hold_launch.set((self.test_hold_launch.get().0, false));
     }
 
     /// Test fleets: waits while `hold-advances` is on, at most
