@@ -94,6 +94,10 @@ struct Installed<'a> {
     triggers: &'a [TriggerDecl],
 }
 
+/// The installed code's identity, as an expression over the `code` row:
+/// its live commit and its loader's id (a blessed template's release).
+pub(crate) const INSTALLED_CODE: &str = "sha || ' ' || loader_id";
+
 /// Replaces the code tables' rows. The caller writes the code row in the
 /// same step.
 fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
@@ -149,13 +153,18 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     // its ordered triggers, as `<channel> <op>`, in a meta row rather than
     // a column, so a release before (a rollback) reads past it, as it
     // reads past any row it does not know, and its triggers then run as
-    // they always have (jobs.rs `launchable` reads it)
+    // they always have (jobs.rs `launchable` reads it). Named for the code
+    // installed with it (the code row, written in this same step), so a
+    // row a release before left behind, under other code it installed,
+    // orders nothing
     let ordered: Vec<String> = code.triggers.iter().filter(|t| t.ordered).filter_map(|t| match &t.on {
         TriggerOn::Channel(c) => Some(fragment_core::manifest::ordered_key(c, &t.run)),
         _ => None,
     }).collect();
     if !ordered.is_empty() {
-        let value = serde_json::to_string(&ordered).expect("names serialize");
+        let rows: Vec<Value> = sql.exec(&format!("SELECT {INSTALLED_CODE} AS code FROM code WHERE id = 1"), None)?.to_array()?;
+        let installed = rows.first().and_then(|r| r["code"].as_str()).map(str::to_string).expect("ordered triggers are installed with their code row");
+        let value = serde_json::to_string(&json!({ "code": installed, "ordered": ordered })).expect("names serialize");
         sql.exec("INSERT INTO meta (key, value) VALUES (?, ?)", vec![MetaKey::OrderedTriggers.key().into(), value.into()])?;
     }
     // what is kept of a kind no channel keeps now goes (one kept again
@@ -1356,10 +1365,7 @@ impl FragmentCell {
     /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
         let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
-        let ordered: Vec<String> = match self.meta(MetaKey::OrderedTriggers)? {
-            Some(v) => crate::json_text::<Vec<String>>(&v).map_err(|e| stored("its ordered triggers", e.to_string()))?,
-            None => vec![],
-        };
+        let ordered = self.ordered_triggers()?;
         let mut out = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
             if row.idx != i64::try_from(i).expect("triggers are few") {
@@ -1381,6 +1387,24 @@ impl FragmentCell {
             out.push(TriggerDecl { on, run: row.run, from, ordered });
         }
         Ok(out)
+    }
+
+    /// The installed code's ordered triggers (`manifest::ordered_key`):
+    /// none when the row was written for other code (a release before
+    /// installed some since, and left it behind).
+    pub(crate) fn ordered_triggers(&self) -> CellResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Ordered {
+            code: String,
+            ordered: Vec<String>,
+        }
+        let Some(v) = self.meta(MetaKey::OrderedTriggers)? else { return Ok(vec![]) };
+        let row: Ordered = crate::json_text(&v).map_err(|e| stored("its ordered triggers", e.to_string()))?;
+        let installed = self.rows(&format!("SELECT {INSTALLED_CODE} AS code FROM code WHERE id = 1"), vec![])?;
+        Ok(match installed.first().and_then(|r| r["code"].as_str()) {
+            Some(code) if code == row.code => row.ordered,
+            _ => vec![],
+        })
     }
 
     /// The operations a record (on its channel, by its poster) starts: each

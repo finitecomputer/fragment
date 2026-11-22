@@ -137,6 +137,8 @@ pub struct FragmentCell {
     pub(crate) in_alarm: Cell<bool>,
     /// A card's shot is under way beside the alarm's pass (`card_beside`).
     pub(crate) card_shooting: Cell<bool>,
+    /// Records whose runs are being made (jobs.rs `Admitting`).
+    pub(crate) admitting: Cell<u32>,
     /// A test fleet's `hold-install` lever (ops.rs): whether a pending
     /// install waits (plane.rs `install_pending`), and whether one is
     /// waiting now. In memory: a life's end, which remakes its storage,
@@ -183,6 +185,7 @@ impl DurableObject for FragmentCell {
             later_asked: Cell::new(false),
             in_alarm: Cell::new(false),
             card_shooting: Cell::new(false),
+            admitting: Cell::new(0),
             test_hold_install: Cell::new((false, false)),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),

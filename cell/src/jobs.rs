@@ -78,6 +78,27 @@ pub const HOPS_HEADER: &str = "x-fragment-hops";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+/// A record's runs being made (`fire_channel`), from its append, across
+/// the wait on its owner's standing, to its runs' rows: while any is, no
+/// ordered trigger's run starts, so none of a later record starts before
+/// an earlier record's is made (the review of #1461). In memory: a wait
+/// cut short by the object's end is a failed try, which its retry makes
+/// again.
+struct Admitting<'a>(&'a std::cell::Cell<u32>);
+
+impl<'a> Admitting<'a> {
+    fn begin(count: &'a std::cell::Cell<u32>) -> Admitting<'a> {
+        count.set(count.get() + 1);
+        Admitting(count)
+    }
+}
+
+impl Drop for Admitting<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
 /// A queued run that may start now: any but an ordered trigger's (the
 /// `ordered_triggers` meta row, `manifest::ordered_key`) while a run of
 /// that trigger and operation is running, or queued for an earlier record
@@ -89,10 +110,12 @@ const QUEUED_RETRY_MS: i64 = 10_000;
 fn launchable() -> String {
     format!(
         "status = 'queued' AND NOT (via = 'channel'
-    AND EXISTS (SELECT 1 FROM meta m, json_each(m.value) o WHERE m.key = '{}' AND o.value = runs.trigger || ' ' || runs.op)
+    AND EXISTS (SELECT 1 FROM meta m, json_each(m.value, '$.ordered') o WHERE m.key = '{}' AND o.value = runs.trigger || ' ' || runs.op
+        AND json_extract(m.value, '$.code') = (SELECT {} FROM code WHERE id = 1))
     AND EXISTS (SELECT 1 FROM runs e WHERE e.op = runs.op AND e.trigger = runs.trigger AND e.via = 'channel' AND (e.status = 'running'
         OR (e.status = 'queued' AND json_extract(e.input, '$.record.seq') < json_extract(runs.input, '$.record.seq')))))",
-        MetaKey::OrderedTriggers.key()
+        MetaKey::OrderedTriggers.key(),
+        crate::plane::INSTALLED_CODE,
     )
 }
 /// The attempt (replays count) at which a change of the app's code under
@@ -467,8 +490,23 @@ impl FragmentCell {
             return 0;
         };
         let mut started = 0;
+        // a record's runs being made: no ordered trigger's run starts until
+        // they are (`Admitting`; its request asks for a launch after)
+        let held_back = match self.admitting.get() {
+            0 => vec![],
+            _ => match self.ordered_triggers() {
+                Ok(o) => o,
+                Err(_) => {
+                    later();
+                    return 0;
+                }
+            },
+        };
         for run in rows.iter().map(run_row) {
             let (id, attempt) = (run.id, run.attempt);
+            if run.via == Via::Channel && run.trigger.as_deref().is_some_and(|t| held_back.contains(&fragment_core::manifest::ordered_key(t, &run.op))) {
+                continue;
+            }
             // still its turn: one launched earlier in this batch (an
             // ordered trigger's run before it) holds it back now
             match self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE id = ? AND {}", launchable()), vec![SqlStorageValue::Integer(id)]) {
@@ -1080,6 +1118,9 @@ impl FragmentCell {
         if self.channel_triggers(record)?.is_empty() {
             return Ok(vec![]);
         }
+        // its record appended, its runs not yet: an ordered trigger's later
+        // record's run starts after this one's is made (`launch_queued`)
+        let _admitting = Admitting::begin(&self.admitting);
         let read_only = self.read_only().await?;
         // read after the wait, so the runs start from the code installed now
         let ops = self.channel_triggers(record)?;
@@ -1458,22 +1499,28 @@ impl FragmentCell {
 
     /// From the alarm: a running run whose Workflow ended without reporting
     /// (it errored outside a step, or it is gone) is held. Each pass looks
-    /// at the next `RECONCILE_BATCH` past the last it looked at
-    /// (`ReconcileFrom`), from the first again once it reaches the end, so
-    /// every running run is looked at in turn: a batch of long sleepers
-    /// never hides a lost one behind them (the review of #1461: a lost head
-    /// of an ordered trigger held its whole queue).
+    /// at the next `RECONCILE_BATCH` past the last it looked at, within a
+    /// cycle over the runs running as it began (`ReconcileFrom`: `<from>
+    /// <end>`), then from the first again: every running run is looked at
+    /// within its cycle's passes, however many sleep long before it or
+    /// start after it (the review of #1461: a lost head of an ordered
+    /// trigger held its whole queue).
     pub(crate) async fn reconcile_runs(&self) {
-        let from: i64 = self.meta(MetaKey::ReconcileFrom).ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let kept = self.meta(MetaKey::ReconcileFrom).ok().flatten();
+        let (from, end) = kept.as_deref().and_then(|s| s.split_once(' ')).and_then(|(f, e)| Some((f.parse::<i64>().ok()?, e.parse::<i64>().ok()?))).unwrap_or((0, 0));
+        let end = match from {
+            0 => self.count_of("SELECT COALESCE(MAX(id), 0) AS n FROM runs WHERE status = 'running'", vec![]).map_or(0, |n| n as i64),
+            _ => end,
+        };
         let Ok(rows) = self.rows(
-            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'running' AND launched_at < ? AND id > ? ORDER BY id LIMIT ?"),
-            vec![SqlStorageValue::Integer(js::now_ms() - RECONCILE_AFTER_MS), SqlStorageValue::Integer(from), SqlStorageValue::Integer(RECONCILE_BATCH)],
+            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'running' AND launched_at < ? AND id > ? AND id <= ? ORDER BY id LIMIT ?"),
+            vec![SqlStorageValue::Integer(js::now_ms() - RECONCILE_AFTER_MS), SqlStorageValue::Integer(from), SqlStorageValue::Integer(end), SqlStorageValue::Integer(RECONCILE_BATCH)],
         ) else {
             return;
         };
         let ids: Vec<i64> = rows.iter().map(run_row).map(|r| r.id).collect();
-        let next = fragment_core::steps::reconcile_from(&ids, RECONCILE_BATCH as usize);
-        let _ = self.set_meta(MetaKey::ReconcileFrom, &next.to_string());
+        let next = fragment_core::steps::reconcile_from(&ids, RECONCILE_BATCH as usize, end);
+        let _ = self.set_meta(MetaKey::ReconcileFrom, &format!("{next} {end}"));
         for run in rows.iter().map(run_row) {
             let Ok(instance) = self.instance_id(run.id, run.attempt) else { return };
             let why = match js::jobs_status(self.env.as_ref(), &instance).await {

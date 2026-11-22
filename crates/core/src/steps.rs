@@ -275,37 +275,52 @@ pub enum StepOutcome {
 
 /// Where the next look for runs whose Workflow ended unreported starts
 /// (cell jobs.rs `reconcile_runs`), after one that looked at `looked` (run
-/// ids, ascending, past the last start) with room for `batch`: past the
-/// last it looked at while it filled its batch, else from the first again.
-/// So every running run is looked at in turn, however many sleep long.
-pub fn reconcile_from(looked: &[i64], batch: usize) -> i64 {
+/// ids, ascending, past the last start) with room for `batch`, in a cycle
+/// over the runs up to `end` (the newest running as it began): past the
+/// last it looked at while it filled its batch short of `end`, else from
+/// the first again (0), a new cycle. So every running run is looked at
+/// within a cycle, however many sleep long before it or start after it.
+pub fn reconcile_from(looked: &[i64], batch: usize, end: i64) -> i64 {
     match looked.last() {
-        Some(&last) if looked.len() >= batch => last,
+        Some(&last) if looked.len() >= batch && last < end => last,
         _ => 0,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    /// Goal: a lost run is found however many runs sleep long before it
-    /// (the review of #1461: the 25 oldest sleepers were looked at on
-    /// every pass, and a lost head of an ordered trigger held its queue).
-    /// Method: 60 running runs, 25 a look, each look from where the last
-    /// left off: every one is looked at within three passes, then again.
+    /// Goal: a lost run is found however many runs sleep long before it,
+    /// or start after it (the review of #1461: the 25 oldest sleepers were
+    /// looked at on every pass, then 25 newer each pass kept the next look
+    /// from ever coming back, and a lost head of an ordered trigger held
+    /// its queue). Method: 60 running, 25 a look, a cycle's end fixed as it
+    /// begins while 30 more start each pass: each of the 60 is looked at
+    /// within a cycle, and the next cycle comes back to the first.
     #[test]
     fn every_running_run_is_looked_at_in_turn() {
-        let running: Vec<i64> = (1..=60).collect();
-        let (mut from, mut seen) = (0, std::collections::BTreeSet::new());
-        for _ in 0..3 {
-            let looked: Vec<i64> = running.iter().copied().filter(|id| *id > from).take(25).collect();
-            seen.extend(looked.iter().copied());
-            from = reconcile_from(&looked, 25);
+        let mut running: Vec<i64> = (1..=60).collect();
+        let (mut from, mut end, mut seen) = (0, 0, std::collections::BTreeSet::new());
+        for pass in 0..4 {
+            if from == 0 {
+                end = *running.last().unwrap();
+            }
+            let looked: Vec<i64> = running.iter().copied().filter(|id| *id > from && *id <= end).take(25).collect();
+            if pass < 3 {
+                seen.extend(looked.iter().copied());
+            }
+            from = reconcile_from(&looked, 25, end);
+            // the traffic goes on: 30 more start before the next pass
+            let newest = *running.last().unwrap();
+            running.extend(newest + 1..=newest + 30);
+            if pass == 3 {
+                assert!(looked.contains(&1), "the next cycle comes back to the first: {looked:?}");
+            }
         }
-        assert_eq!(seen.len(), 60, "all looked at within three passes");
-        assert_eq!(from, 0, "the end reached: from the first again");
-        assert_eq!(reconcile_from(&[], 25), 0);
-        assert_eq!(reconcile_from(&[3, 9], 25), 0, "a short look reached the end");
-        assert_eq!(reconcile_from(&(1..=25).collect::<Vec<_>>(), 25), 25, "a full look goes on past its last");
+        assert!((1..=60).all(|id| seen.contains(&id)), "each of the first 60 looked at within its cycle");
+        assert_eq!(reconcile_from(&[], 25, 9), 0);
+        assert_eq!(reconcile_from(&[3, 9], 25, 99), 0, "a short look reached the end");
+        assert_eq!(reconcile_from(&(1..=25).collect::<Vec<_>>(), 25, 99), 25, "a full look goes on past its last");
+        assert_eq!(reconcile_from(&(1..=25).collect::<Vec<_>>(), 25, 25), 0, "a full look that reached the cycle's end: from the first again");
     }
 
     use super::*;
