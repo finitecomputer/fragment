@@ -794,15 +794,22 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
+/// The last hour's spend at the ledger's `now`, and when its notice ends on
+/// the clock a page counts it down on: the epoch's, a test fleet's offset
+/// (`offset_ms`, moving the ledger's now) taken off.
+fn spending(store: &SqlStore, now: i64, offset: i64) -> (i64, Option<i64>) {
+    (uses::spent_hour(store, now), uses::spent_until(store, now).map(|at| at - offset))
+}
+
 /// How every transaction ends, the same for each (`transact`'s closures,
 /// one for each caller, carry none of it): the head written back, the
 /// store's fault if any, what it leaves the ledger saying kept in `left`
 /// (`told`; packs sold here or not), and when the next sweep is due.
 #[inline(never)]
-fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, offset: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
     save(store, ledger);
     store.checked()?;
-    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok(), (uses::spent_hour(store, now), uses::spent_until(store, now)))));
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok(), spending(store, now, offset))));
     Ok(ledger.next_sweep_ms(now))
 }
 
@@ -868,13 +875,14 @@ impl LedgerCell {
     /// answer and when the next sweep is due (the ledger's clock); the
     /// what it leaves the ledger saying is in `left`.
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
-        let now = js::now_ms() + self.offset_ms()?;
+        let offset = self.offset_ms()?;
+        let now = js::now_ms() + offset;
         let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            Ok((answer, settled(&store, &ledger, now, cfg, &left)?))
+            Ok((answer, settled(&store, &ledger, now, offset, cfg, &left)?))
         })
     }
 
@@ -903,14 +911,15 @@ impl LedgerCell {
     /// person's default plan is a command it keeps), so that call is a
     /// mutation, writing it.
     async fn read<T: 'static>(&self, op: impl FnOnce(&Ledger, &SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
-        let now = js::now_ms() + self.offset_ms()?;
+        let offset = self.offset_ms()?;
+        let now = js::now_ms() + offset;
         let store = SqlStore::new(self.sql());
         let Some(ledger) = stored(&store)?.1 else {
             return self.mutate(move |l, s, now| op(l, s, now)).await;
         };
         let answer = op(&ledger, &store, now);
         store.checked()?;
-        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), (uses::spent_hour(&store, now), uses::spent_until(&store, now)))));
+        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), spending(&store, now, offset))));
         if self.armed.get().is_none() {
             self.alarm_kept(ledger.next_sweep_ms(now)).await?;
         }
@@ -1074,12 +1083,13 @@ impl LedgerCell {
                 // the head as last written (its body, `{}`, says nothing). A
                 // ledger no call has written yet has none to tell (its
                 // standing ok, or a guest's), and an org's tells no one.
-                let now = js::now_ms() + self.offset_ms()?;
+                let offset = self.offset_ms()?;
+                let now = js::now_ms() + offset;
                 let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
                 let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
                     (Some(Payer::Person(_)), Some(row)) => {
                         let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-                        ledger.said(now, self.cfg.stripe().is_ok(), { let store = SqlStore::new(self.sql()); (uses::spent_hour(&store, now), uses::spent_until(&store, now)) })
+                        ledger.said(now, self.cfg.stripe().is_ok(), spending(&SqlStore::new(self.sql()), now, offset))
                     }
                     _ => vec![],
                 };
@@ -1111,12 +1121,13 @@ impl LedgerCell {
                 // its spend passed a step of its notice, or is past one, whose
                 // end it may have moved: its person's pages told what changed
                 // (`told` tells nothing that did not)
-                let now = js::now_ms() + self.offset_ms()?;
+                let offset = self.offset_ms()?;
+                let now = js::now_ms() + offset;
                 let store = SqlStore::new(self.sql());
-                let spent = uses::spent_hour(&store, now);
-                if stepped || spent >= core::said::SPENDING_MICROS {
+                let spent = spending(&store, now, offset);
+                if stepped || spent.0 >= core::said::SPENDING_MICROS {
                     if let Some(ledger) = stored(&store)?.1 {
-                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), (spent, uses::spent_until(&store, now)))));
+                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), spent)));
                         self.told();
                     }
                 }
