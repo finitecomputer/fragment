@@ -1375,6 +1375,32 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
         json!({ "ticks": t, "from": froms }),
     );
 
+    // an ordered trigger's runs go one at a time, in its records' order (a
+    // conversation's relay: a connector's intake and mirror), each started
+    // once the one before has ended
+    let (ord, _) = jobs_fragment(s, api, &owner, "ordered", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "plod", "ordered": true }]))?;
+    for i in 0..3 {
+        api.op(&owner, &ord, "raise", &format!("o{i}"), json!({}))?;
+    }
+    let plods = || runs(api, &owner, &ord, "&op=plod");
+    let done = s.eventually(Duration::from_secs(60), || plods().len() == 3 && plods().iter().all(|r| r["status"] == "succeeded"));
+    let mut ids: Vec<i64> = plods().iter().filter_map(|r| r["id"].as_i64()).collect();
+    ids.sort_unstable();
+    let turns: Vec<(String, i64)> = events(api, &owner, &ord)
+        .into_iter()
+        .filter(|e| (e["kind"] == "run.started" || e["kind"] == "run.succeeded") && e["data"]["run"].as_i64().is_some_and(|r| ids.contains(&r)))
+        .map(|e| (e["kind"].as_str().unwrap_or("").to_string(), e["data"]["run"].as_i64().unwrap_or(0)))
+        .collect();
+    let one_at_a_time: Vec<(String, i64)> = ids.iter().flat_map(|&r| [("run.started".to_string(), r), ("run.succeeded".to_string(), r)]).collect();
+    let fed: Vec<i64> = records(api, &owner, &ord, "feed").iter().filter_map(|r| r["body"]["plod"].as_i64()).collect();
+    let alarms: Vec<i64> = records(api, &owner, &ord, "alarms").iter().filter_map(|r| r["seq"].as_i64()).collect();
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{ord}/triggers"), None)?;
+    s.ok(
+        "an ordered trigger's runs go one at a time, in its records' order, each once the one before has ended",
+        done && turns == one_at_a_time && fed == alarms && listed.body["triggers"][0]["ordered"] == true,
+        json!({ "turns": turns, "fed": fed, "alarms": alarms, "triggers": listed.body["triggers"] }),
+    );
+
     // a live commit with no app says nothing about the next code: the
     // pause outlasts it, and the next good deploy comes back paused
     s.commit(&busy_c, &[("app.mjs", None)]);

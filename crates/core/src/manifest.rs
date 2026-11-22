@@ -409,12 +409,13 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
 /// or `{"installed" | "woke": true, "run": op}`, a channel's with an optional
 /// `"from": "person" | "agent"` (only records a member of that kind posted
-/// start runs).
+/// start runs) and `"ordered": true` (its runs one at a time, in its
+/// records' order).
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from" | "ordered")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from, ordered)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
     let flag = |k: &str| match obj.get(k) {
@@ -458,7 +459,11 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
         Some(_) if !matches!(on, TriggerOn::Channel(_)) => return Err(format!("{at}.from is a channel trigger's: who posted the record")),
         Some(k) => Some(IdentityKind::parse(&k).ok_or_else(|| format!("{at}.from is person or agent, not {k:?}"))?),
     };
-    Ok(TriggerDecl { on, run, from })
+    let ordered = flag("ordered")?;
+    if ordered && !matches!(on, TriggerOn::Channel(_)) {
+        return Err(format!("{at}.ordered is a channel trigger's: its records' runs one at a time"));
+    }
+    Ok(TriggerDecl { on, run, from, ordered })
 }
 
 /// `files: {page?, home?, status?, graph?}` (`FilesDecl`): `page` and
@@ -801,7 +806,7 @@ mod tests {
         .unwrap();
         assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false, description: None });
         assert_eq!(m.triggers.len(), 4);
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None, ordered: false });
         assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));
         assert_eq!(m.triggers[3].on, TriggerOn::Files("notes/**".into()));
         let back: TriggerDecl = serde_json::from_value(serde_json::to_value(&m.triggers[0]).unwrap()).unwrap();
@@ -863,13 +868,37 @@ mod tests {
         assert!(why.contains("description)"), "the unknown-key refusal names it: {why}");
     }
 
+    /// Goal: a channel trigger's runs may go one at a time, in its records'
+    /// order (a connector's relay). Method: `ordered` on a channel trigger
+    /// (the inbox's too), read back from the wire, and said only when true;
+    /// anything but `true`, or on another kind of trigger, refused.
+    #[test]
+    fn a_channel_trigger_may_run_in_order() {
+        let m = parse(br#"{"operations":{"n":{"kind":"job"}},"channels":{"chat":{"post":"viewer"}},"triggers":[{"channel":"inbox","run":"n","ordered":true},{"channel":"chat","run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Channel("inbox".into()), run: "n".into(), from: None, ordered: true });
+        assert!(!m.triggers[1].ordered, "unsaid: as many at once as are queued");
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "channel": "inbox", "run": "n", "ordered": true }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        assert!(!serde_json::to_string(&m.triggers[1]).unwrap().contains("ordered"), "a trigger in no order says nothing of it");
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"channel":"inbox","ordered":false,"run":"n"}]}"#[..], "ordered must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"channel":"inbox","ordered":"yes","run":"n"}]}"#, "ordered must be true"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"cron":"* * * * *","ordered":true,"run":"n"}]}"#, "ordered is a channel trigger's"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"files":"a/**","ordered":true,"run":"n"}]}"#, "ordered is a channel trigger's"),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
     /// Goal: a channel trigger may start runs only for one kind of poster
     /// (a chat's push: its agents' replies). Method: `from` on a channel
     /// trigger, valid and not; on a cron or files trigger, refused.
     #[test]
     fn a_channel_trigger_may_name_its_posters() {
         let m = parse(br#"{"operations":{"n":{"kind":"job"}},"channels":{"chat":{"post":"viewer"}},"triggers":[{"channel":"chat","from":"agent","run":"n"},{"channel":"chat","run":"n"}]}"#).unwrap();
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Channel("chat".into()), run: "n".into(), from: Some(IdentityKind::Agent) });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Channel("chat".into()), run: "n".into(), from: Some(IdentityKind::Agent), ordered: false });
         assert_eq!(m.triggers[1].from, None, "no from: every record");
         let wire = serde_json::to_value(&m.triggers[0]).unwrap();
         assert_eq!(wire, serde_json::json!({ "channel": "chat", "run": "n", "from": "agent" }));
@@ -893,7 +922,7 @@ mod tests {
     #[test]
     fn an_installed_trigger_is_true_and_alone() {
         let m = parse(br#"{"operations":{"n":{"kind":"mutation"}},"triggers":[{"installed":true,"run":"n"}]}"#).unwrap();
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Installed(true), run: "n".into(), from: None });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Installed(true), run: "n".into(), from: None, ordered: false });
         let wire = serde_json::to_value(&m.triggers[0]).unwrap();
         assert_eq!(wire, serde_json::json!({ "installed": true, "run": "n" }));
         assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
@@ -917,7 +946,7 @@ mod tests {
     #[test]
     fn a_woke_trigger_is_true_and_alone() {
         let m = parse(br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"run":"n"}]}"#).unwrap();
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Woke(true), run: "n".into(), from: None });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Woke(true), run: "n".into(), from: None, ordered: false });
         let wire = serde_json::to_value(&m.triggers[0]).unwrap();
         assert_eq!(wire, serde_json::json!({ "woke": true, "run": "n" }));
         assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");

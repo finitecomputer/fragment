@@ -1062,8 +1062,10 @@ does not ship is never answered from its repo (Serving).
 - `triggers` (at most `TRIGGERS_MAX`) start runs of a mutation or a job an
   editor may call: `{"cron": "0 9 * * *", "run": op}` (five fields, UTC,
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
-  "person" | "agent"}` (each new record, of that kind's members only with
-  `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
+  "person" | "agent", "ordered"?: true}` (each new record, of that kind's
+  members only with `from`; with `ordered`, its runs one at a time in its
+  records' order, each started once the one before has ended, succeeded,
+  held or blocked: a conversation's relay, as Telegram's connector's); `{"files": "notes/**", "run": op}` (a move of `main` changing a
   matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
   "run": op}` (once per install of new code: a deploy moving `live`, or a
   blessed template's changed release, at the fragment's next request; its

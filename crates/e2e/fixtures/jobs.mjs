@@ -83,6 +83,13 @@ export class App extends DurableObject {
     return { seqs };
   }
 
+  // a record's run that takes a moment (an ordered trigger's, one at a time)
+  async plod({ record } = {}, job) {
+    await job.sleep(400);
+    await job.publish("feed", { plod: record?.seq ?? null }, "plod");
+    return { seq: record?.seq ?? null };
+  }
+
   async nap({ ms }, job) {
     await job.sleep(ms);
     await job.publish("feed", { woke: true }, "nap");

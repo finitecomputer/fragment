@@ -78,6 +78,15 @@ pub const HOPS_HEADER: &str = "x-fragment-hops";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+/// A queued run that may start now: any but an ordered trigger's
+/// (`code_triggers.ordered`) while an earlier run of that trigger and
+/// operation is queued or running, so that trigger's runs go one at a
+/// time, in its records' order. A run held, blocked or finished holds no
+/// one back. One condition for the launcher and for when runs are due
+/// (`launch_due_at`), so a run waiting its turn never keeps the alarm busy.
+const LAUNCHABLE: &str = "status = 'queued' AND NOT (via = 'channel'
+    AND EXISTS (SELECT 1 FROM code_triggers t WHERE t.kind = 'channel' AND t.target = runs.trigger AND t.run = runs.op AND t.ordered = 1)
+    AND EXISTS (SELECT 1 FROM runs e WHERE e.op = runs.op AND e.trigger = runs.trigger AND e.via = 'channel' AND (e.status = 'running' OR (e.status = 'queued' AND e.id < runs.id))))";
 /// The attempt (replays count) at which a change of the app's code under
 /// a run holds it rather than starting it over, so code that keeps
 /// changing cannot spin it.
@@ -432,9 +441,7 @@ impl FragmentCell {
         let later = || {
             let _ = self.set_meta(MetaKey::LaunchRetryAt, &(js::now_ms() + QUEUED_RETRY_MS).to_string());
         };
-        let Ok(rows) =
-            self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
-        else {
+        let Ok(rows) = self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE {LAUNCHABLE} ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)]) else {
             later();
             return 0;
         };
@@ -449,6 +456,16 @@ impl FragmentCell {
         let mut started = 0;
         for run in rows.iter().map(run_row) {
             let (id, attempt) = (run.id, run.attempt);
+            // still its turn: one launched earlier in this batch (an
+            // ordered trigger's run before it) holds it back now
+            match self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE id = ? AND {LAUNCHABLE}"), vec![SqlStorageValue::Integer(id)]) {
+                Ok(1) => {}
+                Ok(_) => continue,
+                Err(_) => {
+                    later();
+                    return started;
+                }
+            }
             let Ok(instance) = self.instance_id(id, attempt) else {
                 later();
                 return started;
@@ -513,6 +530,8 @@ impl FragmentCell {
         if changed.is_empty() {
             return Ok(());
         }
+        // what it held back (an ordered trigger's next run) starts now
+        self.later();
         // No callback of this attempt is answered from here on, and a
         // replay takes its steps afresh: the kept answers go.
         self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
@@ -1398,7 +1417,7 @@ impl FragmentCell {
     /// them, `launch_queued`), or once a start that failed may be tried
     /// again; none queued, never.
     fn launch_due_at(&self) -> CellResult<Option<i64>> {
-        if self.count_of("SELECT COUNT(*) AS n FROM runs WHERE status = 'queued'", vec![])? == 0 {
+        if self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE {LAUNCHABLE}"), vec![])? == 0 {
             return Ok(None);
         }
         let retry: i64 = self.meta(MetaKey::LaunchRetryAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);

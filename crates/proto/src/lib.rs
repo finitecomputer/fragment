@@ -2278,6 +2278,12 @@ pub struct TriggerDecl {
     /// "agent"`). None: every record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<IdentityKind>,
+    /// A channel trigger's runs one at a time, in its records' order: the
+    /// next starts once the one before it has ended (succeeded, held or
+    /// blocked). A conversation's relay (a connector's `intake` and
+    /// `mirror`). False: as many at once as are queued.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ordered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
