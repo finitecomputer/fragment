@@ -75,7 +75,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "firecrawl: a scrape is charged the credits its answer says (data.metadata.creditsUsed), and a call around it nothing",
     "browser-use: a session's start and a task's are each charged five minutes, and a call around them (a status read) nothing",
     "x: a search is charged the posts its answer counts (meta.result_count), and a lookup whose answer counts none nothing",
-    "past $5 of its agents' calls on shared keys in an hour, its owner is told so (a spending notice, the same until the next step), and nothing pauses: the key's next call goes through and is charged",
+    "past $5 of its agents' calls on shared keys in an hour, its owner is told so (a spending notice, the same until the next step, counting down to an end ahead on the real clock), and nothing pauses: the key's next call goes through and is charged",
     "its owner sees it over the agent's chat, in the server's words, with no button",
     "a connection whose accounts live at hosts of their own (Salesforce's orgs): a call to its account's own host, as Pipes' metadata names it, is swapped the account's credential, and one to its named host Pipes' token",
     "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
@@ -607,6 +607,9 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             && told
             && notice["title"] == "Your agents spent over $5 on tools in the last hour"
             && notice["level"] == "info"
+            // its end is on the epoch's clock, whatever the ledger's says
+            // (this lane moves the ledger's to mid-month: `pin_month`)
+            && notice["until"]["at"].as_i64().is_some_and(|at| at > crate::api::now_ms())
             && after.starts_with("fetched 200")
             && reached
             && charged_after,
