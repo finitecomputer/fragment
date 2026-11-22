@@ -11,6 +11,7 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod access;
+pub mod alarm;
 pub mod across;
 pub mod address;
 pub mod backoff;

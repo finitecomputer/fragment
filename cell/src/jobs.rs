@@ -428,10 +428,15 @@ impl FragmentCell {
     /// Answers how many it started.
     pub(crate) async fn launch_queued(&self) -> usize {
         let _one = self.launching.lock().await;
-        // a start that cannot be made is tried again later, never at once
+        // a start that cannot be made is tried again later, never at once,
+        // nor before then by another launch in this pass or the next
         let later = || {
             let _ = self.set_meta(MetaKey::LaunchRetryAt, &(js::now_ms() + QUEUED_RETRY_MS).to_string());
         };
+        let retry: i64 = self.meta(MetaKey::LaunchRetryAt).ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if retry > js::now_ms() {
+            return 0;
+        }
         let Ok(rows) =
             self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
         else {
