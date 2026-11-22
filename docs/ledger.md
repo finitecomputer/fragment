@@ -103,8 +103,9 @@ bucket, that wait was 85–150 ms on every page. A confirmed write folds the
 count into its minute's row, at the minute's alarm or at the first request
 of a later minute, and the row goes to the ledger as before. A crash can
 lose at most the open minute's unconfirmed counts, in the owner's favour.
-celld honors `allowUnconfirmed` the same way (a write the answer does not
-wait on).
+A self-hosted node's celld honors `allowUnconfirmed` the same way from
+futurepaul/celld#33 (no gate waits on such a write); one without it holds
+the answer for the count as for any write.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
 bills them); a computer's time kept for its failed saves (the platform's:
