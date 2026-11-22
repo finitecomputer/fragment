@@ -1268,6 +1268,10 @@ fragment verify <name> [--dir D]         fragment secret list|rm ...
 fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
 fragment vault set <secret> --agent A [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held
 fragment vault list                      fragment vault rm <secret>
+fragment private-home accept-releases --home H [--after-hours N]   # a person's own: printed, signed with this machine's key, for the home's key service
+fragment private-home release --home H --pcr0 X                    # one image, by its PCR0
+fragment private-home repair --home H --to <npub> --hours N        # one person, for 1 to 24 hours
+fragment private-home withdraw --home H --slot S                   # releases | release/<pcr0> | repair/<key>
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]

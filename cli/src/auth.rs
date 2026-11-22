@@ -48,6 +48,12 @@ impl Identity {
         self.keys.header(method, url, body, now_s())
     }
 
+    /// A BIP-340 signature over `digest` (hex): a nostr event's id, for the
+    /// private home's statements (`private_home.rs`).
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> String {
+        self.keys.sign_digest(digest)
+    }
+
     /// A key proof (crates/nip98 `verify_proof`): this key agrees to join
     /// whoever signs `method url` with the key `signer_hex`.
     pub fn proof(&self, method: &str, url: &str, signer_hex: &str) -> String {

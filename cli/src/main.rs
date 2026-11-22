@@ -9,6 +9,7 @@ mod mcp;
 mod notice;
 mod offload;
 mod operator;
+mod private_home;
 mod quote;
 mod search;
 mod session;
@@ -299,6 +300,13 @@ enum Cmd {
     Vault {
         #[command(subcommand)]
         sub: VaultCmd,
+    },
+    /// A private home's statements, signed with this machine's key for the
+    /// home's key service: which images may have its key, and who may repair
+    /// it. Printed, not sent
+    PrivateHome {
+        #[command(subcommand)]
+        sub: private_home::Cmd,
     },
     /// A fragment's members: list, add, remove, or leave
     Members {
@@ -1570,6 +1578,15 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Skill => {
             print!("{}", agent_doc(SKILL, &cli.host));
             return Ok(());
+        }
+        Cmd::PrivateHome { sub } => {
+            // the owner's word: an agent never signs it, whoever it acts for
+            if let Some(mode) = agent_mode()? {
+                return Err(usage(format!("{} is an agent: a private home's statements are its owner's to sign, on their own device", mode.agent)));
+            }
+            let sk = load_config().secret_key.ok_or_else(|| anyhow::Error::new(CodedError { code: Code::AuthFailed, msg: "no keypair — run `fragment login` first".into() }))?;
+            let id = auth::Identity::from_secret_hex(&sk).ok_or_else(|| anyhow!("the config's secret_key is not a 64-hex secp256k1 secret ({})", config_path().display()))?;
+            return private_home::run(sub, &id);
         }
         Cmd::Operator { sub: OperatorCmd::Key { path } } => {
             let npub = operator::make_key(&path, write_secret_file)?;
@@ -3021,7 +3038,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::PrivateHome { .. } => unreachable!(),
     }
     Ok(())
 }

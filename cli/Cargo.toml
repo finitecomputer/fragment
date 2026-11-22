@@ -61,6 +61,8 @@ tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots", "rus
 
 
 [dev-dependencies]
+# The private home's statements, checked as its key service checks them.
+k256 = { version = "=0.13.4", default-features = false, features = ["schnorr"] }
 fragment-fakes = { path = "../crates/fakes" }
 # a port bound and never listened on (api.rs's tests: a host never reached),
 # which std's TcpListener cannot hold; already in the lock, through tokio
