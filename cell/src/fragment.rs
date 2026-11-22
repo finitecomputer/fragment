@@ -349,6 +349,12 @@ pub(crate) enum MetaKey {
     /// A queued run's Workflow could not be started: queued runs wait
     /// until then to be tried again (`runs_due_at`).
     LaunchRetryAt,
+    /// The installed code's ordered channel triggers (`ordered`), as
+    /// `manifest::ordered_key` names each, in a JSON list.
+    OrderedTriggers,
+    /// Where the next look for runs whose Workflow ended unreported starts
+    /// (`reconcile_runs`): past this run, each batch the next ones.
+    ReconcileFrom,
     /// When the pins last may have fallen behind the repo: a storage token
     /// was minted for it, or a move failed to follow (plane.rs `may_lag`).
     OutsideAt,
@@ -546,6 +552,8 @@ impl MetaKey {
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
             MetaKey::LaunchRetryAt => "launch_retry_at",
+            MetaKey::OrderedTriggers => "ordered_triggers",
+            MetaKey::ReconcileFrom => "reconcile_from",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::TemplateTitle => "template_title",

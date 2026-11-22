@@ -273,8 +273,41 @@ pub enum StepOutcome {
     Error(String),
 }
 
+/// Where the next look for runs whose Workflow ended unreported starts
+/// (cell jobs.rs `reconcile_runs`), after one that looked at `looked` (run
+/// ids, ascending, past the last start) with room for `batch`: past the
+/// last it looked at while it filled its batch, else from the first again.
+/// So every running run is looked at in turn, however many sleep long.
+pub fn reconcile_from(looked: &[i64], batch: usize) -> i64 {
+    match looked.last() {
+        Some(&last) if looked.len() >= batch => last,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// Goal: a lost run is found however many runs sleep long before it
+    /// (the review of #1461: the 25 oldest sleepers were looked at on
+    /// every pass, and a lost head of an ordered trigger held its queue).
+    /// Method: 60 running runs, 25 a look, each look from where the last
+    /// left off: every one is looked at within three passes, then again.
+    #[test]
+    fn every_running_run_is_looked_at_in_turn() {
+        let running: Vec<i64> = (1..=60).collect();
+        let (mut from, mut seen) = (0, std::collections::BTreeSet::new());
+        for _ in 0..3 {
+            let looked: Vec<i64> = running.iter().copied().filter(|id| *id > from).take(25).collect();
+            seen.extend(looked.iter().copied());
+            from = reconcile_from(&looked, 25);
+        }
+        assert_eq!(seen.len(), 60, "all looked at within three passes");
+        assert_eq!(from, 0, "the end reached: from the first again");
+        assert_eq!(reconcile_from(&[], 25), 0);
+        assert_eq!(reconcile_from(&[3, 9], 25), 0, "a short look reached the end");
+        assert_eq!(reconcile_from(&(1..=25).collect::<Vec<_>>(), 25), 25, "a full look goes on past its last");
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -78,15 +78,23 @@ pub const HOPS_HEADER: &str = "x-fragment-hops";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
-/// A queued run that may start now: any but an ordered trigger's
-/// (`code_triggers.ordered`) while an earlier run of that trigger and
-/// operation is queued or running, so that trigger's runs go one at a
-/// time, in its records' order. A run held, blocked or finished holds no
-/// one back. One condition for the launcher and for when runs are due
-/// (`launch_due_at`), so a run waiting its turn never keeps the alarm busy.
-const LAUNCHABLE: &str = "status = 'queued' AND NOT (via = 'channel'
-    AND EXISTS (SELECT 1 FROM code_triggers t WHERE t.kind = 'channel' AND t.target = runs.trigger AND t.run = runs.op AND t.ordered = 1)
-    AND EXISTS (SELECT 1 FROM runs e WHERE e.op = runs.op AND e.trigger = runs.trigger AND e.via = 'channel' AND (e.status = 'running' OR (e.status = 'queued' AND e.id < runs.id))))";
+/// A queued run that may start now: any but an ordered trigger's (the
+/// `ordered_triggers` meta row, `manifest::ordered_key`) while a run of
+/// that trigger and operation is running, or queued for an earlier record
+/// (by the record's seq, not the run's id: a record's run made again after
+/// a failure is still in its record's place), so that trigger's runs go
+/// one at a time, in its records' order. A run held, blocked or finished
+/// holds no one back. One condition for the launcher and for when runs are
+/// due (`launch_due_at`), so a run waiting its turn never keeps the alarm busy.
+fn launchable() -> String {
+    format!(
+        "status = 'queued' AND NOT (via = 'channel'
+    AND EXISTS (SELECT 1 FROM meta m, json_each(m.value) o WHERE m.key = '{}' AND o.value = runs.trigger || ' ' || runs.op)
+    AND EXISTS (SELECT 1 FROM runs e WHERE e.op = runs.op AND e.trigger = runs.trigger AND e.via = 'channel' AND (e.status = 'running'
+        OR (e.status = 'queued' AND json_extract(e.input, '$.record.seq') < json_extract(runs.input, '$.record.seq')))))",
+        MetaKey::OrderedTriggers.key()
+    )
+}
 /// The attempt (replays count) at which a change of the app's code under
 /// a run holds it rather than starting it over, so code that keeps
 /// changing cannot spin it.
@@ -446,7 +454,7 @@ impl FragmentCell {
         if retry > js::now_ms() {
             return 0;
         }
-        let Ok(rows) = self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE {LAUNCHABLE} ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)]) else {
+        let Ok(rows) = self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE {} ORDER BY id LIMIT ?", launchable()), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)]) else {
             later();
             return 0;
         };
@@ -463,7 +471,7 @@ impl FragmentCell {
             let (id, attempt) = (run.id, run.attempt);
             // still its turn: one launched earlier in this batch (an
             // ordered trigger's run before it) holds it back now
-            match self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE id = ? AND {LAUNCHABLE}"), vec![SqlStorageValue::Integer(id)]) {
+            match self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE id = ? AND {}", launchable()), vec![SqlStorageValue::Integer(id)]) {
                 Ok(1) => {}
                 Ok(_) => continue,
                 Err(_) => {
@@ -1422,7 +1430,7 @@ impl FragmentCell {
     /// them, `launch_queued`), or once a start that failed may be tried
     /// again; none queued, never.
     fn launch_due_at(&self) -> CellResult<Option<i64>> {
-        if self.count_of(&format!("SELECT COUNT(*) AS n FROM runs WHERE {LAUNCHABLE}"), vec![])? == 0 {
+        if self.count_of(&format!("SELECT EXISTS (SELECT 1 FROM runs WHERE {}) AS n", launchable()), vec![])? == 0 {
             return Ok(None);
         }
         let retry: i64 = self.meta(MetaKey::LaunchRetryAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -1449,14 +1457,23 @@ impl FragmentCell {
     }
 
     /// From the alarm: a running run whose Workflow ended without reporting
-    /// (it errored outside a step, or it is gone) is held.
+    /// (it errored outside a step, or it is gone) is held. Each pass looks
+    /// at the next `RECONCILE_BATCH` past the last it looked at
+    /// (`ReconcileFrom`), from the first again once it reaches the end, so
+    /// every running run is looked at in turn: a batch of long sleepers
+    /// never hides a lost one behind them (the review of #1461: a lost head
+    /// of an ordered trigger held its whole queue).
     pub(crate) async fn reconcile_runs(&self) {
+        let from: i64 = self.meta(MetaKey::ReconcileFrom).ok().flatten().and_then(|s| s.parse().ok()).unwrap_or(0);
         let Ok(rows) = self.rows(
-            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'running' AND launched_at < ? ORDER BY launched_at LIMIT ?"),
-            vec![SqlStorageValue::Integer(js::now_ms() - RECONCILE_AFTER_MS), SqlStorageValue::Integer(RECONCILE_BATCH)],
+            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'running' AND launched_at < ? AND id > ? ORDER BY id LIMIT ?"),
+            vec![SqlStorageValue::Integer(js::now_ms() - RECONCILE_AFTER_MS), SqlStorageValue::Integer(from), SqlStorageValue::Integer(RECONCILE_BATCH)],
         ) else {
             return;
         };
+        let ids: Vec<i64> = rows.iter().map(run_row).map(|r| r.id).collect();
+        let next = fragment_core::steps::reconcile_from(&ids, RECONCILE_BATCH as usize);
+        let _ = self.set_meta(MetaKey::ReconcileFrom, &next.to_string());
         for run in rows.iter().map(run_row) {
             let Ok(instance) = self.instance_id(run.id, run.attempt) else { return };
             let why = match js::jobs_status(self.env.as_ref(), &instance).await {

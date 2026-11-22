@@ -144,10 +144,19 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let (kind, target) = t.on.parts();
         let idx = SqlStorageValue::Integer(i64::try_from(i).expect("triggers are few"));
         let from = t.from.map_or(SqlStorageValue::Null, |k| k.as_str().into());
-        sql.exec(
-            "INSERT INTO code_triggers (idx, kind, target, run, from_kind, ordered) VALUES (?, ?, ?, ?, ?, ?)",
-            vec![idx, kind.into(), target.into(), t.run.as_str().into(), from, SqlStorageValue::Integer(t.ordered.into())],
-        )?;
+        sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into(), from])?;
+    }
+    // its ordered triggers, as `<channel> <op>`, in a meta row rather than
+    // a column, so a release before (a rollback) reads past it, as it
+    // reads past any row it does not know, and its triggers then run as
+    // they always have (jobs.rs `launchable` reads it)
+    let ordered: Vec<String> = code.triggers.iter().filter(|t| t.ordered).filter_map(|t| match &t.on {
+        TriggerOn::Channel(c) => Some(fragment_core::manifest::ordered_key(c, &t.run)),
+        _ => None,
+    }).collect();
+    if !ordered.is_empty() {
+        let value = serde_json::to_string(&ordered).expect("names serialize");
+        sql.exec("INSERT INTO meta (key, value) VALUES (?, ?)", vec![MetaKey::OrderedTriggers.key().into(), value.into()])?;
     }
     // what is kept of a kind no channel keeps now goes (one kept again
     // starts from its next record): bounded, `NEWEST_KEPT_MAX` a channel
@@ -173,6 +182,7 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
     for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_channel_newest", "code_triggers"] {
         sql.exec(&format!("DELETE FROM {table}"), None)?;
     }
+    sql.exec("DELETE FROM meta WHERE key = ?", vec![MetaKey::OrderedTriggers.key().into()])?;
     Ok(())
 }
 
@@ -275,7 +285,6 @@ struct TriggerRow {
     target: String,
     run: String,
     from_kind: Option<String>,
-    ordered: i64,
 }
 
 /// A pin's move, every read done (`refresh_pin`): what its publish writes.
@@ -1346,7 +1355,11 @@ impl FragmentCell {
 
     /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
-        let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind, ordered FROM code_triggers ORDER BY idx", vec![])?;
+        let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
+        let ordered: Vec<String> = match self.meta(MetaKey::OrderedTriggers)? {
+            Some(v) => serde_json::from_str(&v).map_err(|e| stored("its ordered triggers", e.to_string()))?,
+            None => vec![],
+        };
         let mut out = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
             if row.idx != i64::try_from(i).expect("triggers are few") {
@@ -1364,7 +1377,8 @@ impl FragmentCell {
                 None => None,
                 Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),
             };
-            out.push(TriggerDecl { on, run: row.run, from, ordered: row.ordered != 0 });
+            let ordered = matches!(&on, TriggerOn::Channel(c) if ordered.contains(&fragment_core::manifest::ordered_key(c, &row.run)));
+            out.push(TriggerDecl { on, run: row.run, from, ordered });
         }
         Ok(out)
     }

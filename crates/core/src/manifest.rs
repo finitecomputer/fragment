@@ -406,6 +406,15 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
     Ok(ListedDecl { kinds, fields })
 }
 
+/// How an ordered channel trigger is named where its fragment keeps it
+/// (cell's `ordered_triggers` meta row, which jobs.rs `launchable` reads
+/// as `<run's trigger> <run's op>`): its channel and its operation, neither
+/// of which holds a space.
+pub fn ordered_key(channel: &str, op: &str) -> String {
+    assert!(!channel.contains(' ') && !op.contains(' '), "a channel's and an operation's names hold no space");
+    format!("{channel} {op}")
+}
+
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
 /// or `{"installed" | "woke": true, "run": op}`, a channel's with an optional
 /// `"from": "person" | "agent"` (only records a member of that kind posted
