@@ -1357,7 +1357,7 @@ impl FragmentCell {
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
         let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
         let ordered: Vec<String> = match self.meta(MetaKey::OrderedTriggers)? {
-            Some(v) => serde_json::from_str(&v).map_err(|e| stored("its ordered triggers", e.to_string()))?,
+            Some(v) => crate::json_text::<Vec<String>>(&v).map_err(|e| stored("its ordered triggers", e.to_string()))?,
             None => vec![],
         };
         let mut out = Vec::with_capacity(rows.len());
