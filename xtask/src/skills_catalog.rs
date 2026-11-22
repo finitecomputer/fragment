@@ -5,7 +5,7 @@
 //!
 //! It is read from the Hermes image images/hermes/Dockerfile pins (`ARG
 //! HERMES`), the one the computers' image is built on, and only that one,
-//! so the version it is stamped with is its own: its
+//! so the version and the image it is stamped with are its own: its
 //! `/opt/hermes/optional-skills` is copied out with Docker
 //! (`docker create` and `docker cp`, nothing run in it). Each skill is a
 //! `SKILL.md` at any depth there; its id is its directory's path, as the
@@ -15,7 +15,8 @@
 //! computer already has it.
 //!
 //! Run it again when the pin moves: crates/templates' test holds the
-//! catalog's `hermes` to the Dockerfile's.
+//! catalog's `image` to the Dockerfile's whole pin, digest included, so a
+//! digest that moves under the same tag fails it too.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -75,7 +76,7 @@ pub fn run(args: &[String]) -> Result<()> {
     std::fs::create_dir_all(&scratch)?;
     copy_out(&image, &scratch)?;
     let skills = read_tree(&scratch.join("optional-skills"))?;
-    let text = render(&version, &skills);
+    let text = render(&version, &image, &skills);
     std::fs::create_dir_all(root.join(CATALOG).parent().expect("the catalog has a directory"))?;
     std::fs::write(root.join(CATALOG), &text).with_context(|| format!("write {CATALOG}"))?;
     let _ = std::fs::remove_dir_all(&scratch);
@@ -163,14 +164,16 @@ fn scalar(raw: &str) -> Result<String> {
     Ok(raw.to_string())
 }
 
-/// The catalog's text: its header, then one skill a line, so a pin's move
-/// reads as a diff of the skills it changed.
-pub fn render(version: &str, skills: &[Skill]) -> String {
+/// The catalog's text: its header (the version, the image it was read
+/// from), then one skill a line, so a pin's move reads as a diff of the
+/// skills it changed.
+pub fn render(version: &str, image: &str, skills: &[Skill]) -> String {
     let lines: Vec<String> = skills.iter().map(|s| format!("    {}", serde_json::to_string(s).expect("a skill serializes"))).collect();
     let source = format!("https://github.com/NousResearch/hermes-agent/tree/{version}/optional-skills");
     format!(
-        "{{\n  \"runtime\": \"hermes\",\n  \"hermes\": {},\n  \"source\": {},\n  \"skills\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"runtime\": \"hermes\",\n  \"hermes\": {},\n  \"image\": {},\n  \"source\": {},\n  \"skills\": [\n{}\n  ]\n}}\n",
         serde_json::to_string(version).expect("a string serializes"),
+        serde_json::to_string(image).expect("a string serializes"),
         serde_json::to_string(&source).expect("a string serializes"),
         lines.join(",\n")
     )
@@ -225,9 +228,10 @@ mod tests {
         let skills = read_tree(&dir).unwrap();
         assert_eq!(skills.len(), 2 + LABELS.len());
         assert_eq!(skills.iter().filter(|s| s.id.starts_with("creative/") || s.id.starts_with("mlops/training")).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["creative/excalidraw", "mlops/training/unsloth"]);
-        let text = render("v0.23.2", &skills);
+        let image = "nousresearch/hermes-agent:rc.13-v0.23.2-desktop@sha256:87f2";
+        let text = render("v0.23.2", image, &skills);
         let read: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(read["hermes"], "v0.23.2");
+        assert_eq!((read["hermes"].as_str(), read["image"].as_str()), (Some("v0.23.2"), Some(image)));
         assert_eq!(read["skills"].as_array().unwrap().len(), skills.len());
         assert!(text.contains("\n    {\"id\":\"creative/excalidraw\",\"name\":\"excalidraw\",\"description\":\"Diagrams.\",\"license\":\"MIT\"},\n"), "{text}");
         std::fs::remove_dir_all(dir).unwrap();
