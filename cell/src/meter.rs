@@ -86,9 +86,11 @@ struct Minute {
 
 /// The open minute's request count, in the storage's key-value API under
 /// `OPEN_COUNT_KEY`: written on every request with `allowUnconfirmed`, read
-/// back once an activation.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, Deserialize)]
+/// back once an activation. It names its life (the fragment's `created_at`),
+/// so a life that ends leaves nothing a later life under the name counts.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, Deserialize)]
 pub(crate) struct OpenCount {
+    pub(crate) life: String,
     pub(crate) minute: i64,
     pub(crate) count: i64,
 }
@@ -138,43 +140,78 @@ impl FragmentCell {
     }
 
     async fn count_request_once(&self) -> CellResult<()> {
-        if self.meta(MetaKey::CreatedAt)?.is_none() {
-            return Ok(());
-        }
+        let Some(life) = self.meta(MetaKey::CreatedAt)? else { return Ok(()) };
         let closed: i64 = self.meta(MetaKey::MeterClosed)?.and_then(|v| v.parse().ok()).unwrap_or(-1);
-        let minute = (js::now_ms() / MINUTE_MS).max(closed + 1);
-        let mut open = self.open_count().await?;
-        if let Some(earlier) = open.filter(|o| o.minute != minute) {
-            self.fold_open(earlier).await?;
+        // above every minute closed or folded, even after a clock step back:
+        // a count is always one a fold will take
+        let minute = (js::now_ms() / MINUTE_MS).max(closed + 1).max(self.folded_minute()? + 1);
+        let mut open = self.open_count(&life).await?;
+        if let Some(earlier) = open.as_ref().filter(|o| o.minute != minute) {
+            // its key is overwritten below, so it needs no delete
+            self.fold_open(earlier)?;
             open = None;
         }
-        let now = OpenCount { minute, count: open.map_or(0, |o| o.count) + 1 };
+        let now = OpenCount { life, minute, count: open.map_or(0, |o| o.count) + 1 };
+        let value = js::to_js(&now);
         *self.meter_open.borrow_mut() = Some(Some(now));
-        js::storage_put_unconfirmed(&self.raw, OPEN_COUNT_KEY, &js::to_js(&now)).await
+        js::storage_put_unconfirmed(&self.raw, OPEN_COUNT_KEY, &value).await
     }
 
-    /// The open minute's count: read from storage once an activation.
-    async fn open_count(&self) -> CellResult<Option<OpenCount>> {
-        if let Some(open) = *self.meter_open.borrow() {
-            return Ok(open);
+    /// This life's open count, not yet folded: read from storage once an
+    /// activation. A stored one of another life, or of a minute folded
+    /// already (its key's delete lost), is none, and its key goes.
+    pub(crate) async fn open_count(&self, life: &str) -> CellResult<Option<OpenCount>> {
+        let held = self.meter_open.borrow().clone();
+        if let Some(open) = held {
+            return Ok(open.filter(|o| o.life == life));
         }
-        let open: Option<OpenCount> = self.state.storage().get(OPEN_COUNT_KEY).await.map_err(|e| CellError::host(format!("the open request count: {e}")))?;
-        *self.meter_open.borrow_mut() = Some(open);
+        let stored: Option<OpenCount> = self.state.storage().get(OPEN_COUNT_KEY).await.map_err(|e| CellError::host(format!("the open request count: {e}")))?;
+        let folded = self.folded_minute()?;
+        let kept = stored.is_some();
+        let open = stored.filter(|o| o.life == life && o.minute > folded);
+        *self.meter_open.borrow_mut() = Some(open.clone());
+        if kept && open.is_none() {
+            self.forget_open_key().await;
+        }
         Ok(open)
     }
 
-    /// The open count into its minute's row, and its key gone, in one
-    /// commit (a SQL write and a delete with no wait between them are one):
-    /// a confirmed write, so the row holds what the minute counted.
-    async fn fold_open(&self, open: OpenCount) -> CellResult<()> {
-        self.exec(
-            "INSERT INTO meter_requests (minute, count) VALUES (?, ?) ON CONFLICT (minute) DO UPDATE SET count = count + excluded.count",
-            vec![SqlStorageValue::Integer(open.minute), SqlStorageValue::Integer(open.count)],
-        )?;
+    /// The open count into its minute's row, with the minute recorded as
+    /// folded, in one transaction (a confirmed write on Cloudflare and on
+    /// celld alike): a count is folded once. Its key may outlive it (its
+    /// delete is apart, `forget_open_key`); one at or below the minute folded
+    /// is never folded again.
+    fn fold_open(&self, open: &OpenCount) -> CellResult<()> {
+        if open.minute > self.folded_minute()? {
+            let (sql, minute, count) = (self.sql(), open.minute, open.count);
+            js::transaction_sync(&self.raw, move || {
+                sql.exec(
+                    "INSERT INTO meter_requests (minute, count) VALUES (?, ?) ON CONFLICT (minute) DO UPDATE SET count = count + excluded.count",
+                    vec![SqlStorageValue::Integer(minute), SqlStorageValue::Integer(count)],
+                )?;
+                sql.exec(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    vec![MetaKey::MeterFolded.key().into(), minute.to_string().into()],
+                )?;
+                Ok(())
+            })?;
+        }
         *self.meter_open.borrow_mut() = Some(None);
-        // its first poll submits the delete, with no wait since the insert
+        Ok(())
+    }
+
+    /// The last minute folded, or -1.
+    fn folded_minute(&self) -> CellResult<i64> {
+        Ok(self.meta(MetaKey::MeterFolded)?.and_then(|v| v.parse().ok()).unwrap_or(-1))
+    }
+
+    /// The open count's key gone, best effort: one left is never folded
+    /// twice (`fold_open`), nor counted by another life (`open_count`).
+    async fn forget_open_key(&self) {
         let storage = self.state.storage();
-        storage.delete(OPEN_COUNT_KEY).await.map(|_| ()).map_err(|e| CellError::host(format!("the open request count's delete: {e}")))
+        if let Err(e) = storage.delete(OPEN_COUNT_KEY).await {
+            console_warn!("{}", json!({ "event": "meter.open-key-kept", "message": e.to_string() }));
+        }
     }
 
     /// The alarm set to close this minute's count once it is over, once a
@@ -244,8 +281,10 @@ impl FragmentCell {
         let key = self.meter_key()?;
         let now = js::now_ms();
         let upto = if close_all { i64::MAX } else { now / MINUTE_MS - 1 };
-        if let Some(open) = self.open_count().await?.filter(|o| o.minute <= upto) {
-            self.fold_open(open).await?;
+        let life = self.must(MetaKey::CreatedAt)?;
+        if let Some(open) = self.open_count(&life).await?.filter(|o| o.minute <= upto) {
+            self.fold_open(&open)?;
+            self.forget_open_key().await;
         }
         let minutes: Vec<Minute> = self.typed("SELECT minute, count FROM meter_requests WHERE minute <= ? ORDER BY minute", vec![SqlStorageValue::Integer(upto)])?;
         // bounded: one row per minute counted since the last flush
@@ -317,7 +356,7 @@ impl FragmentCell {
         )?;
         let at = rows.first().and_then(|r| r["at"].as_i64());
         // the open minute's count, as this activation holds it: its end
-        let open = self.meter_open.borrow().flatten().map(|o| (o.minute + 1) * MINUTE_MS);
+        let open = self.meter_open.borrow().clone().flatten().map(|o| (o.minute + 1) * MINUTE_MS);
         Ok(at.into_iter().chain(open).min())
     }
 
@@ -325,7 +364,7 @@ impl FragmentCell {
     /// minutes counted, the open one's among them.
     pub(crate) fn meter_state(&self) -> CellResult<Value> {
         let mut counted = self.rows("SELECT minute, count FROM meter_requests ORDER BY minute", vec![])?;
-        if let Some(open) = self.meter_open.borrow().flatten() {
+        if let Some(open) = self.meter_open.borrow().clone().flatten() {
             counted.push(json!({ "minute": open.minute, "count": open.count }));
         }
         #[derive(Deserialize)]

@@ -493,6 +493,9 @@ pub(crate) enum MetaKey {
     TestFailMeterAcks,
     /// The last minute whose request count was closed into a row (meter.rs).
     MeterClosed,
+    /// The last minute whose open request count was folded into its row
+    /// (meter.rs `fold_open`): a count at or below it is never folded again.
+    MeterFolded,
     /// When storage was last sampled (meter.rs).
     StorageSampledAt,
     /// The preview card and its schedule (card.rs: `fragment_core::card::Cards`, as JSON).
@@ -591,6 +594,7 @@ impl MetaKey {
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
 
             MetaKey::MeterClosed => "meter_closed",
+            MetaKey::MeterFolded => "meter_folded",
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
