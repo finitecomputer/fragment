@@ -28,12 +28,12 @@
 //   with its name typed back, saying what goes; the row leaves once the
 //   list says it is gone (Paul, 2026-11-17).
 //
-// Its rows are in two sections, theirs (they own it: they control who is
-// in it, and may delete it) and those shared with them (someone else owns
-// it), each saying what they may do in it (Can edit, Can view), and a row
-// of filters narrows the page to either, or to what they may edit or only
-// view (`accessView`). Both show only when something is shared with them;
-// until then the page is theirs alone, as before (Austin, 2026-11-20).
+// Its rows are on two tabs, Made by me (they own it: they control who is
+// in it, and may delete it) and Shared with me (someone else owns it, each
+// row saying what they may do in it: Can edit, Can view), the second with
+// filters by that (`accessView`). The tabs show only when something is
+// shared with them; until then the page is theirs alone, as before
+// (Austin, 2026-11-22: the five layouts' second).
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `icon`, `named`, `titleOf`, `art` (an app's icon, as the dock draws it),
@@ -67,40 +67,42 @@ export const shelfOf = (f) => (f.kind === "brain" ? "brains" : "apps");
 const kindWord = (f) => (f.kind === "app" || f.kind === "brain" ? "" : "Other");
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
-// The page's filters, by what the person may do: everything, their own,
-// those shared with them, those they may edit (their own included), those
-// they may only view.
-export const ACCESS_FILTERS = [
-  ["all", "All", () => true],
-  ["yours", "Yours", owns],
-  ["shared", "Shared with you", (f) => !owns(f)],
-  ["edit", "Can edit", edits],
-  ["view", "View only", (f) => !edits(f)],
+// The page's tabs, by who owns it, and the Shared with me tab's filters, by
+// what they may do in it.
+export const TABS = [
+  ["mine", "Made by me", owns],
+  ["shared", "Shared with me", (f) => !owns(f)],
 ];
-// What the page shows of its rows (`live`, not archived; `archived`) under
-// a filter: theirs and those shared with them, each in the list's order,
-// and each filter's count of the live ones. With nothing shared with them
-// there is nothing to split: no filters, every row theirs, whatever filter
-// was chosen before.
-export function accessView(live, archived, filter = "all") {
-  const split = [...live, ...archived].some((f) => !owns(f));
-  const [key, , keep] = (split && ACCESS_FILTERS.find(([k]) => k === filter)) || ACCESS_FILTERS[0];
-  const shown = live.filter(keep);
+export const ACCESS_FILTERS = [
+  ["any", "Any access", () => true],
+  ["edit", "Can edit", edits],
+  ["view", "Can view", (f) => !edits(f)],
+];
+// What the page shows of its rows (`live`, not archived; `archived`) on a
+// tab (`null` until one is chosen: Made by me, unless they own none of the
+// live ones) and, on Shared with me, under a filter: its rows in the list's
+// order, its Archived, and each tab's and filter's count of the live ones.
+// With nothing shared with them there is nothing to split: no tabs, every
+// row, whatever was chosen before.
+export function accessView(live, archived, { tab = null, access = "any" } = {}) {
+  if (![...live, ...archived].some((f) => !owns(f))) return { tab: null, tabs: [], access: "any", accesses: [], rows: live, archived };
+  const on = TABS.find(([k]) => k === tab) ?? TABS[live.some(owns) ? 0 : 1];
+  const inTab = on[2];
+  const tabs = TABS.map(([key, text, test]) => ({ key, text, count: live.filter(test).length }));
+  if (on[0] === "mine") return { tab: "mine", tabs, access: "any", accesses: [], rows: live.filter(inTab), archived: archived.filter(inTab) };
+  const shared = live.filter(inTab);
+  const [key, , keep] = ACCESS_FILTERS.find(([k]) => k === access) ?? ACCESS_FILTERS[0];
   return {
-    filter: key,
-    filters: split ? ACCESS_FILTERS.map(([k, text, test]) => ({ key: k, text, count: live.filter(test).length })) : [],
-    yours: shown.filter(owns),
-    shared: shown.filter((f) => !owns(f)),
-    archived: archived.filter(keep),
+    tab: "shared",
+    tabs,
+    access: key,
+    accesses: ACCESS_FILTERS.map(([k, text, test]) => ({ key: k, text, count: shared.filter(test).length })),
+    rows: shared.filter(keep),
+    archived: archived.filter((f) => inTab(f) && keep(f)),
   };
 }
-// a section's heading, and what it says of its rows
-const SECTIONS = {
-  yours: ["Yours", "you own and control these"],
-  shared: ["Shared with you", "someone else owns these"],
-};
-// what a filter with nothing in it says
-const EMPTY = { yours: "None of your own.", shared: "Nothing is shared with you.", edit: "None you can edit.", view: "None you can only view." };
+// what a tab, or a filter on Shared with me, with nothing in it says
+const EMPTY = { mine: "None of your own yet.", any: "Nothing shared with you outside Archived.", edit: "None you can edit.", view: "None you can only view." };
 // Whether the platform shoots its card (docs/api.md, Cards): one the dock
 // shows, unless its row says it is members only (its owner's row alone
 // says), whose page no shot opens. Such a card comes only of an upload, or
@@ -252,8 +254,10 @@ export function createAppsPage(page, h, shelf = "apps") {
   let accessRead = 0;
   let operation = 0;
   let shown = false;
-  // the filter chosen (`ACCESS_FILTERS`), kept across visits
-  let filter = "all";
+  // the tab chosen (`TABS`; none yet) and Shared with me's filter
+  // (`ACCESS_FILTERS`), kept across visits
+  let tab = null;
+  let accessFilter = "any";
 
   const say = (name, text) => {
     if (text) said.set(name, text);
@@ -826,61 +830,65 @@ export function createAppsPage(page, h, shelf = "apps") {
     updateChildren(box, next);
   }
 
+  // a row of buttons, one pressed, drawn anew only when what it says changes
+  function choices(box, items, chosen, make) {
+    box.hidden = !items.length;
+    if (box.dataset.shows !== JSON.stringify(items)) {
+      box.dataset.shows = JSON.stringify(items);
+      box.replaceChildren(...items.map(make));
+    }
+    for (const b of box.children) b.setAttribute(b.getAttribute("role") === "tab" ? "aria-selected" : "aria-pressed", String(b.dataset.key === chosen));
+  }
+
   function render() {
     if (!shown) return;
     const all = h.state.fragments.filter(onShelf);
-    const view = accessView(all.filter((f) => !f.archived), all.filter((f) => f.archived), filter);
-    let lists = page.querySelectorAll(".apps-layout > .apps-list");
+    const view = accessView(all.filter((f) => !f.archived), all.filter((f) => f.archived), { tab, access: accessFilter });
+    let list = page.querySelector(".apps-layout > .apps-list");
     let folded = page.querySelector(".apps-archived");
+    let tabs = page.querySelector(".apps-tabs");
     let chips = page.querySelector(".apps-filters");
-    if (!lists.length) {
+    if (!list) {
       const wrap = h.el("div", "apps-layout");
       const head = h.el("header", "apps-intro");
       head.append(h.el("h1", null, title));
+      tabs = h.el("div", "apps-tabs");
+      tabs.setAttribute("role", "tablist");
+      tabs.setAttribute("aria-label", `Whose ${noun}s`);
       chips = h.el("div", "apps-filters");
       chips.setAttribute("role", "group");
-      chips.setAttribute("aria-label", "Show");
-      wrap.append(head, chips);
-      // theirs, then those shared with them: each list a heading's
-      for (const [key, [text, hint]] of Object.entries(SECTIONS)) {
-        const heading = h.el("h2", "apps-section");
-        heading.dataset.section = key;
-        heading.append(text, h.el("span", null, ` · ${hint}`));
-        const list = h.el("div", "apps-list");
-        list.dataset.section = key;
-        wrap.append(heading, list);
-      }
+      chips.setAttribute("aria-label", "Your access");
+      list = h.el("div", "apps-list");
+      list.id = `${shelf}-list`;
       folded = h.el("details", "apps-archived");
       folded.append(h.el("summary"), h.el("div", "apps-list"));
-      wrap.append(folded);
+      wrap.append(head, tabs, chips, list, folded);
       page.replaceChildren(wrap);
-      lists = page.querySelectorAll(".apps-layout > .apps-list");
     }
-    const [yours, shared] = lists;
     // a delete's name being typed keeps its focus when its row is drawn anew
     const typing = document.activeElement?.closest?.("[data-delete-confirm]")?.dataset.deleteConfirm;
     if (access?.error && !page.querySelector(".apps-access-failed")) page.querySelector(".apps-intro").after(h.el("p", "settings-warning apps-access-failed", `Who has access did not load: ${access.error}`));
     if (!access?.error) page.querySelector(".apps-access-failed")?.remove();
-    chips.hidden = !view.filters.length;
-    if (chips.dataset.shows !== JSON.stringify(view.filters)) {
-      chips.dataset.shows = JSON.stringify(view.filters);
-      chips.replaceChildren(...view.filters.map(({ key, text, count }) => {
-        const chip = h.el("button", "apps-filter", text);
-        chip.type = "button";
-        chip.dataset.filter = key;
-        chip.append(h.el("span", "apps-filter-count", String(count)));
-        chip.onclick = () => { filter = key; render(); };
-        return chip;
-      }));
-    }
-    for (const chip of chips.children) chip.setAttribute("aria-pressed", String(chip.dataset.filter === view.filter));
-    place(yours, view.yours.map(row));
-    place(shared, view.shared.map(row));
-    // the headings say which is which only when both have rows to show
-    const both = view.yours.length > 0 && view.shared.length > 0;
-    for (const heading of page.querySelectorAll(".apps-section")) heading.hidden = !both;
-    shared.hidden = !view.shared.length;
-    if (!view.yours.length && !view.shared.length) yours.replaceChildren(h.el("p", "muted apps-empty", all.some((f) => !f.archived) ? EMPTY[view.filter] ?? empty : empty));
+    choices(tabs, view.tabs, view.tab, ({ key, text, count }) => {
+      const b = h.el("button", "apps-tab", text);
+      b.type = "button";
+      b.dataset.key = key;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-controls", list.id);
+      b.append(h.el("span", "apps-filter-count", String(count)));
+      b.onclick = () => { tab = key; render(); };
+      return b;
+    });
+    choices(chips, view.accesses, view.access, ({ key, text, count }) => {
+      const b = h.el("button", "apps-filter", text);
+      b.type = "button";
+      b.dataset.key = key;
+      b.append(h.el("span", "apps-filter-count", String(count)));
+      b.onclick = () => { accessFilter = key; render(); };
+      return b;
+    });
+    place(list, view.rows.map(row));
+    if (!view.rows.length) list.replaceChildren(h.el("p", "muted apps-empty", view.tab === "mine" ? EMPTY.mine : view.tab ? EMPTY[view.access] : empty));
     folded.hidden = !view.archived.length;
     folded.querySelector("summary").textContent = `Archived (${view.archived.length})`;
     place(folded.querySelector(".apps-list"), view.archived.map(row));
