@@ -103,6 +103,13 @@ struct HomeConf {
     /// Without it, the home makes no computers (its node runs none).
     #[serde(default)]
     computers: Option<Computers>,
+    /// The parent's address when its 443 is an SNI router (several homes
+    /// on one parent, sandcastle's home-router.sh) rather than forwarded
+    /// untouched: its connections open with the PROXY protocol (v2), which
+    /// carries each client's address, and the front door takes that header
+    /// from this address alone. Without it, nothing changes.
+    #[serde(default)]
+    proxy_from: Option<std::net::Ipv4Addr>,
 }
 
 fn args(rest: &[String]) -> Result<(PathBuf, PathBuf, PathBuf)> {
@@ -423,8 +430,14 @@ fn walk_names(dir: &Path) -> Result<Vec<String>> {
 /// goes on to celld on loopback; Caddy replaces the forwarded headers
 /// (it trusts no proxy), which celld trusts
 /// (`CELLD_TRUST_FORWARDED_HEADERS`), and sets `CF-Connecting-IP` to the
-/// client's address (docs/self-host.md, found 48).
+/// client's address (docs/self-host.md, found 48). Behind a parent's SNI
+/// router (`proxy_from`), that address is the PROXY protocol's, taken
+/// from the parent alone; the TLS still ends here.
 fn caddyfile(c: &HomeConf) -> String {
+    let servers = match c.proxy_from {
+        Some(parent) => format!("\tservers {{\n\t\tlistener_wrappers {{\n\t\t\tproxy_protocol {{\n\t\t\t\ttimeout 5s\n\t\t\t\tallow {parent}/32\n\t\t\t}}\n\t\t\ttls\n\t\t}}\n\t}}\n"),
+        None => String::new(),
+    };
     let proxy = format!(
         "\treverse_proxy 127.0.0.1:{CELLD_PORT} {{\n\t\theader_up X-Forwarded-Host {{host}}\n\t\theader_up X-Forwarded-Proto https\n\t\theader_up CF-Connecting-IP {{remote_host}}\n\t\tflush_interval -1\n\t}}\n\trequest_body {{\n\t\tmax_size 200MB\n\t}}\n"
     );
@@ -441,7 +454,7 @@ fn caddyfile(c: &HomeConf) -> String {
 \tlog {{\n\
 \t\toutput file {STATE_IN_HOME}/log/caddy.log\n\
 \t}}\n\
-}}\n\
+{servers}}}\n\
 \n\
 {platform}:443 {{\n\
 \ttls {{\n\
@@ -517,5 +530,24 @@ mod tests {
         assert!(f.contains("handle_path /__door/* {\n\t\treverse_proxy 127.0.0.1:8803"), "the door on the platform's own origin");
         assert!(f.contains("handle_path /__git/* {\n\t\treverse_proxy 127.0.0.1:8792"), "the code store, which the CLI reaches");
         assert_eq!(f.matches("handle_path").count(), 2, "on the platform's host alone, no fragment's");
+        assert!(!f.contains("proxy_protocol"), "forwarded untouched: no PROXY header taken");
+    }
+
+    // Goal: behind a parent's SNI router, the front door takes the PROXY
+    // protocol's client address from the parent's address alone, before
+    // its own TLS; an address that is not IPv4 is refused.
+    #[test]
+    fn behind_a_router_the_client_address_is_the_proxy_protocols() {
+        let c: HomeConf = serde_json::from_value(json!({
+            "platform_host": "org.homes.example.com", "fragment_suffix": "org.homes.example.com", "models_file": "/m.jsonc", "proxy_from": "10.1.3.1"
+        }))
+        .unwrap();
+        let f = caddyfile(&c);
+        assert!(f.contains("\tservers {\n\t\tlistener_wrappers {\n\t\t\tproxy_protocol {\n\t\t\t\ttimeout 5s\n\t\t\t\tallow 10.1.3.1/32\n\t\t\t}\n\t\t\ttls\n"), "{f}");
+        assert!(f.find("servers {").unwrap() < f.find("org.homes.example.com:443 {").unwrap(), "a global option");
+        assert!(f.contains("header_up CF-Connecting-IP {remote_host}"));
+        for bad in ["10.1.3.0/24", "host", "::1"] {
+            assert!(serde_json::from_value::<HomeConf>(json!({ "platform_host": "a", "fragment_suffix": "a", "models_file": "/m", "proxy_from": bad })).is_err(), "{bad}");
+        }
     }
 }
