@@ -137,6 +137,10 @@ pub struct FragmentCell {
     /// waiting now. In memory: a life's end, which remakes its storage,
     /// leaves it as the test set it.
     pub(crate) test_hold_install: Cell<(bool, bool)>,
+    /// A test fleet's `hold-launch` lever (ops.rs): whether a launch's
+    /// batch, made, waits before it is written (jobs.rs `launch_queued`),
+    /// and whether one is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_launch: Cell<(bool, bool)>,
     /// A launch is under way (`launch_queued`): one at a time, without an
     /// await before its `createBatch`; another finding one leaves its runs
     /// queued for the alarm's next pass.
@@ -180,6 +184,7 @@ impl DurableObject for FragmentCell {
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
+            test_hold_launch: Cell::new((false, false)),
             launching: Cell::new(false),
             card_shooting: Cell::new(false),
             dw_noted: RefCell::new(None),
@@ -1686,8 +1691,9 @@ impl FragmentCell {
     /// backstop (while the pins may lag), the blob collection, running runs
     /// checked, and the storage sample. The next pass is a day away, or
     /// within the poll interval while the fragment is busy (`arm`), and
-    /// soon when runs were queued meanwhile (`launch_due_at`). Last, a
-    /// preview card due is shot beside it (`card_beside`). Then it re-arms.
+    /// soon when runs were queued meanwhile (`launch_due_at`). The delivery
+    /// outbox drains beside it (`deliveries_beside`), and last a preview card
+    /// due is shot beside it (`card_beside`). Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1718,7 +1724,7 @@ impl FragmentCell {
         // after its seed: an agent's notice waits until its template is in
         // (`Stage::joins_wait`)
         self.flush_joined().await;
-        self.drain_deliveries().await;
+        self.deliveries_beside();
         if let Err(e) = self.flush_meters(false).await {
             self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
         }
@@ -1746,6 +1752,23 @@ impl FragmentCell {
         }
         self.card_beside();
         self.schedule().await
+    }
+
+    /// The delivery outbox drained beside the alarm's pass, never inside it:
+    /// a computer's wake waits on its start, and a run queued meanwhile
+    /// (started from the alarm alone, `launch_queued`) would wait on it. Its
+    /// rows are claimed as it takes them (deliveries.rs `drain_deliveries`),
+    /// so another drain, the next pass's or a request's, skips them; its end
+    /// arms the alarm for what is left or failed.
+    fn deliveries_beside(&self) {
+        // SAFETY: as `later`'s: the object outlives a promise `waitUntil` holds
+        let cell: &'static FragmentCell = unsafe { &*(self as *const FragmentCell) };
+        self.state.wait_until(async move {
+            cell.drain_deliveries().await;
+            if let Err(e) = cell.schedule().await {
+                console_error!("{}", json!({ "event": "deliveries.arm-failed", "code": e.code, "message": e.message }));
+            }
+        });
     }
 
     /// A card's shot, beside the alarm's pass and never inside it: the
@@ -1843,7 +1866,10 @@ impl FragmentCell {
     /// than `min_ms` from now. A busy fragment's next pass comes within the
     /// poll interval: a pass further off is brought in (plane.rs `busy`).
     async fn arm(&self, also: Option<i64>, min_ms: i64) -> CellResult<()> {
-        let ended = self.ended_due_at()?;
+        // while a card's shot is under way an ended life's clearing waits
+        // for it (`drain_ended`): asked again no sooner than this, its end
+        // arms the alarm sooner
+        let ended = self.ended_due_at()?.map(|at| if self.card_shooting.get() { at.max(js::now_ms() + ALARM_RETRY_MS) } else { at });
         let [created_at, poll_at] = self.metas([MetaKey::CreatedAt, MetaKey::PollAt])?;
         if created_at.is_none() {
             // no life: an ended one's cleanup is all that comes due

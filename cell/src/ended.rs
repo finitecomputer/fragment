@@ -322,7 +322,12 @@ impl FragmentCell {
     /// (`fragment_core::ended`).
     pub(crate) async fn drain_ended(&self) {
         self.tell_ended(None).await;
-        self.clear_ended().await;
+        // a card's shot under way beside the alarm's pass (`card_beside`)
+        // may yet store its blob under an ended life's prefix: the clearing
+        // waits for its end, which arms the alarm again (`arm`)
+        if !self.card_shooting.get() {
+            self.clear_ended().await;
+        }
         self.clear_repos().await;
         self.clear_agents().await;
         self.forget_ended().await;

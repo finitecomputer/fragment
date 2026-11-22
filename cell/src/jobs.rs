@@ -480,7 +480,17 @@ impl FragmentCell {
             runs.push((instance, params, run));
         }
         let items: Vec<(&str, &Value)> = runs.iter().map(|(instance, params, _)| (instance.as_str(), params)).collect();
-        if let Err(e) = js::jobs_create_batch(self.env.as_ref(), &items).await {
+        let made = js::jobs_create_batch(self.env.as_ref(), &items).await;
+        if self.cfg.test_hooks {
+            self.held_launch().await;
+        }
+        // a life ended, or made again, while the batch was asked: nothing is
+        // written into the next (its runs' ids start again from 1, ended.rs),
+        // and its Workflows stop at their first call (`current_run`)
+        if self.meta(MetaKey::CreatedAt).ok().flatten().as_deref() != Some(incarnation.as_str()) {
+            return 0;
+        }
+        if let Err(e) = made {
             let ids: Vec<i64> = runs.iter().map(|(_, _, run)| run.id).collect();
             self.event("run.launch-failed", &format!("{} queued runs: their Workflows did not start: {}", ids.len(), e.message), json!({ "runs": ids }));
             later();
@@ -712,6 +722,19 @@ impl FragmentCell {
             self.later();
         }
         Ok(json!({ "stop": true }))
+    }
+
+    /// Test fleets: waits while `hold-launch` is on, at most
+    /// `TEST_HOLD_MAX_MS`, a batch made and not yet written (`waiting`).
+    async fn held_launch(&self) {
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if !self.test_hold_launch.get().0 {
+                break;
+            }
+            self.test_hold_launch.set((true, true));
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        self.test_hold_launch.set((self.test_hold_launch.get().0, false));
     }
 
     /// Test fleets: waits while `hold-advances` is on, at most

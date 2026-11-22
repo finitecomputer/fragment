@@ -458,6 +458,16 @@ impl FragmentCell {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;
         }
+        if body["op"] == "hold-launch" {
+            // a launch's batch, made, waits while on before it is written
+            // (jobs.rs `launch_queued`), across a delete and the name made
+            // again; `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_launch.set((on, self.test_hold_launch.get().1));
+            }
+            let (on, waiting) = self.test_hold_launch.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
+        }
         if body["op"] == "hold-install" {
             // a pending install (plane.rs `install_pending`) waits while on,
             // its release's reads and writes to come: set before a create,

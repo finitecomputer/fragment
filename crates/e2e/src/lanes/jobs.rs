@@ -534,7 +534,43 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     secret_hosts(s, api, &owner, &upstream)?;
     inbox_secret(s, api, &owner)?;
     inbox_hmac(s, api, &owner)?;
+    launched_across_lives(s, api, &owner)?;
     channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a launch answers only into the life it was asked for (the review
+/// of #1467). The alarm starts queued runs in one `createBatch`, and
+/// while it waits for the answer the fragment may be deleted and its name
+/// made again: the new life's first run has the same id and attempt as the
+/// old one's. Its batch held as it answers (`hold-launch`), the old life
+/// deleted, the name made again and a run queued there, then let go: that
+/// run starts and succeeds, never marked started by the old batch.
+fn launched_across_lives(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let (name, _) = jobs_fragment(s, api, owner, "relaunched", |_| {})?;
+    let hold = |on: Option<bool>| -> Value {
+        let mut extra = json!({});
+        if let Some(on) = on {
+            extra["on"] = json!(on);
+        }
+        super::ledger::lever(api, &name, "hold-launch", extra).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    hold(Some(true));
+    let old = api.op(owner, &name, "count_up", "relaunched-old", json!({ "n": 1 }))?;
+    let held = s.eventually(wait, || hold(None)["waiting"] == true);
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, JOBS_APP, JOBS_JSON);
+    let new = api.op(owner, &name, "count_up", "relaunched-new", json!({ "n": 1 }))?;
+    hold(Some(false));
+    let (old_id, new_id) = (old.body["result"]["run"].as_i64(), new.body["result"]["run"].as_i64());
+    let run = settle(api, owner, &name, new_id.unwrap_or(0), &["succeeded", "held", "failed", "blocked"], Duration::from_secs(90));
+    s.ok(
+        "a fragment deleted and made again while its alarm's launch waits for its batch's answer: the new life's run, its id the old one's, starts and succeeds, never marked started by the old batch",
+        held && deleted.status == 200 && old_id.is_some() && old_id == new_id && run["status"] == "succeeded",
+        json!({ "held": held, "deleted": deleted.status, "old": old.body, "new": new.body, "run": run }),
+    );
+    Ok(())
 }
 
 /// Goal: an inbox whose code names a secret header (a webhook's own, as
