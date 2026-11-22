@@ -56,7 +56,8 @@ function platform() {
     if (method === "GET" && rest === "file") {
       const text = files.get(name).get(new URLSearchParams(query).get("path"));
       if (text === undefined) throw Object.assign(new Error("not found"), { status: 404 });
-      return { text };
+      // JSON as the shell's api answers it
+      return path.includes(".json") ? JSON.parse(text) : { text };
     }
     if (method === "GET" && rest === "manifest") return JSON.parse(files.get(name).get("fragment.json"));
     if (method === "POST" && rest === "files") {
@@ -304,6 +305,44 @@ for (const stray of [false, true]) {
     assert.deepEqual(world.writes().map((w) => w.replace(/--[a-z0-9]{4}/g, "")), ["POST /api/f/wren/channels/tasks"]);
   });
 }
+
+// FIN-492 (11-22): a move's new agent is empty until its import's routine
+// runs, minutes later, so its hello says its upgrade is under way, never a
+// new agent's "who I am" (one greeted its person as a stranger, in
+// Chinese). Every hello names the language their browser is set to.
+const said = (world) => world.tasks(world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name).get("hello").text;
+const language = `browser is set to (${globalThis.navigator?.language || "en"}) until they write to you in another.`;
+
+test("a move's agent says its upgrade is under way; an added one says who it is; each in the browser's language", async () => {
+  for (const from of [null, "old1"]) {
+    const world = platform();
+    const p = page(world, from ? { at: "move" } : {});
+    await p.load();
+    await p.onboarding.addAgent({ name: "Wren", role: "Researcher", ...(from ? { quiet: true, from } : {}) });
+    madeWhole(world);
+    const text = said(world);
+    if (from) {
+      assert.match(text, /your upgrade is under way/, "the move's hello");
+      assert.match(text, /never guess who they are/, "and it says nothing as if it knew them");
+      assert.doesNotMatch(text, /SOUL\.md/, "never a new agent's");
+    } else {
+      assert.match(text, /what you will do for them \(your SOUL\.md\)/, "a new agent's hello");
+      assert.doesNotMatch(text, /upgrade/, "never the move's");
+    }
+    assert.ok(text.endsWith(language), `in the browser's language: ${text}`);
+  }
+});
+
+test("a move's agent cut short before its hello: the page opened next says the move's hello", async () => {
+  const world = platform();
+  const first = page(world, { at: "move" });
+  await first.load();
+  world.cut(at(/^\/api\/f\/wren--[^/]+\/channels\/tasks$/, "POST"));
+  await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+  await page(world).opened();
+  madeWhole(world);
+  assert.match(said(world), /your upgrade is under way/);
+});
 
 // The move's page (FIN-463 F6): a quiet Add made for an old agent (`from`),
 // cut short, is gone on with as the agent it made, handed back to Add

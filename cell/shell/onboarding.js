@@ -22,11 +22,24 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // `tasks`), so its chat opens with its hello and no message of the
   // person's. Posted once it is in the chat, where its turn posts; its id
   // makes a retry the same record.
-  const hello = (agent, chat) =>
+  //
+  // A move's new agent (`from`: the finite.computer agent it was made for)
+  // is empty until its import's routine runs, minutes after its Yes: its
+  // hello says its upgrade is under way, and before then it answers nothing
+  // as if it knew them (FIN-492, 11-22: one greeted its person as a
+  // stranger, in Chinese). Every hello names the language their browser is
+  // set to, so an agent with nothing else to go on writes in theirs.
+  const hello = (agent, chat, from = null) =>
     api("POST", `/api/f/${agent}/channels/tasks`, {
       id: "hello",
-      body: { kind: "routine", chat, text: "You were just made, and this is your chat with the person you work for. Say hello in a sentence or two: who you are, and what you will do for them (your SOUL.md). Start no work until they answer." },
+      body: { kind: "routine", chat, text: helloText(from) },
     });
+  const helloText = (from) => [
+    from
+      ? "You were just made to take in your person's agent from finite.computer: to them, this is its upgrade, and you are that agent. Your memories, chats and skills are still on their way: a routine brings them in a few minutes. Say in a sentence or two that your upgrade is under way and that you'll write again when everything is here. Until that routine has run you know nothing about them: if they write before then, say you're still bringing yourself over, and never guess who they are or what they want."
+      : "You were just made, and this is your chat with the person you work for. Say hello in a sentence or two: who you are, and what you will do for them (your SOUL.md). Start no work until they answer.",
+    `Write in the language their browser is set to (${globalThis.navigator?.language || "en"}) until they write to you in another.`,
+  ].join(" ");
 
   // ---- first run: sign in, a seat, then the default agent is made
   // (decision 10); it never goes through settings ----
@@ -370,7 +383,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       if (joined) {
         if (!helloAgain.has(chat.name)) {
           helloAgain.add(chat.name);
-          hello(agent.name, chat.name).catch(() => helloAgain.delete(chat.name));
+          // a move's agent says its own (agent.json `from`): unread, none yet
+          const from = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then((json) => json?.from ?? null, (e) => (e?.status === 404 ? null : undefined));
+          if (from === undefined) helloAgain.delete(chat.name);
+          else hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
         }
         continue;
       }
@@ -454,7 +470,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // its joining is what lets the chat's page send (and wakes its computer)
     await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
     setupChanged({ joined: true });
-    await hello(agent, chatName);
+    await hello(agent, chatName, setup.from);
     api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
     await load();
     return { chat: chatName, id, computer: computer.computer };
