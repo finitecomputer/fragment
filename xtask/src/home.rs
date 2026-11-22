@@ -20,7 +20,10 @@
 //! macrofiche's. The
 //! front door is Caddy, which ends TLS in the home with certificates it
 //! gets itself (TLS-ALPN-01): the platform's at its start, a fragment's on
-//! its first visit once the home says the fragment exists. Nothing here
+//! its first visit once the home says the fragment exists; or, for a home
+//! whose conf says `"certificate": "wildcard"`, one for its name and its
+//! fragments' wildcard, which the operator's issuer gets for a key the home
+//! makes and keeps (sandcastle's docs/nitro-issuer.md). Nothing here
 //! changes the cell.
 //!
 //! `--secrets` holds the home's inputs, owner-only. Made when missing:
@@ -117,6 +120,24 @@ struct HomeConf {
     /// from this address alone. Without it, nothing changes.
     #[serde(default)]
     proxy_from: Option<std::net::Ipv4Addr>,
+    /// Where the front door's certificates come from (sandcastle's
+    /// docs/nitro-issuer.md). Without it, nothing changes.
+    #[serde(default)]
+    certificate: Certificate,
+}
+
+/// The front door's certificates.
+#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum Certificate {
+    /// Caddy's own: one per name by TLS-ALPN-01, the platform's at its start
+    /// and a fragment's on its first visit.
+    #[default]
+    Acme,
+    /// One for the platform's name and its fragments' wildcard, which the
+    /// operator's issuer gets for a key the home makes and keeps (its
+    /// entrypoint's tls.sh); so the platform host is the fragments' suffix.
+    Wildcard,
 }
 
 fn args(rest: &[String]) -> Result<(PathBuf, PathBuf, PathBuf)> {
@@ -210,6 +231,14 @@ fn tree_sha(dir: &Path) -> Result<String> {
 }
 
 fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
+    if c.certificate == Certificate::Wildcard {
+        anyhow::ensure!(
+            c.platform_host == c.fragment_suffix,
+            "certificate wildcard: its one certificate names the platform host and *.<the fragments' suffix>, so they are one name ({} is not {})",
+            c.platform_host,
+            c.fragment_suffix
+        );
+    }
     let meta = fs::metadata(secrets).with_context(|| format!("{} (--secrets)", secrets.display()))?;
     anyhow::ensure!(meta.is_dir() && meta.mode() & 0o077 == 0, "{}: the home's inputs are its owner's alone (0700)", secrets.display());
     let host_secret = made_secret(secrets, "host-secret", || devstack::random_hex(32))?;
@@ -363,6 +392,10 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
     let backend = json!({ "backend": "openbao", "addr": OPENBAO_ADDR, "mount": "secret", "token_file": "/run/fragment-home/celld/openbao.token" });
     write(&release.join("celld-secrets.json"), &backend.to_string(), true)?;
     write(&release.join("Caddyfile"), &caddyfile(c), false)?;
+    // what the entrypoint reads; a release without it is `acme`'s
+    if c.certificate == Certificate::Wildcard {
+        write(&release.join("certificate"), "wildcard\n", false)?;
+    }
     // the platform's own name, for the stack's calls to its own URL: this
     // home's Caddy
     write(&release.join("hosts"), &format!("127.0.0.1 {}\n", c.platform_host), false)?;
@@ -480,6 +513,10 @@ fn in_home_paths(release: &Path, cell_dir: &Path) -> Result<()> {
 /// client's address (docs/self-host.md, found 48). Behind a parent's SNI
 /// router (`proxy_from`), that address is the PROXY protocol's, taken
 /// from the parent alone; the TLS still ends here.
+///
+/// A `wildcard` home's sites both import the file its entrypoint writes,
+/// `tls <chain> <key>`, which names the certificate in use; Caddy runs with
+/// `--watch` and serves a new one within a second of the file naming it.
 fn caddyfile(c: &HomeConf) -> String {
     let servers = match c.proxy_from {
         Some(parent) => format!("\tservers {{\n\t\tlistener_wrappers {{\n\t\t\tproxy_protocol {{\n\t\t\t\ttimeout 5s\n\t\t\t\tallow {parent}/32\n\t\t\t}}\n\t\t\ttls\n\t\t}}\n\t}}\n"),
@@ -489,23 +526,31 @@ fn caddyfile(c: &HomeConf) -> String {
         "\treverse_proxy 127.0.0.1:{CELLD_PORT} {{\n\t\theader_up X-Forwarded-Host {{host}}\n\t\theader_up X-Forwarded-Proto https\n\t\theader_up CF-Connecting-IP {{remote_host}}\n\t\tflush_interval -1\n\t}}\n\trequest_body {{\n\t\tmax_size 200MB\n\t}}\n"
     );
     let issuer = "\t\tissuer acme {\n\t\t\tdir https://acme-v02.api.letsencrypt.org/directory\n\t\t\tdisable_http_challenge\n\t\t}\n";
+    let (ask, platform_tls, fragment_tls) = match c.certificate {
+        Certificate::Acme => (
+            format!("\ton_demand_tls {{\n\t\task http://127.0.0.1:{ASK_PORT}/ask\n\t}}\n"),
+            format!("\ttls {{\n{issuer}\t}}\n"),
+            format!("\ttls {{\n\t\ton_demand\n{issuer}\t}}\n"),
+        ),
+        Certificate::Wildcard => {
+            let import = format!("\timport {STATE_IN_HOME}/tls/caddy-tls\n");
+            (String::new(), import.clone(), import)
+        }
+    };
     format!(
         "# The home's front door (xtask/src/home.rs), rendered for one home.\n\
 {{\n\
 \tadmin off\n\
 \tauto_https disable_redirects\n\
 \tstorage file_system {STATE_IN_HOME}/caddy\n\
-\ton_demand_tls {{\n\
-\t\task http://127.0.0.1:{ASK_PORT}/ask\n\
-\t}}\n\
+{ask}\
 \tlog {{\n\
 \t\toutput file {STATE_IN_HOME}/log/caddy.log\n\
 \t}}\n\
 {servers}}}\n\
 \n\
 {platform}:443 {{\n\
-\ttls {{\n\
-{issuer}\t}}\n\
+{platform_tls}\
 \thandle_path {DOOR_PATH}/* {{\n\
 \t\treverse_proxy 127.0.0.1:{DOOR_PORT}\n\
 \t}}\n\
@@ -520,9 +565,7 @@ fn caddyfile(c: &HomeConf) -> String {
 }}\n\
 \n\
 *.{suffix}:443 {{\n\
-\ttls {{\n\
-\t\ton_demand\n\
-{issuer}\t}}\n\
+{fragment_tls}\
 {proxy}}}\n",
         platform = c.platform_host,
         suffix = c.fragment_suffix,
@@ -578,6 +621,32 @@ mod tests {
         assert!(f.contains("handle_path /__git/* {\n\t\treverse_proxy 127.0.0.1:8792"), "the code store, which the CLI reaches");
         assert_eq!(f.matches("handle_path").count(), 2, "on the platform's host alone, no fragment's");
         assert!(!f.contains("proxy_protocol"), "forwarded untouched: no PROXY header taken");
+    }
+
+    // Goal: a wildcard home's front door serves the one certificate its
+    // entrypoint names in tls/caddy-tls, for its name and every fragment's:
+    // no ACME of Caddy's own, nothing on demand, no ask; without the field,
+    // the front door is acme's as before; a wildcard home whose platform
+    // host is not its fragments' suffix is refused before anything is made.
+    #[test]
+    fn a_wildcard_front_door_serves_the_issuers_certificate() {
+        let conf = |extra: Value| -> serde_json::Result<HomeConf> {
+            let mut c = json!({ "platform_host": "home.example.com", "fragment_suffix": "home.example.com", "models_file": "/m.jsonc" });
+            c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(c)
+        };
+        let f = caddyfile(&conf(json!({ "certificate": "wildcard" })).unwrap());
+        assert_eq!(f.matches("\timport /var/lib/fragment-home/tls/caddy-tls\n").count(), 2, "both sites, one file");
+        assert!(!f.contains("issuer acme") && !f.contains("on_demand") && !f.contains("/ask"), "no certificate of Caddy's own");
+        assert!(f.contains("home.example.com:443 {\n\timport") && f.contains("*.home.example.com:443 {\n\timport"));
+        assert!(f.contains("admin off") && f.contains("handle_path /__door/* {") && f.contains("header_up CF-Connecting-IP {remote_host}"));
+        let acme = caddyfile(&conf(json!({ "certificate": "acme" })).unwrap());
+        assert_eq!(caddyfile(&conf(json!({})).unwrap()), acme, "no field: acme's");
+        assert_eq!(acme.matches("disable_http_challenge").count(), 2);
+        assert!(conf(json!({ "certificate": "dns" })).is_err());
+        let apart = conf(json!({ "certificate": "wildcard", "fragment_suffix": "apps.example.com" })).unwrap();
+        let err = render(&apart, Path::new("/nonexistent"), Path::new("/nonexistent")).unwrap_err().to_string();
+        assert!(err.contains("one name"), "{err}");
     }
 
     // Goal: a rendered release names no path of the machine that rendered
