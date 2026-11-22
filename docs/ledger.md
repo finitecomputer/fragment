@@ -95,6 +95,17 @@ person in an org's fragment too (decision 67). A step's key is the same
 in every attempt, so a step tried again after its call was paid is
 charged once.
 
+**Requests.** A fragment counts every request the router hands it, per
+minute (cell/src/meter.rs). The open minute's count is written with the
+storage's own `allowUnconfirmed`, so no answer waits for its count to be
+durable: on a self-hosted node, where every durable write waits for the
+bucket, that wait was 85–150 ms on every page. A confirmed write folds the
+count into its minute's row, at the minute's alarm or at the first request
+of a later minute, and the row goes to the ledger as before. A crash can
+lose at most the open minute's unconfirmed counts, in the owner's favour.
+celld honors `allowUnconfirmed` the same way (a write the answer does not
+wait on).
+
 Not metered: a person's own keys (decisions 37 and 60: their provider
 bills them); a computer's time kept for its failed saves (the platform's:
 docs/computers.md); a computer's saves, an app facet's database and git
