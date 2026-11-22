@@ -23,17 +23,18 @@
 //!    `editor`. The owner's part is the owner's own role capped at
 //!    `editor`, not `editor` outright: an agent never reaches further than
 //!    its owner could, so a key that signs `for` someone else gains nothing
-//!    its owner does not hold. **Its floor:** for its own owner it never
-//!    acts with less than its own membership gives it signing as itself
-//!    (rule 4's hold beside its person, rule 5's ceiling), at most `editor`
-//!    (FIN-615; Paul, 2026-11-21: "something that should OBVIOUSLY work is
-//!    if ben is talking to my agent and he asks it to do something with a
-//!    fragment he's shared as an editor on"). The same key holds that much
-//!    as itself, so the floor reaches no further; nothing yet says who
-//!    asked the agent, so whoever talks to it reaches it, as they reach
-//!    its owner's access (`TRUST_WARNING`). Once a request proves who asked
-//!    (FIN-615's mandates), an asker other than its owner gets this floor
-//!    only through the place's lend.
+//!    its owner does not hold. **Where its owner is not in**, and it is,
+//!    a request it signs for its owner is its own: it acts as itself, with
+//!    its own membership, under its own name (`acts_as_itself`; FIN-615,
+//!    Paul, 2026-11-21: "something that should OBVIOUSLY work is if ben is
+//!    talking to my agent and he asks it to do something with a fragment
+//!    he's shared as an editor on"). An app is never told its owner with a
+//!    role its owner does not hold. The same key reaches that much signing
+//!    as itself, so this reaches no further; and as nothing yet says who
+//!    asked the agent, whoever talks to it reaches it, as they reach its
+//!    owner's access (`TRUST_WARNING`). Once a request proves who asked
+//!    (FIN-615's mandates), an asker other than its owner reaches it only
+//!    through the place's lend.
 //! 4. **A hold** (decision 36): an agent its owner holds below them acts
 //!    with at most its hold with its owner's access, whomever it acts for,
 //!    and as itself where its person is a guest (decision 64: the whole
@@ -141,12 +142,10 @@ impl Standing {
     }
 }
 
-/// What an agent acting for someone brings to a fragment (decision R17):
-/// its own owner, the only one it may name (`may_act_for`).
+/// What an agent acting for someone brings to a fragment (decision R17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cap {
-    /// The agent's own membership: what caps it, and the least it acts
-    /// with (rule 3's floor).
+    /// The agent's own membership.
     pub agent: Option<Role>,
     /// Its owner's membership.
     pub owner: Option<Role>,
@@ -221,19 +220,13 @@ impl Refusal {
 /// Whether the caller may do `facts.action`, with the role they act with
 /// or why not: the rules of the module doc, in their order.
 pub fn decide(facts: &Facts) -> Verdict {
-    decide_by(facts, effective_role)
-}
-
-/// `decide` by the rules `role` gives a role by: `effective_role`, or, in
-/// a test, the rules without rule 3's floor (`role_by_the_rules`).
-fn decide_by(facts: &Facts, role_of: fn(Visibility, Standing, Purpose) -> Option<Role>) -> Verdict {
     let Facts { visibility, standing, action } = *facts;
     let needs = action.needs();
     let purpose = match action {
         Action::Read(_) | Action::Repo(_) => Purpose::Read,
         Action::Act(_) => Purpose::Act,
     };
-    let role = match role_of(visibility, standing, purpose) {
+    let role = match effective_role(visibility, standing, purpose) {
         Some(role) if role >= needs => role,
         _ => return Verdict::Refuse(Refusal { needs, why: short(facts, purpose), sign_in: !standing.signed }),
     };
@@ -241,7 +234,7 @@ fn decide_by(facts: &Facts, role_of: fn(Visibility, Standing, Purpose) -> Option
     // what a visibility floor, a share link or an agent of theirs that is a
     // member gave the read above, the repo never does
     let members = Standing { link: false, owns_member_agent: false, ..standing };
-    match role_of(Visibility::Members, members, Purpose::Read) {
+    match effective_role(Visibility::Members, members, Purpose::Read) {
         Some(repo) if repo >= needs => {
             assert!(repo <= role, "memberships alone lend no more than the read");
             Verdict::Allow(repo)
@@ -274,27 +267,13 @@ enum Purpose {
     Act,
 }
 
-/// The role a caller acts with, or `None` when they cannot see the
-/// fragment: the rules' (`role_by_the_rules`), and for an agent acting for
-/// its owner, never less than its own membership gives it signing as
-/// itself, at most `editor` (rule 3's floor). Its owner's own standing
-/// there (reading through it, a share link) is not the agent's.
-fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
-    let role = role_by_the_rules(visibility, standing, purpose);
-    let Some(agent) = standing.cap.and_then(|cap| cap.agent) else { return role };
-    let itself = Standing { member: Some(agent.min(AGENT_ROLE_MAX)), owns_member_agent: false, cap: None, owner_in_person: false, ..standing };
-    let floor = role_by_the_rules(visibility, itself, purpose);
-    assert!(floor <= Some(AGENT_ROLE_MAX), "the floor is an agent's: never above editor");
-    role.max(floor)
-}
-
-/// The role a caller acts with by rules 1 to 5, before rule 3's floor. An
-/// agent acting for them (`standing.cap`) acts with the lower of that and
-/// its cap, and of its hold: a hold limits what an agent does with its
+/// The role a caller acts with, or `None` when they cannot see the fragment.
+/// An agent acting for them (`standing.cap`) acts with the lower of that
+/// and its cap, and of its hold: a hold limits what an agent does with its
 /// owner's access (decision 36; Paul, 2026-10-05), never its own
 /// memberships, so an agent held at viewer still answers in the chats it is
 /// a member of, recording its turns there.
-fn role_by_the_rules(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
+fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
     // a hold is set below its owner (registry.rs), never at the `public`
     // floor: a held agent's floor is the floor anyone has
     assert!(standing.held.is_none_or(|h| h > Role::Public && h <= AGENT_ROLE_MAX), "a hold is viewer or editor");
@@ -542,6 +521,18 @@ pub fn may_act_for(kind: IdentityKind, owner: Option<&str>, named: &str) -> Resu
     }
 }
 
+/// Whether a request an agent signs `for` its own owner is the agent's own
+/// on a fragment (rule 3, where its owner is not in), from their two
+/// memberships there: where its owner holds none and the agent holds one,
+/// that membership is all the request brings, so it acts as itself, under
+/// its own name. Its owner's other standing there (reading through it, a
+/// share link, a visibility floor) is not the agent's to act with. An
+/// agent owning a fragment never does: owning is never an agent's
+/// (`AGENT_ROLE_MAX`), so that stays its owner's request.
+pub fn acts_as_itself(owner: Option<Role>, agent: Option<Role>) -> bool {
+    owner.is_none() && agent.is_some_and(|role| role <= AGENT_ROLE_MAX)
+}
+
 /// Why a membership change is refused, or `None` when it is allowed. Only
 /// the owner manages members (their own agent sharing for them acts with
 /// their role: `agent_shares`); the owner's own row is never changed here
@@ -662,8 +653,6 @@ mod tests {
         let held = |held, s: Standing| Standing { held: Some(held), ..s };
         let beside = |s: Standing| Standing { beside_person: true, ..s };
         let connector = |s: Standing| Standing { connector: true, ..s };
-        // an agent for its owner where it alone is in (its owner reads through it)
-        let alone = |agent| Standing { owns_member_agent: true, ..acting(None, Some(agent), None) };
         let rows: &[(&str, Visibility, Standing, Action, Verdict)] = &[
             // rule 1: a caller's own role
             ("anonymous reads a public page", V::Public, anon, Read(Public), Verdict::Allow(Public)),
@@ -695,17 +684,6 @@ mod tests {
             ("its owner's viewer share caps it", V::Members, acting(Some(Editor), None, Some(Viewer)), Read(Editor), refused(Editor, Why::Capped, false)),
             ("the public floor, for anyone", V::Public, acting(None, None, None), Read(Public), Verdict::Allow(Public)),
             ("the link is not the agent's to hold", V::Link, acting(None, None, None), Read(Public), refused(Public, Why::Capped, false)),
-            // rule 3's floor: for its owner, never less than its own membership
-            ("for its owner, where it alone is in: its own membership", V::Members, alone(Editor), Act(Editor), Verdict::Allow(Editor)),
-            ("for its owner, its own membership short of the role", V::Members, alone(Viewer), Act(Editor), refused(Editor, Why::Capped, false)),
-            ("for its owner, its own membership never owner", V::Members, alone(Owner), Act(Owner), refused(Owner, Why::Capped, false)),
-            ("for its owner, its own membership at most editor", V::Members, alone(Owner), Act(Editor), Verdict::Allow(Editor)),
-            ("for its owner on a link fragment, its own membership with no link", V::Link, alone(Editor), Act(Editor), Verdict::Allow(Editor)),
-            ("for its owner, held: its own membership elsewhere stands", V::Members, held(Viewer, alone(Editor)), Act(Editor), Verdict::Allow(Editor)),
-            ("for its owner beside its guest person, held: its own membership held", V::Members, beside(held(Viewer, acting(Some(Viewer), Some(Editor), Some(Viewer)))), Act(Editor), refused(Editor, Why::Capped, false)),
-            ("for its owner beside its guest person, held: it reads", V::Members, beside(held(Viewer, acting(Some(Viewer), Some(Editor), Some(Viewer)))), Read(Viewer), Verdict::Allow(Viewer)),
-            ("for its owner on a connector: its own membership a viewer's", V::Members, connector(alone(Editor)), Act(Editor), refused(Editor, Why::Capped, false)),
-            ("for its owner, its own membership lends the repo", V::Members, alone(Editor), Repo(Editor), Verdict::Allow(Editor)),
             // rule 4: a hold
             ("held at viewer, it reads", V::Members, held(Viewer, acting(Some(Editor), None, Some(Editor))), Read(Viewer), Verdict::Allow(Viewer)),
             ("held at viewer, it does not edit", V::Members, held(Viewer, acting(Some(Editor), None, Some(Editor))), Act(Editor), refused(Editor, Why::Capped, false)),
@@ -748,12 +726,8 @@ mod tests {
     /// person, decision 64; a connector's viewer ceiling), moved here
     /// unchanged. Method: every standing on every visibility for every
     /// action, decided once as the cell did (`as_the_cell_did`, the old
-    /// code's narrowing, then the rules over the narrowed standing with no
+    /// code's narrowing, then `decide` over the narrowed standing with no
     /// facts) and once from the facts; the two agree, verdict and reason.
-    /// The rules are those before rule 3's floor (`role_by_the_rules`),
-    /// which came later, and which
-    /// `for_its_owner_an_agent_holds_its_own_membership_and_no_more` builds
-    /// from these same rules.
     #[test]
     fn the_cells_own_rules_moved_in_unchanged() {
         /// fragment.rs `standing`'s hold and doors.rs `only_owner_edits`, as
@@ -796,8 +770,8 @@ mod tests {
                             let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap: *cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false };
                             for standing in [standing, Standing { owner_in_person: true, ..standing }] {
                                 for &action in &actions {
-                                    let new = decide_by(&Facts { visibility, standing, action }, role_by_the_rules);
-                                    let old = decide_by(&Facts { visibility, standing: as_the_cell_did(standing), action }, role_by_the_rules);
+                                    let new = decide(&Facts { visibility, standing, action });
+                                    let old = decide(&Facts { visibility, standing: as_the_cell_did(standing), action });
                                     assert_eq!(new, old, "{visibility:?} {standing:?} {action:?}");
                                     n += 1;
                                 }
@@ -810,88 +784,38 @@ mod tests {
         assert_eq!(n, 3 * 5 * 26 * 3 * 32 * 2 * 12, "every combination, once");
     }
 
-    /// Goal: rule 3's floor (FIN-615) reaches as far as the agent's own
-    /// membership and no further. An agent acting for its owner acts with
-    /// the better of what the rules gave it before the floor and what the
-    /// same agent holds signing as itself by that membership (its hold
-    /// beside its person, a connector's ceiling), at most `editor`; and a
-    /// refusal is the one it was. Method: every standing an agent acting
-    /// for its owner may bring, on every visibility, for every action,
-    /// decided three ways: with the floor (`decide`), without it, and as
-    /// the agent itself, as the cell reads that (no `for`, so no cap; an
-    /// agent owns no agent and is never its owner in person).
-    #[test]
-    fn for_its_owner_an_agent_holds_its_own_membership_and_no_more() {
-        let role = |v: Verdict| match v {
-            Verdict::Allow(role) => Some(role),
-            Verdict::Ask(ask) => match ask {},
-            Verdict::Refuse(_) => None,
-        };
-        let roles = [None, Some(Public), Some(Viewer), Some(Editor), Some(Owner)];
-        let mut actions = vec![];
-        for needs in [Public, Viewer, Editor, Owner] {
-            actions.extend([Action::Read(needs), Action::Act(needs), Action::Repo(needs)]);
-        }
-        let (mut n, mut raised) = (0u64, 0u64);
-        for visibility in [V::Members, V::Link, V::Public] {
-            for member in roles {
-                for agent in roles {
-                    for owner in roles {
-                        for held in [None, Some(Viewer), Some(Editor)] {
-                            for bits in 0u8..32 {
-                                let flag = |i: u8| bits & (1 << i) != 0;
-                                let cap = Some(Cap { agent, owner });
-                                let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false };
-                                let itself = Standing { member: agent, owns_member_agent: false, cap: None, ..standing };
-                                for &action in &actions {
-                                    let facts = Facts { visibility, standing, action };
-                                    let (now, before) = (decide(&facts), decide_by(&facts, role_by_the_rules));
-                                    let as_itself = agent.and_then(|_| role(decide(&Facts { standing: itself, ..facts })));
-                                    let best = role(before).max(as_itself.map(|r| r.min(AGENT_ROLE_MAX))).filter(|r| *r >= action.needs());
-                                    assert_eq!(role(now), best, "{visibility:?} {standing:?} {action:?}");
-                                    if let (Verdict::Refuse(_), Verdict::Refuse(_)) = (now, before) {
-                                        assert_eq!(now, before, "a refusal is the one it was: {visibility:?} {standing:?} {action:?}");
-                                    }
-                                    raised += u64::from(now != before);
-                                    n += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert_eq!(n, 3 * 5 * 5 * 5 * 3 * 32 * 12, "every combination, once");
-        assert!(raised > 0, "the floor raises some");
-    }
-
     /// Goal: what should obviously work works, and stays working (Paul,
     /// 2026-11-21: "something that should OBVIOUSLY work is if ben is
     /// talking to my agent and he asks it to do something with a fragment
     /// he's shared as an editor on"). Every later change keeps this table
     /// green. Method: each case as the facts its request reads today (the
-    /// agent's terminal signs `for` its owner, Ana, whoever asked), its
-    /// verdict today, and the one it must have. A row whose two differ is
-    /// a known gap, named in `GAPS`: fixing it moves it out of there, and
-    /// a change that breaks any other row fails here. Then whom else rule
-    /// 3's floor reaches (an agent for its own owner never acts with less
-    /// than its own membership), each with its verdict: nobody past what
+    /// agent's terminal signs `for` its owner, Ana, whoever asked; where
+    /// she is not in and it is, the request is its own: `acts_as_itself`),
+    /// its verdict today, and the one it must have. A row whose two differ
+    /// is a known gap, named in `GAPS`: fixing it moves it out of there,
+    /// and a change that breaks any other row fails here. Then whom else
+    /// acting as itself reaches, each with its verdict: nobody past what
     /// the same agent holds signing as itself.
     #[test]
     fn the_obvious_cases() {
         use Action::{Act, Read};
         // Juniper is Ana's agent, Fred her second; Ben is in Ana's shared
-        // chat; the facts as the cell reads them (fragment.rs `standing`)
-        let for_ana = |ana: Option<Role>, juniper: Option<Role>| Standing {
-            member: ana,
-            // her agent is in where she is not: she reads through it
-            owns_member_agent: ana.is_none() && juniper.is_some(),
-            link: false,
-            signed: true,
-            cap: Some(Cap { agent: juniper, owner: ana }),
-            // she is in here, and not its owner
-            beside_person: ana.is_some_and(|r| r != Owner),
-            ..Standing::default()
+        // chat; the facts as the cell reads them (fragment.rs `standing`,
+        // after `as_whom`)
+        let for_ana = |ana: Option<Role>, juniper: Option<Role>| match acts_as_itself(ana, juniper) {
+            // its own membership, as itself; its person is not in, so none of hers beside it
+            true => Standing { member: juniper, signed: true, ..Standing::default() },
+            false => Standing {
+                member: ana,
+                // her agent is in where she is not: she reads through it
+                owns_member_agent: ana.is_none() && juniper.is_some(),
+                link: false,
+                signed: true,
+                cap: Some(Cap { agent: juniper, owner: ana }),
+                // she is in here, and not its owner
+                beside_person: ana.is_some_and(|r| r != Owner),
+                ..Standing::default()
+            },
         };
         let held = |s: Standing| Standing { held: Some(Viewer), ..s };
         // Ben's fragment, Juniper an editor of its own and Ana not in it: a
@@ -939,7 +863,7 @@ mod tests {
                 Verdict::Allow(Viewer),
                 Verdict::Allow(Viewer),
             ),
-            // whom else the floor reaches
+            // whom else acting as itself reaches
             (
                 "Carol, in Ana's chat and not in Ben's fragment, asks Juniper to edit it",
                 // the same request as Ben's: until a mandate says who asked
@@ -960,7 +884,7 @@ mod tests {
             ),
             (
                 "Juniper is in beside Ana, a viewer, and held: for her it never edits",
-                // its guest person's hold secures the whole entity (decision 64)
+                // she is in, so it acts for her (R17), and her guest standing secures the whole entity (decision 64)
                 Facts { visibility: V::Members, standing: held(for_ana(Some(Viewer), Some(Editor))), action: Act(Editor) },
                 refused(Editor, Why::Capped, false),
                 refused(Editor, Why::Capped, false),
@@ -971,7 +895,7 @@ mod tests {
                 refused(Editor, Why::ThroughAgent, false),
                 refused(Editor, Why::ThroughAgent, false),
             ),
-            ("Juniper, for Ana, never deletes Ben's fragment", Facts { action: Act(Owner), ..bens }, refused(Owner, Why::Capped, false), refused(Owner, Why::Capped, false)),
+            ("Juniper, for Ana, never owns Ben's fragment", Facts { action: Act(Owner), ..bens }, refused(Owner, Why::Short, false), refused(Owner, Why::Short, false)),
         ];
         for &(case, facts, today, target) in rows {
             assert_eq!(decide(&facts), today, "{case}: today");
@@ -981,9 +905,35 @@ mod tests {
         // and what Ana could do herself through Fred includes sharing what she owns
         let for_ana = Sharer { for_owner: true, held: None };
         assert_eq!(agent_shares(for_ana, Some(Owner)), Ok(Owner), "Fred shares Ana's app for her");
-        // and neither shares Ben's fragment, Ana's role there being none, nor deletes it or sets its cap
-        assert_eq!(agent_shares(for_ana, None), Err(ShareRefusal::NotOwner), "Juniper shares nothing of Ben's for Ana");
+        // and Juniper never deletes Ben's fragment or sets its cap, for Ana
+        // (the router refuses), nor shares it: its request there is its own,
+        // and as itself it shares nothing
         assert_eq!(agent_may_ask(Reserved::Dangerous, for_ana), Err(ShareRefusal::Dangerous), "nor deletes it or sets its cap");
+        assert_eq!(agent_shares(Sharer { for_owner: false, held: None }, None), Err(ShareRefusal::NotForOwner), "nor shares it");
+    }
+
+    /// Goal: rule 3's "where its owner is not in": a request an agent
+    /// signs for its owner is its own only where its owner holds no
+    /// membership and it holds one, at most an editor's. Method: valid, its
+    /// owner out and it in at viewer or editor; invalid, its owner in at any
+    /// role (R17 as ever, whatever the agent's), neither in, and an agent
+    /// that owns the fragment; decided twice, the same.
+    #[test]
+    fn where_its_owner_is_not_in_an_agent_acts_as_itself() {
+        let rows = [
+            (None, Some(Editor), true, "its owner out, it an editor: its own"),
+            (None, Some(Viewer), true, "its owner out, it a viewer: its own"),
+            (None, None, false, "neither in: its owner's request, which reaches what the visibility gives"),
+            (Some(Viewer), Some(Editor), false, "its owner in, a viewer: for its owner, capped (R17)"),
+            (Some(Editor), Some(Editor), false, "in with its person, at their role: for its owner"),
+            (Some(Owner), Some(Editor), false, "its owner's own fragment: for its owner"),
+            (Some(Editor), None, false, "its owner in, it not: for its owner"),
+            (None, Some(Owner), false, "owning is never an agent's: its owner's request, which reaches nothing there"),
+        ];
+        for (owner, agent, itself, why) in rows {
+            assert_eq!(acts_as_itself(owner, agent), itself, "{why}");
+            assert_eq!(acts_as_itself(owner, agent), acts_as_itself(owner, agent), "{why}: decided again, the same");
+        }
     }
 
     /// Goal: each reason says what the cell said before the rules moved
@@ -1103,8 +1053,7 @@ mod tests {
     /// public one, a link holder, a person whose agent is in, an agent
     /// acting for any of them) holds no repo role where it holds a viewer's
     /// or a public role; a member holds theirs; an agent acting for a
-    /// member holds the lower of theirs and its cap, at most its hold; and
-    /// an agent acting for its owner, its own membership's (rule 3's floor).
+    /// member holds the lower of theirs and its cap, at most its hold.
     #[test]
     fn the_repo_is_its_members_whatever_its_visibility() {
         let repo = |v, s| allowed(v, s, Action::Repo(Viewer));
@@ -1117,9 +1066,8 @@ mod tests {
             assert_eq!(repo(v, st(None, true, true)), None, "a link holder, on {v:?}");
             assert_eq!(repo(v, st(None, true, false)), None, "a link holder not signed in, on {v:?}");
             assert_eq!(repo(v, owner_of_agent()), None, "a person whose agent is in, on {v:?}");
-            assert_eq!(repo(v, acting(None, None, Some(Editor))), None, "an agent acting for a non-member, its owner's role notwithstanding");
-            assert_eq!(repo(v, Standing { link: true, ..acting(None, None, Some(Editor)) }), None, "nor with a link");
-            assert_eq!(repo(v, Standing { owns_member_agent: true, ..acting(None, Some(Viewer), None) }), Some(Viewer), "for its owner, its own membership is a member's");
+            assert_eq!(repo(v, acting(None, Some(Viewer), Some(Editor))), None, "an agent acting for a non-member, its own and its owner's roles notwithstanding");
+            assert_eq!(repo(v, Standing { link: true, ..acting(None, Some(Viewer), Some(Editor)) }), None, "nor with a link");
             assert_eq!(repo(v, Standing { owns_member_agent: true, ..acting(None, None, Some(Viewer)) }), None, "nor for a person whose agent is in");
             for role in [Viewer, Editor, Owner] {
                 assert_eq!(repo(v, st(Some(role), false, true)), Some(role), "a member holds their own role");
@@ -1138,7 +1086,7 @@ mod tests {
         assert_eq!(d(V::Members, acting(Some(Owner), None, Some(Owner)), Editor), Some(Editor));
         // a guest who is in the owner's chat only: the owner's app is out of reach
         assert_eq!(d(V::Members, acting(None, None, Some(Owner)), Viewer), None);
-        assert_eq!(d(V::Link, acting(None, None, Some(Owner)), Public), None);
+        assert_eq!(d(V::Link, acting(None, Some(Editor), Some(Owner)), Public), None);
         // what the owner shared with the guest: the guest's own role
         assert_eq!(d(V::Members, acting(Some(Editor), None, Some(Owner)), Editor), Some(Editor));
         assert_eq!(d(V::Members, acting(Some(Viewer), None, Some(Owner)), Editor), None);
@@ -1157,25 +1105,19 @@ mod tests {
         assert_eq!(d(V::Public, acting(None, None, None), Viewer), None);
         // the link is not the agent's to hold for anyone
         assert_eq!(allowed(V::Link, acting(None, None, None), Action::Read(Public)), None);
-        // an owner who reads through their agent's membership never acts
-        // there in person, and their agent acts there for them with that
-        // membership (rule 3's floor: Paul's obvious case, FIN-615)
-        assert_eq!(allowed(V::Members, owner_of_agent(), Action::Act(Viewer)), None);
+        // an asker who reads through their own agent's membership reads, and never acts
         let owner_reads = Standing { owns_member_agent: true, ..acting(None, Some(Editor), None) };
-        assert_eq!(allowed(V::Members, owner_reads, Action::Read(Viewer)), Some(Editor));
-        assert_eq!(allowed(V::Members, owner_reads, Action::Act(Editor)), Some(Editor));
+        assert_eq!(allowed(V::Members, owner_reads, Action::Read(Viewer)), Some(Viewer));
+        assert_eq!(allowed(V::Members, owner_reads, Action::Act(Viewer)), None);
     }
 
     #[test]
     fn listing_for_an_asker() {
         let cap = |agent, owner| Cap { agent, owner };
         assert_eq!(listed_role(Some(Owner), cap(None, Some(Owner))), Some(Editor));
-        assert_eq!(listed_role(Some(Viewer), cap(Some(Viewer), Some(Viewer))), Some(Viewer));
+        assert_eq!(listed_role(Some(Viewer), cap(Some(Editor), None)), Some(Viewer));
         assert_eq!(listed_role(Some(Editor), cap(None, None)), None);
-        assert_eq!(listed_role(None, cap(None, Some(Owner))), None);
-        // its own membership, for its owner: never less (rule 3's floor)
-        assert_eq!(listed_role(Some(Viewer), cap(Some(Editor), Some(Viewer))), Some(Editor));
-        assert_eq!(listed_role(None, cap(Some(Editor), None)), Some(Editor));
+        assert_eq!(listed_role(None, cap(Some(Editor), Some(Owner))), None);
     }
 
     #[test]

@@ -403,9 +403,9 @@ appoints control who may use them.
   Sessions are `__Host-` cookies.
 - **R17. An agent acts for its owner, capped:** with the lower of the
   owner's role and its cap (its own role, or its owner's on a fragment
-  the owner belongs to), never above `editor`, and never less than its
-  own membership gives it as itself (2026-11-21, FIN-615: what should
-  obviously work works). `for` names only the
+  the owner belongs to), never above `editor`. Where its owner is not in
+  and it is, its request is its own, as itself (2026-11-21, FIN-615: what
+  should obviously work works). `for` names only the
   agent's own owner (2026-11-19, `permit::may_act_for`): an app is told
   the named identity as `call.principal`, and nothing proved anyone else
   asked.

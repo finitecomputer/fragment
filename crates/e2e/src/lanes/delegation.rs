@@ -23,6 +23,9 @@ use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
+const CHAT_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
+const CHAT_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
+const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 
 pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("delegation", &[]) {
@@ -168,58 +171,70 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
 
 /// Goal: Paul's obvious case (2026-11-21: "if ben is talking to my agent
 /// and he asks it to do something with a fragment he's shared as an editor
-/// on"): an agent acting for its own owner never acts with less than its
-/// own membership (FIN-615, rule 3's floor), and no more. Method: Ben's
-/// app, Ana's agent Juniper an editor there on its own (a membership from
-/// before decision 64: today an agent comes in only with its person, so a
-/// lever makes it), Ana not in it. Valid: Juniper, signing for Ana as its
-/// terminal does, edits it, and the same call again (a replay) writes
-/// nothing more; it mints a storage token that writes; held at viewer by
-/// Ana, it still edits (a hold never caps its own memberships, decision
-/// 36). Invalid: Ana herself still only reads it (FIN-11); Juniper for Ana
-/// never shares it, deletes it or sets its cap; once Ben removes Juniper,
-/// for Ana it reaches nothing.
+/// on"): where an agent's owner is not in and it is, a request it signs for
+/// its owner is its own (FIN-615, `permit::acts_as_itself`): it acts with
+/// its own membership, under its own name, and no further. Method: Ben's
+/// chat app, Ana's agent Juniper an editor there on its own (a membership
+/// from before decision 64: today an agent comes in only with its person,
+/// so a lever makes it), Ana not in it. Valid: Juniper, signing for Ana as
+/// its terminal does, edits it, the app told Juniper with its own role,
+/// never Ana with a role she does not hold, and its record Juniper's; the
+/// same call again (a replay) writes nothing more; it mints a storage token
+/// that writes; held at viewer by Ana, it still edits (a hold never caps
+/// its own memberships, decision 36). Invalid: Ana herself still only reads
+/// it (FIN-11); Juniper for Ana never shares it, deletes it or sets its
+/// cap; once Ben removes it, for Ana it reaches nothing; and once Ana is
+/// in, it acts for her again, at her role (R17).
 fn own_membership(s: &mut Suite, api: &Api) -> Result<()> {
     let (ana, ben) = (api.person()?, api.person()?);
     let ana_id = api.identity(&ana)?;
     let (juniper, juniper_id) = agent_of(api, &ana)?;
     let app = s.named(api, &ben, "bens")?;
     let c = s.create(api, &ben, &app)?;
-    ship(s, &c, TODO_APP, TODO_JSON);
+    s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+    ship(s, &c, CHAT_APP, CHAT_JSON);
     api.signed(&ben, "PUT", &format!("/api/f/{app}/visibility"), Some(&json!({ "visibility": "members" })))?;
     let r = api.share(&app, &juniper_id, "editor")?;
     anyhow::ensure!(r.status == 200, "Juniper in Ben's app on its own: {r}");
-    // Juniper signs `method /api/f/<app>/<rest>` for Ana, as its terminal does (`FRAGMENT_FOR`)
+    // Juniper signs `method /api/f/<app>[/<rest>]` for Ana, as its terminal does (`FRAGMENT_FOR`)
     let for_ana = |method: &str, rest: &str, body: Option<Value>| {
         let path = match rest {
             "" => format!("/api/f/{app}?for={ana_id}"),
-            rest => format!("/api/f/{app}/{rest}{}for={ana_id}", if rest.contains('?') { '&' } else { '?' }),
+            rest => format!("/api/f/{app}/{rest}?for={ana_id}"),
         };
         api.signed(&juniper, method, &path, body.as_ref())
     };
-    let add = |id: &str| for_ana("POST", "ops/add_todo", Some(json!({ "id": id, "input": { "text": "Ben asked Juniper" } })));
-    let count = || api.op(&ben, &app, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64());
+    // `note` is an editor's: it posts to the editors' channel
+    let note = |id: &str| for_ana("POST", "ops/note", Some(json!({ "id": id, "input": { "text": "Ben asked Juniper" } })));
+    let notes = || super::jobs::records(api, &ben, &app, "staff");
+    let whoami = |id: &str| for_ana("POST", "ops/whoami", Some(json!({ "id": id, "input": {} })));
 
-    let first = add("for-ana-1")?;
-    let again = add("for-ana-1")?;
+    let (first, again) = (note("for-ana-1")?, note("for-ana-1")?);
+    let posted = notes();
     s.ok(
-        "Ana's agent, signing for Ana, edits Ben's app it is an editor of, where Ana is not; the same call again writes nothing more",
-        first.status == 200 && again.status == 200 && count() == Some(1),
-        format!("{first} {again} {:?}", count()),
+        "Ana's agent, signing for Ana, edits Ben's app it is an editor of, where Ana is not: its record is its own; the same call again writes nothing more",
+        first.status == 200 && again.status == 200 && posted.len() == 1 && posted[0]["principal"] == juniper_id.as_str(),
+        format!("{first} {again} {posted:?}"),
+    );
+    let who = whoami("w1")?;
+    s.ok(
+        "the app is told the agent, with its own role: never Ana, with a role she does not hold there",
+        who.status == 200 && who.body["result"] == json!({ "principal": juniper_id, "role": "editor" }),
+        &who,
     );
     let token = for_ana("GET", "storage-token", None)?;
-    s.ok("for Ana, it mints a storage token that writes: its own membership is a member's", token.status == 200 && token.body["write"] == true, &token);
+    s.ok("for Ana, it mints a storage token that writes: its membership is a member's", token.status == 200 && token.body["write"] == true, &token);
     let held = |held: Value| api.signed(&ana, "PUT", &format!("/api/identities/{juniper_id}/held"), Some(&json!({ "held": held })));
     let hold = held(json!("viewer"))?;
-    let r = add("for-ana-2")?;
+    let r = note("for-ana-2")?;
     let freed = held(Value::Null)?;
     s.ok(
         "held at viewer by Ana, it still edits there for her: a hold caps what it does with her access, never its own memberships",
-        hold.status == 200 && r.status == 200 && freed.status == 200 && count() == Some(2),
+        hold.status == 200 && r.status == 200 && freed.status == 200 && notes().len() == 2,
         format!("{hold} {r} {freed}"),
     );
 
-    let hers = api.op(&ana, &app, "add_todo", "ana-1", json!({ "text": "Ana herself" }))?;
+    let hers = api.op(&ana, &app, "note", "ana-1", json!({ "text": "Ana herself" }))?;
     let reads = api.status(&ana, &app)?;
     s.ok(
         "Ana herself reads Ben's app through Juniper, and acts there never (403)",
@@ -231,17 +246,22 @@ fn own_membership(s: &mut Suite, api: &Api) -> Result<()> {
     let deletes = for_ana("DELETE", "", None)?;
     let caps = for_ana("PUT", "cap", Some(json!({ "id": "c1", "micros": 1 })))?;
     s.ok(
-        "for Ana it shares nothing of Ben's (403: only what its owner owns), and never deletes it or sets its cap (403)",
-        shares.status == 403 && shares.message().contains("only what its owner owns") && deletes.status == 403 && caps.status == 403 && api.status(&ben, &app)?.status == 200,
+        "for Ana it shares nothing of Ben's, and never deletes it or sets its cap (403 each)",
+        shares.status == 403 && shares.message().contains("an agent shares only") && deletes.status == 403 && caps.status == 403 && api.status(&ben, &app)?.status == 200,
         format!("{shares} {deletes} {caps}"),
     );
 
     let removed = api.signed(&ben, "DELETE", &format!("/api/f/{app}/members/{juniper_id}"), None)?;
-    let r = add("for-ana-3")?;
+    let r = note("for-ana-3")?;
+    s.ok("once Ben removes it, for Ana it reaches nothing (403), and nothing was written", removed.status == 200 && r.status == 403 && notes().len() == 2, format!("{removed} {r}"));
+    // Ana in, at viewer: her yes brings her agents in beside her, at her role
+    let invited = api.signed(&ben, "POST", &format!("/api/f/{app}/invites"), Some(&json!({ "email": Api::email_of(&ana), "role": "viewer" })))?;
+    let yes = api.signed(&ana, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
+    let (who, r) = (whoami("w2")?, note("for-ana-4")?);
     s.ok(
-        "once Ben removes it, for Ana it reaches nothing (403), and nothing was written",
-        removed.status == 200 && r.status == 403 && count() == Some(2),
-        format!("{removed} {r}"),
+        "once Ana is in, a viewer, it acts for her again: the app is told Ana at her role, and it edits nothing (403)",
+        invited.status == 200 && yes.status == 200 && who.body["result"] == json!({ "principal": ana_id, "role": "viewer" }) && r.status == 403,
+        format!("{yes} {who} {r}"),
     );
     Ok(())
 }

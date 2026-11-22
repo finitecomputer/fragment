@@ -157,9 +157,10 @@ else to the request): it acts with the
 lower of that identity's role (its membership, an agent of its own that is
 a member, or the visibility floor; never a share link) and the agent's cap
 (its own role, or its owner's membership role if higher; never above
-`editor`), and never with less than its own membership gives it as itself
-(its hold where its person is a guest, a connector's ceiling; at most
-`editor`). The principal stays the agent; an operation called `for`
+`editor`). Where that identity holds no membership and the agent holds one,
+the request is the agent's own: it acts as itself, as if it named no `for`
+(`permit::acts_as_itself`), so an app is never told the identity with the
+agent's role. The principal stays the agent; an operation called `for`
 someone sees `call.principal` as them and `call.agent` as the agent. `for`
 is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 `POST` for anyone but the agent's owner is 403), on `POST /api/search`
@@ -776,7 +777,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
 | `POST /api/f/{name}/door` | its owner, in person (never an agent) | `{act: "link", agent}` → `{door, agent, relayed}`, or `{act: "unlink"}` → `{ok}` (An agent's doors). No connector, one the deployment does not allow, or an agent not the owner's, 403; another `act` 400 |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt, write: true}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S` |
-| `GET /api/f/{name}/storage-token?access=read` | a member, viewer and up | → the same with `write: false`: `git:read` alone. A token reads the repo's whole history, not only main's files, so membership decides either (`permit::decide`, `Action::Repo`): no visibility floor, share link or agent of theirs in lends one, and an agent acting for someone holds the lower of their membership and its cap, never less than its own membership (R17). A host before it named no `write` (its tokens all wrote), and a client that sends no `access` is refused as a viewer was before (403): an older CLI never holds a token it cannot push with. Another `access` 400 |
+| `GET /api/f/{name}/storage-token?access=read` | a member, viewer and up | → the same with `write: false`: `git:read` alone. A token reads the repo's whole history, not only main's files, so membership decides either (`permit::decide`, `Action::Repo`): no visibility floor, share link or agent of theirs in lends one, and an agent acting for someone holds the lower of their membership and its cap (R17). A host before it named no `write` (its tokens all wrote), and a client that sends no `access` is refused as a viewer was before (403): an older CLI never holds a token it cannot push with. Another `access` 400 |
 | `POST /api/f/{name}/refresh` | editor | `{ref?: "main" \| "live"}`, the ref the writer moved (none, or no body: both; another ref 400) → `{ok, refs: {main: {pin, moved} \| {absent}, live: …}}`, the refs it read, once a moved live is installed. A writer to the repo asks this after its push; the platform follows its own moves, and a busy fragment's poll is the backstop (`FRAGMENT_POLL_INTERVAL_S`) |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main (at most `FILE_WRITES_MAX` files, 400; `API_FILES_WRITE_MAX_BYTES` decoded in a body of `BODY_MAX_BYTES`, 413; relative paths, no `.` or `..`). The same `key` from the same person answers the first commit again; a write of what main holds commits nothing. Main moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |

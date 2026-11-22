@@ -50,7 +50,8 @@ pub struct Signed {
     /// signed URL named in `for`, which the router honors on an agent's
     /// request to a fragment only (`crate::acting_for`). The fragment acts
     /// with the lower of that identity's role and the agent's cap
-    /// (`fragment_core::permit`).
+    /// (`fragment_core::permit`), or, where that identity is not in and the
+    /// agent is, as the agent itself (`FragmentCell::as_whom`).
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub acting_for: Option<String>,
 }
