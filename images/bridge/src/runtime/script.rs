@@ -49,6 +49,10 @@
 //!   /api/computer`): each credential's provider, its environment variables
 //!   and its placeholder (and `models at <base>` for a provider that serves
 //!   models), `; ` between;
+//! - `fill-data <path> <MiB>`: a file of `<MiB>` MiB (at most 256, bytes that
+//!   do not compress) at `<path>` under the data root, as a download or a
+//!   build would leave one (the lanes' Storage: docs/computers.md, "Room to
+//!   restore"). The reply: `filled <path> <bytes>`, or `fill refused: <why>`;
 //! - `write <path> <text>`: the text in the file `<path>` under the data
 //!   root (`/data`), and `read <path>`: that file's text, or `none` (what a
 //!   save kept, and left out);
@@ -194,6 +198,37 @@ async fn write_data(root: &std::path::Path, rest: &str) -> String {
     match wrote.await {
         Ok(()) => format!("wrote {rel}"),
         Err(e) => format!("write failed: {e}"),
+    }
+}
+
+/// `fill-data <path> <MiB>`: a file of that many MiB under the data root, of
+/// bytes that do not compress, at most `FILL_MIB_MAX`.
+async fn fill_data(root: &std::path::Path, rest: &str) -> String {
+    const FILL_MIB_MAX: usize = 256;
+    let mut words = rest.split_whitespace();
+    let (Some(rel), Some(mib)) = (words.next(), words.next().and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=FILL_MIB_MAX).contains(n))) else {
+        return format!("say `fill-data <path> <MiB>`, at most {FILL_MIB_MAX}");
+    };
+    let Some(path) = data_path(root, rel) else { return format!("fill refused: {rel:?} is no path under the data") };
+    // xorshift: the same bytes every time, which no compressor shrinks
+    let mut x = 0x2545_f491_4f6c_dd1d_u64;
+    let bytes: Vec<u8> = (0..mib * 1024 * 1024)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    let wrote = async {
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        tokio::fs::write(&path, &bytes).await
+    };
+    match wrote.await {
+        Ok(()) => format!("filled {rel} {}", bytes.len()),
+        Err(e) => format!("fill refused: {e}"),
     }
 }
 
@@ -868,6 +903,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("write ") {
         reply = write_data(&cfg.data, rest.trim()).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("fill-data ") {
+        reply = fill_data(&cfg.data, rest.trim()).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("read ") {
         reply = read_data(&cfg.data, rest.trim()).await;
     }
@@ -1132,6 +1170,12 @@ mod tests {
         assert_eq!(read_data(&root, "notes/keep.txt").await, "read notes/keep.txt: kept, hello");
         assert_eq!(read_data(&root, "notes/gone.txt").await, "read notes/gone.txt: none");
         assert!(write_data(&root, "../escape x").await.starts_with("write refused"));
+        // fill: a file of that many MiB, never outside the data, never past its bound
+        assert_eq!(fill_data(&root, "work/a/downloads/talk.mp4 2").await, "filled work/a/downloads/talk.mp4 2097152");
+        assert_eq!(std::fs::metadata(root.join("work/a/downloads/talk.mp4")).map(|m| m.len()).ok(), Some(2 * 1024 * 1024));
+        assert!(fill_data(&root, "../escape 1").await.starts_with("fill refused"));
+        assert!(fill_data(&root, "big.bin 257").await.starts_with("say `fill-data"));
+        assert!(fill_data(&root, "big.bin").await.starts_with("say `fill-data"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
