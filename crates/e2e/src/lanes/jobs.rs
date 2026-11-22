@@ -1401,6 +1401,28 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
         json!({ "turns": turns, "fed": fed, "alarms": alarms, "triggers": listed.body["triggers"] }),
     );
 
+    // a try cut short partway through a record's triggers (as a restart in
+    // its wait on the owner's standing would be; the review of #1461): its
+    // ordered run is stored with the record, so a later record's waits for
+    // it, the first try's retry starts the rest, and they run in order
+    let (cut, _) = jobs_fragment(s, api, &owner, "orderedcut", |m| {
+        m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }, { "channel": "alarms", "run": "plod", "ordered": true }])
+    })?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": cut, "op": "fail-triggers", "times": 1 })))?;
+    anyhow::ensure!(r.status == 200, "(the test fleet fails the next trigger step before its last run): {r}");
+    let first = api.op(&owner, &cut, "raise", "cut-1", json!({}))?;
+    api.op(&owner, &cut, "raise", "cut-2", json!({}))?;
+    let again = api.op(&owner, &cut, "raise", "cut-1", json!({}))?;
+    let plods = || runs(api, &owner, &cut, "&op=plod");
+    let done = s.eventually(Duration::from_secs(60), || plods().len() == 2 && plods().iter().all(|r| r["status"] == "succeeded"));
+    let fed: Vec<i64> = records(api, &owner, &cut, "feed").iter().filter_map(|r| r["body"]["plod"].as_i64()).collect();
+    let alarms: Vec<i64> = records(api, &owner, &cut, "alarms").iter().filter_map(|r| r["seq"].as_i64()).collect();
+    s.ok(
+        "a record's try cut short partway through its triggers: its ordered run is stored with it, so a later record's runs after it, in order",
+        first.status >= 500 && again.status == 200 && done && alarms.len() == 2 && fed == alarms,
+        json!({ "first": first.status, "again": again.body, "fed": fed, "alarms": alarms, "plods": plods() }),
+    );
+
     // a live commit with no app says nothing about the next code: the
     // pause outlasts it, and the next good deploy comes back paused
     s.commit(&busy_c, &[("app.mjs", None)]);

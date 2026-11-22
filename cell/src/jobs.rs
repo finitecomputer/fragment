@@ -78,12 +78,12 @@ pub const HOPS_HEADER: &str = "x-fragment-hops";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
-/// A record's runs being made (`fire_channel`), from its append, across
-/// the wait on its owner's standing, to its runs' rows: while any is, no
-/// ordered trigger's run starts, so none of a later record starts before
-/// an earlier record's is made (the review of #1461). In memory: a wait
-/// cut short by the object's end is a failed try, which its retry makes
-/// again.
+/// A record's runs being made (`fire_channel`): its ordered triggers' runs
+/// stored with the record, the owner's standing not yet read. While any
+/// is, no ordered trigger's run starts, so none starts before that answer
+/// says whether it may. In memory: the order itself is stored, the runs
+/// being rows already; an object that ends in the wait leaves them
+/// queued, in order.
 struct Admitting<'a>(&'a std::cell::Cell<u32>);
 
 impl<'a> Admitting<'a> {
@@ -1114,24 +1114,22 @@ impl FragmentCell {
     /// its runs are written in one turn; a mutation's record or a job's
     /// publish may wait on the ledger here, and a crash while it does is a
     /// failed try, which their retries finish by the record's key.
+    ///
+    /// But an ordered trigger's runs are made first, in the record's own
+    /// step (no await between them and its append, so they are stored
+    /// together and no restart comes between): a later record's run never
+    /// starts before an earlier record's exists (the review of #1461: a
+    /// restart in the wait lost an in-memory hold). The owner's standing,
+    /// read after, blocks them if it must; until it is read, no ordered
+    /// run starts (`Admitting`).
     pub(crate) async fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
-        if self.channel_triggers(record)?.is_empty() {
+        let ops = self.channel_triggers(record)?;
+        if ops.is_empty() {
             return Ok(vec![]);
         }
-        // its record appended, its runs not yet: an ordered trigger's later
-        // record's run starts after this one's is made (`launch_queued`)
-        let _admitting = Admitting::begin(&self.admitting);
-        let read_only = self.read_only().await?;
-        // read after the wait, so the runs start from the code installed now
-        let ops = self.channel_triggers(record)?;
         let own = self.own_key()?;
         let input = json!({ "channel": record.channel, "record": record });
-        let mut started = vec![];
-        for (i, op) in ops.iter().enumerate() {
-            if i + 1 == ops.len() {
-                // after the record, its deliveries, and the runs before this one are written
-                self.test_countdown(MetaKey::TestFailTriggers, "the trigger step failed before its last run started")?;
-            }
+        let start = |op: &str, read_only: Option<Why>| -> CellResult<i64> {
             let call_id = format!("record:{}:{}:{op}", record.channel, record.seq);
             let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
             let s = self.start_run(NewRun {
@@ -1145,7 +1143,34 @@ impl FragmentCell {
                 input: input.clone(),
                 owner_read_only: read_only,
             })?;
-            started.push(s.id);
+            Ok(s.id)
+        };
+        let ordered = self.ordered_triggers()?;
+        let in_order = |op: &str| ordered.contains(&fragment_core::manifest::ordered_key(&record.channel, op));
+        let mut first = vec![];
+        for op in ops.iter().filter(|op| in_order(op)) {
+            first.push(start(op, None)?);
+        }
+        let _admitting = Admitting::begin(&self.admitting);
+        let read_only = self.read_only().await?;
+        if let Some(why) = read_only {
+            let error = format!("{}: its triggers start no runs until then", crate::meter::read_only_refusal(why).message);
+            for id in &first {
+                self.exec(
+                    "UPDATE runs SET status = 'blocked', error = ?, finished_at = ? WHERE id = ? AND status = 'queued'",
+                    vec![error.as_str().into(), SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(*id)],
+                )?;
+            }
+        }
+        // the rest read after the wait, so they start from the code installed now
+        let rest: Vec<String> = self.channel_triggers(record)?.into_iter().filter(|op| !in_order(op)).collect();
+        let mut started = first;
+        for (i, op) in rest.iter().enumerate() {
+            if i + 1 == rest.len() {
+                // after the record, its deliveries, and the runs before this one are written
+                self.test_countdown(MetaKey::TestFailTriggers, "the trigger step failed before its last run started")?;
+            }
+            started.push(start(op, read_only)?);
         }
         Ok(started)
     }
