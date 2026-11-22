@@ -4,7 +4,7 @@
 //! can restore it, and a restore needs more of the disk than the running
 //! computer used.
 
-use fragment_proto::computer::DiskRoom;
+use fragment_proto::computer::{ComputerSizes, DiskRoom, KindSize, SizeEntry, StorageKind};
 use serde::{Deserialize, Serialize};
 
 use crate::computer::held::LEFT_OUT_PATTERN_MAX_BYTES;
@@ -157,6 +157,18 @@ pub const DISK_READ: &str = "df -P -B1 /";
 /// with no number, never another's (`disk_of_sizes` reads none then). A
 /// pattern outside the patterns' alphabet or with a `..` is not used, and
 /// what it names counts as restored.
+///
+/// After them, what its owner's Storage shows (`sizes_of`): the folders
+/// of all of `/data`, its caches too, to `SIZES_DEPTH` below it, allocated
+/// (KiB), biggest first (`/data`'s own, `.`, among them), and its files of
+/// at least `SIZES_FILE_MIN_KIB` wherever they are, biggest first, each at
+/// most as many as a summary holds, a line each: GNU's `du -0` frames each,
+/// so a newline in a name reads as `?` and forges no line (Codex on
+/// #1426); a line past its bound is dropped, in bytes; each walk ends by
+/// `SIZES_LISTED_BY_S` from the read's start; its errors are dropped. The
+/// df and records come first, so the first of each line is theirs, never
+/// one the listing printed, and so the whole answer is within what the cell
+/// keeps of it.
 pub fn sizes_read(left_out: &[String]) -> String {
     let safe = |p: &&String| !p.is_empty() && p.len() <= LEFT_OUT_PATTERN_MAX_BYTES && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b)) && !p.split('/').any(|s| s == "..");
     // each a word the shell expands as a glob (the alphabet holds no space,
@@ -167,9 +179,183 @@ pub fn sizes_read(left_out: &[String]) -> String {
     let work = globs(crate::computer::held::work_left_out(left_out));
     // `m <paths>`: the folder's measure less each path that exists
     let m = "m() { n=$#; for p; do [ -e \"$p\" ] && set -- \"$@\" \"--exclude=$p\"; done; shift $n; echo \"$(du -sxk \"$@\" . 2>/dev/null | cut -f1) $(du -sxb \"$@\" . 2>/dev/null | cut -f1)\"; }";
-    format!(
+    let records = format!(
         "{DISK_READ}; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi"
-    )
+    );
+    // what takes the disk: all of /data, its caches too; each record a line
+    // (GNU's du -0, a newline in a name read as `?`: a name forges no line),
+    // a line past its bound dropped (bytes: LC_ALL=C), each walk ending by
+    // SIZES_LISTED_BY_S from the read's start (`s`) and within SIZES_WALK_S
+    let walk = |what: &str| format!("{{ t=$(( {SIZES_LISTED_BY_S} - $(date +%s) + s )); [ $t -gt {SIZES_WALK_S} ] && t={SIZES_WALK_S}; [ $t -gt 0 ] && timeout $t {what} 2>/dev/null; }} | framed | LC_ALL=C awk 'length < {SIZE_LINE_MAX_BYTES}' | sort -rn");
+    let listing = format!(
+        "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() {{ tr '\\n\\0' '?\\n'; }}; else z=; framed() {{ cat; }}; fi; echo folders; {} | head -n {}; echo files; {} | head -n {SIZES_FILES_MAX}",
+        walk(&format!("du $z -xk -d {SIZES_DEPTH} .")),
+        SIZES_FOLDERS_MAX + 1,
+        walk(&format!("find . -xdev -type f -size +{SIZES_FILE_MIN_KIB}k -exec du $z -k {{}} +"))
+    );
+    // its df and its records first (Codex on #1426: a line the listing
+    // prints never passes for theirs, and its walks never cost them their read)
+    format!("s=$(date +%s); {records}; {listing}")
+}
+
+/// How deep below `/data` a size summary lists its folders: an agent's
+/// work (`work/<agent>`), its home and browser profile, and their caches
+/// (`work/<agent>/home/.cache`).
+pub const SIZES_DEPTH: u32 = 4;
+/// Each walk of a size summary's listing ends within this many seconds
+/// (`timeout`), and both by `SIZES_LISTED_BY_S` from the read's start, its
+/// records and df read before them: the whole read ends within its bound
+/// (`SIZES_READ_MS` in the cell, 30 s) whatever the listing does, and a
+/// read whose records take the time lists nothing (Codex on #1426).
+pub const SIZES_WALK_S: u32 = 8;
+pub const SIZES_LISTED_BY_S: u32 = 24;
+/// The folders and the files a size summary lists at most, the biggest
+/// first, and the least a file it lists holds (10 MiB, in KiB).
+pub const SIZES_FOLDERS_MAX: usize = 64;
+pub const SIZES_FILES_MAX: usize = 32;
+pub const SIZES_FILE_MIN_KIB: u64 = 10 * 1024;
+/// A path a size summary lists is at most this long (one longer is left
+/// out), and its paths together at most this (the rest left out, smallest
+/// first): its owner's view carries it whole.
+pub const SIZE_PATH_MAX_BYTES: usize = 400;
+pub const SIZES_PATHS_MAX_BYTES: usize = 16 * 1024;
+/// A listing's line the container drops past (`awk`, in bytes), its count,
+/// a tab and `./` beside a path at most `SIZE_PATH_MAX_BYTES`; so
+/// `sizes_read`'s whole answer is at most `SIZES_READ_MAX_BYTES`, which the
+/// cell keeps of it (an exec keeps its answer's tail).
+pub const SIZE_LINE_MAX_BYTES: usize = SIZE_PATH_MAX_BYTES + 24;
+pub const SIZES_READ_MAX_BYTES: usize = 64 * 1024;
+const _: () = assert!(1024 + (SIZES_FOLDERS_MAX + 1 + SIZES_FILES_MAX) * SIZE_LINE_MAX_BYTES <= SIZES_READ_MAX_BYTES, "a summary's whole answer is kept");
+
+/// The `N\t./path` lines of `sizes_read`'s answer after `section`'s line,
+/// up to the next section's: KiB and the path below `/data` (`.` its own).
+/// Its df and records come before its first section, never among them. A
+/// line is what ends in `\n`, a `\r` before it kept as the name's own.
+fn listed<'a>(out: &'a str, section: &'static str) -> impl Iterator<Item = (u64, &'a str)> {
+    // split on `\n` alone: `lines()` would strip a name's own trailing `\r`,
+    // listing `a.zip\r` as `a.zip` (Codex on #1429); kept, it is a control
+    // character, so the entry is left out
+    out.split('\n').skip_while(move |l| l.trim() != section).skip(1).take_while(|l| !matches!(l.trim(), "folders" | "files" | "end")).filter_map(|l| {
+        let (n, path) = l.split_once('\t')?;
+        Some((n.trim().parse::<u64>().ok()?, path))
+    })
+}
+
+/// What its owner's Storage shows, from `sizes_read`'s answer read at
+/// `at_ms`: `/data`'s own total (GNU's `.`; BusyBox's `all` record, as a
+/// name there could forge a `.`), its biggest folders below it and
+/// its biggest files, each in bytes allocated, a path below `/data` a line,
+/// printable and at most `SIZE_PATH_MAX_BYTES`, as many as
+/// `SIZES_FOLDERS_MAX` and `SIZES_FILES_MAX`, their paths together at most
+/// `SIZES_PATHS_MAX_BYTES`. None for an answer with no folders.
+pub fn sizes_of(out: &str, at_ms: i64) -> Option<ComputerSizes> {
+    if !out.lines().any(|l| l.trim() == "folders") {
+        return None;
+    }
+    // BusyBox frames no name, so a newline in one could forge a `.` line:
+    // its `all` record (before the listing) is its total; GNU's `.` is framed
+    let all = out.lines().take_while(|l| l.trim() != "folders").find_map(|l| l.strip_prefix("all ")?.split_whitespace().next()?.parse::<u64>().ok());
+    let total = all.or_else(|| listed(out, "folders").find(|(_, path)| *path == ".").map(|(kib, _)| kib)).map(|kib| kib.saturating_mul(1024));
+    let mut room = SIZES_PATHS_MAX_BYTES;
+    let mut take = |section: &'static str, max: usize| -> Vec<SizeEntry> {
+        let mut got = Vec::new();
+        for (kib, path) in listed(out, section) {
+            let path = path.strip_prefix("./").unwrap_or(path);
+            if path == "." || path.is_empty() || path.len() > SIZE_PATH_MAX_BYTES || path.chars().any(char::is_control) || got.len() == max || path.len() > room {
+                continue;
+            }
+            room -= path.len();
+            got.push(SizeEntry { path: path.to_string(), bytes: kib.saturating_mul(1024) });
+        }
+        got
+    };
+    let folders = take("folders", SIZES_FOLDERS_MAX);
+    let files = take("files", SIZES_FILES_MAX);
+    Some(ComputerSizes { at: at_ms, total, folders, files, kinds: vec![] })
+}
+
+/// What a person's Delete in Storage removes (docs/computers.md, "Room to
+/// restore"): one regular file of its work, named by its path below
+/// `/data` as its summary names it (`work/…`), refused outside `/data/work`
+/// (a `..` or `.` or empty part, a control character, past
+/// `SIZE_PATH_MAX_BYTES`). Answers the command its computer runs (as root):
+/// the path quoted for `sh`, resolved (`readlink -f`, so a link to a folder
+/// elsewhere leads nowhere) and held to `/data/work/` again, a regular file
+/// that is no link itself; it exits 0 once that file is gone, and
+/// `DELETE_REFUSED` for anything else (none there, a folder, a link, a
+/// path that leads out), touching nothing.
+pub fn delete_read(path: &str) -> Result<String, &'static str> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let ok = path.len() <= SIZE_PATH_MAX_BYTES
+        && parts.first() == Some(&"work")
+        && parts.len() >= 2
+        && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != "..")
+        && !path.chars().any(char::is_control)
+        // GNU's listing reads a newline in a name as `?`: such a path may
+        // name another file (Codex on #1429)
+        && !path.contains('?');
+    if !ok {
+        return Err("a file is named by its path below /data, in its work (work/…), with no . or .. part and no ?");
+    }
+    let quoted = format!("'/data/{}'", path.replace('\'', "'\\''"));
+    Ok(format!(
+        "p={quoted}; r=$(readlink -f -- \"$p\") || exit {DELETE_REFUSED}; case \"$r\" in /data/work/*) ;; *) exit {DELETE_REFUSED} ;; esac; {{ [ -f \"$r\" ] && [ ! -L \"$p\" ]; }} || exit {DELETE_REFUSED}; rm -f -- \"$r\""
+    ))
+}
+
+/// `delete_read`'s exit when it removed nothing.
+pub const DELETE_REFUSED: i64 = 3;
+
+/// What a summary's folders hold, by kind, the most first, none empty
+/// (its owner's Storage). Its agents' own: all of `/data` (`total`) but its
+/// work (the seam: docs/computers.md, "Data and the restore gate"), or,
+/// in a summary read before its total was kept, the folders of `/data`
+/// but its work (Codex on #1428: a file of `/data`'s own counts). In its
+/// work, a folder named as a cache (`.cache`, `.npm`, `Cache`), a browser's
+/// (`browser-profile`, `chromium`, `google-chrome`) or downloads
+/// (`Downloads`, `downloads`) is of that kind, counted once at the
+/// shallowest such folder listed; its projects are the rest of its work.
+/// A summary lists folders a few levels deep, so a kind's folder deeper
+/// than that counts as projects.
+pub fn storage_kinds(sizes: &ComputerSizes) -> Vec<KindSize> {
+    let kind_of = |name: &str| match name {
+        ".cache" | ".npm" | "Cache" => Some(StorageKind::Caches),
+        "browser-profile" | "chromium" | "google-chrome" => Some(StorageKind::Browser),
+        "Downloads" | "downloads" => Some(StorageKind::Downloads),
+        _ => None,
+    };
+    let mut bytes = std::collections::BTreeMap::<StorageKind, u64>::new();
+    let mut counted: Vec<&str> = Vec::new();
+    // shallowest first, so a kind's folder inside another is not counted twice
+    let mut folders: Vec<&SizeEntry> = sizes.folders.iter().collect();
+    folders.sort_by_key(|e| e.path.matches('/').count());
+    let mut work = 0u64;
+    let mut agents = 0u64;
+    for e in folders {
+        let path = e.path.as_str();
+        if path == "work" {
+            work = e.bytes;
+            continue;
+        }
+        if !path.starts_with("work/") {
+            if !path.contains('/') {
+                agents = agents.saturating_add(e.bytes);
+            }
+            continue;
+        }
+        let Some(kind) = path.rsplit('/').next().and_then(kind_of) else { continue };
+        if counted.iter().any(|c| path.starts_with(&format!("{c}/"))) {
+            continue;
+        }
+        counted.push(path);
+        *bytes.entry(kind).or_default() += e.bytes;
+    }
+    let in_work: u64 = [StorageKind::Caches, StorageKind::Browser, StorageKind::Downloads].iter().map(|k| bytes.get(k).copied().unwrap_or(0)).sum();
+    bytes.insert(StorageKind::Projects, work.saturating_sub(in_work));
+    bytes.insert(StorageKind::Agents, sizes.total.map_or(agents, |t| t.saturating_sub(work)));
+    let mut kinds: Vec<KindSize> = bytes.into_iter().filter(|(_, b)| *b > 0).map(|(kind, bytes)| KindSize { kind, bytes }).collect();
+    kinds.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.kind.cmp(&b.kind)));
+    kinds
 }
 
 /// The most one argument of an exec may hold on Linux (`MAX_ARG_STRLEN`,
@@ -432,7 +618,7 @@ mod tests {
         // pattern a glob of the shell's, once), BusyBox's all
         let read = |home: &str, work: &str| {
             let m = "m() { n=$#; for p; do [ -e \"$p\" ] && set -- \"$@\" \"--exclude=$p\"; done; shift $n; echo \"$(du -sxk \"$@\" . 2>/dev/null | cut -f1) $(du -sxb \"$@\" . 2>/dev/null | cut -f1)\"; }";
-            format!("df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi")
+            format!("s=$(date +%s); df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi; {LISTING}")
         };
         assert_eq!(sizes_read(&[]), read(" ./work", ""));
         assert_eq!(
@@ -448,6 +634,130 @@ mod tests {
         assert!(read.len() <= EXEC_ARG_MAX_BYTES, "{} bytes", read.len());
         assert_eq!(read.matches("/000aaa").count(), 1, "each pattern once");
     }
+
+    /// The listing `sizes_read` begins with: all of `/data`, framed, bounded.
+    const LISTING: &str = "cd /data; if du -0 -s /dev/null > /dev/null 2>&1; then z=-0; framed() { tr '\\n\\0' '?\\n'; }; else z=; framed() { cat; }; fi; echo folders; { t=$(( 24 - $(date +%s) + s )); [ $t -gt 8 ] && t=8; [ $t -gt 0 ] && timeout $t du $z -xk -d 4 . 2>/dev/null; } | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 65; echo files; { t=$(( 24 - $(date +%s) + s )); [ $t -gt 8 ] && t=8; [ $t -gt 0 ] && timeout $t find . -xdev -type f -size +10240k -exec du $z -k {} + 2>/dev/null; } | framed | LC_ALL=C awk 'length < 424' | sort -rn | head -n 32";
+
+    /// Goal: what takes the disk, read after a save as the Hermes image's GNU
+    /// tools and the stub's BusyBox answer `sizes_read` (both answers the
+    /// images' own, 2026-11-20: a 20 MiB video, a 12 MiB file in a uv cache
+    /// linked into a venv, a 4 MiB file in that cache alone, and a folder
+    /// whose name holds a newline and a forged line): `/data`'s total, its
+    /// biggest folders (its caches too) and files, paths below `/data`; a
+    /// newline in a name forges no line on GNU (Codex on #1426); its df and
+    /// records before the listing, read as ever, a line in it never theirs. Valid, small files, invalid (no
+    /// listing, a path past its bound, a control character, too many).
+    #[test]
+    fn what_takes_the_disk_is_listed() {
+        let named = |l: &[SizeEntry]| l.iter().map(|e| (e.path.clone(), e.bytes)).collect::<Vec<_>>();
+        let gnu = sizes_of(GNU_ANSWER, T).expect("a summary");
+        assert_eq!(gnu.at, T);
+        assert_eq!(gnu.total, Some(48_132 * 1024));
+        let kib = |p: &str, k: u64| (p.to_string(), k * 1024);
+        assert_eq!(named(&gnu.folders), vec![kib("work/juniper", 48_128), kib("work", 48_128), kib("work/juniper/home/.cache", 16_384), kib("work/juniper/home", 16_384), kib("hermes", 4), kib("work/juniper/proj/.venv", 0), kib("work/juniper/proj", 0)], "its caches too; the link counted once, where du found it first; the odd name (a tab in it) left out");
+        assert_eq!(named(&gnu.files), vec![kib("work/juniper/talk.mp4", 20_480), kib("work/juniper/home/.cache/uv/pkg.bin", 12_288)], "a newline forges no line");
+        assert_eq!(disk_of_sizes(GNU_ANSWER, T, 2).and_then(|d| d.data), Some(4096 + 44_032 * 1024), "its records after its listing: the work without its cache, the venv's link kept");
+        let busybox = sizes_of(BUSYBOX_ANSWER, T).expect("a summary");
+        assert_eq!(busybox.total, Some(48_132 * 1024), "its total its own record's, never a forged `.` line");
+        assert!(named(&busybox.files).starts_with(&[kib("forged/clip.bin", 999_999), kib("work/juniper/talk.mp4", 20_480), kib("work/juniper/home/.cache/uv/pkg.bin", 12_288)]), "BusyBox frames no name: a newline forges a line (the stub's only)");
+        assert_eq!(disk_of_sizes(BUSYBOX_ANSWER, T, 2).and_then(|d| d.data), Some(48_132 * 1024));
+        // its total: `.`'s, or an `all` record's after `end`, never one before it
+        assert_eq!(sizes_of("folders\n100\t.\nfiles\n", T).map(|s| (s.total, s.folders.len(), s.files.len())), Some((Some(102_400), 0, 0)));
+        assert_eq!(sizes_of("all 9 1\nfolders\n100\t.\nall 7 1\nfiles\n", T).and_then(|s| s.total), Some(9 * 1024), "its record's, before the listing, never a line in it (Codex on #1426)");
+        assert_eq!(sizes_of("folders\n5\t./a\nfiles\n", T).map(|s| s.total), Some(None), "neither: none");
+        // no listing: no summary
+        assert_eq!(sizes_of("Filesystem x\noverlay 100 50 50 50% /\nall 1 1\n", T), None);
+        // bounds: a path too long, a control character, too many, all paths together
+        let long = "a".repeat(SIZE_PATH_MAX_BYTES + 1);
+        let odd = format!("folders\n9\t./{long}\n8\t./a\u{7}b\n7\t./ok\nfiles\nend\n");
+        assert_eq!(sizes_of(&odd, T).map(|s| named(&s.folders)), Some(vec![("ok".to_string(), 7 * 1024)]));
+        let many: String = (0..SIZES_FOLDERS_MAX + 10).map(|i| format!("{}\t./f{i}\n", 1000 - i)).collect();
+        let many = sizes_of(&format!("folders\n{many}files\nend\n"), T).expect("a summary");
+        assert_eq!((many.folders.len(), many.folders[0].path.as_str()), (SIZES_FOLDERS_MAX, "f0"), "the biggest, as many as it holds");
+        let wide: String = (0..60).map(|i| format!("{}\t./{}{i:02}\n", 1000 - i, "d".repeat(SIZE_PATH_MAX_BYTES - 2))).collect();
+        let wide = sizes_of(&format!("folders\n{wide}files\nend\n"), T).expect("a summary");
+        assert!(wide.folders.iter().map(|e| e.path.len()).sum::<usize>() <= SIZES_PATHS_MAX_BYTES && wide.folders.len() == SIZES_PATHS_MAX_BYTES / SIZE_PATH_MAX_BYTES, "its paths within their bound: {}", wide.folders.len());
+        // a df and a record forged in the listing (BusyBox frames no name) never pass for the real ones before it
+        assert_eq!(disk_of_sizes("Filesystem x\noverlay 100 50 50 50% /\nall 9 1\nfolders\nall 1 1\nFilesystem y\noverlay 7 7 0 0% /\nfiles\n", T, 2).map(|d| (d.total, d.free, d.data)), Some((100, 50, Some(9 * 1024))), "Codex on #1426");
+        // a name's own trailing `\r` is kept, so it never passes for another file's (Codex on #1429)
+        let cr = sizes_of("folders\n9\t./work/a/report.zip\r\n8\t./work/a\nfiles\n7\t./work/a/report.zip\r\n6\t./work/a/ok.zip\n", T).expect("a summary");
+        assert_eq!((named(&cr.folders), named(&cr.files)), (vec![("work/a".to_string(), 8 * 1024)], vec![("work/a/ok.zip".to_string(), 6 * 1024)]));
+        // its df and records, before the listing, are no folder or file
+        let after = sizes_of("Filesystem x\noverlay 100 50 50 50% /\nall 3 3\nfolders\n5\t./a\nfiles\n4\t./b\n", T).expect("a summary");
+        assert_eq!((named(&after.folders), named(&after.files)), (vec![("a".to_string(), 5120)], vec![("b".to_string(), 4096)]));
+    }
+
+    /// Goal (Paul, 2026-11-20: Settings → Computer → Storage, in plain
+    /// categories): a summary's folders by kind. Its agents' own is `/data`
+    /// but its work (all of it, its total known); in its work, caches, browser data and downloads, each
+    /// once at its shallowest folder listed (a cache inside a browser's
+    /// profile is the browser's); projects the rest of its work. Valid, a
+    /// kind nested in another, nothing in a kind (left out), no work,
+    /// nothing at all.
+    #[test]
+    fn a_summary_is_told_by_kind() {
+        const GB: u64 = 1_000_000_000;
+        let entry = |path: &str, gb: f64| SizeEntry { path: path.into(), bytes: (gb * GB as f64) as u64 };
+        let sizes = |folders: Vec<SizeEntry>| ComputerSizes { at: T, total: None, folders, files: vec![], kinds: vec![] };
+        let told = |s: &ComputerSizes| storage_kinds(s).into_iter().map(|k| (k.kind, k.bytes)).collect::<Vec<_>>();
+        let full = sizes(vec![
+            entry("work", 20.0),
+            entry("work/juniper", 18.0),
+            entry("work/juniper/home", 5.0),
+            entry("work/juniper/home/.cache", 2.0),
+            entry("work/juniper/browser-profile", 3.0),
+            entry("work/juniper/browser-profile/Cache", 1.0),
+            entry("work/juniper/downloads", 4.0),
+            entry("work/juniper/home/Downloads", 1.0),
+            entry("work/juniper/proj", 6.0),
+            entry("hermes", 1.5),
+            entry("hermes/sessions", 1.0),
+            entry("bridge", 0.1),
+        ]);
+        assert_eq!(
+            told(&full),
+            [(StorageKind::Projects, 10 * GB), (StorageKind::Downloads, 5 * GB), (StorageKind::Browser, 3 * GB), (StorageKind::Caches, 2 * GB), (StorageKind::Agents, (1.6 * GB as f64) as u64)],
+            "the browser's own Cache is the browser's, once"
+        );
+        assert_eq!(told(&sizes(vec![entry("work", 2.0), entry("work/a/proj", 2.0)])), [(StorageKind::Projects, 2 * GB)], "nothing in a kind: left out");
+        assert_eq!(told(&sizes(vec![entry("hermes", 1.0)])), [(StorageKind::Agents, GB)], "no work");
+        assert_eq!(told(&sizes(vec![])), [], "nothing at all");
+        // its total known: its agents' own is all of /data but its work, its own files too (Codex on #1428)
+        let whole = ComputerSizes { total: Some(23 * GB), ..full.clone() };
+        assert_eq!(told(&whole).iter().find(|k| k.0 == StorageKind::Agents), Some(&(StorageKind::Agents, 3 * GB)), "1.6 GB of folders and 1.4 GB of /data's own files");
+        assert_eq!(told(&ComputerSizes { total: Some(GB), ..full.clone() }).iter().find(|k| k.0 == StorageKind::Agents), None, "a total under its work: none, never an overflow");
+        // the Hermes image's real answer: its cache is a kind, its venv's link its project's
+        let real = sizes_of(GNU_ANSWER, T).expect("a summary");
+        assert_eq!(told(&real), [(StorageKind::Projects, 31_744 * 1024), (StorageKind::Caches, 16_384 * 1024), (StorageKind::Agents, 4 * 1024)]);
+    }
+
+    /// Goal (Paul, 2026-11-20: Delete, done by the platform in the
+    /// container, never on a path outside /data/work): what a Delete runs
+    /// for a path as its summary names it. Valid: a file of the work, a
+    /// name with spaces and a quote, quoted for sh. Invalid: outside the
+    /// work, the work or an agent's folder's parent itself, `..`, `.`, an
+    /// empty part, an absolute path, a control character, past its bound.
+    /// What the command does on both images (a file gone; a folder, a link,
+    /// a link to a folder elsewhere and nothing there refused, untouched)
+    /// is the Docker check in the PR that added it.
+    #[test]
+    fn a_delete_is_a_file_of_the_work_alone() {
+        let ran = |path: &str| delete_read(path).expect("a file of the work");
+        assert!(ran("work/juniper/downloads/talk.mp4").starts_with("p='/data/work/juniper/downloads/talk.mp4'; r=$(readlink -f -- \"$p\") || exit 3;"));
+        assert!(ran("work/juniper/downloads/talk.mp4").ends_with("case \"$r\" in /data/work/*) ;; *) exit 3 ;; esac; { [ -f \"$r\" ] && [ ! -L \"$p\" ]; } || exit 3; rm -f -- \"$r\""));
+        assert!(ran("work/a b/it's.mp4").starts_with("p='/data/work/a b/it'\\''s.mp4';"), "a quote closes, is escaped, and opens again");
+        assert!(ran("work/x").starts_with("p='/data/work/x';"));
+        for bad in ["", "work", "work/", "/work/x", "hermes/state.db", "x/work/y", "work/../hermes/state.db", "work/./x", "work//x", "work/x/", "work/a\nb", "work/a\u{0}b", &format!("work/{}", "a".repeat(SIZE_PATH_MAX_BYTES)), "work/a?b", "work/odd?999999\t./forged/clip.bin"] {
+            assert!(delete_read(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(DELETE_REFUSED, 3);
+    }
+
+    /// `sizes_read`'s answer from the Hermes image (GNU), 2026-11-20 (its
+    /// records the shell's globs: Codex on #1421).
+    const GNU_ANSWER: &str = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1789511987200 187965280256      91% /\nhome 4 3\nwork 44032 45088768\nfolders\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd?999999\t./forged\n11264\t./work/juniper/odd?999999\t.\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd?999999\t./forged/clip.bin\n";
+    /// The same from the stub (BusyBox).
+    const BUSYBOX_ANSWER: &str = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1789512024064 187965276160  90% /\nall 48132 49283285\nfolders\n999999\t./forged\n999999\t.\n48132\t.\n48128\t./work/juniper\n48128\t./work\n16384\t./work/juniper/home/.cache\n16384\t./work/juniper/home\n11264\t./work/juniper/odd\n11264\t./work/juniper/odd\n4\t./hermes\n0\t./work/juniper/proj/.venv\n0\t./work/juniper/proj\nfiles\n999999\t./forged/clip.bin\n20480\t./work/juniper/talk.mp4\n12288\t./work/juniper/home/.cache/uv/pkg.bin\n11264\t./work/juniper/odd\n";
 
     /// Goal (production, 2026-11-20): a restore that stopped for want of
     /// room is told from every other failure by its words alone, narrowly:

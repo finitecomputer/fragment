@@ -765,13 +765,16 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "due": due, "records": records })
             }
-            Some("poll-now") => {
+            Some(op @ ("poll-now" | "age-blobs")) => {
                 // the next alarm is a poll pass (the blob collection's), so a
-                // test need not wait a quiet fragment's day for one
+                // test need not wait a quiet fragment's day for one; `age-blobs`
+                // makes every blob a grace period older first, so it need not
+                // wait a blob's week either
+                let aged = if op == "age-blobs" { self.age_blobs()? } else { 0 };
                 let now = js::now_ms();
                 self.set_meta(MetaKey::PollAt, &now.to_string())?;
                 self.schedule().await?;
-                json!({ "pollAt": now })
+                json!({ "pollAt": now, "aged": aged })
             }
             Some("hold-rows") => {
                 // while on, the alarm sends no list row (`on_alarm`): a row
@@ -787,7 +790,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
+ hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, age-blobs, hold-rows, or ended")),
         })
     }
 }
