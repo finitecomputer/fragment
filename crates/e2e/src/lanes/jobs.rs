@@ -1473,15 +1473,18 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     anyhow::ensure!(r.status == 200, "(the test fleet fails the next trigger step before its last run): {r}");
     let first = api.op(&owner, &cut, "raise", "cut-1", json!({}))?;
     api.op(&owner, &cut, "raise", "cut-2", json!({}))?;
-    let again = api.op(&owner, &cut, "raise", "cut-1", json!({}))?;
     let plods = || runs(api, &owner, &cut, "&op=plod");
+    // the later record's run given its chance to start before the first
+    // try's retry: held behind the earlier record's, it never does
+    let jumped = s.eventually(Duration::from_secs(5), || plods().iter().any(|r| r["status"] != "queued"));
+    let again = api.op(&owner, &cut, "raise", "cut-1", json!({}))?;
     let done = s.eventually(Duration::from_secs(60), || plods().len() == 2 && plods().iter().all(|r| r["status"] == "succeeded"));
     let fed: Vec<i64> = records(api, &owner, &cut, "feed").iter().filter_map(|r| r["body"]["plod"].as_i64()).collect();
     let alarms: Vec<i64> = records(api, &owner, &cut, "alarms").iter().filter_map(|r| r["seq"].as_i64()).collect();
     s.ok(
         "a record's try cut short partway through its triggers: its ordered run is stored with it, so a later record's runs after it, in order",
         first.status >= 500 && again.status == 200 && done && alarms.len() == 2 && fed == alarms,
-        json!({ "first": first.status, "again": again.body, "fed": fed, "alarms": alarms, "plods": plods() }),
+        json!({ "first": first.status, "again": again.body, "fed": fed, "alarms": alarms, "jumped": jumped, "plods": plods() }),
     );
 
     // a live commit with no app says nothing about the next code: the
