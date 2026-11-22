@@ -29,10 +29,16 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // as if it knew them (FIN-492, 11-22: one greeted its person as a
   // stranger, in Chinese). Every hello names the language their browser is
   // set to, so an agent with nothing else to go on writes in theirs.
+  // A hello already posted in other words (a retry from a browser set to
+  // another language, or one an older release wrote) is its hello: the
+  // channel refuses its id with another body (409 `conflicting_body`), and
+  // a making goes on.
   const hello = (agent, chat, from = null) =>
     api("POST", `/api/f/${agent}/channels/tasks`, {
       id: "hello",
       body: { kind: "routine", chat, text: helloText(from) },
+    }).catch((e) => {
+      if (e?.code !== "conflicting_body") throw e;
     });
   const helloText = (from) => [
     from
@@ -380,23 +386,23 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
         if (!members) continue;
         joined = (members.members ?? []).some((m) => m.principal === id);
       }
-      if (joined && helloAgain.has(chat.name)) continue;
-      if (joined) helloAgain.add(chat.name);
-      // a move's agent says its own hello, made on or posted again: the old
-      // agent it is for, which its agent.json says (`from`, written before
-      // its chat). Unread, it waits for a later read, never the other hello.
-      const from = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then((json) => json?.from ?? null, (e) => (e?.status === 404 ? null : undefined));
-      if (from === undefined) {
-        helloAgain.delete(chat.name);
-        firstRunPutOff = true;
-        continue;
-      }
       if (joined) {
-        hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
+        if (!helloAgain.has(chat.name)) {
+          helloAgain.add(chat.name);
+          // a move's agent says its own (agent.json `from`): unread, put off
+          // until a read answers, never the other hello
+          const from = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then((json) => json?.from ?? null, (e) => (e?.status === 404 ? null : undefined));
+          if (from === undefined) {
+            helloAgain.delete(chat.name);
+            firstRunPutOff = true;
+          } else hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
+        }
         continue;
       }
       if (setup) return;
-      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, from, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+      // made on, a move's agent still says the move's hello (`agentWritten`
+      // reads its agent.json's `from`)
+      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
       return creatingAgent();
     }
   }
@@ -489,8 +495,14 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     if (!agent) agent = (await api("POST", "/api/fragments", { label, template: "agent", title })).name;
     setupChanged({ agent });
     if (setup.written) return agent;
-    const written = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
-    if (!written) {
+    // Written, it may name the old agent a move made it for (`from`): a
+    // making gone on with after a reload, by Add's or the first run's way
+    // (a mover's first agent here), knows it only from here, and its hello
+    // is still the move's.
+    const json = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).catch((e) => { if (e.status === 404) return null; throw e; });
+    if (json) {
+      if (json.from && !setup.from) setupChanged({ from: json.from });
+    } else {
       const owner = person().email || "your person";
       // what it runs on, as the bridge reads it (docs/bridge.md): Claude
       // Code named, Hermes (none named) with its tier
