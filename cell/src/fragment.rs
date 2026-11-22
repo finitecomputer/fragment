@@ -1877,7 +1877,7 @@ impl FragmentCell {
         let now = js::now_ms();
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(now + min_ms);
         // an alarm still to come that is sooner stays (`alarm::to_set`)
-        let Some(at) = fragment_core::alarm::to_set(self.state.storage().get_alarm().await?, at, now) else { return Ok(()) };
+        let Some(at) = fragment_core::alarm::to_set(self.state.storage().get_alarm().await?, at, now, min_ms) else { return Ok(()) };
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())
     }
