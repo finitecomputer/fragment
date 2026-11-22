@@ -46,6 +46,9 @@ use sha2::Digest as _;
 
 /// The client the cell is bound as at the door (`WORKOS_CLIENT`).
 const DOOR_CLIENT: &str = "client_fragment_home";
+/// The sealed fleet bucket's file in `--secrets` and in the bundle (celld's
+/// `CELLD_BUCKET_SEAL`, celld#30): optional.
+const BUCKET_SEAL: &str = "bucket-seal.json";
 /// The door's path on the platform's host, which Caddy hands it: its
 /// pages run their passkey ceremonies on the platform's own origin.
 const DOOR_PATH: &str = "/__door";
@@ -302,6 +305,14 @@ fn render(c: &HomeConf, secrets: &Path, out: &Path) -> Result<()> {
     }
     for name in ["door/secret", "aws/access-key-id", "aws/secret-access-key"] {
         write(&sealed.join(name), &read_secret(secrets, name)?, true)?;
+    }
+    // the sealed fleet bucket (celld's CELLD_BUCKET_SEAL: its key, and its
+    // counter's bucket and credentials), when the home has one
+    if secrets.join(BUCKET_SEAL).exists() {
+        let seal = read_secret(secrets, BUCKET_SEAL)?;
+        let v: Value = serde_json::from_str(&seal).with_context(|| format!("{BUCKET_SEAL} is JSON"))?;
+        anyhow::ensure!(v["key"].is_string() && v["counter"]["bucket"].as_str().is_some_and(|b| b.starts_with("s3://")) && v["counter"]["name"].is_string(), "{BUCKET_SEAL}: {{key, counter: {{bucket: s3://…, name, region, access_key_id, secret_access_key}}}}");
+        write(&sealed.join(BUCKET_SEAL), &seal, true)?;
     }
 
     // what runs beside celld in the home, configured
