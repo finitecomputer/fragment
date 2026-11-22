@@ -724,6 +724,26 @@ impl FragmentCell {
         Ok(json!({ "stop": true }))
     }
 
+    /// Whether queued runs wait to start now (`launch_due_at`, no failed
+    /// start's retry pending): the alarm's pass then leaves its card's shot
+    /// for the next pass, which starts them first.
+    pub(crate) fn launch_waiting(&self) -> CellResult<bool> {
+        Ok(self.launch_due_at()?.is_some_and(|at| at <= js::now_ms()))
+    }
+
+    /// Test fleets: waits while `hold-card` is on, at most
+    /// `TEST_HOLD_MAX_MS`, the alarm's pass where it chooses its card's shot.
+    pub(crate) async fn held_card(&self) {
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if !self.test_hold_card.get().0 {
+                break;
+            }
+            self.test_hold_card.set((true, true));
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        self.test_hold_card.set((self.test_hold_card.get().0, false));
+    }
+
     /// Test fleets: waits while `hold-launch` is on, at most
     /// `TEST_HOLD_MAX_MS`, a batch made and not yet written (`waiting`).
     async fn held_launch(&self) {

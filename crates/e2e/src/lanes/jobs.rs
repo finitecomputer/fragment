@@ -535,7 +535,52 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     inbox_secret(s, api, &owner)?;
     inbox_hmac(s, api, &owner)?;
     launched_across_lives(s, api, &owner)?;
+    queued_before_a_card(s, api, &owner)?;
     channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a run queued while the alarm's pass works starts before that
+/// pass's card shot (a browser's seconds), never after it (#1467's full
+/// e2e: a brain's run, queued as a pass began its shot, waited it out and
+/// started with a later run, which took its pages from it). The pass held
+/// where it chooses the shot (`hold-card`), a page deployed so a card is
+/// due, and a run queued, then let go: the run starts before the card is
+/// made.
+fn queued_before_a_card(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    const LABEL: &str = "a run queued while the alarm's pass works starts before that pass's card shot, never after it";
+    if !s.shoots_cards() {
+        s.skip_card(LABEL);
+        return Ok(());
+    }
+    let wait = Duration::from_secs(30);
+    let (name, c) = jobs_fragment(s, api, owner, "cardwait", |_| {})?;
+    let hold = |on: Option<bool>| -> Value {
+        let mut extra = json!({});
+        if let Some(on) = on {
+            extra["on"] = json!(on);
+        }
+        super::ledger::lever(api, &name, "hold-card", extra).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    let made = || events(api, owner, &name).iter().filter(|e| e["kind"] == "card.made").count();
+    let before = made();
+    hold(Some(true));
+    s.commit(&c, &[("site/index.html", Some(b"<!doctype html><title>A page</title><p>A page to shoot.</p>".as_slice()))]);
+    let held = s.eventually(wait, || hold(None)["waiting"] == true);
+    let queued = api.op(owner, &name, "count_up", "card-wait", json!({ "n": 1 }))?;
+    let id = queued.body["result"]["run"].as_i64().unwrap_or(0);
+    hold(Some(false));
+    let run = settle(api, owner, &name, id, &["succeeded", "held", "failed", "blocked"], Duration::from_secs(60));
+    let shot = s.eventually(Duration::from_secs(60), || made() > before);
+    let ev = events(api, owner, &name);
+    let started = ev.iter().position(|e| e["kind"] == "run.started" && e["data"]["run"] == id);
+    // the first card made since the page's deploy
+    let card = ev.iter().enumerate().filter(|(_, e)| e["kind"] == "card.made").map(|(i, _)| i).nth(before);
+    s.ok(
+        LABEL,
+        held && shot && run["status"] == "succeeded" && started.is_some() && card.is_some() && started < card,
+        json!({ "held": held, "shot": shot, "run": run["status"], "startedAt": started, "cardAt": card }),
+    );
+    Ok(())
 }
 
 /// Goal: a launch answers only into the life it was asked for (the review

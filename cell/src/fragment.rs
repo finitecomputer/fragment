@@ -141,6 +141,10 @@ pub struct FragmentCell {
     /// batch, made, waits before it is written (jobs.rs `launch_queued`),
     /// and whether one is waiting now. In memory, as `test_hold_install`.
     pub(crate) test_hold_launch: Cell<(bool, bool)>,
+    /// A test fleet's `hold-card` lever (ops.rs): whether the alarm's pass
+    /// waits where it chooses its card's shot (`on_alarm`), and whether one
+    /// is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_card: Cell<(bool, bool)>,
     /// A launch is under way (`launch_queued`): one at a time, without an
     /// await before its `createBatch`; another finding one leaves its runs
     /// queued for the alarm's next pass.
@@ -183,6 +187,7 @@ impl DurableObject for FragmentCell {
             later_asked: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
             test_hold_launch: Cell::new((false, false)),
+            test_hold_card: Cell::new((false, false)),
             launching: Cell::new(false),
             dw_noted: RefCell::new(None),
             schema,
@@ -1690,7 +1695,8 @@ impl FragmentCell {
     /// within the poll interval while the fragment is busy (`arm`), and
     /// soon when runs were queued meanwhile (`launch_due_at`): a run queued
     /// while this pass works waits for its end. Last, a preview card due is
-    /// shot (card.rs). Then it re-arms.
+    /// shot (card.rs), unless runs were queued meanwhile: they start first,
+    /// in the next pass. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1747,8 +1753,17 @@ impl FragmentCell {
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
-        if let Err(e) = self.drain_card().await {
-            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+        if self.cfg.test_hooks {
+            self.held_card().await;
+        }
+        // A run queued while this pass worked starts before a card's shot
+        // (a browser's seconds, which an object's next alarm waits for): the
+        // shot waits for the next pass, armed at once, which starts the run
+        // first (`launch_queued`) and shoots then, with nothing queued.
+        if !self.launch_waiting()? {
+            if let Err(e) = self.drain_card().await {
+                self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+            }
         }
         self.schedule().await
     }

@@ -458,6 +458,15 @@ impl FragmentCell {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;
         }
+        if body["op"] == "hold-card" {
+            // the alarm's pass waits while on where it chooses its card's
+            // shot (fragment.rs `on_alarm`); `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_card.set((on, self.test_hold_card.get().1));
+            }
+            let (on, waiting) = self.test_hold_card.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
+        }
         if body["op"] == "hold-launch" {
             // a launch's batch, made, waits while on before it is written
             // (jobs.rs `launch_queued`), across a delete and the name made
