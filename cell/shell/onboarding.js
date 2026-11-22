@@ -380,18 +380,23 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
         if (!members) continue;
         joined = (members.members ?? []).some((m) => m.principal === id);
       }
+      if (joined && helloAgain.has(chat.name)) continue;
+      if (joined) helloAgain.add(chat.name);
+      // a move's agent says its own hello, made on or posted again: the old
+      // agent it is for, which its agent.json says (`from`, written before
+      // its chat). Unread, it waits for a later read, never the other hello.
+      const from = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then((json) => json?.from ?? null, (e) => (e?.status === 404 ? null : undefined));
+      if (from === undefined) {
+        helloAgain.delete(chat.name);
+        firstRunPutOff = true;
+        continue;
+      }
       if (joined) {
-        if (!helloAgain.has(chat.name)) {
-          helloAgain.add(chat.name);
-          // a move's agent says its own (agent.json `from`): unread, none yet
-          const from = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then((json) => json?.from ?? null, (e) => (e?.status === 404 ? null : undefined));
-          if (from === undefined) helloAgain.delete(chat.name);
-          else hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
-        }
+        hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
         continue;
       }
       if (setup) return;
-      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, from, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
       return creatingAgent();
     }
   }

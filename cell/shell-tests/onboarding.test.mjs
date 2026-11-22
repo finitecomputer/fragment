@@ -333,16 +333,52 @@ test("a move's agent says its upgrade is under way; an added one says who it is;
   }
 });
 
-test("a move's agent cut short before its hello: the page opened next says the move's hello", async () => {
-  const world = platform();
-  const first = page(world, { at: "move" });
-  await first.load();
-  world.cut(at(/^\/api\/f\/wren--[^/]+\/channels\/tasks$/, "POST"));
-  await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
-  await page(world).opened();
-  madeWhole(world);
-  assert.match(said(world), /your upgrade is under way/);
-});
+// Each place a move's Add may be cut once its chat is made: the page opened
+// next (home's, which knows nothing of the move) makes it on from what was
+// made, and its hello is still the move's, from its agent.json's `from`.
+const helloCut = at(/^\/api\/f\/wren--[^/]+\/channels\/tasks$/, "POST");
+for (const [where, when, done] of [
+  ["its chat made, its answer lost", create("wren-chat"), true],
+  ["its chat made, before its computer took it", at(/\/agents\/wren--/, "PUT"), false],
+  ["on its computer, before its deploy", at(/^\/api\/f\/wren--[^/]+\/deploy$/, "POST"), false],
+  ["deployed, before it joined its chat", at(/\/members\/npub1wren$/, "PUT"), false],
+  ["in its chat, before its hello", helloCut, false],
+]) {
+  test(`a move's agent cut short (${where}): the page opened next says the move's hello`, async () => {
+    const world = platform();
+    const first = page(world, { at: "move" });
+    await first.load();
+    world.cut(when, done);
+    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    await page(world).opened();
+    madeWhole(world);
+    assert.match(said(world), /your upgrade is under way/);
+  });
+}
+
+// Its agent.json unread on the page opened next: no hello yet, never the
+// other one; a later read says the move's.
+for (const [where, when] of [
+  ["before it joined its chat", at(/\/members\/npub1wren$/, "PUT")],
+  ["in its chat, before its hello", helloCut],
+]) {
+  test(`a move's agent cut short (${where}), its agent.json unread next: the move's hello waits for a read`, async () => {
+    const world = platform();
+    const first = page(world, { at: "move" });
+    await first.load();
+    world.cut(when);
+    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    const next = page(world);
+    world.cut(at(/\/file\?path=agent\.json$/, "GET"));
+    await next.opened();
+    const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
+    assert.equal(world.tasks(wren)?.get("hello"), undefined, "no hello on an unread agent.json");
+    assert.ok(next.onboarding.putOff(), "put off till a read answers");
+    await next.onboarding.resumeFirstRun();
+    madeWhole(world);
+    assert.match(said(world), /your upgrade is under way/);
+  });
+}
 
 // The move's page (FIN-463 F6): a quiet Add made for an old agent (`from`),
 // cut short, is gone on with as the agent it made, handed back to Add
