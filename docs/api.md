@@ -1740,7 +1740,9 @@ run and step, so a repeat applies nothing twice; a fetch's repeat carries
 the same `Idempotency-Key`. A step failing for a reason that may pass is
 retried 4 times (`FRAGMENT_JOB_RETRY_DELAY_S`, doubling); one failing for
 good, out of retries, or whose arguments do not fit throws a `StepError`
-the job may catch. A job that throws is **held** until replayed. A run uses
+the job may catch. A job that throws is **held** until replayed, as is a
+running run, a minute after its launch, whose Workflow ended without
+reporting or was never made (`no_such_instance`). A run uses
 the code installed at its first step: a deploy that changes it restarts the
 run at its next step as its next attempt (`run.restarted`), held at the
 8th. At most 256 steps (`limits::JOB_STEPS_MAX`) and

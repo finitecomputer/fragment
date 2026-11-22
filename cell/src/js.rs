@@ -378,18 +378,13 @@ pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) ->
     Ok(())
 }
 
-/// The Workflows binding rejects `get(id)` for an instance it has no
-/// record of with an Error whose message ends so (`WORKFLOW_ERROR:
-/// instance does not exist`).
-const NO_INSTANCE: &str = "instance does not exist";
-
 /// A Workflow instance's `status()`: `{status, error?, output?}`, or
 /// `None` when the binding has no such instance.
 pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::Value>, String> {
     let binding = jobs(env).map_err(|e| e.message)?;
     let instance = match settle(call(&binding, "get", &[id.into()]).map_err(|e| js_message(&e))?).await {
         Ok(instance) => instance,
-        Err(e) if js_message(&e).ends_with(NO_INSTANCE) => return Ok(None),
+        Err(e) if fragment_core::steps::no_such_instance(&js_message(&e)) => return Ok(None),
         Err(e) => return Err(js_message(&e)),
     };
     let status = settle(call(&instance, "status", &[]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
