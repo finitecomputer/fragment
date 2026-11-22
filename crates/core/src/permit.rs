@@ -630,6 +630,8 @@ mod tests {
         let held = |held, s: Standing| Standing { held: Some(held), ..s };
         let beside = |s: Standing| Standing { beside_person: true, ..s };
         let connector = |s: Standing| Standing { connector: true, ..s };
+        // an agent for its owner where it alone is in (its owner reads through it)
+        let alone = |agent| Standing { owns_member_agent: true, ..acting(None, Some(agent), None) };
         let rows: &[(&str, Visibility, Standing, Action, Verdict)] = &[
             // rule 1: a caller's own role
             ("anonymous reads a public page", V::Public, anon, Read(Public), Verdict::Allow(Public)),
@@ -661,6 +663,17 @@ mod tests {
             ("its owner's viewer share caps it", V::Members, acting(Some(Editor), None, Some(Viewer)), Read(Editor), refused(Editor, Why::Capped, false)),
             ("the public floor, for anyone", V::Public, acting(None, None, None), Read(Public), Verdict::Allow(Public)),
             ("the link is not the agent's to hold", V::Link, acting(None, None, None), Read(Public), refused(Public, Why::Capped, false)),
+            // rule 3's floor: for its owner, never less than its own membership
+            ("for its owner, where it alone is in: its own membership", V::Members, alone(Editor), Act(Editor), Verdict::Allow(Editor)),
+            ("for its owner, its own membership short of the role", V::Members, alone(Viewer), Act(Editor), refused(Editor, Why::Capped, false)),
+            ("for its owner, its own membership never owner", V::Members, alone(Owner), Act(Owner), refused(Owner, Why::Capped, false)),
+            ("for its owner, its own membership at most editor", V::Members, alone(Owner), Act(Editor), Verdict::Allow(Editor)),
+            ("for its owner on a link fragment, its own membership with no link", V::Link, alone(Editor), Act(Editor), Verdict::Allow(Editor)),
+            ("for its owner, held: its own membership elsewhere stands", V::Members, held(Viewer, alone(Editor)), Act(Editor), Verdict::Allow(Editor)),
+            ("for its owner beside its guest person, held: its own membership held", V::Members, beside(held(Viewer, acting(Some(Viewer), Some(Editor), Some(Viewer)))), Act(Editor), refused(Editor, Why::Capped, false)),
+            ("for its owner beside its guest person, held: it reads", V::Members, beside(held(Viewer, acting(Some(Viewer), Some(Editor), Some(Viewer)))), Read(Viewer), Verdict::Allow(Viewer)),
+            ("for its owner on a connector: its own membership a viewer's", V::Members, connector(alone(Editor)), Act(Editor), refused(Editor, Why::Capped, false)),
+            ("for its owner, its own membership lends the repo", V::Members, alone(Editor), Repo(Editor), Verdict::Allow(Editor)),
             // rule 4: a hold
             ("held at viewer, it reads", V::Members, held(Viewer, acting(Some(Editor), None, Some(Editor))), Read(Viewer), Verdict::Allow(Viewer)),
             ("held at viewer, it does not edit", V::Members, held(Viewer, acting(Some(Editor), None, Some(Editor))), Act(Editor), refused(Editor, Why::Capped, false)),
@@ -769,11 +782,15 @@ mod tests {
     /// agent's terminal signs `for` its owner, Ana, whoever asked), its
     /// verdict today, and the one it must have. A row whose two differ is
     /// a known gap, named in `GAPS`: fixing it moves it out of there, and
-    /// a change that breaks any other row fails here.
+    /// a change that breaks any other row fails here. Then whom else rule
+    /// 3's floor reaches (an agent for its own owner never acts with less
+    /// than its own membership), each with its verdict: nobody past what
+    /// the same agent holds signing as itself.
     #[test]
     fn the_obvious_cases() {
         use Action::{Act, Read};
-        // Juniper is Ana's agent, Fred her second; Ben is in Ana's shared chat
+        // Juniper is Ana's agent, Fred her second; Ben is in Ana's shared
+        // chat; the facts as the cell reads them (fragment.rs `standing`)
         let for_ana = |ana: Option<Role>, juniper: Option<Role>| Standing {
             member: ana,
             // her agent is in where she is not: she reads through it
@@ -781,15 +798,23 @@ mod tests {
             link: false,
             signed: true,
             cap: Some(Cap { agent: juniper, owner: ana }),
+            // she is in here, and not its owner
+            beside_person: ana.is_some_and(|r| r != Owner),
             ..Standing::default()
         };
-        const GAPS: &[&str] = &["Ben asks Juniper to edit the fragment he shared with it as an editor"];
+        let held = |s: Standing| Standing { held: Some(Viewer), ..s };
+        // Ben's fragment, Juniper an editor of its own and Ana not in it: a
+        // membership from before decision 64 (today an agent comes in only
+        // with its person)
+        let bens = Facts { visibility: V::Members, standing: for_ana(None, Some(Editor)), action: Act(Editor) };
+        const GAPS: &[&str] = &[];
         let rows: &[(&str, Facts, Verdict, Verdict)] = &[
+            ("Ben asks Juniper to edit the fragment he shared with it as an editor", bens, Verdict::Allow(Editor), Verdict::Allow(Editor)),
             (
-                "Ben asks Juniper to edit the fragment he shared with it as an editor",
-                // Ben's fragment: Juniper an editor, Ana not in it
-                Facts { visibility: V::Members, standing: for_ana(None, Some(Editor)), action: Act(Editor) },
-                refused(Editor, Why::Capped, false),
+                "Ben asks Juniper to edit a fragment he invited Ana to as an editor",
+                // her yes brought her agents in beside her, at her role (decisions 63, 64)
+                Facts { visibility: V::Members, standing: for_ana(Some(Editor), Some(Editor)), action: Act(Editor) },
+                Verdict::Allow(Editor),
                 Verdict::Allow(Editor),
             ),
             (
@@ -823,6 +848,39 @@ mod tests {
                 Verdict::Allow(Viewer),
                 Verdict::Allow(Viewer),
             ),
+            // whom else the floor reaches
+            (
+                "Carol, in Ana's chat and not in Ben's fragment, asks Juniper to edit it",
+                // the same request as Ben's: until a mandate says who asked
+                // (PR 6), whoever talks to Juniper reaches what it does, as
+                // with all of Ana's own access today (`TRUST_WARNING`); then
+                // the place's lend asks Ana (PR 9)
+                bens,
+                Verdict::Allow(Editor),
+                Verdict::Allow(Editor),
+            ),
+            (
+                "Ana holds Juniper at viewer, and Ben asks it to edit the fragment he shared with it",
+                // a hold limits what it does with Ana's access, never its own
+                // memberships (decision 36), as signing as itself
+                Facts { standing: held(bens.standing), ..bens },
+                Verdict::Allow(Editor),
+                Verdict::Allow(Editor),
+            ),
+            (
+                "Juniper is in beside Ana, a viewer, and held: for her it never edits",
+                // its guest person's hold secures the whole entity (decision 64)
+                Facts { visibility: V::Members, standing: held(for_ana(Some(Viewer), Some(Editor))), action: Act(Editor) },
+                refused(Editor, Why::Capped, false),
+                refused(Editor, Why::Capped, false),
+            ),
+            (
+                "Ana, signed in herself, still only reads Ben's fragment through Juniper",
+                Facts { visibility: V::Members, standing: Standing { owns_member_agent: true, signed: true, ..Standing::default() }, action: Act(Editor) },
+                refused(Editor, Why::ThroughAgent, false),
+                refused(Editor, Why::ThroughAgent, false),
+            ),
+            ("Juniper, for Ana, never deletes Ben's fragment", Facts { action: Act(Owner), ..bens }, refused(Owner, Why::Capped, false), refused(Owner, Why::Capped, false)),
         ];
         for &(case, facts, today, target) in rows {
             assert_eq!(decide(&facts), today, "{case}: today");
@@ -830,7 +888,11 @@ mod tests {
         }
         assert!(GAPS.iter().all(|gap| rows.iter().any(|(case, ..)| case == gap)), "every gap is a row");
         // and what Ana could do herself through Fred includes sharing what she owns
-        assert_eq!(agent_shares(Sharer { for_owner: true, held: None }, Some(Owner)), Ok(Owner), "Fred shares Ana's app for her");
+        let for_ana = Sharer { for_owner: true, held: None };
+        assert_eq!(agent_shares(for_ana, Some(Owner)), Ok(Owner), "Fred shares Ana's app for her");
+        // and neither shares Ben's fragment, Ana's role there being none, nor deletes it or sets its cap
+        assert_eq!(agent_shares(for_ana, None), Err(ShareRefusal::NotOwner), "Juniper shares nothing of Ben's for Ana");
+        assert_eq!(agent_may_ask(Reserved::Dangerous, for_ana), Err(ShareRefusal::Dangerous), "nor deletes it or sets its cap");
     }
 
     /// Goal: each reason says what the cell said before the rules moved
