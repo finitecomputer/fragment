@@ -82,6 +82,9 @@ use calls::{
 pub(crate) const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
+/// The longest a due card's shot waits for queued runs to start first
+/// (`fragment_core::alarm::card_waits`).
+const CARD_WAIT_MAX_MS: i64 = 10_000;
 
 // exported by the cell's build alone (lib.rs, "Two Workers, one crate")
 #[cfg_attr(not(feature = "admin"), durable_object)]
@@ -1759,8 +1762,8 @@ impl FragmentCell {
         // A run queued while this pass worked starts before a card's shot
         // (a browser's seconds, which an object's next alarm waits for): the
         // shot waits for the next pass, armed at once, which starts the run
-        // first (`launch_queued`) and shoots then, with nothing queued.
-        if !self.launch_waiting()? {
+        // first (`launch_queued`), for at most CARD_WAIT_MAX_MS of its due.
+        if !fragment_core::alarm::card_waits(self.launch_waiting()?, self.card_due_at()?, js::now_ms(), CARD_WAIT_MAX_MS) {
             if let Err(e) = self.drain_card().await {
                 self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
             }

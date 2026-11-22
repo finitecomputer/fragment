@@ -14,9 +14,37 @@ pub fn to_set(set: Option<i64>, at: i64, now: i64) -> Option<i64> {
     }
 }
 
+/// Whether the alarm's pass leaves a due card's shot (a browser's seconds,
+/// which an object's next alarm waits for) to its next pass: while runs
+/// wait to start, they go first, but a card due `max_ms` or longer is shot
+/// all the same, so a busy fragment's runs never keep it off for good.
+pub fn card_waits(runs_waiting: bool, card_due_at: Option<i64>, now: i64, max_ms: i64) -> bool {
+    runs_waiting && card_due_at.is_some_and(|at| now - at < max_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a run queued while the pass works starts before its card's
+    /// shot, yet a busy fragment's runs never keep its card off for good
+    /// (the review of #1467: a run queued every 100 ms, each pass's batch
+    /// in flight when the next came). Valid: runs waiting and a card just
+    /// due, the card waits; due `max_ms` or longer, it is shot. Invalid
+    /// cases wait for nothing: no run waiting, or no card due.
+    #[test]
+    fn a_card_waits_for_queued_runs_but_not_for_good() {
+        let (now, max) = (100_000, 10_000);
+        assert!(card_waits(true, Some(now - 50), now, max), "a card just due waits for the runs");
+        assert!(!card_waits(true, Some(now - max), now, max), "one due this long is shot all the same");
+        assert!(!card_waits(false, Some(now - 50), now, max), "no run waiting: shot now");
+        assert!(!card_waits(true, None, now, max), "no card due: nothing waits");
+        // a pass every 300 ms, runs waiting at each: the card is shot at the
+        // first pass once it has been due `max_ms`
+        let (due, every) = (now, 300);
+        let shot = (0..1_000).map(|k| due + every * k).find(|&t| !card_waits(true, Some(due), t, max));
+        assert!(shot.is_some_and(|t| (max..max + every).contains(&(t - due))), "shot by {shot:?}");
+    }
 
     /// Goal: a burst of calls never starves what is due (the review of
     /// #1460: arms every 40 ms each moved a 50 ms alarm out by 40 ms, so
