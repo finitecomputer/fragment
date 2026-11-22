@@ -101,8 +101,11 @@ storage's own `allowUnconfirmed`, so no answer waits for its count to be
 durable: on a self-hosted node, where every durable write waits for the
 bucket, that wait was 85–150 ms on every page. A confirmed write folds the
 count into its minute's row, at the minute's alarm or at the first request
-of a later minute, and the row goes to the ledger as before. A crash can
-lose at most the open minute's unconfirmed counts, in the owner's favour.
+of a later minute, and the row goes to the ledger as before. The fold is
+one transaction that also records the minute as folded, so a count is
+folded once; and a count names its fragment's life, so a deleted
+fragment's never reaches the name made again. A crash can lose at most
+the open minute's unconfirmed counts, in the owner's favour.
 A self-hosted node's celld honors `allowUnconfirmed` the same way from
 futurepaul/celld#33 (no gate waits on such a write); one without it holds
 the answer for the count as for any write.
