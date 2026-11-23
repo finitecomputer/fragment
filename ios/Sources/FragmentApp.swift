@@ -26,9 +26,13 @@ final class Library {
     }
     var error: String?
     var loading = false
+    /// A chat is being started (Home's send, the sidebar's New chat): one at
+    /// a time, as two for one agent would share one readied chat.
     var creating = false
     var unfinishedChat: FragmentSummary?
     @ObservationIgnored private var readying: (agent: String, chat: Task<FragmentSummary, Error>)?
+    /// A chat made to write in, whose composer takes the keyboard as it opens.
+    @ObservationIgnored var focusOnOpen: String?
     /// What the home screen's prompt holds (`HomeDraft`).
     let home = HomeDraft()
     /// A launch not sent yet: its chat, made for it and still empty, and
@@ -158,6 +162,20 @@ final class Library {
             } catch { readying = nil; throw error }
         }
         readying = (agent.name, chat)
+        return chat
+    }
+
+    /// A new chat with `agent` and nothing in it yet, listed and shown at once
+    /// (the sidebar's New chat): the readied one if there is one for them.
+    /// `creating` while it starts (its caller may have set it as it asked).
+    func startChat(with agent: FragmentSummary, api: FragmentAPI) async throws -> FragmentSummary {
+        creating = true
+        defer { creating = false }
+        let chat = try await readyChat(with: agent, api: api).value
+        readying = nil; unfinishedChat = nil
+        if !fragments.contains(where: { $0.name == chat.name }) { fragments.insert(chat, at: 0) }
+        try session(for: chat, api: api).beginEmpty()
+        focusOnOpen = chat.name
         return chat
     }
 
@@ -513,6 +531,9 @@ struct FragmentRoot: View {
     @State private var showingConnection = false
     @State private var page = ShellPage.launcher
     @State private var sidebar = false
+    /// Every notice fanned out over the app (`NoticesFan`), from the band's stack.
+    @State private var noticesFanned = false
+    @Namespace private var noticesSpace
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
@@ -559,39 +580,20 @@ struct FragmentRoot: View {
             VStack(spacing: 0) {
                 // its notices glass, as iOS's banners are, over what the page
                 // beneath has (below: Home's wallpaper meets it without a seam)
-                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                // Home's alone: elsewhere Settings' Notices row counts them and
+                // opens them (a page's own top fade can't reach up under a band)
+                if page == .launcher && !showingApps {
+                    NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4, fanned: $noticesFanned, space: noticesSpace)
+                        // its glass's shadow over the page's top, not under it
+                        .zIndex(1)
+                }
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
                         content(api)
                             .navigationTitle(title)
                             .navigationBarTitleDisplayMode(.inline)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
-                                }
-                                // Home's name is a glass button, as its neighbors are: Settings
-                                if page == .launcher {
-                                    ToolbarItem(placement: .principal) {
-                                        // the center gets no toolbar glass of its own: drawn as its neighbors'
-                                        Button { page = .settings } label: {
-                                            Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
-                                                .glassEffect(.regular.interactive(), in: .capsule)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
-                                    }
-                                }
-                                ToolbarItemGroup(placement: .topBarTrailing) {
-                                    // a chat has no New chat of its own: the sidebar's starts one
-                                    if page == .history || page == .settings {
-                                        Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
-                                    }
-                                    if page != .apps {
-                                        Button("Your Apps", systemImage: "square.grid.2x2") { showingApps = true }.accessibilityIdentifier("yourApps")
-                                    }
-                                }
-                            }
+                            .toolbar { topBar }
                             .navigationDestination(isPresented: $showingApps) {
                                 AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
@@ -601,12 +603,29 @@ struct FragmentRoot: View {
             // behind the notices and the page alike: on Home the whole window's
             // wallpaper, which Home's own lines up with, so it shows behind them
             .background {
-                if page == .launcher { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
+                if page == .launcher || page == .apps || showingApps { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
             }
-            .accessibilityHidden(sidebar)
+            .accessibilityHidden(sidebar || noticesFanned)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
-            SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
+            SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api, newChat: { agent in
+                // one chat starts at a time: taken at once, before the task
+                // runs, so a second tap (its button disabled) finds it taken
+                guard !library.creating else { return }
+                library.creating = true
+                showingApps = false; toggleSidebar()
+                Task { await newChat(api, with: agent) }
+            }) { destination in
                 page = destination; showingApps = false; toggleSidebar()
+            }
+            // over everything: its cards fly from the band's stack, and back
+            // (the cards grow from the stack, unfaded; the wallpaper and title fade around them)
+            if noticesFanned {
+                NoticesFanBackdrop().transition(.opacity).zIndex(2)
+                // in, at once from the stack; out, kept as they fly back into it
+                // (from Settings' row there's no stack to grow from: they fade in)
+                NoticesFan(library: library, api: api, space: noticesSpace) { noticesFanned = false }
+                    .transition(.asymmetric(insertion: page == .launcher ? .identity : .opacity, removal: .opacity)).zIndex(3)
+                NoticesFanHeader(library: library) { noticesFanned = false }.transition(.opacity).zIndex(4)
             }
         }
         .sheet(item: $openedApp) { app in
@@ -653,7 +672,7 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil)
+            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil || noticesFanned)
         // a message on its way to a chat not made yet: the launcher is already left
         case .startingChat: ChatLoadingView()
         case .chat(let name):
@@ -671,7 +690,9 @@ struct FragmentRoot: View {
             }
         case .history: HistoryView(library: library, api: api, open: { open($0) })
         case .apps: AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
-        case .settings: SettingsView(library: library, api: api, connect: { showingConnection = true }, open: { open($0) })
+        case .settings:
+            SettingsView(library: library, api: api, connect: { showingConnection = true }, open: { open($0) },
+                         showNotices: { withAnimation(reduceMotion ? nil : .snappy(duration: 0.3)) { noticesFanned = true } })
         }
     }
     private var title: String {
@@ -687,20 +708,73 @@ struct FragmentRoot: View {
     private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
+    /// The page's top bar: the sidebar, Home's name (Settings), New chat and
+    /// Your Apps. Its own builder, so the
+    /// shell's body type-checks in time.
+    @ToolbarContentBuilder private var topBar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
+        }
+        // Home's name is a glass button, as its neighbors are: Settings
+        if page == .launcher {
+            ToolbarItem(placement: .principal) {
+                // the center gets no toolbar glass of its own: drawn as its neighbors'
+                Button { page = .settings } label: {
+                    Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
+            }
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            // a chat has no New chat of its own: the sidebar's starts one
+            if page == .history || page == .settings {
+                Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
+            }
+            if page != .apps {
+                Button("Your Apps", systemImage: "square.grid.2x2") { showingApps = true }.accessibilityIdentifier("yourApps")
+            }
+        }
+    }
     private func toggleSidebar() {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
     }
     /// The page an answer named, opened now if nothing must be answered and
-    /// no cover is up or still going (`covered`): else it waits, kept.
+    /// no cover is up or still going (`covered`): else it waits, kept. The
+    /// fan folds first, as it would hide the page (an invite accepted there
+    /// beside another notice); an answer that opens nothing (Later) leaves it.
     private func openAnswered() {
         guard !covered, let fragment = library.takeAnswered() else { return }
+        if noticesFanned { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding) { noticesFanned = false } }
         open(fragment)
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }
         else if fragment.kind == "launcher" { page = .launcher }
         else { openedApp = fragment }
+    }
+    /// The sidebar's New chat: a chat with `agent`, open and empty, its
+    /// composer the first thing; not made, Home again with why. One chat is
+    /// started at a time (`Library.creating`: the sidebar's New chat buttons
+    /// are disabled, and Home's send waits, until it opens), and the account
+    /// it was asked in is the one it answers: removed meanwhile, nothing is
+    /// shown.
+    private func newChat(_ api: FragmentAPI, with agent: FragmentSummary) async {
+        let library = library
+        library.selectedAgent = agent.name
+        page = .startingChat
+        do {
+            let chat = try await library.startChat(with: agent, api: api)
+            guard library === self.library else { return }
+            if page == .startingChat { page = .chat(chat.name) }
+            await library.load(api)
+        } catch {
+            guard library === self.library else { return }
+            library.error = error.localizedDescription
+            if page == .startingChat { page = .launcher }
+        }
     }
     /// Home's launch (`Library.launch`): its chat shown once made; not
     /// sent, Home again with its words, files and why, if that chat is still
