@@ -29,18 +29,26 @@ pub struct Fresh {
     pub note: String,
     /// The answer as its runtime reads it (`runtime::LateCard`).
     pub late: crate::runtime::LateCard,
+    /// The verified room of the originating turn, when the card came from a
+    /// hosted door's room: carried onto the fresh turn so it resumes in the
+    /// same room with the shared-room note.
+    pub room: Option<records::Room>,
+    /// The door id (`slack`, …) when the originating turn came from a room.
+    pub via: Option<String>,
 }
 
 /// `answer`, an owner's `prompt_response` on `chat`, against the agent's
 /// records on `work` back to its card's turn's start and `chat` back to
 /// the card, both from the answer on; `cause`, the record that started the
-/// card's turn, when it was read; `name`, what the chat calls a principal.
+/// card's turn, when it was read; `door`, the open door on this chat when
+/// it is a hosted door; `name`, what the chat calls a principal.
 /// `None`: nothing to do (not the owner's, not its card's option, or the
 /// card closed already). Only a closure this path wrote (`answerSeq`, the
 /// answer's seq) lets its answer rebuild the fresh turn again (a retry
 /// after a restart, whose claim is the same): a card answered live, then
 /// rolled back past, never runs again.
-pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record], cause: Option<&Record>, name: impl Fn(&str) -> String, now: u64) -> Result<Option<Resolved>, Unavailable> {
+#[allow(clippy::too_many_arguments)]
+pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record], cause: Option<&Record>, door: Option<&str>, name: impl Fn(&str) -> String, now: u64) -> Result<Option<Resolved>, Unavailable> {
     let Said::PromptResponse { prompt, option, text, card } = records::said(&answer.body) else { return Ok(None) };
     if answer.principal != agent.owner || card.as_ref().is_some_and(|c| c.agent != agent.identity) {
         return Ok(None);
@@ -85,9 +93,36 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
-    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && r.principal == asker && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
+    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && (r.principal == asker || (door.is_some() && r.principal == agent.owner)) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
         return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
     }
+    // Recover the originating turn's verified room from `turn.start` (or
+    // from `cause` for a turn started before `turn.start` carried `room`).
+    // On a door chat where a connector turn's cause could not be read and
+    // `turn.start` names no room, refuse recovery rather than running in
+    // the connector-wide session.
+    let (room, via) = match start.body.get("room") {
+        Some(Value::String(rid)) => {
+            if !records::valid_token(rid, limits::ROOM_ID_MAX_BYTES) {
+                return Err(Unavailable::Corrupt);
+            }
+            let full = cause.and_then(|c| records::room(&c.body)).filter(|r| r.id == *rid).unwrap_or_else(|| records::Room { id: rid.clone(), name: String::new(), thread: None });
+            let via = door
+                .map(str::to_string)
+                .or_else(|| cause.and_then(|c| records::heard(&c.body).map(|h| h.via).or_else(|| records::relayed(&c.body).map(|r| r.via))))
+                .ok_or(Unavailable::Missing)?;
+            (Some(full), Some(via))
+        }
+        Some(Value::Null) | None => match (door, cause) {
+            (Some(d), Some(c)) => match records::room(&c.body) {
+                Some(r) => (Some(r), Some(d.to_string())),
+                None => (None, None),
+            },
+            (Some(_), None) if asker != agent.owner => return Err(Unavailable::Missing),
+            _ => (None, None),
+        },
+        Some(_) => return Err(Unavailable::Corrupt),
+    };
     let cut = note::turn(work, &agent.identity, turn).ok_or(Unavailable::Corrupt)?;
     let question = asked.body["text"].as_str().ok_or(Unavailable::Corrupt)?;
     // a card that takes words is answered by them; no words, its label
@@ -97,11 +132,15 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
         // never a cut of what the owner chose
         return Err(Unavailable::Budget);
     }
-    let note = note::late(&cut, &name(asker), cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
+    let asker_label = cause
+        .and_then(|c| records::heard(&c.body))
+        .map(|h| note::room_speaker(&h, room.as_ref()))
+        .unwrap_or_else(|| name(asker));
+    let note = note::late(&cut, &asker_label, cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
     let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked) };
-    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late }) }))
+    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late, room, via }) }))
 }
 
 #[cfg(test)]
@@ -144,7 +183,7 @@ mod tests {
     }
 
     fn late(work: &[Record], chat: &[Record], answer: &Record, now: u64) -> Result<Option<Resolved>, Unavailable> {
-        resolve(&agent(), answer, work, chat, Some(&chat[0]), name, now)
+        resolve(&agent(), answer, work, chat, Some(&chat[0]), None, name, now)
     }
 
     /// Goal: a realistic turn's late answer starts a fresh turn whose
@@ -172,10 +211,41 @@ mod tests {
         let words = rec("chat", 3, 20, OWNER, json!({ "kind": "prompt_response", "prompt": "p", "option": "other", "text": "only the summary", "agent": ME, "turn": "old" }));
         let r = late(&work, &[chat[0].clone(), chat[1].clone(), words.clone()], &words, 20).unwrap().unwrap();
         assert_eq!(r.fresh.unwrap().text, "Answer to your earlier question “Publish?”: only the summary");
-        let no_cause = resolve(&agent(), &chat[2], &work, &chat, None, name, 20).unwrap().unwrap();
+        let no_cause = resolve(&agent(), &chat[2], &work, &chat, None, None, name, 20).unwrap().unwrap();
         let no_cause = no_cause.fresh.unwrap();
         assert!(no_cause.note.contains("It was answering Robin; what they asked is not in this chat's record."));
         assert_eq!(no_cause.late.request, None, "no request it was not told");
+    }
+
+    /// Goal (FIN-508): a late answer to a card from a room turn recovers the
+    /// verified room and door, and refuses recovery when a connector card's
+    /// room cannot be established.
+    #[test]
+    fn late_room_card_recovers_room_or_refuses_when_unknown() {
+        let (mut work, mut chat) = history();
+        work[0].body["asker"] = json!("npub1slackconn");
+        work[0].body["room"] = json!("C0123");
+        chat[0] = rec(
+            "chat",
+            1,
+            9,
+            "npub1slackconn",
+            json!({
+                "text": "Publish my draft",
+                "to": [ME],
+                "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+                "room": { "id": "C0123", "name": "#deploys" }
+            }),
+        );
+        let r = resolve(&agent(), &chat[2], &work, &chat, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
+        let fresh = r.fresh.unwrap();
+        assert_eq!(fresh.room, Some(records::Room { id: "C0123".into(), name: "#deploys".into(), thread: None }));
+        assert_eq!(fresh.via.as_deref(), Some("slack"));
+        assert!(fresh.note.contains("Maple · Slack · #deploys"), "{}", fresh.note);
+        // Without `room` on turn.start and without cause on a door chat, refuse recovery
+        let mut legacy = work.clone();
+        legacy[0].body.as_object_mut().unwrap().remove("room");
+        assert_eq!(resolve(&agent(), &chat[2], &legacy, &chat, None, Some("slack"), name, 20), Err(Unavailable::Missing));
     }
 
     /// Goal (the rollback's double run): only a closure the late path wrote

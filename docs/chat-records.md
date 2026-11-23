@@ -153,6 +153,53 @@ mirrors:
 - A page shows it as the owner's, "via" its door, once the members say
   its poster is their agent or none of the chat's members.
 
+**A message heard in a room**: an outside speaker's words from a shared
+room on a hosted door (e.g. a Slack channel or DM), posted by that
+door's connector in its connector chat:
+
+```json
+{
+  "text": "@Juniper is the deploy green?",
+  "to": ["npub1<agent>"],
+  "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+  "room": { "id": "C0123", "name": "#deploys", "thread": "1790000000.000100" },
+  "context": [{ "name": "Sam", "text": "deploy started", "at": 1790000000000 }],
+  "attachments": [ATTACHMENT]
+}
+```
+
+- `heard` names an outside speaker: `via` is the door's id (`door_ok`),
+  `from` is the speaker's id on that door (at most 128 bytes, no
+  whitespace or control characters), and `name` is their display name.
+  An outside speaker speaks for no one on finite.chat and carries no
+  owner authority: they never answer cards and never run commands. A
+  `heard` record requires a valid `room` and cannot also carry `relayed`.
+- `room` names where the message came from: `id` is the room's id on
+  that door (`^[A-Za-z0-9._-]{1,128}$`), `name` is an optional display
+  name (e.g. `#deploys`, `DM`), and `thread` is an optional thread id
+  (at most 128 bytes, no whitespace or control characters). The owner's
+  own words in a room stay a `relayed` record, with `room` (and
+  optional `context`) added; a `relayed` record with a malformed `room`
+  is dropped rather than run in the connector-wide session.
+- `context` is optional recent room or thread history, oldest first, at
+  most 20 messages and 16 KiB (`[{ name, text, at? }]`), handed to the
+  runtime as quoted lines before the message.
+- On a connector fragment, the platform refuses `heard`, `room`, and
+  `context` on external `POST /channels/*` posts and scheduled records;
+  only the connector's own app effects publish them while bound as an
+  open door. In the bridge, `heard`, `room`, and `context` are honored
+  only when the poster is none of the chat's members in a chat whose
+  members list marks that agent's row as that door (`door`). From any
+  member or on any other chat, those fields are ignored and the record
+  is read as the poster's own plain message.
+- Each `room.id` gets a runtime session of its own; `turn.start` on
+  `work` records `"room": "<room.id>"` so last-seen markers, cut-turn
+  notes, journal recaps, late card recovery, and quotes stay scoped to
+  that room and never leak across rooms. Concurrency stays one active
+  turn of an agent per chat across rooms (up to 16 queued). A question
+  in words (`turn.asked`) on a `heard` turn takes only that speaker's
+  (`principal` + `heard.from`) next message in that room.
+
 **An ask** (`fragment ask --return-to`): an agent's message to another
 agent of its computer whose answer comes back to it, as a turn of its
 own, in the chat it asked from:
@@ -180,9 +227,11 @@ own, in the chat it asked from:
 ```
 
 A page posts it with the id `stop:<turn>`. Only the turn's asker stops a
-turn (for a routine or an ask's answer, the agent's owner). Without
-`turn`, it stops the asker's running turn. A waiting turn it names never
-runs.
+turn (for a routine or an ask's answer, the agent's owner; in a chat
+where the agent is a door's viewer, the agent's owner may stop any turn
+of that agent there). Without `turn`, it stops the asker's running turn
+(or, for the owner in a door chat, the agent's running turn). A waiting
+turn it names never runs.
 
 **A prompt's answer:**
 

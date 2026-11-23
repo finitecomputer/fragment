@@ -1509,3 +1509,104 @@ async fn a_stop_after_a_voice_answer_and_a_call_says_no_skip() {
     let heard = stop_while_a_call_runs_after_an_answer(true).await;
     assert!(!heard.iter().any(|e| e["text"] == wire::STOP_WORDS), "a stray `skip` reached Hermes after its clarify was answered: {:?}", heard.iter().map(|e| e["text"].clone()).collect::<Vec<_>>());
 }
+
+/// Goal (FIN-508): in a hosted door connector chat (`door: "slack"`),
+/// messages from two rooms reach Hermes under two distinct `chat_id`s
+/// (separate sessions), outside speakers carry their room label, speaker id,
+/// shared-room note, and quoted `context`, owner `relayed` messages in the
+/// same room share that room's `chat_id` with `[you, in Slack #deploys]`,
+/// and the owner can stop an outside speaker's running turn (interrupting
+/// that room's session).
+#[tokio::test]
+async fn rooms_in_a_connector_chat_get_separate_sessions_and_context() {
+    let (fake, bridge, hermes, _dir) = setup("relay-rooms", &["juniper"]).await;
+    let chat = fake.connector("slack", "juniper", Some("slack"));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let conn = "npub1slack";
+
+    // 1. Outside speaker Maple in #deploys with prior context
+    fake.say(
+        &chat,
+        conn,
+        json!({
+            "text": "is the deploy green?",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+            "room": { "id": "C0123", "name": "#deploys", "thread": "1790000000.000100" },
+            "context": [{ "name": "Sam", "text": "deploy started", "at": 1790000000000i64 }],
+        }),
+    );
+    fake.until(WAIT, "first room turn ended", |w| w.bodies(&chat, "work", "turn.end").len() == 1).await;
+
+    // 2. Outside speaker Sam in #general (different room -> different Hermes chat_id)
+    fake.say(
+        &chat,
+        conn,
+        json!({
+            "text": "lunch plans?",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0789", "name": "Sam" },
+            "room": { "id": "C0456", "name": "#general" },
+        }),
+    );
+    fake.until(WAIT, "second room turn ended", |w| w.bodies(&chat, "work", "turn.end").len() == 2).await;
+
+    // 3. Owner relayed in #deploys (same room -> same Hermes chat_id as #1)
+    fake.say(
+        &chat,
+        conn,
+        json!({
+            "text": "ship it",
+            "to": ["npub1juniper"],
+            "relayed": { "via": "slack", "for": "npub1paul", "agent": "juniper--k3x9" },
+            "room": { "id": "C0123", "name": "#deploys" },
+        }),
+    );
+    fake.until(WAIT, "third turn ended", |w| w.bodies(&chat, "work", "turn.end").len() == 3).await;
+
+    // 4. Slow turn by Maple in #deploys, stopped by owner (paul)
+    let slow = fake.say(
+        &chat,
+        conn,
+        json!({
+            "text": "run slow check",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+            "room": { "id": "C0123", "name": "#deploys" },
+        }),
+    );
+    let slow_turn = records::turn_id("juniper--k3x9", &chat, "chat", slow["seq"].as_u64().unwrap());
+    fake.until(WAIT, "slow turn started", |w| !work_of(w, &chat, &slow_turn, "turn.start").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": slow_turn }));
+    fake.until(WAIT, "slow turn stopped", |w| !work_of(w, &chat, &slow_turn, "turn.end").is_empty()).await;
+
+    let deploys_chat = wire::room_chat_id(&chat, "juniper--k3x9", Some("C0123"));
+    let general_chat = wire::room_chat_id(&chat, "juniper--k3x9", Some("C0456"));
+    fake.with(|w| {
+        let end = work_of(w, &chat, &slow_turn, "turn.end");
+        assert_eq!(end[0]["outcome"], "stopped", "owner stopped Maple's turn in the door chat");
+    });
+    hermes.with(|s| {
+        assert_eq!(s.heard.len(), 4, "{:?}", s.heard);
+        let first = &s.heard[0];
+        assert_eq!(first["source"]["chat_id"], deploys_chat);
+        assert_eq!(first["source"]["chat_name"], "#deploys");
+        assert_eq!(first["source"]["user_id"], "npub1slack:U0456");
+        assert_eq!(first["source"]["user_name"], "Maple · Slack · #deploys");
+        let ctx_text = first["context"][0]["text"].as_str().unwrap_or("");
+        assert!(ctx_text.contains("shared room") && ctx_text.contains("> Sam: deploy started"), "{ctx_text}");
+
+        let second = &s.heard[1];
+        assert_eq!(second["source"]["chat_id"], general_chat);
+        assert_eq!(second["source"]["user_id"], "npub1slack:U0789");
+        assert_eq!(second["source"]["user_name"], "Sam · Slack · #general");
+
+        let third = &s.heard[2];
+        assert_eq!(third["source"]["chat_id"], deploys_chat, "owner in #deploys shares #deploys' session");
+        assert_eq!(third["source"]["user_id"], "npub1paul");
+        assert_eq!(third["source"]["user_name"], "you, in Slack #deploys");
+
+        assert!(s.interrupted >= 1, "interrupt routed to #deploys session: {}", s.interrupted);
+    });
+    bridge.stop().await;
+}

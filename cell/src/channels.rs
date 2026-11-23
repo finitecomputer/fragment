@@ -510,6 +510,9 @@ impl FragmentCell {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
         self.door_checked(caller, &facts.name, channel, id, body).await?;
+        if door::room_fields(body) && (self.hosted_door()?.is_some() || self.meta(MetaKey::DoorTemplate)?.is_some()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a record carrying `heard`, `room`, or `context` is published only by a connector's own app"));
+        }
         // where the post waited, step by step: one line a post
         let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
@@ -685,6 +688,9 @@ impl FragmentCell {
         // this is the floor beneath them.
         if door::relays(body) {
             return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own relays no one (`relayed`)"));
+        }
+        if door::hears(body) || (door::room_fields(body) && (self.hosted_door()?.is_some() || self.meta(MetaKey::DoorTemplate)?.is_some())) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own carries no door room metadata (`heard`, `room`, `context`)"));
         }
         let own = self.own_key()?;
         let (record, appended) = self.append_once(channel, &own, POST_KIND, body, key, POST_INDEX)?;

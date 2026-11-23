@@ -326,15 +326,15 @@ pub struct Relayed {
 /// a `via` that is no door's id. Whether it is honored (by whom, for whom)
 /// is the engine's.
 pub fn relayed(body: &Value) -> Option<Relayed> {
-    let Value::Object(o) = body else { return None };
-    if !matches!(o.get("kind"), None | Some(Value::Null)) && o.get("kind") != Some(&Value::String("message".into())) {
+    let o = is_message_object(body)?;
+    if o.get("heard").is_some_and(|v| !v.is_null()) {
         return None;
     }
     let r = o.get("relayed")?.as_object()?;
     let via = r.get("via")?.as_str().filter(|v| door_ok(v))?.to_string();
     let for_ = r.get("for")?.as_str().filter(|p| is_identity(p) && p.len() <= 128)?.to_string();
     let agent = r.get("agent")?.as_str().filter(|a| fragment_name_ok(a))?.to_string();
-    matches!(message(o), Said::Message(_)).then_some(Relayed { for_, via, agent })
+    Some(Relayed { for_, via, agent })
 }
 
 /// A relayed message's body: `text` (cut as a person's is), `to` its agent
@@ -359,6 +359,143 @@ pub fn relayed_id(agent: &str, sender_id: &str) -> String {
     let id = format!("sx:{}", &hex(&digest)[..32]);
     assert!(valid_post_id(&id), "a relayed id is a post id: {id}");
     id
+}
+
+/// An outside speaker on a hosted door (docs/chat-records.md, "A message
+/// heard in a room"): speaks for no one on finite.chat and carries no
+/// owner authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heard {
+    /// The door it came through (`door_ok`): `slack`, ….
+    pub via: String,
+    /// The speaker's id on that door (e.g. a Slack user id).
+    pub from: String,
+    /// What to call them, one line, cut to `HEARD_NAME_MAX_CHARS`.
+    pub name: String,
+}
+
+/// A room on a hosted door (docs/chat-records.md, "A message heard in a
+/// room"): each room gets a runtime session of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Room {
+    /// The room's id on that door (`^[A-Za-z0-9._-]{1,128}$`).
+    pub id: String,
+    /// What the room is called (e.g. `#deploys`, `DM`), one line; empty
+    /// when unnamed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// The thread within the room, if any (e.g. a Slack `thread_ts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+}
+
+/// One prior message from a room, oldest first (`context` on a room's
+/// message: docs/chat-records.md).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMessage {
+    pub name: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+}
+
+/// Flattens control characters to spaces and collapses whitespace to one
+/// line.
+fn one_line(s: &str) -> String {
+    let flat: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    flat.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `s` is a non-empty identifier on an external door (`heard.from`,
+/// `room.thread`): at most `max` bytes, with no control characters or
+/// whitespace.
+pub fn valid_door_token(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+fn is_message_object(body: &Value) -> Option<&Map<String, Value>> {
+    let Value::Object(o) = body else { return None };
+    if !matches!(o.get("kind"), None | Some(Value::Null)) && o.get("kind") != Some(&Value::String("message".into())) {
+        return None;
+    }
+    matches!(message(o), Said::Message(_)).then_some(o)
+}
+
+/// An outside speaker's `heard` on a message (docs/chat-records.md):
+/// `{"via": <door>, "from": <id>, "name": <display name>}`. Returns `None`
+/// for non-messages, malformed shapes, invalid door ids, or records that
+/// also carry `relayed`. Whether it is honored (only from a hosted door's
+/// non-member carrier) is the engine's.
+pub fn heard(body: &Value) -> Option<Heard> {
+    let o = is_message_object(body)?;
+    if o.get("relayed").is_some_and(|v| !v.is_null()) {
+        return None;
+    }
+    let h = o.get("heard")?.as_object()?;
+    let via = h.get("via")?.as_str().filter(|v| door_ok(v))?.to_string();
+    let from = h.get("from")?.as_str().filter(|f| valid_door_token(f, limits::HEARD_FROM_MAX_BYTES))?.to_string();
+    let name = one_line(h.get("name")?.as_str()?);
+    if name.is_empty() {
+        return None;
+    }
+    Some(Heard { via, from, name: cut(&name, limits::HEARD_NAME_MAX_CHARS) })
+}
+
+/// A room on a message (docs/chat-records.md): `{"id": <token>, "name"?:
+/// <display name>, "thread"?: <token>}`. Returns `None` for non-messages
+/// or malformed shapes. Whether it is honored is the engine's.
+pub fn room(body: &Value) -> Option<Room> {
+    let o = is_message_object(body)?;
+    let r = o.get("room")?.as_object()?;
+    let id = r.get("id")?.as_str().filter(|id| valid_token(id, limits::ROOM_ID_MAX_BYTES))?.to_string();
+    let name = match r.get("name") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => cut(&one_line(s), limits::ROOM_NAME_MAX_CHARS),
+        Some(_) => return None,
+    };
+    let thread = match r.get("thread") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if valid_door_token(s, limits::ROOM_THREAD_MAX_BYTES) => Some(s.clone()),
+        Some(_) => return None,
+    };
+    Some(Room { id, name, thread })
+}
+
+/// Prior room messages on a message (docs/chat-records.md): oldest first,
+/// at most `ROOM_CONTEXT_MAX_MESSAGES` (20) messages and
+/// `ROOM_CONTEXT_MAX_BYTES` (16 KiB). Any malformed entry or bound
+/// overflow yields an empty list (strict at the edges without dropping the
+/// message itself).
+pub fn context(body: &Value) -> Vec<ContextMessage> {
+    let Some(o) = is_message_object(body) else { return Vec::new() };
+    let Some(Value::Array(items)) = o.get("context") else { return Vec::new() };
+    if items.is_empty() || items.len() > limits::ROOM_CONTEXT_MAX_MESSAGES {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(items.len());
+    let mut bytes = 0usize;
+    for item in items {
+        let Some(m) = item.as_object() else { return Vec::new() };
+        let Some(name_raw) = m.get("name").and_then(Value::as_str) else { return Vec::new() };
+        let name = cut(&one_line(name_raw), limits::HEARD_NAME_MAX_CHARS);
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let Some(text) = m.get("text").and_then(Value::as_str) else { return Vec::new() };
+        let at = match m.get("at") {
+            None | Some(Value::Null) => None,
+            Some(v) => match v.as_i64() {
+                Some(t) => Some(t),
+                None => return Vec::new(),
+            },
+        };
+        bytes = bytes.saturating_add(name.len()).saturating_add(text.len());
+        if bytes > limits::ROOM_CONTEXT_MAX_BYTES {
+            return Vec::new();
+        }
+        out.push(ContextMessage { name, text: text.to_string(), at });
+    }
+    out
 }
 
 /// Whether a `tasks` record is a routine that names no chat (`{kind:
@@ -542,9 +679,21 @@ pub struct Cause {
 /// body as 409, so with the life in the body this life's own retry is a
 /// replay and any other life's claim of the turn is a 409.
 pub fn turn_start(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &str) -> Value {
+    turn_start_in(turn, asker, agent, cause, life, None)
+}
+
+/// A turn's claim, naming its room id when it runs in a hosted door's room
+/// (so last-seen markers, cut-turn notes, recaps, and late card recovery
+/// stay scoped to that room).
+pub fn turn_start_in(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &str, room: Option<&str>) -> Value {
     assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
-    json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
-        "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life })
+    let mut body = json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
+        "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life });
+    if let Some(r) = room {
+        assert!(valid_token(r, limits::ROOM_ID_MAX_BYTES), "a turn's room id is a valid token: {r}");
+        body["room"] = json!(r);
+    }
+    body
 }
 
 /// What a step does, whatever its runtime calls the tool: a page shows each
@@ -1272,5 +1421,86 @@ mod tests {
         let long = "é".repeat(100);
         let c = cut_bytes(&long, 21);
         assert!(c.len() <= 21 && c.ends_with('…'), "{c}");
+    }
+
+    /// Goal (FIN-508): `heard`, `room`, and `context` read strictly on
+    /// messages, honor their bounds (20 messages, 16 KiB), and reject
+    /// invalid shapes or contradictory `relayed` + `heard` records.
+    #[test]
+    fn heard_room_and_context_read_strictly() {
+        let valid = json!({
+            "text": "@Juniper is the deploy green?",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": " Maple \n Lee " },
+            "room": { "id": "C0123", "name": " #deploys\t", "thread": "1790000000.000100" },
+            "context": [
+                { "name": "Sam", "text": "deploy started", "at": 1790000000000i64 },
+                { "name": "Alex", "text": "watching logs" }
+            ]
+        });
+        assert_eq!(heard(&valid), Some(Heard { via: "slack".into(), from: "U0456".into(), name: "Maple Lee".into() }));
+        assert_eq!(room(&valid), Some(Room { id: "C0123".into(), name: "#deploys".into(), thread: Some("1790000000.000100".into()) }));
+        assert_eq!(
+            context(&valid),
+            vec![
+                ContextMessage { name: "Sam".into(), text: "deploy started".into(), at: Some(1790000000000) },
+                ContextMessage { name: "Alex".into(), text: "watching logs".into(), at: None },
+            ]
+        );
+        // room without optional name/thread
+        assert_eq!(room(&json!({ "text": "hi", "room": { "id": "D999" } })), Some(Room { id: "D999".into(), name: String::new(), thread: None }));
+
+        // contradictory relayed + heard is neither
+        let both = json!({
+            "text": "hi",
+            "relayed": { "via": "slack", "for": "npub1paul", "agent": "juniper--k3x9" },
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" }
+        });
+        assert_eq!(heard(&both), None);
+        assert_eq!(relayed(&both), None);
+
+        // invalid heard
+        for bad in [
+            json!({ "text": "x", "heard": { "via": "../slack", "from": "U1", "name": "M" } }),
+            json!({ "text": "x", "heard": { "via": "Slack", "from": "U1", "name": "M" } }),
+            json!({ "text": "x", "heard": { "via": "slack", "from": "", "name": "M" } }),
+            json!({ "text": "x", "heard": { "via": "slack", "from": "U 1", "name": "M" } }),
+            json!({ "text": "x", "heard": { "via": "slack", "from": "U\n1", "name": "M" } }),
+            json!({ "text": "x", "heard": { "via": "slack", "from": "u".repeat(limits::HEARD_FROM_MAX_BYTES + 1), "name": "M" } }),
+            json!({ "text": "x", "heard": { "via": "slack", "from": "U1", "name": "   " } }),
+            json!({ "kind": "stop", "heard": { "via": "slack", "from": "U1", "name": "M" } }),
+        ] {
+            assert_eq!(heard(&bad), None, "{bad}");
+        }
+
+        // invalid room
+        for bad in [
+            json!({ "text": "x", "room": { "id": "" } }),
+            json!({ "text": "x", "room": { "id": "C0123/evil" } }),
+            json!({ "text": "x", "room": { "id": "C 0123" } }),
+            json!({ "text": "x", "room": { "id": "c".repeat(limits::ROOM_ID_MAX_BYTES + 1) } }),
+            json!({ "text": "x", "room": { "id": "C0123", "name": 7 } }),
+            json!({ "text": "x", "room": { "id": "C0123", "thread": "bad thread" } }),
+            json!({ "kind": "command", "command": "new", "room": { "id": "C0123" } }),
+        ] {
+            assert_eq!(room(&bad), None, "{bad}");
+        }
+
+        // context bounds: 20 messages ok, 21 rejected; >16 KiB rejected; malformed rejected
+        let twenty: Vec<Value> = (0..limits::ROOM_CONTEXT_MAX_MESSAGES).map(|i| json!({ "name": "Sam", "text": format!("m{i}") })).collect();
+        assert_eq!(context(&json!({ "text": "hi", "context": twenty })).len(), limits::ROOM_CONTEXT_MAX_MESSAGES);
+        let twenty_one: Vec<Value> = (0..=limits::ROOM_CONTEXT_MAX_MESSAGES).map(|i| json!({ "name": "Sam", "text": format!("m{i}") })).collect();
+        assert!(context(&json!({ "text": "hi", "context": twenty_one })).is_empty(), "past 20 messages");
+        let huge = json!({ "text": "hi", "context": [{ "name": "Sam", "text": "a".repeat(limits::ROOM_CONTEXT_MAX_BYTES) }] });
+        assert!(context(&huge).is_empty(), "past 16 KiB");
+        for bad in [
+            json!({ "text": "hi", "context": "not array" }),
+            json!({ "text": "hi", "context": [{ "name": "", "text": "x" }] }),
+            json!({ "text": "hi", "context": [{ "name": "Sam", "text": 5 }] }),
+            json!({ "text": "hi", "context": [{ "name": "Sam", "text": "x", "at": "now" }] }),
+        ] {
+            assert!(context(&bad).is_empty(), "{bad}");
+            assert!(matches!(said(&bad), Said::Message(_)), "bad context does not drop the message");
+        }
     }
 }

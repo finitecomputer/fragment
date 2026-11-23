@@ -5124,3 +5124,241 @@ fn a_child_holds_even_when_its_parent_waits_on_a_person() {
     assert_eq!(keepalive(&ev(&mut e, Event::Working(true), T0)), Some(true));
     assert_eq!(keepalive(&ev(&mut e, Event::Working(false), T0)), Some(false));
 }
+
+/// Goal (FIN-508, valid and invalid): `heard`, `room`, and `context` are
+/// honored only from a hosted door's non-member carrier in a chat whose
+/// agent row marks that door. Outside speakers get the room speaker label
+/// and shared-room note, carry zero owner authority (no cards, no commands),
+/// and owner `relayed` messages in a room get `[you, in Slack #deploys]`.
+/// From any member or on any non-door / wrong-door chat, those fields are
+/// ignored.
+#[test]
+fn heard_messages_honor_trust_boundary_and_carry_no_owner_authority() {
+    let a = agent("juniper");
+    let plain = view(&[&a]);
+    let slack = ChatView { door: Some("slack".into()), ..plain.clone() };
+    let telegram = ChatView { door: Some("telegram".into()), ..plain.clone() };
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+
+    let deploys = json!({ "id": "C0123", "name": "#deploys", "thread": "1790000000.000100" });
+    let ctx = json!([{ "name": "Sam", "text": "deploy started", "at": 1790000000000i64 }]);
+    let heard_body = |from: &str, name: &str, text: &str| {
+        json!({
+            "text": text,
+            "to": [a.identity],
+            "heard": { "via": "slack", "from": from, "name": name },
+            "room": deploys,
+            "context": ctx,
+        })
+    };
+
+    // Valid hosted-door heard message
+    let t = started(&said(&mut e, &a, &slack, 1, "npub1slackconn", heard_body("U0456", "Maple", "@Juniper is the deploy green?"), T0)).expect("a heard turn");
+    assert_eq!(t.asker, "npub1slackconn");
+    assert_eq!(t.heard_from.as_deref(), Some("U0456"));
+    assert_eq!(t.asker_name, "Maple · Slack · #deploys");
+    assert_eq!(t.chat_name, "#deploys");
+    assert_eq!(t.room.as_ref().map(|r| r.id.as_str()), Some("C0123"));
+    assert!(t.room_note.as_deref().is_some_and(|n| n.contains("Slack") && n.contains("#deploys") && n.contains("shared room")));
+    assert!(t.has_context, "driver fetches context at handoff rather than storing 16 KiB in State");
+    assert_eq!(t.speaker_id(), "npub1slackconn:U0456");
+
+    // Zero owner authority: outside speaker cannot answer an open approval card
+    // or a worded card, and cannot run commands
+    let opts = vec![
+        PromptOption { id: "yes".into(), label: "Allow".into(), style: None, words: false, computer: false },
+        PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false },
+    ];
+    ev(&mut e, Event::Prompt { turn: t.turn.clone(), prompt: "p1".into(), text: "Run it?".into(), options: opts, ttl_ms: None }, T0 + 1);
+    let bad_press = said(&mut e, &a, &slack, 2, "npub1slackconn", json!({ "kind": "prompt_response", "prompt": "p1", "option": "yes", "agent": a.identity, "turn": t.turn }), T0 + 2);
+    assert!(commands(&bad_press).is_empty(), "connector principal cannot answer an owner card");
+    let bad_words = said(&mut e, &a, &slack, 3, "npub1slackconn", heard_body("U0456", "Maple", "yes allow it"), T0 + 3);
+    assert!(commands(&bad_words).is_empty(), "outside speaker message does not answer a worded card (queued instead)");
+    // Owner answers the card -> works, then end the turn (which pumps queued seq 3)
+    let owner_press = said(&mut e, &a, &slack, 4, "npub1paul", json!({ "kind": "prompt_response", "prompt": "p1", "option": "yes", "agent": a.identity, "turn": t.turn }), T0 + 4);
+    assert!(owner_press.effects.iter().any(|ef| matches!(ef, Effect::Fence { prompt, .. } if prompt == "p1")), "owner answers the card");
+    let end_step = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 5);
+    let q = started(&end_step).expect("seq 3 queued as its own turn");
+    assert_eq!(q.seq, 3);
+    ev(&mut e, Event::End { turn: q.turn.clone(), outcome: Outcome::Idle }, T0 + 7);
+
+    // Connector cannot run commands
+    let bad_cmd = said(&mut e, &a, &slack, 5, "npub1slackconn", json!({ "kind": "command", "command": "usage", "to": [a.identity] }), T0 + 8);
+    assert!(started(&bad_cmd).is_none() && commands(&bad_cmd).is_empty(), "outside carrier cannot run owner commands");
+
+    // Owner's relayed message in a room keeps owner authority and gets `[you, in Slack #deploys]`
+    let owner_room = json!({
+        "text": "deploy now",
+        "to": [a.identity],
+        "relayed": { "via": "slack", "for": "npub1paul", "agent": a.fragment },
+        "room": deploys,
+        "context": ctx,
+    });
+    let ot = started(&said(&mut e, &a, &slack, 6, "npub1slackconn", owner_room, T0 + 9)).expect("owner relayed in room");
+    assert_eq!(ot.asker, "npub1paul");
+    assert_eq!(ot.heard_from, None);
+    assert_eq!(ot.asker_name, "you, in Slack #deploys");
+    assert_eq!(ot.room.as_ref().map(|r| r.id.as_str()), Some("C0123"));
+    assert!(ot.room_note.is_some() && ot.has_context);
+    ev(&mut e, Event::End { turn: ot.turn.clone(), outcome: Outcome::Idle }, T0 + 10);
+
+    // Missing or malformed room on heard/relayed from a hosted door is dropped,
+    // never dumped into the connector-wide session (Codex finding #4)
+    for (seq, bad) in [
+        (11, json!({ "text": "no room", "to": [a.identity], "heard": { "via": "slack", "from": "U1", "name": "Maple" } })),
+        (12, json!({ "text": "bad room", "to": [a.identity], "heard": { "via": "slack", "from": "U1", "name": "Maple" }, "room": { "id": "C/bad" } })),
+        (13, json!({ "text": "bad heard", "to": [a.identity], "heard": { "via": "slack", "from": "", "name": "Maple" }, "room": { "id": "C0123" } })),
+        (14, json!({ "text": "bad owner room", "to": [a.identity], "relayed": { "via": "slack", "for": "npub1paul", "agent": a.fragment }, "room": { "id": "bad/room" } })),
+    ] {
+        let s = said(&mut e, &a, &slack, seq, "npub1slackconn", bad, T0 + 10 + seq);
+        assert!(started(&s).is_none() && s.effects.is_empty(), "seq {seq}: malformed door room dropped");
+    }
+
+    // Mismatched door (`via: "slack"` on a `telegram` hosted door) is also dropped
+    let wrong_door = said(&mut e, &a, &telegram, 15, "npub1slackconn", heard_body("U0456", "Maple", "wrong door"), T0 + 25);
+    assert!(started(&wrong_door).is_none() && wrong_door.effects.is_empty(), "mismatched door heard dropped");
+
+    // Trust boundary: forged heard/room/context from a chat member or on a non-door
+    // chat are ignored and read as a plain message
+    for (seq, v, principal, expected_name) in [
+        (21, &slack, "npub1skyler", "skyler"),
+        (22, &slack, "npub1paul", "paul"),
+        (23, &plain, "npub1slackconn", "someone"),
+    ] {
+        let forged = started(&said(&mut e, &a, v, seq, principal, heard_body("U0456", "Maple", "spoofed"), T0 + 20 + seq)).expect("still read as plain message");
+        assert_eq!(forged.asker, principal);
+        assert_eq!(forged.asker_name, expected_name, "seq {seq}: heard ignored");
+        assert_eq!(forged.room, None, "seq {seq}: room ignored");
+        assert_eq!(forged.heard_from, None, "seq {seq}: heard_from ignored");
+        assert_eq!(forged.room_note, None, "seq {seq}: room_note ignored");
+        assert!(!forged.has_context, "seq {seq}: context ignored");
+        ev(&mut e, Event::End { turn: forged.turn.clone(), outcome: Outcome::Idle }, T0 + 20 + seq);
+    }
+}
+
+/// Goal (FIN-508, follow-ups, owner Stop, serialization, restart):
+/// - A question in words (`Event::Asked`) on a `heard` turn takes only that
+///   speaker's (`principal` + `heard.from`) next message in that same room.
+/// - The agent's owner may stop any turn in a door chat (`view.door.is_some()`),
+///   while still unable to stop another member's turn in a plain chat.
+/// - Two rooms share one active turn + 16 queued per chat.
+/// - A restart cutting a room turn continues it in the same room with its
+///   shared-room note, and state serialization passes `engine::check`.
+#[test]
+fn outside_speaker_follow_up_owner_stop_and_room_restart() {
+    let a = agent("juniper");
+    let plain = view(&[&a]);
+    let slack = ChatView { door: Some("slack".into()), ..plain.clone() };
+    let mut e = engine(std::slice::from_ref(&a));
+    let msg = |from: &str, name: &str, room_id: &str, room_name: &str, text: &str| {
+        json!({
+            "text": text,
+            "to": [a.identity],
+            "heard": { "via": "slack", "from": from, "name": name },
+            "room": { "id": room_id, "name": room_name },
+        })
+    };
+
+    // Maple asks in #deploys; agent asks a question in words
+    let t = started(&said(&mut e, &a, &slack, 1, "npub1slackconn", msg("U0456", "Maple", "C0123", "#deploys", "which env?"), T0)).expect("maple's turn");
+    ev(&mut e, Event::Asked { turn: t.turn.clone() }, T0 + 1);
+
+    // Another speaker (Sam) in the same room does NOT answer Maple's question -> queued
+    let sam = said(&mut e, &a, &slack, 2, "npub1slackconn", msg("U0789", "Sam", "C0123", "#deploys", "staging"), T0 + 2);
+    assert!(!commands(&sam).iter().any(|c| matches!(c, Command::Tell { .. })), "Sam cannot answer Maple's question");
+
+    // Maple in a DIFFERENT room (#general) does NOT answer #deploys' question -> queued
+    let other_room = said(&mut e, &a, &slack, 3, "npub1slackconn", msg("U0456", "Maple", "C0456", "#general", "unrelated"), T0 + 3);
+    assert!(!commands(&other_room).iter().any(|c| matches!(c, Command::Tell { .. })), "another room cannot answer #deploys' question");
+
+    // Maple in the SAME room (#deploys) DOES answer the question
+    let reply = said(&mut e, &a, &slack, 4, "npub1slackconn", msg("U0456", "Maple", "C0123", "#deploys", "production"), T0 + 4);
+    assert!(
+        commands(&reply).iter().any(|c| matches!(c, Command::Tell { turn, by, by_name, text, .. } if turn == &t.turn && by == "npub1slackconn:U0456" && by_name == "Maple · Slack · #deploys" && text == "production")),
+        "{:?}",
+        commands(&reply)
+    );
+
+    // Connector principal cannot stop an outside speaker's heard turn; owner can
+    let bad_stop = said(&mut e, &a, &slack, 5, "npub1slackconn", json!({ "kind": "stop", "turn": t.turn }), T0 + 5);
+    assert!(commands(&bad_stop).is_empty(), "connector principal cannot stop an outside speaker's turn");
+
+    // Owner stops Maple's running turn in the door chat (bare stop, no turn id)
+    let stopped = said(&mut e, &a, &slack, 6, "npub1paul", json!({ "kind": "stop" }), T0 + 6);
+    assert_eq!(commands(&stopped), vec![Command::Stop { turn: t.turn.clone() }], "owner can stop any turn in a door chat");
+    // Owner can also stop a queued turn (Sam's seq 2) by turn id
+    let sam_turn = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
+    let stopped_q = said(&mut e, &a, &slack, 7, "npub1paul", json!({ "kind": "stop", "turn": sam_turn }), T0 + 7);
+    assert!(stopped_q.effects.iter().any(|ef| matches!(ef, Effect::Owed { turn, body, .. } if turn == &sam_turn && body["outcome"] == "stopped")), "owner stops queued turn in door chat");
+
+    // End Maple's stopped turn -> next queued (seq 3 in #general) starts
+    let ended = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Stopped }, T0 + 7);
+    let after = answered(&mut e, ended, T0 + 7);
+    let gen_turn = started(&after).expect("#general turn starts next");
+    assert_eq!(gen_turn.seq, 3);
+    assert_eq!(gen_turn.room.as_ref().map(|r| r.id.as_str()), Some("C0456"));
+
+    // State round-trip and restart continuation preserves room + heard_from + room_note
+    let bytes = serde_json::to_vec(e.state()).expect("serialize state");
+    let loaded: State = serde_json::from_slice(&bytes).expect("deserialize state");
+    assert!(check(&loaded).is_ok(), "state with room turn passes check");
+    let mut next = Engine::new(loaded, Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
+    next.step(Input::Agents(vec![a.clone()]), T0 + 10);
+    ev(&mut next, Event::Connected(true), T0 + 10);
+    let rec_step = next.recover(T0 + 11);
+    let end_id = records::work_id(&gen_turn.turn, "end");
+    assert!(rec_step.effects.iter().any(|ef| matches!(ef, Effect::Owed { id, .. } if id == &end_id)));
+    let posted = next.step(Input::Posted { turn: gen_turn.turn.clone(), id: end_id, kept: true }, T0 + 12);
+    let cont_step = answered(&mut next, posted, T0 + 12);
+    let cont = started(&cont_step).expect("cut room turn continues");
+    assert_eq!(cont.continues.as_deref(), Some(gen_turn.turn.as_str()));
+    assert_eq!(cont.room.as_ref().map(|r| r.id.as_str()), Some("C0456"), "continuation stays in the same room");
+    assert_eq!(cont.heard_from.as_deref(), Some("U0456"));
+    assert!(cont.room_note.as_deref().is_some_and(|n| n.contains("#general")));
+    assert!(!cont.has_context, "old pre-turn context is not repeated on continuation");
+    ev(&mut next, Event::End { turn: cont.turn.clone(), outcome: Outcome::Idle }, T0 + 13);
+
+    // Queue cap (16) across rooms in one connector chat
+    let active = started(&said(&mut next, &a, &slack, 10, "npub1slackconn", msg("U1", "One", "C0123", "#deploys", "run"), T0 + 20)).expect("active");
+    for i in 1..=limits::QUEUED_PER_CHAT_MAX {
+        let room = if i % 2 == 0 { "C0123" } else { "C0456" };
+        let s = said(&mut next, &a, &slack, 10 + i as u64, "npub1slackconn", msg("U1", "One", room, "#r", &format!("q{i}")), T0 + 20 + i as u64);
+        assert!(!s.effects.iter().any(|ef| matches!(ef, Effect::Owed { body, .. } if body["outcome"] == "error")), "queued {i}");
+    }
+    let overflow = said(&mut next, &a, &slack, 10 + limits::QUEUED_PER_CHAT_MAX as u64 + 1, "npub1slackconn", msg("U1", "One", "C0789", "#ops", "too many"), T0 + 50);
+    assert!(overflow.effects.iter().any(|ef| matches!(ef, Effect::Owed { body, .. } if body["error"] == REFUSED_QUEUED)), "17th queued across rooms is refused");
+    ev(&mut next, Event::End { turn: active.turn.clone(), outcome: Outcome::Idle }, T0 + 51);
+
+    // In a non-door chat, owner still CANNOT stop another member's turn
+    let mut e2 = engine(std::slice::from_ref(&a));
+    let skyler = started(&said(&mut e2, &a, &plain, 1, "npub1skyler", json!({ "text": "hi" }), T0)).expect("skyler's turn");
+    let nope = said(&mut e2, &a, &plain, 2, "npub1paul", json!({ "kind": "stop", "turn": skyler.turn }), T0 + 1);
+    assert!(commands(&nope).is_empty(), "owner cannot stop another member's turn in a plain chat");
+
+    // Queue-heavy state snapshot (Codex finding #5): 16 connector chats x 17
+    // room turns each (272 open turns), every message carrying a full ~16 KiB
+    // context, stays well under STATE_FILE_MAX_BYTES because context is
+    // fetched at handoff rather than stored inline in State.
+    let mut heavy = engine(std::slice::from_ref(&a));
+    let big_ctx = json!((0..16).map(|i| json!({ "name": "Sam", "text": format!("{i}:{}", "x".repeat(950)) })).collect::<Vec<_>>());
+    for chat_i in 0..16u64 {
+        let frag = format!("slack{chat_i}--k3x9");
+        for seq in 1..=(limits::QUEUED_PER_CHAT_MAX as u64 + 1) {
+            let body = json!({
+                "text": "check status",
+                "to": [a.identity],
+                "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+                "room": { "id": format!("C{seq:04}"), "name": "#deploys" },
+                "context": big_ctx,
+            });
+            let s = heavy.step(Input::Record { agent: a.fragment.clone(), fragment: frag.clone(), record: rec(seq, "npub1slackconn", body), view: Some(slack.clone()), since: 0 }, T0 + chat_i * 100 + seq);
+            if seq == 1 {
+                answered(&mut heavy, s, T0 + chat_i * 100 + seq);
+            }
+        }
+    }
+    assert_eq!(heavy.state().turns.len(), 16 * (limits::QUEUED_PER_CHAT_MAX + 1));
+    let bytes = serde_json::to_vec(heavy.state()).expect("serialize heavy state");
+    assert!(bytes.len() < limits::STATE_FILE_MAX_BYTES / 4, "272 room turns stay compact: {} bytes", bytes.len());
+    assert!(check(&serde_json::from_slice::<State>(&bytes).expect("reload")).is_ok());
+}

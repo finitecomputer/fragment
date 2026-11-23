@@ -32,10 +32,25 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::records;
 
 /// The marker's directory, in the runtime's memory of an agent.
 const DIR: &str = "fragment-seen";
+
+/// The marker filename for `chat` and an optional room id: `chat` itself
+/// for non-room chats, and a deterministic per-room token (`rm-<32 hex>`)
+/// for rooms so two rooms in one connector chat keep separate markers.
+pub fn key(chat: &str, room: Option<&str>) -> String {
+    match room {
+        None => chat.to_string(),
+        Some(r) => {
+            let d = Sha256::digest(format!("{chat}\0{r}").as_bytes());
+            format!("rm-{}", &records::hex(&d)[..32])
+        }
+    }
+}
 
 /// The turn the runtime last took in `chat`: `None` when no marker is
 /// there (or it is not a plain file holding a turn's id).

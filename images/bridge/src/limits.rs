@@ -192,6 +192,21 @@ pub const AGE_NOTE_MAX_BYTES: usize = 256;
 /// The line telling an agent its computer's disk is filling (note.rs,
 /// `disk`), at most.
 pub const DISK_NOTE_MAX_BYTES: usize = 400;
+/// A room's fields and outside-speaker identity on a hosted door's message
+/// (docs/chat-records.md, "A message heard in a room"): bounded so room
+/// ids fit session keys and names stay on one line.
+pub const ROOM_ID_MAX_BYTES: usize = 128;
+pub const ROOM_NAME_MAX_CHARS: usize = 80;
+pub const ROOM_THREAD_MAX_BYTES: usize = 128;
+pub const HEARD_FROM_MAX_BYTES: usize = 128;
+pub const HEARD_NAME_MAX_CHARS: usize = 80;
+/// Prior room messages carried on a room's message (`context`), oldest
+/// first: at most this many messages and this many bytes rendered.
+pub const ROOM_CONTEXT_MAX_MESSAGES: usize = 20;
+pub const ROOM_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+/// The one-line note telling an agent a message came from a shared room
+/// (note.rs, `room_note`), at most.
+pub const ROOM_NOTE_MAX_BYTES: usize = 384;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;
@@ -443,3 +458,4 @@ const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
 const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");
 const _: () = assert!(HERMES_MEDIA_MAX_BYTES < ATTACHMENT_MAX_BYTES && ATTACHMENT_MAX_BYTES <= SCRATCH_MAX_BYTES, "a file past Hermes' cap still fits, and so does the largest file in scratch");
 const _: () = assert!(DOWNLOAD_TRIES_MAX >= 2, "a cut download resumes");
+const _: () = assert!(ROOM_CONTEXT_MAX_MESSAGES > 0 && ROOM_CONTEXT_MAX_BYTES < FRAME_MAX_BYTES && ROOM_NOTE_MAX_BYTES < NOTE_MAX_BYTES, "a room's note and context stay well under a frame");

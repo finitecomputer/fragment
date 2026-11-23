@@ -165,6 +165,28 @@ pub fn relays(body: &Value) -> bool {
     body.get("relayed").is_some()
 }
 
+/// Whether `body` carries an outside speaker (`heard` at all).
+pub fn hears(body: &Value) -> bool {
+    body.get("heard").is_some()
+}
+
+/// Whether `body` carries hosted-door room metadata (`heard`, `room`, or
+/// `context`, non-null or present): only a connector's own app publishes
+/// these on a connector fragment, never an external HTTP post or a
+/// scheduled record.
+pub fn room_fields(body: &Value) -> bool {
+    body.get("heard").is_some() || body.get("room").is_some() || body.get("context").is_some()
+}
+
+/// Whether a `heard` body matches the open hosted door `hosted` (`heard.via`
+/// is that door's id, and `body` does not also carry `relayed`).
+pub fn heard_via_ok(body: &Value, hosted: &Hosted) -> bool {
+    if relays(body) {
+        return false;
+    }
+    body.get("heard").and_then(|h| h.get("via")).and_then(Value::as_str) == Some(hosted.door.as_str())
+}
+
 /// `body`'s `relayed`: none when it has none; what is wrong with one that
 /// is not a door's.
 pub fn relayed(body: &Value) -> Option<Result<Relayed, &'static str>> {

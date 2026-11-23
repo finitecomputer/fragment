@@ -753,6 +753,141 @@ async fn a_relayed_record_is_its_owners_only_through_its_door() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-508, end-to-end through the driver and scripted runtime):
+/// a `heard` message with `room` and `context` is honored only while the
+/// agent's row marks that door (`door: "slack"`): read before binding it is
+/// a plain message without room metadata; bound since, it carries the room
+/// speaker label, `(room: ...)`, shared-room note, and quoted context; and
+/// after a restart, a new life honors it again.
+#[tokio::test]
+async fn a_heard_room_message_is_honored_only_through_its_door() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let door = fake.connector("slackdoor", "juniper", None);
+    let heard = |text: &str| {
+        json!({
+            "text": text,
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+            "room": { "id": "C0123", "name": "#deploys", "thread": "1790000000.000100" },
+            "context": [{ "name": "Sam", "text": "deploy started", "at": 1790000000000i64 }],
+        })
+    };
+    let reply_for = |w: &World, said: &Value| {
+        let t = turn_of("juniper", &door, seq(said));
+        w.bodies(&door, "chat", "reply").into_iter().find(|r| r["turn"] == t).and_then(|r| r["text"].as_str().map(str::to_string))
+    };
+    let dir = support::dir("heard-room-door");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start(cfg.clone(), support::script());
+    following(&fake, 2).await;
+
+    // Unbound: heard/room/context ignored
+    let before = fake.say(&door, "npub1slackdoor", heard("before link"));
+    fake.until(WAIT, "reply before link", |w| reply_for(w, &before).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &before).unwrap();
+        assert_eq!(text, "echo: [someone] before link", "unbound door ignores heard/room/context: {text}");
+    });
+
+    // Bound as slack door without restarting: driver refreshes members and honors heard/room/context
+    fake.with(|w| w.fragments.get_mut(&door).unwrap().members.iter_mut().find(|m| m.principal == "npub1juniper").unwrap().door = Some("slack".into()));
+    let live = fake.say(&door, "npub1slackdoor", heard("after link"));
+    fake.until(WAIT, "reply after link", |w| reply_for(w, &live).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &live).unwrap();
+        assert!(text.contains("[Maple · Slack · #deploys] after link"), "{text}");
+        assert!(text.contains("(room: C0123)"), "{text}");
+        assert!(text.contains("shared room") && text.contains("> Sam: deploy started"), "{text}");
+    });
+
+    // Restart: new life reads the door again and honors room messages
+    bridge.stop().await;
+    fake.until(WAIT, "sockets closed", |w| w.live_sockets() == 0).await;
+    let later = fake.say(&door, "npub1slackdoor", heard("after restart"));
+    let bridge = support::start(cfg, support::script());
+    fake.until(WAIT, "reply after restart", |w| reply_for(w, &later).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &later).unwrap();
+        assert!(text.contains("[Maple · Slack · #deploys] after restart") && text.contains("(room: C0123)"), "{text}");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (Codex finding #1, private-to-public isolation across restart and
+/// rollback): a private DM room's messages, cut turn, and quotes never leak
+/// into a public room's cut note, journal recap, or reply quote.
+#[tokio::test]
+async fn private_room_history_never_leaks_into_another_room_after_restart_or_rollback() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let door = fake.connector("slackiso", "juniper", Some("slack"));
+    let reply_for = |w: &World, said: &Value| {
+        let t = turn_of("juniper", &door, seq(said));
+        w.bodies(&door, "chat", "reply").into_iter().find(|r| r["turn"] == t).and_then(|r| r["text"].as_str().map(str::to_string))
+    };
+    let dir = support::dir("room-isolation");
+    let memory = dir.join("memory");
+    let script_with_mem = |mem: std::path::PathBuf| -> Box<dyn fragment_bridge::runtime::Runtime> {
+        Box::new(fragment_bridge::runtime::script::Script { config: fragment_bridge::runtime::script::ScriptConfig { pace: Duration::from_millis(10), data: dir.join("data"), scratch: dir.join("scratch"), memory: Some(mem) } })
+    };
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start(cfg.clone(), script_with_mem(memory.clone()));
+    following(&fake, 2).await;
+
+    // 1. Private DM room turn completes
+    let priv_msg = fake.say(
+        &door,
+        "npub1slackiso",
+        json!({
+            "text": "secret salary 999k",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0100", "name": "Boss" },
+            "room": { "id": "D0001", "name": "DM" },
+        }),
+    );
+    fake.until(WAIT, "private turn finished", |w| reply_for(w, &priv_msg).is_some()).await;
+
+    // 2. Private DM room slow turn is cut by a crash/restart
+    let priv_cut = fake.say(
+        &door,
+        "npub1slackiso",
+        json!({
+            "text": "slow secret cut task",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0100", "name": "Boss" },
+            "room": { "id": "D0001", "name": "DM" },
+        }),
+    );
+    let cut_turn = turn_of("juniper", &door, seq(&priv_cut));
+    fake.until(WAIT, "private cut turn started", |w| !w.bodies(&door, "work", "turn.start").into_iter().filter(|r| r["turn"] == cut_turn).collect::<Vec<_>>().is_empty()).await;
+    bridge.stop().await;
+    fake.until(WAIT, "sockets closed", |w| w.live_sockets() == 0).await;
+
+    // 3. Wipe runtime memory (simulating rollback) and restart
+    let _ = std::fs::remove_dir_all(&memory);
+    let bridge = support::start(cfg, script_with_mem(memory.clone()));
+    following(&fake, 2).await;
+
+    // 4. Send a public room message that ALSO tries to `reply_to` the private DM seq
+    let pub_msg = fake.say(
+        &door,
+        "npub1slackiso",
+        json!({
+            "text": "public status check",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+            "room": { "id": "C0123", "name": "#public" },
+            "reply_to": seq(&priv_msg),
+        }),
+    );
+    fake.until(WAIT, "public turn finished", |w| reply_for(w, &pub_msg).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &pub_msg).unwrap();
+        assert!(text.contains("[Maple · Slack · #public] public status check") && text.contains("(room: C0123)"), "{text}");
+        assert!(!text.contains("secret salary") && !text.contains("999k") && !text.contains("secret cut task") && !text.contains("quoting"), "private DM leaked into #public: {text}");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (lesson 5): when the API drops every socket (a deploy) or goes
 /// down a while, the bridge comes back on its own and answers what was
 /// said meanwhile, once.

@@ -380,6 +380,45 @@ pub struct TurnStart {
     /// `continue_turn`): its note is that turn's, by its id (driver.rs,
     /// `cut_note`); said by the computer, never as its asker's words.
     pub continues: Option<String>,
+    /// The room this turn's message came from (a hosted door's:
+    /// docs/chat-records.md, "A message heard in a room"): each room gets a
+    /// runtime session of its own.
+    pub room: Option<crate::records::Room>,
+    /// The outside speaker's id on their door (`heard.from`), when this turn
+    /// was started by a `heard` message.
+    pub heard_from: Option<String>,
+    /// One-line shared-room note (`note::room_note`): the driver folds it
+    /// into `note` before handing the turn.
+    pub room_note: Option<String>,
+    /// Whether the causing `chat` record carries prior room `context` for
+    /// the driver to read and render when handing the turn (kept out of
+    /// bridge `State` so queued room turns stay well under
+    /// `STATE_FILE_MAX_BYTES`).
+    pub has_context: bool,
+    /// Quoted prior room messages (`note::room_context`, oldest first, at
+    /// most 20 messages and 16 KiB): read by the driver when `has_context`
+    /// is set, and folded into `note` before handing the turn.
+    pub room_context: Option<String>,
+}
+
+impl TurnStart {
+    /// The speaker id handed to runtimes: `asker:heard_from` for an outside
+    /// speaker on a door, else `asker`.
+    pub fn speaker_id(&self) -> String {
+        match &self.heard_from {
+            Some(from) => format!("{}:{from}", self.asker),
+            None => self.asker.clone(),
+        }
+    }
+
+    /// All read-only notes carried before the message: when the driver
+    /// already folded `room_note` and `room_context` into `note`, returns
+    /// `note` as-is; when a runtime is handed a `TurnStart` directly, joins
+    /// any remaining room note, note, and room context.
+    pub fn turn_note(&self) -> Option<String> {
+        let parts: Vec<&str> = [self.room_note.as_deref(), self.note.as_deref(), self.room_context.as_deref()].into_iter().flatten().filter(|s| !s.trim().is_empty()).collect();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
 }
 
 /// What the bridge asks of a runtime.

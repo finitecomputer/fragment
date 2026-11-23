@@ -87,6 +87,9 @@ pub fn check_record(channel: &str, kind: &str, body: &Value, decl: Option<&Chann
     if crate::door::relays(body) && hosted.is_none_or(|h| body["relayed"] != h.relayed()) {
         return Err("a record that relays its agent's owner (`relayed`) is posted through that agent's door: an app publishes one only as the connector its owner bound as that door, `relayed` exactly {via, for, agent}".into());
     }
+    if crate::door::hears(body) && hosted.is_none_or(|h| !crate::door::heard_via_ok(body, h)) {
+        return Err("a record naming an outside speaker (`heard`) is published only by a connector bound as an open door, with `heard.via` matching that door and no `relayed`".into());
+    }
     let size = body.to_string().len();
     if size > limits::RECORD_BODY_MAX_BYTES {
         return Err(format!("a record's body is at most {} bytes", limits::RECORD_BODY_MAX_BYTES));
@@ -262,6 +265,15 @@ mod tests {
             assert!(check_record("room", "message", &bad, declared().get("room"), Some(&h)).is_err(), "{k}: {v}");
             assert!(decode(&json!([{ "channel": "room", "kind": "message", "body": bad }]), &declared(), Some(&h)).is_err(), "{k}: {v}");
         }
+        let heard = json!({ "text": "hi", "to": ["npub1juniper"], "heard": { "via": "telegram", "from": "U1", "name": "Maple" }, "room": { "id": "C1", "name": "#ops" } });
+        assert!(check_record("room", "message", &heard, declared().get("room"), Some(&h)).is_ok());
+        assert!(check_record("room", "message", &heard, declared().get("room"), None).is_err(), "unbound: no heard");
+        let mut wrong_via = heard.clone();
+        wrong_via["heard"]["via"] = json!("slack");
+        assert!(check_record("room", "message", &wrong_via, declared().get("room"), Some(&h)).is_err(), "wrong door via");
+        let mut both = heard.clone();
+        both["relayed"] = h.relayed();
+        assert!(check_record("room", "message", &both, declared().get("room"), Some(&h)).is_err(), "relayed + heard refused");
         assert_eq!(crate::door::blessed_template("blessed:telegram@0f1e2d"), Some("telegram"));
         for id in ["app:0f1e2d", "blessed:telegram", "telegram@0f1e2d", ""] {
             assert_eq!(crate::door::blessed_template(id), None, "{id}");
