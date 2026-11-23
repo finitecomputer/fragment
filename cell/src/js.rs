@@ -501,6 +501,18 @@ pub fn set_alarm(state: &JsValue, at_ms: i64) -> CellResult<()> {
     Ok(())
 }
 
+/// `storage.put(key, value, { allowUnconfirmed: true })`: a write the
+/// output gate does not hold the answer for, Cloudflare's own option for a
+/// write the answer need not wait on (a crash can lose it); celld honors it
+/// the same way. Settles once the write is in the object's storage.
+pub async fn storage_put_unconfirmed(state: &JsValue, key: &str, value: &JsValue) -> CellResult<()> {
+    let storage = get(state, "storage")?;
+    let options = Object::new();
+    Reflect::set(&options, &JsValue::from_str("allowUnconfirmed"), &JsValue::TRUE).map_err(|e| CellError::host(format!("put options: {}", js_message(&e))))?;
+    let put = call(&storage, "put", &[JsValue::from_str(key), value.clone(), options.into()]).map_err(|e| CellError::host(format!("put: {}", js_message(&e))))?;
+    settle(put).await.map(|_| ()).map_err(|e| CellError::host(format!("put: {}", js_message(&e))))
+}
+
 /// A blob's size, or `None` when absent.
 pub async fn blob_head(env: &Env, key: &str) -> CellResult<Option<u64>> {
     Ok(blobs(env)?.head(key).await?.map(|o| o.size()))

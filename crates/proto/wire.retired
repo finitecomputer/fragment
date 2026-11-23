@@ -3,3 +3,4 @@
 # or send it are gone: `retire <YYYY-MM-DD> <the lock's line> # <why, and
 # the client floor that makes it safe>`. Append only: master's lines stay
 # as they are.
+retire 2026-11-21 value Reason key_paused # the hourly key pause is gone (FIN-616): no server sends it any more, and a client that knows it only never sees it

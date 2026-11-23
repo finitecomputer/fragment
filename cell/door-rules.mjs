@@ -6,9 +6,24 @@
 // start falls back on when its newest will not restore.
 export const SAVES_KEPT = 3;
 
-// Its owner's messages the door keeps, the newest, until its connector
-// takes them on (the next step: D2).
+// Its owner's messages the door keeps: at most this many its connector's
+// inbox has yet to take (past them its runner is refused, and delivers
+// again later from its own cursor: none is let go untaken), and the newest
+// this many it took (each taken once, by its id).
 export const DELIVERIES_KEPT = 256;
+
+// An ask of its runner overtaken by a later mark (a delivery's, numbered
+// as it went) is refused, and asked again under a new one this many times
+// (images/simplex-door/src/main.rs, "Marks").
+export const STALE_ASKS = 3;
+
+// The header its deliveries carry its connector's inbox secret in: the one
+// templates/simplex/fragment.json's `inbox` names.
+export const INBOX_HEADER = "x-simplex-door-secret";
+
+// What its connector's jobs ask (cell/src/jobs.rs sends each as
+// `/job/<ask>`): nothing of its runner's own or its levers'.
+export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply"];
 
 // The door's schema, step by step, from 1: a step released is never edited
 // or dropped, only one added after it (as the Rust objects' are,
@@ -18,6 +33,11 @@ export const STEPS = [
   "CREATE TABLE door (id INTEGER PRIMARY KEY CHECK (id = 1), door TEXT NOT NULL, agent TEXT NOT NULL, started INTEGER NOT NULL, generation INTEGER NOT NULL, marks INTEGER NOT NULL, saved INTEGER NOT NULL, stopped TEXT)",
   "CREATE TABLE saves (generation INTEGER NOT NULL, seq INTEGER NOT NULL, mark INTEGER NOT NULL, bytes INTEGER NOT NULL, at INTEGER NOT NULL, unreadable INTEGER NOT NULL, PRIMARY KEY (generation, seq))",
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
+  // its connector (its name, its inbox's), the inbox's secret as its
+  // `connect` gave it, and the newest link or unlink it numbered
+  "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), fragment TEXT NOT NULL, secret TEXT NOT NULL, asked INTEGER NOT NULL DEFAULT 0)",
+  // whether its connector's inbox took it
+  "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
 ];
 
 // The steps a schema at `version` has yet to take, in order.
@@ -30,6 +50,29 @@ export function steps(version) {
 // bucket and in its object's name.
 export function nameOk(name) {
   return typeof name === "string" && name.length > 0 && name.length <= 96 && /^[a-z0-9-]+$/.test(name);
+}
+
+// Whether `door` is the door of the connector named `connector`: its name
+// and its life's digits (fragment_core::door::door_id).
+export function doorOf(door, connector) {
+  return nameOk(door) && nameOk(connector) && door.startsWith(`${connector}--`) && /^[0-9a-f]{12}$/.test(door.slice(connector.length + 2));
+}
+
+// Its connector's inbox: on the platform's own origin, at the connector's
+// name (as the platform named it, never a job).
+export function inboxUrl(platform, door) {
+  if (!nameOk(door)) throw new Error(`no door is named ${JSON.stringify(door)}`);
+  return `${new URL(platform).origin}/api/f/${door}/inbox`;
+}
+
+// An inbox secret as a header carries it: visible ASCII, none empty.
+export function secretOk(secret) {
+  return typeof secret === "string" && /^[\x21-\x7e]+$/.test(secret);
+}
+
+// Whether a runner's refusal is a stale mark's: asked again under a new one.
+export function stale(status, body) {
+  return status === 409 && typeof body?.message === "string" && body.message.startsWith("a stale mark");
 }
 
 // A save's file in the bucket, under the door's own prefix.

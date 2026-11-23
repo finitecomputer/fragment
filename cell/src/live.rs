@@ -50,8 +50,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use fragment_core::live::{presence_admit, QueryBudget, QueryRefused};
 use fragment_core::facet::Answered;
 use fragment_core::npub;
+use fragment_core::permit::{Action, Standing};
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
-use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, Role, Via};
+use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, Role, Via, Visibility};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use worker::*;
@@ -542,9 +543,7 @@ impl FragmentCell {
         if decl.kind != OpKind::Query {
             return Err(CellError::invalid(format!("{op} is not a query: only queries run over the live socket (call it through __op)")));
         }
-        if st.role < decl.role {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("this needs the {} role", decl.role.as_str())));
-        }
+        crate::fragment::decide(Visibility::Members, Standing::kept(st.role), Action::Read(decl.role))?;
         let inv = Invocation { principal: &st.principal, asker: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
         self.invoke(inv).await
     }
