@@ -23,13 +23,20 @@
 .platform-page :focus-visible,.first-run-card :focus-visible{outline:3px solid #779a53;outline-offset:3px}
 .platform-page .people,.platform-page .options,.platform-page .more{text-align:left;font-size:14px}
 .platform-page code{font-size:14px}
+/* dark: the system's unless the shell's root says light, or the shell's
+   (Settings, Theme: theme.js); a page of its own has no data-theme. :where
+   keeps each rule's weight as it was. */
 @media(prefers-color-scheme:dark){
- :root{--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e}
+ :root:where(:not([data-theme=light])){--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e}
  .platform-page{background-color:#141c1b;background-image:url("platform-landscape-dark.jpg")}
- .platform-page main,.first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
- .platform-brand img{filter:brightness(0) invert(1)}
- .platform-page input,.platform-page textarea,.first-run-card input{background:#ffffff08}
+ :where(:root:not([data-theme=light])) .platform-page main,:where(:root:not([data-theme=light])) .first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
+ :where(:root:not([data-theme=light])) .platform-brand img{filter:brightness(0) invert(1)}
+ :where(:root:not([data-theme=light])) .platform-page input,:where(:root:not([data-theme=light])) .platform-page textarea,:where(:root:not([data-theme=light])) .first-run-card input{background:#ffffff08}
 }
+:root:where([data-theme=dark]){--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e}
+:where([data-theme=dark]) .first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
+:where([data-theme=dark]) .platform-brand img{filter:brightness(0) invert(1)}
+:where([data-theme=dark]) .first-run-card input{background:#ffffff08}
 @media(max-width:600px){.platform-page body,.first-run-content{padding-inline:16px}.platform-page main,.first-run-card{padding:28px 22px}}
 /* A dialog supplies its own positioning and surface; do not add wallpaper
    or viewport-sized rows inside an iframe that measures its own height. */
@@ -147,9 +154,12 @@
 .page-footer a:hover{text-decoration:underline;text-underline-offset:3px}
 .page-footer a:focus-visible{outline:2px solid currentColor;outline-offset:4px;border-radius:2px}
 @media(prefers-color-scheme:dark){
- .ticket{box-shadow:0 5px 22px rgba(0,0,0,.16)}
- .ticket::before{opacity:.42}
- .ticket::after{background:radial-gradient(ellipse at 50% 30%,rgba(179,223,212,.16),transparent 62%)}
+ :where(:root:not([data-theme=light])) .ticket{box-shadow:0 5px 22px rgba(0,0,0,.16)}
+ :where(:root:not([data-theme=light])) .ticket::before{opacity:.42}
+ :where(:root:not([data-theme=light])) .ticket::after{background:radial-gradient(ellipse at 50% 30%,rgba(179,223,212,.16),transparent 62%)}
 }
+:where([data-theme=dark]) .ticket{box-shadow:0 5px 22px rgba(0,0,0,.16)}
+:where([data-theme=dark]) .ticket::before{opacity:.42}
+:where([data-theme=dark]) .ticket::after{background:radial-gradient(ellipse at 50% 30%,rgba(179,223,212,.16),transparent 62%)}
 @media(max-width:600px){.page-footer{flex-direction:column;justify-content:center;gap:10px}.page-footer nav{margin-left:0;justify-content:center}.page-footer>:first-child{order:1}}
 @media(prefers-reduced-motion:reduce){.ticket::before{animation:none;transition:none}.ticket::after{transition:none}}
