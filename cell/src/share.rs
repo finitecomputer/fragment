@@ -232,7 +232,8 @@ pub(crate) fn sheet_html(sheet: &str, title: &str, body: &str) -> String {
 const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classList.add(\"framed\")</script>";
 
 /// A page on the platform's origin, in the onboarding's look: the base
-/// sheet and platform-pages.css over it, and the pointer-following rim's
+/// sheet and platform-pages.css over it, in the platform's type
+/// (fonts.css), and the pointer-following rim's
 /// script (platform-pages.js, a module: it waits for the page, and nothing
 /// waits for it), each linked by its version and kept by the browser
 /// (shell.rs `versioned`); the logo only where it shows (lazy: a framed
@@ -240,9 +241,10 @@ const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classL
 pub(crate) fn platform_html(title: &str, body: &str) -> String {
     use crate::shell::versioned;
     let head = format!(
-        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
+        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
          <div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\" loading=\"lazy\"></div>",
         versioned("sheet.css"),
+        versioned("fonts.css"),
         versioned("platform-pages.css"),
         versioned("platform-pages.js"),
     );
@@ -343,6 +345,7 @@ struct SheetStatus {
     title: Option<String>,
     view_token: Option<String>,
     reach: Option<bool>,
+    npub: String,
 }
 
 /// Emails and pictures for identities, asked of the registry
@@ -480,6 +483,9 @@ struct Sheet {
     /// once that the people added can use its keys, and its Copy link is
     /// its address, never the share link.
     reach: bool,
+    /// An agent's own, its owner's alone (alone.rs): by its kind, or its
+    /// own key among its members, as it is once it has run as an agent.
+    alone: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -527,6 +533,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     // an agent in with its person is no entry of its own (decision 64):
     // its person is the one, "with their agents", never named
     let all = members.members;
+    let alone = kind == FragmentKind::Agent || all.iter().any(|m| m.principal == status.npub);
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // an agent by its title and picture, as the shell shows it, read
@@ -552,6 +559,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         link,
         canonical,
         reach: status.reach == Some(true),
+        alone,
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -674,15 +682,21 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // that means, then its address and Copy
     out += "<section><h2>Link</h2><div class=\"link-card\">";
     let (path, named, means) = general(sheet.visibility);
-    // with reach, With link and Public show, unavailable, saying why (reach.rs)
-    let locked = |v: Visibility| sheet.reach && v != Visibility::Members;
-    if sheet.owner() {
+    // an agent's own is its owner's alone (alone.rs): no switch, but one
+    // to close a link from before the rule
+    let alone = sheet.alone;
+    let alone_now = alone && sheet.visibility == Visibility::Members;
+    // with reach, or an agent's, With link and Public show, unavailable,
+    // saying why (reach.rs)
+    let locked = |v: Visibility| (sheet.reach || alone) && v != Visibility::Members;
+    let why = if alone { crate::alone::AGENT } else { REACH_LINE };
+    if sheet.owner() && !alone_now {
         let option = |v: Visibility| {
             let (path, named, _) = general(v);
             let face = format!("{}{named}", svg("i", path));
             match (sheet.visibility == v, locked(v)) {
                 (true, _) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"true\">{face}</button>", v.as_str()),
-                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{REACH_LINE}\" disabled>{face}</button>", v.as_str()),
+                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{why}\" disabled>{face}</button>", v.as_str()),
                 (false, false) => format!("<button name=\"visibility\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{face}</button>", v.as_str()),
             }
         };
@@ -691,15 +705,15 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     } else {
         out += &format!("<div class=\"access-now\">{}<span>{named}</span></div>", svg("i", path));
     }
-    let note = if sheet.owner() && sheet.reach { REACH_LINE } else { means };
+    let note = if alone_now || (sheet.owner() && sheet.reach && !alone) { why } else { means };
     out += &format!("<p class=\"hint\" data-link-note>{note}</p>");
     // the share link: its owner's, while it is what opens it. With reach,
     // Copy link never gives it, though one from before the rule still
     // opens it: the sheet gives it to no one more (reach.rs); New link, in
     // its field, still ends it
     let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
-    let copied = shared.filter(|_| !sheet.reach).unwrap_or(&sheet.canonical);
-    let rotate = match sheet.owner() && shared.is_some() {
+    let copied = shared.filter(|_| !sheet.reach && !alone).unwrap_or(&sheet.canonical);
+    let rotate = match sheet.owner() && shared.is_some() && !alone {
         true => action_form(
             sheet,
             "rotate",
@@ -720,7 +734,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
 
     // the people: the owner's invite form, then everyone in and invited
     out += "<section><h2>People with access</h2>";
-    if sheet.owner() {
+    if sheet.owner() && !alone {
         let radio = |value: &str, name: &str, checked: bool| {
             format!(
                 "<label class=\"menu-radio\"><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span>{}</label>",
@@ -744,8 +758,8 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         // whoever comes into a chat can talk to the owner's agent in it
         // (Paul, 2026-10-23: the design, and this its safeguard; 10-24:
         // only on a chat, one short line, and no other paragraph here)
-        if fragment_core::access::talks_to_owners_agent(sheet.kind, &sheet.members) {
-            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        if fragment_core::permit::talks_to_owners_agent(sheet.kind, &sheet.members) {
+            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::permit::TRUST_WARNING);
         }
         if sheet.reach {
             out += &format!("<p class=\"hint keys\">{KEYS_LINE}</p>");
@@ -1087,7 +1101,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
             };
             // a guest's agent named nowhere, its members read or not (decision 64)
             let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
-            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
+            let agents = fragment_core::permit::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
             AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();

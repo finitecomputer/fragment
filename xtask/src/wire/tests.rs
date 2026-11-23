@@ -1701,7 +1701,7 @@ fn the_wires_types_are_read_from_their_source() {
     roots.push((syn::parse_str("ErrorBody").unwrap(), "crate".into()));
     let components: Vec<String> = doc["components"]["schemas"].as_object().unwrap().keys().cloned().collect();
     let guarded = super::source::guard(&src, &roots, &components, &super::source::Allowed::wire()).unwrap();
-    assert_eq!(guarded.facts, ["other FragmentKind other"], "the wire's one input fallback");
+    assert_eq!(guarded.facts, ["other Author other", "other FragmentKind other"], "the wire's input fallbacks: a record's author (FIN-615) and a fragment's kind");
     let reached = guarded.reached;
     for t in ["crate::live::Answer", "crate::live::AnswerFrame", "crate::live::SubscribeFrame", "crate::live::Query", "crate::Reason", "crate::ErrorBody", "crate::routes::ListWatchFrame"] {
         assert!(reached.contains(t), "{t} reached: {reached:?}");

@@ -22,7 +22,7 @@ pub struct Notice {
     /// Unique among the person's notices, and the same across reads while it
     /// tells the same thing: what a client keys its row by.
     pub id: String,
-    /// What it is about (`key_paused`), for tests and logs. No client reads
+    /// What it is about (`spending`), for tests and logs. No client reads
     /// it to decide what to draw.
     pub kind: String,
     pub level: NoticeLevel,

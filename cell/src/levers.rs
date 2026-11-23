@@ -8,7 +8,7 @@
 //!   POST /api/test/ledger   {identity, op, …}: a lever on that person's ledger
 //!   POST /api/test/keys     {fragment, op, …}: seal or open as that fragment
 //!   POST /api/test/fragment {fragment, op, …}: a lever on that fragment
-//!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, hang-backups, alive-check, always-on)
+//!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, hang-backups, alive-check, always-on, fail-restore)
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
 //!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
@@ -182,14 +182,17 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
         }
         (Method::Post, ["computer"]) => {
-            /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?,
-            /// generation?, agent?, row?}`: a lever on that computer (computer.rs, `lever`):
+            /// `{computer, op, times?, on?, ms?, freeze?,
+            /// generation?, agent?, row?, provider?, key?, month?, total?, free?, data?, save?}`: a lever on that computer (computer.rs, `lever`):
             /// `times` is `fail-saves`', `fail-starts`' and
             /// `fail-takeover-destroys`', `on` is `always-on`'s, `ms` is
-            /// `hang-backups`', `alive-check`'s, `slow-tell`'s,
+            /// `hang-backups`', `alive-check`'s, `slow-tell`'s, `slow-start-tell`'s,
             /// `stall-failing-start`'s and `alarm-in`'s, `freeze` is `alive-check`'s,
-            /// `offsetMs` is `clock`'s, `generation` is `exit`'s, `agent`
-            /// and `row` are `legacy-grants`'.
+            /// `generation` is `exit`'s, `agent`
+            /// and `row` are `legacy-grants`', `provider` is `legacy-own-key`'s
+            /// and `legacy-sign-in`'s, `key` is `legacy-own-key`'s,
+            /// `row` and `month` `legacy-uses`', `total`, `free` and `data` are `disk`'s,
+            /// `save` is `fail-restore`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -203,14 +206,28 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 ms: Option<u32>,
                 #[serde(default)]
                 freeze: Option<bool>,
-                #[serde(default, rename = "offsetMs")]
-                offset_ms: Option<i64>,
                 #[serde(default)]
                 generation: Option<u64>,
                 #[serde(default)]
                 agent: Option<String>,
                 #[serde(default)]
                 row: Option<serde_json::Value>,
+                #[serde(default)]
+                provider: Option<String>,
+                #[serde(default)]
+                key: Option<String>,
+                #[serde(default)]
+                month: Option<String>,
+                #[serde(default)]
+                total: Option<u64>,
+                #[serde(default)]
+                free: Option<u64>,
+                /// `disk`'s: what its `/data` restores to.
+                #[serde(default)]
+                data: Option<u64>,
+                /// `fail-restore`'s: the number of the save whose restores fail.
+                #[serde(default)]
+                save: Option<u64>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -229,7 +246,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
                 return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
-            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms, "agent": t.agent, "row": t.row });
+            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save });
             json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &asked).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
@@ -243,6 +260,23 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             json_answer(&ask_registry(env, &hook).await?)
         }
         // the move's object is the whole deployment's, as the registry is
+        (Method::Post, ["door"]) => {
+            /// `{door, op, …}`: a lever on that SimpleX door (cell/door.mjs,
+            /// its `lever`): its object's own, its body passed on whole.
+            #[derive(Deserialize)]
+            struct TestDoor {
+                door: String,
+            }
+            let asked: TestDoor = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // a connector's door (its name and its life's digits), or one
+            // the lever starts by a fragment's name alone
+            let of = fragment_core::door::door_of(&asked.door).ok_or_else(|| CellError::invalid("door: a connector's door (fragment_core::door::door_id), or a fragment's name"))?;
+            if cfg.levers_scoped && !levers::is_e2e_fragment(of) {
+                return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the door lever reaches e2e doors alone"));
+            }
+            let text = std::str::from_utf8(&body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
+            crate::routed::send(env, "SIMPLEX_DOOR", &asked.door, crate::routed::internal_request("door/lever", text)?).await
+        }
         (Method::Post, ["migrations"]) if cfg.levers_scoped => Err(no_route("/api/test/migrations")),
         (Method::Post, ["migrations"]) => crate::migrations::lever(env, cfg, &body).await,
         // a preview's mail goes out for real: only the fake's is a test's

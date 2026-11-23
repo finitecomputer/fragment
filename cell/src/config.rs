@@ -122,9 +122,6 @@ pub struct Config {
     /// loopback, link-local, localhost or the platform's own
     /// (`fragment_core::egress::Allow`). Unset: none, public only.
     pub egress_allow: fragment_core::egress::Allow,
-    /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
-    /// (default 7 days: a rollback within it still has its bytes).
-    pub blob_grace_ms: i64,
     /// The shortest wait before a delivery, or a card's shot, is tried
     /// again (10 s; the wait grows with the delivery's age, and a shot's
     /// doubles), and the longest (an hour). `FRAGMENT_DELIVERY_RETRY_S`
@@ -310,6 +307,7 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragment_core::models::Models, version: u32) -> fragment_core::price::PriceBook {
     let mut book = models.priced(fragment_core::price::PriceBook::defaults());
     book.keys = providers.key_prices();
+    book.keys.extend(models.cost_keys());
     book.version = book.version.max(version);
     match book.validate() {
         Ok(()) => book,
@@ -403,7 +401,6 @@ impl Config {
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             egress_allow,
-            blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
             delivery_retry_s: pinned_retry_s.unwrap_or(10),
             delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
@@ -602,6 +599,18 @@ impl Config {
         if arrived.host_str().and_then(|host| self.address_of_host(host)).is_some() {
             return arrived.origin().ascii_serialization();
         }
+        // A request that came by a host neither the platform's nor under
+        // the suffix (a box's loopback port, where its own CLI calls past
+        // the door in front of it) names links on the platform's scheme
+        // and port, which a device opens; it has none of its own to give.
+        let platform;
+        let arrived = match arrived.host_str() {
+            Some(host) if !self.is_platform_host(host) && self.subdomain(host).is_none() => {
+                platform = url::Url::parse(&self.platform_url).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
+                &platform
+            }
+            _ => arrived,
+        };
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
         let host = name;
         let branch = self.host_label_suffix.as_deref().unwrap_or("");

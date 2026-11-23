@@ -123,6 +123,22 @@ pub struct Computer {
     /// server from a Cloudflare computer.
     #[serde(default)]
     pub relay: Option<RelayOffer>,
+    /// Its disk as the platform last read it, and the room it has left
+    /// (docs/computers.md, "Room to restore"); none from a platform before
+    /// it, or before its first read.
+    #[serde(default)]
+    pub disk: Option<Disk>,
+}
+
+/// A computer's disk, as its view says it: the room it has left before its
+/// save may no longer restore (bytes), whether it is told filling, and
+/// when it was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disk {
+    pub room: u64,
+    #[serde(default)]
+    pub filling: bool,
+    pub at: i64,
 }
 
 /// The hosts and the port the platform's XFTP relay carries.
@@ -388,6 +404,11 @@ pub struct Member {
     pub added_at: i64,
     #[serde(default)]
     pub owner: Option<String>,
+    /// On a connector bound as an agent's door, that agent's row alone:
+    /// the door it is (`telegram`), while it is open (docs/api.md, "An
+    /// agent's doors"). None from a platform before it.
+    #[serde(default)]
+    pub door: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

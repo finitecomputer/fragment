@@ -5,6 +5,26 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A deleted fragment's owner-named repo stays at code.storage
+
+- **Shortcut:** a delete takes a fragment's code.storage repo only when
+  the repo is named by that life's own key (`fragment_core::ended::
+  repo_goes`, the `RepoOfLife` meta). Fragments made before that naming
+  have repos named by their owner's identity, and a delete leaves those,
+  as it left every repo before. A wipe takes them all.
+- **Why:** a release from before that naming, rolled back to, names a
+  repo by its owner. Its create of a deleted name, by the same owner,
+  would find that repo while its delete was still to come (held, or
+  backing off), and the delete would then take the new life's files
+  (FIN-538, a review of #1369).
+- **Risk:** a deleted fragment made before that naming keeps its files
+  at code.storage, out of everyone's reach on the platform (404), until
+  the sweep.
+- **Delete when:** no rollback can reach a release that names repos by
+  their owner (the rollout's fence past it). Then a sweep deletes the
+  repos no live fragment names (FIN-540), and `repo_goes` takes every
+  deleted life's repo.
+
 ## No mail without Email Sending
 
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,
@@ -88,20 +108,96 @@ unfinished design, not debt.
   computers something touched, so its silence alone is not enough: say
   so if cutting on it.
 
-## A chat wiped while its seed runs can keep its template's repo
+## An older CLI renames by its fragment.json
 
-- **Shortcut:** a chat's create answers before its repo is made
-  (`publish::seeds_later`); its seed makes the repo right after. A life
-  that ends while that seed waits on code.storage records no repo for its
-  wipe (none was made when it ended), and the seed, seeing the life gone,
-  stops and keeps what it made, as a delete keeps a repo
-  (`publish.rs` `seed`). A wipe in that second leaves the repo holding
-  the chat's first `fragment.json` (its template and title), or nothing.
-- **Risk:** one chat's title outlives its owner's wipe at code.storage,
-  when the wipe lands within about a second of that chat's making.
-- **Delete when:** a wipe deletes its person's repos by their name
-  (`codestorage::repo_name`, the owner's digest), not only those its
-  fragments' lives recorded.
+- **Shortcut:** a fragment's name is its cell's own (docs/api.md, "An
+  agent's name and picture"), set by `PUT /api/f/{name}/face`. The CLI
+  before it, which a computer's image carries and which can lag for days
+  (an agent runs `fragment rename` and `fragment agent --name`), renames
+  by reading `GET manifest`, writing `fragment.json` back with a new
+  `meta.title` and deploying. So that it still does, `GET manifest`
+  answers the face's title and, to an editor, a mark of the read (plane.rs
+  `manifest`, `title_read`; `MetaKey::TitleRead`), and a files write of
+  `fragment.json` naming it renames it once (`title_from_read`).
+- **Risk:** such a client writes the mark into its `fragment.json`, where
+  it stays, read by nothing once taken.
+- **Delete when:** the computer image pinned in production carries a CLI
+  from this release or later, and a week of production logs shows no
+  `face.changed` event from `fragment.json`. Then a Fragment step deletes
+  the `title_read` rows, and the manifest route's title and mark,
+  `title_read` and `title_from_read` go.
+
+## A repo whose create's answer is lost can outlive its life
+
+- **Shortcut:** a blessed fragment's repo is made at its first file, by
+  its first writer's seed (`seed::Making::SeedsLater`), named by its
+  life's key (`codestorage::repo_name`). A seed that sees its life ended
+  once the repo is made records it for deletion (`end_repo_of_no_life`).
+  But when code.storage makes the repo and its answer is lost (or the
+  lookup after it fails), the seed fails with nothing recorded; a later
+  writer finds the repo by its name, while a delete or wipe before one
+  records no repo, and the repo stays (as on master since repos were
+  named by their life's key, for a chat's).
+- **Risk:** an empty repo (no commit landed in it) outlives its fragment
+  at code.storage; nothing of the person's is in it.
+- **Delete when:** a life's end reconciles its repo by its name (the
+  life's key gives it) whatever its rows say, or the seed records its
+  intent before asking code.storage.
+
+## A computer keeps its owner's own keys from before the move
+
+- **Shortcut:** a person's own keys and their sign-ins moved from their
+  computer (`own_keys`, `own_signins`) to their Vault (M16; docs/secrets.md,
+  "A person's Vault"). The tables stay, written by nothing but the test
+  levers: a computer hands its keys over at its owner's next read of it
+  or of their connections, or its agent's next call through one
+  (`ComputerCell::hand_over_logged`; never a start, an exit, a takeover or
+  its guest's request: #1343) and deletes
+  each, taken or not; the Vault takes one only where its person set or
+  removed none since (a removal is kept, `sealed` NULL). A sign-in its
+  person's Vault holds none of is asked of their computer, found by
+  `default_computer_of` (`vault::signed_in`). The release is forward only
+  (the Vault's step 4). The test levers `legacy-own-key` and
+  `legacy-sign-in` make a computer as before the move.
+- **Risk:** no rollback across this release. A computer nothing touches
+  keeps its keys owed; a Vault that does not answer leaves them owed, and
+  its agents' calls through one refused until it does. The removals the
+  Vault keeps outlive the hand-over.
+- **Delete when:** production has run this release for ten minutes (no
+  sign-in begun on a computer is under way), and a sweep that reads every
+  computer (FIN-527's) finds none holding an own key, or production has
+  logged no `"ownKeys":"handed"` line for 14 days (the log sees only
+  computers something touched: say so when cutting). Then a Computer
+  schema step drops `own_keys` and `own_signins`; `hand_over_own`,
+  `owed_own`, `computer/signed-in` and the Vault's fallback to it,
+  `computer/own-keys`' `providers`, both levers and the Vault's
+  `own-handover` go, its removals may, and `GET /api/connections` asks
+  the computer and the Vault at once (it asks the Vault after the
+  computer's hand-over until then).
+
+## A computer owes its owner's ledger its months of uses
+
+- **Shortcut:** what a person's agents used of each provider moved from
+  each computer's `uses` to the person's ledger
+  (`fragment_core::ledger::uses`; M16). The Computer's step 7 dropped
+  `uses`, keeping each month it held in the computer's `meta`
+  `uses_owed:<month>`, as the ledger reads a hand-over's rows. As its
+  owner reads its view, once an activation and in a task of its own
+  (`ComputerCell::uses_later`), the computer hands each month to its
+  owner's ledger (`uses::TakeUses`, under `<computer>:<month>`), which
+  takes it once by that id and keeps the id in its `meta`
+  (`uses_taken:<id>`); the computer forgets each month the ledger took
+  or refused, logging how many it still owes (`uses_owed`). The test
+  lever `legacy-uses` makes a month owed.
+- **Risk:** a computer nothing touches keeps owing, and its person's
+  Settings shows those months short until it hands them over. Dropped
+  instead, up to 13 months of a person's usage would be lost.
+- **Delete when:** a sweep has asked every computer and found none owing
+  (no `uses_owed:` row; the sweep FIN-527 asks for the grants' rows can
+  ask both). Then a Computer step deletes those `meta` rows, and
+  `uses_later`, `hand_over_uses`, `TakeUses`, `/take-uses` and the lever
+  go; a Ledger step may drop its `uses_taken:` rows. The log sees only
+  computers something touched, so its silence alone is not enough.
 
 ## The bridge copies the platform's file bounds; the app, an older platform's
 
@@ -149,6 +245,19 @@ unfinished design, not debt.
   reach.rs's two refusals and their call sites, the share sheet's lock,
   the two reasons (kept on the wire as add-only names), the census route
   and command, and the `legacy-reach` lever.
+
+## Agent fragments shared before FIN-544
+
+- **Shortcut:** an agent fragment is its owner's alone from 2026-11-18
+  (`cell/src/alone.rs`): new sharing is refused, but one shared before
+  keeps its other members, invites, link or public, so no one's settings
+  change silently. Their cleanup is Paul's call; `fragment operator reach`
+  lists them by name (`shared_past_owner`, each fragment's answer).
+- **Risk:** whoever was let in before still reads its `memories/`, and an
+  editor still steers its agent.
+- **Delete when:** they are counted and narrowed. Then drop the sheet's
+  switch for an agent's link (share.rs `alone_now`) and the
+  `legacy-visibility` lever.
 
 ## An app facet's subrequests are the account's, for the facet's life
 
@@ -314,6 +423,26 @@ unfinished design, not debt.
   `a_regular_browser_is_shared_by_the_desktop_and_tools` with the flag
   gone.
 
+## Hermes reads the image's bytecode
+
+- **Shortcut:** Hermes' launcher (since v0.23, `libexec/hermes`) sets
+  `PYTHONPYCACHEPREFIX` to `$HOME/.cache/hermes-pycache` unless one is set,
+  so a sealed install never sees bytecode written into it. Under a prefix
+  Python reads none of the bytecode beside a source, so each `hermes`
+  command (and the gateway's fallback start, not its preload) compiled
+  its imports again: `hermes --version` 0.87 s against 0.22 s. The image's
+  build deletes that one line of the launcher (images/hermes/Dockerfile,
+  after its compileall): the launcher sets no prefix, as before v0.23,
+  and one a caller sets still holds. An exact match: an upstream change
+  fails the build.
+- **Risk:** none known: `/opt/hermes` is root's and the image sets
+  `PYTHONDONTWRITEBYTECODE`, so nothing writes into the install. A
+  process that unsets both and runs as root could, as before v0.23.
+- **Delete when:** a pinned Hermes reads an install's own bytecode under
+  its launcher (or leaves the prefix unset), proven by the build's check
+  (a launcher run with bytecode writes on leaves no
+  `$HOME/.cache/hermes-pycache`) passing without the change.
+
 ## The image brings the agent's browser tab to the front
 
 - **Shortcut:** Hermes' browser_exec opens each page after the first in a
@@ -364,8 +493,8 @@ unfinished design, not debt.
   so hermes-boot writes each `config.yaml` whole
   (images/hermes/boot/src/hermes.rs `profile_config`).
 - **Risk:** an agent's own `hermes config set` lasts until it sleeps.
-- **Delete when:** an agent's settings live in its `agent.json` and the
-  boot merges them into the profile's config, proven by a setting that
+- **Delete when:** an agent's settings live in the agent fragment's
+  `meta` and the boot merges them into the profile's config, proven by a setting that
   survives a wake.
 
 ## A Stop over Hermes' Relay reaches its turn through the image
@@ -424,8 +553,8 @@ unfinished design, not debt.
   `own_chat`; the CLI's `direct_label` finds the same).
 - **Risk:** an agent made another way has no home chat until one is made
   with that label; a second chat of that label may be taken instead.
-- **Delete when:** the agent fragment names its own chat (its
-  `agent.json`), and the bridge, the shell and the CLI read that.
+- **Delete when:** the agent fragment names its own chat (in its
+  `meta`), and the bridge, the shell and the CLI read that.
 
 ## A Hermes release has no rollback
 
@@ -464,53 +593,37 @@ unfinished design, not debt.
 - **Delete when:** the swap streams the body (its length passed on),
   proven by an upload larger than the cap.
 
-## An operator key is metered per call, not per what its vendor counts
+## An older release's key rows are priced as it priced them
 
-- **Shortcut:** the swap charges one `key` unit a call at an estimate
-  (`fragment_core::price::DEFAULT_KEYS`, sources beside it), except a
-  part of a key's calls priced by what its request says
-  (`price::KEY_PARTS`: ElevenLabs' speech by its text's characters, at
-  the multilingual models' $0.08 per 1,000 whatever the model, so Flash
-  and Turbo's $0.04 calls are charged twice their list; fal's
-  synchronous Klein runs by the pixels they ask for; xAI's X searches as
-  20 posts and a call's tokens, its synchronous images as one
-  grok-imagine-image ($0.02) a call; Google Places' photos at their own
-  list; Firecrawl's scrapes and maps by their credits; a Browser Use
-  session's start as five minutes; X's searches as ten posts).
-- **Risk:** calls charged above or below what they cost: every other
-  ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
-  is charged a minute of music; a queued fal generation (Hermes'
-  `image_generate`), an edit and every other fal model are charged
-  nothing until a queued job is settled from its result's answer, once
-  per request id; a Grok chat (its tokens not read), a deferred image, a
-  video and server-side tools other than X Search are charged nothing, a
-  grok-imagine-image-2.0 image or several images a call under their
-  cost, and an X search that fetches fewer than 20 posts over it; Google
-  Places' searches and details (their tier their field mask's, which the
-  meter does not read) and autocompletes (free in a session that ends in
-  a Details call) are charged nothing; a Firecrawl search (its returned
-  results not counted), crawl, batch scrape, extract, agent or browser
-  session is charged nothing, as are a scrape's PDF pages and other
-  add-ons; a Browser Use session is charged five minutes at its start,
-  whatever it ran, and a task its session alone, not its model's tokens;
-  X's lookups (their returned resources not counted) are charged
-  nothing, and a search that returns fewer than ten posts is charged
-  ten.
-- **Delete when:** the swap reads each answer's usage and settles the
-  vendor's own units against a hold of its worst case, each catalog row
-  naming how, proven by a lane whose upstream fake answers usage.
+- **Shortcut:** the book still prices the names the release before
+  FIN-616's charges wrote (`fragment_core::price::LEGACY_KEYS`: its per
+  call estimates and request-read parts, `elevenlabs:speech`,
+  `fal:image` and the rest), so a row it queued just before a deploy is
+  charged as it would have been.
+- **Risk:** none, but code: no release writes these names any more.
+- **Delete when:** the release after this one reaches production, so no
+  queued row of the old names is left (`REF_KEEP_MS` has passed since).
 
-## Own keys assume one computer per person
+## A vendor whose answer says no cost is charged an estimate
 
-- **Shortcut:** a person has one computer (decision 13), so own keys are
-  sealed in it (cell/src/computer.rs, `own_keys`), and an own key's
-  sign-in callback finds it by `default_computer_of`, never the URL (the
-  audit's H3).
-- **Risk:** a second computer needs the keys again; a deleted one loses
-  them.
-- **Delete when:** own keys live in the person's own cell, proven by two
-  computers swapping one key, and a sign-in's computer is found from its
-  bound state alone, never the URL, with the H3 checks run against it.
+- **Shortcut:** an operator key whose vendor's answers say nothing is
+  charged a call at an estimate (`price::DEFAULT_CHARGES`): Browser Use a
+  session's start as five minutes, a task on a session it has too;
+  ElevenLabs' music as a minute; Perplexity's Sonar at a search's price;
+  fal's models other than Klein, xAI's videos and deferred images (their
+  cost on a poll) and Firecrawl's crawls, batch scrapes and extracts (a
+  running total on each poll) nothing. ElevenLabs' characters are priced
+  at the multilingual models' rate, which its header doesn't tell from
+  Flash's half; X's posts at $0.005, though X bills a post read again
+  within 24 hours nothing and a user $0.010.
+  A Grok chat streamed without `stream_options.include_usage` names no
+  cost (the swap sends a request as it came), and an answer read whole
+  past 8 MiB (a Grok image's, its images inline) is not read for its
+  number: each is charged nothing.
+- **Risk:** those calls charged above or below what they cost.
+- **Delete when:** each is read from its vendor's own report: a poll's
+  cost settled once per job (fal's queue: FIN-616's queue PR), a model's
+  price per unit for each fal model, or a vendor's billing read back.
 
 ## An imported connection's refresh is unproven
 
@@ -563,6 +676,40 @@ unfinished design, not debt.
 - **Delete when:** the Computer DO holds a save until its export has
   copied it, with a test that saves three times mid-copy.
 
+## A SimpleX door's object is JavaScript in the cell's Worker
+
+- **Shortcut:** the door's Durable Object and its container's egress
+  (cell/door.mjs, its rules cell/door-rules.mjs) live in the cell's own
+  Worker, as JavaScript, so the Wasm every fragment loads carries none of
+  it (Paul, 2026-11-20: "pay for what you use"); the cell's Rust holds only
+  its lever and its probe. Its schema's steps are locked by its own test
+  (door-rules.test.mjs), not `schema.lock`.
+- **Risk:** every isolate of the cell still loads the module, and the
+  door deploys only with the cell.
+- **Delete when:** two Workers deploy in lockstep (M19, after its admin
+  pilot): once the admin Worker has shipped, the door's object moves to a
+  Worker of its own, bound to the cell.
+
+## Two SimpleX doors: the computer's, and the connector's
+
+- **Shortcut:** an agent's SimpleX may run two ways at once: the
+  computer's (images/bridge/src/simplex, its door key and signed records
+  posted as the agent into its `<label>-simplex` chat), and the
+  connector's (templates/simplex on the platform's door, cell/door.mjs:
+  no key, records the platform checks through `job.door`). The
+  connector is made only by a test or the e2e so far, and a connector
+  deleted or unbound leaves its door running, its saves in the bucket,
+  until it is stopped (its life's own: a name made again reaches another
+  door, never its link).
+- **Risk:** two paths to keep proven for one messenger; a door no one
+  stops costs its container (about $2 a month), and a deleted
+  connector's SimpleX state outlives it.
+- **Delete when:** Settings links through the connector (D3), existing
+  links move to doors (D4), and the bridge's SimpleX module, its door key
+  and the signed-record route are deleted (D5); the connector's deletion
+  stops its door and deletes its saves (`ended.rs`), and its unlinking
+  stops it, with tests.
+
 ## SimpleX retains the computer's root trust and rewindable state
 
 - **Shortcut:** the SimpleX door and cores (images/bridge/src/simplex)
@@ -580,19 +727,10 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
-## OpenRouter's calls are charged at their ceiling, not their cost
-
-- **Shortcut:** an OpenRouter slot is priced at its `max_price` plus fee
-  (`fragment_core::models::Upstream::ceiling`), so no call is charged
-  below what it could cost; `usage.cost` is unread.
-- **Risk:** people are overcharged, cached input most.
-- **Delete when:** a call is charged from OpenRouter's reported cost,
-  the fee and margin on it.
-
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
-  calls are charged after answering (cell/src/meter.rs `charge`): no
+  calls are charged after answering (cell/src/pipe.rs `settle`): no
   usage charges nothing (`ledger.unknown-usage`), a failed send is lost
   (`ledger.charge-lost`), the gate is a minute stale.
 - **Risk:** calls given away: cents, against an agent never stopped.
@@ -695,6 +833,40 @@ unfinished design, not debt.
   should every fragment need all this machinery"), and the move's code
   is removed (FIN-463's debt entry). First candidates: the Migrations
   object, the export's archive builder, the Computer DO's routes.
+
+## The admin Worker deploys after the cell, not with it
+
+- **Shortcut:** a deploy is atomic for the cell (docs/MODEL.md, "Calls
+  between releases"), but the operators' admin Worker (cell/src/admin.rs)
+  deploys after it, from the same build and release, and is then probed
+  (`/healthz/admin`; xtask/src/deploy.rs). Cloudflare deploys one Worker
+  at a time, and each refuses a binding to a Worker that is not there:
+  the cell's to the admin, the admin's to the cell's classes. So the
+  admin goes second, and a deployment with none yet first gets one with
+  no object binding (`admin_bare`). Nothing in the system reads from the
+  admin, so it alone is let fall behind.
+- **Risk:** in a deploy's seconds the objects refuse the old admin's
+  calls (`deploying`); an admin deploy that fails fails the job with the
+  cell live, and the operators' routes stay down until the next deploy.
+  A class the cell adds and the admin binds in the same release would
+  make the admin's deploy fail until the cell's is live: it is, by then.
+  Deleting a branch deletes the admin first (it binds the cell's
+  classes); whether Cloudflare also refuses to delete a Worker another
+  binds as a service is untested.
+- **Delete when:** Cloudflare deploys several Workers as one, or the
+  admin moves back into the cell.
+
+## celld runs no admin Worker
+
+- **Shortcut:** `celld dev` runs one Worker, so its render drops the
+  cell's binding to the admin (crates/devstack celld.rs `DROPPED`), and
+  the cell there answers the admin's routes with a host failure saying
+  so (cell/src/admin.rs `forward`).
+- **Risk:** a self-hosted node has no admin page or admin API; CI runs
+  no celld lane (tag `celld-final`), so nothing else notices.
+- **Delete when:** celld runs a deployment's Workers together, with a
+  service binding between them and object bindings across them, or the
+  celld lane is retired.
 
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
@@ -1095,14 +1267,13 @@ unfinished design, not debt.
 
 - **Shortcut:** `fragment session import` commits each batch of
   conversations as upserts on whatever head main has
-  (cli/src/session/mod.rs `commit`); only the indexes' commit is made
-  again from main when it loses its race.
+  (cli/src/session/mod.rs `commit`).
 - **Risk:** two imports of one conversation at once keep the last one's
-  file, and its index entry may name the other's copy, so the next
-  import skips a newer copy once or writes one again. Nothing is lost.
-- **Delete when:** each batch's commit is made again from main as the
-  indexes' is (keeping the newer entry), or the archive moves to an app
-  whose mutation writes both.
+  file, which may be the older copy; the indexes describe whichever file
+  stands (each entry names its file's commit). Nothing is lost:
+  importing the newer copy again replaces it.
+- **Delete when:** each batch's commit compares and swaps each file it
+  replaces, made again from main when it loses (keeping the newer).
 
 ## The computer's view carries two fixed routes beside the list
 
@@ -1147,3 +1318,21 @@ unfinished design, not debt.
   the snapshot is in the format it wrote.
 - **Delete when:** no computer can be pinned to an image whose bridge
   predates the log.
+
+## A Telegram setup in a tab of its own offers no Vault bot
+
+- **Shortcut:** a Vault secret moves into a fragment only on its person's
+  word: from the platform's own pages or their key, never a fragment's
+  page (docs/secrets.md). The Telegram connector's setup page asks
+  Settings, which framed it, to move the bot it offered (`vault-move`,
+  frame-messages.js). Where that frame cannot sign in (Safari's cookie
+  rule), the page opens in a tab of its own, with no Settings to ask
+  (`noopener`), so it does not offer the Vault's bot there and asks for
+  a token instead (`templates/telegram/site/setup.js` `VAULT`).
+- **Risk:** a person whose browser cannot sign in the frame, with a bot
+  moved from finite.computer, pastes its token (from @BotFather) instead
+  of reusing the one in their Vault; the Vault keeps it until they remove
+  it. Nothing is lost or exposed.
+- **Delete when:** Settings itself offers the move where no frame can ask
+  (a Use it of its own in the setup dialog's note, or a move token a tab
+  carries), or every supported browser signs in the frame.

@@ -189,6 +189,9 @@ pub const NOTE_MAX_BYTES: usize = 4096;
 pub const MESSAGE_AGE_TOLD_MS: u64 = 5 * 60_000;
 /// That line, at most (its longest, a continuation's in days, is under 150).
 pub const AGE_NOTE_MAX_BYTES: usize = 256;
+/// The line telling an agent its computer's disk is filling (note.rs,
+/// `disk`), at most.
+pub const DISK_NOTE_MAX_BYTES: usize = 400;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;
@@ -198,10 +201,6 @@ pub const NOTE_REPLY_MAX_CHARS: usize = 200;
 pub const NOTE_STEPS_MAX: usize = 8;
 pub const NOTE_CARDS_MAX: usize = 3;
 pub const NOTE_REPLIES_MAX: usize = 2;
-/// A turn whose agent's memory of its chat is behind (a rollback of
-/// `/data`: note.rs, "forgotten") is told of the newest this many of its
-/// turns there that another life ran; the rest are counted.
-pub const NOTE_FORGOTTEN_MAX: usize = 4;
 /// A chat continued from its owner's Session Archive (docs/chat-records.md,
 /// "History"): its agent's first turn there is told what was said, at most
 /// this (the record's summary and newest messages, the oldest dropped first
@@ -209,6 +208,26 @@ pub const NOTE_FORGOTTEN_MAX: usize = 4;
 /// this many records (the shell posts it first).
 pub const HISTORY_NOTE_MAX_BYTES: usize = 24 * 1024;
 pub const HISTORY_SCAN_RECORDS: u32 = 8;
+/// A runtime that forgot a chat (a rollback or a loss of `/data`: note.rs,
+/// `recap`) is told the chat in the same bound as a continued one
+/// (`HISTORY_NOTE_MAX_BYTES`, the oldest dropped first past it): each
+/// message on a line of at most this, its sayer's name at most this many
+/// characters (a file's too).
+pub const RECAP_MESSAGE_MAX_BYTES: usize = HISTORY_NOTE_MAX_BYTES / 4;
+pub const RECAP_NAME_MAX_CHARS: usize = 60;
+/// Its read of the chat goes back in pages of this many records, at most
+/// this many: a chat's long messages fill a page of 100 past one answer
+/// (`ANSWER_MAX_BYTES`), and a page of these is one answer even when every
+/// record is a long reply, escaped twice over (or a record at the
+/// platform's own most, proto's `RECORD_BODY_MAX_BYTES`). The names of
+/// whoever else said them are read in this long, or told as `Someone`.
+pub const RECAP_PAGE_RECORDS: u32 = 16;
+pub const RECAP_SCAN_RECORDS: usize = 192;
+pub const NAMES_READ_MS_MAX: u64 = 1_500;
+/// The last of a note's time (`NOTE_READ_MS_MAX`) that the names never
+/// take: the recap is told with what it has (each name it lacks
+/// `Someone`), never dropped for a name.
+pub const RECAP_SPARE_MS: u64 = 1_000;
 /// The journal a note or a late card's answer reads, at most: pages of
 /// this many records, back from the turn's claim on `work` (to the agent's
 /// turn before it, or to the card) and back from the chat's tail (to that
@@ -313,6 +332,22 @@ pub const LIVE_PING_MS: u64 = 30_000;
 /// platform then counts it closed, and its computer would sleep under the
 /// turn that holds it.
 pub const KEEPALIVE_PING_MS: u64 = 15_000;
+/// Work left running (load.rs) holds the computer at most this long after
+/// its agents' work last did: what a forgotten loop costs, at most.
+pub const LEFT_RUNNING_HOLD_MS: u64 = 2 * 60 * 60 * 1000;
+/// A card only this life can take (a sign-in's code) holds the computer
+/// at most this long while open, or to its expiry if sooner: a person
+/// signs in within minutes.
+pub const COMPUTER_CARD_HOLD_MS: u64 = 10 * 60 * 1000;
+/// The counters are read every slice; the computer works while one of its
+/// last `LOAD_SLICES` was over a floor (a pause in the work holds on).
+pub const LOAD_SLICE_MS: u64 = 20_000;
+pub const LOAD_SLICES: usize = 6;
+/// The floors: CPU in thousandths of a core, network both ways. Measured
+/// in the Hermes image (#1349): idle at most 29 and 1,700 B/s; a busy loop
+/// about 1,000; a 200 KB/s download only 7–11 of CPU.
+pub const LOAD_CPU_FLOOR_PERMILLE: u64 = 50;
+pub const LOAD_NET_FLOOR_BYTES_PER_S: u64 = 50_000;
 
 /// A post the platform did not take is tried this many times, waiting a
 /// jittered backoff between (ids make every retry the same record).
@@ -328,6 +363,7 @@ pub const CATCHUP_PAGE_RECORDS: u32 = 1000;
 /// names are reused before they are read again (sooner when one of the
 /// computer's agents joins it).
 pub const VIEW_TTL_MS: u64 = 30_000;
+
 
 /// Joins of the computer's agents to fragments remembered at once, each for
 /// a view's life (`VIEW_TTL_MS`): past it they are forgotten, and a view
@@ -390,9 +426,13 @@ const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(CARD_READ_MS_MAX > HTTP_TIMEOUT_MS, "one hung call fits a card's read");
 const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
-const _: () = assert!(2 * NOTE_MAX_BYTES + 2 < MESSAGE_TEXT_MAX_BYTES, "a cut turn's note and a forgotten one's, together, are small beside it too");
+const _: () = assert!(DISK_NOTE_MAX_BYTES + AGE_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + 6 <= MESSAGE_TEXT_MAX_BYTES, "a turn's notes together (its disk, its age, a cut turn's or a card's, a chat's history or a recap) are told in no more than a message holds");
+const _: () = assert!(RECAP_MESSAGE_MAX_BYTES + 1024 < HISTORY_NOTE_MAX_BYTES, "a recap's newest line fits beside its head and where the rest is (under 1 KiB: note.rs, `recap`)");
+const _: () = assert!(RECAP_PAGE_RECORDS as usize * (2 * REPLY_TEXT_MAX_BYTES + 1024) < ANSWER_MAX_BYTES, "a page of the longest replies is one answer");
+const _: () = assert!(RECAP_PAGE_RECORDS <= NOTE_PAGE_RECORDS && RECAP_PAGE_RECORDS as usize <= RECAP_SCAN_RECORDS && RECAP_SCAN_RECORDS + NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX);
+const _: () = assert!(RECAP_SCAN_RECORDS.div_ceil(RECAP_PAGE_RECORDS as usize) + NOTE_SCAN_RECORDS_MAX / (NOTE_PAGE_RECORDS as usize) < HISTORY_PAGES_MAX, "a recap's reads (the chat, `work`, and the channel list's one page) are one budget");
+const _: () = assert!(NAMES_READ_MS_MAX < NOTE_READ_MS_MAX && RECAP_SPARE_MS < NOTE_READ_MS_MAX, "names are a note's detail");
 const _: () = assert!(HISTORY_NOTE_MAX_BYTES <= MESSAGE_TEXT_MAX_BYTES, "a chat's history is told in no more than a message holds");
-const _: () = assert!(NOTE_FORGOTTEN_MAX >= 1, "a forgotten turn is named");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(2 * NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX && 2 * NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 2 <= HISTORY_PAGES_MAX, "a read's bounds hold both scans");
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");

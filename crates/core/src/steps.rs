@@ -273,10 +273,37 @@ pub enum StepOutcome {
     Error(String),
 }
 
+/// Whether the Workflows binding's `get(id)` refused for an instance it
+/// has no record of (the cell's reconcile holds that run), by its Error's
+/// message: Cloudflare's `(instance.not_found) Instance not found`, local
+/// workerd's `WORKFLOW_ERROR: instance does not exist`. Any other refusal
+/// is the binding not answering, asked again later.
+pub fn no_such_instance(message: &str) -> bool {
+    message.contains("(instance.not_found)") || message.ends_with("instance does not exist")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_missing_workflow_instance_is_known_by_either_runtimes_words() {
+        // Cloudflare's, as its binding said it on preview's account
+        // (2026-11-22), and local workerd's
+        assert!(no_such_instance("(instance.not_found) Instance not found"));
+        assert!(no_such_instance("WORKFLOW_ERROR: instance does not exist"));
+        // the binding not answering, or another refusal: never a gone run
+        for other in [
+            "(instance.cannot_terminate) Cannot terminate instance since its on a finite state",
+            "Subrequest depth limit exceeded. This request looped back into the Workers runtime too many times. This can happen e.g. if you have a Worker or Durable Object that calls other Workers or objects recursively.",
+            "Network connection lost.",
+            "internal error",
+            "",
+        ] {
+            assert!(!no_such_instance(other), "{other}");
+        }
+    }
 
     fn step(kind: &str, args: Value) -> Result<Step, String> {
         Step::from_parts(kind, args)

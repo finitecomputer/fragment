@@ -534,7 +534,91 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     secret_hosts(s, api, &owner, &upstream)?;
     inbox_secret(s, api, &owner)?;
     inbox_hmac(s, api, &owner)?;
+    launched_across_lives(s, api, &owner)?;
+    queued_before_a_card(s, api, &owner)?;
     channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a run queued while the alarm's pass works starts before that
+/// pass's card shot (a browser's seconds), never after it (#1467's full
+/// e2e: a brain's run, queued as a pass began its shot, waited it out and
+/// started with a later run, which took its pages from it). The pass held
+/// where it chooses the shot (`hold-card`), the app deployed so its card
+/// is due, and a run queued, then let go: the run starts before the card
+/// is made. The hold goes on before the deploy wants the card, so no pass
+/// shoots it unheld, and the fragment's first card is the one the held
+/// pass chose about. Set after the deploy, the hold raced the deploy's own
+/// pass (armed 50 ms on): when that pass came first, it shot the card
+/// unheld, and the test took that card for the held pass's.
+fn queued_before_a_card(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    const LABEL: &str = "a run queued while the alarm's pass works starts before that pass's card shot, never after it";
+    if !s.shoots_cards() {
+        s.skip_card(LABEL);
+        return Ok(());
+    }
+    let wait = Duration::from_secs(30);
+    let name = s.named(api, owner, "cardwait")?;
+    let c = s.create(api, owner, &name)?;
+    let hold = |on: Option<bool>| -> Value {
+        let mut extra = json!({});
+        if let Some(on) = on {
+            extra["on"] = json!(on);
+        }
+        super::ledger::lever(api, &name, "hold-card", extra).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    let first_card = || events(api, owner, &name).iter().position(|e| e["kind"] == "card.made");
+    hold(Some(true));
+    ship(s, &c, JOBS_APP, JOBS_JSON);
+    let held = s.eventually(wait, || hold(None)["waiting"] == true);
+    let queued = api.op(owner, &name, "count_up", "card-wait", json!({ "n": 1 }))?;
+    let id = queued.body["result"]["run"].as_i64().unwrap_or(0);
+    hold(Some(false));
+    let run = settle(api, owner, &name, id, &["succeeded", "held", "failed", "blocked"], Duration::from_secs(60));
+    let shot = s.eventually(Duration::from_secs(60), || first_card().is_some());
+    let ev = events(api, owner, &name);
+    let started = ev.iter().position(|e| e["kind"] == "run.started" && e["data"]["run"] == id);
+    let card = ev.iter().position(|e| e["kind"] == "card.made");
+    s.ok(
+        LABEL,
+        held && shot && run["status"] == "succeeded" && started.is_some() && card.is_some() && started < card,
+        json!({ "held": held, "shot": shot, "run": run["status"], "startedAt": started, "cardAt": card }),
+    );
+    Ok(())
+}
+
+/// Goal: a launch answers only into the life it was asked for (the review
+/// of #1467). The alarm starts queued runs in one `createBatch`, and
+/// while it waits for the answer the fragment may be deleted and its name
+/// made again: the new life's first run has the same id and attempt as the
+/// old one's. Its batch held as it answers (`hold-launch`), the old life
+/// deleted, the name made again and a run queued there, then let go: that
+/// run starts and succeeds, never marked started by the old batch.
+fn launched_across_lives(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let (name, _) = jobs_fragment(s, api, owner, "relaunched", |_| {})?;
+    let hold = |on: Option<bool>| -> Value {
+        let mut extra = json!({});
+        if let Some(on) = on {
+            extra["on"] = json!(on);
+        }
+        super::ledger::lever(api, &name, "hold-launch", extra).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    hold(Some(true));
+    let old = api.op(owner, &name, "count_up", "relaunched-old", json!({ "n": 1 }))?;
+    let held = s.eventually(wait, || hold(None)["waiting"] == true);
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, JOBS_APP, JOBS_JSON);
+    let new = api.op(owner, &name, "count_up", "relaunched-new", json!({ "n": 1 }))?;
+    hold(Some(false));
+    let (old_id, new_id) = (old.body["result"]["run"].as_i64(), new.body["result"]["run"].as_i64());
+    let run = settle(api, owner, &name, new_id.unwrap_or(0), &["succeeded", "held", "failed", "blocked"], Duration::from_secs(90));
+    s.ok(
+        "a fragment deleted and made again while its alarm's launch waits for its batch's answer: the new life's run, its id the old one's, starts and succeeds, never marked started by the old batch",
+        held && deleted.status == 200 && old_id.is_some() && old_id == new_id && run["status"] == "succeeded",
+        json!({ "held": held, "deleted": deleted.status, "old": old.body, "new": new.body, "run": run }),
+    );
+    Ok(())
 }
 
 /// Goal: an inbox whose code names a secret header (a webhook's own, as
@@ -761,6 +845,11 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
             && as_editor.body.get("withheld").is_none(),
         &as_editor,
     );
+    s.ok(
+        "the record a run is handed is as it was before records said who wrote them: no `author` (FIN-615), so an app's input schema reads it as ever",
+        as_editor.body["input"]["record"].is_object() && as_editor.body["input"]["record"].get("author").is_none(),
+        &as_editor,
+    );
     let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
     if let Some(channels) = without["channels"].as_object_mut() {
         channels.remove("alarms");
@@ -778,9 +867,10 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// schedules its editors add at run time, each appending a record to one of
 /// its channels as the fragment itself, where its channel trigger runs a
 /// job from it. Viewers list them and add none; each bound refused with a
-/// typed error; the same one added again is that one; an install keeps
-/// them; due (the `cron-now` lever), one fires once; paused it fires
-/// nothing, resumed it fires again; removed, it fires no more; and a
+/// typed error (a record that relays someone among them); the same one
+/// added again is that one; an install keeps them; due (the `cron-now`
+/// lever), one fires once; paused it fires nothing, resumed it fires
+/// again; removed, it fires no more; and a
 /// fragment keeps at most 32.
 /// An installed trigger: each install of new code runs its operation once,
 /// as the fragment; asked again, nothing more; cut short by an outage, once
@@ -1033,6 +1123,8 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         json!([seen.body, added.body, stranger_seen.body]),
     );
     let big = json!({ "t": "w".repeat(limits::RECORD_SCHEDULE_BODY_MAX_BYTES) });
+    // the fragment's own key is no member, so a computer's bridge would take it as an agent's owner's
+    let relaying = json!({ "text": "water the plants", "relayed": { "via": "simplex", "for": editor_id, "agent": name } });
     let refusals = [
         ("not five fields", "0 * * *", "pings", water.clone(), 400, "five fields"),
         ("every 5 minutes", "*/5 * * * *", "pings", water.clone(), 400, "at most every 15 minutes"),
@@ -1042,6 +1134,7 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         ("a channel that takes no posts", "0 * * * *", "feed", water.clone(), 400, "takes no posts"),
         ("a channel only one kind of member posts on", "0 * * * *", "work", water.clone(), 400, "only its members of one kind"),
         ("a channel only its owner posts on", "0 * * * *", "desk", water.clone(), 403, "needs the owner role"),
+        ("a record that relays someone, as a post would be", "0 0 1 1 *", "pings", relaying, 403, "relays no one"),
     ];
     let (mut each, mut said) = (true, vec![]);
     for (why, cron, channel, record, status, says) in refusals {
@@ -1345,6 +1438,33 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     );
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
     s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
+
+    // a connector's own code is no loop: its inbox's deliveries past the
+    // hourly count each start a run, and its relay is never paused (the
+    // SimpleX door spike: a busy hour paused `intake`, and the connector
+    // said nothing until its owner unpaused it). Telegram's, its updates
+    // none of a paired account's, so each run only looks and ends.
+    let telegram = s.named(api, &owner, "tgpace")?;
+    let made = api.create_with(&owner, json!({ "name": telegram, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "making a Telegram connector: {made}");
+    s.owned(&made.body, &owner);
+    const HOOK: &str = "e2e0c0ffee5ec4e7a9f0b1c2d3e4f5061728394a5b6c7d8e9f001122334455";
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{telegram}/secrets/TELEGRAM_WEBHOOK_SECRET"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
+    anyhow::ensure!(r.status == 200, "its webhook's secret: {r}");
+    let mut taken = 0;
+    for update in 0..=limits::TRIGGERED_RUNS_PER_HOUR {
+        let body = json!({ "update_id": update }).to_string().into_bytes();
+        let extra = vec![("x-telegram-bot-api-secret-token", HOOK.to_string())];
+        let r = api.call(Call { method: "POST", url: format!("{}/api/f/{telegram}/inbox", api.base), body: Some(body), content_type: Some("application/json"), extra, ..Call::default() })?;
+        taken += usize::from(r.status == 200);
+    }
+    let intakes = runs(api, &owner, &telegram, "&op=intake");
+    let r = api.signed(&owner, "GET", &format!("/api/f/{telegram}/runs?limit=1"), None)?;
+    s.ok(
+        "a connector's triggers past the hourly count each start a run, and its relay is never paused",
+        taken as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && intakes.len() as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && intakes.iter().all(|r| r["status"] != "blocked") && r.body["paused"] == json!([]),
+        json!({ "taken": taken, "runs": intakes.len(), "blocked": intakes.iter().filter(|r| r["status"] == "blocked").count(), "paused": r.body["paused"] }),
+    );
 
     // a live commit with no app says nothing about the next code: the
     // pause outlasts it, and the next good deploy comes back paused

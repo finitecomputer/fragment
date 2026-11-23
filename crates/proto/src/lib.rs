@@ -51,12 +51,11 @@ pub mod limits {
     /// paragraph, never a manual (`MANIFEST_MAX_BYTES` bounds them all
     /// together).
     pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
-    /// A fragment's title (`fragment.json`'s `meta.title`: an agent's
-    /// name), in characters: in its manifest, given at its create, or
-    /// written by `fragment agent --name`.
+    /// A fragment's title (an agent's name), in characters: given at its
+    /// create, or set through its face (`PUT /api/f/{name}/face`).
     pub const TITLE_MAX_CHARS: usize = 120;
-    /// An agent's role (its `fragment.json`'s `meta.role`: "chief of
-    /// staff"), in characters: a tag beside its name, so a few words.
+    /// An agent's role ("chief of staff"), in characters, set through its
+    /// face: a tag beside its name, so a few words.
     pub const ROLE_MAX_CHARS: usize = 48;
     /// CPU per call into author code: the runtime's guard against a
     /// runaway call, each call's own (measured on a preview, 2026-11-01:
@@ -789,9 +788,9 @@ pub enum Reason {
     /// takes no secret and no door: it is made members only first (FIN-352;
     /// `Sharing::beyond`).
     UnshareFirst,
-    /// A shared key's calls are paused: its charges this last hour reached
-    /// the cap its person holds them to (FIN-448, `fragment_core::key_hour`).
-    KeyPaused,
+    /// A trial is for a seat of one: while the org's subscription is a
+    /// trial, it takes no further paid seat (offered, given or accepted).
+    TrialSeatOfOne,
 }
 
 impl Reason {
@@ -823,7 +822,7 @@ impl Reason {
         Reason::LastPaidSeat,
         Reason::PrivateWhileReaching,
         Reason::UnshareFirst,
-        Reason::KeyPaused,
+        Reason::TrialSeatOfOne,
     ];
 
     /// Its name on the wire.
@@ -856,7 +855,7 @@ impl Reason {
             Reason::LastPaidSeat => "last_paid_seat",
             Reason::PrivateWhileReaching => "private_while_reaching",
             Reason::UnshareFirst => "unshare_first",
-            Reason::KeyPaused => "key_paused",
+            Reason::TrialSeatOfOne => "trial_seat_of_one",
         }
     }
 
@@ -1025,7 +1024,7 @@ impl Visibility {
     /// keys: FIN-352); anything else anyone with its share link (decision 48).
     pub fn made_from(template: Option<&str>) -> Visibility {
         match template {
-            Some("chat" | "agent" | "sessions" | "telegram") => Visibility::Members,
+            Some("chat" | "agent" | "sessions" | "telegram" | "simplex") => Visibility::Members,
             _ => Visibility::Link,
         }
     }
@@ -1054,9 +1053,8 @@ pub struct CreateFragment {
     /// first commit is a `fragment.json` that names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// With `template`, the fragment's title: its first `fragment.json`'s
-    /// `meta.title`, over the template's (at most
-    /// `limits::TITLE_MAX_CHARS`).
+    /// With `template`, the fragment's title, over the template's (at most
+    /// `limits::TITLE_MAX_CHARS`): its face's from its making.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// One of its maker's own agents (its identity), an editor from the
@@ -1139,8 +1137,8 @@ pub struct Urls {
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
-    /// What it is, and its title, as its live `fragment.json` last said
-    /// (an app with no title until it has).
+    /// What it is, as its live `fragment.json` last said (an app until it
+    /// has), and its title, its face's (`PUT /api/f/{name}/face`).
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1239,23 +1237,23 @@ pub enum PageErrorKind {
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
-    /// What it is, and its title, as its live `fragment.json` last said
-    /// (an app with no title until it has).
+    /// What it is, as its live `fragment.json` last said (an app until it
+    /// has), and its title, its face's (`PUT /api/f/{name}/face`).
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// Its picture, as the address on the platform that serves it: an
-    /// agent fragment's `avatar.png` at live (its agent's identity's
+    /// agent fragment's `avatar.png` at main (its agent's identity's
     /// `/api/identities/<npub>/picture?v=…`), any other's icon
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub picture: Option<String>,
-    /// An agent fragment's role (its live `fragment.json`'s `meta.role`,
-    /// trimmed; none when it says nothing), as its last install said: the
-    /// tag the shell shows beside its name. Never any other fragment's.
+    /// An agent fragment's role, as its face says it (trimmed; none when
+    /// it says nothing): the tag the shell shows beside its name. Never
+    /// any other fragment's.
     #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
@@ -1318,6 +1316,26 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub listed: Vec<ListedRecord>,
+}
+
+/// `PUT /api/f/{name}/face` (editors and up): its new title, an agent's
+/// new role (`""` takes it away), or both (docs/api.md, "An agent's
+/// name and picture"); with `was`, only while its title is that
+/// (else 409: a chat titled from its first message keeps a rename made
+/// meanwhile). Answered with its face as its lists show it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaceChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+    /// Its picture's address, in an answer (a change never names one: an
+    /// agent's picture is its `avatar.png`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
@@ -1587,6 +1605,14 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub email: Option<String>,
+    /// On a connector bound as an agent's door, that agent's row alone: the
+    /// door it is (`telegram`), while it is open (docs/api.md, "An agent's
+    /// doors"). Its records relaying that agent's owner come through it, so
+    /// the agent's bridge and its pages take them as its owner's words
+    /// (docs/chat-records.md). Add-only: absent from an older platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub door: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -2072,6 +2098,65 @@ pub fn valid_listed_field(field: &str) -> bool {
     !b.is_empty() && b.len() <= 32 && b[0].is_ascii_alphabetic() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_') && field != "kind"
 }
 
+/// Who wrote a record, as the platform stamps it as it appends one, never
+/// as its caller says (FIN-615): its principal is whom it was written as,
+/// and this is what wrote the words. Only a person's or an agent's own post
+/// is its principal's own words.
+///
+/// Open (`x-fragment-open`, docs/wire): an author this build does not know
+/// reads as `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
+#[serde(rename_all = "snake_case")]
+pub enum Author {
+    /// A person's post, signed or in their session (an anonymous visitor's
+    /// too).
+    Person,
+    /// An agent's post, as itself or for its owner.
+    Agent,
+    /// App code: a mutation's effect or a job's step, in a fragment that
+    /// runs its author's own code. It speaks for no one: its principal is
+    /// whoever called the code, not who chose the words.
+    Code,
+    /// The platform: its own records (`events`, `ops`, a schedule firing),
+    /// and what a release's code writes (a blessed template, unforked).
+    Platform,
+    /// A door: a relay its owner opened (a connector's release code, a
+    /// door's signed post), or a delivery to the fragment's inbox.
+    Door,
+    /// An author this build does not know, which a newer platform names:
+    /// read as this so that one new author breaks no shipped CLI or pinned
+    /// image. Never written. Last: serde's `other` must be.
+    #[serde(other)]
+    Other,
+}
+
+impl Author {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Author::Person => "person",
+            Author::Agent => "agent",
+            Author::Code => "code",
+            Author::Platform => "platform",
+            Author::Door => "door",
+            Author::Other => "other",
+        }
+    }
+
+    /// An author the platform writes, by its stored name: never `Other`.
+    pub fn parse(s: &str) -> Option<Author> {
+        match s {
+            "person" => Some(Author::Person),
+            "agent" => Some(Author::Agent),
+            "code" => Some(Author::Code),
+            "platform" => Some(Author::Platform),
+            "door" => Some(Author::Door),
+            _ => None,
+        }
+    }
+}
+
 /// One record in a channel. Records are appended by the platform (`events`,
 /// `ops`, and posts to a channel its fragment.json declares postable) or by
 /// mutations' effects (app channels), never by a client's own hand.
@@ -2083,6 +2168,11 @@ pub struct ChannelRecord {
     pub at: i64,
     /// npub, `anon:…`, or `platform`
     pub principal: String,
+    /// Who wrote it, as the platform stamped it as it appended it. Absent
+    /// on a record stored before the stamp, which reads as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub author: Option<Author>,
     pub kind: String,
     /// The JSON text the cell stored, passed through as it is: the cell
     /// neither parses a body it just wrote nor one it reads back.
@@ -2710,11 +2800,35 @@ mod tests {
             seq: 7,
             at: 1,
             principal: "platform".into(),
+            author: None,
             kind: "said".into(),
             body: RawValue::from_string(stored.into()).unwrap(),
         };
         let text = serde_json::to_string(&record).unwrap();
         assert_eq!(text, format!(r#"{{"channel":"room","seq":7,"at":1,"principal":"platform","kind":"said","body":{stored}}}"#));
+    }
+
+    /// Goal: who wrote a record says itself on the wire, and an older or a
+    /// newer reader is untouched (FIN-615). Method: a stamped record writes
+    /// its author; one stored before the stamp writes none and reads back
+    /// with none; one a newer platform names reads as `Other`; and the
+    /// stored names are the wire's, `Other` never one of them.
+    #[test]
+    fn a_record_says_who_wrote_it() {
+        let record = |author: &str| format!(r#"{{"channel":"chat","seq":1,"at":1,"principal":"npub1ana",{author}"kind":"message","body":{{}}}}"#);
+        let code: ChannelRecord = serde_json::from_str(&record(r#""author":"code","#)).unwrap();
+        assert_eq!(code.author, Some(Author::Code));
+        assert_eq!(serde_json::to_string(&code).unwrap(), r#"{"channel":"chat","seq":1,"at":1,"principal":"npub1ana","author":"code","kind":"message","body":{}}"#);
+        let before: ChannelRecord = serde_json::from_str(&record("")).unwrap();
+        assert_eq!(before.author, None, "a record stored before the stamp");
+        assert_eq!(serde_json::to_string(&before).unwrap(), record(""), "reads and writes as it did");
+        let newer: ChannelRecord = serde_json::from_str(&record(r#""author":"mandate","#)).unwrap();
+        assert_eq!(newer.author, Some(Author::Other), "an author this build does not know");
+        for author in [Author::Person, Author::Agent, Author::Code, Author::Platform, Author::Door] {
+            assert_eq!(Author::parse(author.as_str()), Some(author));
+            assert_eq!(serde_json::to_string(&author).unwrap(), format!("\"{}\"", author.as_str()), "its stored name is its wire name");
+        }
+        assert_eq!(Author::parse(Author::Other.as_str()), None, "`other` is never stored");
     }
 
     #[test]
@@ -2871,7 +2985,7 @@ mod tests {
         }
         assert!(!old.reach && value(&Sharing { reach: false, ..private }).get("reach").is_none());
         // a chat and an agent are made members only; the rest by link
-        assert_eq!([Some("chat"), Some("agent"), Some("sessions"), Some("telegram")].map(Visibility::made_from), [Visibility::Members; 4]);
+        assert_eq!([Some("chat"), Some("agent"), Some("sessions"), Some("telegram"), Some("simplex")].map(Visibility::made_from), [Visibility::Members; 5]);
         assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
         // a share is the person's and their agents' (Paul, 2026-10-13): no
         // field says otherwise, and one that tries is refused
@@ -3002,7 +3116,7 @@ mod tests {
             (LastPaidSeat, "last_paid_seat"),
             (PrivateWhileReaching, "private_while_reaching"),
             (UnshareFirst, "unshare_first"),
-            (KeyPaused, "key_paused"),
+            (TrialSeatOfOne, "trial_seat_of_one"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
         for (reason, wire) in all {

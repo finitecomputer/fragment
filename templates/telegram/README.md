@@ -39,14 +39,18 @@ where that frame can't sign in, in a tab.
   agent's bot, moved there on its owner's Yes): when the Vault holds a
   secret bound to this agent toward `api.telegram.org` alone, Settings
   names it to the setup page (`setup.html?vault=<name>`), which offers
-  it before the paste: Use it moves it here as `TELEGRAM_BOT_TOKEN`
-  (`{fromVault}`: gone from the Vault, kept here) and `connect`s, the
+  it before the paste: Use it asks Settings, which framed it, to move it
+  here as `TELEGRAM_BOT_TOKEN` (`vault-move`: a page may not move a Vault
+  secret itself, docs/secrets.md; gone from the Vault, kept here) and
+  `connect`s, the
   webhook's secret written first. It says so first (`hold`: `state`'s
   `held`), so a try cut short anywhere (the move's answer lost, the
   connect not sent) is offered again, the dialog reopened too, and goes
   on from the token kept here (a Vault that no longer holds it, 404, is
   one moved already). So the same bot talks in the same Telegram chat;
   pairing is still its one Start tap. Use another bot asks for a token.
+  In a tab of its own (a frame that cannot sign in) there is no Settings
+  to ask, so it asks for a token (docs/technical-debt-ledger.md).
 - **Reconnecting** (the bot stopped, or another bot): Settings, Set up,
   New token, and the token pasted again. The webhook's secret is kept, so
   Telegram's deliveries still come in while a token it refused is put

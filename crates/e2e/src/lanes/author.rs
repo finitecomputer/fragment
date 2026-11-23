@@ -745,18 +745,34 @@ fn apps_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys) -> Re
     s.cli_json(api, home, &["create", &name, "--template", "blank", "--visibility", "public", "--json"])?;
     let before = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
     s.ok("CLI template creation gives the app its own display name instead of Blank", before.body["meta"]["title"].as_str().is_some_and(|t| !t.is_empty() && t != "Blank"), &before.body);
+    // work waiting on main, undeployed; then a rename (FIN-541)
+    let waiting = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "message": "not yet", "files": [{ "path": "site/waiting.txt", "text": "not deployed\n" }] })))?;
+    let pins = api.status(keys, &name)?.body["pins"].clone();
     let renamed = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
-    let after = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    let status = api.status(keys, &name)?;
+    let served = api.page(&name, "waiting.txt", None)?;
+    s.ok(
+        "CLI rename of an app with undeployed work on main deploys none of it (FIN-541): its pins stay, its page serves nothing of main's, and its name changes",
+        waiting.status == 200 && status.body["pins"] == pins && served.status == 404 && status.body["title"] == "Meals this week",
+        json!({ "pins": [pins, status.body["pins"]], "served": served.status, "title": status.body["title"] }),
+    );
+    // its fragment.json as main holds it (`GET manifest` says its face's title)
+    let file = || api.signed(keys, "GET", &format!("/api/f/{name}/file?path=fragment.json"), None).map(|r| r.text);
+    let after = file()?;
     let again = s.cli_json(api, home, &["rename", &name, "Meals this week", "--json"])?;
-    s.ok("CLI rename deploys the name, preserves the other metadata and is safe to repeat", after.body["meta"]["title"] == "Meals this week" && after.body["meta"]["description"] == before.body["meta"]["description"] && renamed["title"] == again["title"], &after.body);
+    s.ok(
+        "CLI rename commits nothing (its fragment.json as it was), and is safe to repeat",
+        !after.is_empty() && file()? == after && renamed["title"] == again["title"] && api.status(keys, &name)?.body["pins"] == pins,
+        json!({ "manifest": after, "renamed": renamed, "again": again }),
+    );
     let mut titles = vec![];
     for title in ["Meal archive", "Meals this week", "Meals this week"] {
         s.cli_json(api, home, &["rename", &name, title, "--json"])?;
-        let manifest = api.signed(keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
         let status = api.status(keys, &name)?;
-        titles.push(json!({ "wanted": title, "main": manifest.body["meta"]["title"], "live": status.body["title"] }));
+        let listed = super::faces::row(api, keys, &name);
+        titles.push(json!({ "wanted": title, "status": status.body["title"], "list": listed["title"] }));
     }
-    s.ok("CLI rename A to B to A and an immediate repeat each change main and the live display name", titles.iter().all(|r| r["wanted"] == r["main"] && r["wanted"] == r["live"]), json!(titles));
+    s.ok("CLI rename A to B to A and an immediate repeat each change the name its status and list show", titles.iter().all(|r| r["wanted"] == r["status"] && r["wanted"] == r["list"]), json!(titles));
     if s.shoots_cards() {
         let receipt = s.cli_json(api, home, &["preview", &name, "--json"])?;
         s.ok("CLI preview asks for a screenshot and returns its completion receipt", receipt["since"].is_i64() && receipt["live"].is_string(), &receipt);
@@ -855,14 +871,14 @@ fn archive_rm_cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys)
     let (right_exit, right) = at_terminal(&format!("{asked}\n"))?;
     let after = api.status(keys, &asked)?;
     s.ok(
-        "fragment rm at a terminal asks for its name typed back: anything else deletes nothing (exit 2); its name deletes it, saying the repo's history stays",
+        "fragment rm at a terminal asks for its name typed back: anything else deletes nothing (exit 2); its name deletes it, saying its files go",
         wrong_exit == Some(2)
             && wrong.contains(&format!("Type {asked} to delete it"))
             && wrong.contains("nothing deleted")
             && still.status == 200
             && right_exit == Some(0)
             && right.contains(&format!("deleted {asked} for everyone in it"))
-            && right.contains("repo's history stays")
+            && right.contains("data and files go")
             && after.status == 404,
         json!({ "wrong": [wrong_exit, wrong, still.status], "right": [right_exit, right, after.status] }),
     );
@@ -1024,32 +1040,34 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
         json!({ "mcp": wrote, "room": said.body }),
     );
-    // a quote of the book's parts (FIN-443 and FIN-445), through the CLI:
-    // each priced as the ledger charges its row, a part counted by its
-    // units, none said, said so; the lines a person reads printed here
-    let asked = ["fal:image", "1x", "1048576px", "xai", "1", "xai:image", "2x", "google-places:photo", "firecrawl:credit", "5credits", "elevenlabs:speech", "200chars", "fal:image"];
+    // a quote of the vendors' units (FIN-616), through the CLI: each priced
+    // as the ledger charges its row, a unit its vendor counts, none said,
+    // said so; the lines a person reads printed here
+    let asked = ["fal:flux-2-klein-9b", "1x", "2units", "xai:tick", "1234500ticks", "perplexity:call", "2x", "firecrawl:credit", "5credits", "elevenlabs:character", "200chars", "fal:flux-2-klein-9b"];
     let said = s.cli(api, &home, &[&["quote"][..], &asked].concat());
     let lines = String::from_utf8_lossy(&said.stdout).into_owned();
     println!("      (fragment quote {}:\n{})", asked.join(" "), lines.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
     let quoted = s.cli_json(api, &home, &[&["quote"][..], &asked, &["--json"]].concat())?;
     let charge = |key: &str, units: u64| {
-        let (micros, per) = fragment_core::price::default_key_price(key).expect("the book prices each part");
+        let (vendor, unit) = key.split_once(':').expect("a vendor's unit");
+        let c = fragment_core::catalog::default_charges(vendor).into_iter().find(|c| c.unit == unit).expect("the book prices each unit");
+        let (micros, per) = (c.price.micros, c.price.per);
         let book = fragment_core::price::PriceBook { keys: vec![fragment_core::price::KeyPrice { key: key.into(), micros, per }], ..fragment_core::price::PriceBook::defaults() };
-        book.price(&fragment_core::price::Usage::Key { key: key.into(), units }).expect("a part's row is priced").charge
+        book.price(&fragment_core::price::Usage::Key { key: key.into(), units }).expect("a unit's row is priced").charge
     };
-    let expect = [("fal:image", 1_048_576, 1), ("xai", 1, 1), ("xai:image", 1, 2), ("google-places:photo", 1, 1), ("firecrawl:credit", 5, 1), ("elevenlabs:speech", 200, 1)];
+    let expect = [("fal:flux-2-klein-9b", 2, 1), ("xai:tick", 1_234_500, 1), ("perplexity:call", 1, 2), ("firecrawl:credit", 5, 1), ("elevenlabs:character", 200, 1)];
     let items = quoted["items"].as_array().cloned().unwrap_or_default();
     let priced = expect.iter().zip(&items).all(|((key, units, calls), q)| q["pricedAs"] == *key && q["calls"] == *calls && q["eachMicros"].as_i64() == Some(charge(key, *units)) && q["chargeMicros"].as_i64() == Some(charge(key, *units) * *calls));
     let total: i64 = expect.iter().map(|(key, units, calls)| charge(key, *units) * calls).sum();
     s.ok(
-        "fragment quote prices each of the book's parts as the ledger charges its row: fal's image by its pixels, xAI's X search and its image a call, a Places photo, Firecrawl's credits, speech by its characters; a part counted by its units, none said, is said so",
+        "fragment quote prices each vendor's unit as the ledger charges its row: Klein's units, xAI's ticks, Perplexity's searches a call, Firecrawl's credits, speech by its characters; a unit its vendor counts, none said, is said so",
         said.status.success()
-            && items.len() == 7
+            && items.len() == 6
             && priced
-            && items[6] == json!({ "pricedAs": "fal:image", "calls": 1, "unknown": "no_units" })
+            && items[5] == json!({ "pricedAs": "fal:flux-2-klein-9b", "calls": 1, "unknown": "no_units" })
             && quoted["totalMicros"].as_i64() == Some(total)
             && lines.starts_with(&format!("about {} for what is priced; you ", fragment_core::price::dollars(total)))
-            && lines.contains("  fal:image: say each call's units")
+            && lines.contains("  fal:flux-2-klein-9b: say each call's units")
             && lines.lines().next().is_some_and(|l| l.ends_with(" left this month") && l.rsplit_once('.').is_some_and(|(_, cents)| cents.len() == 2 + " left this month".len())),
         json!({ "said": lines, "quoted": quoted }),
     );
@@ -1223,7 +1241,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli_json(api, &home, &["members", "add", &app, &agent, "--role", "editor", "--json"])?;
     let after = invite(&chat);
     let in_app = invite(&app);
-    let warning = fragment_core::access::TRUST_WARNING;
+    let warning = fragment_core::permit::TRUST_WARNING;
     s.ok(
         "fragment members add <email> on a chat its owner's agent is in says people in it can talk to their agent; on that chat before the agent is in, and on an app it is in, it does not",
         before.starts_with("invited ")

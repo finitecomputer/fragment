@@ -751,6 +751,34 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Goal (FIN-401): a watcher's pass decides its refusal from the files
+    /// it sends, so a browser profile that comes into the folder while the
+    /// pass reads it is refused, and nothing is sent. Method: as
+    /// `a_sync_refuses_a_profile_that_comes_while_it_reads`, through `serve`:
+    /// a watch's flake (master, 2026-11-21) sent `Cookies` when the
+    /// profile's folder came before it, between the guard and the scan.
+    #[cfg(unix)]
+    #[test]
+    fn a_watchers_pass_refuses_a_profile_that_comes_while_it_reads() {
+        use crate::sync::tests::{while_a_pass_reads, PROFILE_CHANGES};
+        for (tag, change) in PROFILE_CHANGES {
+            let mock = crate::mockcs::start();
+            mock.seed_repo("t--k3x9", &[]);
+            let c = Client::new(&mock.url, auth::fixed(7));
+            let dir = folder_with_ignored_profile(&format!("comes-{tag}"));
+            let o = opts();
+            let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+            assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.pushed == ["note.md"]), "{tag}: an ignored profile is not sent");
+            let packs = mock.commit_pack_count();
+            let held = while_a_pass_reads(&dir, change, || watcher.serve(LOCAL, true));
+            assert!(matches!(held, Err(SyncError::Refused(sync::DirRefused::BrowserProfile { .. }))), "{tag}: {:?}", held.err());
+            assert_eq!(mock.commit_pack_count(), packs, "{tag}: a refused pass sends nothing");
+            assert_eq!(mock.file_at("t--k3x9", "main", "chrome/Default/Cookies"), None, "{tag}");
+            assert_eq!(mock.file_at("t--k3x9", "main", "browser/Default/Cookies"), None, "{tag}");
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
     /// Runs `fragment sync --watch` over `dir` until its first pass sent
     /// `note.md`, makes `change`, and returns how the watch ended.
     fn watch_through(tag: &str, change: impl FnOnce(&Path)) -> (anyhow::Error, crate::mockcs::MockServer) {

@@ -358,30 +358,6 @@ pub struct Providers {
     pub providers: Vec<ProviderView>,
 }
 
-/// One agent's use of one provider in a month: its calls the provider
-/// answered, and what they were charged (an operator key's; zero for a
-/// connection or an own key, which are counted, never charged).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderUse {
-    pub provider: String,
-    /// The agent fragment.
-    pub agent: String,
-    pub calls: u64,
-    pub micros: i64,
-}
-
-/// `GET /api/computers/{id}/uses?month=YYYY-MM`: a month's uses of the
-/// deployment's providers through the computer's swap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComputerUses {
-    pub computer: String,
-    /// `YYYY-MM`, UTC.
-    pub month: String,
-    pub uses: Vec<ProviderUse>,
-}
-
 /// `PUT /api/computers/{id}/agents/{fragment}/connections`: the providers
 /// an agent may use, all of them named at once, or `null` for every one
 /// its owner has (the default again). The field is named even when it is
@@ -488,6 +464,101 @@ pub struct ComputerView {
     /// 443, for images that read only it. The guest's view alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_targets: Option<Vec<RelayTarget>>,
+    /// Its disk as the platform last read it, and the room it has left
+    /// (docs/computers.md, "Room to restore"); absent before its first read.
+    /// Its owner's view and its guest's alike: its agents make room when it
+    /// is filling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskRoom>,
+    /// What takes its disk, as the platform read it after its newest awake
+    /// save (docs/computers.md, "Room to restore"): its biggest folders
+    /// and files. Its owner's view only; absent before the first read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<ComputerSizes>,
+    /// Whether its update waits for room (docs/computers.md, "An image's
+    /// share of the disk"): its save may not restore beside a newer image,
+    /// or its disk is told filling. Its owner makes room first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub room_first: bool,
+}
+
+/// What takes a computer's disk (docs/computers.md, "Room to
+/// restore"): all of `/data` (`total`, allocated bytes; absent in one read
+/// before it was kept), its biggest folders to a few levels below it, its
+/// caches too, and its biggest files, each the biggest first, their paths
+/// below `/data`, read after a save at `at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSizes {
+    pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    pub folders: Vec<SizeEntry>,
+    pub files: Vec<SizeEntry>,
+    /// What its folders hold, by kind, the most first
+    /// (`fragment_core::computer::storage_kinds`): its owner's Storage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<KindSize>,
+}
+
+/// One kind of what takes a computer's disk, and the bytes it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindSize {
+    pub kind: StorageKind,
+    pub bytes: u64,
+}
+
+/// What a folder of a computer's `/data` holds, in plain words: its work's
+/// projects, downloads, browser data and caches, and its agents' own state
+/// (the rest of `/data`: docs/computers.md, "Data and the restore gate").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageKind {
+    Projects,
+    Downloads,
+    Browser,
+    Agents,
+    Caches,
+}
+
+/// `POST /api/computers/{id}/files/delete`: the file its owner deletes,
+/// named by its path below `/data` as `ComputerSizes` names it (`work/…`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileAsk {
+    pub path: String,
+}
+
+/// One folder or file of `ComputerSizes`: its path below `/data` and the
+/// bytes it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizeEntry {
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// A computer's disk as the platform last read it (`df` of its container,
+/// and `du` of its `/data` after an awake save), and the room it has left
+/// (docs/computers.md, "Room to restore"), in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskRoom {
+    /// Its size, and what was free.
+    pub total: u64,
+    pub free: u64,
+    /// What a restore of its `/data` writes, as last read after a save;
+    /// absent before the first such read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<u64>,
+    /// What it can still take: the least of what is free now and what a
+    /// restore of its `/data` would leave beside the largest image, each
+    /// less the restore's own floor. At 0 its save may no longer restore.
+    pub room: u64,
+    /// Its owner and its agents are told it is filling (`disk_filling`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filling: bool,
+    /// When it was read.
+    pub at: i64,
 }
 
 /// One endpoint a computer's relay carries: exactly this DNS name and port
@@ -524,6 +595,12 @@ pub struct ComputerSave {
     /// no wake restores it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unusable: bool,
+    /// When an operator set it aside, choosing an older save for its next
+    /// start (docs/computers.md, "Saves and what a wake restores"): kept
+    /// for a while, and its owner's export reads it, but no wake restores
+    /// it. None for every other save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_aside: Option<i64>,
 }
 
 /// Where a start's `/data` came from.
@@ -645,31 +722,43 @@ pub enum ComputerNotice {
         /// When the start that went back came up (none while `pending`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<i64>,
+        /// No turn ran and no port tab was used on that life after the save
+        /// it went back to: nothing the platform ran since may have changed
+        /// its files (false when it may have, or is not known).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unchanged: bool,
+        /// It went back because its newest save did not fit its disk: that
+        /// save is set aside, kept a while, and its owner may still export
+        /// it (docs/computers.md, "Saves and what a wake restores").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        too_big: bool,
     },
     /// An update is ready: it is awake on another image than its next
     /// start runs (`version`, its view's `latest`), with no turn running.
     /// A restart takes it, and so does its next sleep and wake. Its owner
     /// may put it off (`POST …/notices/later {version}`): told no more until
-    /// a version other than that one is ready.
-    Update { version: String },
-    /// Its disk is filling, as the platform last read it (`df` of its
-    /// container, after a start came up and after each save): `free` of its
-    /// `total` bytes are left, the image's own share counted used. A disk
-    /// that fills stops its agents from saving their work, so its owner is
-    /// told well before.
-    DiskFilling { total: u64, free: u64 },
-    /// A shared key its agents call is paused (FIN-448): its owner's calls
-    /// on `provider` were charged `spent_micros` this last hour, its cap
-    /// `cap_micros`, until `resumes_at` as the hour passes, or its owner
-    /// lifts the cap to `allow_micros` (none: the most already).
+    /// a version other than that one is ready. `roomFirst`: its save may not
+    /// restore beside the new image (docs/computers.md, "An image's share of
+    /// the disk"), so it stays on the image it has until there is room, and
+    /// its owner is asked to make room first, never to restart.
     #[serde(rename_all = "camelCase")]
-    KeyPaused {
-        provider: String,
-        spent_micros: i64,
-        cap_micros: i64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        allow_micros: Option<i64>,
-        resumes_at: i64,
+    Update {
+        version: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        room_first: bool,
+    },
+    /// Its disk is filling, as the platform last read it (`df` of its
+    /// container, after a start came up and after each save, and `du` of its
+    /// `/data` after an awake save): `free` of its `total` bytes are free,
+    /// and it has `room` left before its save may no longer restore
+    /// (docs/computers.md, "Room to restore"; 0 from a platform before it).
+    /// A save that does not restore leaves a computer that cannot start,
+    /// so its owner is told well before.
+    DiskFilling {
+        total: u64,
+        free: u64,
+        #[serde(default)]
+        room: u64,
     },
 }
 
@@ -688,20 +777,10 @@ pub struct RestartAsk {
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeen {
     pub life: u64,
-}
-
-/// `POST /api/computers/{id}/key-caps/{provider}`: its owner's hourly cap on
-/// a shared key (FIN-448). `from`, the cap a pause's notice showed: lifted
-/// one step, worked out by the computer, while it is still that one (a
-/// stale page changes nothing). Else `micros`, that cap, or none for the
-/// default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct KeyCapAsk {
-    #[serde(default)]
-    pub from: Option<i64>,
-    #[serde(default)]
-    pub micros: Option<i64>,
+    /// The notice read is the one that says its newest save did not fit
+    /// its disk (its OK says so): another of that life hides only itself.
+    #[serde(default, rename = "tooBig", skip_serializing_if = "std::ops::Not::not")]
+    pub too_big: bool,
 }
 
 /// `POST /api/computers/{id}/notices/later`: its owner put off the update
@@ -822,12 +901,16 @@ mod tests {
     fn a_computers_notices_on_the_wire() {
         let unsaved = ComputerNotice::Unsaved { since: 10, save: Some(3), failing_since: 20, failures: 2, why: "R2".into(), stops_at: None };
         assert_eq!(serde_json::to_value(&unsaved).unwrap(), serde_json::json!({ "kind": "unsaved", "since": 10, "save": 3, "failingSince": 20, "failures": 2, "why": "R2" }));
-        let back = ComputerNotice::WentBack { life: 4, cause: LossCause::Unsaved, ended_at: Some(30), pending: true, save: None, saved_at: None, at: None };
+        let back = ComputerNotice::WentBack { life: 4, cause: LossCause::Unsaved, ended_at: Some(30), pending: true, save: None, saved_at: None, at: None, unchanged: false, too_big: false };
         assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::json!({ "kind": "went_back", "life": 4, "cause": "unsaved", "endedAt": 30, "pending": true }));
+        let quiet = ComputerNotice::WentBack { life: 4, cause: LossCause::Crash, ended_at: Some(30), pending: false, save: Some(2), saved_at: Some(20), at: Some(40), unchanged: true, too_big: false };
+        assert_eq!(serde_json::to_value(&quiet).unwrap()["unchanged"], true, "told only when so");
         assert_eq!(serde_json::to_value(ComputerNotice::WontWake { why: "x".into() }).unwrap(), serde_json::json!({ "kind": "wont_wake", "why": "x" }));
-        let update = ComputerNotice::Update { version: "0123456789ab".into() };
+        let update = ComputerNotice::Update { version: "0123456789ab".into(), room_first: false };
         assert_eq!(serde_json::to_value(&update).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab" }));
-        for n in [unsaved, back, update] {
+        let waits = ComputerNotice::Update { version: "0123456789ab".into(), room_first: true };
+        assert_eq!(serde_json::to_value(&waits).unwrap(), serde_json::json!({ "kind": "update", "version": "0123456789ab", "roomFirst": true }));
+        for n in [unsaved, back, quiet, update, waits] {
             assert_eq!(serde_json::from_value::<ComputerNotice>(serde_json::to_value(&n).unwrap()).unwrap(), n);
         }
         // a view from before notices reads as none, at no start

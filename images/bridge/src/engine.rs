@@ -31,10 +31,10 @@
 //!   next turn in that chat is told what was cut (P5): its note is built
 //!   from the chat's journal alone, before its claim (note.rs), so it is
 //!   said once, and the same in any life.
-//! - A turn another life claimed (409) ran after this life's `/data` was
-//!   saved, so its runtime remembers none of it: the agent's next turn in
-//!   that chat is told what those turns were (`TurnStart::forgotten`,
-//!   note.rs "forgotten"), once in this life.
+//! - Whether a runtime remembers a chat is its memory's to say, not this
+//!   state's: the driver compares the marker beside it with the journal's
+//!   newest turn of the agent's there (crate::seen), and a turn whose
+//!   runtime is behind is told the chat (note.rs `recap`).
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -170,10 +170,17 @@ pub const CONTINUE_NOTICE: &str = "Picking up where it left off after a restart"
 /// computer's bridge does not run (its image carries none by that name).
 pub fn refused_runtime(runtime: &str) -> String {
     if crate::runtime::valid_name(runtime) {
-        format!("this computer doesn't run {runtime} agents")
+        format!("{REFUSED_RUNTIME}{runtime} agents")
     } else {
-        "this computer doesn't run this agent's runtime".to_string()
+        format!("{REFUSED_RUNTIME}this agent's runtime")
     }
+}
+const REFUSED_RUNTIME: &str = "this computer doesn't run ";
+
+/// Whether a turn's end's error is a refusal: the turn never reached a
+/// runtime (note.rs passes over it).
+pub fn refusal(error: &str) -> bool {
+    matches!(error, REFUSED_QUEUED | REFUSED_BUSY) || error.starts_with(REFUSED_RUNTIME) || error == refused_deep() || error == refused_budget()
 }
 
 /// Why an agent's hand-off is refused a turn: the chat's agents started as
@@ -355,6 +362,10 @@ pub struct Prompt {
     pub computer: Vec<String>,
     pub expires_at: u64,
     pub closed: bool,
+    /// Until when it holds the computer (0, never): an option for the
+    /// computer is this life's alone (`COMPUTER_CARD_HOLD_MS`). Never kept.
+    #[serde(skip)]
+    pub holds_until: u64,
     /// Its owner's answer, held from the runtime until its closure is on
     /// `work` (`Effect::Fence`). A restart ends its turn, so never kept.
     #[serde(skip)]
@@ -396,6 +407,10 @@ pub struct Turn {
     pub cause: Cause,
     pub asker: String,
     pub asker_name: String,
+    /// App code wrote what started it (`Ask::Code`): its asker is no one,
+    /// whoever its principal names. A state from before holds none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_code: bool,
     pub text: String,
     pub attachments: Vec<AttachmentRef>,
     /// Where its attachments' blobs are, when not its chat's: an answer's
@@ -484,6 +499,9 @@ pub struct Turn {
 enum Ask<'a> {
     /// A message (a person's, or an agent's hand-off).
     Message,
+    /// A message app code wrote (`Record::by_code`): heard as one, asked by
+    /// no one, and so said on its turn's start (`turn.start`'s `code`).
+    Code,
     /// A routine (its agent's cron), asked as its owner.
     Routine,
     /// A command of the runtime's menu, its text said as it is.
@@ -510,6 +528,11 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
+    /// The door this chat is of the agent reading it, as the agent's own row
+    /// of its members says (`door`: a connector bound as the agent's door,
+    /// while open: docs/api.md, "An agent's doors"): `telegram`, …. None for
+    /// any other chat, and from a platform before the row said it.
+    pub door: Option<String>,
 }
 
 impl ChatView {
@@ -523,6 +546,11 @@ impl ChatView {
 pub enum Input {
     /// The computer's agents, as `GET /api/computer` lists them now.
     Agents(Vec<Agent>),
+    /// Its disk, as a view of `GET /api/computer` says it (none: not read
+    /// yet): the read's time, its room, and whether it is told filling. A
+    /// read older than the newest it was told changes nothing: a view read
+    /// before another may answer after it (Codex on #1425).
+    Disk(Option<crate::api::Disk>),
     /// A record of a followed channel, read as `agent`, with the chat's view
     /// (a `chat` record's admission needs it; a `tasks` record's does not).
     /// A record from before `since` (ms; when the agent joined the chat) is
@@ -550,6 +578,9 @@ pub enum Input {
     Posted { turn: String, id: String, kept: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
+    /// A slice of the computer's counters from `from` (ms) to now, over a
+    /// floor or not; none under the platform's hold (load.rs).
+    Slice { from: u64, over: Option<bool> },
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
     /// The agents whose SimpleX link is bound now (simplex/run.rs), each
@@ -557,6 +588,10 @@ pub enum Input {
     /// its owner's phone (`mirror`). Their relayed records are honored with
     /// or without it.
     Relaying(BTreeMap<String, Option<String>>),
+    /// The computer's agents not ready yet for the runtime their
+    /// `agent.json` names now (ready.rs, `unready`): theirs, their turns
+    /// wait, none claimed, until they are ready.
+    Unready(BTreeSet<String>),
     /// An open card's option answered on the agent's computer (its `/answer`
     /// page: screen.rs), never in a record: `reply` names the request the
     /// answer goes back to (`Effect::ComputerAnswered`).
@@ -651,19 +686,29 @@ pub struct Engine {
     /// prompt (`Effect::Fence`): one not answered is posted again at a tick.
     fencing: BTreeSet<(String, String)>,
     agents: Vec<Agent>,
+    /// Its disk as the newest read it was told says it (`Input::Disk`),
+    /// and the read each agent was last told of: an agent is told at its
+    /// next turn after each read that finds it filling, once (docs/bridge.md,
+    /// "An agent is told to make room"). Never saved: a new life tells each
+    /// again.
+    disk: Option<crate::api::Disk>,
+    disk_told: BTreeMap<String, i64>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
+    /// Its agents' work held the computer at the last step: a turn queued
+    /// or running, or a runtime's own work.
+    busy: bool,
+    /// Work left running (docs/bridge.md): the last `LOAD_SLICES` slices
+    /// (start, `Input::Slice`'s `over`); when this life's agents' work last
+    /// stopped holding the computer; whether it holds it now. Never saved:
+    /// a wake's own start never holds a computer woken for a look.
+    slices: VecDeque<(u64, Option<bool>)>,
+    left_from: Option<u64>,
+    left: bool,
     /// Turns that ran here and ended lately, oldest first (at most
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
     ended: VecDeque<EndedTurn>,
-    /// Per agent and chat, its turns there another life ran since this
-    /// life's `/data` was saved (each claim answered 409), the newest at
-    /// most `NOTE_FORGOTTEN_MAX`, and how many more: its runtime remembers
-    /// none of them, so its next turn there is told (`TurnStart::forgotten`)
-    /// and the entry goes. Never written to `/data`: a life that restores
-    /// the same old `/data` reads them again, and is told again.
-    forgotten: BTreeMap<(String, String), (VecDeque<String>, u32)>,
     /// Cut turns another life ran (claims answered 409) that may be
     /// continued once their lost end is this life's, which the journal
     /// decides then (`Effect::ReadCut`). Never written to `/data`: a life
@@ -688,6 +733,15 @@ pub struct Engine {
     /// Never written to `/data`: the bridge reads it from each link's file
     /// as it starts.
     relaying: BTreeMap<String, Option<String>>,
+    /// The agents not ready for their runtime yet (`Input::Unready`): no turn
+    /// of theirs is claimed. Never written to `/data`: the driver says it
+    /// with each read of the computer.
+    unready: BTreeSet<String>,
+    /// Turns claimed as this life's while their agent was not ready (its
+    /// claim was in flight as it became so), each with its claim's seq:
+    /// handed once it is (`Input::Unready`). Never written to `/data`: a
+    /// life that ends meanwhile leaves them cut, as any claimed turn.
+    parked: BTreeMap<String, Option<u64>>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -777,15 +831,22 @@ impl Engine {
             claiming: BTreeSet::new(),
             fencing: BTreeSet::new(),
             agents: Vec::new(),
+            disk: None,
+            disk_told: BTreeMap::new(),
             views: HashMap::new(),
             keepalive: false,
+            busy: false,
+            slices: VecDeque::new(),
+            left_from: None,
+            left: false,
             ended: VecDeque::new(),
-            forgotten: BTreeMap::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
             closed_late: BTreeSet::new(),
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
+            unready: BTreeSet::new(),
+            parked: BTreeMap::new(),
             noticed: VecDeque::new(),
             helpers_said: BTreeMap::new(),
             helpers_n: 0,
@@ -884,6 +945,9 @@ impl Engine {
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
         assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
+        // an earlier life's turns, ended here, are no work of this life's
+        self.busy = false;
+        self.left_from = None;
         self.pump_all();
         self.finish()
     }
@@ -892,7 +956,13 @@ impl Engine {
     pub fn step(&mut self, input: Input, now: u64) -> Step {
         self.begin(now);
         match input {
-            Input::Agents(agents) => self.set_agents(agents),
+            Input::Agents(agents) => {
+                // what each agent was told of its disk, for agents still here
+                self.disk_told.retain(|told, _| agents.iter().any(|a| a.fragment == *told));
+                self.set_agents(agents)
+            }
+            Input::Disk(Some(read)) if self.disk.is_none_or(|newest| read.at >= newest.at) => self.disk = Some(read),
+            Input::Disk(_) => {}
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
             Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime { runtime, event } => self.runtime(&runtime, event),
@@ -903,10 +973,17 @@ impl Engine {
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
             Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
+            Input::Slice { from, over } => {
+                if self.slices.len() == limits::LOAD_SLICES {
+                    self.slices.pop_front();
+                }
+                self.slices.push_back((from, over));
+            }
             Input::Relaying(agents) => {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
             }
+            Input::Unready(agents) => self.set_unready(agents),
         }
         self.finish()
     }
@@ -921,9 +998,28 @@ impl Engine {
     fn finish(&mut self) -> Step {
         let working = self.runtimes.values().any(|r| r.working);
         let busy = working || self.state.turns.values().any(|t| t.phase == Phase::Queued || (t.phase == Phase::Running && !t.asking));
-        if busy != self.keepalive {
-            self.keepalive = busy;
-            self.out.push(Effect::Keepalive(busy));
+        // a card only this life can take holds it too; it waits on a
+        // person, so work left running counts from its start
+        let card = self.state.turns.values().any(|t| t.active() && t.prompts.iter().any(|p| !p.closed && self.now < p.holds_until));
+        if self.busy && !busy {
+            self.left_from = Some(self.now);
+        }
+        self.busy = busy;
+        // only slices wholly after the agents' work count, and a save's
+        // (none) keep a hold as it was
+        let window = limits::LOAD_SLICES as u64 * limits::LOAD_SLICE_MS;
+        let fresh = |start: u64| start + window + limits::LOAD_SLICE_MS > self.now;
+        let working = |from: u64| self.slices.iter().any(|&(start, over)| over == Some(true) && start >= from && fresh(start));
+        let saving = self.slices.back().is_some_and(|&(start, over)| over.is_none() && start + 2 * limits::LOAD_SLICE_MS > self.now);
+        let left = !busy && self.left_from.is_some_and(|from| self.now < from + limits::LEFT_RUNNING_HOLD_MS && (working(from) || (saving && self.left)));
+        if left != self.left {
+            self.left = left;
+            crate::ev!("keepalive.left", { "hold": left, "from": self.left_from });
+        }
+        let hold = busy || card || left;
+        if hold != self.keepalive {
+            self.keepalive = hold;
+            self.out.push(Effect::Keepalive(hold));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
         // the format it holds: 3 only while a turn holds a return
@@ -1062,10 +1158,12 @@ impl Engine {
         match record.channel.as_str() {
             // its owner's words through one of its doors (docs/chat-records.md,
             // "A relayed message") are their message, as theirs, whichever
-            // door and whoever carried them: the platform takes such a record
-            // only through a door its owner opened, so no door need be linked
-            // on this computer. Another agent of the chat carrying them is a
-            // hand-off from that agent at most, never its owner.
+            // door: the platform takes such a record only through a door its
+            // owner opened, so no door need be linked on this computer. Only
+            // a carrier that is that door counts (`relayed_for`); from any
+            // other it is the record without the mark: another agent of the
+            // chat carrying them is a hand-off from that agent at most, never
+            // its owner.
             records::CHAT if self.relayed_for(&agent, fragment, &record) => {
                 let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
                 crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via });
@@ -1080,7 +1178,8 @@ impl Engine {
                 // identity) and its owner ask it anything here. Another
                 // agent, though it acts for the owner and may post here,
                 // starts no routine: it would start a turn no hop counts.
-                if record.principal != agent.owner && record.principal != agent.identity {
+                // Nor does app code, whoever it names: it speaks for no one.
+                if record.by_code() || (record.principal != agent.owner && record.principal != agent.identity) {
                     crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "principal": record.principal, "why": "only the agent's owner, or its own fragment, asks it on tasks" });
                     return;
                 }
@@ -1160,27 +1259,59 @@ impl Engine {
     }
 
     /// Whether `record` relays `agent`'s owner through `agent`'s own door,
-    /// carried by the agent itself or by a key that is none of the chat's
-    /// members (a hosted connector publishes as its own fragment's key), as
-    /// the chat's page reads it.
+    /// carried by that door (docs/api.md, "An agent's doors"):
+    ///
+    /// - **the agent itself**: its SimpleX door's, which the platform took
+    ///   only signed by the door key its owner's ticket registered;
+    /// - **a hosted door**: a key none of the chat's members (a connector
+    ///   publishes as its own fragment), in a chat whose members mark the
+    ///   agent's row as that door (`ChatView::door`), whose `via` it is.
+    ///
+    /// Any other key that is none of the chat's members (the chat's own,
+    /// firing a record one of its editors scheduled, which the platform
+    /// took until it refused relaying schedules; or one no one holds)
+    /// speaks for no one: the record is its carrier's, without the mark,
+    /// and is logged as such.
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
-        let member = |v: &ChatView| v.agents.contains(&record.principal) || v.people.contains(&record.principal);
-        let carrier = record.principal == agent.identity || self.views.get(fragment).is_some_and(|v| !member(v));
-        carrier && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment)
+        let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
+        if record.principal == agent.identity {
+            return true;
+        }
+        let Some(v) = self.views.get(fragment) else { return false };
+        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
+            return false;
+        }
+        let door = v.door.as_deref() == Some(r.via.as_str());
+        if !door {
+            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
+        }
+        door
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
-        match records::said(&record.body) {
+        let said = records::said(&record.body);
+        // App code's words (docs/chat-records.md, "Who wrote a record") are
+        // heard as a message alone, and as no one's: they answer no
+        // question, and stop and command nothing, under whoever's name.
+        let code = record.by_code();
+        if code && !matches!(said, Said::Message(_) | Said::Other) {
+            crate::ev!("said.ignored", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "why": "app code wrote it: it answers, stops and commands nothing" });
+            return;
+        }
+        match said {
             Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
                 let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
-                if hop == Some(0) && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
+                if hop == Some(0) && !code && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
                     return;
                 }
                 if let Some(hop) = hop {
-                    let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
+                    let asker_name = match code {
+                        true => records::CODE_SAYS.to_string(),
+                        false => view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into()),
+                    };
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, Ask::Message);
+                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message });
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
@@ -1390,7 +1521,7 @@ impl Engine {
             panic!("turn {id} admitted twice: the cursor of {} is behind its turns", cursor_key(&agent.fragment, &cause.fragment, &cause.channel));
         }
         let routine = ask == Ask::Routine;
-        assert!(ask == Ask::Message || hop == 0, "a routine or a command is its owner's ask, no hand-off");
+        assert!(matches!(ask, Ask::Message | Ask::Code) || hop == 0, "a routine or a command is its owner's ask, no hand-off");
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
         let refusal = if let Ask::Refused(why) = ask {
             Some(why.to_string())
@@ -1422,6 +1553,7 @@ impl Engine {
             cause,
             asker: asker.to_string(),
             asker_name,
+            by_code: ask == Ask::Code,
             text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES),
             attachments: m.attachments.clone(),
             attachments_in: m.attachments_in.clone(),
@@ -1464,7 +1596,7 @@ impl Engine {
                 // refused) are posted and not kept: a crash before they land
                 // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
-                let start = records::turn_start(&id, asker, &agent.identity, &turn.cause, &self.life);
+                let start = records::turn_start(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life);
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
                 if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
@@ -1494,7 +1626,7 @@ impl Engine {
         let life = self.life.clone();
         let t = self.state.turns.get_mut(id).expect("held");
         assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
-        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start(id, &t.asker, &identity, &t.cause, &life), to: None };
+        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start(id, &t.asker, t.by_code, &identity, &t.cause, &life), to: None };
         let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![start.clone(), end.clone()];
@@ -1683,6 +1815,7 @@ impl Engine {
             cause: cut.cause,
             asker: cut.asker,
             asker_name: CONTINUE_ASKER.into(),
+            by_code: cut.by_code,
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
             attachments_in: None,
@@ -1730,13 +1863,16 @@ impl Engine {
     /// answered, so a life that ends meanwhile leaves it for the next to
     /// claim (a 409 then, if this claim had landed).
     fn pump(&mut self, agent: &str, fragment: &str) {
+        if self.unready.contains(agent) {
+            return;
+        }
         let runtime = self.runtime_of(agent);
         match self.runtimes.get(&runtime) {
             Some(r) if r.connected => {}
             Some(_) => return,
             None => return self.refuse_queued(agent, fragment, &runtime),
         }
-        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id)));
+        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id) || self.parked.contains_key(&t.id)));
         if busy || self.settling(agent, fragment) {
             return;
         }
@@ -1744,7 +1880,7 @@ impl Engine {
         let Some(id) = next else { return };
         let identity = self.agent(agent).expect("a held turn's agent is on this computer").identity.clone();
         let t = &self.state.turns[&id];
-        let body = records::turn_start(&id, &t.asker, &identity, &t.cause, &self.life);
+        let body = records::turn_start(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life);
         let fragment = t.fragment.clone();
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });
@@ -1779,6 +1915,28 @@ impl Engine {
         }
     }
 
+    /// The agents not ready for their runtime now (`Input::Unready`): those
+    /// ready again hand their parked turns, and their queues move. Said
+    /// after the roster (`Input::Agents`), so a turn starts on the runtime
+    /// its agent names now.
+    fn set_unready(&mut self, agents: BTreeSet<String>) {
+        assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
+        let ready: Vec<String> = self.unready.difference(&agents).cloned().collect();
+        self.unready = agents;
+        let parked: Vec<(String, Option<u64>)> = self.parked.iter().filter(|(id, _)| self.state.turns.get(*id).is_none_or(|t| !self.unready.contains(&t.agent))).map(|(id, seq)| (id.clone(), *seq)).collect();
+        for (id, seq) in parked {
+            self.parked.remove(&id);
+            // stopped, or its agent gone, while parked: nothing to hand
+            if self.state.turns.get(&id).is_some_and(|t| t.phase == Phase::Queued && self.agent(&t.agent).is_some()) {
+                self.hand(&id, seq);
+            }
+        }
+        let chats: BTreeSet<(String, String)> = self.state.turns.values().filter(|t| ready.contains(&t.agent)).map(|t| (t.agent.clone(), t.fragment.clone())).collect();
+        for (agent, fragment) in chats {
+            self.pump(&agent, &fragment);
+        }
+    }
+
     /// Every chat's queue moves (a claim may be due in any).
     fn pump_all(&mut self) {
         let chats: BTreeSet<(String, String)> = self.state.turns.values().map(|t| (t.agent.clone(), t.fragment.clone())).collect();
@@ -1798,6 +1956,12 @@ impl Engine {
         }
         assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         match answer {
+            // its agent stopped being ready while its claim was in flight:
+            // claimed, it waits until its agent is ready again
+            ClaimAnswer::Ours { seq } if self.state.turns.get(id).is_some_and(|t| self.unready.contains(&t.agent)) => {
+                crate::ev!("turn.parked", { "turn": id, "why": "its agent is not ready for its runtime yet" });
+                self.parked.insert(id.to_string(), seq);
+            }
             ClaimAnswer::Ours { seq } => self.hand(id, seq),
             ClaimAnswer::Theirs => {
                 // It owes its end as lost (a 409 itself when that life ended
@@ -1818,15 +1982,6 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
-                // that life ran it after this /data was saved: the runtime
-                // remembers nothing of it, and its next turn here is told
-                let (newest, more) = self.forgotten.entry((agent.clone(), fragment.clone())).or_default();
-                newest.push_back(id.to_string());
-                if newest.len() > limits::NOTE_FORGOTTEN_MAX {
-                    newest.pop_front();
-                    *more = more.saturating_add(1);
-                }
-                assert!(newest.len() <= limits::NOTE_FORGOTTEN_MAX, "a note names its newest forgotten turns");
                 self.owe(&agent, &fragment, id, end);
                 self.owe_answer(id, &Outcome::Error(LOST.into()), false);
                 self.pump(&agent, &fragment);
@@ -1861,9 +2016,6 @@ impl Engine {
             crate::ev!("turn.refused", { "turn": id, "agent": agent, "fragment": fragment, "why": "its runtime is none this bridge runs", "runtime": runtime });
             return self.end(id, Outcome::Error(refused_runtime(&runtime)), Closed::Expired);
         };
-        // what another life ran here that the runtime does not remember,
-        // told once: this turn takes it
-        let (forgotten, forgotten_more) = self.forgotten.remove(&(agent.clone(), fragment.clone())).map(|(newest, more)| (Vec::from(newest), more)).unwrap_or_default();
         // the menu, once a life in each chat, as the agent first runs there
         if !menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
             self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, menu), Vec::new());
@@ -1889,6 +2041,17 @@ impl Engine {
         // driver puts it first in the note); its own note stays a card's,
         // which takes the cut note's place (driver.rs, `note_for`)
         let age = crate::note::age(t.said_at, now, t.routine || t.command, t.continues.is_some());
+        // a disk filling is told to each agent at its next turn after each
+        // read that finds it so, first in the note; never to a command
+        let command = t.command;
+        let disk = match self.disk {
+            Some(crate::api::Disk { at, room, filling: true }) if !command && self.disk_told.get(&agent) != Some(&at) => {
+                self.disk_told.insert(agent.clone(), at);
+                Some(crate::note::disk(room))
+            }
+            _ => None,
+        };
+        let t = self.state.turns.get_mut(id).expect("checked");
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
@@ -1906,8 +2069,7 @@ impl Engine {
             claim_seq,
             note: t.note.clone(),
             age,
-            forgotten,
-            forgotten_more,
+            disk,
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
@@ -2228,7 +2390,7 @@ impl Engine {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Called { turn, .. } | Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Child { change: ChildChange::Started { turn, .. }, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } => None,
+                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } | Event::Taken { .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -2255,6 +2417,8 @@ impl Engine {
             }
         }
         match event {
+            // the driver's (crate::seen), which keeps it from here
+            Event::Taken { .. } => {}
             Event::Working(working) => self.runtimes.get_mut(from).expect("checked").working = working,
             Event::Connected(connected) => {
                 let r = self.runtimes.get_mut(from).expect("checked");
@@ -2571,7 +2735,9 @@ impl Engine {
         let expires_at = self.now + ttl;
         let t = self.state.turns.get_mut(id).expect("checked");
         let Some(owner) = self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone()) else { return };
-        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer: options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect(), expires_at, closed: false, held: None });
+        let computer: Vec<String> = options.iter().filter(|o| o.computer).map(|o| o.id.clone()).collect();
+        let holds_until = if computer.is_empty() { 0 } else { expires_at.min(self.now + limits::COMPUTER_CARD_HOLD_MS) };
+        t.prompts.push(Prompt { id: prompt.clone(), options: options.iter().map(|o| o.id.clone()).collect(), words: options.iter().filter(|o| o.words && !o.computer).map(|o| o.id.clone()).collect(), computer, expires_at, closed: false, holds_until, held: None });
         t.phase = Phase::Waiting;
         self.dirty = true;
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());

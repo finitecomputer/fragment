@@ -886,15 +886,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a call names only a fragment its agent is in", r.status == 403, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", fragment_core::npub::encode(hand.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c4", "micros": 1_000 })))?;
-    let for_visitor = || api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)));
-    forget_gate(api, &owner_id)?;
-    let first = for_visitor()?;
-    let taught = gate_hears(s, api, &owner_id, "refused");
-    let r = for_visitor()?;
+    // `for` names only the agent's own owner (permit::may_act_for): a turn
+    // naming anyone else is refused as it is signed, before any fragment
+    let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)))?;
     s.ok(
-        "an agent turn for someone else in a fragment past its cap: the first, its gate cold, goes on; the next is refused, 402",
-        first.status == 200 && taught && r.status == 402 && r.message().contains("cap this month"),
-        json!({ "first": first.status, "taught": taught, "next": r.body }),
+        "an agent turn naming someone other than its owner (`for`) is refused, 403",
+        r.status == 403 && r.message().contains("its own owner"),
+        &r,
     );
     let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&owner_id)), Some(&chat(false)))?;
     s.ok("and one for its owner goes on", r.status == 200, &r);
@@ -1709,6 +1707,26 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         "a batch sent again after its acknowledgement was lost charges its rows once",
         acked && new.len() == 1 && new[0]["entry"]["row"]["usage"]["count"].as_i64() >= Some(3) && m(&after, "charged") - m(&before, "charged") == charged,
         json!({ "before": before, "after": after, "new": new }),
+    );
+    // a life's end takes its open minute's count with it: the name made
+    // again counts only its own requests, never the deleted life's
+    let held = 10;
+    for _ in 0..held {
+        api.op(&owner, &name, "notes", "q", json!({}))?;
+    }
+    let open = lever(api, &name, "meter", json!({}))?.body;
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    s.create(api, &owner, &name)?;
+    let again = lever(api, &name, "meter", json!({}))?.body;
+    let counted = |state: &Value| -> i64 {
+        let open: i64 = state["counted"].as_array().into_iter().flatten().filter_map(|m| m["count"].as_i64()).sum();
+        let closed: i64 = state["rows"].as_array().into_iter().flatten().filter(|r| r["ref"].as_str().is_some_and(|r| r.starts_with("req:"))).filter_map(|r| r["usage"]["count"].as_i64()).sum();
+        open + closed
+    };
+    s.ok(
+        "a fragment deleted with its minute's requests still counting: the name made again counts none of them",
+        counted(&open) >= held && deleted.status == 200 && counted(&again) < held,
+        json!({ "before the delete": open, "deleted": deleted.status, "made again": again }),
     );
     let _ = c;
     Ok(())

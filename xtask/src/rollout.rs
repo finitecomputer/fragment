@@ -21,14 +21,24 @@
 //! 1. The release live now is read from the Worker's deployments (its
 //!    version at 100%, and that version's `FRAGMENT_DEPLOY_ID` and
 //!    `FRAGMENT_SCHEMA`): the one a failure goes back to.
-//! 2. `wrangler deploy`, again only for an image's push that timed out
-//!    (the hand deploys' 4 GB layer did), which is before any upload.
+//! 2. `wrangler deploy`, again for an image's push that timed out (the
+//!    hand deploys' 4 GB layer did), which is before any upload, and once
+//!    more when it could not apply the container settings after its upload,
+//!    as wrangler says to (preview's master deploys at 96b82b38e and
+//!    78439b1be, 2026-11-20). Nothing is read between runs: the release
+//!    before stays 1's, so a first run that made the Worker live changes
+//!    no rollback.
 //! 3. Whether the Worker changed is read from its deployments, never from
 //!    wrangler's words (one that could not even run to its end included),
 //!    asked again with backoff for `OBSERVE_LIMIT` while they cannot be
 //!    read, and failing as stuck, naming the release before, if they never
-//!    are: when it failed and nothing changed, the deploy ends
-//!    so, nothing to undo. When it failed with the Worker live, the deploy
+//!    are. Cloudflare lists a new deployment late (2026-11-20: twice read
+//!    as the version before seconds after the upload that changed it, and
+//!    the job said "nothing changed" over a release live and never
+//!    verified), so the version before is believed only once they have
+//!    named it for `UNCHANGED_LIMIT` and the platform then answers the
+//!    release before: the deploy then ends so, nothing to undo; else it
+//!    fails as stuck, not known. When it failed with the Worker live, the deploy
 //!    is finished, not run again (each run is another upload): the version
 //!    read back, the Computer's container application checked as wrangler
 //!    checks it, and the triggers deployed (`wrangler triggers deploy`),
@@ -58,10 +68,10 @@ use serde_json::Value;
 
 use crate::prepare::Clock;
 
-/// How many times `wrangler deploy` runs at most: again only after a push
-/// that timed out.
+/// How many times `wrangler deploy` runs at most while an image's push
+/// times out: again only after one that did.
 pub(crate) const DEPLOY_TRIES: u32 = 3;
-/// The pause before each of its tries after the first.
+/// The pause before each run after the first.
 pub(crate) const DEPLOY_PAUSE: Duration = Duration::from_secs(10);
 /// How long a deploy whose Worker is live is asked to finish, its pauses
 /// doubling from `FINISH_PAUSE_FIRST` to `FINISH_PAUSE_MAX`.
@@ -69,6 +79,14 @@ pub(crate) const FINISH_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// How long the Worker's deployments are asked, after a failed deploy,
 /// whether it changed the Worker, with the same backoff.
 pub(crate) const OBSERVE_LIMIT: Duration = Duration::from_secs(3 * 60);
+/// How long a failed deploy's deployments must keep naming the version
+/// before, read every `PROBE_PAUSE`, before the platform is asked whether
+/// it still answers that release: Cloudflare lists a new deployment late
+/// (2026-11-20, preview: the version before 5.8 s and 3.3 s after wrangler's
+/// "Uploaded"; on the deploys either side, every object class answered the
+/// new release 9 s and 5 s after it). Ten times the lag seen; the
+/// platform's answer covers a listing later still.
+pub(crate) const UNCHANGED_LIMIT: Duration = Duration::from_secs(60);
 const FINISH_PAUSE_FIRST: Duration = Duration::from_secs(10);
 const FINISH_PAUSE_MAX: Duration = Duration::from_secs(60);
 /// How long the platform has to answer a release at every object class.
@@ -99,6 +117,10 @@ pub(crate) enum Wrangled {
     Done,
     /// An image's push timed out (before any upload): worth running again.
     PushTimedOut,
+    /// Wrangler could not finish applying the Durable Object-managed
+    /// Container application settings after its upload, and says to run
+    /// the same `wrangler deploy` again (its words): run once more.
+    SettingsUnapplied(String),
     /// Anything else, as wrangler said it: whether the Worker changed is
     /// read from its deployments.
     Failed(String),
@@ -175,7 +197,7 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
         Wrangled::Done => None,
         failed => {
             let failed = said(&failed);
-            match observed(p, clock, before.as_ref()) {
+            match observed(p, clock, before.as_ref(), new) {
                 Observed::Unchanged => return Ok(Outcome::Unchanged(failed)),
                 Observed::Unknown(e) => {
                     let was = before.as_ref().map_or("none".to_string(), |b| format!("{} (version {})", b.release, b.version));
@@ -187,10 +209,7 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
                         ),
                         Err(cannot) => format!("ask /healthz/objects, and do not roll back by hand: {cannot}"),
                     };
-                    return Ok(Outcome::Stuck(format!(
-                        "{failed}; and whether the Worker changed could not be read for {} ({e}). The release before is {was}; {new} may be live: {advice}",
-                        minutes(OBSERVE_LIMIT)
-                    )));
+                    return Ok(Outcome::Stuck(format!("{failed}; and whether the Worker changed is not known: {e}. The release before is {was}; {new} may be live: {advice}")));
                 }
                 Observed::Live(version) => {
                     println!("deploy: wrangler failed with version {version} live ({failed}): finishing it, not running it again");
@@ -210,21 +229,36 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
 }
 
 /// `wrangler deploy` until it is done, fails other than by a push that
-/// timed out, or has run `DEPLOY_TRIES` times. One that could not run to
-/// its end (it could not start, or its output could not be read) is a
-/// failure like any other: whether it changed the Worker is read after.
+/// timed out (`DEPLOY_TRIES` of those at most) or by settings it could not
+/// apply (once), each run again after `DEPLOY_PAUSE`. Nothing is read
+/// between runs: the release before stays the one read before the first.
+/// One that could not run to its end (it could not start, or its output
+/// could not be read) is a failure like any other: whether it changed the
+/// Worker is read after. A run once more that fails otherwise keeps the
+/// first's words (they say the Worker was deployed).
 fn deployed(p: &mut impl Platform, clock: &mut impl Clock) -> Wrangled {
-    for tries in 1..=DEPLOY_TRIES {
-        match p.deploy() {
-            Ok(Wrangled::PushTimedOut) if tries < DEPLOY_TRIES => {
-                eprintln!("deploy: an image's push timed out (try {tries} of {DEPLOY_TRIES}); running wrangler deploy again in {}", minutes(DEPLOY_PAUSE));
-                clock.sleep(DEPLOY_PAUSE);
+    let (mut pushes, mut unapplied) = (0, None);
+    loop {
+        let ended = match p.deploy() {
+            Ok(Wrangled::PushTimedOut) if pushes + 1 < DEPLOY_TRIES => {
+                pushes += 1;
+                eprintln!("deploy: an image's push timed out (try {pushes} of {DEPLOY_TRIES}); running wrangler deploy again in {}", minutes(DEPLOY_PAUSE));
+                None
             }
-            Ok(wrangled) => return wrangled,
-            Err(e) => return Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}")),
+            Ok(Wrangled::SettingsUnapplied(said)) if unapplied.is_none() => {
+                eprintln!("deploy: wrangler could not apply the container settings; running wrangler deploy once more in {}, as it says to", minutes(DEPLOY_PAUSE));
+                unapplied = Some(said);
+                None
+            }
+            Ok(wrangled) => Some(wrangled),
+            Err(e) => Some(Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}"))),
+        };
+        match (ended, &unapplied) {
+            (None, _) => clock.sleep(DEPLOY_PAUSE),
+            (Some(w @ (Wrangled::Done | Wrangled::SettingsUnapplied(_))), _) | (Some(w), None) => return w,
+            (Some(other), Some(first)) => return Wrangled::Failed(format!("{first} Run once more: {}", said(&other))),
         }
     }
-    unreachable!("the last try returns")
 }
 
 /// Whether a failed deploy changed the Worker, as its deployments say.
@@ -234,23 +268,39 @@ enum Observed {
     Unchanged,
     /// This version is live now, another than the one before.
     Live(String),
-    /// Not known: the deployments could not be read for `OBSERVE_LIMIT`.
+    /// Not known, and why: the deployments could not be read for
+    /// `OBSERVE_LIMIT`, or the platform does not answer the release before.
     Unknown(String),
 }
 
 /// The Worker's deployments read, after a failed `wrangler deploy`, asked
 /// again with backoff for `OBSERVE_LIMIT` while they cannot be: never
-/// uploaded again meanwhile.
-fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>) -> Observed {
+/// uploaded again meanwhile. Unchanged only when they name the version
+/// before for `UNCHANGED_LIMIT` from the first read that did (one read
+/// may be stale), and the platform then answers the release before at
+/// every object class (`unchanged`). Each wait is bounded: unreadable for
+/// `OBSERVE_LIMIT` from the start, naming the version before for
+/// `UNCHANGED_LIMIT` from its first read.
+fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>, new: &str) -> Observed {
     let start = clock.now();
     let mut pause = FINISH_PAUSE_FIRST;
+    let mut named_before_since = None;
     loop {
         let read = p.version();
         match read {
-            Ok(now) if now.as_deref() == before.map(|b| b.version.as_str()) => return Observed::Unchanged,
+            Ok(now) if now.as_deref() == before.map(|b| b.version.as_str()) => {
+                let since = *named_before_since.get_or_insert_with(|| {
+                    eprintln!("deploy: the Worker's deployments name the version before; asking again for {}, as Cloudflare may list a new one late", minutes(UNCHANGED_LIMIT));
+                    clock.now()
+                });
+                if clock.now() - since >= UNCHANGED_LIMIT {
+                    return unchanged(p, before, new);
+                }
+                clock.sleep(PROBE_PAUSE);
+            }
             Ok(Some(version)) => return Observed::Live(version),
             Ok(None) => return Observed::Unknown("the Worker has no deployment, and had one".into()),
-            Err(e) if clock.now() - start + pause > OBSERVE_LIMIT => return Observed::Unknown(format!("{e:#}")),
+            Err(e) if clock.now() - start + pause > OBSERVE_LIMIT => return Observed::Unknown(format!("its deployments could not be read for {} ({e:#})", minutes(OBSERVE_LIMIT))),
             Err(e) => {
                 eprintln!("deploy: the Worker's deployments could not be read ({e:#}); asking again in {}", minutes(pause));
                 clock.sleep(pause);
@@ -258,6 +308,33 @@ fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>
             }
         }
     }
+}
+
+/// Deployments that named the version before for `UNCHANGED_LIMIT`,
+/// believed only when the platform answers the release before at every
+/// object class (one with no probe route by `/healthz` naming it): never
+/// over its answering another release, or not answering. With no release
+/// before, nothing answers to say so; with the release before `new` (a
+/// commit deployed again, its id the same), no answer tells them apart.
+fn unchanged(p: &mut impl Platform, before: Option<&Live>, new: &str) -> Observed {
+    let Some(before) = before else {
+        return Observed::Unknown(format!("its deployments name no Worker for {}, and there is no release before for the platform to answer", minutes(UNCHANGED_LIMIT)));
+    };
+    if before.release == new {
+        return Observed::Unknown(format!(
+            "its deployments name the version before ({}) for {}, and the release before is {new} too, so the platform's answer cannot tell them apart",
+            before.version,
+            minutes(UNCHANGED_LIMIT)
+        ));
+    }
+    let answered = match p.probe() {
+        Ok(Probed::Release(r) | Probed::NoRoute(Some(r))) if r == before.release => return Observed::Unchanged,
+        Ok(Probed::Release(r)) => format!("every object class answers {r}"),
+        Ok(Probed::Not(why)) => why,
+        Ok(Probed::NoRoute(named)) => format!("no /healthz/objects, and /healthz names {}", named.as_deref().unwrap_or("no release")),
+        Err(e) => format!("{e:#}"),
+    };
+    Observed::Unknown(format!("its deployments name the version before for {}, and the platform does not answer {}: {answered}", minutes(UNCHANGED_LIMIT), before.release))
 }
 
 /// The finish of a deploy whose Worker (`version`) is live, asked again
@@ -316,6 +393,32 @@ fn verified(p: &mut impl Platform, clock: &mut impl Clock, release: &str, old: b
     }
 }
 
+/// The admin Worker, deployed after the cell (deploy.rs; cell/src/admin.rs):
+/// its probe (`GET /healthz/admin`, through the cell, `probe`) asked until
+/// it answers `release` at every object class, for `VERIFY_LIMIT`, or why
+/// not. Nothing is rolled back for it: only the operators' routes wait on it.
+pub(crate) fn admin_verified(probe: &mut impl FnMut() -> Result<Probed>, clock: &mut impl Clock, release: &str) -> std::result::Result<(), String> {
+    let start = clock.now();
+    // bounded: VERIFY_LIMIT, a PROBE_PAUSE between asks
+    loop {
+        let last = match probe() {
+            Ok(Probed::Release(r)) if r == release => {
+                println!("deploy: the admin Worker answers {release} at every object class ({} after its deploy)", minutes(clock.now() - start));
+                return Ok(());
+            }
+            Ok(Probed::Release(other)) => format!("it answers {other}"),
+            Ok(Probed::Not(why)) => why,
+            Ok(Probed::NoRoute(_)) => "the platform has no /healthz/admin".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        let waited = clock.now() - start;
+        if waited >= VERIFY_LIMIT {
+            return Err(format!("it did not answer {release} at every object class after {} (the limit): {last}", minutes(waited)));
+        }
+        clock.sleep(PROBE_PAUSE);
+    }
+}
+
 /// The release `before` deployed again, after `why`, when it may be: the
 /// outcome either way.
 fn back(p: &mut impl Platform, clock: &mut impl Clock, before: Option<Live>, schema: &str, rollback: Result<(), String>, why: String) -> Result<Outcome> {
@@ -356,7 +459,7 @@ fn said(w: &Wrangled) -> String {
     match w {
         Wrangled::Done => "done".into(),
         Wrangled::PushTimedOut => "an image's push to the registry timed out, three times".into(),
-        Wrangled::Failed(why) => why.clone(),
+        Wrangled::SettingsUnapplied(why) | Wrangled::Failed(why) => why.clone(),
     }
 }
 
@@ -416,6 +519,10 @@ mod tests {
         broken: Option<String>,
         /// How many reads of the deployments fail (503, a timeout).
         version_fails: u32,
+        /// How many reads of the deployments still list the version live
+        /// before the deploy (Cloudflare lists a new deployment late).
+        stale_reads: u32,
+        listed_before: Option<String>,
         /// Whether `wrangler deploy` cannot run to its end (its output
         /// lost), after its upload when `uploads_before_failing`.
         deploy_breaks: bool,
@@ -438,6 +545,8 @@ mod tests {
                 rollback_lag: Some(0),
                 broken: None,
                 version_fails: 0,
+                stale_reads: 0,
+                listed_before: Some("v-old".into()),
                 deploy_breaks: false,
                 calls: vec![],
                 new: Live { version: "v-new".into(), release: new.into(), schema: Some(SCHEMA.into()) },
@@ -446,6 +555,7 @@ mod tests {
         fn first_deploy(new: &str) -> World {
             let mut w = World::new("none", new, None);
             w.versions.clear();
+            w.listed_before = None;
             w
         }
         /// Each side's release when the deploy ended.
@@ -470,6 +580,10 @@ mod tests {
                 self.version_fails -= 1;
                 anyhow::bail!("the Worker's deployments: 503");
             }
+            if self.stale_reads > 0 {
+                self.stale_reads -= 1;
+                return Ok(self.listed_before.clone());
+            }
             Ok(self.versions.last().map(|_| self.worker.version.clone()))
         }
         fn deploy(&mut self) -> Result<Wrangled> {
@@ -483,7 +597,7 @@ mod tests {
             let next = if self.deploys.len() > 1 { self.deploys.remove(0) } else { self.deploys[0].clone() };
             match &next {
                 Wrangled::Done => self.upload(),
-                Wrangled::Failed(_) if self.uploads_before_failing => self.upload(),
+                Wrangled::Failed(_) | Wrangled::SettingsUnapplied(_) if self.uploads_before_failing => self.upload(),
                 _ => {}
             }
             Ok(next)
@@ -534,10 +648,19 @@ mod tests {
         w.calls.iter().filter(|c| c.starts_with(call)).count()
     }
 
-    /// A Worker left live by a deploy that failed after its upload.
+    /// wrangler's words when the Worker deployed and its container
+    /// settings could not be applied (preview, 2026-11-20).
+    const UNAPPLIED: &str = "The Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings. Re-run the same `wrangler deploy` command to retry and finish deployment.";
+
+    fn unapplied() -> Wrangled {
+        Wrangled::SettingsUnapplied(UNAPPLIED.into())
+    }
+
+    /// A Worker left live by a deploy that failed after its upload (its
+    /// triggers' deploy refused).
     fn live_unfinished() -> World {
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
-        w.deploys = vec![Wrangled::Failed("could not finish applying its Durable Object-managed Container application settings".into())];
+        w.deploys = vec![Wrangled::Failed("A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/subdomain) failed.".into())];
         w.uploads_before_failing = true;
         w
     }
@@ -620,11 +743,77 @@ mod tests {
         // all), or one wrangler gives up on, or a config Cloudflare refuses
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
         w.deploys = vec![Wrangled::Failed("Timed out while preparing the container image on Cloudflare's network.".into())];
-        let out = deploy(&mut w);
+        let clock = Fake::default();
+        let out = run(&mut w, &mut clock.clone(), NEW, SCHEMA, Ok(())).unwrap();
         assert!(matches!(&out, Outcome::Unchanged(why) if why.contains("Timed out while preparing")), "{out:?}");
         assert_eq!(w.ends(), (OLD.into(), OLD.into()));
-        assert_eq!((count(&w, "deploy"), count(&w, "probe"), count(&w, "rollback")), (1, 0, 0), "not run again, nothing to verify or undo");
+        assert_eq!((count(&w, "deploy"), count(&w, "rollback")), (1, 0), "not run again, nothing to undo");
+        // believed only once the deployments named the version before for
+        // UNCHANGED_LIMIT, and the platform then answered the release before
+        let reads = (UNCHANGED_LIMIT.as_secs() / PROBE_PAUSE.as_secs() + 1) as usize;
+        assert_eq!((count(&w, "version"), count(&w, "probe"), clock.0.get()), (reads, 1, UNCHANGED_LIMIT));
         assert!(out.result().unwrap_err().to_string().contains("nothing changed"));
+    }
+
+    /// Cloudflare lists a new deployment late: preview's master deploys at
+    /// 96b82b38e and 78439b1be (2026-11-20) read the version before 5.8 s
+    /// and 3.3 s after wrangler's "Uploaded", ended "nothing changed", and
+    /// the next deploys found each live. Read again, the new version is
+    /// finished and verified.
+    #[test]
+    fn deployments_that_list_the_upload_late_are_read_until_they_do() {
+        let mut w = live_unfinished();
+        w.stale_reads = 2;
+        assert_eq!(deploy(&mut w), Outcome::Deployed);
+        assert_eq!(w.ends(), (NEW.into(), NEW.into()));
+        assert_eq!((count(&w, "deploy"), count(&w, "version"), count(&w, "finish v-new"), count(&w, "rollback")), (1, 3, 1, 0));
+    }
+
+    /// Past the limit, a listing still late is not believed over the
+    /// platform answering the new release: the deploy fails as unknown.
+    #[test]
+    fn deployments_late_past_the_limit_with_the_release_live_fail_as_unknown() {
+        let mut w = live_unfinished();
+        w.stale_reads = u32::MAX;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("not known") && why.contains(NEW) && why.contains(OLD) && why.contains("`wrangler rollback v-old`")), "{out:?}");
+        assert_eq!((count(&w, "finish"), count(&w, "rollback"), count(&w, "probe")), (0, 0, 1), "nothing done blind");
+        assert!(out.result().unwrap_err().to_string().contains("STUCK"));
+    }
+
+    /// Review of #1412: a re-run of the same commit (78439b1be's, on
+    /// 2026-11-20) deploys the release live already, so the platform's
+    /// answer cannot tell the new version from the one before.
+    #[test]
+    fn a_rerun_of_the_release_live_is_never_believed_unchanged() {
+        let mut w = World::new(NEW, NEW, Some(SCHEMA));
+        w.deploys = vec![Wrangled::Failed("A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/subdomain) failed.".into())];
+        w.uploads_before_failing = true;
+        w.stale_reads = u32::MAX;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("not known") && why.contains("cannot tell")), "{out:?}");
+        assert_eq!((count(&w, "finish"), count(&w, "rollback")), (0, 0), "nothing done blind");
+    }
+
+    /// Review of #1412: time the deployments could not be read is not
+    /// time they named the version before.
+    #[test]
+    fn unreadable_deployments_do_not_spend_the_late_listing_s_limit() {
+        let mut w = live_unfinished();
+        w.version_fails = 3; // 10 + 20 + 40 s, past UNCHANGED_LIMIT
+        w.stale_reads = 1;
+        assert_eq!(deploy(&mut w), Outcome::Deployed);
+        assert_eq!((count(&w, "version"), count(&w, "finish v-new")), (5, 1));
+    }
+
+    #[test]
+    fn a_first_deploy_that_fails_is_never_believed_unchanged() {
+        // no release before for the platform to answer
+        let mut w = World::first_deploy(NEW);
+        w.deploys = vec![Wrangled::Failed("Timed out while preparing the container image on Cloudflare's network.".into())];
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("not known") && why.contains("no release before")), "{out:?}");
+        assert_eq!(count(&w, "probe"), 0, "nothing to ask");
     }
 
     #[test]
@@ -640,18 +829,88 @@ mod tests {
         assert_eq!((count(&w, "deploy"), w.ends()), (DEPLOY_TRIES as usize, (OLD.into(), OLD.into())));
     }
 
+    /// Preview's master deploys at 96b82b38e and 78439b1be (2026-11-20):
+    /// wrangler could not finish applying the container settings, and the
+    /// deployments, read at once, named the version before (`uploads`
+    /// false), though the next deploy found 96b82b38e's live. Run once
+    /// more, as wrangler says, after the pause a push's retry takes; then
+    /// verified as any deploy is.
     #[test]
-    fn a_worker_live_whose_settings_were_not_applied_is_finished_not_uploaded_again() {
-        // 2026-10-24: "The Worker version was deployed, but Wrangler could
-        // not finish applying its Durable Object-managed Container
-        // application settings", for minutes
+    fn settings_not_applied_are_run_once_more_as_wrangler_says() {
+        for uploads in [false, true] {
+            let mut w = World::new(OLD, NEW, Some(SCHEMA));
+            w.deploys = vec![unapplied(), Wrangled::Done];
+            w.uploads_before_failing = uploads;
+            let clock = Fake::default();
+            let out = run(&mut w, &mut clock.clone(), NEW, SCHEMA, Ok(())).unwrap();
+            assert_eq!(out, Outcome::Deployed, "uploads: {uploads}");
+            assert_eq!(w.ends(), (NEW.into(), NEW.into()));
+            assert_eq!((count(&w, "deploy"), count(&w, "live"), count(&w, "version"), count(&w, "finish"), count(&w, "rollback")), (2, 1, 0, 0, 0));
+            assert!(count(&w, "probe") > 0, "verified");
+            assert_eq!(clock.0.get(), DEPLOY_PAUSE);
+        }
+    }
+
+    #[test]
+    fn settings_not_applied_twice_fail_as_they_did() {
+        // the deployments name the version before: nothing changed, in
+        // wrangler's words, as before; never a third run
         let mut w = World::new(OLD, NEW, Some(SCHEMA));
-        w.deploys = vec![Wrangled::Failed("could not finish applying its Durable Object-managed Container application settings".into())];
+        w.deploys = vec![unapplied()];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(UNAPPLIED.into()));
+        assert_eq!(out.result().unwrap_err().to_string(), format!("deploy: nothing changed: {UNAPPLIED}"));
+        assert_eq!((count(&w, "deploy"), w.ends()), (2, (OLD.into(), OLD.into())));
+        // 2026-10-24: the Worker live, the version not ready to read back
+        // for minutes: finished, not uploaded a third time
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![unapplied()];
         w.uploads_before_failing = true;
         w.finish_fails = 4;
         assert_eq!(deploy(&mut w), Outcome::Deployed);
         assert_eq!(w.ends(), (NEW.into(), NEW.into()));
-        assert_eq!((count(&w, "deploy"), count(&w, "finish v-new"), count(&w, "rollback")), (1, 5, 0), "one upload; finished on its fifth ask");
+        assert_eq!((count(&w, "deploy"), count(&w, "finish v-new"), count(&w, "rollback")), (2, 5, 0), "two uploads; finished on its fifth ask");
+        // review of #1411: a second run that fails otherwise keeps the
+        // first's words, which say the Worker was deployed
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        let preparing = "Timed out while preparing the container image on Cloudflare's network.";
+        w.deploys = vec![unapplied(), Wrangled::Failed(preparing.into())];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(format!("{UNAPPLIED} Run once more: {preparing}")));
+        assert_eq!(count(&w, "deploy"), 2);
+    }
+
+    /// A first run that made the new Worker live changes nothing a failure
+    /// reads after the second: the release before is the one read before
+    /// the first, never re-read between runs, so a rollback goes back to
+    /// it and is held to its schema.
+    #[test]
+    fn a_second_run_after_a_live_first_still_goes_back_to_the_release_before() {
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![unapplied(), Wrangled::Done];
+        w.uploads_before_failing = true;
+        w.lag = None;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::RolledBack { to, .. } if to == OLD), "{out:?}");
+        assert_eq!(w.ends(), (OLD.into(), OLD.into()));
+        assert_eq!((count(&w, "deploy"), count(&w, "live"), count(&w, "rollback v-old")), (2, 1, 1));
+
+        let mut w = World::new(OLD, NEW, Some("0000000000000000"));
+        w.deploys = vec![unapplied(), Wrangled::Done];
+        w.uploads_before_failing = true;
+        w.lag = None;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("forward only")), "{out:?}");
+        assert_eq!((count(&w, "deploy"), count(&w, "rollback")), (2, 0));
+    }
+
+    #[test]
+    fn the_settings_one_more_run_is_apart_from_a_push_s_tries() {
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![unapplied(), Wrangled::PushTimedOut];
+        let out = deploy(&mut w);
+        assert_eq!(out, Outcome::Unchanged(format!("{UNAPPLIED} Run once more: an image's push to the registry timed out, three times")));
+        assert_eq!(count(&w, "deploy"), 1 + DEPLOY_TRIES as usize, "bounded");
     }
 
     #[test]
@@ -751,5 +1010,32 @@ mod tests {
         assert_eq!(probe_of(503, &skewed, Some(NEW)), Probed::Not(format!("Computer: 503 schema_refused: newer, Registry runs {OLD}")));
         assert_eq!(probe_of(404, &Value::Null, Some(OLD)), Probed::NoRoute(Some(OLD.into())));
         assert_eq!(probe_of(522, &Value::Null, None), Probed::Not("the probe answered 522".into()));
+    }
+
+    /// Goal: the admin Worker, deployed after the cell, counts as deployed
+    /// only once its probe answers the new release at every object class:
+    /// an old admin, a class refusing it, or no answer at all is waited
+    /// on for `VERIFY_LIMIT` and then failed, saying the last thing it
+    /// answered. Method: a scripted probe on the fake clock.
+    #[test]
+    fn the_admin_counts_only_once_it_answers_the_new_release() {
+        let mut clock = Fake(Default::default());
+        let mut answers = vec![Err(anyhow::anyhow!("GET /healthz/admin: timed out")), Ok(Probed::Release(OLD.into())), Ok(Probed::Not("Registry runs old".into())), Ok(Probed::Release(NEW.into()))].into_iter();
+        let mut asked = 0;
+        let mut probe = || {
+            asked += 1;
+            answers.next().expect("asked no more than scripted")
+        };
+        assert_eq!(admin_verified(&mut probe, &mut clock, NEW), Ok(()));
+        assert_eq!((asked, clock.now()), (4, PROBE_PAUSE * 3), "asked until it answered, a pause between");
+
+        let mut clock = Fake(Default::default());
+        let mut probe = || Ok(Probed::Release(OLD.into()));
+        let failed = admin_verified(&mut probe, &mut clock, NEW).unwrap_err();
+        assert!(failed.contains(NEW) && failed.contains(&format!("it answers {OLD}")) && failed.contains("(the limit)"), "{failed}");
+        assert!(clock.now() >= VERIFY_LIMIT && clock.now() < VERIFY_LIMIT + PROBE_PAUSE, "for the limit, no longer");
+
+        let mut probe = || Ok(Probed::NoRoute(Some(NEW.into())));
+        assert!(admin_verified(&mut probe, &mut Fake(Default::default()), NEW).unwrap_err().contains("no /healthz/admin"));
     }
 }

@@ -11,7 +11,7 @@ use fragment_proto::ErrorCode;
 
 use super::sim::{apply, Op, Outcome, T0};
 use super::*;
-use crate::price::{KeyCall, KeyPrice, PriceBook, StorageClass, UsageFault, USD};
+use crate::price::{KeyPrice, PriceBook, StorageClass, UsageFault, USD};
 
 const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
 /// A month after T0: 2026-11-01T00:00:00Z.
@@ -259,27 +259,6 @@ fn a_grant_adds_purchased_credit_once() {
     let mut g = World::guest();
     g.ok(grant("g1", USD));
     assert_eq!(g.balance(), USD);
-}
-
-/// Goal: the finite.computer move's credit (F5) is granted once a person,
-/// ever, as the cell asks it (`migrations::comp_grant_id`): asked again,
-/// after a restart, and months later (past `REF_KEEP_MS`: a command is
-/// never forgotten), it grants nothing more; another person's is theirs.
-#[test]
-fn the_moves_credit_is_granted_once_a_person_ever() {
-    use crate::migrations::{comp_grant_id, COMP_GRANT_MICROS};
-    let comp = |person: &str| Op::Grant(GrantCredit { id: comp_grant_id(person), micros: COMP_GRANT_MICROS, by: "migrations".into(), why: "the finite.computer move's credit".into() });
-    let mut w = World::guest();
-    w.replays(comp("npub1ada"));
-    assert_eq!((w.status().purchased_micros, COMP_GRANT_MICROS), (25 * USD, 25 * USD));
-    let mut later = w.restarted();
-    later.replays(comp("npub1ada"));
-    later.now += 400 * 24 * 60 * 60 * 1000;
-    later.ok(comp("npub1ada"));
-    assert_eq!(later.ledger.totals().purchased, 25 * USD, "once, whenever it is asked again");
-    let mut other = World::guest();
-    other.ok(comp("npub1bea"));
-    assert_eq!(other.status().purchased_micros, 25 * USD);
 }
 
 #[test]
@@ -617,253 +596,55 @@ fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "and the row in another batch is charged once");
 }
 
-/// FIN-443: every ElevenLabs call was charged as a minute of music, so
-/// short speech clips cost people 10 to 20 times what they cost. Goal: a
-/// deployment's book (its keys' prices from its catalog) charges a speech
-/// call by its text's characters and a music call by the minute, each
-/// once, across a replay and a restart, and one ElevenLabs refused
-/// nothing; a release whose book has no
-/// speech price (one rolled back to) charges its rows nothing. Method:
-/// the swap's rows as it meters them (`price::key_usage`), sent again.
+/// FIN-616: an operator key's call is charged what its vendor said it
+/// used, at its unit's list price and the margin. Goal: a deployment's
+/// book (its keys' prices from its catalog) charges a Grok call its ticks,
+/// a speech its characters, a scrape its credits and a search a call, each
+/// once across a replay and a restart; a row an older release queued, as
+/// it priced it; and a release whose book has no unit's price (one rolled
+/// back to) charges its rows nothing. Method: the swap's rows as
+/// `Provider::charged` makes them, sent again.
 #[test]
-fn a_speech_call_is_charged_by_its_characters_and_once() {
-    let eleven = serde_json::json!([{ "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"] }]);
+fn a_vendors_number_is_charged_at_its_unit_and_once() {
+    let vendor = |name: &str| serde_json::json!({ "name": name, "kind": "operator", "hosts": [format!("api.{name}.test")], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [format!("{}_KEY", name.to_uppercase())] });
+    let catalog = crate::catalog::Catalog::parse(&serde_json::json!(["xai", "elevenlabs", "firecrawl", "perplexity"].map(vendor)).to_string()).unwrap();
     let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&eleven.to_string()).unwrap().key_prices());
-    let reply = serde_json::to_vec(&serde_json::json!({ "text": "a".repeat(200), "model_id": "eleven_multilingual_v2" })).unwrap();
-    let eleven_call = |path, body, status| crate::price::key_usage("elevenlabs", &KeyCall { method: "POST", host: "api.elevenlabs.io", path, body, status });
-    let spoken = eleven_call("/v1/text-to-speech/voice", &reply, 200);
-    let music = eleven_call("/v1/music", br#"{"prompt":"a jingle","music_length_ms":15000}"#, 200);
-    assert_eq!((&spoken, &music), (&Usage::Key { key: "elevenlabs:speech".into(), units: 200 }, &Usage::Key { key: "elevenlabs".into(), units: 1 }));
-    // one ElevenLabs refused (a rate limit): its row kept, charged nothing
-    let refused = eleven_call("/v1/text-to-speech/voice", &reply, 429);
+    configured.keys.extend(catalog.key_prices());
+    let segments = |path: &str| path.split('/').filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec()).collect::<Vec<_>>();
+    let charged = |name: &str, method: &str, path: &str, said: Option<u64>| catalog.get(name).unwrap().charged(&[method], &segments(path), 200, |_| said);
+    let grok = charged("xai", "POST", "/v1/responses", Some(1_234_567_000)).unwrap();
+    let spoken = charged("elevenlabs", "POST", "/v1/text-to-speech/voice", Some(200)).unwrap();
+    let scraped = charged("firecrawl", "POST", "/v2/scrape", Some(5)).unwrap();
+    let searched = charged("perplexity", "POST", "/search", None).unwrap();
+    assert_eq!(grok, Usage::Key { key: "xai:tick".into(), units: 1_234_567_000 });
+    assert_eq!(spoken, Usage::Key { key: "elevenlabs:character".into(), units: 200 });
+    assert_eq!((&scraped, &searched), (&Usage::Key { key: "firecrawl:credit".into(), units: 5 }, &Usage::Key { key: "perplexity:call".into(), units: 1 }));
     let mut w = World::seat();
     w.ok(Op::Book(configured.clone()));
     let before = w.balance();
-    let batch = meter("key:c-1:a1", vec![row("key:c-1:a1", spoken.clone(), None, T0), row("key:c-1:a2", music, None, T0), row("key:c-1:a3", refused, None, T0)]);
-    // 200 characters at $0.08 per 1,000, a minute at $0.15, each with the margin, and nothing
-    let charged = Outcome::Metered(Metered { charged: 24_000 + 225_000, rows_new: 3, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    assert_eq!(w.balance(), before - 249_000);
+    let rows = vec![row("key:c-1:a1", grok.clone(), None, T0), row("key:c-1:a2", spoken, None, T0), row("key:c-1:a3", scraped, None, T0), row("key:c-1:a4", searched, None, T0)];
+    let batch = meter("key:c-1:a1", rows);
+    // $0.1234567 rounded up once with the margin; 200 characters at $0.08
+    // per 1,000; 5 credits at $0.005; a search at $5 per 1,000
+    let total = 185_186 + 24_000 + 37_500 + 7_500;
+    let answered = Outcome::Metered(Metered { charged: total, rows_new: 4, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(batch.clone()), answered);
+    assert_eq!(w.balance(), before - total);
     let mut w = w.restarted();
     w.replays(Op::Book(configured.clone()));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:a1-again", vec![row("key:c-1:a1", spoken.clone(), None, T0)]));
+    assert_eq!(w.ok(batch), answered, "a batch sent again answers as it did");
+    let again = w.ok(meter("key:c-1:a1-again", vec![row("key:c-1:a1", grok.clone(), None, T0)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 249_000);
-    // a release before the speech price: its row refused as unpriced, charging nothing
-    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "elevenlabs:speech").cloned().collect(), ..configured };
+    // a row an older release queued, as it priced it: a speech's characters
+    let queued = w.ok(meter("key:c-1:old", vec![row("key:c-1:old", Usage::Key { key: "elevenlabs:speech".into(), units: 200 }, None, T0)]));
+    assert_eq!(queued, Outcome::Metered(Metered { charged: 24_000, rows_new: 1, rows_before: 0, refused: vec![] }));
+    assert_eq!(w.balance(), before - total - 24_000);
+    // a release before the tick's price: its row refused as unpriced, charging nothing
+    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "xai:tick").cloned().collect(), ..configured };
     w.ok(Op::Book(older));
-    let Outcome::Metered(m) = w.ok(meter("key:c-1:b1", vec![row("key:c-1:b1", spoken, None, T0)])) else { panic!("a batch answers Metered") };
+    let Outcome::Metered(m) = w.ok(meter("key:c-1:b1", vec![row("key:c-1:b1", grok, None, T0)])) else { panic!("a batch answers Metered") };
     assert_eq!((m.charged, m.rows_new, m.refused.iter().map(|r| r.why).collect::<Vec<_>>()), (0, 0, vec![Refused::NoPrice]));
-    assert_eq!(w.balance(), before - 249_000);
-}
-
-/// FIN-445: fal's key charged each call as an image, so the SDK's queue
-/// polls, status and result made one image cost several. Goal: a
-/// deployment's book charges a generation by its pixels and the calls
-/// around it nothing, once across a replay and a restart; one fal refused
-/// nothing; a row an older release queued (one image) as before; a release
-/// whose book has no image price charges this one's rows nothing. Method:
-/// the swap's rows as it meters them (`price::key_usage`), sent again.
-#[test]
-fn a_fal_image_is_charged_by_its_pixels_and_once() {
-    let fal = serde_json::json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }]);
-    let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&fal.to_string()).unwrap().key_prices());
-    let call = |method, host, path, body, status| crate::price::key_usage("fal", &KeyCall { method, host, path, body, status });
-    let ask = br#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
-    // a synchronous run is charged; a queued submit, its poll and result nothing
-    let made = call("POST", "fal.run", "/fal-ai/flux-2/klein/9b", ask, 200);
-    let polled = call("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status", b"", 200);
-    let result = call("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e", b"", 200);
-    let refused = call("POST", "fal.run", "/fal-ai/flux-2/klein/9b", ask, 422);
-    assert_eq!(call("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", ask, 200), Usage::Key { key: "fal".into(), units: 0 }, "a queued submit");
-    assert_eq!(made, Usage::Key { key: "fal:image".into(), units: 1024 * 576 });
-    assert_eq!((&polled, &result, &refused), (&Usage::Key { key: "fal".into(), units: 0 }, &Usage::Key { key: "fal".into(), units: 0 }, &Usage::Key { key: "fal:image".into(), units: 0 }));
-    let mut w = World::seat();
-    w.ok(Op::Book(configured.clone()));
-    let before = w.balance();
-    let rows = vec![row("key:c-1:f1", made.clone(), None, T0), row("key:c-1:f2", polled, None, T0), row("key:c-1:f3", result, None, T0), row("key:c-1:f4", refused, None, T0)];
-    let batch = meter("key:c-1:f1", rows);
-    // 589,824 pixels at $0.006 per 1,048,576, with the margin, and nothing for the rest
-    let charged = Outcome::Metered(Metered { charged: 5_063, rows_new: 4, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    assert_eq!(w.balance(), before - 5_063);
-    let mut w = w.restarted();
-    w.replays(Op::Book(configured.clone()));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:f1-again", vec![row("key:c-1:f1", made.clone(), None, T0)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    // a row an older release queued: one call, one image, as before
-    let queued = w.ok(meter("key:c-1:old", vec![row("key:c-1:old", Usage::Key { key: "fal".into(), units: 1 }, None, T0)]));
-    assert_eq!(queued, Outcome::Metered(Metered { charged: 9_000, rows_new: 1, rows_before: 0, refused: vec![] }));
-    assert_eq!(w.balance(), before - 5_063 - 9_000);
-    // a release before the image price: its row refused as unpriced, charging nothing
-    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "fal:image").cloned().collect(), ..configured };
-    w.ok(Op::Book(older));
-    let Outcome::Metered(m) = w.ok(meter("key:c-1:g1", vec![row("key:c-1:g1", made, None, T0)])) else { panic!("a batch answers Metered") };
-    assert_eq!((m.charged, m.rows_new, m.refused.iter().map(|r| r.why).collect::<Vec<_>>()), (0, 0, vec![Refused::NoPrice]));
-    assert_eq!(w.balance(), before - 5_063 - 9_000);
-}
-
-/// FIN-445: xAI's key charged every call as an X search ($0.18). Goal: a
-/// deployment's book charges an X search as before and an image one image,
-/// a chat (its tokens not read) nothing, each once across a replay and a
-/// restart; one xAI refused nothing; a release whose book has no image
-/// price charges its rows nothing. Method: the
-/// swap's rows as it meters them (`price::key_usage`), sent again.
-#[test]
-fn an_xai_call_is_charged_as_what_it_is_and_once() {
-    let xai = serde_json::json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }]);
-    let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&xai.to_string()).unwrap().key_prices());
-    let call = |path, body, status| crate::price::key_usage("xai", &KeyCall { method: "POST", host: "api.x.ai", path, body, status });
-    let searched = call("/v1/responses", br#"{"model":"grok-4.3","input":"news","tools":[{"type":"x_search"}]}"#, 200);
-    let chatted = call("/v1/chat/completions", br#"{"model":"grok-4.3","messages":[{"role":"user","content":"hi"}]}"#, 200);
-    let drawn = call("/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat","n":2}"#, 200);
-    let refused = call("/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 429);
-    assert_eq!((&searched, &chatted, &drawn), (&Usage::Key { key: "xai".into(), units: 1 }, &Usage::Key { key: "xai".into(), units: 0 }, &Usage::Key { key: "xai:image".into(), units: 1 }));
-    let mut w = World::seat();
-    w.ok(Op::Book(configured.clone()));
-    let before = w.balance();
-    let rows = vec![row("key:c-1:x1", searched, None, T0), row("key:c-1:x2", chatted, None, T0), row("key:c-1:x3", drawn.clone(), None, T0), row("key:c-1:x4", refused, None, T0)];
-    let batch = meter("key:c-1:x1", rows);
-    // an X search at $0.12 and an image at $0.02, each with the margin; a chat and a refusal nothing
-    let charged = Outcome::Metered(Metered { charged: 180_000 + 30_000, rows_new: 4, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    assert_eq!(w.balance(), before - 210_000);
-    let mut w = w.restarted();
-    w.replays(Op::Book(configured.clone()));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:x3-again", vec![row("key:c-1:x3", drawn.clone(), None, T0)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 210_000);
-    // a release before the image price: its row refused as unpriced, charging nothing
-    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "xai:image").cloned().collect(), ..configured };
-    w.ok(Op::Book(older));
-    let Outcome::Metered(m) = w.ok(meter("key:c-1:y1", vec![row("key:c-1:y1", drawn, None, T0)])) else { panic!("a batch answers Metered") };
-    assert_eq!((m.charged, m.rows_new, m.refused.iter().map(|r| r.why).collect::<Vec<_>>()), (0, 0, vec![Refused::NoPrice]));
-    assert_eq!(w.balance(), before - 210_000);
-}
-
-/// FIN-445: Google Places' key charged every call as an Enterprise text
-/// search. Goal: a deployment's book charges a photo its own list and a
-/// search or a place's details (their tier their field mask's) nothing,
-/// once across a replay and a restart; one Google refused nothing.
-/// Method: the swap's rows as it meters them (`price::key_usage`), sent
-/// again.
-#[test]
-fn a_places_photo_is_charged_its_own_price_and_once() {
-    let places = serde_json::json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }]);
-    let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&places.to_string()).unwrap().key_prices());
-    let call = |method, path, status| crate::price::key_usage("google-places", &KeyCall { method, host: "places.googleapis.com", path, body: b"", status });
-    let searched = call("POST", "/v1/places:searchText", 200);
-    let detailed = call("GET", "/v1/places/ChIJ", 200);
-    let photo = call("GET", "/v1/places/ChIJ/photos/AUc7/media", 200);
-    let redirected = call("GET", "/v1/places/ChIJ/photos/AUc7/media", 302);
-    let mut w = World::seat();
-    w.ok(Op::Book(configured.clone()));
-    let before = w.balance();
-    let rows = vec![row("key:c-1:p1", searched, None, T0), row("key:c-1:p2", detailed, None, T0), row("key:c-1:p3", photo.clone(), None, T0), row("key:c-1:p4", redirected, None, T0)];
-    let batch = meter("key:c-1:p1", rows);
-    // a photo at $0.007 with the margin; a search, a detail and a redirect nothing
-    let charged = Outcome::Metered(Metered { charged: 10_500, rows_new: 4, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    let mut w = w.restarted();
-    w.replays(Op::Book(configured));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:p3-again", vec![row("key:c-1:p3", photo, None, T0)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 10_500);
-}
-
-/// FIN-445: Firecrawl's key charged every call as a search (2 credits),
-/// its status polls too. Goal: a deployment's book charges a scrape its
-/// credit, and a search (its results not counted) and a poll nothing, once
-/// across a replay and a restart. Method: the swap's rows as it meters them, sent again.
-#[test]
-fn a_firecrawl_call_is_charged_its_credits_and_once() {
-    let firecrawl = serde_json::json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }]);
-    let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&firecrawl.to_string()).unwrap().key_prices());
-    let call = |method, path, body, status| crate::price::key_usage("firecrawl", &KeyCall { method, host: "api.firecrawl.dev", path, body, status });
-    let scraped = call("POST", "/v2/scrape", br#"{"url":"https://example.com/","formats":["markdown","html"]}"#, 200);
-    let searched = call("POST", "/v2/search", br#"{"query":"q","limit":5}"#, 200);
-    let polled = call("GET", "/v2/crawl/0b1e", b"", 200);
-    let mut w = World::seat();
-    w.ok(Op::Book(configured.clone()));
-    let before = w.balance();
-    let batch = meter("key:c-1:w1", vec![row("key:c-1:w1", scraped.clone(), None, T0), row("key:c-1:w2", searched, None, T0), row("key:c-1:w3", polled, None, T0)]);
-    // a scrape's credit at $0.005 with the margin; a search (its results not counted) and a poll nothing
-    let charged = Outcome::Metered(Metered { charged: 7_500, rows_new: 3, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    let mut w = w.restarted();
-    w.replays(Op::Book(configured));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:w1-again", vec![row("key:c-1:w1", scraped, None, T0)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 7_500);
-}
-
-/// FIN-445: Browser Use's key charged a session's start, each status read
-/// and its stop each as five minutes. Goal: a deployment's book charges
-/// the start alone, once across a replay and a restart. Method: Hermes'
-/// browser provider's calls as the swap meters them, sent again.
-#[test]
-fn a_browser_session_is_charged_once_at_its_start() {
-    let browser = serde_json::json!([{ "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"], "placements": [{ "header": "x-browser-use-api-key" }], "env": ["BROWSER_USE_API_KEY"] }]);
-    let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&browser.to_string()).unwrap().key_prices());
-    let call = |method, path, status| crate::price::key_usage("browser-use", &KeyCall { method, host: "api.browser-use.com", path, body: b"{}", status });
-    let started = call("POST", "/api/v3/browsers", 201);
-    let read = call("GET", "/api/v3/browsers/b-1", 200);
-    let stopped = call("PATCH", "/api/v3/browsers/b-1", 200);
-    let continued = crate::price::key_usage("browser-use", &KeyCall { method: "POST", host: "api.browser-use.com", path: "/api/v4/runs", body: br#"{"task":"t","sessionId":"b-1"}"#, status: 201 });
-    let mut w = World::seat();
-    w.ok(Op::Book(configured.clone()));
-    let before = w.balance();
-    let batch = meter("key:c-1:b1", vec![row("key:c-1:b1", started.clone(), None, T0), row("key:c-1:b2", read, None, T0), row("key:c-1:b3", stopped, None, T0), row("key:c-1:b4", continued, None, T0)]);
-    // five minutes at $0.02 an hour, with the margin, and nothing for the
-    // rest: a read, a stop, a task on the session it has
-    let charged = Outcome::Metered(Metered { charged: 2_500, rows_new: 4, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    let mut w = w.restarted();
-    w.replays(Op::Book(configured));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:b1-again", vec![row("key:c-1:b1", started, None, T0)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 2_500);
-}
-
-/// FIN-445: X's key charged every call as a 10-post search. Goal: a
-/// deployment's book charges a search ten posts as before, and a lookup
-/// (its returned resources not counted) nothing, once across a replay and
-/// a restart. Method: the x-api-finite helper's calls as the swap meters
-/// them, sent again.
-#[test]
-fn an_x_search_is_charged_and_once_and_a_lookup_nothing() {
-    let x = serde_json::json!([{ "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["X_API_BEARER_TOKEN"] }]);
-    let mut configured = book();
-    configured.keys.extend(crate::catalog::Catalog::parse(&x.to_string()).unwrap().key_prices());
-    let call = |path| crate::price::key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path, body: b"", status: 200 });
-    let looked = call("/2/tweets");
-    let user = call("/2/users/by/username/jack");
-    let searched = call("/2/tweets/search/recent");
-    let mut w = World::seat();
-    w.ok(Op::Book(configured.clone()));
-    let before = w.balance();
-    let batch = meter("key:c-1:t1", vec![row("key:c-1:t1", looked, None, T0), row("key:c-1:t2", user, None, T0), row("key:c-1:t3", searched.clone(), None, T0)]);
-    // a search of ten posts with the margin; two lookups nothing
-    let charged = Outcome::Metered(Metered { charged: 75_000, rows_new: 3, rows_before: 0, refused: vec![] });
-    assert_eq!(w.replays(batch.clone()), charged);
-    let mut w = w.restarted();
-    w.replays(Op::Book(configured));
-    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:t3-again", vec![row("key:c-1:t3", searched, None, T0)]));
-    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 75_000);
+    assert_eq!(w.balance(), before - total - 24_000);
 }
 
 /// Bug 2: a step's charge is its row under the step's key, whatever
@@ -1431,13 +1212,27 @@ fn a_seat_that_ends_or_comes_back_is_news_though_its_standing_holds() {
     w.spend("b1", 52 * USD);
     let overdrawn = Standing::ReadOnly { why: Why::Overdrawn };
     assert_eq!(w.ledger.standing(T0), overdrawn);
-    let with_buy = w.ledger.told_key(T0, true);
+    let with_buy = w.ledger.told_key(T0, true, (0, None));
     w.ok(seat("seat:2", SeatState::Canceled, 2));
     assert_eq!(w.ledger.standing(T0), overdrawn, "its standing holds");
-    let without = w.ledger.told_key(T0, true);
+    let without = w.ledger.told_key(T0, true, (0, None));
     assert!(said::news(Some(&with_buy), &without), "the seat gone: Buy credit goes, and that is news");
     w.ok(seat("seat:3", SeatState::Active, 3));
-    let back = w.ledger.told_key(T0, true);
+    let back = w.ledger.told_key(T0, true, (0, None));
     assert!(said::news(Some(&without), &back), "the seat back: Buy credit is back, news too");
     assert!(!said::news(Some(&with_buy), &back), "the same notices as before: nothing new");
+}
+
+/// A request's minute (cell/src/meter.rs): now's; above the minutes closed
+/// and folded; and after a clock step back, the open one's, never one the
+/// fold marker has passed (where its count would be dropped).
+#[test]
+fn a_request_counts_in_now_s_minute_or_the_open_one_after_a_step_back() {
+    assert_eq!(request_minute(100, -1, -1, None), 100, "now's minute");
+    assert_eq!(request_minute(100, 100, 99, None), 101, "above the minute closed");
+    assert_eq!(request_minute(100, 98, 100, None), 101, "above the minute folded");
+    assert_eq!(request_minute(100, 98, 99, Some(100)), 100, "the open minute, while it is now's");
+    assert_eq!(request_minute(101, 98, 99, Some(100)), 101, "a later minute's request opens it");
+    // the clock steps back from the open minute 101 to 100, both floors below
+    assert_eq!(request_minute(100, 98, 99, Some(101)), 101, "a step back keeps counting into the open minute");
 }

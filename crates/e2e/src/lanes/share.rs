@@ -176,7 +176,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // sheet says so by the invite, on a chat their agent is in and nowhere
     // else (Paul, 2026-10-23 and 10-24): not on an app it is in (no agent
     // hears one: this list), nor an app or a chat without it
-    let warning = fragment_core::access::TRUST_WARNING;
+    let warning = fragment_core::permit::TRUST_WARNING;
     let plain = make(&s.name("plain"), "blank")?;
     let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
     let talk = make(&s.name("talk"), "chat")?;
@@ -201,7 +201,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // versions, which a browser keeps: opening the sheet again waits on no
     // round trip for them (shell.rs `versioned`); none is inline
     let linked = |prefix: &str| r.text.split(['"', '\'']).find(|u| u.starts_with(prefix)).unwrap_or("").to_string();
-    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v=")];
+    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v="), linked("/__shell/fonts.css?v=")];
     let kept = files.iter().map(|f| api.unsigned("GET", f, None)).collect::<Result<Vec<_>>>()?;
     let other = api.unsigned("GET", "/__shell/platform-pages.css?v=0000", None)?;
     let named = api.unsigned("GET", "/__shell/platform-pages.css", None)?;

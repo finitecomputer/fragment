@@ -46,8 +46,9 @@ use std::rc::Rc;
 
 use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
+use fragment_core::ledger::uses::{self, Tally};
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, LedgerUses, OrgBudget, OrgLedgerStatus, Plan, ProviderUse, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::notice::NoticeList;
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
@@ -81,18 +82,21 @@ const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// or far ledger costs a call at most this, once a minute, and one that
 /// does not answer lets the call through (decision 62).
 const GATE_WAIT_MS: u64 = 1_500;
-/// How long an ask beside a model call waits on a ledger (`may_beside`):
-/// no call waits on it, so longer than `GATE_WAIT_MS`, a slow ledger's
-/// answer still kept for the next call; within the 30 s a Worker keeps a
-/// request's `waitUntil` work alive after its answer.
-const BESIDE_WAIT_MS: u64 = 20_000;
+/// How long an ask beside a paid call waits on a ledger (`may_beside`):
+/// longer than `GATE_WAIT_MS`, a slow ledger's answer still kept for the
+/// next call; within the 30 s a Worker keeps a request's `waitUntil` work
+/// alive after its answer. The gate marks its question asked as long
+/// (`gate::ASKING_MS`, this value).
+const BESIDE_WAIT_MS: u64 = fragment_core::ledger::gate::ASKING_MS.unsigned_abs();
+const _: () = assert!(GATE_WAIT_MS < BESIDE_WAIT_MS, "an ask beside a call outlasts a call's own wait");
 
 thread_local! {
     /// What each person's ledger last answered this isolate's gate (`may`).
     static GATE: RefCell<Gate> = const { RefCell::new(Gate::new()) };
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct LedgerCell {
     state: State,
     raw: JsValue,
@@ -120,6 +124,7 @@ pub struct LedgerCell {
     schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for LedgerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -241,6 +246,13 @@ pub struct NoticesOf {}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrgStatus {}
+
+/// A month's uses (`uses::read`): `month`'s, else this one's.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsesOf {
+    pub month: Option<Month>,
+}
 
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
 /// move this ledger's clock (`clock {offsetMs}`: its now, and the times of
@@ -426,6 +438,22 @@ impl Route for OrgBudget {
     type Answer = Done;
 }
 
+impl Route for uses::Used {
+    const PATH: &'static str = "/used";
+    type Answer = Done;
+}
+
+impl Route for uses::TakeUses {
+    const PATH: &'static str = "/take-uses";
+    type Answer = Done;
+}
+
+impl Route for UsesOf {
+    const PATH: &'static str = "/uses";
+    /// Forwarded as bytes by the router (`GET /api/ledger/uses`).
+    type Answer = LedgerUses;
+}
+
 impl Route for TestHook {
     const PATH: &'static str = "/test";
     type Answer = Value;
@@ -509,9 +537,91 @@ impl SqlStore {
     }
 }
 
+/// A change to the uses (`LedgerCell::tally`): what it could not keep, and
+/// whether the hour's spend passed a step of its notice.
+type TallyOp = Box<dyn FnOnce(&mut SqlStore, i64) -> Result<(u32, bool), Refused>>;
+
+#[derive(Deserialize)]
+struct UseLine {
+    provider: String,
+    agent: String,
+    calls: i64,
+    micros: i64,
+}
+
+/// The uses table and, in `meta`, the hand-overs taken
+/// (`uses_taken:<id>`), as the core's tally (`fragment_core::ledger::uses`).
+impl Tally for SqlStore {
+    fn rows(&self, month: Month) -> u64 {
+        self.count("SELECT COUNT(*) AS n FROM uses WHERE month = ?", vec![SqlStorageValue::Integer(month.0.into())])
+    }
+
+    fn holds(&self, month: Month, agent: &str, provider: &str) -> bool {
+        self.count("SELECT COUNT(*) AS n FROM uses WHERE month = ? AND agent = ? AND provider = ?", vec![SqlStorageValue::Integer(month.0.into()), agent.into(), provider.into()]) > 0
+    }
+
+    fn add(&mut self, month: Month, agent: &str, provider: &str, calls: u64, micros: i64) {
+        self.exec(
+            "INSERT INTO uses (month, agent, provider, calls, micros) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (month, agent, provider) DO UPDATE SET calls = calls + excluded.calls, micros = micros + excluded.micros",
+            vec![SqlStorageValue::Integer(month.0.into()), agent.into(), provider.into(), SqlStorageValue::Integer(calls as i64), SqlStorageValue::Integer(micros)],
+        );
+    }
+
+    fn forget_before(&mut self, month: Month) {
+        self.exec("DELETE FROM uses WHERE month < ?", vec![SqlStorageValue::Integer(month.0.into())]);
+    }
+
+    fn taken(&self, id: &str) -> Option<String> {
+        let rows: Vec<Json> = self.rows("SELECT value FROM meta WHERE key = ?", vec![format!("uses_taken:{id}").into()]);
+        rows.into_iter().next().map(|r| r.value)
+    }
+
+    fn put_taken(&mut self, id: &str, digest: &str) {
+        self.exec("INSERT INTO meta (key, value) VALUES (?, ?)", vec![format!("uses_taken:{id}").into(), digest.into()]);
+    }
+
+    fn add_spend(&mut self, slot: i64, micros: i64) {
+        self.exec("INSERT INTO spend_slots (slot, micros) VALUES (?, ?) ON CONFLICT (slot) DO UPDATE SET micros = micros + excluded.micros", vec![SqlStorageValue::Integer(slot), SqlStorageValue::Integer(micros)]);
+    }
+
+    fn spent_since(&self, slot: i64) -> i64 {
+        // at most `uses::SPEND_SLOTS` rows: older ones are forgotten as each is counted
+        let rows: Vec<Spent> = self.rows("SELECT COALESCE(SUM(micros), 0) AS micros FROM spend_slots WHERE slot >= ?", vec![SqlStorageValue::Integer(slot)]);
+        rows.first().map_or(0, |r| r.micros)
+    }
+
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)> {
+        // at most an hour's rows: older ones are forgotten as each is counted
+        let rows: Vec<Slot> = self.rows("SELECT slot, micros FROM spend_slots WHERE slot >= ? ORDER BY slot", vec![SqlStorageValue::Integer(slot)]);
+        rows.into_iter().map(|r| (r.slot, r.micros)).collect()
+    }
+
+    fn forget_spend_before(&mut self, slot: i64) {
+        self.exec("DELETE FROM spend_slots WHERE slot < ?", vec![SqlStorageValue::Integer(slot)]);
+    }
+
+    fn month(&self, month: Month) -> Vec<ProviderUse> {
+        // bounded by `uses::ROWS_MAX` and its computers' hand-overs
+        let rows: Vec<UseLine> = self.rows("SELECT provider, agent, calls, micros FROM uses WHERE month = ? ORDER BY provider, agent", vec![SqlStorageValue::Integer(month.0.into())]);
+        rows.into_iter().map(|r| ProviderUse { provider: r.provider, agent: r.agent, calls: u64::try_from(r.calls).unwrap_or(0), micros: r.micros }).collect()
+    }
+}
+
 #[derive(Deserialize)]
 struct Json {
     value: String,
+}
+
+#[derive(Deserialize)]
+struct Spent {
+    micros: i64,
+}
+
+#[derive(Deserialize)]
+struct Slot {
+    slot: i64,
+    micros: i64,
 }
 
 #[derive(Deserialize)]
@@ -684,15 +794,22 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
+/// The last hour's spend at the ledger's `now`, and when its notice ends on
+/// the clock a page counts it down on: the epoch's, a test fleet's offset
+/// (`offset_ms`, moving the ledger's now) taken off.
+fn spending(store: &SqlStore, now: i64, offset: i64) -> (i64, Option<i64>) {
+    (uses::spent_hour(store, now), uses::spent_until(store, now).map(|at| at - offset))
+}
+
 /// How every transaction ends, the same for each (`transact`'s closures,
 /// one for each caller, carry none of it): the head written back, the
 /// store's fault if any, what it leaves the ledger saying kept in `left`
 /// (`told`; packs sold here or not), and when the next sweep is due.
 #[inline(never)]
-fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, offset: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
     save(store, ledger);
     store.checked()?;
-    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok())));
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok(), spending(store, now, offset))));
     Ok(ledger.next_sweep_ms(now))
 }
 
@@ -734,6 +851,23 @@ impl LedgerCell {
         Ok(self.meta("clock_offset")?.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
+    /// Runs `op` on its uses (`fragment_core::ledger::uses`) in one
+    /// transaction, at the ledger's now, apart from the head: a count
+    /// neither reads nor writes it, nor the alarm, so it never changes what
+    /// the gate answers. A store that failed rolls it back. One copy for
+    /// both its routes (`op` boxed), as the cell's Wasm is held to a budget.
+    fn tally(&self, op: TallyOp) -> Result<(u32, bool), Failed> {
+        let now = js::now_ms() + self.offset_ms()?;
+        let sql = self.sql();
+        let answer = js::transaction_sync(&self.raw, move || {
+            let mut store = SqlStore::new(sql);
+            let answer = op(&mut store, now);
+            store.checked()?;
+            Ok(answer)
+        })?;
+        answer.map_err(Failed::Refused)
+    }
+
     /// Runs `op` on the head and the store in one transaction, at the
     /// ledger's now: the head is written back whatever `op` answers (a
     /// refusal changed nothing but the month it rolled to), and a store
@@ -741,13 +875,14 @@ impl LedgerCell {
     /// answer and when the next sweep is due (the ledger's clock); the
     /// what it leaves the ledger saying is in `left`.
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
-        let now = js::now_ms() + self.offset_ms()?;
+        let offset = self.offset_ms()?;
+        let now = js::now_ms() + offset;
         let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            Ok((answer, settled(&store, &ledger, now, cfg, &left)?))
+            Ok((answer, settled(&store, &ledger, now, offset, cfg, &left)?))
         })
     }
 
@@ -776,14 +911,15 @@ impl LedgerCell {
     /// person's default plan is a command it keeps), so that call is a
     /// mutation, writing it.
     async fn read<T: 'static>(&self, op: impl FnOnce(&Ledger, &SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
-        let now = js::now_ms() + self.offset_ms()?;
+        let offset = self.offset_ms()?;
+        let now = js::now_ms() + offset;
         let store = SqlStore::new(self.sql());
         let Some(ledger) = stored(&store)?.1 else {
             return self.mutate(move |l, s, now| op(l, s, now)).await;
         };
         let answer = op(&ledger, &store, now);
         store.checked()?;
-        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok())));
+        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), spending(&store, now, offset))));
         if self.armed.get().is_none() {
             self.alarm_kept(ledger.next_sweep_ms(now)).await?;
         }
@@ -841,7 +977,10 @@ impl LedgerCell {
             // a ledger no one has called has nothing to sweep
             return Ok(core::Swept { forgotten: 0 });
         }
-        let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
+        let (swept, next) = self.transact(|ledger, store, now| {
+            uses::sweep(store, now);
+            Ok(ledger.sweep(store, now))
+        })?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
         self.told();
@@ -877,6 +1016,12 @@ impl LedgerCell {
             Delay::from(std::time::Duration::from_millis(slow)).await;
         }
         let body = req.bytes().await?;
+        // a wipe that ran while this waited (its body, `slow`) is seen here:
+        // each route's transaction follows with no await between, so none
+        // writes rows back into a ledger its wipe emptied
+        if self.wiped.get() {
+            return Err(Failed::Refused(Refused::Wiped));
+        }
         fn done(answer: ()) -> Done {
             let () = answer;
             Done {}
@@ -938,12 +1083,13 @@ impl LedgerCell {
                 // the head as last written (its body, `{}`, says nothing). A
                 // ledger no call has written yet has none to tell (its
                 // standing ok, or a guest's), and an org's tells no one.
-                let now = js::now_ms() + self.offset_ms()?;
+                let offset = self.offset_ms()?;
+                let now = js::now_ms() + offset;
                 let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
                 let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
                     (Some(Payer::Person(_)), Some(row)) => {
                         let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-                        ledger.said(now, self.cfg.stripe().is_ok())
+                        ledger.said(now, self.cfg.stripe().is_ok(), spending(&SqlStore::new(self.sql()), now, offset))
                     }
                     _ => vec![],
                 };
@@ -958,6 +1104,47 @@ impl LedgerCell {
             <OrgBudget as Route>::PATH => {
                 let c: OrgBudget = decode(&body)?;
                 reply(done(self.mutate(move |l, s, now| l.set_budget(s, &c, now)).await?))
+            }
+            // what its person's agents used (docs/ledger.md, "Usage"): a
+            // person's alone, apart from the head and the gate
+            <uses::Used as Route>::PATH | <uses::TakeUses as Route>::PATH if matches!(Payer::parse(&payer), Some(Payer::Org(_))) => Err(Failed::Refused(Refused::PersonsOnly)),
+            <uses::Used as Route>::PATH => {
+                let mut u: uses::Used = decode(&body)?;
+                // a clock a test fleet moved reads the call's time on it too
+                u.at_ms = u.at_ms.saturating_add(self.offset_ms()?);
+                let agent = u.agent.clone();
+                // counted, and its charges in the hour's spend, in one go
+                let (full, stepped) = self.tally(Box::new(move |t, now| uses::count(t, &u, now).map(|full| (full, uses::spend(t, &u, now)))))?;
+                if full > 0 {
+                    console_error!("{}", json!({ "event": "ledger.uses-full", "agent": agent, "lost": full }));
+                }
+                // its spend passed a step of its notice, or is past one, whose
+                // end it may have moved: its person's pages told what changed
+                // (`told` tells nothing that did not)
+                let offset = self.offset_ms()?;
+                let now = js::now_ms() + offset;
+                let store = SqlStore::new(self.sql());
+                let spent = spending(&store, now, offset);
+                if stepped || spent.0 >= core::said::SPENDING_MICROS {
+                    if let Some(ledger) = stored(&store)?.1 {
+                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), spent)));
+                        self.told();
+                    }
+                }
+                reply(Done {})
+            }
+            <uses::TakeUses as Route>::PATH => {
+                let o: uses::TakeUses = decode(&body)?;
+                self.tally(Box::new(move |t, now| uses::take(t, &o, now).map(|()| (0, false))))?;
+                reply(Done {})
+            }
+            UsesOf::PATH => {
+                let q: UsesOf = decode(&body)?;
+                let now = js::now_ms() + self.offset_ms()?;
+                let store = SqlStore::new(self.sql());
+                let answer = uses::read(&store, q.month.unwrap_or_else(|| Month::of(now)), now);
+                store.checked()?;
+                reply(answer)
             }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
@@ -975,7 +1162,7 @@ impl LedgerCell {
                 .sql()
                 .exec(
                     "SELECT (SELECT COUNT(*) FROM meta) + (SELECT COUNT(*) FROM head) + (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM batches)
-                       + (SELECT COUNT(*) FROM commands) + (SELECT COUNT(*) FROM spend) + (SELECT COUNT(*) FROM caps) AS n",
+                       + (SELECT COUNT(*) FROM commands) + (SELECT COUNT(*) FROM spend) + (SELECT COUNT(*) FROM caps) + (SELECT COUNT(*) FROM uses) AS n",
                     None,
                 )?
                 .to_array()?;
@@ -1200,7 +1387,7 @@ pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R)
 /// or undoes a call already started.
 pub async fn may_beside<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R, after: &dyn crate::models::Background) -> Result<(), LedgerError> {
     let body = serde_json::to_string(question).expect("a gate's question serializes");
-    match GATE.with(|g| g.borrow().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
+    match GATE.with(|g| g.borrow_mut().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
         Step::Go => Ok(()),
         Step::Refuse(why) => Err(why.into()),
         Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await,

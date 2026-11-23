@@ -75,8 +75,13 @@ with its default. What an image sets:
   the save may leave out. An image with more to quiet names another file
   and answers the platform itself.
 - `BRIDGE_RUNTIME`: `relay` (with `BRIDGE_RELAY_SECRET_FILE`, the secret
-  Hermes is given too) or `script`.
-- `BRIDGE_AGENTS_FILE`: the agents the image has made ready (`ready.rs`).
+  Hermes is given too, and `BRIDGE_RELAY_HOME`, Hermes' home, whose
+  profiles hold each agent's memory) or `script` (`BRIDGE_SCRIPT_MEMORY`
+  its stand-in for that memory). See "What a runtime forgot".
+- `BRIDGE_AGENTS_FILE`: the agents the image has made ready, each with
+  the runtime it is ready for (`ready.rs`; one named with none is ready for
+  none): the turns of one whose `agent.json` names another wait, a claim
+  answered meanwhile included, until the file names it for that one.
   Unset, every agent the platform lists runs.
 - `BRIDGE_SCREEN_LISTEN`, `BRIDGE_SCREENS_FILE` and `BRIDGE_SCREEN_START`:
   each agent's screen (`screen.rs`, `screens.rs`, `lease.rs`).
@@ -214,14 +219,99 @@ check before acting on it." A continuation is told the age of what its
 cut turn answered. A routine (its message says its hour), a command,
 and a state from before keep or tell none.
 
-### What a rollback forgot
+### An agent is told to make room
 
-A computer can go back to an older save (docs/computers.md, "What its
-owner is told"). The bridge then reads again the turns run since that
-save, and each of their claims is a 409. Those 409s are exactly what its
-runtime forgot. The agent's next turn in that chat is told what each
-forgotten turn was asked and replied, from the journal
-(`note::forgotten`), once a life.
+A computer whose disk fills may not start again from its save
+(docs/computers.md, "Room to restore"), so its agents make room before
+their person has to ask. The computer's view says its disk as the
+platform last read it (`disk`: its `room`, whether it is `filling`, and
+when it was read), which the bridge reads with the rest of the view. At
+each agent's next turn after a read that finds it filling, the turn
+carries one firm line, first in its note (`TurnStart::disk`,
+`note::disk`): "Your computer is almost full: only 2.4 GB of room is left
+before it can no longer start again from its save. Before anything else,
+load the disk-space-finite skill and make room: move big files you are
+not using to storage, then tell your owner what you moved." At no room
+it says the computer may not start again after it sleeps. Each agent is
+told once per read (a later turn is not told stale room while it makes
+room), and again at a newer read still filling: one after each awake
+save. Its first view counts, as each after it, and the newest read wins:
+a view read before another that answers after it changes nothing. Never
+a command's turn. Nothing of it is saved: a new life tells each agent
+again.
+
+### What a runtime forgot
+
+A runtime's memory of a chat is on `/data`: Hermes' sessions in the
+agent's profile, Claude Code's transcripts. A computer can go back to an
+older save (docs/computers.md, "What its owner is told"), lose `/data`
+or only that memory, and an agent can start on a computer that never ran
+it. Then the runtime has forgotten turns the chat's records hold (Paul,
+2026-11-18, M17: rebuild from the records).
+
+The runtime says when it is behind (`seen.rs`). Beside its memory of
+each agent (`Runtime::memory`: the profile; Claude Code's project
+directory), the bridge keeps one marker per chat, `fragment-seen/<chat>`,
+naming the turn the runtime last took there. The marker goes back,
+and is lost, exactly when that memory does. As it hands a turn, the
+bridge reads the chat's `work` back from the turn's claim
+(`note::behind`). If a turn of the agent's there ran after the marker's
+turn, or there is no marker, the runtime is behind. Refusals never
+reached a runtime and don't count; a stop does (its words are on
+`chat`). A chat the agent never took a turn in is behind nothing, and a
+`/new` is a turn like any other. A behind runtime's turn is told the
+chat (`note::recap`), and once the runtime has the turn
+(`Event::Taken`: Hermes acked it, Claude Code was given it), the marker
+names it. One it ended without taking moves the marker too when its
+memory was current (the turn never reached it), never one that was to
+tell it the chat. So a
+sleep before anyone writes in a chat loses nothing, and a profile lost
+alone is noticed. In the end state the agent fragment compares, and the
+marker stays where it is.
+
+- **A read that failed** (the journal, or the recap, answered too
+  slowly or not at all), or one that does not reach back far enough to
+  say, leaves the marker as it was, so the next turn asks again.
+- **Under a hold** a marker moves only once the hold is gone, so a save
+  never holds a marker newer than Hermes' own copies, which the hold
+  took first. Meanwhile, and until it is written, the turn after
+  compares with the marker the hold keeps back, never the older one in
+  memory (a save after each turn holds often), while that memory still
+  holds what it held when its turn was taken: a memory lost meanwhile is
+  neither hidden nor given the marker.
+- **The runtime's user may change its memory's directory**, and the
+  bridge is root. Each directory is opened once, never through a link,
+  and everything in it is done relative to it. It reads only a plain
+  file and writes a file of its own making. A directory it makes is its
+  parent's owner's.
+- **No marker at all** means a fresh computer or a lost memory, and also,
+  once, every chat on a computer that first runs this release. So the
+  recap's head says the memory "is behind, or may be".
+
+The note holds:
+
+- its messages before the turn's own, both sides, oldest first, since
+  the agent joined and after the newest `/new` of its owner's it ran;
+  each by its sayer (`You`, `Your owner`, anyone else by name);
+- before each of its turns' first reply, that turn's steps on one line
+  (a cut turn's are the cut note's);
+- at most the 24 KiB a continued chat gets (`HISTORY_NOTE_MAX_BYTES`),
+  the oldest dropped first, with where the rest is
+  (`fragment channel <chat> chat`).
+
+It is one bounded read, complete or nothing (`read_back`, `Budget`),
+and runtime-neutral: Hermes gets it as relay's `context`, Claude Code
+in its message. It opens "Your memory of this chat is behind, or may
+be". A cut
+turn is the cut note's to tell. What a rebuild loses is tool outputs
+and the runtime's own summaries. After a `/new` nothing is told from
+before it, nor the runtime's words about the `/new` itself.
+
+In a chat with other members, the note hands the agent their words
+again. That widens nothing. The bridge reads the chat as the agent,
+which may read all of it with `fragment channel`, and only what was said
+since it joined is told. The note is read-only context, never a message
+or anyone's words to act on.
 
 ## An answer for the computer
 
@@ -244,7 +334,10 @@ masked field, and:
   gets its words once the card's closure is on `work`; the closure says it
   was answered by the agent's owner, nothing of what. A record answering
   it is ignored, live or late. A card whose turn is gone (a restart) takes
-  it no more, saying so: its person sends a message to start again.
+  it no more, saying so: its person sends a message to start again. So
+  such a card holds the computer while it is open, at most
+  `COMPUTER_CARD_HOLD_MS` (10 minutes) or to its expiry if sooner
+  (`Prompt::holds_until`): a sleep comes only after that.
 
 The value is never logged or kept, here or on the platform, which only
 carries the port's bytes. Something on the computer itself (the agent's
@@ -255,7 +348,8 @@ only fail.
 ## A card outlives its turn
 
 Waiting on a person (a card, or a question in words) never holds the
-computer, so a sleep or a restart may cut a turn under its card. The
+computer, but for a card only this life can take ("An answer for the
+computer"), so a sleep or a restart may cut a turn under its card. The
 turn ends as lost; its cards stay answerable until `expiresAt`. An owner's
 answer that no running turn of this life holds is late, and the engine
 resolves it from the chat's journal, read back to the card (`cards.rs`):
@@ -287,7 +381,8 @@ it.
 ## Runtime work outside a turn
 
 The keepalive is held while a turn is queued or runs (not while it waits
-on a person), and while a runtime says it has work of its own (`Working`):
+on a person, but for a card only this life can take), and while a
+runtime says it has work of its own (`Working`):
 in our image, delegated children still running after their parent
 replied.
 
@@ -350,6 +445,40 @@ it, and the hook returns only then:
   turn's own calls are steps (`pre_llm_call` maps Hermes' run to our
   turn): its memory review's and a delegated child's are not. A call
   whose end is not observed is no step; nothing is guessed.
+
+## Work left running
+
+Work an agent leaves running outside its turns (a background command of
+any runtime's, `nohup … &`, a download) holds the computer while the
+computer is working, for at most `LEFT_RUNNING_HOLD_MS` (2 hours) after
+its agents' work last held it: a turn queued or running, or a runtime's
+own work. An idle server, an idle runtime and its desktop never do
+(load.rs; `Input::Slice`).
+
+- **Working** is read from the computer's own counters every
+  `LOAD_SLICE_MS` (20 s): its CPU time (its cgroup's `cpu.stat`) and its
+  network bytes both ways on every interface but loopback
+  (`/proc/net/dev`). A slice over either floor
+  (`LOAD_CPU_FLOOR_PERMILLE`, `LOAD_NET_FLOOR_BYTES_PER_S`) is work, and
+  the computer is working while one of its last `LOAD_SLICES` (2
+  minutes) was, counting only slices that began after its agents' work
+  stopped holding it: a turn's own work (its last tool, the runtime's
+  reply) never holds the computer on. A slice the platform's hold
+  overlapped says nothing: the save's own work would hold the computer it
+  saves, and its end save it again; a hold stays as it was through a
+  save, so a long one never ends it while work runs. Disk writes are no measure: idle
+  write-back alone passes any useful floor. The measurements behind the
+  floors are beside them.
+- **The bound is this life's**, never saved: a new life (a restart, a
+  wake) holds nothing until its own agents' work ends (an earlier life's
+  turns it ends as lost are none of its), so a wake's own start never
+  holds a computer woken for a look. The bound runs on the guest's clock,
+  as every bound of the engine does: a clock set back holds that much
+  longer. A bridge restarted alone
+  loses the hold; the computer then sleeps after its idle wait unless a
+  turn runs.
+- A computer with no counters to read (`load.counters` says so) holds
+  nothing for it. Its awake time is billed as any other.
 
 ## Agents asking each other
 
@@ -554,9 +683,10 @@ reaches it (`withheld`).
   expiring, ends the turn, its login with it, and no session begins; the
   URL is taken only once said whole (a pipe's reads are not its lines).
   The login's verifier lives only in
-  its process (PKCE), so a sign-in never outlives its turn: after a sleep
-  or a restart its card's code is refused, saying so, and the next
-  message asks anew.
+  its process (PKCE), so a sign-in never outlives its turn: its card holds
+  the computer for at most `COMPUTER_CARD_HOLD_MS`, and after a sleep or
+  a restart its card's code is refused, saying so, and the next message
+  asks anew.
 - **Its model and effort** are its agent's own: its `agent.json`'s
   `"claude": {"model", "effort"}` (`ClaudeSettings`), read with its
   runtime, in Claude Code's own names (`opus`, `sonnet`, `haiku`, `fable`
@@ -569,8 +699,10 @@ reaches it (`withheld`).
 - **Its folder** is its work directory, its own: an `AGENTS.md` the
   bridge writes (who it is, and the `fragment` CLI, which acts as it:
   `FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and a `CLAUDE.md` that reads it,
-  written only when the agent has none. Claude's auto memory is on, kept
-  per agent under the person's `.claude`.
+  written only when the agent has none. `AGENTS.md` imports its
+  `SOUL.md`. Claude's auto memory is on, kept per agent under the
+  person's `.claude`. The boot syncs `SOUL.md`, `CLAUDE.md` and that
+  memory with its agent fragment (docs/computers.md, "Claude Code").
 - **A session per agent and chat**, its id derived from the two and the
   chat's `/new` count, so every life names the same one. It resumes when
   its transcript is on disk, and its process stops once idle.

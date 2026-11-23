@@ -166,6 +166,10 @@ impl Lab {
         if !presets {
             args.extend(["-s", self.server.as_str()]);
         }
+        // its SMP agent's own log, in its container's (kept at the lab's end)
+        if std::env::var_os("SIMPLEX_LAB_LOG_AGENT").is_some() {
+            args.extend(["--log-agent", "-l", "info"]);
+        }
         if let Some(xftp) = self.xftp.as_deref().filter(|_| !presets) {
             args.extend(["--xftp-server", xftp]);
         }
@@ -225,6 +229,8 @@ impl Drop for Lab {
             let _ = std::fs::write(self.dir.join(format!("{c}.log")), logs(&ctr));
             let _ = docker(&["rm", "-f", &ctr]);
         }
+        // the server's log too, however the test ended (a stall's evidence)
+        let _ = std::fs::write(self.dir.join("smp.log"), logs(&self.container("smp")));
         let _ = docker(&["rm", "-f", &self.container("smp")]);
         let _ = docker(&["rm", "-f", &self.container("xftp")]);
         let _ = docker(&["network", "rm", &format!("{}-net", self.prefix)]);

@@ -43,8 +43,8 @@ first, in `GET /api/notices` (docs/api.md, Notices): a notice that must
 be answered, `move:<old>`, its words the server's
 (`fragment_core::migrations::offer`): "<name>'s upgrade is ready", "Its
 memories, chats, and supported files and skills come with it, to a more
-secure home with a fresh key. You'll get a month free.", with the
-roster's picture through the platform. A person reads the move as their
+secure home with a fresh key.", with the roster's picture through the
+platform. A person reads the move as their
 agent's upgrade: the same agent, in a better home. The words promise
 only what comes (files past the cap, and a skill that needs what this
 platform lacks, stay behind), and its key is new: no words promise the
@@ -52,7 +52,7 @@ same one. Its answers:
 
 | Answer | Does |
 |---|---|
-| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent, and posts `yes {agent}` |
+| Upgrade <name> (Yes) | Opens `/move` (F6), which asks what the import needs, makes the new agent (or takes one the person has), and posts `yes {agent}` |
 | Not now | `POST /api/migrations/offers/{old}/later`: asked again after `LATER_MS` (a day) |
 | Never | `POST …/never`: asked no more until `POST …/ask-again` (from `/move`) |
 
@@ -89,40 +89,97 @@ it, the offer's cover stands aside: it is answered there.
 - The one question: which to upgrade. Each new agent takes its old
   one's name (the import brings who it is; it is renamed as any agent). A
   Never'd one has Ask again.
+- **Into an agent they have.** Someone with an agent here already (one
+  who moved by hand, Paul 11-19) is asked, for each old agent: "You
+  already have an agent here. Make a new one for this upgrade, or use
+  <name>?", its answers "Make a new one" and each of theirs, nothing
+  chosen for them; Upgrade waits for each answer. Theirs are their own
+  agents on a computer and on Hermes (the import is a Hermes skill) that
+  no move is bound to, and none made for another old agent still to
+  answer. An agent takes in one move, ever: two would share its import
+  folder, its SimpleX staging and its keys' names in the Vault, and
+  staff's retry of the first could start while the second imports. The
+  server refuses a Yes into an agent another move is bound to (409,
+  `fragment_core::migrations::yes_into`), whatever that move's state,
+  and staff's retry that would stage or import into such an agent again
+  (`retry_into`; one that only retires goes on), and choosing it for a
+  second old agent on the page takes it from the first. One of theirs is taken as it is: its Yes alone, nothing made,
+  nothing written to it. Until that Yes lands nothing is decided, so a
+  reload asks again; once it lands the move names the agent (the
+  offer's `agent`), and nothing is asked. An old agent that an agent was
+  made for already (`from`, bound to no other move) is not asked: that
+  agent is its answer. Upgrade goes on only with old agents the move's
+  opening still answers askable (another tab may have answered one).
+  The import into one of theirs adds to it and never replaces what it
+  was (`import-agent-home`, "You may be someone already").
 - Upgrade: `POST /api/migrations/offers` opens the move (binds them;
   the comp, once), the page waits for the seat to reach the ledger, then
   for each, one at a time, a new agent is made as Settings' Add makes one
-  (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
-  {agent}` posted: the old agent is stopped then. One new agent per old
-  agent: its agent.json keeps the old one it was made for (`from`), and
-  the page hands that agent back to Add (`agent`), which goes on with
-  what it lacks, its chat too; one cut short before its agent.json is
-  found by its name, the old one's each time. A Yes that never arrived, a
-  reload, or a lost answer never makes a second. An agent.json that could
-  not be read (not missing) makes nothing: the page stops, to be tried
-  again. A refusal shows the server's words.
+  (`addAgent`, its chat made but not opened), or one of theirs taken, and
+  `…/offers/{old}/yes {agent}` posted: the old agent is stopped then. One
+  new agent per old agent: its agent.json keeps the old one it was made
+  for (`from`), and the page hands that agent back to Add (`agent`),
+  which goes on with what it lacks, its chat too; one cut short before
+  its agent.json is found by its name, the old one's each time. A Yes
+  that never arrived, a reload, or a lost answer never makes a second.
+  Upgrade reads each of their agent.json files first: one that could not
+  be read (not missing) makes nothing, and the page stops, to be tried
+  again; a question new since the page drew is asked first. A refusal
+  shows the server's words.
 - Once its new agent exists, a move is that agent's to tell: it imports
   in its own chat, and asks its person there. Each row with a new agent
   (the offer's `agent`) has Open chat, that agent's own chat. An import
   that starts while the page shows takes the person to its agent's chat
   (the first, if several start between two reads); one already importing
   when the page opens leaves the page as it is.
+- Its new agent is empty until the import's routine runs, minutes after
+  its Yes, so its first message (its hello) says its upgrade is under
+  way, and that it will write again once everything is here. Until then
+  it answers nothing as if it knew its person: it says it is still
+  bringing itself over (`onboarding.js` `helloText`; FIN-492, 11-22: one
+  greeted its person as a stranger, in a language not theirs). Every
+  agent's hello names the language their browser is set to.
 
 ## The comp (F5)
 
 A person on the roster who opens the move (`/move`, `migrations::visit`)
-and has an old agent the roster offers or moves is given, once:
-
-- `COMP_GRANT_MICROS` ($25) of credit on their ledger, `GrantCredit` by
-  `migrations` with id `move:<person>` (`comp_grant_id`): a ledger answers
-  the same id again as it did, so it is granted once a person, ever;
-- a comped `seat` for `COMP_MS` (30 days, `CompSeat.untilMs`), which the
-  registry ends then. One who holds a seat already keeps theirs.
+and has an old agent the roster offers or moves is given, once, a comped
+`seat` with no end (Paul, 2026-11-19: most of finite.computer's people
+are paid for out of band, so everyone moves comped, and staff sort out
+their orgs after). It lasts until staff end it or the person takes an
+org's seat. One who holds a seat already keeps theirs, as it is. No
+credit is granted: a `seat` brings its own each month
+(`fragment_core::ledger::SEAT_INCLUDED`). The $25 granted before then
+(`GrantCredit` by `migrations`, id `move:<person>`) stays.
 
 Then Migrations marks them (`people.comped_ms`) and no visit gives it
-again. A visit cut off before the mark gives it again, each step
-answering as it did. A guest makes no agent (decision 25), so the comp
+again. A visit cut off before the mark gives it again, the registry
+answering the same comp. A guest makes no agent (decision 25), so the comp
 comes before `/move` makes the new ones.
+
+**SimpleX needs always-on.** A `seat`'s computer sleeps, and SimpleX runs
+only on one that stays on, so a mover whose stage carries their SimpleX
+chat would lose it (a mover's, 2026-11-20). The mover says so in the
+manifest (`simplex: true`, "SimpleX in a stage"), and the stage's
+`complete` makes that person's comped `seat` a `seat_always_on` before its
+zip is made: a failure is the mover's complete tried again. A paid seat,
+one always-on already, or none is left as it is, and so is a person
+wiped since the move bound them: their stage lands as any other.
+Everyone else keeps a `seat` that sleeps.
+
+Comps the move gave before with a 30-day end lost it at the registry's
+step 12 (`0012_move_comps_open.sql`): each row whose last comp in the
+operators' log is Migrations', or, none logged, that Migrations added.
+`people.comp_until_ms` is that release's, read by nothing now.
+
+**After the move.** A move's comp is a comp like any other:
+
+- `fragment operator uncomp <seat>` ends it at once (its id, as
+  `fragment operator orgs` and `people` print it).
+- An org that pays by Stripe offers them a seat (`POST /api/org/seats`).
+  Their yes moves them: their org of one ends, the comp with it.
+- `fragment operator comp <email> --org <org>` places only someone in no
+  org. Someone the move comped is in an org of one already: 409.
 
 ## The mover's routes
 
@@ -227,6 +284,7 @@ move in the routine that starts the import.
 |---|---|---|
 | `POST /api/migrations/stages/{stage}/open` | `StageOpened {stage, manifest}` | The manifest as the mover wrote it. |
 | `GET /api/migrations/stages/{stage}/zip` | the zip's bytes | `Range: bytes=…` is answered 206 with that range alone. |
+| `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=` | → `StageCopied {sha256, bytes, crc32}` | One range of the zip (a file's bytes, or a part of them: 1 to the caller's upload limit) copied on the platform into the blobs of the fragment `into`, never through the agent's computer: hashed as R2 reads it (its CRC-32 too, which the caller checks against the zip entry's own before it takes the copy for the file), then read again into `into`'s blob upload as the agent, or for its owner (`for`), which the fragment checks as its client's (editor, and the hash). The same range again is the same blob. A range past the zip is 400. |
 | `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | Harmless either way. `ok` moves it to `retiring` with no command: its old agent stays stopped until staff's `retire`, and its person reads it as done. Not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once, and its objects are kept to their keep (Deletion). |
 
 Each is the bound agent's alone (403 for anyone else), for its current
@@ -292,6 +350,9 @@ the files open as they are.
   read by ranges as the agent, or given up (then Link SimpleX, as before),
   so the import, and its `done`, come after by construction. It runs
   nothing then.
+- **The manifest says it carries one** (`simplex: true`), so its
+  person's comped seat is made always-on as it completes (The comp, "SimpleX
+  needs always-on").
 - **Only the owner adopts it**, from their Settings ("Keep my SimpleX
   chat"), by a door ticket the platform signs (`adopt`, docs/api.md, "An
   agent's doors"). The bridge binds its link to that contact and lets the
@@ -397,8 +458,20 @@ enough by hand), and `withdraw` (out of the move).
 | 90 days after the cutoff (phase 2), whatever its import did | its prefix. A phase 2 stage is the only copy left (its old agent was retired as archived), so it is kept until then: after a good import as after a failed one (for staff's retry). Its `done` ends only its reads |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |
 
-`/data` saves never hold a stage: the importer reads it by ranges into
-`/tmp`, outside the saved directories (docs/computers.md).
+A stage is never downloaded: the importer reads it in place, by ranges
+(`fragment home … stage:<stage>`), only what it imports, so neither its
+computer's disk nor its `/data` saves (docs/computers.md) ever hold it.
+An old agent's home can be larger than a new computer's whole disk.
+
+Nothing is left behind (Paul, 11-19). Beside what the import brings,
+`fragment home files --store` keeps every other file of the stage whole
+in the agent's storage (its owner's members-only fragment, the one
+`fragment offload` moves into), each large file copied there by the
+platform (`…/copy`), never through the computer, with a note where each
+was that `fragment offload --back` brings back. Only a file whose name
+says it may hold a password or key stays behind, unread, as before. Kept
+blobs bill the owner's ledger as any fragment's storage does (R2's
+price, with the margin: about $0.02 a GB a month).
 
 ## The operators' routes
 
@@ -409,7 +482,7 @@ staff read a move's state and act on it here.
 | Route | Answer |
 |---|---|
 | `GET /api/admin/migrations[?after=<old>]` | `AdminMoves`: each move by old id, a page at a time, with staff's `why` on each they withdrew |
-| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
+| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt; 409 when that would import into an agent another move is bound to), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
 
 ### The will-not-move list
 

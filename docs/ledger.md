@@ -95,10 +95,65 @@ person in an org's fragment too (decision 67). A step's key is the same
 in every attempt, so a step tried again after its call was paid is
 charged once.
 
+**Requests.** A fragment counts every request the router hands it, per
+minute (cell/src/meter.rs). The open minute's count is written with the
+storage's own `allowUnconfirmed`, so no answer waits for its count to be
+durable: on a self-hosted node, where every durable write waits for the
+bucket, that wait was 85–150 ms on every page. A confirmed write folds the
+count into its minute's row, at the minute's alarm or at the first request
+of a later minute, and the row goes to the ledger as before. The fold is
+one transaction that also records the minute as folded, so a count is
+folded once; and a count names its fragment's life, so a deleted
+fragment's never reaches the name made again. A crash can lose at most
+the open minute's unconfirmed counts, in the owner's favour.
+A self-hosted node's celld honors `allowUnconfirmed` the same way from
+futurepaul/celld#33 (no gate waits on such a write); one without it holds
+the answer for the count as for any write.
+
 Not metered: a person's own keys (decisions 37 and 60: their provider
 bills them); a computer's time kept for its failed saves (the platform's:
 docs/computers.md); a computer's saves, an app facet's database and git
 storage (the debt ledger).
+
+## Usage
+
+What a person's agents used of each provider (M16; Paul, 2026-11-18:
+"one place for what my agents used this month") is the ledger's too: each
+agent's calls a provider answered through a computer's swap, by month,
+and what they cost. A connection's and an own key's are counted at $0
+(their provider bills the person); an operator key's at its charge as
+the swap priced it. It is a display, not money: what charges is the
+meter, above. `fragment_core::ledger::uses` is its state machine, the
+ledger's `uses` table its store, `GET /api/ledger/uses[/{YYYY-MM}]`
+(Settings' Connections) its read.
+
+- **Off the path, best effort.** A swap sends its count (`/used`) to its
+  agent's owner's ledger after its answer, in `wait_until`, one for every
+  provider it named; nothing waits on it, and a count lost is lost (Paul:
+  "accounting should be best effort, not sprawl into interfering and
+  delaying everything that happens"). A count writes only the `uses`
+  table, never the head, so the gate's answers never wait on it.
+- **Bounded.** Thirteen months are kept (`MONTHS_KEPT`; an older one is
+  never read back, and a count, a hand-over or the ledger's daily sweep
+  forgets it), and a month takes at most `ROWS_MAX` agent and provider
+  pairs (a person's agents at each provider); a pair past that is logged
+  (`ledger.uses-full`), and one held counts on.
+- **The hour's spend** (FIN-616; 2026-11-20: a notice instead of the
+  hourly key pause). Each count adds its charges to its five-minute slot of
+  the hour (`spend_slots`, `uses::spend`); past $5 of them in an hour
+  (`said::SPENDING_MICROS`), then each doubling, the person is told
+  (`spending`, an info notice, its words the same until the next step, so
+  their pages are told once a step, and gone when the hour's spend falls
+  below $5 as its slots age out, `uses::spent_until`; a count past $5 tells
+  them again if that moved). Nothing pauses or is refused: agents
+  stop at zero credit, and each vendor's own limit on the platform's key
+  is the backstop.
+- **Moved, never dropped.** A computer counted its agents' uses itself
+  before. Its step 7 keeps each month it held as owed, and it hands each
+  to its owner's ledger as its owner reads its view (`/take-uses`, under
+  `<computer>:<month>`). The ledger takes a month once by that id,
+  adding it to what it counted since: the same body again adds nothing,
+  another under it is refused. The debt ledger says when this goes.
 
 ## The price book
 
@@ -122,50 +177,39 @@ informational. The fee is AI Gateway's on credits, so it applies to
   usage kind of its own: every release's ledger prices tokens, and one
   without the row charges the video nothing (decision 62).
 
-- **An operator key's call** is one `key` unit at its catalog row's
-  price, else the book's (`DEFAULT_KEYS`), an estimate of a typical call
-  where its vendor bills something else. A part of a key's calls the
-  book prices apart (`KEY_PARTS`) is metered in its vendor's own unit
-  from the request: ElevenLabs' text to speech (`/v1/text-to-speech/…`)
-  is `elevenlabs:speech`, a unit a character of its JSON body's `text`,
-  at most 40,000 (a request's limit), at $0.08 per 1,000 (FIN-443); its
-  music and every other call on the key is one call, a minute of music.
-  On fal's key (FIN-445), only FLUX.2 Klein 9B's synchronous run (`POST
-  fal.run/fal-ai/flux-2/klein/9b`) is charged, as `fal:image`, a unit a
-  pixel its JSON body asks for (`num_images` of its `image_size`,
-  Klein's default when absent), at most 16 megapixels, at $0.006 per
-  1,048,576; every other call (a queued generation, its polls and
-  result, an edit, another model, an upload) is none of the key's,
-  charged nothing. On xAI's key, a call whose `tools` name `x_search` is
-  one call of the key (an X search, as before), and an image call naming
-  a grok-imagine-image model and made in its answer (not `deferred`) one
-  `xai:image` ($0.02); any other call (a chat, whose tokens are not
-  read, a deferred image, a video, a model list) none. On Google Places'
-  key, a place's photo is one `google-places:photo`, at its own list; a
-  search or a place's details (whose tier is its field mask's), an
-  autocomplete (free in a session that ends in a Details call) and any
-  other call none. On Firecrawl's key, a scrape and a map are their
-  credits as `firecrawl:credit` ($0.005 each); a search (its results not
-  counted), a crawl, a batch scrape, an extract and a status poll none.
-  On Browser Use's key, a new session's or task's start is one call of
-  the key (five minutes); a task on a session it has (`sessionId`), its
-  status, its stop and any other call none. On X's key, a search is one
-  call of the key, ten posts, as before; a lookup (its resources not
-  counted) and any other call none. Only a call so classified is
-  charged, and only on a 2xx: a part's call, or any call on a key priced
-  by its parts, that its vendor refused or redirected, or whose units
-  are not read (no JSON, no `text` or no size, a body past
-  `KEY_PART_BODY_MAX_BYTES`), is charged nothing, and a release whose
-  book has no part's price refuses its rows as unpriced, charging
-  nothing.
+- **An operator key's call is charged what its vendor said it cost**
+  (FIN-616). Its row's `charges` (`catalog::Charge`; the book's for its
+  name, `price::DEFAULT_CHARGES`, each with its source) name the calls
+  each is for and where its vendor's answer says what the call used: xAI's
+  ticks (`xai:tick`, 10^10 a dollar, on a POST), ElevenLabs' characters
+  (`character-cost`), Firecrawl's credits (a scrape's and a v2 search's),
+  fal's units (each model priced apart: Klein's alone so far), X's posts
+  (`meta.result_count`); or one call, at an estimate, where its answers
+  say nothing (Perplexity's `call`, Browser Use's `session`, ElevenLabs'
+  `music`). The swap reads a header as the answer came and a JSON pointer
+  in the pipe's one pass over the answer (a body read whole, or an event
+  stream's last event naming it), never holding the answer back. The
+  first charge that is for the call and whose number its answer says is
+  the call's usage, `<provider>:<unit>`; else the row's own price a call,
+  if it names one; else nothing, logged `pipe.uncharged` (Google Places:
+  kept uncharged, 2026-11-20, and held to 120 calls an hour a computer,
+  `catalog::DEFAULT_CALLS_AN_HOUR`). Only a 2xx is charged: a call its vendor
+  refused made nothing. A status poll that repeats a running total (a
+  crawl's), or a read that says a cost again (a stored response, a
+  video's poll), is for no charge. A release whose book lacks a unit
+  refuses its rows as unpriced, charging nothing; an older release's
+  rows are priced as it priced them (`price::LEGACY_KEYS`, the debt
+  ledger).
 
-- **OpenRouter's price** (decision 61; a decision for Paul): a slot on
-  OpenRouter is priced at the ceiling it routes under
-  (`body.provider.max_price`), every input token at its prompt price,
-  never less than OpenRouter could bill, grossed up to OpenRouter's fee
-  (`OPENROUTER_FEE_BP`). A slot without one is refused
-  (`Upstream::ceiling`). Settling from OpenRouter's own `usage.cost` is
-  in the debt ledger.
+- **OpenRouter's price** (decision 61; FIN-616): a call on an OpenRouter
+  slot is charged what OpenRouter's answer says it cost (`usage.cost`,
+  dollars of its credits, a stream's on its last usage chunk), as
+  `openrouter/nanousd`, grossed up to OpenRouter's fee on the credits
+  (`OPENROUTER_FEE_BP`: $1.055 a dollar), then the margin
+  (`Upstream::used`). An answer that names no cost is charged its tokens
+  at the ceiling the slot routes under (`body.provider.max_price`, every
+  input token at its prompt price, with the fee), which a quote's estimate
+  uses too; a slot without one is refused (`Upstream::ceiling`).
 - **A slot's own price**: a slot on any other OpenAI-compatible API may
   name its model's list price (`price`), which takes the fee and margin
   as every token row does (`Upstream::own_price`).
@@ -189,11 +233,12 @@ left this month, okay to proceed?"), and reads the balance rather than
 guessing after a refusal. Each item is a row's usage times its calls,
 charged by `ledger::row_charge`, the function a ledger's own rows are
 charged by, with the book the answering release charges with: so it
-prices every key and part the book has (`KEY_PARTS`), the always-on
+prices every key and unit the book has (`Catalog::key_prices`), the always-on
 seat's awake time at nothing, and a name the book does not price is
 unknown, never guessed. Its payer is the one a charge resolves to (an
-agent's owner). It is as accurate as the units it is given: a part's
-(speech's characters) must be said, a model's tokens are an estimate,
+agent's owner). It is as accurate as the units it is given: a unit its
+vendor's answer counts (speech's characters, Grok's ticks:
+`Catalog::counted`) must be said, a model's tokens are an estimate,
 and a call that falls back is quoted on its own model. It holds and
 keeps nothing: the job is still charged after, never held (decision 62).
 
@@ -211,13 +256,18 @@ own refusal stops a spend. A ledger that does not answer, or answers
 otherwise, lets the spend start (`ledger.gate-unknown`) and is asked
 again next time.
 
-**A model call waits on no ledger** (Paul, 2026-11-01: "prioritize user
-experience over nickel-and-diming"; `ledger::may_beside`). A fresh
+**An agent's paid call waits on no ledger** (2026-11-01: "prioritize
+user experience over nickel-and-diming"; `ledger::may_beside`):
+its model calls and its calls on an operator key alike go through the
+pipe (`cell/src/pipe.rs`), one gate and one charge. A fresh
 answer answers it at once, a refusal refusing it before its vendor call.
 With none, it starts at once and the ledger is asked beside it, the
 answer kept for the next call. Only a question last heard refused,
 longer ago than the window, is asked first, for at most `GATE_WAIT_MS`
-(the payer may have topped up). An ask beside a call holds nothing of
+(the payer may have topped up), and so is one being asked beside another
+call now, each call for at most as long: a burst on a cold gate starts
+one call, and the rest take the answer heard beside it, or go when the
+ledger answers none of them. An ask beside a call holds nothing of
 the call's: a call started runs to its end, a stream to its `[DONE]`,
 and is charged as any call is. So a payer out of credit, or past a
 fragment's cap, may make one call more in each isolate that has not
@@ -230,9 +280,9 @@ fresh answer is asked once, for at most `GATE_WAIT_MS`. So a payer out
 of credit may overspend by what starts within the minute, and one who
 topped up waits up to a minute.
 
-- A model call (an agent's chat, vision, decision, transcription and
-  embeddings, and a search's embeddings) asks `agent_turn` of its payer,
-  beside it; an operator key's call through the swap asks it first.
+- An agent's paid call (its chat, vision, decision, transcription and
+  embeddings, a search's embeddings, and an operator key's call through
+  its computer's swap) asks `agent_turn` of its payer, beside it.
 - A job's AI step asks `ai_step` of the fragment's owner, capped when
   the run's principal is neither the owner nor an agent of theirs.
 - A fragment's write asks `write` of its owner (402 past the overdraft).

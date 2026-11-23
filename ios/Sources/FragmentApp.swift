@@ -373,11 +373,9 @@ final class Library {
     /// A chat of the person's still titled `untitled` that has a message is
     /// titled from its first message with words, as the web titles it
     /// (cell/shell/shell.js `titleFromFirst`): its first line's words, cut
-    /// to `titleMax` characters; one its manifest no longer titles so keeps
-    /// its name. Once per chat a session, unless it had no words to take yet.
-    /// As the web's, the check is of the manifest read, not the write: a
-    /// rename landing between them is overwritten (last writer wins), as
-    /// `POST files` takes no expectation of what main holds.
+    /// to `titleMax` characters, set only while it is still untitled (the
+    /// face's `was`: a rename made meanwhile is refused, 409, and kept).
+    /// Once per chat a session, unless it had no words to take yet.
     static let untitled = "New chat"
     static let titleMax = 48
     private func titleUntitled(_ api: FragmentAPI) async {
@@ -387,9 +385,10 @@ final class Library {
                 struct Page: Decodable { let records: [ChannelRecord] }
                 let page: Page = try await api.request("api/f/\(chat.name)/channels/chat", query: [URLQueryItem(name: "after", value: "0"), URLQueryItem(name: "limit", value: "20")])
                 guard let said = Self.firstSaid(page.records) else { titling.remove(chat.name); continue }
-                if try await api.retitle(chat, exactly: Self.title(from: said), from: Self.untitled, message: "its title, from its first message") {
-                    listChanged(api)
-                }
+                try await api.retitle(chat, exactly: Self.title(from: said), was: Self.untitled)
+                listChanged(api)
+            } catch APIError.refused {
+                // renamed meanwhile (409), or refused for good: not asked again this session
             } catch { titling.remove(chat.name) }
         }
     }

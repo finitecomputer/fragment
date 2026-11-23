@@ -81,11 +81,14 @@ mod tests {
         assert_eq!(uses(&files, "keys::connection_exchange("), only("registry/connection_signin.rs", 1));
         assert_eq!(uses(&files, "keys::pipes_import("), only("registry/connection_signin.rs", 1));
         assert!(uses(&files, "pipes_authorize(").is_empty(), "no legacy authorization bypass");
-        let computer = &files["computer.rs"];
-        assert!(computer.contains("#[derive(serde::Serialize)]\npub(crate) struct SignedIn {"), "SignedIn is Serialize only");
-        assert_eq!(uses(&files, "SignedIn { computer"), only("computer.rs", 1), "a SignedIn is made in SignedIn::of alone");
-        assert!(computer.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
+        // an own key's sign-in is its person's Vault's (M16): a SignedIn derives nothing
+        let vault = &files["vault.rs"];
+        assert!(vault.contains("makes one, from its `Bound`: its fields are private.\npub(crate) struct SignedIn {\n    person: String,"), "SignedIn derives nothing, its fields private");
+        assert_eq!(uses(&files, "SignedIn { person"), only("vault.rs", 1), "a SignedIn is made in SignedIn::of alone");
+        assert!(vault.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
+        // one begun before the move is its computer's, asked through vault.rs `signed_in` alone
         assert_eq!(uses(&files, "\"computer/signed-in\""), only("computer.rs", 2), "the computer's signed-in is asked through signed_in alone (and answered by the computer)");
+        assert_eq!(uses(&files, "computer::signed_in("), only("vault.rs", 1), "the computer's signed-in is asked for a sign-in its person's Vault holds none of");
         assert!(Path::new(&crate::devstack::repo_root().join("crates/core/src/roundtrip.rs")).exists());
     }
 
@@ -119,7 +122,8 @@ mod tests {
     /// added (computer.rs, jobs.rs); a job step's results and a file's
     /// content, the facet's arguments and a step's answer (jobs.rs,
     /// files.rs); the queues' messages, whose JSON stays `to_value`'s, keys
-    /// sorted, byte for byte across releases (meter.rs, deliveries.rs); and
+    /// sorted, byte for byte across releases (meter.rs, pipe.rs,
+    /// deliveries.rs); and
     /// the rare calls whose body is a `Value` so `computer::ask` stays one
     /// copy (an own key's sign-in: a body type of its own is about 1.4 KB
     /// more of the Wasm; computer.rs). clippy cannot hold this:
@@ -129,7 +133,7 @@ mod tests {
     fn a_type_is_made_a_value_only_to_be_edited() {
         // the name alone: `to_value::<T>(…)` is one too
         let made = uses(&cell_sources(), "to_value");
-        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 2)].map(|(f, n)| (f.to_string(), n)));
+        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 1), ("pipe.rs", 1)].map(|(f, n)| (f.to_string(), n)));
         assert_eq!(made, edited, "write the type as JSON once (Response::from_json, routed::ask_object, js::to_js), not as a Value written out again");
     }
 
@@ -149,8 +153,13 @@ mod tests {
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
         let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell"), ("vault.rs", "VaultCell"), ("migrations.rs", "MigrationsCell")];
+        // the admin Worker's build exports no class (cell/src/lib.rs, "Two
+        // Workers, one crate"): each is an object in the cell's build alone
+        assert!(uses(&files, "#[durable_object").is_empty(), "every class's macro is cfg'd to the cell's build");
         for (file, class) in objects {
             let text = &files[file];
+            assert!(text.contains(&format!("#[cfg_attr(not(feature = \"admin\"), durable_object)]\npub struct {class} {{")), "{class} is exported by the cell's build alone");
+            assert!(text.contains(&format!("#[cfg(not(feature = \"admin\"))]\nimpl DurableObject for {class} {{")), "{class} is an object in the cell's build alone");
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
             let fetch = text[at..].find("    async fn fetch(&self, req: Request) -> Result<Response> {\n").unwrap_or_else(|| panic!("{class} answers fetch")) + at;
             let first = text[fetch..].lines().nth(1).unwrap_or_default();
@@ -317,5 +326,40 @@ mod tests {
         assert_eq!(file_bounds(r#"{"limits":{"uploadMaxBytes":100000000,"filesPerMessage":8}}"#), 1, "a key that names it");
         assert_eq!(file_bounds("let size = 100_000_000; // bytes"), 1);
         assert_eq!(file_bounds("let sha = \"9f1e8a\"; let x = \"1e8ab\";"), 0, "an exponent's spelling inside a hash");
+    }
+
+    /// Goal: a run's Workflow is made with a fresh subrequest budget (the
+    /// D2b depth spike on Cloudflare: a Workflow keeps the budget of the
+    /// call that made it, and a call a busy object makes after it awaited
+    /// may take another request's deeper one; runs started behind other
+    /// calls lost 2 hops a generation, until a run's call into another
+    /// object failed or `createBatch` made nothing). So queued runs start
+    /// from the alarm alone, its first call out, all in one `createBatch`:
+    /// `launch_queued` is called once, by the alarm, as its first await,
+    /// and its own first await is that batch. Method: the cell's source,
+    /// read; a line comment is not code.
+    #[test]
+    fn queued_runs_start_first_in_the_alarm() {
+        let files = cell_sources();
+        let code = |text: &str| text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        // a function's code, from its signature to its closing brace at its indent
+        let body = |file: &str, sig: &str| -> String {
+            let text = code(&files[file]);
+            let at = text.find(sig).unwrap_or_else(|| panic!("{file} has {sig}"));
+            let end = text[at..].find("\n    }\n").unwrap_or_else(|| panic!("{sig} ends"));
+            text[at..at + end].to_string()
+        };
+        let before_first_await = |f: &str| f[..f.find(".await").expect("it awaits")].to_string();
+        assert_eq!(
+            uses(&files, "launch_queued("),
+            BTreeMap::from([("fragment.rs".to_string(), 1), ("jobs.rs".to_string(), 1)]),
+            "made in jobs.rs, called by the alarm alone: a request arms the alarm (`arm_launch`)"
+        );
+        let alarm = before_first_await(&body("fragment.rs", "async fn alarm(&self) -> Result<Response> {"));
+        assert!(alarm.trim_end().ends_with("self.launch_queued()"), "the alarm's first await is the launch:\n{alarm}");
+        let launch = before_first_await(&body("jobs.rs", "pub(crate) async fn launch_queued(&self) -> usize {"));
+        let last = launch.lines().last().unwrap_or_default();
+        assert!(last.contains("js::jobs_create_batch("), "the launch's first await is its one createBatch:\n{launch}");
+        assert_eq!(uses(&files, "js::jobs_create_batch("), only("jobs.rs", 1), "and no other Workflow is made");
     }
 }

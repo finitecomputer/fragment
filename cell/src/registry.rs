@@ -67,7 +67,8 @@ pub use signin::SESSION_TTL_MS;
 /// The fleet's one registry cell.
 pub const NAME: &str = "registry";
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct RegistryCell {
     state: State,
     /// The state as the runtime handed it (what a restart onto a newer
@@ -122,6 +123,7 @@ pub struct RegistryCell {
     schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -598,7 +600,7 @@ impl RegistryCell {
         if agent.kind != IdentityKind::Agent || agent.owner.as_deref() != Some(by.id.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "only an agent's owner holds it"));
         }
-        if b.held.is_some_and(|r| r == Role::Public || r > fragment_core::access::AGENT_ROLE_MAX) {
+        if b.held.is_some_and(|r| r == Role::Public || r > fragment_core::permit::AGENT_ROLE_MAX) {
             return Err(CellError::invalid("an agent is held at viewer or editor"));
         }
         let held = b.held.map_or(SqlStorageValue::Null, |r| r.as_str().into());
@@ -788,6 +790,10 @@ impl RegistryCell {
             TestHook::InvitesBefore(email) => {
                 let made = self.rows::<Value>("UPDATE invites_waiting SET role = NULL, title = NULL, sharer = NULL WHERE email = ? RETURNING fragment", vec![email.into()])?;
                 Ok(json!({ "before": made.len() }))
+            }
+            TestHook::CompEnds(email) => {
+                let ends = self.rows::<Value>("SELECT until_ms FROM org_members WHERE email = ? AND comped = 1 ORDER BY added_at, id", vec![signin::email_of(&email).unwrap_or_default().into()])?;
+                Ok(json!({ "ends": ends.iter().map(|r| r["until_ms"].clone()).collect::<Vec<_>>() }))
             }
         }
     }

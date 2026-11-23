@@ -443,6 +443,14 @@ pub enum GlanceLogs {
     Failed { why: String },
     #[serde(rename_all = "camelCase")]
     Read {
+        /// When these numbers were read (ms): a read is kept a short while
+        /// (`fragment_core::glance::LOGS_FRESH_MS`), so this is how old they
+        /// are, which the page shows.
+        at: i64,
+        /// Why a newer read failed, when these are a kept one standing in
+        /// for it (a 429 under the account's query limit).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why_kept: Option<String>,
         /// Distinct computers whose lines say they are awake: in the last
         /// ten minutes (an awake one logs at least every five), since
         /// `dayStart`, in the last seven days.
@@ -456,6 +464,10 @@ pub enum GlanceLogs {
         /// Computers whose lines in the last day say they are in trouble,
         /// the most lines first.
         trouble: Vec<GlanceTrouble>,
+        /// Why the reasons saves failed (`GlanceTrouble::why`) were not
+        /// read, when they were not: the rest stands without them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why_unread: Option<String>,
     },
 }
 
@@ -470,6 +482,21 @@ pub struct GlanceTrouble {
     /// Whose it is, and their email, when a person's computer.
     pub npub: Option<String>,
     pub email: Option<String>,
+    /// For `saves_failing`: the reason its newest failed save gave, and
+    /// when, if that line is among the newest read
+    /// (`fragment_core::glance::WHYS_READ_MAX`); none for another kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<TroubleWhy>,
+}
+
+/// Why a computer's save failed, as its line said: the platform's words,
+/// short, with a person's paths left out (`fragment_core::glance::why`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TroubleWhy {
+    /// When it was logged (ms).
+    pub at: i64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -479,8 +506,8 @@ pub enum TroubleKind {
     WontWake,
     /// A save of it failed.
     SavesFailing,
-    /// Its disk had less than `fragment_core::computer::DISK_TOLD_FREE_MAX`
-    /// free.
+    /// Its disk had less than `fragment_core::computer::ROOM_TOLD_MAX` of
+    /// room (docs/computers.md, "Room to restore").
     DiskFilling,
 }
 
