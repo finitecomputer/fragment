@@ -1,4 +1,4 @@
--- Fragment, step 11: a SimpleX connector's door ends with it (cell/door.mjs
+-- Fragment, step 13: a SimpleX connector's door ends with it (cell/door.mjs
 -- `/door/end`): its container, its saves in the bucket and its object's
 -- storage. A life that ends records its door here, beside its other
 -- parts, and so does a life that installs other code (no door again), and

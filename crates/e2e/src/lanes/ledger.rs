@@ -886,7 +886,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a call names only a fragment its agent is in", r.status == 403, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", fragment_core::npub::encode(hand.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c4", "micros": 1_000 })))?;
-    // `for` names only the agent's own owner (access::may_act_for): a turn
+    // `for` names only the agent's own owner (permit::may_act_for): a turn
     // naming anyone else is refused as it is signed, before any fragment
     let r = api.signed(&hand, "POST", &format!("{route}?fragment={}&for={}", url_enc(&name), url_enc(&visitor_id)), Some(&chat(false)))?;
     s.ok(

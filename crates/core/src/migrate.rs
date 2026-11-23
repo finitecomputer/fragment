@@ -121,7 +121,9 @@ pub const FRAGMENT: Class = Class {
         step!("newest", "fragment/0008_newest.sql"),
         step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
         step!("face_forward_only", "fragment/0010_face_forward_only.sql"),
-        step!("ended_doors", "fragment/0011_ended_doors.sql"),
+        step!("record_author", "fragment/0011_record_author.sql"),
+        step!("pending_code", "fragment/0012_pending_code.sql"),
+        step!("ended_doors", "fragment/0013_ended_doors.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -1096,7 +1098,7 @@ mod tests {
         let short = Lite::new();
         migrated(&short, &with(ONE), 1).expect("v1");
         short.exec("INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (1, 'a', 'npub1a', 'f', 1, 1)").expect("an ended life");
-        let tables = short.transaction(|db| remake(db, &FRAGMENT)).expect("remade short of step 11");
+        let tables = short.transaction(|db| remake(db, &FRAGMENT)).expect("remade short of step 13");
         assert!(!tables.contains(&"ended_doors".to_string()) && !tables.contains(&"ended".to_string()), "{tables:?}");
         assert_eq!(short.count("SELECT COUNT(*) FROM ended"), 1, "its ended life is kept");
         assert_eq!(short.count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'ended_doors'"), 0, "and nothing made it");

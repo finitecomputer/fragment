@@ -50,7 +50,7 @@
 //! downloaded.
 //!
 //! **A SimpleX connector's door goes with it.** Its end records its door
-//! (`ended_doors`, Fragment step 11), which the alarm ends (cell/door.mjs
+//! (`ended_doors`, Fragment step 13), which the alarm ends (cell/door.mjs
 //! `/door/end`: its container, its saves in the bucket, its object's
 //! storage), retried as the rest are. A life that installs other code is
 //! no door from then on and records its door the same way (plane.rs). A
@@ -444,7 +444,7 @@ impl FragmentCell {
     }
 
     /// Whether it records its connectors' doors to end (`ended_doors`,
-    /// Fragment step 11): an object that refuses its schema may not.
+    /// Fragment step 13): an object that refuses its schema may not.
     fn ended_records_doors(&self) -> CellResult<bool> {
         Ok(!self.rows("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ended_doors'", vec![])?.is_empty())
     }
