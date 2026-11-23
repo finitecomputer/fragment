@@ -161,18 +161,15 @@ pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
 
-/// Pins computer `id` and its owner's ledger to this month for the lane
-/// (their `clock` levers, run on from the 15th), so the uses the lane
-/// makes, which its owner's ledger counts, its reads of the month's, and
-/// its key hours, which the computer counts, are in one month however late
-/// in a month it runs: its month.
-pub(super) fn pin_month(api: &Api, id: &str, owner_id: &str) -> Result<String> {
+/// Pins its owner's ledger to this month for the lane (its `clock` lever,
+/// run on from the 15th), so the uses the lane makes, which that ledger
+/// counts, and its reads of the month's are in one month however late in
+/// a month it runs: its month.
+pub(super) fn pin_month(api: &Api, owner_id: &str) -> Result<String> {
     let offset = super::ledger::mid_month_offset_ms();
-    let r = lever_with(api, id, json!({ "op": "clock", "offsetMs": offset }))?;
-    anyhow::ensure!(r.status == 200, "the computer's clock moves: {r}");
     let l = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "clock", "offsetMs": offset })))?;
     anyhow::ensure!(l.status == 200, "its owner's ledger's clock moves: {l}");
-    Ok(r.body["month"].as_str().unwrap_or_default().to_string())
+    Ok(l.body["month"].as_str().unwrap_or_default().to_string())
 }
 
 /// The newest save computer `id` keeps (the lever's `saves`), if any.
@@ -2241,7 +2238,7 @@ const SPOKEN_CHARS: u64 = 20;
 
 /// The quote's checks beside the swap's (FIN-448), skipped as they are.
 const QUOTE_CHECKS: [&str; 2] = [
-    "its owner quotes a speech job through the CLI (`fragment quote elevenlabs:speech 20chars`): one line, about what it costs and what is left, and the quote with --json",
+    "its owner quotes a speech job through the CLI (`fragment quote elevenlabs:character 20chars`): one line, about what it costs and what is left, and the quote with --json",
     "the speech its owner quoted, made through the swap, is charged what the quote said",
 ];
 
@@ -2254,16 +2251,16 @@ fn quote_speech(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Value> 
     std::fs::create_dir_all(&config)?;
     std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
     let chars = format!("{SPOKEN_CHARS}chars");
-    let said = s.cli(api, &home, &["quote", "elevenlabs:speech", &chars]);
+    let said = s.cli(api, &home, &["quote", "elevenlabs:character", &chars]);
     let line = String::from_utf8_lossy(&said.stdout).into_owned();
-    let quoted = s.cli_json(api, &home, &["quote", "elevenlabs:speech", &chars, "--json"])?;
+    let quoted = s.cli_json(api, &home, &["quote", "elevenlabs:character", &chars, "--json"])?;
     let total = quoted["totalMicros"].as_i64().unwrap_or(-1);
     s.ok(
         QUOTE_CHECKS[0],
         said.status.success()
             && line.lines().count() == 1
             && line.starts_with(&format!("about {}; you ", fragment_core::price::dollars(total)))
-            && quoted["items"][0]["pricedAs"] == "elevenlabs:speech"
+            && quoted["items"][0]["pricedAs"] == "elevenlabs:character"
             && quoted["items"][0]["calls"] == 1
             && total > 0,
         json!({ "said": line, "stderr": String::from_utf8_lossy(&said.stderr), "quoted": quoted }),
@@ -2451,7 +2448,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
-    let month = pin_month(api, &id, &api.identity(&owner)?)?;
+    let month = pin_month(api, &api.identity(&owner)?)?;
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
     // deployment's own image (our Hermes) answers as its real model does.
@@ -2683,7 +2680,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let rows = entries(api, &owner_id, &format!("key:{id}:"));
         // each speech call of the quoted size (the cap's checks make longer
         // ones too, and more of that size)
-        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:speech" && usage(r)["units"] == SPOKEN_CHARS).collect();
+        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:character" && usage(r)["units"] == SPOKEN_CHARS).collect();
         s.ok(
             QUOTE_CHECKS[1],
             !spoken.is_empty() && spoken.iter().all(|r| charged(r).is_some_and(|c| Some(c) == quoted["totalMicros"].as_i64())),
@@ -2742,6 +2739,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             let sx = super::simplex_settings::Agent { owner: &owner, computer: &id, agent: &agent_name, chat: &chat_name, identity: &identity, wake };
             replies_so_far += super::simplex_settings::checks(s, api, &sx, &fetched)?;
             replies_so_far += telegram_checks(s, api, &doors, &fetched, wake)?;
+            // SimpleX's connector, on a door (run by name: its stack builds the door's image)
+            let sx = super::simplex_door::Agent { owner: &owner, owner_id: &owner_id, computer: &id, agent: &agent_name, identity: &identity, wake };
+            super::simplex_door::connector(s, api, &sx)?;
         }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
