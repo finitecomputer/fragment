@@ -4,27 +4,45 @@ An agent reads untrusted text: email, web pages, documents, messages
 from other people. That text may try to steer it. This page says what
 limits an agent today, whatever it is told, and what does not.
 
-Google's Workspace API user data policy asks AI apps for prompt-injection
-protection (Model Armor or an equivalent). Finite has no classifier of
-that kind today. What it has are limits outside the model, below, and
+Our understanding is that Google's Workspace API user data policy asks
+AI apps for prompt-injection protection (Model Armor or an equivalent).
+To confirm: the policy's exact wording and link, and whether it applies
+to Finite. Finite has no classifier of that kind today. What it has are limits outside the model, below, and
 one instruction inside it.
 
 ## What limits an agent, whatever it reads
 
 These hold in the platform's code, not in the model's judgment.
 
-### It holds no credential
+### What credentials it holds
 
-- The computer's guest holds no secret. Every credential is a
-  per-agent placeholder (`fcx_…`, `fck_…`), a MAC under a key only the
+- Connections (Google) and operator keys reach the guest only as
+  per-agent placeholders (`fcx_…`, `fck_…`), a MAC under a key only the
   platform holds (docs/computers.md, "Connections and operator keys").
-- The real token is added only at the computer's egress, only toward
-  that provider's own hosts. A placeholder sent anywhere else is
-  refused before any provider is reached (`swap::Plan`;
-  `cell/intercepts.mjs`). So an injected agent cannot send a Google
-  token to an attacker: it never has one.
+- The guest does hold some real credentials: a code.storage token for
+  one repo, git read or read and write, for fifteen minutes
+  (`cell/src/cs.rs`, `storage_token`); the local relay secret the bridge
+  and Hermes share (`images/hermes/boot/src/main.rs`); and, on the
+  Claude Code runtime, the person's own Anthropic sign-in under
+  `/data/hermes/.claude` (docs/computers.md, "Claude Code in our Hermes
+  image"). An injected agent can use or send these.
+- The real token is added only at the computer's egress. The swap runs
+  only on traffic to the hosts the egress intercepts (the catalog's
+  provider hosts and the person's Vault secrets' hosts). There, a
+  placeholder toward a host that is not its provider's is refused
+  (`swap::Plan`; `cell/intercepts.mjs`). A request to any other host
+  leaves with the placeholder unchanged, which carries no real token.
+- The platform never provisions a Google token to the computer. But the
+  swap redacts the provider's answer only for filled Vault secrets: a
+  connection's or an operator key's answer comes back as the provider
+  sent it (`cell/src/computer.rs`, `egress_swap`, `hidden`). If a
+  provider ever echoed the token in its answer, the agent would see it.
+  We know of no Google API that does; this is not yet checked.
+- A placeholder's tag names an agent of the computer, not the process
+  that sent it. Any process in the container can use any of its agents'
+  placeholders.
 - A connection's token is asked of WorkOS Pipes for each request and
-  never held on the computer.
+  not stored on the computer.
 - An operator key shared by every agent is never sent on the calls its
   catalog row denies, which would reach other people's data at that
   vendor (`catalog::Deny`; docs/computers.md, "Calls an operator key
@@ -35,11 +53,16 @@ These hold in the platform's code, not in the model's judgment.
 
 ### It can do only what its owner allowed
 
-- **Connection scopes are the person's.** As they connect Google, they
-  pick read only or read and write, and untick what they don't want. The
-  grant holds only those scopes (docs/pipes-browser-binding.md,
-  "Access"). A read-only grant cannot send mail or change files, whatever
-  the agent is told.
+- **Connection scopes are the person's.** Before Google's consent
+  screen, they pick read only or read and write, and Finite asks Google
+  for that tier's scopes alone; on Google's screen they may untick more.
+  The grant holds what Google returns, which can include scopes granted
+  before (`include_granted_scopes`), so a reconnect as read only keeps
+  earlier write scopes; going back to read only is a disconnect, then a
+  connect (docs/pipes-browser-binding.md, "Access";
+  `crates/core/src/connection_signin.rs`, `tokens`). Settings shows the
+  access the grant holds. A grant that holds only read-only scopes
+  cannot send mail or change files, whatever the agent is told.
 - **The owner may narrow an agent's connections** to a list (decision 44;
   `fragment_core::grants`). This is specialization, not a security
   boundary: a person's agents are not fenced from each other.
@@ -53,9 +76,15 @@ These hold in the platform's code, not in the model's judgment.
   person's, never a page's or an agent's (docs/secrets.md); a card is
   answered only by the agent's owner (decision 42); invites wait for
   their person's yes (decision 63).
-- **Spending is capped.** A fragment's costs stop at its monthly cap
-  (decision 26); agents stop at zero credit (decision 27); a shared key
-  has an hourly cap per person (`key_hour`).
+- **Spending is limited, not hard-stopped.** A fragment's monthly cap
+  stops other people's spending in it, not its owner's or their agents'
+  (decision 26; `crates/core/src/ledger.rs`, `may_spend`). Agents stop
+  when credit runs out (decision 27). Each limit is checked before a
+  call starts and the call is charged after, so spending can pass a cap
+  or go below zero, down to the payer's overdraft, where the ledger
+  turns read only (`latch`). A shared key has an hourly cap per person
+  (`key_hour`); if the hour's usage can't be read, the call goes ahead
+  (`computer.rs`, `key_open`), and its spend is recorded after the call.
 
 ### It runs apart from other people
 
@@ -86,9 +115,10 @@ the platform enforces.
 
 Stated plainly, so the lab reads it here first:
 
-- **Computers reach the internet** (decision 43). The guest holds no
-  secret, so traffic that bypasses the egress carries nothing of ours.
-  But data the agent has read (an email's text, a file) can be sent by
+- **Computers reach the internet** (decision 43). Traffic to a host the
+  egress doesn't intercept carries placeholders, not connection tokens
+  or operator keys, but it can carry the real credentials the guest
+  does hold (above). And data the agent has read (an email's text, a file) can be sent by
   an injected agent to any host. There is no egress allowlist for
   computers.
 - **No technical approvals.** Hermes' own approvals are off

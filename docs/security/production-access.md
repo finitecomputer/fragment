@@ -8,9 +8,9 @@ names are under "To confirm".
 
 | Access | What it reaches | How it is granted | Source |
 |---|---|---|---|
-| Cloudflare account (production) | the Workers, Durable Objects, R2, Secrets Store (names, and setting values; the store gives no value back), Workers Logs, containers, DNS | Cloudflare account membership | decisions 1, 3; docs/secrets.md |
-| GitHub `production` environment | the deploy job's secrets: `CLOUDFLARE_API_TOKEN`, `DEPLOY_REPO_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and the preview registry's token | set by Paul | docs/secrets.md, "Files"; `.github/workflows/ci.yml` |
-| Pushing `production` | deploys to production | only Paul's GitHub account may update the branch (ruleset, read 2026-11-23) | secure-development.md |
+| Cloudflare account (production) | the Workers, Durable Objects, R2, Secrets Store (names, and setting values; to confirm against the account's roles that the store's API gives no value back, though code bound to a secret reads it), Workers Logs, containers, DNS | Cloudflare account membership; roles to confirm | decisions 1, 3; docs/secrets.md |
+| GitHub `production` environment | the deploy job's secrets (`CLOUDFLARE_API_TOKEN`, `DEPLOY_REPO_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`), and the preview registry's token and account id (`PREVIEW_REGISTRY_TOKEN`, `PREVIEW_ACCOUNT_ID`), which only the manual image workflow's copy into production's registry uses | set by Paul | docs/secrets.md, "Files"; `.github/workflows/ci.yml` (`deploy`); `.github/workflows/image.yml` (`copy`) |
+| Pushing `production` | deploys to production | restricted by a GitHub ruleset to one bypass actor (to confirm against the live ruleset; auditor evidence provided privately) | secure-development.md |
 | Merging to `master` | deploys to preview, not production | anyone with write on the repo, through a PR | secure-development.md |
 | finitecomputer/fragment-deploy | the deploy configs: names and paths, never secret values | GitHub repo access; CI reads it with a read-only token | docs/secrets.md |
 | Operators | `/admin`: people's emails, seats, sign-in times, counts of what they own and share, the operators' log; comps, credit, pins, starting a computer from a save; and, with an operator key, a wipe | the deployment's `operators` list of npubs, set in the deploy config | docs/api.md, "Operators: the admin", "Operators: wiping a person" |
@@ -27,16 +27,20 @@ names are under "To confirm".
   "Operators: the admin").
 - `/admin` answers only an operator's platform session; to anyone else it
   is a 404. Its API decides again on every call.
-- Every operator write is in the operators' log.
-- No one reads a sealed secret: the Secrets Store gives no value back,
-  and sealed values open only in the Durable Object that sealed them
-  (secrets-and-encryption.md).
+- Most operator writes are in the operators' log; an object wake is
+  not, and a wipe is in `wipes` (logging.md; FIN-651).
+- No operator route reads a sealed secret. That is a property of the
+  routes, not of the encryption: Secrets Store values are returned to
+  the Worker code bound to them, and a sealed value opens for any
+  Worker code that holds the host secret and names its scope
+  (secrets-and-encryption.md, "What Finite seals itself").
 - A person's agents act for that person, never for an operator.
 
 ## What platform access could reach
 
 Someone with Cloudflare account access could deploy code, and code can
-read any Durable Object's storage. So Cloudflare account access is, in
+read any Durable Object's storage, read every bound secret and open
+every sealed value. So Cloudflare account access is, in
 effect, access to all user content. The same holds for code.storage's
 org key (every fragment's git) and WorkOS (connected accounts' tokens,
 through Pipes). These are the accounts to keep smallest.

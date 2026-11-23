@@ -1,8 +1,10 @@
 # Security material for Google's CASA assessment
 
-This folder answers the security assessment Google asks for before it
-lets Finite read Gmail and Drive for more than 100 people (CASA, run by
-TAC Security on OWASP ASVS). Each page states what the code and the
+This folder answers the security assessment (CASA) that Google asks
+for as part of verifying Finite's restricted Gmail and Drive scopes. Our
+understanding, to confirm with Google and TAC Security: an unverified
+app is capped at 100 users, verification of restricted scopes needs a
+CASA letter, and TAC Security assesses against OWASP ASVS. Each page states what the code and the
 deployment do today, with file references, and lists what is not done.
 Policy pages are drafts until Paul approves them.
 
@@ -19,8 +21,11 @@ repository: one Rust Worker (`cell/`), its Durable Objects, and the
 images computers run (`images/`).
 
 A person may connect accounts such as Google. Their agents then call
-Google's APIs for them, from their computer, without ever holding the
-token (docs/computers.md, "Connections and operator keys").
+Google's APIs for them, from their computer. The platform never gives
+the computer the Google token: the agent holds a placeholder, and the
+platform swaps the token in at the computer's egress (docs/computers.md,
+"Connections and operator keys"). prompt-injection.md says where that
+stops short: Google's answers come back unredacted.
 
 ## Pages
 
@@ -55,7 +60,7 @@ an account), docs/api.md (the wire, operators, export, wipe).
 | `finite.chat` | the platform host: the shell (sign-in, chats, settings), every `/api/…` route, `/auth/…`, the OAuth callbacks, and the operators' `/admin` | docs/cloudflare-v1.md decision 5; docs/api.md |
 | `<name>.finite.place` | each fragment (an app, a chat, an agent's page, a site) on its own browser origin, on a site apart from the platform's | decision 5; docs/MODEL.md ("Each fragment is its own browser origin"); R16 |
 | `<24 hex>--computer.finite.place` | a computer's own origin: its ports (`/p/<port>/…`), such as its screen, to its owner only | docs/computers.md, "Ports"; decision 41 |
-| previews | every branch deploys a complete copy at `<branch>.<zone>`, its fragments at `<name>--<branch>.<zone>` | decision 20; `.github/workflows/ci.yml` (`deploy`) |
+| preview | one shared preview, deployed by master's green CI run as the branch deployment `preview` at `preview.<zone>`, its fragments at `<name>--preview.<zone>`. Another branch deploys only when someone runs `cargo xtask deploy --branch <name>` by hand | decision 20; `.github/workflows/ci.yml` (`deploy`) |
 
 The exact preview zone and any other hostnames are in the private
 deployment configs (finitecomputer/fragment-deploy) and are not copied
@@ -81,7 +86,7 @@ here.
 | R2 (container saves) | Cloudflare R2, through the sandbox SDK's `DirectoryBackup` | each computer's `/data` saves | docs/computers.md, "Saves and what a wake restores" |
 | Workflows, Queues | Cloudflare | job runs; deliveries and web push | docs/MODEL.md table |
 | Secrets Store | Cloudflare | the deployment's own secrets | docs/secrets.md |
-| AI Gateway, Workers AI | Cloudflare | model calls, with zero data retention and gateway logs off | decision 23 |
+| AI Gateway, Workers AI | Cloudflare | model calls. Each Workers AI call through the gateway sets `collectLog: false` (`cell/src/models.rs`), and a deploy refuses the `default` gateway (`xtask/src/deploy.rs`). Retention at Workers AI and the gateway's live settings: to confirm | decision 23 |
 
 ### Processors (outside services)
 
@@ -100,6 +105,20 @@ each.
 | Google | only for a person who connects Google | below |
 | The browser's push service | only for a person who turns on notifications; the message is encrypted for their device | `cell/src/push.rs` |
 
+The code can also send model calls to these, depending on the
+deployment's config and the agent's runtime. Which ones production's
+effective config uses is to confirm:
+
+- **Anthropic**, for an agent on the Claude Code runtime: Claude Code
+  runs on the computer, signed in with the person's own Anthropic
+  account, and calls Anthropic itself (docs/computers.md, "Claude Code
+  in our Hermes image"; `images/bridge/src/runtime/claude.rs`).
+- **The embeddings provider**, for searchable content: Workers AI by
+  default, or an OpenAI-compatible API the config names
+  (`cell/src/searchable.rs`, `cell/src/models.rs`, `embedded`).
+- **Any OpenAI-compatible API a model slot names**, such as Tinfoil
+  (Finite Private) in `deploy/example.jsonc`'s commented examples.
+
 Agents can also visit websites and use other services a person asks
 for. Computers reach the internet (decision 43); those sites see what
 the agent sends.
@@ -114,30 +133,51 @@ Google is a `connection` row of the deployment's catalog
 
 ### 1. Connecting
 
-1. The person, signed in on finite.chat, starts the connection
-   (`POST /api/connections/google/authorize`). The registry keeps the
+1. The person, signed in on finite.chat, picks read only or read and
+   write in Settings and starts the connection
+   (`POST /api/connections/google/authorize` with `{access}`). Finite
+   asks Google for that tier's scopes alone. The registry keeps the
    state's hash and the sealed PKCE verifier for ten minutes, bound to
    that browser by an HttpOnly cookie.
-2. Google's consent screen. The person picks read only or read and write
-   (docs/pipes-browser-binding.md, "Access").
-3. Google redirects to finite.chat's callback. The cell checks the
+2. Google's consent screen, where the person may untick scopes.
+3. Google redirects to finite.chat's callback. The Registry checks the
    cookie, the session and the attempt, then exchanges the code at
    `oauth2.googleapis.com` with the confidential client.
-4. The tokens go straight from Google's token endpoint to WorkOS Pipes'
-   import. Fragment never keeps them and never sends them to the
-   browser (docs/pipes-browser-binding.md, "Tokens").
+4. The Registry receives and parses Google's token response, and
+   submits the tokens to WorkOS Pipes' import with the scopes Google
+   says it granted (`cell/src/registry/connection_signin.rs`,
+   `finish_taken`). The tokens are not written to any Registry row and
+   are never sent to the browser (docs/pipes-browser-binding.md,
+   "Tokens").
+
+The scopes Google returns can include scopes granted earlier
+(`include_granted_scopes`). So a reconnect that picks read only does not
+remove write scopes granted before; only a disconnect, then a connect as
+read only, does (docs/pipes-browser-binding.md, "Access"). Settings shows
+the access the grant holds, not the access last asked for
+(`connection_signin::access_of`).
 
 ### 2. Using
 
 1. The agent's runtime, on the person's computer, holds only a
    placeholder (`fcx_google_<tag>`) in `GOOGLE_OAUTH_ACCESS_TOKEN`.
-2. It calls a Google API host. The Computer Durable Object's egress
-   intercept catches the request (`cell/intercepts.mjs`), checks the
-   placeholder belongs to that agent, that computer and that provider,
-   asks Pipes for a short-lived access token for this one request, swaps
-   it in and sends the request on over HTTPS. A placeholder sent to any
-   other host is refused (docs/computers.md, "The intercept").
-3. Google's answer goes back to the agent on its computer.
+2. It calls a Google API host. The egress intercepts cover a selected
+   set of hosts: the catalog's provider hosts and the hosts of the
+   person's Vault secrets (`cell/intercepts.mjs`). For a request to one
+   of them, the Computer Durable Object's swap checks that the
+   placeholder's tag names an agent of that computer that may use that
+   provider, and that the host is one of the provider's own. It then
+   asks Pipes for an access token for this request, swaps it in and
+   sends the request on over HTTPS. A placeholder for another
+   provider's host is refused there (docs/computers.md, "The
+   intercept").
+3. A request to a host no intercept covers leaves the computer with the
+   placeholder unchanged. It carries no real token, but nothing refuses
+   it.
+4. The tag says which agent of the computer the placeholder is for, not
+   which process on the computer sent it: any process in the container
+   can read and use the agents' placeholders.
+5. Google's answer goes back to the agent on its computer, unredacted.
 
 ### 3. Where it can then rest
 
@@ -147,22 +187,33 @@ where the agent puts it while doing what the person asked:
 | Place | What | Source |
 |---|---|---|
 | The computer's memory and `/data` | the runtime's context, transcripts and working files | docs/computers.md, "Durability" |
-| The computer's saves in R2 | the newest three saves of `/data`, and saves set aside for 30 days | docs/computers.md, "Saves and what a wake restores" |
-| A model provider, in transit | the agent's prompt, when it carries Google content: Workers AI through AI Gateway (zero data retention, logs off), or OpenRouter (zero data retention per the privacy policy), or the person's own OpenRouter account | decision 23; docs/computers.md, "Models" |
+| The computer's saves in R2 | the newest three saves of `/data`, plus a fourth when the running computer came up from an older one, and saves set aside for 30 days | docs/computers.md, "Saves and what a wake restores"; `crates/core/src/computer/saves.rs` (`saved`) |
+| A model provider, in transit | the agent's prompt, when it carries Google content: Workers AI through AI Gateway (`collectLog: false` on each call), OpenRouter (the example config asks for zero-data-retention endpoints on its OpenRouter slots; production's config and OpenRouter's retention to confirm), the person's own OpenRouter account, Anthropic on the Claude Code runtime, the embeddings provider for searchable content, or another API a model slot names (list above) | decision 23; docs/computers.md, "Models"; `deploy/example.jsonc` |
 | Chat records | what the agent writes in a chat, in the chat fragment's Durable Object | docs/chat-records.md |
 | The agent's repo | memories the agent writes, in code.storage git | docs/MODEL.md ("An agent's self") |
 | Any fragment the agent writes to | an app's SQLite, git files, R2 blobs, search index | docs/MODEL.md |
-| The person's export | a copy of everything theirs, in R2, deleted after seven days | docs/api.md, Export |
+| The person's export | a copy of what the export reads (their own fragments and their agents', their computer's newest save and newest set-aside save; a fragment shared with them only by name), in R2. A ready export expires after seven days; its objects are then deleted by a later alarm, retried until it succeeds | docs/api.md, Export; `cell/src/export.rs` (`export_alarm`, `clean`) |
 
-The OAuth tokens themselves rest only at WorkOS Pipes.
+The OAuth tokens are stored only at WorkOS Pipes. The Registry holds
+them in memory while it imports them, and the computer's swap holds an
+access token only for the request it goes on.
 
 ### 4. Disconnecting
 
-A disconnect revokes the grant at Google (RFC 7009), then deletes the
-account at Pipes, and tells the person's computer, whose swaps then
-refuse the provider at once (docs/pipes-browser-binding.md,
-"Disconnecting"; `cell/src/connections.rs`, `disconnect`). Deleting
-Google data an agent already saved is FIN-588.
+The person disconnects from Settings, signed in; the route acts only on
+that person's own accounts (`cell/src/connections.rs`, `route`). There
+is no operator route that disconnects someone else's account.
+
+A disconnect tries to revoke the grant at Google first (RFC 7009), with
+an access token Pipes mints for it. The revoke is best effort: if Pipes
+mints no token, or Google's revoke fails, the failure is logged and the
+disconnect goes on. It then deletes the account at Pipes, which ends
+every later swap of it, and answers whether Google confirmed the revoke
+(`revoked`, which can be false). Last, it tells the person's computer,
+whose swaps then refuse the provider at once; if that call fails, the
+disconnect answers an error and the person is asked to disconnect again
+(`disconnect`, `revoke_grant`, `disconnected_told`). Deleting Google
+data an agent already saved is FIN-588.
 
 ## To confirm
 

@@ -12,8 +12,9 @@ How a change goes from a branch to production. Sources: AGENTS.md
    the PR.
 3. It gets one round of code review.
 4. Paul reads the evidence and says merge.
-5. Master's CI runs the full checks and end-to-end tests; only a green
-   run deploys to preview.
+5. Master's CI runs the full checks and end-to-end tests (or reuses an
+   earlier green master run of the same tree); only a green run deploys
+   to the shared preview.
 6. Paul tries preview, then promotes it to production by pushing the
    `production` branch. That push is the approval; its run checks again
    before it deploys.
@@ -62,15 +63,15 @@ Paul reads the evidence and says merge; the coordinating session merges.
 There is no merge queue, required check or required approval in GitHub
 (AGENTS.md, "How work lands").
 
-GitHub rulesets on the repo (read 2026-11-23 with `gh api
-repos/finitecomputer/fragment/rulesets`):
+GitHub rulesets on the repo are live settings, not in the tree. As
+read on 2026-11-23 (to confirm before submission; auditor evidence
+provided privately):
 
 - **`master`:** changes only through a pull request (merge commits
   only), no force push, no deletion. Required approvals: zero. No
   required status checks.
-- **`production`:** no force push, no deletion, and updates restricted:
-  only Paul's GitHub account (`futurepaul`) may update it (the ruleset's
-  one bypass actor).
+- **`production`:** no force push, no deletion, and updates restricted
+  to one bypass actor.
 
 ## 5. Master's CI and preview
 
@@ -79,15 +80,23 @@ repos/finitecomputer/fragment/rulesets`):
 - **On a pull request:** `check` alone (`cargo xtask check`), which
   nothing requires.
 - **On a push to master:** `check` and every end-to-end shard (five, each
-  on its own runner, against the cell under workerd with vendor fakes).
-  Only one master run is under way at a time; a burst of merges is
-  tested together at the tip.
-- **Deploy to preview** runs only when `check`, the end-to-end tests and
-  the preview image are green. It reads the deploy config from
-  finitecomputer/fragment-deploy with a read-only token, prints the
-  config's commit and never its contents, and runs `cargo xtask deploy`.
-  The deploy is verified: every Durable Object class must answer the new
-  release within its bound, or it rolls back (`xtask/src/rollout.rs`).
+  on its own runner, against the cell under workerd with vendor fakes),
+  unless an earlier green master run already tested the same tree
+  (`proven` job), in which case the shards are skipped. Only one master
+  run is under way at a time; a burst of merges is tested together at
+  the tip.
+- **Deploy** runs only on a push to `master` or `production`. On master
+  it deploys the one shared preview (`--branch preview`) when `check`,
+  the end-to-end tests (or a `proven` tree) and the preview image are
+  green. It reads the deploy config from finitecomputer/fragment-deploy
+  with a read-only token, prints the config's commit and never its
+  contents, and runs `cargo xtask deploy`. The deploy is verified:
+  every Durable Object class must answer the new release within its
+  bound. If not, it rolls back only when there is an eligible release
+  before, and the rollback can itself fail, leaving the run red and the
+  deploy stuck. The admin Worker deploys after the cell; its failure
+  leaves the new cell live (`xtask/src/rollout.rs`, `back`;
+  `xtask/src/deploy.rs`).
 - **Red master** deploys nothing. The `master-red` job names what failed,
   and the fix goes forward as another PR.
 - **Schema safety:** `check` holds the schema lock against what the push
@@ -104,9 +113,13 @@ repos/finitecomputer/fragment/rulesets`):
 - The production run checks again: `check` always runs; the end-to-end
   shards are skipped only when a green master run already tested the
   same tree (`proven` job).
-- Production's image is the digest preview proved, copied and pinned by
-  hand (`image.yml`, `workflow_dispatch` with an environment;
-  docs/computers.md, "Preview and production").
+- Production's images are the digests pinned in production's deploy
+  config (`xtask/src/deploy.rs`: production uses its config's pins).
+  The intended path copies the digest preview proved into production's
+  registry by hand (`image.yml`, `workflow_dispatch` with `from`), but
+  the same workflow can also build a fresh production image, whose
+  digest preview never ran; it warns when it does. Which one a pin names
+  is a human step (docs/computers.md, "Preview and production").
 - Each GitHub environment (`preview`, `production`) holds its own
   deploy secrets, set by Paul (docs/secrets.md, "Files").
 - CLI releases are built from tags (`release.yml`).
@@ -132,9 +145,9 @@ repos/finitecomputer/fragment/rulesets`):
   code review beyond Paul reading the evidence.
 - No security-specific step (SAST) is in the workflows; dependency
   scanning is dependency-scanning.md (in progress, FIN-576).
-- GitHub secret scanning, push protection and Dependabot security
-  updates are off on the repo, which is public (read 2026-11-23 with
-  `gh api repos/finitecomputer/fragment`). FIN-635.
+- The repo's GitHub security settings (secret scanning, push
+  protection, Dependabot security updates) are to be turned on; see
+  FIN-635. Auditor evidence of the current settings provided privately.
 - Some third-party GitHub Actions are pinned by tag (`actions/checkout@v4`),
   others by commit SHA (`Swatinem/rust-cache`).
 
