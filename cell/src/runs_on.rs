@@ -305,10 +305,11 @@ impl FragmentCell {
                 if !valid_channel_name(&b.channel) {
                     return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
                 }
-                let Some(role) = self.member_role(&b.identity)? else {
+                if self.member_role(&b.identity)?.is_none() {
                     return Err(CellError::new(ErrorCode::Forbidden, "only a member subscribes to a channel"));
-                };
-                if role < self.channel_read_role(&b.channel)? {
+                }
+                self.channel_read_role(&b.channel)?;
+                if !self.may_read(&b.identity, &b.channel, crate::subscriptions::Hold::Registry).await? {
                     return Err(CellError::new(ErrorCode::Forbidden, format!("that agent's role may not read {}", b.channel)));
                 }
                 let id = self.add_subscription(&b.identity, &b.channel, &wake_url(&b.computer))?;
