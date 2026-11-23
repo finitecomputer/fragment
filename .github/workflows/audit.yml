@@ -64,4 +64,6 @@ jobs:
         with:
           path: target/tools
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
-      - run: cargo xtask audit
+      # `cargo xtask audit`, with xtask built from the committed lock
+      # (--locked); the scan itself runs cargo-deny --locked on each lock
+      - run: cargo run --locked --package xtask -- audit

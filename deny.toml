@@ -13,9 +13,12 @@ all-features = true
 
 [advisories]
 version = 2
-# A vulnerability or an unsoundness, at any depth, is always a finding. A
-# crate the workspace depends on directly that RustSec calls unmaintained
-# is one too; one only deeper in the graph is not (chrono, through others).
+# A vulnerability, at any depth, is always a finding (cargo-deny has no
+# scope for those). An unsoundness is one at any depth too: cargo-deny 0.20
+# counts only workspace crates' unless told "all". A crate the workspace
+# depends on directly that RustSec calls unmaintained is one too; one only
+# deeper in the graph is not (chrono, through others).
+unsound = "all"
 unmaintained = "workspace"
 # a yanked version locked: shown, and fails nothing
 yanked = "warn"
@@ -28,9 +31,17 @@ ignore = [
     # noisy; verification handles public data only.
     { id = "RUSTSEC-2026-0387", reason = "needs the k256/p256 0.14 migration: FIN-636" },
     # libsqlite3-sys 0.38.2 bundles SQLite 3.53: a crafted database and
-    # -wal pair can return uninitialized memory. Local only: the CLI opens
-    # its own files, and dev tooling its own. rusqlite 0.41 fixes it (FIN-637).
-    { id = "RUSTSEC-2026-0459", reason = "local only; rusqlite 0.41 bump: FIN-637" },
+    # -wal pair can return uninitialized memory into query results. Not
+    # only the CLI's own files: `fragment session import` copies a Hermes
+    # database and its -wal out of the archive or folder it is given
+    # (cli/src/session/mod.rs, `read`) and opens them, read-only, and what
+    # it reads is uploaded as chats into the person's archive. So an
+    # archive from someone else can put bytes of the CLI's memory (which
+    # holds its signing key) in that person's chats. Needs that person to
+    # import the crafted archive. Dev tooling opens only its own files.
+    # rusqlite 0.41 (SQLite 3.54) fixes it: a breaking bump in this lock,
+    # the cell's and images', FIN-637.
+    { id = "RUSTSEC-2026-0459", reason = "CLI session import of an untrusted archive; rusqlite 0.41 bump: FIN-637" },
     # rsa 0.9 (Marvin, timing): in crates/fakes alone, the vendor fakes
     # that sign test tokens on this machine and in CI. Nothing that ships
     # links it (cargo tree -i rsa), so no secret of ours is at stake. No

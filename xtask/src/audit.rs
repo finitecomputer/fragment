@@ -121,14 +121,8 @@ fn deny_is_pinned() -> Result<()> {
 /// One workspace's lock, by cargo-deny with its deny.toml; its report goes
 /// to the terminal as it comes.
 fn rust(root: &Path, ws: &str) -> Result<()> {
-    let dir = root.join(ws);
     let status = Command::new("cargo")
-        .args(["deny", "--manifest-path"])
-        .arg(dir.join("Cargo.toml"))
-        .arg("--workspace")
-        .arg("--config")
-        .arg(dir.join("deny.toml"))
-        .args(["check", "--show-stats", "advisories"])
+        .args(deny_args(&root.join(ws)))
         .stdin(Stdio::null())
         .status()
         .context("run cargo deny")?;
@@ -137,11 +131,28 @@ fn rust(root: &Path, ws: &str) -> Result<()> {
     Ok(())
 }
 
+/// cargo-deny's arguments for the workspace in `dir`. `--locked`: its
+/// `cargo metadata` and `cargo fetch` must read the committed lock as it is,
+/// and fail on one that no longer matches its manifests, never rewrite it
+/// and scan what is not committed.
+fn deny_args(dir: &Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["deny".into(), "--locked".into(), "--manifest-path".into(), dir.join("Cargo.toml").into()];
+    args.extend(["--workspace", "--config"].map(Into::into));
+    args.push(dir.join("deny.toml").into());
+    args.extend(["check", "--show-stats", "advisories"].map(Into::into));
+    args
+}
+
+/// npm audit's arguments. `--include=dev`: dev dependencies build and
+/// deploy what ships, and npm drops them by default under
+/// NODE_ENV=production, which a shell or a CI runner may set.
+const NPM_AUDIT_ARGS: [&str; 4] = ["audit", "--json", "--package-lock-only", "--include=dev"];
+
 /// One package-lock.json, by npm audit, held to `NPM_IGNORED`.
 fn npm(node: &fragment_devstack::node::Node, cache: &Path, root: &Path, lock: &str) -> Result<()> {
     let out = node
         .script(&node.npm_cli, cache)?
-        .args(["audit", "--json", "--package-lock-only"])
+        .args(NPM_AUDIT_ARGS)
         .env("npm_config_cache", cache.join("npm"))
         .env("npm_config_update_notifier", "false")
         .current_dir(root.join(lock))
@@ -250,12 +261,47 @@ mod tests {
         }
     }
 
+    /// Goal: unsoundness is a finding at any depth, as the doc says.
+    /// cargo-deny 0.20 scopes `unsound` to workspace crates unless told
+    /// otherwise, which skips a transitive one. Invalid: a deny.toml
+    /// without `unsound = "all"`.
+    #[test]
+    fn each_workspace_counts_unsoundness_at_any_depth() {
+        for ws in RUST_WORKSPACES {
+            let path = repo().join(ws).join("deny.toml");
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(text.lines().any(|l| l.trim() == "unsound = \"all\""), "{}: unsound = \"all\"", path.display());
+        }
+    }
+
+    /// Goal: the scan reads the committed lock, never one cargo rewrote.
+    /// Valid: cargo-deny runs with `--locked`, before its subcommand (a
+    /// global option). Invalid: without it, `cargo metadata` updates a
+    /// stale lock and the scan passes on what is not committed.
+    #[test]
+    fn cargo_deny_reads_the_committed_lock() {
+        let args = deny_args(Path::new("ws"));
+        let locked = args.iter().position(|a| a == "--locked").expect("--locked");
+        let check = args.iter().position(|a| a == "check").expect("check");
+        assert!(locked < check, "--locked is cargo-deny's own option: {args:?}");
+    }
+
+    /// Goal: dev dependencies are audited, because they build and deploy
+    /// what ships. Invalid: npm's default, which drops them under
+    /// NODE_ENV=production.
+    #[test]
+    fn npm_audit_includes_dev_dependencies() {
+        assert!(NPM_AUDIT_ARGS.contains(&"--include=dev"), "{NPM_AUDIT_ARGS:?}");
+        assert!(NPM_AUDIT_ARGS.contains(&"--package-lock-only"), "{NPM_AUDIT_ARGS:?}");
+    }
+
     /// CI installs the cargo-deny release the run requires.
     #[test]
     fn ci_installs_the_pinned_cargo_deny() {
         let workflow = std::fs::read_to_string(repo().join(".github/workflows/audit.yml")).expect("audit.yml");
         assert!(workflow.contains(&format!("cargo-deny@{CARGO_DENY_VERSION}")), "audit.yml installs cargo-deny@{CARGO_DENY_VERSION}");
-        assert!(workflow.contains("cargo xtask audit"), "audit.yml runs cargo xtask audit");
+        // `cargo xtask audit`, with xtask's own build held to the committed lock
+        assert!(workflow.contains("cargo run --locked --package xtask -- audit"), "audit.yml runs xtask audit, built --locked");
     }
 
     /// Each npm ignore entry names a lock this audits, a GHSA id, and a reason, once.

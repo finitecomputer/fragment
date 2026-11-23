@@ -1,7 +1,9 @@
 # Dependency scanning
 
-Every third-party dependency the repo locks is checked against public
-advisory databases. This runs on every change to master, every day, and on
+Every third-party dependency in the repo's Cargo.lock and
+package-lock.json files is checked against public advisory databases. The
+iOS app's Swift packages, and what the Hermes image installs outside a
+lockfile, are not scanned yet (see "Not scanned yet", FIN-638). This runs on every change to master, every day, and on
 any pull request that changes a dependency. A known vulnerability fails the
 scan unless it is on a reviewed ignore list, and each entry on that list
 gives its reason and the Linear issue that will remove it. This page covers
@@ -36,7 +38,13 @@ policy file, `deny.toml`, next to its `Cargo.toml`:
 
 - **Vulnerabilities and unsound code** (advisories rated `unsound`) fail
   the scan at any depth of the dependency graph, with all features on.
-  This includes dev and build dependencies.
+  This includes dev and build dependencies. cargo-deny 0.20 counts an
+  unsound advisory only on workspace crates by default, so each
+  `deny.toml` sets `unsound = "all"` (a test checks).
+- **The committed lock is what is scanned.** cargo-deny runs with
+  `--locked`, so a `Cargo.lock` that no longer matches its manifests fails
+  the scan instead of being rewritten and scanned as rewritten. CI builds
+  xtask itself `--locked` too.
 - **Unmaintained crates** fail the scan when a workspace crate depends on
   them directly (`unmaintained = "workspace"`). An unmaintained crate
   deeper in the graph is not a finding by itself: we can't replace it
@@ -57,8 +65,9 @@ workflow and `xtask/src/audit.rs` name the same version.
 [GitHub Advisory Database](https://github.com/advisories). It installs
 nothing and runs no package scripts. It runs on the repo's pinned Node
 release and that release's own npm (`docs/pinned-node.md`), never a
-developer's install. Development dependencies are included, because they
-build and deploy what ships.
+developer's install. Development dependencies are included
+(`--include=dev`, so a `NODE_ENV=production` in the environment can't drop
+them), because they build and deploy what ships.
 
 npm has no ignore file of its own, so the ignore list is `NPM_IGNORED` in
 `xtask/src/audit.rs`. Each entry names the lockfile, the GHSA id and the
@@ -124,7 +133,7 @@ These stay on the ignore lists:
 | Advisory | Where | Handling |
 |---|---|---|
 | RUSTSEC-2026-0387, crypto-bigint 0.5 timing | k256/p256 0.13 in every workspace. The cell signs Web Push and code.storage tokens with P-256, and the CLI signs NIP-98 with k256. | Tracked: FIN-636 (move to the 0.14 line) |
-| RUSTSEC-2026-0459, bundled SQLite before 3.54 | rusqlite 0.40: the CLI, dev tooling, and on computers the SimpleX door and Hermes' boot. Only a build dependency in the cell, not part of its Wasm. | Tracked: FIN-637 (rusqlite 0.41) |
+| RUSTSEC-2026-0459, bundled SQLite before 3.54 | rusqlite 0.40: the CLI, dev tooling, and on computers the SimpleX door and Hermes' boot. Only a build dependency in the cell, not part of its Wasm. The CLI's exposure is `fragment session import`, which opens the Hermes database and `-wal` from the archive it is given: a crafted archive from someone else can put bytes of the CLI's memory into the importing person's chats. | Tracked: FIN-637 (rusqlite 0.41, a breaking bump) |
 | RUSTSEC-2023-0071, rsa (Marvin) | `crates/fakes` only, the vendor fakes used in tests | Accepted: nothing that ships links rsa |
 | GHSA-mrhx-c7xc-m3w5, zod before 4.6.6 | `@cloudflare/sandbox` 1.0.0, bundled into the cell | Tracked: FIN-639 (sandbox 1.0.3) |
 | Eight undici advisories and GHSA-wq5f-xc86-pv6w (sharp) | miniflare under wrangler 4.145, used for dev, e2e and deploy. Not in the Worker. | Tracked: FIN-640 (wrangler 4.167) |
