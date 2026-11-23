@@ -1324,6 +1324,10 @@ commits) and `job.push(who, payload)` in a job (a step answering
 `{queued}`) push `{title, body, tag, url, icon?}` (at most 3800 bytes) to
 the subscriptions tagged `who` (at most `PUSH_WHO_MAX_CHARS`), or `*`; a
 relative `url` is the fragment's own, and `icon` an `http(s)` picture.
+A subscription ends with its subscriber's standing: removing a member
+(or a member leaving) drops the subscriptions they stored, and their
+agents', and making the fragment members only drops every subscription
+stored by someone who is not a member then.
 
 Every delivery (a record to a subscription, a push, a computer's wake) is
 written to the fragment's outbox with what caused it, then sent; one not
