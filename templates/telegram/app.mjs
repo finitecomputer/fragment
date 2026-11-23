@@ -14,7 +14,8 @@
 //   account and publishes it here as its owner's words to their agent
 //   (`job.door`'s `relayed`, `to` that agent), which the platform takes
 //   only while its owner has bound this chat as that agent's `telegram`
-//   door.
+//   door. A message they forward, or send through an inline bot, is not
+//   their words: it goes marked so (`marked`), its text quoted.
 // - `mirror` (each reply an agent posts here) sends it to that account,
 //   while the door is open.
 // - `typing`, started by `intake` as it relays a message, shows that
@@ -50,6 +51,91 @@ const TYPING_ROUNDS_MAX = 60;
 
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const nameOf = (from) => [from?.first_name, from?.last_name].filter((s) => typeof s === "string" && s).join(" ").slice(0, 64) || (from?.username ? `@${from.username}` : "someone");
+
+// Whose words a message carries. A relayed record is its owner's own
+// words, so a message they forward, or send through an inline bot, is
+// someone else's: it goes marked so, a line of the connector's first
+// (where Telegram says it came from), then its text, every line quoted
+// (`> `), so no line of it reads as theirs. A reply to another chat's
+// message keeps their words theirs, the part they quote marked so.
+// Names and titles from Telegram are someone else's text too: one line,
+// no control or format characters, none of the marks these lines use,
+// at most NAME_MAX characters.
+const NAME_MAX = 64;
+// Every line break JavaScript or a reader may see: each starts a line
+// that is quoted in its turn.
+const LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+// Telegram's own bound on a quote (ReplyParameters `quote`).
+const QUOTE_MAX = 1024;
+const NOT_MINE = "Its words, quoted below, are not mine.";
+
+function oneLine(s) {
+  if (typeof s !== "string") return "";
+  const flat = s.replace(/[\p{C}\p{Z}]+/gu, " ").replace(/[[\]"\u201c\u201d]/g, "").trim();
+  return [...flat].slice(0, NAME_MAX).join("").trim();
+}
+
+const named = (name, at) => (name ? `\u201c${name}\u201d${at}` : "");
+const handle = (u) => (oneLine(u) ? ` (@${oneLine(u)})` : "");
+const signed = (s) => (oneLine(s) ? `, signed \u201c${oneLine(s)}\u201d` : "");
+
+function person(u) {
+  const name = oneLine([u?.first_name, u?.last_name].filter((s) => typeof s === "string" && s).join(" "));
+  return name ? named(name, handle(u?.username)) : oneLine(u?.username) ? `@${oneLine(u.username)}` : "";
+}
+
+function aChat(c, signature) {
+  const kind = c?.type === "channel" ? "the channel" : "the group";
+  const title = oneLine(c?.title);
+  return `${title ? `${kind} ${named(title, handle(c?.username))}` : `a ${kind.slice(4)} Telegram doesn't name`}${signed(signature)}`;
+}
+
+// Bot API MessageOrigin (`forward_origin`, `external_reply.origin`), said
+const NOBODY = "someone Telegram doesn't name";
+function origin(o) {
+  if (o?.type === "user") return `${person(o.sender_user) || "someone"}, a Telegram user`;
+  if (o?.type === "hidden_user") return `${named(oneLine(o.sender_user_name), "") || "someone"}, a Telegram user who hides their account`;
+  if (o?.type === "chat") return aChat(o.sender_chat, o.author_signature);
+  if (o?.type === "channel") return aChat(o.chat, o.author_signature);
+  return NOBODY;
+}
+
+// a forward's origin: Bot API 7.0's `forward_origin`, or the fields before it
+function forwarded(m) {
+  if (m.forward_origin) return origin(m.forward_origin);
+  if (m.forward_from) return origin({ type: "user", sender_user: m.forward_from });
+  if (m.forward_from_chat) return aChat(m.forward_from_chat, m.forward_signature);
+  if (typeof m.forward_sender_name === "string") return origin({ type: "hidden_user", sender_user_name: m.forward_sender_name });
+  return m.forward_date !== undefined ? NOBODY : null;
+}
+
+function quoted(text) {
+  const lines = text.split(LINE_BREAK).map((line) => (line ? `> ${line}` : ">"));
+  return lines.join("\n");
+}
+
+/// What its owner's message says, as theirs: `text` (bounded, trimmed)
+/// as it is, or marked as someone else's (above). Null: its owner's own
+/// words, unmarked.
+function marked(m, text) {
+  const from = forwarded(m);
+  const bot = m.via_bot ? (oneLine(m.via_bot.username) ? `@${oneLine(m.via_bot.username)}` : "a bot Telegram doesn't name") : null;
+  let said;
+  if (from || bot) {
+    const what = [from && `forwarded from ${from}`, bot && `sent through the inline bot ${bot}`].filter(Boolean).join(", ");
+    said = `[Telegram: a message ${what}. ${NOT_MINE}]\n${quoted(text)}`;
+  } else if (m.external_reply) {
+    const quote = typeof m.quote?.text === "string" ? [...m.quote.text.trim()].slice(0, QUOTE_MAX).join("") : "";
+    const head = `[Telegram: replying to a message from ${origin(m.external_reply.origin)}, ${quote ? "quoted below" : "not shown here"}.]`;
+    return `${head}\n${quote ? `${quoted(quote)}\n` : ""}\n${text}`;
+  } else {
+    return null;
+  }
+  // its egress: one line of the connector's, then not one line unquoted
+  const [head, ...rest] = said.split(LINE_BREAK);
+  if (!head.startsWith("[Telegram: ") || rest.length === 0 || !rest.every((l) => l.startsWith(">"))) throw new Error("a forwarded message's text is quoted, every line");
+  return said;
+}
 
 /// A Bot API call, the bot's token filled at the platform's egress point,
 /// toward Telegram's host alone (its secret's).
@@ -245,7 +331,9 @@ export class App extends DurableObject {
     if (!(await job.call("seen", { update: update.update_id })).fresh) return { ignored: "taken already" };
     const { api, paired } = await job.call("route", {});
     const text = typeof m.text === "string" ? m.text.trim() : "";
-    const start = /^\/start(?:@\w+)?\s+([0-9a-f]{32})$/.exec(text);
+    // its owner's own `/start` alone: a forwarded one is someone else's
+    const theirs = forwarded(m) === null && !m.via_bot;
+    const start = theirs ? /^\/start(?:@\w+)?\s+([0-9a-f]{32})$/.exec(text) : null;
     if (start) {
       const { proposed, conflict } = await job.call("propose", { nonce: start[1], user: m.from.id, chat: m.chat.id, name: nameOf(m.from) });
       if (proposed) await send(job, api, m.chat.id, "Almost there: confirm it's you on the page where you started.");
@@ -263,9 +351,14 @@ export class App extends DurableObject {
       await tell(job, api, m.chat.id, "This chat isn't linked to your agent.");
       return { ignored: "not linked" };
     }
+    // whose words they are, said (`marked`): at most TEXT_MAX characters of
+    // Telegram's text, QUOTE_MAX of a quote, a mark a line and a header:
+    // within a record's text (the bridge's MESSAGE_TEXT_MAX_BYTES, 32 KiB)
+    const said = [...text].slice(0, TEXT_MAX).join("");
+    const relayed = marked(m, said) ?? said;
     // owed before it is published, so an answer however quick ends it
     const { id } = await job.call("owe", {});
-    await job.publish("chat", { text: [...text].slice(0, TEXT_MAX).join(""), to: [job.door.to], relayed: job.door.relayed }, "message");
+    await job.publish("chat", { text: relayed, to: [job.door.to], relayed: job.door.relayed }, "message");
     const typing = await job.call("typing", { chat: m.chat.id, id });
     return { relayed: true, typing: typing.run };
   }
