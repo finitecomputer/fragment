@@ -119,6 +119,7 @@ pub const FRAGMENT: Class = Class {
         step!("newest", "fragment/0008_newest.sql"),
         step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
         step!("face_forward_only", "fragment/0010_face_forward_only.sql"),
+        step!("ended_doors", "fragment/0011_ended_doors.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -126,7 +127,7 @@ pub const FRAGMENT: Class = Class {
         fix: "ALTER TABLE members DROP COLUMN people_only",
         why: "people-only shares (#116, 2026-10-03) until they went (#313, 2026-10-13): unread and unwritten since, at its default",
     }],
-    kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_errors"],
+    kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_doors", "ended_errors"],
 };
 
 pub const REGISTRY: Class = Class {

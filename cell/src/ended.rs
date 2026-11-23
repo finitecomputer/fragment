@@ -49,6 +49,13 @@
 //! a delete reach copies an agent's computer synced, or exports people
 //! downloaded.
 //!
+//! **A SimpleX connector's door goes with it.** Its end records its door
+//! (`ended_doors`, Fragment step 11), which the alarm ends (cell/door.mjs
+//! `/door/end`: its container, its saves in the bucket, its object's
+//! storage), retried as the rest are. A life that installs other code is
+//! no door from then on and records its door the same way (plane.rs). A
+//! name made again is another life, so another door, never this one.
+//!
 //! A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators) is the
 //! same end, its repo recorded however it is named (a wiped person never
 //! makes the name again), and no agent recorded: the wipe empties the
@@ -96,27 +103,44 @@ const PART_LISTS: &str = "lists";
 const PART_STORED: &str = "stored";
 const PART_REPO: &str = "repo";
 const PART_AGENT: &str = "agent";
+const PART_DOOR: &str = "door";
 
 /// Each ended life, oldest first, and what it has left: its lists still to
 /// tell, its app's database or blobs (`stored`), its repo (`repos`), its
-/// agent (`agents`), the most failed tries of a part left (`tries`), and
-/// the last error of a part left (`part: error`). `attempts` is the stored
+/// agent (`agents`), its door (`doors`; none where `ended_doors` is not,
+/// `doors_table`), the most failed tries of a part left (`tries`), and the
+/// last error of a part left (`part: error`). `attempts` is the stored
 /// part's own count.
-const LIVES_LEFT: &str = "SELECT e.incarnation, e.name, e.stored, e.attempts,
+fn lives_left(doors_table: bool) -> String {
+    let (doors, door_tries, door_error) = match doors_table {
+        true => (
+            "(SELECT COUNT(*) FROM ended_doors d WHERE d.incarnation = e.incarnation)",
+            "(SELECT COALESCE(MAX(d.attempts), 0) FROM ended_doors d WHERE d.incarnation = e.incarnation)",
+            "OR (x.part = 'door' AND EXISTS (SELECT 1 FROM ended_doors d WHERE d.incarnation = e.incarnation))",
+        ),
+        false => ("0", "0", ""),
+    };
+    format!(
+        "SELECT e.incarnation, e.name, e.stored, e.attempts,
   (SELECT COUNT(*) FROM ended_index i WHERE i.incarnation = e.incarnation) AS lists,
   (SELECT COUNT(*) FROM ended_repos r WHERE r.incarnation = e.incarnation) AS repos,
   (SELECT COUNT(*) FROM ended_agents a WHERE a.incarnation = e.incarnation) AS agents,
+  {doors} AS doors,
   MAX(CASE WHEN e.stored = 1 THEN e.attempts ELSE 0 END,
       (SELECT COALESCE(MAX(i.attempts), 0) FROM ended_index i WHERE i.incarnation = e.incarnation),
       (SELECT COALESCE(MAX(r.attempts), 0) FROM ended_repos r WHERE r.incarnation = e.incarnation),
-      (SELECT COALESCE(MAX(a.attempts), 0) FROM ended_agents a WHERE a.incarnation = e.incarnation)) AS tries,
+      (SELECT COALESCE(MAX(a.attempts), 0) FROM ended_agents a WHERE a.incarnation = e.incarnation),
+      {door_tries}) AS tries,
   (SELECT x.part || ': ' || x.error FROM ended_errors x WHERE x.incarnation = e.incarnation AND (
       (x.part = 'stored' AND e.stored = 1)
       OR (x.part = 'lists' AND EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = e.incarnation))
       OR (x.part = 'repo' AND EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = e.incarnation))
-      OR (x.part = 'agent' AND EXISTS (SELECT 1 FROM ended_agents a WHERE a.incarnation = e.incarnation)))
+      OR (x.part = 'agent' AND EXISTS (SELECT 1 FROM ended_agents a WHERE a.incarnation = e.incarnation))
+      {door_error})
     ORDER BY x.at DESC LIMIT 1) AS error
-FROM ended e ORDER BY e.incarnation";
+FROM ended e ORDER BY e.incarnation"
+    )
+}
 
 /// Ended lives one pass clears the storage of.
 const CLEARED_PER_PASS: i64 = 4;
@@ -127,6 +151,8 @@ const REPOS_PER_PASS: i64 = 4;
 /// Ended lives' agents one pass takes off their computers and out of the
 /// registry's names (two calls each, at most).
 const AGENTS_PER_PASS: i64 = 4;
+/// Ended connectors' doors one pass ends (one call each).
+const DOORS_PER_PASS: i64 = 4;
 
 /// A life a delete ended: whose list it tells first.
 pub(crate) struct Ended {
@@ -148,6 +174,14 @@ struct Untold {
 struct EndedRepo {
     incarnation: i64,
     repo: String,
+    attempts: i64,
+}
+
+/// An ended connector's door, still to end.
+#[derive(Deserialize)]
+struct EndedDoor {
+    incarnation: i64,
+    door: String,
     attempts: i64,
 }
 
@@ -196,7 +230,7 @@ impl FragmentCell {
     /// registry's names (a delete's), or not (a wipe's, which empties
     /// both), and its repo recorded when it goes (`rules::repo_goes`).
     fn end(&self, by: End) -> CellResult<Ended> {
-        let [name, created_at, owner, npub, version, identity, computer, search, repo, of_life] = self.metas([
+        let [name, created_at, owner, npub, version, identity, computer, search, repo, of_life, door_template] = self.metas([
             MetaKey::Name,
             MetaKey::CreatedAt,
             MetaKey::Owner,
@@ -207,11 +241,14 @@ impl FragmentCell {
             MetaKey::Search,
             MetaKey::Repo,
             MetaKey::RepoOfLife,
+            MetaKey::DoorTemplate,
         ])?;
         let name = name.ok_or_else(|| missing(MetaKey::Name))?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
         let owner = owner.ok_or_else(|| missing(MetaKey::Owner))?;
         let npub = npub.ok_or_else(|| missing(MetaKey::Npub))?;
+        // a SimpleX connector's door, ended by the alarm (`clear_doors`)
+        let door = door_template.filter(|t| t == fragment_core::door::SIMPLEX).and_then(|_| fragment_core::door::door_id(&name, &npub));
         // newer than every change this life sent: each list takes it
         let version = version.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
         let facet = self.app_facet()?;
@@ -226,6 +263,9 @@ impl FragmentCell {
         // that refuses its schema still ends, its tables as they are)
         if search.is_some() && self.ended_records_search()? {
             self.exec("UPDATE ended SET search = 1 WHERE incarnation = ?", vec![SqlStorageValue::Integer(incarnation)])?;
+        }
+        if let Some(door) = &door {
+            self.door_ends(incarnation, door)?;
         }
         // every member's list, and any a change still waits for (a member
         // removed whose list was not told yet)
@@ -307,9 +347,12 @@ impl FragmentCell {
 
     /// When an ended life's cleanup is next due, if one has any left.
     pub(crate) fn ended_due_at(&self) -> CellResult<Option<i64>> {
+        let doors = if self.ended_records_doors()? { " UNION ALL SELECT MIN(next_at) FROM ended_doors" } else { "" };
         let rows = self.rows(
-            "SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM ended_index UNION ALL SELECT MIN(next_at) FROM ended WHERE stored = 1
-               UNION ALL SELECT MIN(next_at) FROM ended_repos UNION ALL SELECT MIN(next_at) FROM ended_agents)",
+            &format!(
+                "SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM ended_index UNION ALL SELECT MIN(next_at) FROM ended WHERE stored = 1
+               UNION ALL SELECT MIN(next_at) FROM ended_repos UNION ALL SELECT MIN(next_at) FROM ended_agents{doors})"
+            ),
             vec![],
         )?;
         Ok(rows.first().and_then(|r| r["at"].as_i64()))
@@ -325,6 +368,7 @@ impl FragmentCell {
         self.clear_ended().await;
         self.clear_repos().await;
         self.clear_agents().await;
+        self.clear_doors().await;
         self.forget_ended().await;
     }
 
@@ -394,6 +438,25 @@ impl FragmentCell {
     /// 1's `ended`, and ends all the same.
     fn ended_records_search(&self) -> CellResult<bool> {
         Ok(!self.rows("SELECT 1 FROM pragma_table_info('ended') WHERE name = 'search'", vec![])?.is_empty())
+    }
+
+    /// Whether it records its connectors' doors to end (`ended_doors`,
+    /// Fragment step 11): an object that refuses its schema may not.
+    fn ended_records_doors(&self) -> CellResult<bool> {
+        Ok(!self.rows("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ended_doors'", vec![])?.is_empty())
+    }
+
+    /// Records the door of this connector's life `incarnation` for the
+    /// alarm to end (`clear_doors`): its life's end, or other code
+    /// installed (no door again). Once a life: recorded again, nothing.
+    pub(crate) fn door_ends(&self, incarnation: i64, door: &str) -> CellResult<()> {
+        if !self.ended_records_doors()? {
+            return Ok(());
+        }
+        self.exec(
+            "INSERT INTO ended_doors (incarnation, door, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+            vec![SqlStorageValue::Integer(incarnation), door.into(), SqlStorageValue::Integer(js::now_ms())],
+        )
     }
 
     /// Deletes the app facet's database and the blobs of each ended life
@@ -478,6 +541,44 @@ impl FragmentCell {
         }
     }
 
+    /// The connectors' doors due to end, at most `DOORS_PER_PASS`: each
+    /// one's container, saves and storage (cell/door.mjs `/door/end`); its
+    /// row goes once its door answers it has ended. An end asked again
+    /// ends it again, so a try cut after the door ended is harmless.
+    async fn clear_doors(&self) {
+        match self.ended_records_doors() {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => return console_error!("the ended doors did not read ({:?}): {}", e.code, e.message),
+        }
+        let due: Vec<EndedDoor> = match self.typed(
+            "SELECT incarnation, door, attempts FROM ended_doors WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(DOORS_PER_PASS)],
+        ) {
+            Ok(due) => due,
+            Err(e) => return console_error!("the ended doors did not read ({:?}): {}", e.code, e.message),
+        };
+        assert!(due.len() as i64 <= DOORS_PER_PASS, "a pass ends a bounded batch of doors");
+        for d in due {
+            let inc = SqlStorageValue::Integer(d.incarnation);
+            let wrote = match crate::doors::end_door(&self.env, &d.door).await {
+                Ok(()) => {
+                    console_log!("{}", json!({ "event": "ended.door-ended", "door": d.door, "incarnation": d.incarnation }));
+                    self.exec("DELETE FROM ended_doors WHERE incarnation = ?", vec![inc])
+                }
+                Err(failure) => {
+                    let update = "UPDATE ended_doors SET attempts = ?, next_at = ? WHERE incarnation = ?";
+                    self.failed_part(d.incarnation, PART_DOOR, d.attempts, &failure, update, vec![inc]).map(|after| {
+                        console_error!("the ended life {}'s door {} did not end (try {}, held: {}): {}", d.incarnation, d.door, after.attempts, rules::held(after.attempts), failure.message());
+                    })
+                }
+            };
+            if let Err(e) = wrote {
+                console_error!("the ended life {}'s door row did not write ({:?}): {}", d.incarnation, e.code, e.message);
+            }
+        }
+    }
+
     /// The ended lives' agents due, at most `AGENTS_PER_PASS`: each one's
     /// computer runs it no more (that agent's row alone: a life made again
     /// under the name keeps its own), then the registry names it by its
@@ -538,11 +639,19 @@ impl FragmentCell {
     /// lets the object's storage go whole, as a delete's did before it
     /// answered.
     async fn forget_ended(&self) {
+        let doors = match self.ended_records_doors() {
+            Ok(true) => "AND NOT EXISTS (SELECT 1 FROM ended_doors d WHERE d.incarnation = ended.incarnation)",
+            Ok(false) => "",
+            Err(e) => return console_error!("the ended lives were not forgotten ({:?}): {}", e.code, e.message),
+        };
         let forgot = self.rows(
-            "DELETE FROM ended WHERE stored = 0 AND NOT EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = ended.incarnation)
+            &format!(
+                "DELETE FROM ended WHERE stored = 0 AND NOT EXISTS (SELECT 1 FROM ended_index i WHERE i.incarnation = ended.incarnation)
                AND NOT EXISTS (SELECT 1 FROM ended_repos r WHERE r.incarnation = ended.incarnation)
                AND NOT EXISTS (SELECT 1 FROM ended_agents a WHERE a.incarnation = ended.incarnation)
-             RETURNING name, incarnation, ended_at",
+               {doors}
+             RETURNING name, incarnation, ended_at"
+            ),
             vec![],
         );
         let forgot = match forgot {
@@ -579,11 +688,11 @@ impl FragmentCell {
     }
 
     /// The test lever `ended` (ops.rs): each ended life, and what is left
-    /// of its cleanup (`lists`, `stored`, `repos`, `agents`, the most failed `tries`
+    /// of its cleanup (`lists`, `stored`, `repos`, `agents`, `doors`, the most failed `tries`
     /// of a part left, whether one is `held`, and its last `error`). It
     /// answers on an object with no life.
     pub(crate) fn ended_view(&self) -> CellResult<Value> {
-        let lives = self.rows(&format!("{LIVES_LEFT} LIMIT ?"), vec![SqlStorageValue::Integer(LIVES_SHOWN_MAX as i64)])?;
+        let lives = self.rows(&format!("{} LIMIT ?", lives_left(self.ended_records_doors()?)), vec![SqlStorageValue::Integer(LIVES_SHOWN_MAX as i64)])?;
         let lives: Vec<Value> = lives
             .into_iter()
             .map(|mut l| {
@@ -607,7 +716,7 @@ impl FragmentCell {
             tries: i64,
             error: Option<String>,
         }
-        let rows: Vec<Row> = self.typed(&format!("{LIVES_LEFT} LIMIT ?"), vec![SqlStorageValue::Integer(LIVES_SHOWN_MAX as i64)])?;
+        let rows: Vec<Row> = self.typed(&format!("{} LIMIT ?", lives_left(self.ended_records_doors()?)), vec![SqlStorageValue::Integer(LIVES_SHOWN_MAX as i64)])?;
         assert!(rows.len() <= LIVES_SHOWN_MAX, "a bounded few lives");
         Ok(rows
             .into_iter()
@@ -638,6 +747,9 @@ impl FragmentCell {
         self.exec("UPDATE ended_index SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
         self.exec("UPDATE ended SET next_at = ?1 WHERE stored = 1 AND next_at > ?1", vec![now.clone()])?;
         self.exec("UPDATE ended_repos SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
+        if self.ended_records_doors()? {
+            self.exec("UPDATE ended_doors SET next_at = ?1 WHERE next_at > ?1", vec![now.clone()])?;
+        }
         self.exec("UPDATE ended_agents SET next_at = ?1 WHERE next_at > ?1", vec![now])
     }
 

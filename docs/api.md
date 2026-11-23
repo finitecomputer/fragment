@@ -66,7 +66,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -2304,6 +2304,13 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  **Its door ends with it** (`/door/end`): its container with no last
+  save, every file under its prefix in the bucket, and its object's
+  storage. Its owner's unlink ends it before the binding goes (502, still
+  bound, while it cannot); its deletion, a wipe's end of it, or other
+  code installed records it for its alarm to end, retried as a delete's
+  other parts are. Bound to another of its owner's agents, it stays.
+  Ended, a connect starts a new door.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.

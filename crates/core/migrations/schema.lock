@@ -14,6 +14,7 @@ step Fragment 7 making df7c73337a08c512
 step Fragment 8 newest b439b2eb5ec07074
 step Fragment 9 inbox_forward_only ece226038ced1436
 step Fragment 10 face_forward_only c83644ba432a03d7
+step Fragment 11 ended_doors 094fedc13bab0e4e
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -70,6 +71,7 @@ Fragment index delivery_outbox_due: CREATE INDEX delivery_outbox_due ON delivery
 Fragment index delivery_outbox_waiting: CREATE INDEX delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0
 Fragment table ended: CREATE TABLE ended ( incarnation INTEGER PRIMARY KEY, name TEXT NOT NULL, npub TEXT NOT NULL, facet TEXT NOT NULL, ended_at INTEGER NOT NULL, stored INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, search INTEGER NOT NULL DEFAULT 0)
 Fragment table ended_agents: CREATE TABLE ended_agents ( incarnation INTEGER PRIMARY KEY, identity TEXT NOT NULL, computer TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
+Fragment table ended_doors: CREATE TABLE ended_doors ( incarnation INTEGER PRIMARY KEY, door TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
 Fragment table ended_errors: CREATE TABLE ended_errors ( incarnation INTEGER NOT NULL, part TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incarnation, part))
 Fragment table ended_index: CREATE TABLE ended_index ( incarnation INTEGER NOT NULL, principal TEXT NOT NULL, version INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, PRIMARY KEY (incarnation, principal))
 Fragment index ended_index_due: CREATE INDEX ended_index_due ON ended_index (next_at)
