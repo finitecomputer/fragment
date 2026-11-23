@@ -380,6 +380,26 @@ pub struct TurnStart {
     /// `continue_turn`): its note is that turn's, by its id (driver.rs,
     /// `cut_note`); said by the computer, never as its asker's words.
     pub continues: Option<String>,
+    /// The room of the agent's door it was said in (docs/chat-records.md,
+    /// "A message heard in a room"), by the door's id for it: a runtime
+    /// keeps a conversation per room of a chat (`conversation`), so one
+    /// room's talk never sits in another's.
+    pub room: Option<String>,
+    /// What it is told of that room (note.rs, `place`): where it is, whose
+    /// words they are, and what was said there just before. The driver
+    /// puts it in `note`, before the journal's.
+    pub place: Option<String>,
+}
+
+impl TurnStart {
+    /// The conversation its runtime keeps it in: its chat's, or, said in a
+    /// room of the agent's door, that room's (`<chat>/<room>`).
+    pub fn conversation(&self) -> String {
+        match &self.room {
+            Some(room) => format!("{}/{room}", self.fragment),
+            None => self.fragment.clone(),
+        }
+    }
 }
 
 /// What the bridge asks of a runtime.

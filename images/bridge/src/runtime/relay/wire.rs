@@ -293,14 +293,20 @@ pub fn valid_profile(p: &str) -> bool {
 
 /// The chat id Hermes is given: the chat fragment and the agent, so two
 /// agents in one chat are two chats to Hermes (its adapter keeps per-chat
-/// state by this id alone).
-pub fn chat_id(fragment: &str, agent_fragment: &str) -> String {
-    format!("{fragment}/{agent_fragment}")
+/// state by this id alone), and the room of the agent's door it was said
+/// in, if any (`TurnStart::room`): a session of its own each.
+pub fn chat_id(fragment: &str, agent_fragment: &str, room: Option<&str>) -> String {
+    match room {
+        Some(room) => format!("{fragment}/{agent_fragment}/{room}"),
+        None => format!("{fragment}/{agent_fragment}"),
+    }
 }
 
-/// The chat fragment and agent of a chat id.
+/// The chat fragment and agent of a chat id (its room aside).
 pub fn split_chat_id(chat: &str) -> Option<(&str, &str)> {
-    chat.split_once('/').filter(|(f, a)| !f.is_empty() && !a.is_empty())
+    let mut parts = chat.splitn(3, '/');
+    let (f, a) = (parts.next()?, parts.next()?);
+    (!f.is_empty() && !a.is_empty()).then_some((f, a))
 }
 
 /// The session Hermes keeps for one agent's chat: one per chat, shared by
@@ -1008,7 +1014,12 @@ mod tests {
         let p = profile(&long);
         assert!(p.len() <= 64 && valid_profile(&p), "{p}");
         assert_ne!(p, profile(&format!("{}--k3x9", "a".repeat(81))), "two long names, two profiles");
-        assert_eq!(split_chat_id(&chat_id("talk--k3x9", "juniper--k3x9")), Some(("talk--k3x9", "juniper--k3x9")));
+        assert_eq!(split_chat_id(&chat_id("talk--k3x9", "juniper--k3x9", None)), Some(("talk--k3x9", "juniper--k3x9")));
+        // a room's: a session of its own, in the same chat of the same agent
+        assert_eq!(chat_id("slack--k3x9", "juniper--k3x9", Some("C0123")), "slack--k3x9/juniper--k3x9/C0123");
+        assert_eq!(split_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), Some(("slack--k3x9", "juniper--k3x9")));
+        assert_ne!(session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("D0456"))));
+        assert_ne!(session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", None)));
         assert_eq!(split_chat_id("nochat"), None);
     }
 

@@ -723,6 +723,8 @@ async fn an_agents_model_and_effort_are_its_sessions_flags() {
             continues: None,
             age: None,
             disk: None,
+            room: None,
+            place: None,
         };
         to_runtime.send(Command::Start(Box::new(ts))).await.expect("the runtime runs");
         // bounded by `wait()`: its events until its end

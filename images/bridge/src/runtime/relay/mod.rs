@@ -715,7 +715,9 @@ impl Loop {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the
                 // running turn after its next tool call) or beside none
-                let chat = wire::chat_id(&fragment, &agent);
+                // into the running turn's own conversation (a room's, too)
+                let running = turn.as_ref().and_then(|t| self.inflight.get(t)).map(|f| f.chat.clone());
+                let chat = running.unwrap_or_else(|| wire::chat_id(&fragment, &agent, None));
                 let profile = wire::profile(&agent);
                 let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None, topic: wire::topic(simplex) };
                 let buffer = format!("x-{id}");
@@ -777,7 +779,7 @@ impl Loop {
     }
 
     fn start(&mut self, ts: TurnStart) {
-        let chat = wire::chat_id(&ts.fragment, &ts.agent.fragment);
+        let chat = wire::chat_id(&ts.fragment, &ts.agent.fragment, ts.room.as_deref());
         let profile = wire::profile(&ts.agent.fragment);
         if let Some(old) = self.by_chat.get(&chat).cloned() {
             // The engine runs one turn of an agent in a chat at a time; a
