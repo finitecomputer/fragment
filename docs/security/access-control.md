@@ -4,7 +4,8 @@ For the CASA assessment (OWASP ASVS V4 access control and V8 data
 protection; FIN-584). This lists every authenticated route, the id it
 names, and where the platform checks that the caller may reach the thing
 that id names. It was written from the code on 2026-11-23, with `master` at
-`06e158bc7`, and corrected after a Codex review the same day. When a
+`06e158bc7`, and corrected after a Codex review the same day, on `master`
+at `9094a72c5` (where `access.rs` became `permit.rs`, FIN-615). When a
 route changes, change its row here.
 
 ## The short answer
@@ -23,7 +24,7 @@ of three ways:
    client's copies of those headers, and the `lockdown` e2e section checks
    that. The fragment reads the caller's membership from its own `members`
    table and decides with one pure function,
-   `fragment_core::access::decide` (`crates/core/src/access.rs`), before
+   `fragment_core::permit::decide` (`crates/core/src/permit.rs`), before
    the route reads or writes anything. Two things happen to every routed
    request before that check, refused or not (`cell/src/fragment.rs`
    `route`): it counts once on the owner's request meter (`meter.rs`
@@ -40,7 +41,7 @@ of three ways:
 
 The routes keyed by a person refuse agents where the data is the person's
 alone: computers, connections, Vault, export, notices and the access view.
-An agent acts for its owner only (`access::may_act_for`, decision R17), and
+An agent acts for its owner only (`permit::may_act_for`, decision R17), and
 never above editor (`AGENT_ROLE_MAX`).
 
 **Three defects were found** in review, each filed and fixed in its own
@@ -57,8 +58,11 @@ A fragment has members at a role: `owner` (one), `editor` or `viewer`.
 Everyone else reaches it by its visibility: `members` (nobody else),
 `link` (a viewer while holding the share link), or `public` (the `public`
 role, plus a viewer with the link). A person whose own agent is a member
-reads, but never acts, as a viewer. `decide` answers 401 to someone
-unsigned and 403 to a signer, never the data.
+reads, but never acts, as a viewer. An agent held below its owner acts
+with at most its hold, for its owner, or as itself where its person is a
+guest. On a connector everyone but its owner, in person, is at most a
+viewer. `decide` answers 401 to someone unsigned and 403 to a signer,
+never the data.
 
 The share link (`?view=<token>`) counts only on the fragment's own site
 (`cell/src/serve.rs` `answer`, compared in constant time with `eq_ct`). It
@@ -74,9 +78,9 @@ not found there. Checked in `cell/src/fragment.rs` `route`, through each
 handler's first line (`require`, `admit` or `decide`). "Owner" means the
 fragment's owner, in person, or their own agent sharing for them where a
 row says so. Tests: the pure rule's exhaustive test,
-`access::tests::no_one_reaches_more_than_their_own_standing_gives`,
-which compares `decide` with a model of the rule (caps and holds
-included) for every standing, and the `idor` e2e section
+`permit::tests::no_one_reaches_more_than_their_own_standing_gives`,
+which compares `decide` with a model of the rules (caps, holds, an
+agent beside its person and a connector included) for every standing, and the `idor` e2e section
 (`crates/e2e/src/lanes/idor.rs`, not yet run), which asks the reads,
 the secrets, files, blob upload, deploy, schedule, card and icon writes,
 and the owner's routes (membership changes, invites, visibility, rotate,
@@ -91,7 +95,7 @@ channels: the `ops` and `posts` sections do).
 | `GET channels/{c}`, `channels/{c}/newest` | the channel's read role (viewer for built-ins) | `channels.rs` `channel`, `newest_api` |
 | `GET runs`, `runs/{id}` | viewer | `jobs.rs` `runs_api`, `run_api` |
 | `GET`/`HEAD blobs/{sha}` | viewer | `blobs.rs` `get_blob` |
-| `GET storage-token?access=read` / no `access` | viewer / editor | `plane.rs` `storage_token`; the repo itself only for members (`access::repo_role`) |
+| `GET storage-token?access=read` / no `access` | viewer / editor | `plane.rs` `storage_token`; the repo itself only for members (`permit::Action::Repo`) |
 | `POST search` | viewer | `searchable.rs` `search_found` |
 | `GET secrets`, `PUT`/`DELETE secrets/{key}` | editor | `members.rs` `list_secrets`, `put_secret`, `delete_secret` |
 | `POST files`, `deploy`, `refresh` | editor | `publish.rs` `write_files_api`, `deploy_api`; `plane.rs` `refresh` |
@@ -101,11 +105,11 @@ channels: the `ops` and `posts` sections do).
 | `POST search/upsert`, `search/delete`; `GET search/sources` | editor | `searchable.rs` |
 | `POST ops/{op}` | the operation's declared role. A mutation or job decides as acting, so reading through one's agent's membership lends nothing; an operation declared `public` on a public fragment is anyone's to call, a mutation or a job included, rate limited per caller (`RateLimited`) | `ops.rs` `call_op` |
 | `POST channels/{c}`, `PUT channels/{c}/draft` | the channel's post role | `channels.rs` `post`, `admit_poster` |
-| `PUT members/{who}`, `DELETE members/{who}` | owner, or their own agent acting for them with their authority (not held below them, not on a connector); a member may remove themselves | `members.rs` `sharer`, `set_member`, `remove_member`; rules in `access::agent_shares`, `refuse_set_role`, `refuse_remove`; the router refuses other agents first (`access::agent_may_ask`) |
+| `PUT members/{who}`, `DELETE members/{who}` | owner, or their own agent acting for them with their authority (not held below them, not on a connector); a member may remove themselves | `members.rs` `sharer`, `set_member`, `remove_member`; rules in `permit::agent_shares`, `refuse_set_role`, `refuse_remove`; the router refuses other agents first (`permit::agent_may_ask`) |
 | `PUT address` | a viewer who shares (the owner, or their agent as above) | `address.rs` `claim_address` (`shares`); reserved as sharing at the router |
 | `GET`/`POST invites`, `DELETE invites/{email}` | owner, or their own agent sharing for them | `members.rs` `sharer` |
 | `PUT visibility`, `POST rotate`, `GET`/`POST door`, `GET database`, `PUT cap` | owner | `members.rs`; `doors.rs`; `export.rs` `database`; `meter.rs` `put_cap` |
-| `DELETE` (the fragment) | owner, in person | `fragment.rs` `delete`; an agent is refused at the router (`access::reserved`, `agent_may_ask`) |
+| `DELETE` (the fragment) | owner, in person | `fragment.rs` `delete`; an agent is refused at the router (`permit::reserved`, `agent_may_ask`: `Reserved::Dangerous`) |
 | `POST subscriptions` | a member whose role may read the channel; each delivery asks again (FIN-656) | `subscriptions.rs` `subscriber`; `record_delivery` |
 | `GET subscriptions`, `DELETE subscriptions/{id}` | any signer, no membership: scoped to the signer's own, the owner's all, so another's id removes nothing (`removed: 0`) | `subscriptions.rs` `subscriptions`, `unsubscribe` (`WHERE principal = ? OR owner`) |
 | `POST inbox` | its inbox token or its code's webhook secret, no role | `fragment.rs` `inbox` |

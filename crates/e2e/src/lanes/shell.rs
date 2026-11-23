@@ -4616,7 +4616,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     };
     let id = computer["computer"].as_str().unwrap_or("").to_string();
     // the uses below, and the page's month of them, in one month
-    super::computers::pin_month(api, &id, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
+    super::computers::pin_month(api, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -6225,7 +6225,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
 }
 
 /// The Skills page's library: the pinned Hermes image's optional skills
-/// (the release's catalog in the skills fragment), each a switch. Valid:
+/// (the release's catalog the shell publishes), each a switch. Valid:
 /// switched on, the fragment holds its `optional/hermes/<id>.on`, which
 /// is what the image's boot installs; switched off, it is gone. A labelled
 /// skill asks first. Replay: loaded again, the switch is as it was left.

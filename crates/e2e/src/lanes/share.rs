@@ -176,7 +176,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // sheet says so by the invite, on a chat their agent is in and nowhere
     // else (Paul, 2026-10-23 and 10-24): not on an app it is in (no agent
     // hears one: this list), nor an app or a chat without it
-    let warning = fragment_core::access::TRUST_WARNING;
+    let warning = fragment_core::permit::TRUST_WARNING;
     let plain = make(&s.name("plain"), "blank")?;
     let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
     let talk = make(&s.name("talk"), "chat")?;

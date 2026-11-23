@@ -758,8 +758,8 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         // whoever comes into a chat can talk to the owner's agent in it
         // (Paul, 2026-10-23: the design, and this its safeguard; 10-24:
         // only on a chat, one short line, and no other paragraph here)
-        if fragment_core::access::talks_to_owners_agent(sheet.kind, &sheet.members) {
-            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        if fragment_core::permit::talks_to_owners_agent(sheet.kind, &sheet.members) {
+            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::permit::TRUST_WARNING);
         }
         if sheet.reach {
             out += &format!("<p class=\"hint keys\">{KEYS_LINE}</p>");
@@ -1101,7 +1101,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
             };
             // a guest's agent named nowhere, its members read or not (decision 64)
             let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
-            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
+            let agents = fragment_core::permit::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
             AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();

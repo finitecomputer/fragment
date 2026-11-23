@@ -51,6 +51,7 @@ mod migrations;
 mod moves;
 mod native;
 mod notes;
+mod pipe_live;
 mod offload;
 mod orgs;
 mod plane;
@@ -185,6 +186,7 @@ const LANES: &[Lane] = &[
     agent_ask::agent_ask,
     agent_app::agent_app,
     agent_restart::agent_restart,
+    pipe_live::pipe_live,
     checkout::checkout,
     sync::folder_sync,
     migrations::migrations,
@@ -218,7 +220,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 5] = [
     &[
         "keys", "levers", "delegation", "orgs", "admin-page", "computers", "computer-room", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
-        "agent-app", "agent-restart", "checkout",
+        "agent-app", "agent-restart", "pipe-live", "checkout",
     ],
     &["shell-ui"],
     &[

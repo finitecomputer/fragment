@@ -101,6 +101,11 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let held = records(api, &viewer, &name, "notes");
     s.ok("the channel holds the record, for its readers", held.len() == 1 && held[0]["principal"] == editor_id.as_str(), json!(held));
+    s.ok(
+        "and says a person wrote it, as the platform stamped it (FIN-615)",
+        record["author"] == "person" && held.first().is_some_and(|r| r["author"] == "person"),
+        json!([record, held]),
+    );
     let r = post(api, &viewer, &name, "notes", "n2", json!({ "text": "from a viewer" }))?;
     s.ok(
         "below the post role is 403, and appends nothing",
@@ -701,6 +706,7 @@ fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         r.status == 200 && r.body["replayed"] == false && r.body["record"]["principal"] == agent_id.as_str() && work().len() == 1,
         &r,
     );
+    s.ok("and says an agent wrote it", r.body["record"]["author"] == "agent" && work().first().is_some_and(|w| w["author"] == "agent"), &r);
     let acting = api.signed(&agent, "POST", &format!("/api/f/{name}/channels/work?for={owner_id}"), Some(&json!({ "id": "w2", "body": step })))?;
     s.ok(
         "the same agent acting for its owner is refused (403): the post would be the owner's say",
