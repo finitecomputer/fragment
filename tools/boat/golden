@@ -9,7 +9,7 @@
 # builder. Sandboxes already started from the old snapshot keep theirs.
 # About 15 minutes from nothing, 5 to 15 to refresh depending on how far
 # master moved; rerun it when runs start rebuilding much. Uses a large
-# sandbox (twice the default rate) and one start.
+# sandbox (twice the default rate) and one start. Test: tools/boat/test-golden.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib.sh"
@@ -33,13 +33,20 @@ for f in "$HERE"/sandbox/*; do
   "$B" scp "$f" "$id:/home/user/.boat-keep/$(basename "$f")" >/dev/null
 done
 bx "$id" 'chmod +x ~/.boat-keep/*.sh ~/.boat-keep/*.py'
-"$B" exec "$id" --detach -- bash -lc '~/.boat-keep/build-golden.sh' >/dev/null
+# The builder starts from the last snapshot, whose ~/golden.status is the
+# last refresh's. Clear it before the build starts, and take only a status
+# naming this run: a poll that comes before the detached build begins must
+# not read the old one as this build's.
+run="$(date +%s).$$.$RANDOM"
+bx "$id" 'rm -f ~/golden.status ~/golden.log'
+"$B" exec "$id" --detach -- bash -lc "~/.boat-keep/build-golden.sh > ~/golden.log 2>&1; echo \"$run \$?\" > ~/golden.status" >/dev/null
 started=$(date +%s)
-until status=$(bx "$id" 'cat ~/golden.status 2>/dev/null') && [ -n "$status" ]; do
+until status=$(bx "$id" 'cat ~/golden.status 2>/dev/null') && [ "${status%% *}" = "$run" ]; do
   [ $(( $(date +%s) - started )) -lt 5400 ] || { echo "tools/boat/golden: still building after 90 min; giving up" >&2; exit 1; }
-  sleep 20
+  sleep "${FRAGMENT_BOAT_POLL:-20}"
 done
-bx "$id" 'grep "^== \|^fragment-times\|^times" ~/golden.log'
+status=${status#* }
+bx "$id" 'grep "^== \|^fragment-times\|^times" ~/golden.log' || true  # a summary; none is no failure
 if [ "$status" != 0 ]; then
   echo "tools/boat/golden: build-golden.sh failed ($status); $SNAPSHOT unchanged. The end of its log:" >&2
   bx "$id" 'tail -n 40 ~/golden.log' >&2

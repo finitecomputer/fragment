@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # tools/boat/sandbox/build-golden.sh: on the golden builder (tools/boat/golden
-# copies this folder to ~/.boat-keep and runs it detached). Sets a fresh
-# sandbox up, or takes the last snapshot's, brings the warm tree to
-# origin/master and builds what copies will need, leaving it ready to save.
-# Log: ~/golden.log; exit code: ~/golden.status.
+# copies this folder to ~/.boat-keep and runs it detached, its output in
+# ~/golden.log and its exit code, with the run's token, in ~/golden.status).
+# Sets a fresh sandbox up, or takes the last snapshot's, brings the warm
+# tree to origin/master and builds what copies will need, leaving it ready
+# to save.
 set -euo pipefail
-rm -f ~/golden.status
-exec > ~/golden.log 2>&1
-trap 'echo $? > ~/golden.status' EXIT
 t() { local s; s=$(date +%s); "$@"; echo "== $(( $(date +%s) - s ))s  $*"; }
 REPO=$HOME/Projects/fragment
 KEEP=$HOME/.boat-keep
