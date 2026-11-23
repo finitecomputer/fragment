@@ -107,9 +107,12 @@ fi
 save_times=""
 [ "$mode" = once ] || save_times='python3 ~/fragment-src/tools/boat/sandbox/times.py save >/dev/null'
 set +e
+# Boat's user holds CAP_DAC_READ_SEARCH (it reads any file), which CI's
+# runner does not: tests that make a file unreadable fail. The command runs
+# without it.
 bx "$id" "bash ~/fragment-src/tools/boat/sandbox/start.sh ~/fragment-src $sha || exit 97
 cd ~/Projects/fragment
-$command_line
+setpriv --inh-caps=-all --ambient-caps=-all -- bash -c $(printf %q "$command_line")
 rc=\$?
 $save_times
 exit \$rc" 0
