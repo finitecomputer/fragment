@@ -1762,7 +1762,9 @@ d + 1 (a delivery's `x-fragment-hops`), and past `HOP_DEPTH_MAX` a run is
 `blocked` (`cycle.detected`). An operation's triggers pause themselves
 (`op.auto-paused`) after `AUTO_PAUSE_HELD` held runs in
 `AUTO_PAUSE_WINDOW_MS` or `TRIGGERED_RUNS_PER_HOUR` triggered runs in an
-hour; paused, a trigger records a `blocked` run. Past the owner's
+hour, but a connector's own code (An agent's doors) never by the hourly
+count: its triggers relay a conversation and fire on nothing they publish
+(`connectors::trips_hourly_breaker`); paused, a trigger records a `blocked` run. Past the owner's
 overdraft every trigger's run is `blocked`. A deploy dropping an operation
 drops its pause. A cron tick whose last run still goes is skipped. The
 inbox's pending records are its unfinished runs (`inbox.rejected` past

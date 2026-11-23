@@ -70,6 +70,14 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["loader_id"].as_str()).and_then(door::blessed_template).map(str::to_string))
     }
 
+    /// Whether this fragment runs a connector's own code: made from a
+    /// blessed connector template (`door_template`, unmarked for good by
+    /// any other install) and running it now.
+    pub(crate) fn runs_connector(&self) -> CellResult<bool> {
+        let Some(template) = self.meta(MetaKey::DoorTemplate)? else { return Ok(false) };
+        Ok(self.blessed()?.as_deref() == Some(template.as_str()))
+    }
+
     /// The connector policy its doors ask: the deployment's, or, on a test
     /// fleet, the `connectors` lever's in its place (ops.rs).
     pub(crate) fn connector_policy(&self) -> CellResult<Cow<'_, Policy>> {

@@ -365,10 +365,13 @@ impl FragmentCell {
         } else if let Some(why) = r.owner_read_only.filter(|_| triggered) {
             Some(format!("{}: its triggers start no runs until then", crate::meter::read_only_refusal(why).message))
         } else if triggered
-            && self.count_of(
-                "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND via NOT IN ('call', 'job') AND status != 'blocked' AND created_at > ?",
-                vec![r.op.into(), SqlStorageValue::Integer(now - 3_600_000)],
-            )? >= limits::TRIGGERED_RUNS_PER_HOUR
+            && fragment_core::connectors::trips_hourly_breaker(
+                self.count_of(
+                    "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND via NOT IN ('call', 'job') AND status != 'blocked' AND created_at > ?",
+                    vec![r.op.into(), SqlStorageValue::Integer(now - 3_600_000)],
+                )?,
+                self.runs_connector()?,
+            )
         {
             let why = format!("{} triggered runs in the last hour", limits::TRIGGERED_RUNS_PER_HOUR);
             self.set_paused(r.op, true, "auto", &why)?;
