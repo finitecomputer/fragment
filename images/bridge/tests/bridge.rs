@@ -885,6 +885,52 @@ async fn private_room_history_never_leaks_into_another_room_after_restart_or_rol
         assert!(text.contains("[Maple · Slack · #public] public status check") && text.contains("(room: C0123)"), "{text}");
         assert!(!text.contains("secret salary") && !text.contains("999k") && !text.contains("secret cut task") && !text.contains("quoting"), "private DM leaked into #public: {text}");
     });
+
+    // 5. Find the agent's reply seq from the private DM turn:
+    //    - A root-session message quoting that private-room reply MUST NOT quote it
+    //    - A same-room DM message quoting that private-room reply MUST quote it
+    let priv_turn = turn_of("juniper", &door, seq(&priv_msg));
+    let priv_reply_seq = fake.with(|w| {
+        w.fragments[&door]
+            .channels
+            .get("chat")
+            .unwrap()
+            .records
+            .iter()
+            .find(|r| r["body"]["turn"] == priv_turn)
+            .map(|r| r["seq"].as_u64().unwrap())
+            .expect("private DM agent reply seq")
+    });
+    let root_quote = fake.say(
+        &door,
+        &person("paul"),
+        json!({
+            "text": "root check",
+            "to": ["npub1juniper"],
+            "reply_to": priv_reply_seq,
+        }),
+    );
+    fake.until(WAIT, "root turn finished", |w| reply_for(w, &root_quote).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &root_quote).unwrap();
+        assert!(!text.contains("secret salary") && !text.contains("999k") && !text.contains("quoting"), "private DM reply leaked into root quote/recap: {text}");
+    });
+    let dm_quote = fake.say(
+        &door,
+        "npub1slackiso",
+        json!({
+            "text": "follow up on salary",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0100", "name": "Boss" },
+            "room": { "id": "D0001", "name": "DM" },
+            "reply_to": priv_reply_seq,
+        }),
+    );
+    fake.until(WAIT, "same-room DM quote finished", |w| reply_for(w, &dm_quote).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &dm_quote).unwrap();
+        assert!(text.contains("(quoting itself:") && text.contains("secret salary 999k"), "same-room reply quote should work: {text}");
+    });
     bridge.stop().await;
 }
 

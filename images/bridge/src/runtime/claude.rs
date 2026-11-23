@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -219,9 +219,28 @@ impl Generations {
     }
 }
 
+/// RAII guard for one accepted `Start` on a session: acquired synchronously by
+/// the dispatcher before enqueueing `ToSession::Start` and dropped only when
+/// that turn (or install-card wait) finishes, so `session()` can never race
+/// with the dispatcher and clear busy before receiving a newly dispatched turn.
+struct Lease(Arc<AtomicUsize>);
+
+impl Lease {
+    fn take(counter: &Arc<AtomicUsize>) -> Lease {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Lease(counter.clone())
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// What the bridge tells a session's task.
 enum ToSession {
-    Start(Box<TurnStart>),
+    Start(Box<TurnStart>, Lease),
     Stop(String),
     Answer { turn: String, prompt: String, option: Option<String>, words: Option<String> },
     Forget(String),
@@ -231,7 +250,7 @@ type SessionKey = (String, String, Option<String>);
 
 struct SessionEntry {
     tx: mpsc::Sender<ToSession>,
-    busy: Arc<AtomicBool>,
+    inflight: Arc<AtomicUsize>,
     used: u64,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -254,14 +273,18 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         let Some(c) = c else { return Ok(()) };
         sessions.retain(|_, s| !s.tx.is_closed());
         turns.retain(|_, key| sessions.contains_key(key));
-        let (key, msg, is_start) = match c {
+        enum Pending {
+            Start(Box<TurnStart>),
+            Other(ToSession),
+        }
+        let (key, pending) = match c {
             Command::Start(ts) => {
                 let key = (ts.agent.fragment.clone(), ts.fragment.clone(), ts.room.as_ref().map(|r| r.id.clone()));
                 if !sessions.contains_key(&key) && sessions.len() >= SESSIONS_MAX {
                     // Reclaim the least-recently-used idle session before
                     // refusing a new room/chat: its transcript and
                     // deterministic session id stay on disk to resume later.
-                    let victim = sessions.iter().filter(|(_, s)| !s.busy.load(Ordering::SeqCst)).min_by_key(|(_, s)| s.used).map(|(k, _)| k.clone());
+                    let victim = sessions.iter().filter(|(_, s)| s.inflight.load(Ordering::SeqCst) == 0).min_by_key(|(_, s)| s.used).map(|(k, _)| k.clone());
                     if let Some(evict) = victim {
                         if let Some(old) = sessions.remove(&evict) {
                             turns.retain(|_, k| k != &evict);
@@ -275,18 +298,18 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
                     }
                 }
                 turns.insert(ts.turn.clone(), key.clone());
-                (key, ToSession::Start(ts), true)
+                (key, Pending::Start(ts))
             }
             Command::Stop { turn } => match turns.get(&turn) {
-                Some(key) => (key.clone(), ToSession::Stop(turn), false),
+                Some(key) => (key.clone(), Pending::Other(ToSession::Stop(turn))),
                 None => continue,
             },
             Command::Answer { turn, prompt, option, words, .. } => match turns.get(&turn) {
-                Some(key) => (key.clone(), ToSession::Answer { turn, prompt, option, words }, false),
+                Some(key) => (key.clone(), Pending::Other(ToSession::Answer { turn, prompt, option, words })),
                 None => continue,
             },
             Command::Forget { turn } => match turns.remove(&turn) {
-                Some(key) => (key, ToSession::Forget(turn), false),
+                Some(key) => (key, Pending::Other(ToSession::Forget(turn))),
                 None => continue,
             },
             // Claude Code never waits on words mid-turn (it asks in a reply,
@@ -296,14 +319,15 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         seq += 1;
         let entry = sessions.entry(key.clone()).or_insert_with(|| {
             let (tx, rx) = mpsc::channel(16);
-            let busy = Arc::new(AtomicBool::new(is_start));
-            let handle = tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone(), io.held.clone(), io.unquiet.clone(), busy.clone()));
-            SessionEntry { tx, busy, used: seq, handle }
+            let inflight = Arc::new(AtomicUsize::new(0));
+            let handle = tokio::spawn(session(cfg.clone(), key.clone(), generations.clone(), rx, io.events.clone(), io.held.clone(), io.unquiet.clone()));
+            SessionEntry { tx, inflight, used: seq, handle }
         });
         entry.used = seq;
-        if is_start {
-            entry.busy.store(true, Ordering::SeqCst);
-        }
+        let msg = match pending {
+            Pending::Start(ts) => ToSession::Start(ts, Lease::take(&entry.inflight)),
+            Pending::Other(m) => m,
+        };
         let _ = entry.tx.send(msg).await;
     }
 }
@@ -355,6 +379,7 @@ struct Turn {
     said: Option<(String, u32)>,
     asked: Vec<Asked>,
     stopping: bool,
+    _lease: Lease,
 }
 
 /// A session counted while its process runs with no turn on it: what a
@@ -384,8 +409,7 @@ impl Drop for Idle {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>, mut held: watch::Receiver<bool>, unquiet: Arc<AtomicUsize>, busy: Arc<AtomicBool>) {
+async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Generations>>, mut rx: mpsc::Receiver<ToSession>, events: mpsc::Sender<Event>, mut held: watch::Receiver<bool>, unquiet: Arc<AtomicUsize>) {
     let (agent, chat, room) = key;
     let gen_key = match &room {
         Some(r) => format!("{agent}|{chat}|{r}"),
@@ -398,10 +422,9 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
     let mut requests = 0u64;
     let mut idle = Idle { counted: false, unquiet };
     // a turn asking its person to install Claude Code (`INSTALL_CARD`)
-    let mut asking: Option<Box<TurnStart>> = None;
+    let mut asking: Option<(Box<TurnStart>, Lease)> = None;
     // bounded by its idle stop, or the bridge dropping its sender
     loop {
-        busy.store(turn.is_some() || asking.is_some(), Ordering::SeqCst);
         idle.set(proc.is_some() && turn.is_none());
         let idle_left = cfg.idle.saturating_sub(idle_since.elapsed());
         // the words a draft said since are said once its interval is out
@@ -411,7 +434,7 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
             m = rx.recv() => {
                 let Some(m) = m else { break };
                 match m {
-                    ToSession::Start(ts) => {
+                    ToSession::Start(ts, lease) => {
                         // the bridge runs one turn of an agent in a chat at a
                         // time, so one still here was let go of: it ends on its
                         // process before this one starts there
@@ -455,7 +478,7 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
                                 continue;
                             }
                             let id = room_session_id(&agent, &chat, room.as_deref(), generations.lock().expect("generations").of(&gen_key));
-                            begin(&cfg, &asked, &cwd, &id, &mut proc, &mut turn, &events).await;
+                            begin(&cfg, &asked, &cwd, &id, &mut proc, &mut turn, &events, lease).await;
                             continue;
                         }
                         // not installed: its person may install it from here,
@@ -467,7 +490,7 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
                                 PromptOption { id: INSTALL_NO.into(), label: "Not now".into(), style: None, words: false, computer: false },
                             ];
                             let _ = events.send(Event::Prompt { turn: ts.turn.clone(), prompt: INSTALL_CARD.into(), text: INSTALL_ASK.into(), options, ttl_ms: None }).await;
-                            asking = Some(ts);
+                            asking = Some((ts, lease));
                             continue;
                         }
                         // signed out: its person signs in from the turn's card
@@ -475,10 +498,10 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
                             continue;
                         }
                         let id = room_session_id(&agent, &chat, room.as_deref(), generations.lock().expect("generations").of(&gen_key));
-                        begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events).await;
+                        begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events, lease).await;
                     }
-                    ToSession::Answer { turn: id, prompt, option, .. } if prompt == INSTALL_CARD && asking.as_ref().is_some_and(|a| a.turn == id) => {
-                        let ts = asking.take().expect("checked");
+                    ToSession::Answer { turn: id, prompt, option, .. } if prompt == INSTALL_CARD && asking.as_ref().is_some_and(|(a, _)| a.turn == id) => {
+                        let (ts, lease) = asking.take().expect("checked");
                         idle_since = Instant::now();
                         // not now, or the card expired: it says so, and ends
                         if option.as_deref() != Some(INSTALL_YES) {
@@ -494,15 +517,15 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
                         idle.set(false);
                         if installed && ensure_signed_in(&cfg, &ts, &mut rx, &events).await {
                             let id = room_session_id(&agent, &chat, room.as_deref(), generations.lock().expect("generations").of(&gen_key));
-                            begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events).await;
+                            begin(&cfg, &ts, &cwd, &id, &mut proc, &mut turn, &events, lease).await;
                         }
                     }
-                    ToSession::Stop(id) if asking.as_ref().is_some_and(|a| a.turn == id) => {
+                    ToSession::Stop(id) if asking.as_ref().is_some_and(|(a, _)| a.turn == id) => {
                         asking = None;
                         let _ = events.send(Event::End { turn: id, outcome: Outcome::Stopped }).await;
                         idle_since = Instant::now();
                     }
-                    ToSession::Forget(id) if asking.as_ref().is_some_and(|a| a.turn == id) => {
+                    ToSession::Forget(id) if asking.as_ref().is_some_and(|(a, _)| a.turn == id) => {
                         asking = None;
                         idle_since = Instant::now();
                     }
@@ -1157,7 +1180,8 @@ pub fn prepare(cwd: &Path, agent: &Agent, run_as: Option<(u32, u32)>) -> std::io
 /// A turn's message to its session's `claude` (session `id`), started for
 /// it, resuming the session if its transcript is on disk, when none runs;
 /// one that will not start ends saying why.
-async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &mut Option<Proc>, turn: &mut Option<Turn>, events: &mpsc::Sender<Event>) {
+#[allow(clippy::too_many_arguments)]
+async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &mut Option<Proc>, turn: &mut Option<Turn>, events: &mpsc::Sender<Event>, lease: Lease) {
     let message = message(ts);
     // its agent asks another model or effort now (`agent.json`'s `claude`):
     // the process it idles in stops between turns, and this turn resumes
@@ -1185,7 +1209,7 @@ async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &
         }
         Err(e) => crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() }),
     }
-    *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
+    *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false, _lease: lease });
 }
 
 /// What an agent's sessions start with: its own model (`agent.json`'s
@@ -1641,7 +1665,7 @@ mod tests {
     #[test]
     fn its_words_stream_as_the_draft() {
         let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: Default::default() };
-        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false };
+        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false, _lease: Lease::take(&Arc::new(AtomicUsize::new(0))) };
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let text = |s: &str| json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": s } });
@@ -1704,6 +1728,7 @@ mod tests {
             continues: None,
             age: None,
             disk: None,
+            door_chat: false,
             room: None,
             heard_from: None,
             room_note: None,
@@ -1750,6 +1775,7 @@ mod tests {
             continues: None,
             age: None,
             disk: None,
+            door_chat: true,
             room: Some(records::Room { id: "C0123".into(), name: "#deploys".into(), thread: None }),
             heard_from: Some("U0456".into()),
             room_note: Some("This message is from Slack (#deploys), a shared room; people other than your owner can read your reply.".into()),

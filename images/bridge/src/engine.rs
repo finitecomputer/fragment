@@ -2157,6 +2157,7 @@ impl Engine {
             _ => None,
         };
         let t = self.state.turns.get_mut(id).expect("checked");
+        let door_chat = self.views.get(&t.fragment).and_then(|v| v.door.as_ref()).is_some() || t.room_door.is_some();
         let chat_name = t.room.as_ref().map(|r| r.name.as_str()).filter(|n| !n.is_empty()).unwrap_or_else(|| label(&t.fragment)).to_string();
         let room_note = t.room_door.as_deref().map(|via| crate::note::room_note(via, t.room.as_ref()));
         let start = TurnStart {
@@ -2182,6 +2183,7 @@ impl Engine {
             quote: None,
             simplex,
             continues,
+            door_chat,
             room: t.room.clone(),
             heard_from: t.heard_from.clone(),
             room_note,

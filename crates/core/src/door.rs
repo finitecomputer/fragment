@@ -230,10 +230,23 @@ pub fn hears(body: &Value) -> bool {
 
 /// Whether `body` carries hosted-door room metadata (`heard`, `room`, or
 /// `context`, non-null or present): only a connector's own app publishes
-/// these on a connector fragment, never an external HTTP post or a
+/// these on a connector fragment's `chat`, never an external HTTP post or a
 /// scheduled record.
 pub fn room_fields(body: &Value) -> bool {
     body.get("heard").is_some() || body.get("room").is_some() || body.get("context").is_some()
+}
+
+/// Whether an external HTTP post (`POST /channels/{channel}/records`) to a
+/// connector fragment is forbidden for carrying hosted-door room metadata.
+/// On `work` (`from: agent`), the bridge posts `turn.start` with `"room"`
+/// (never `heard` or `context`); on every other channel (notably `chat`),
+/// all three fields are reserved for the connector's own app.
+pub fn post_room_forbidden(channel: &str, body: &Value) -> bool {
+    if channel == "work" {
+        hears(body) || body.get("context").is_some()
+    } else {
+        room_fields(body)
+    }
 }
 
 /// Whether a `heard` body matches the open hosted door `hosted` (`heard.via`
@@ -500,5 +513,20 @@ mod tests {
         let read: Ticket = serde_json::from_value(json!({ "door": "simplex", "act": "adopt", "agent": "juniper--k3x9", "computer": "computer:00aa", "nonce": "0f".repeat(16), "exp": 5 })).expect("a ticket");
         assert_eq!(read.act, Act::Adopt);
         assert!(serde_json::from_value::<Ticket>(json!({ "door": "simplex", "act": "keep", "agent": "juniper--k3x9", "computer": "computer:00aa", "nonce": "0f".repeat(16), "exp": 5 })).is_err(), "no other act");
+    }
+
+    /// Goal (FIN-508): external HTTP posts on a connector fragment cannot
+    /// spoof `heard`, `room`, or `context` on `chat`, while the agent's bridge
+    /// can post `turn.start` with `"room"` on `work` (never `heard`/`context`).
+    #[test]
+    fn post_room_guard_allows_work_turn_start_room_and_blocks_chat_spoofs() {
+        let turn_start = json!({ "kind": "turn.start", "turn": "t1", "asker": "npub1s", "agent": "npub1a", "cause": { "fragment": "s--k3x9", "channel": "chat", "seq": 1 }, "life": "0123456789abcdef0123456789abcdef", "room": "C0123" });
+        assert!(!post_room_forbidden("work", &turn_start), "bridge posts turn.start with room on work");
+        assert!(post_room_forbidden("work", &json!({ "kind": "turn.start", "heard": { "via": "slack", "from": "U1", "name": "M" } })), "heard is never posted on work");
+        assert!(post_room_forbidden("work", &json!({ "kind": "turn.start", "context": [] })), "context is never posted on work");
+        assert!(post_room_forbidden("chat", &json!({ "text": "hi", "heard": { "via": "slack", "from": "U1", "name": "M" } })));
+        assert!(post_room_forbidden("chat", &json!({ "text": "hi", "room": { "id": "C0123", "name": "#deploys" } })));
+        assert!(post_room_forbidden("chat", &json!({ "text": "hi", "context": [] })));
+        assert!(!post_room_forbidden("chat", &json!({ "text": "plain message" })));
     }
 }

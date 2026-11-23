@@ -380,6 +380,10 @@ pub struct TurnStart {
     /// `continue_turn`): its note is that turn's, by its id (driver.rs,
     /// `cut_note`); said by the computer, never as its asker's words.
     pub continues: Option<String>,
+    /// Whether this turn's chat is a hosted door chat (where room-scoped turns
+    /// may coexist with root turns on the same `chat` channel, so quote and
+    /// recap provenance must fail closed when a reply's `turn.start` is unread).
+    pub door_chat: bool,
     /// The room this turn's message came from (a hosted door's:
     /// docs/chat-records.md, "A message heard in a room"): each room gets a
     /// runtime session of its own.

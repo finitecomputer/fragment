@@ -1919,19 +1919,50 @@ impl Marks {
 async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
     let page = api.records(&ts.agent.fragment, &ts.fragment, records::CHAT, seq.saturating_sub(1), 1).await.map_err(|e| crate::ev!("quote.unread", { "turn": ts.turn, "seq": seq, "error": e.to_string() })).ok()?;
     let r = page.records.into_iter().find(|r| r.seq == seq)?;
-    // Never quote across room boundaries: a room turn only quotes records
-    // carrying the same room id, and a non-room turn never quotes a record
-    // carrying room or outside-speaker metadata.
-    match &ts.room {
-        Some(want) if records::room(&r.body).as_ref().map(|rm| rm.id.as_str()) != Some(want.id.as_str()) => {
-            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want.id });
+    // Never quote across room boundaries:
+    // - An agent's own reply carries `turn` without `room`/`heard`, so on a
+    //   room turn or any hosted door chat we verify the reply's room from our
+    //   own `turn.start` on `work` (and fail closed if unread).
+    // - Any other record must carry the exact matching room id (or no room /
+    //   heard metadata for a root turn).
+    let want_room = ts.room.as_ref().map(|rm| rm.id.as_str());
+    let is_own = own_words(&r.principal, &r.body, &ts.agent);
+    if is_own && (want_room.is_some() || ts.door_chat) {
+        let Some(reply_turn) = r.body["turn"].as_str() else {
+            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "reply lacks turn id" });
+            return None;
+        };
+        let Some(claim) = ts.claim_seq else {
+            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "cannot verify reply room without claim seq" });
+            return None;
+        };
+        let me = ts.agent.identity.as_str();
+        let found = |rs: &[Record]| rs.iter().any(|w| w.principal == me && w.body["kind"] == "turn.start" && w.body["turn"] == reply_turn);
+        let Ok((work, _)) = read_back(api, &ts.agent.fragment, &ts.fragment, records::WORK, claim, found, &mut Budget::default()).await else {
+            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "work unread for reply quote" });
+            return None;
+        };
+        let Some(start) = work.iter().find(|w| w.principal == me && w.body["kind"] == "turn.start" && w.body["turn"] == reply_turn) else {
+            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "reply turn.start not reached within budget" });
+            return None;
+        };
+        let reply_room = start.body.get("room").and_then(Value::as_str);
+        if reply_room != want_room {
+            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "reply_room": reply_room });
             return None;
         }
-        None if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) => {
-            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq });
-            return None;
+    } else {
+        match want_room {
+            Some(want) if records::room(&r.body).as_ref().map(|rm| rm.id.as_str()) != Some(want) => {
+                crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want });
+                return None;
+            }
+            None if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) => {
+                crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq });
+                return None;
+            }
+            _ => {}
         }
-        _ => {}
     }
     let text = match records::said(&r.body) {
         records::Said::Message(m) if !m.text.trim().is_empty() => m.text,
@@ -2224,6 +2255,20 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<Option<String>> {
         said.retain(|r| {
             same_seqs.contains(&r.seq)
                 || (note::own_words(&r.principal, &r.body, me, owner) && r.body["turn"].as_str().is_some_and(|t| same_turns.contains(t)))
+        });
+        work.retain(|r| r.principal != me || r.body["turn"].as_str().is_some_and(|t| same_turns.contains(t)));
+    } else if ts.door_chat {
+        // On a door chat's root session, fail closed for agent replies and
+        // `work` records: a reply omits `room`/`heard`, so keep it only when
+        // its `turn.start` was positively seen without a room.
+        said.retain(|r| {
+            if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) || other_seqs.contains(&r.seq) {
+                return false;
+            }
+            if let Some(t) = r.body["turn"].as_str() {
+                return same_turns.contains(t);
+            }
+            !note::own_words(&r.principal, &r.body, me, owner)
         });
         work.retain(|r| r.principal != me || r.body["turn"].as_str().is_some_and(|t| same_turns.contains(t)));
     } else {

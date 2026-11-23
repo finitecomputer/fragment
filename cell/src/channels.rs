@@ -543,7 +543,7 @@ impl FragmentCell {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
         self.door_checked(caller, &facts.name, channel, id, body).await?;
-        if door::room_fields(body) && (self.hosted_door()?.is_some() || self.meta(MetaKey::DoorTemplate)?.is_some()) {
+        if door::post_room_forbidden(channel, body) && (self.hosted_door()?.is_some() || self.meta(MetaKey::DoorTemplate)?.is_some()) {
             return Err(CellError::new(ErrorCode::Forbidden, "a record carrying `heard`, `room`, or `context` is published only by a connector's own app"));
         }
         // where the post waited, step by step: one line a post

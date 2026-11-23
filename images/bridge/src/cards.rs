@@ -93,9 +93,6 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
-    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && (r.by(asker) || (door.is_some() && r.by(&agent.owner))) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
-        return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
-    }
     // Recover the originating turn's verified room from `turn.start` (or
     // from `cause` for a turn started before `turn.start` carried `room`).
     // On a door chat where a connector turn's cause could not be read and
@@ -123,6 +120,20 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
         },
         Some(_) => return Err(Unavailable::Corrupt),
     };
+    // Match `engine::can_stop`: a `heard` turn (or any non-owner room turn in
+    // a door chat, where `asker` is the connector principal) is stoppable only
+    // by the agent's owner in the door chat, never by the connector itself.
+    let heard_turn = cause.is_some_and(|c| records::heard(&c.body).is_some()) || (door.is_some() && room.is_some() && asker != agent.owner);
+    let can_stop = |r: &Record| {
+        if heard_turn {
+            door.is_some() && r.by(&agent.owner)
+        } else {
+            r.by(asker) || (door.is_some() && r.by(&agent.owner))
+        }
+    };
+    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && can_stop(r) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
+        return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
+    }
     let cut = note::turn(work, &agent.identity, turn).ok_or(Unavailable::Corrupt)?;
     let question = asked.body["text"].as_str().ok_or(Unavailable::Corrupt)?;
     // a card that takes words is answered by them; no words, its label
@@ -258,6 +269,17 @@ mod tests {
         assert_eq!(fresh.room, Some(records::Room { id: "C0123".into(), name: "#deploys".into(), thread: None }));
         assert_eq!(fresh.via.as_deref(), Some("slack"));
         assert!(fresh.note.contains("Maple · Slack · #deploys"), "{}", fresh.note);
+        // A Stop from the connector principal on a `heard` turn is ignored during
+        // late card recovery (matching live `can_stop`), whereas the owner's Stop closes it.
+        let conn_stop = rec("chat", 2, 19, "npub1slackconn", json!({ "kind": "stop", "turn": "old" }));
+        let answer_after_stop = rec("chat", 3, 20, OWNER, response("yes"));
+        let with_conn_stop = vec![chat[0].clone(), conn_stop, answer_after_stop.clone()];
+        let r_conn = resolve(&agent(), &answer_after_stop, &work, &with_conn_stop, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
+        assert!(r_conn.fresh.is_some(), "connector Stop on a heard turn must not discard the owner's answer");
+        let owner_stop = rec("chat", 2, 19, OWNER, json!({ "kind": "stop", "turn": "old" }));
+        let with_owner_stop = vec![chat[0].clone(), owner_stop, answer_after_stop.clone()];
+        let r_owner = resolve(&agent(), &answer_after_stop, &work, &with_owner_stop, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
+        assert_eq!((r_owner.closed["outcome"].as_str(), r_owner.fresh), (Some("stopped"), None), "owner Stop in door chat closes the card");
         // Without `room` on turn.start and without cause on a door chat, refuse recovery
         let mut legacy = work.clone();
         legacy[0].body.as_object_mut().unwrap().remove("room");
