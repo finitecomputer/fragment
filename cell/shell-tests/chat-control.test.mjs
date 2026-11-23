@@ -16,7 +16,7 @@ const MEMBERS = [
   { principal: PAUL, kind: "person" },
   { principal: RAE, kind: "person" },
 ];
-const turn = (agent, asker, channel, startAt = 1, end = null) => ({ agent, asker, cause: { fragment: "x", channel, seq: 1 }, startAt, end });
+const turn = (agent, asker, channel, startAt = 1, end = null, room = null) => ({ agent, asker, cause: { fragment: "x", channel, seq: 1 }, startAt, end, room });
 // what the page's Stop and `/` take: the person's newest running turn, else the lead
 const commandTarget = (turns, me) => controlledBy(turns, MEMBERS, me)?.agent ?? JUNIPER;
 
@@ -54,4 +54,21 @@ test("only a running turn, the newest; a tasks turn of an agent no longer here i
   assert.equal(controlledBy([{ ...older, startAt: null }], MEMBERS, PAUL), null, "not started");
   assert.equal(controllerOf(turn("npub1gone", JUNIPER, "tasks"), MEMBERS), null);
   assert.equal(controlledBy([older], MEMBERS, undefined), null, "no one signed in");
+});
+
+test("an outside speaker's turn in a room or door chat is controlled by the agent's owner (FIN-508)", () => {
+  const CONN = "npub1connector";
+  const slack = turn(JUNIPER, CONN, "chat", 10, null, "C0123");
+  assert.equal(controllerOf(slack, MEMBERS), PAUL);
+  assert.equal(controlledBy([slack], MEMBERS, PAUL), slack, "Paul can stop a teammate's room turn");
+  assert.equal(controlledBy([slack], MEMBERS, RAE), null, "another chat member cannot");
+  // a door chat grants the owner Stop for an outside speaker even without a room id
+  const doorMembers = MEMBERS.map((m) => (m.principal === JUNIPER ? { ...m, door: "slack" } : m));
+  const doorTurn = turn(JUNIPER, CONN, "chat", 12, null, null);
+  assert.equal(controllerOf(doorTurn, doorMembers), PAUL);
+  assert.equal(controlledBy([doorTurn], doorMembers, PAUL), doorTurn);
+  assert.equal(controllerOf(doorTurn, MEMBERS), CONN, "on a non-door chat without room, stays its asker's");
+  // a chat member's own turn in a room or door chat stays theirs
+  const raeRoom = turn(JUNIPER, RAE, "chat", 11, null, "C0123");
+  assert.equal(controllerOf(raeRoom, doorMembers), RAE);
 });

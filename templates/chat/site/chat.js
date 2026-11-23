@@ -59,7 +59,7 @@ import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
 import { moreOf } from "./pages.js";
 import { over, refusal } from "./limits.js";
-import { noteSaid, relayedOwner as relayedOwnerOf, saidSince, speakerOf } from "./speakers.js";
+import { contextOf, heardSpeaker, noteSaid, parseDoorFields, relayedOwner as relayedOwnerOf, roomOf, saidSince, speakerOf, viaLabel } from "./speakers.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -828,9 +828,10 @@ export function mount(root) {
     } else f.textContent = w.initial ?? "?";
     return f;
   }
-  function byline(principal, w = who(principal)) {
+  function byline(principal, w = who(principal), tag = null) {
     const line = el("div", "who");
     line.append(face(principal, w, "small"), w.name);
+    if (tag) line.append(el("span", "room-tag", tag));
     return line;
   }
 
@@ -863,7 +864,7 @@ export function mount(root) {
   function turnOf(agent, id) {
     const key = turnKey(agent, id);
     if (!state.turns.has(key)) {
-      state.turns.set(key, { key, id, agent, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), calls: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
+      state.turns.set(key, { key, id, agent, asker: null, cause: null, room: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), calls: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
     }
     return state.turns.get(key);
   }
@@ -905,18 +906,33 @@ export function mount(root) {
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
   // a turn waiting on its asker's words (`turn.asked`): until they say
   // something to the chat after it, or the turn goes on or ends
-  // A relayed message (docs/chat-records.md): its owner's words, said
-  // through one of their agent's doors (SimpleX, Telegram, …), posted by
-  // that agent, or by a connector chat's own key. It is theirs, "via" that
-  // door, once the members say its poster is that person's agent or none
-  // of the chat's members; until then, or from any other member, it is
-  // the poster's own.
-  // a door's id, as the platform's (a connector's), and what to call it
-  const doorId = (v) => typeof v === "string" && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$/.test(v);
-  const DOOR_NAMES = { simplex: "SimpleX", telegram: "Telegram" };
-  const doorName = (v) => DOOR_NAMES[v] ?? v;
+  // A relayed or heard message (docs/chat-records.md): an owner's words
+  // relayed through a door, or an outside speaker's words heard in a room.
+  // Trust is checked against `state.members` as last read (speakers.js).
   const relayedOwner = (m) => relayedOwnerOf(m, state.members);
   const speaker = (m) => speakerOf(m, state.members);
+  function whoMessage(m) {
+    const h = heardSpeaker(m, state.members);
+    if (h) return { agent: false, name: h.name, picture: null, initial: h.name.charAt(0).toUpperCase() || "?" };
+    return who(speaker(m));
+  }
+  // Display name of a room (`#deploys`, `DM`, …) from the highest-seq trusted
+  // message seen in it (paging up appends older history unsorted until the
+  // window trims), falling back to its room id.
+  function roomLabel(roomId) {
+    if (!roomId) return "";
+    let bestSeq = -1;
+    let bestName = "";
+    for (const m of state.chat) {
+      const r = roomOf(m, state.members);
+      if (r?.id === roomId && r.name && m.seq > bestSeq) {
+        bestSeq = m.seq;
+        bestName = r.name;
+      }
+    }
+    return bestName || roomId;
+  }
+  const causeMessage = (t) => (t?.cause?.channel === "chat" ? state.chat.find((x) => x.seq === t.cause.seq) ?? null : null);
   const waitsOnWords = (t) => running(t) && !!t.asked && !saidSince(state.spoke, state.members, t.asked.asks, t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
@@ -927,14 +943,15 @@ export function mount(root) {
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
   // an agent waiting on this person's words, or on their card that takes
   // words: what they type is the answer
-  const answeringMe = () => [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
+  const answeringMe = () => [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || (!t.room && cardFor(t, state.me?.principal)));
   // a card this page's person may answer now: theirs, neither closed nor
   // gone (expired, or its turn stopped); open past its turn's end, as a
   // card outlives its turn (docs/bridge.md)
   const mayAnswer = (t, p) => !!state.me && p.asks === state.me.principal && !t.closed.has(p.prompt) && !expired(p) && t.end?.outcome !== "stopped";
-  // whether message `m` answered one of turn `t`'s cards: by its asker, said
-  // after the card and before its close
-  const answeredCard = (t, m) => !m.code && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+  // whether message `m` answered one of turn `t`'s cards: by its asker in the
+  // same room (outside speakers never answer cards), said after the card and
+  // before its close
+  const answeredCard = (t, m) => !m.code && !heardSpeaker(m, state.members) && (roomOf(m, state.members)?.id ?? null) === (t.room ?? null) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   // A message the window holds; one past its newest end while the reader is
   // up the chat is kept aside (and read again as the window reaches it).
@@ -976,7 +993,8 @@ export function mount(root) {
     // what app code wrote (the platform's stamp, docs/chat-records.md "Who
     // wrote a record") is no one's word, as the agent's computer hears it:
     // it answers no card and no question here either
-    const code = record.author === "code";
+    const author = typeof record.author === "string" ? record.author : null;
+    const code = author === "code";
     if (body.kind === "prompt_response") {
       // each poster's first answer, for the card it names (its agent's turn
       // and prompt; an answer naming none, the API's, is the prompt's); a
@@ -1011,10 +1029,9 @@ export function mount(root) {
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
     const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
-    // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
-    const r = body.relayed;
-    const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed, code });
+    // a message relayed from its owner or heard from an outside speaker in a room
+    const { relayed, heard, room, context } = parseDoorFields(body, record.principal, turn, code);
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed, heard, room, context, author, code });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -1061,6 +1078,7 @@ export function mount(root) {
     } else if (b.kind === "turn.start") {
       t.asker = typeof b.asker === "string" ? b.asker : null;
       t.cause = b.cause ?? null;
+      t.room = typeof b.room === "string" && b.room.trim() ? b.room : null;
       t.startAt = record.at;
       if (state.pending && b.cause?.channel === "chat" && b.cause?.seq === state.pending.seq) state.pending = null;
     } else if (b.kind === "turn.step" && Number.isInteger(b.step)) {
@@ -1584,16 +1602,22 @@ export function mount(root) {
   }
 
   function messageNode(entry) {
-    // a relayed message shows as its owner's, saying how they sent it
+    // a relayed message shows as its owner's; a heard message shows as its outside speaker
     const owner = relayedOwner(entry);
-    const m = owner ? { ...entry, principal: owner, via: doorName(entry.relayed.via) } : entry;
-    const w = who(m.principal);
-    const mine = m.principal === state.me?.principal;
+    const heard = heardSpeaker(entry, state.members);
+    const room = roomOf(entry, state.members);
+    const context = contextOf(entry, state.members);
+    const via = viaLabel(entry, state.members);
+    const m = owner ? { ...entry, principal: owner, heard: null, via, room, context } : { ...entry, heard, via, room, context };
+    const w = whoMessage(entry);
+    const mine = !heard && m.principal === state.me?.principal;
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(speaker(quoted)).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? ""].join("|");
-    return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
+    const turnRoom = w.agent && m.turn ? roomLabel(state.turns.get(turnKey(m.principal, m.turn))?.room) : "";
+    const ctxSig = context.length ? `${context.length}:${context[0].name}:${context[context.length - 1].text.length}` : "";
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${whoMessage(quoted).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? "", heard?.from ?? "", room?.id ?? "", room?.name ?? "", ctxSig, turnRoom].join("|");
+    return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w, true, turnRoom || null) : userMessage(m, w, mine, quoted, waits)))];
   }
 
   /// Whether a person's message waits for its agent: no turn started on it
@@ -1610,6 +1634,10 @@ export function mount(root) {
       if (!running(t) || !targets.includes(t.agent) || t.startAt > m.at) return false;
       // it answered the turn's card: it waits for nothing
       if (answeredCard(t, m)) return false;
+      if ((t.room ?? null) !== (roomOf(m, state.members)?.id ?? null)) return true;
+      // owner Stop on an outside speaker's door turn does not make an owner's
+      // message an answer to that turn
+      if (t.cause?.channel !== "tasks" && t.asker !== m.principal) return true;
       if (controllerOf(t, state.members) !== m.principal) return true;
       // Chat and work have independent sequence cursors. Compare their
       // times so loading older work cannot change whether a reply waits.
@@ -1640,7 +1668,7 @@ export function mount(root) {
       q.disabled = true;
       return q;
     }
-    q.append(el("span", "quote-who", who(speaker(quoted)).name), quoteText(el("span", "quote-text"), quoted));
+    q.append(el("span", "quote-who", whoMessage(quoted).name), quoteText(el("span", "quote-text"), quoted));
     q.onclick = () => $("messages").querySelector(`[data-seq="${quoted.seq}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
     return q;
   }
@@ -1663,13 +1691,31 @@ export function mount(root) {
     return span;
   }
 
+  // Recent room messages carried beside a room message (`context`), folded
+  // quietly above the bubble so the timeline stays calm until opened.
+  function roomContextNode(context, room) {
+    const d = el("details", "room-context");
+    const s = el("summary");
+    const where = room?.name ? ` in ${room.name}` : "";
+    s.append(icon("chevron", "chev"), el("span", null, `${plural(context.length, "earlier message")}${where}`));
+    const list = el("div", "room-context-list");
+    for (const c of context) {
+      const row = el("div", "room-context-item");
+      row.append(el("span", "room-context-who", c.name), el("span", "room-context-text", c.text));
+      list.append(row);
+    }
+    d.append(s, list);
+    return d;
+  }
+
   function userMessage(m, w, mine, quoted, waits) {
     const wrap = el("div", `msg user ${mine ? "mine" : "other"}${m.sending ? " sending" : ""}`);
     wrap.dataset.seq = m.seq;
     // this page's post: the same id while it sends and once it is sent
     const post = m.sending ? m.id : m.post;
     if (post) wrap.dataset.post = post;
-    if (!mine) wrap.append(byline(m.principal, w));
+    if (!mine) wrap.append(byline(m.principal, w, m.heard ? m.via : null));
+    if (m.context?.length) wrap.append(roomContextNode(m.context, m.room));
     if (m.replyTo) wrap.append(quoteNode(m, quoted));
     if (m.attachments.length) wrap.append(attachmentsNode(m.attachments));
     if (m.command) {
@@ -1694,7 +1740,7 @@ export function mount(root) {
       actions.append(label);
     }
     // said elsewhere (through its agent's door), and relayed here
-    if (m.via) actions.append(el("span", "via", `via ${m.via}`));
+    if (m.via && !m.heard) actions.append(el("span", "via", `via ${m.via}`));
     // sent once the platform has its record: until then it says so, no time
     actions.append(m.sending ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));
     wrap.append(actions);
@@ -1714,14 +1760,14 @@ export function mount(root) {
     return wrap;
   }
 
-  function agentMessage(m, w, quotable = true) {
+  function agentMessage(m, w, quotable = true, roomTag = null) {
     const wrap = el("div", "msg agent");
     if (m.seq !== null) wrap.dataset.seq = m.seq;
     if (m.turn) wrap.dataset.turn = m.turn;
     const body = el("div", "md");
     body.append(renderMarkdown(m.text));
     openBeside(body);
-    wrap.append(byline(m.principal, w), body);
+    wrap.append(byline(m.principal, w, roomTag), body);
     if (m.attachments.length) wrap.append(attachmentsNode(m.attachments));
     const actions = el("div", "actions");
     const copy = el("button", "icon-button copy");
@@ -1959,7 +2005,8 @@ export function mount(root) {
     const theirs = mayAnswer(t, p);
     const asks = who(p.asks);
     const by = closed?.by ? who(closed.by).name : "";
-    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, handed, !!rosterOrigin, gone, theirs, asks.name, who(t.agent).name]);
+    const roomTag = t.room ? roomLabel(t.room) : "";
+    const sig = JSON.stringify([closed?.outcome, closed?.option, by, sent, handed, !!rosterOrigin, gone, theirs, asks.name, who(t.agent).name, roomTag]);
     return [
       key,
       cached(key, sig, () => {
@@ -1969,6 +2016,7 @@ export function mount(root) {
         const head = el("div", "prompt-head");
         head.replaceChildren(icon("shield"));
         head.append(closed || gone ? `${who(t.agent).name} asked` : `${who(t.agent).name} asks`);
+        if (roomTag) head.append(el("span", "room-tag", roomTag));
         card.append(head, inline(el("div", "prompt-text"), typeof p.text === "string" ? p.text : ""));
         const label = (id) => p.options.find((o) => o.id === id)?.label ?? id;
         const answered = typeof closed?.text === "string" && closed.text ? closed.text : label(closed?.option);
@@ -2148,12 +2196,14 @@ export function mount(root) {
   function draftNode(turnKey, d) {
     const key = `d:${turnKey}`;
     const w = who(d.principal);
+    const roomTag = roomLabel(state.turns.get(turnKey)?.room);
+    const sig = `${w.name}|${roomTag}`;
     let c = nodes.get(key);
-    if (!c || c.sig !== w.name) {
+    if (!c || c.sig !== sig) {
       const node = el("div", "msg agent streaming");
       node.dataset.turn = d.turn;
-      node.append(byline(d.principal, w), el("div", "md"));
-      c = { sig: w.name, node, text: null };
+      node.append(byline(d.principal, w, roomTag || null), el("div", "md"));
+      c = { sig, node, text: null };
       nodes.set(key, c);
     }
     if (c.text !== d.text) {
@@ -2168,7 +2218,15 @@ export function mount(root) {
 
   function workingNode(t) {
     const agent = t ? t.agent : state.pending?.target;
-    const forWhom = t?.asker && t.asker !== state.me?.principal ? ` for ${who(t.asker).name}` : "";
+    const cause = causeMessage(t);
+    const heard = cause ? heardSpeaker(cause, state.members) : null;
+    const room = t?.room ? roomLabel(t.room) : "";
+    const inRoom = room ? ` in ${room}` : "";
+    const forWhom = heard
+      ? ` for ${heard.name}${inRoom}`
+      : t?.asker && t.asker !== state.me?.principal
+        ? (!t.room || state.members.some((m) => m.principal === t.asker) ? ` for ${who(t.asker).name}${inRoom}` : inRoom)
+        : inRoom;
     const name = agent ? who(agent).name : "The agent";
     const phase = inRoster(agent)?.phase;
     const present = state.here.some((p) => p.principal === agent);
@@ -2198,7 +2256,14 @@ export function mount(root) {
   // A turn waiting on its asker's words, in place of its working line: whose.
   function askedNode(t) {
     const asks = t.asked.asks;
-    const said = asks === state.me?.principal ? "Waiting for your answer" : `Waiting for ${who(asks).name}'s answer`;
+    const cause = causeMessage(t);
+    const heard = cause ? heardSpeaker(cause, state.members) : null;
+    const room = t.room ? roomLabel(t.room) : "";
+    const said = asks === state.me?.principal
+      ? "Waiting for your answer"
+      : heard && asks === cause.principal
+        ? `Waiting for ${heard.name}'s answer${room ? ` in ${room}` : ""}`
+        : `Waiting for ${who(asks).name}'s answer`;
     const key = `q:${t.key}`;
     return [
       key,
@@ -2492,7 +2557,7 @@ export function mount(root) {
   function renderQuoting() {
     const q = state.replyTo;
     $("quoting").hidden = !q;
-    $("quoting-who").textContent = q ? `Replying to ${who(q.principal).name}` : "";
+    $("quoting-who").textContent = q ? `Replying to ${whoMessage(q.m).name}` : "";
     $("quoting-text").replaceChildren();
     if (q) quoteText($("quoting-text"), q.m);
     // a quote chosen is kept by no storage: the shell is told

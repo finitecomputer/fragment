@@ -164,10 +164,28 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .setup-error button:disabled { opacity: .6; cursor: wait; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg.user.other { align-items: flex-start; }
-.msg .who { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.msg .who { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .msg.user .who { margin: 0 0 4px 4px; }
 .msg.agent > .who { gap: 9px; margin: 0 0 10px 2px; font-size: 13px; }
 .msg.agent > .who .agent-avatar { width: 20px; height: 20px; }
+/* a room on a hosted door (Slack · #deploys, #deploys): quiet beside the speaker */
+.room-tag { display: inline-block; max-width: 220px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-subtle); color: var(--text-tertiary); font-size: 11px; font-weight: 500; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-head .room-tag { margin-left: auto; }
+/* recent room messages carried beside a room message (`context`), folded above the bubble */
+details.room-context { max-width: min(520px, 82%); margin: 0 0 6px; font-size: 12.5px; line-height: 1.45; color: var(--text-secondary); }
+details.room-context summary { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 6px 2px 2px; border-radius: 6px; color: var(--text-tertiary); cursor: pointer; list-style: none; }
+details.room-context summary::-webkit-details-marker { display: none; }
+details.room-context summary:hover, details.room-context summary:focus-visible { color: var(--text-secondary); }
+details.room-context summary .chev { width: 13px; height: 13px; flex: none; transition: transform .14s; }
+details.room-context[open] summary .chev { transform: rotate(90deg); }
+.room-context-list { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 0 6px; padding: 6px 10px; border-left: 2px solid var(--border-strong); border-radius: 4px 10px 10px 4px; background: var(--surface-subtle); }
+.room-context-item { display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0; overflow-wrap: anywhere; }
+.room-context-who { font-weight: 600; color: var(--text-primary); flex: none; }
+.room-context-text { min-width: 0; color: var(--text-secondary); }
+@media (max-width: 760px) {
+  .room-tag { max-width: 160px; }
+  details.room-context { max-width: 100%; }
+}
 /* faces: a person's picture or initial */
 .face { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: 50%; overflow: hidden; background: var(--surface-muted); color: var(--text-secondary); font-size: 10px; font-weight: 700; line-height: 1; }
 .face img { width: 100%; height: 100%; object-fit: cover; }
