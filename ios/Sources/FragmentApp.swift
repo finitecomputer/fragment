@@ -620,6 +620,9 @@ struct FragmentRoot: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api, newChat: { agent in
                 showingApps = false; toggleSidebar()
+                // a chat still starting (this or Home's) opens first; two at once
+                // would race for the page and could share one readied chat
+                guard page != .startingChat else { return }
                 Task { await newChat(api, with: agent) }
             }) { destination in
                 page = destination; showingApps = false; toggleSidebar()
@@ -719,15 +722,21 @@ struct FragmentRoot: View {
         else { openedApp = fragment }
     }
     /// The sidebar's New chat: a chat with `agent`, open and empty, its
-    /// composer the first thing; not made, Home again with why.
+    /// composer the first thing; not made, Home again with why. One chat is
+    /// started at a time (a New chat while one, or Home's send, is still
+    /// starting is not taken: `SidebarDrawer`'s), and the account it was
+    /// asked in is the one it answers: removed meanwhile, nothing is shown.
     private func newChat(_ api: FragmentAPI, with agent: FragmentSummary) async {
+        let library = library
         library.selectedAgent = agent.name
         page = .startingChat
         do {
             let chat = try await library.startChat(with: agent, api: api)
+            guard library === self.library else { return }
             if page == .startingChat { page = .chat(chat.name) }
             await library.load(api)
         } catch {
+            guard library === self.library else { return }
             library.error = error.localizedDescription
             if page == .startingChat { page = .launcher }
         }

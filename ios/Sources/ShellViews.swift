@@ -199,7 +199,10 @@ struct SidebarView: View {
                                     Image(systemName: "chevron.down").font(Self.mark).foregroundStyle(.secondary)
                                 }
                                 // the new-chat button's glass, and its height
-                                .padding(.leading, 8).padding(.trailing, 14).frame(height: Self.control)
+                                .padding(.leading, 8).padding(.trailing, 14)
+                                // at least a control's height: a name that needs more lines (the
+                                // largest text sizes) wraps and the pill grows, never cut short
+                                .frame(minHeight: Self.control)
                                 .glassEffect(.regular.interactive(), in: .capsule)
                                 // its shape as the menu opens from it and closes back into
                                 // it: the rectangle around it showed as the menu went

@@ -226,6 +226,34 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(app.buttons["homeSettings"].exists, "over the page it was opened on")
     }
 
+    /// At the largest text size, as above: an agent's name wraps and its
+    /// pill grows, so two agents named alike are told apart. A pill held to
+    /// one control's height cut a name to its first word.
+    func testAtTheLargestTextSizeAnAgentsNameWrapsBesideItsNewChat() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key,
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        XCTAssertTrue(app.buttons["sidebar"].waitForExistence(timeout: 30), "Home, signed in")
+        app.buttons["sidebar"].tap()
+        let pills = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "agentMenu-"))
+        XCTAssertTrue(pills.firstMatch.waitForExistence(timeout: 30), "an agent's pill")
+        screenshot(app, "Sidebar, the largest text")
+        // the longest name: one like "Turbo Quasar 486" takes two lines or more at this size
+        guard let pill = pills.allElementsBoundByIndex.max(by: { $0.label.count < $1.label.count }), pill.label.count >= 12 else {
+            throw XCTSkip("no agent named long enough to wrap")
+        }
+        let newChat = app.buttons["agentNewChat-" + pill.identifier.dropFirst("agentMenu-".count)]
+        XCTAssertGreaterThan(pill.frame.height, newChat.frame.height * 1.5, "its name wraps, the pill grows")
+        XCTAssertTrue(newChat.isHittable, "its New chat beside it")
+    }
+
     /// What the person is told (FIN-458), against a real platform: a dev
     /// stack (`cargo xtask dev`, its port forwarded to this Mac) whose
     /// person's computer has an update ready and saves that fail, signed as
