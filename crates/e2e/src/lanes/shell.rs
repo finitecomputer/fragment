@@ -198,10 +198,12 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let row = |p: &str| rows.iter().find(|x| x["provider"] == p).cloned().unwrap_or(Value::Null);
     let keys = crate::SWAP_KEYS.iter().all(|(name, _, env)| {
         let k = row(name);
-        k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
+        // offered, with nothing to set; what a call costs is the price
+        // book's, by the vendor's own number (FIN-616), not a row's
+        k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env])
     });
     s.ok(
-        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, own keys not set (one signed in to, with its models)",
+        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered, own keys not set (one signed in to, with its models)",
         status(&r) == Some(json!("not_connected"))
             && row(crate::SWAP_CONNECTION)["kind"] == "connection"
             && keys
