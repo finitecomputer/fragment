@@ -2257,11 +2257,18 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     // (a deploy's old side, answering again), reload nothing
     b.eval(page, "(window.__release = 3, true)")?;
     b.set_cookie(&platform, RELEASE_COOKIE, &next)?;
-    // the launcher's search: an answer the shell reads, naming the old release
+    // the launcher's search: an answer the shell reads, naming the old
+    // release. It asks for the other chat by its title, so that chat's row
+    // drawn is the answer read (a new chat is the arrow's, with no row of
+    // its own: launcher.js `renderFound`).
+    let other_title = shell(api, session, "GET", "/api/fragments", None, &[])?.body["fragments"]
+        .as_array()
+        .and_then(|l| l.iter().find(|f| f["name"] == other).and_then(|f| f["title"].as_str().map(str::to_string)))
+        .unwrap_or_default();
     press(b, "#sidebar-new-chat")?;
     b.until(page, "document.getElementById('search-dialog').open", wait);
-    b.eval(page, &fill("#workspace-search", "thought"))?;
-    let read = b.until(page, "document.getElementById('search-results').children.length > 0 || document.getElementById('search-status').textContent !== ''", wait);
+    b.eval(page, &fill("#workspace-search", &other_title))?;
+    let read = !other_title.is_empty() && b.until(page, &format!("!!document.querySelector({})", js(&format!("#search-results [data-fragment=\"{other}\"]"))), wait);
     b.press(page, "Escape", false)?;
     b.until(page, "!document.getElementById('search-dialog').open", wait);
     press(b, &row(other))?;
