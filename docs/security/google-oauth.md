@@ -118,8 +118,13 @@ only the sign-in scopes (`openid`, `email`, `profile`) connects nothing
   (`keys.rs:409`, `pipes_import`). The `Tokens` type has no `Debug`, so
   it cannot be printed by accident (`connection_signin.rs:183`).
 - Every refusal redirects (303) to `?refused=<word>`, a page with no
-  code in its URL, so an unspent code leaves the address bar and
-  history. The `state` cookie is cleared.
+  code in its URL, so the address bar no longer shows the code. The 303
+  does not establish that the code leaves the browser's history (the
+  callback URL may stay in it); the code is one use and bound to the
+  verifier, so it is useless once spent. The `state` cookie is cleared,
+  except on `NotBegunHere` (this browser did not begin that attempt),
+  which deliberately keeps it so another tab's attempt in progress
+  survives (`connections.rs:617-641`, `connections.rs:733`).
 
 ### Redirect URI exactness
 
@@ -164,8 +169,11 @@ What Settings shows is read from the grant, never from what was asked
   only still holds the write scopes, and Settings says Read and write.
   Going back to Read only is a disconnect, then a connect
   (docs/pipes-browser-binding.md, "Access").
-- An unticked scope is shown as missing, and a reconnect asks only for
-  what is missing.
+- An unticked scope is shown as missing. "Reconnect to add" asks Google
+  again for the whole scope set of the access the person picked (Read
+  only or Read and write), not only the missing scopes
+  (`cell/shell/connections.js:184-190`; `authorize_url`,
+  `crates/core/src/connection_signin.rs:115-123`).
 
 ### Where tokens live, and who can read them
 
@@ -178,17 +186,23 @@ What Settings shows is read from the grant, never from what was asked
 - **Who can get a token from Pipes:** anything holding the WorkOS API
   key. Only the cell reads that key, from Cloudflare Secrets Store
   (`keys.rs`, `store::WORKOS_KEY`; docs/secrets.md). The cell asks Pipes
-  for a token in exactly two places:
+  for a token in exactly three places:
   - each swapped agent request (`cell/src/computer.rs:4126`,
     `connection_token`), only for an agent of the account's owner, not
     narrowed away from Google, and only while the connection is
     connected and not fenced by a disconnect;
   - a disconnect, to revoke the grant (`connections.rs:446`,
-    `revoke_grant`).
-- The token is never returned to the browser, the computer or the agent.
-  It is put in the outgoing request's `Authorization` header by the cell
-  and nowhere else. The swap's log line names the provider and host,
-  never a token or placeholder tag (`computer.rs`, `egress_swap`).
+    `revoke_grant`);
+  - an account wipe's `connections` step, to revoke each grant
+    (`connections.rs`, `wipe_revoke`; PR #1480).
+- The token is never returned to the browser, the computer's container
+  or the agent. Inside the cell it crosses one internal call: the
+  person's Computer Durable Object asks Pipes for it and hands the raw
+  token to the Worker running the swap (`computer.rs:4105-4110`), which
+  puts it in the outgoing request's `Authorization` header. A disconnect
+  or wipe sends it to Google's revoke endpoint in a POST form body. The
+  swap's log line names the provider and host, never a token or
+  placeholder tag (`computer.rs:4990-4998`, `egress_swap`).
 - People with admin access to the WorkOS dashboard are inside the same
   trust boundary as the API key.
 
@@ -232,8 +246,13 @@ How an agent's request gets a token:
    from a parsed URL, so it cannot change the authority. It always goes
    over HTTPS, even when the agent sent HTTP.
 5. Redirects are not followed (`computer.rs:4922`,
-   `RequestRedirect::Manual`). A redirect goes back to the agent with the
-   placeholder, never the token.
+   `RequestRedirect::Manual`): a redirect's answer goes back to the agent
+   as it is, and the token is not sent to its `Location`. Google's
+   answers, redirect headers included, pass to the agent without
+   redaction: the cell does not scan them for the token or put the
+   placeholder back (only a Vault secret's value is hidden in answers,
+   `computer.rs:4996`, `hidden`). Google does not echo access tokens in
+   these APIs' answers, but nothing in the cell enforces it (Finding 8).
 6. Hop-by-hop headers, `Host` and the platform's own `x-fragment-*`
    headers are dropped before sending (`computer.rs:4788`).
 
@@ -327,25 +346,58 @@ user, which only that same person signs in as. But it broke the promise
 that deleting an account deletes the Google data and grant, which
 Google's user data policy requires.
 
-The fix (PR #1480; until it merges, `master` still behaves as above):
-the wipe's first step, `computer`, now ends every connection of
-the catalog before anything else, while the registry still knows the
-person's WorkOS user (`connections::wipe`, which calls the same
-`disconnect` as above for each account Pipes lists, connected or not;
-`fragment_core::connection_accounts::wiped`). A failure stops the step,
-and the next wipe call tries again. Each part may be repeated.
+The fix (PR #1480; until it merges, `master` still behaves as above) is
+a wipe step of its own, `connections`, after the computer is destroyed
+and before the registry forgets the person's WorkOS user
+(`connections::wipe`, `crates/core/src/wipe_connections.rs`; docs/api.md
+lists it):
+
+1. **Fence.** In one registry turn the step checks the wipe still stands
+   at this step and fences every connection of the catalog for the
+   person's WorkOS user: a callback still exchanging a code is cancelled,
+   and while one is importing into Pipes the step fails and the next call
+   tries again (`Finishing::fence_all`). The wipe's begin already ended
+   every session, so no new connect can start.
+2. **List, then confirm.** Pipes lists the person's accounts, and the
+   registry is asked again: only a list made while the wipe stood at
+   this step is acted on, so a call that stalled past the end of the
+   wipe never touches the accounts of the new person a later sign-in
+   makes under the same WorkOS user. Each account is reached by its Pipes
+   id, never by an account-less call.
+3. **Revoke, then delete.** Each grant is revoked at Google with a token
+   Pipes vends for that account. Only once Google confirms, or the grant
+   is known gone (Google's `invalid_token`, or Pipes cannot vend a token
+   because Google refused its refresh), is the account deleted at Pipes.
+4. **When revoking fails.** The account is kept, so its token is still
+   there to revoke with; the step reports it in the wipe's `note` and the
+   log, and is not done, so the wipe cannot finish. After 5 failed calls
+   spread over at least a day the account is given up: deleted at Pipes,
+   and the `note` and the log say its grant may be left at Google. No
+   Finite or WorkOS party holds a token for it after that; the person can
+   remove Finite in their Google Account's third-party access.
+5. **Time.** Each vendor call starts within the wipe call's 20-second
+   budget; a call cut short leaves the rest to the next. A vendor call
+   itself can take up to 30 seconds.
+6. **Wipes already under way.** A wipe begun before this release and not
+   finished reaches the new step before its last one, so it ends the
+   person's connections too.
+
+Not covered: an import whose outcome is unknown because the Registry
+restarted during it can still land at Pipes after the step listed; the
+step does not wait that out (FIN-659).
 
 ## Findings
 
 | # | Ticket | Severity | Finding | Where | Status |
 | --- | --- | --- | --- | --- | --- |
-| 1 | FIN-588 | High | An account wipe left the person's Google grant live at Google and its tokens at WorkOS, and the next sign-in found them connected again | `cell/src/wipe.rs`, docs/api.md | Fixed, PR #1480 |
+| 1 | FIN-588 | High | An account wipe left the person's Google grant live at Google and its tokens at WorkOS, and the next sign-in found them connected again | `cell/src/wipe.rs`, docs/api.md | Fixed in PR #1480 (not merged yet): revoked before deleted, a failed revoke holds the wipe, given up only after 5 calls over a day (said in the report) |
 | 2 | FIN-588 | Low | A connect cancelled after Google issued tokens (a disconnect, sign-out or wipe during the code exchange) drops the tokens without revoking them. No one holds the refresh token, but Google keeps listing Finite under the account's third-party access | `registry/connection_signin.rs:132-182` | Filed, FIN-645 |
 | 3 | FIN-588 | Medium | No written process for deleting Google-derived data an agent saved (chats, files, fragments) when someone asks | process | Filed, FIN-646 |
 | 4 | FIN-585 | Low | `FRAGMENT_SWAP_UPSTREAM` sends every swapped request, tokens included, to another URL; the cell does not refuse it outside a local fleet | `cell/src/config.rs:460`, `computer.rs:4912` | Filed, FIN-647 (defence in depth) |
 | 5 | FIN-585 | Info | Reachability of link-local and metadata addresses from a computer was not tested | Cloudflare Containers | Filed, FIN-648 (needs the real platform) |
 | 6 | FIN-580 | Info | The Google client in Cloud Console should list only the cell's callback, without the WorkOS redirect URI or `workos.com` domain | Google Cloud Console | Manual, on FIN-580 |
 | 7 | FIN-580 | Info | A reconnect as Read only keeps earlier write scopes (`include_granted_scopes`); Settings shows the true access, and going back is disconnect then connect | docs/pipes-browser-binding.md | By design, documented |
+| 8 | FIN-585 | Low | Google's answers to swapped requests, redirect headers included, reach the agent without the token being redacted; the cell relies on Google never echoing it | `computer.rs:4990-4998` | Filed, FIN-657 |
 
 Checked and found sound: `state` (random, one use, hashed at rest, bound
 to the browser, the session and the provider, ten minutes); PKCE S256
@@ -354,4 +406,5 @@ person and enforced by Google; code exchange server-side with no
 redirects, retries or logged answers; tokens never in Finite storage,
 the browser, the computer or logs; swap only to exact Google hosts, over
 HTTPS, without following redirects; disconnect fences, revokes at Google
-and deletes at WorkOS.
+and deletes at WorkOS (a disconnect deletes the account even when the
+revoke fails, and tells the person to remove access at Google).

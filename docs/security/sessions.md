@@ -17,8 +17,10 @@ docs/security/google-oauth.md.
   up live, so a revoked or expired session stops working at once.
 - A session lasts 30 days from sign-in. There is no idle timeout and no
   sliding renewal.
-- Sign-out revokes the session on the server, every fragment session
-  made from it, and the WorkOS session.
+- Sign-out revokes the session on the server and every fragment session
+  made from it, and sends the browser to WorkOS's logout when WorkOS gave
+  the session a `sid`. It does not end a computer-origin session (Finding
+  1).
 
 ## Kinds of session
 
@@ -28,7 +30,8 @@ docs/security/google-oauth.md.
 | A fragment's origin, top level | `__Host-fragment_site` | until its platform session expires | registry `sessions`, `parent` = the platform session |
 | A fragment's origin, in a frame of the platform's page | `__Host-fragment_frame`, `SameSite=None; Partitioned` | until its platform session expires | registry `sessions`, with its embedder |
 | A computer's origin (its desktop and ports) | `__Host-fragment_computer`, or `__Host-fragment_computer_frame` in a frame | 12 hours (`cell/src/computer.rs:130`) | that computer's Durable Object, by SHA-256 |
-| A round trip in progress (sign-in, switch, own-key sign-in, connection) | `__Host-fragment_login`, `_switch`, `_own_key`, `_connection` | 10 minutes, one use | registry, by SHA-256 |
+| A round trip in progress (sign-in, switch, connection) | `__Host-fragment_login`, `_switch`, `_connection` | 10 minutes, one use | registry, by SHA-256 |
+| An own-key sign-in in progress | `__Host-fragment_own_key` | 10 minutes, one use | the person's Vault (`own_signins`, by the nonce's hash, its verifier sealed; `cell/src/vault.rs:645-679`) |
 
 CLI and app keys are not cookies: each request is signed with the
 person's key (NIP-98, `crates/nip98`), within a short time window
@@ -92,9 +95,13 @@ ends any fragment session made from it.
 ## Lifetime and timeout (ASVS 3.3)
 
 - **Absolute:** 30 days from sign-in for a platform session and every
-  fragment session made from it (a fragment session expires with its
-  parent, `registry/signin.rs`, `redeem`). The cookie's `Max-Age`
-  matches.
+  fragment session made from it: on the server a fragment session
+  expires with its parent (`registry/signin.rs:829-840`, `redeem`). The
+  platform cookie's `Max-Age` matches. A fragment cookie does not: it is
+  given a fresh 30-day `Max-Age` when it is redeemed (`auth.rs:1030-1062`),
+  so it can outlive its server-side session, which still ends with its
+  parent. The browser then sends a token the registry refuses, which is
+  no access (Finding 6).
 - **Idle:** none. A session used every day still ends at 30 days; one
   never used also lasts 30 days.
 - **Renewal:** none. When it expires the person signs in again through
@@ -106,11 +113,11 @@ ends any fragment session made from it.
 
 | Event | What ends | Code |
 | --- | --- | --- |
-| Sign out (`POST /auth/logout`) | the platform session and every fragment session made from it (revoked on the server), the cookie (cleared), and the WorkOS session (the browser goes to WorkOS's logout with its `sid`) | `auth.rs:418`, `registry/signin.rs:692` |
-| Sign out on a fragment (`POST __signout`) | that fragment's sessions in this browser, and the person's consent to it | `registry/signin.rs:684` |
+| Sign out (`POST /auth/logout`) | the platform session and every fragment session made from it (revoked on the server) and the cookie (cleared). The browser is sent to WorkOS's logout only when the session has a WorkOS `sid`; Finite does not confirm WorkOS ended its session. Not ended: a computer-origin session (Finding 1) | `auth.rs:418-430`, `registry/signin.rs:692` |
+| Sign out on a fragment (`POST __signout`) | that fragment's sessions in this browser (revoked on the server), and the person's consent to it. Its cookies are cleared even when the registry fails to revoke them; that failure is logged, and those sessions then last until they expire or the platform session ends | `auth.rs:1085-1098`, `registry/signin.rs:684` |
 | Use another account (`POST /auth/switch`) | this browser's platform session | `auth.rs:434` |
 | A key revoked | every fragment session made from that key | `registry/signin.rs` (`live_session`'s key check) |
-| Account deleted (operator wipe) | every session and key of the person and their agents, at the wipe's first call; sign-in refused until the wipe is done | `registry/wipe.rs:248`, `end_access` |
+| Account deleted (operator wipe) | every registry session and key of the person and their agents, at the wipe's begin; sign-in refused until the wipe is done. A computer-origin session is kept in the computer, not the registry: it works until the wipe's `computer` step marks the computer wiped (normally the same call) or it expires | `registry/wipe.rs:248`, `end_access`; `computer.rs:4232-4246` |
 | 30 days pass | the session and its fragment sessions | `live_session` |
 
 ## Findings
@@ -122,9 +129,10 @@ ends any fragment session made from it.
 | 3 | Low | No idle timeout: a session stays valid for 30 days whether used or not. | 3.3.2 (L2) | Filed, FIN-644 (a product decision) |
 | 4 | Low | A change at WorkOS (password reset, user blocked or deleted there) does not end Finite sessions already issued; they last to their 30 days. | 3.3.3 | Filed, FIN-643 |
 | 5 | Info | `POST /auth/logout` without an `Origin` header is accepted. Browsers always send one, and the worst case is a forced sign-out. | — | By design (`same_origin`) |
+| 6 | Low | A fragment cookie's `Max-Age` is a fresh 30 days at redemption, longer than its server-side session, which ends with its parent. The stale cookie grants nothing (the registry refuses it), but the browser keeps it. | 3.3.1 | Filed, FIN-658 |
 
 Checked and found sound: token entropy (256 bits) and hashing at rest;
 `__Host-`, `HttpOnly`, `Secure`, `SameSite`; a new token at each sign-in;
 browser-bound, one-use sign-in state; live lookup on every request;
-server-side revocation at sign-out, including fragment sessions and the
-WorkOS session; deletion at wipe.
+server-side revocation at sign-out, including fragment sessions; deletion
+of registry sessions at wipe.
