@@ -66,9 +66,9 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   Check fails on a change an older client would feel; retire a fact in
   `crates/proto/wire.retired` only once its clients are gone.
 - `cargo xtask skills-catalog`: write the index of Hermes'
-  optional skills (`templates/skills/catalog/hermes.json`) from the pinned
+  optional skills (`cell/shell/optional-skills-hermes.json`) from the pinned
   Hermes image, through Docker. Run it when the pin moves; a host test
-  fails while the catalog names another version.
+  fails while the catalog names another image (its tag or its digest).
 - `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: dev stack
   at :8790, fragments at `http://<name>.fragment.localhost:8790/`.
   Default vendors are fakes. `--real-agent` calls real text models using

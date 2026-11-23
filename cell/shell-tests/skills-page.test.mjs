@@ -4,8 +4,9 @@
 // a SKILL.md's description; and the page itself: loading, the On tab and
 // the Library, a switch written as one file, put back when the write
 // fails, a labelled skill asking first, a switch the catalog no longer
-// names, a skills fragment without the catalog, and the shell making one
-// skills fragment however often it is asked meanwhile.
+// names, the catalog read from the release (one that fails, or is no
+// catalog, is a failed read), and the shell making one skills fragment
+// however often it is asked meanwhile.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
@@ -16,7 +17,6 @@ import { createSettings } from "../shell/settings.js";
 test("a listing's managed skills, and the optional skills it switches on", () => {
   const { managed, on } = readListing([
     { path: "fragment.json" },
-    { path: "catalog/hermes.json" },
     { path: "skills/software-development/apps-finite/SKILL.md" },
     { path: "skills/software-development/apps-finite/references/x.md" },
     { path: "skills/music-generation-finite/SKILL.md" },
@@ -83,6 +83,7 @@ function page({ on = [], catalog = CATALOG } = {}) {
     seg: (s) => s,
     skillsFragment: async () => "skills--z8w6",
     text: async () => "---\nname: apps-finite\ndescription: Publish and share apps.\n---\n",
+    releaseJson: (file) => new Promise((ok, fail) => calls.push({ method: "GET", path: `/__shell/${file}`, ok, fail })),
     openApp: (name) => opened.push(["app", name]),
     openFiles: (name, folder) => opened.push(["files", name, folder]),
   };
@@ -94,7 +95,7 @@ function page({ on = [], catalog = CATALOG } = {}) {
       c.done = true;
       if (c.path.endsWith("/files")) c.ok({ files: [{ path: "skills/software-development/apps-finite/SKILL.md" }, ...on.map((id) => ({ path: markerPath(id) }))] });
       else if (catalog) c.ok(catalog);
-      else c.fail(Object.assign(new Error("not found"), { status: 404 }));
+      else c.fail(Object.assign(new Error("Not Found"), { status: 404 }));
     }
   };
   const item = (id) => find("skills-item").find((n) => n.dataset.skill === id);
@@ -108,7 +109,7 @@ test("the page: loading, then the On tab (what is on, what is included) and the 
   t.p.open();
   await settle();
   assert.equal(t.find("skills-loading")[0]?.textContent, "Loading skills…");
-  assert.deepEqual(t.calls.map((c) => c.path), ["/api/f/skills--z8w6/files", "/api/f/skills--z8w6/file?path=catalog%2Fhermes.json"]);
+  assert.deepEqual(t.calls.map((c) => c.path), ["/api/f/skills--z8w6/files", "/__shell/optional-skills-hermes.json"]);
   t.answerReads();
   await settle();
   await settle();
@@ -241,26 +242,29 @@ test("a switch whose id the catalog no longer names stays in On, by its id, to b
   assert.equal(t.find("skills-tab")[0].textContent, "On · 1");
 });
 
-test("a skills fragment without the catalog (no longer on the template) still shows what is on, and its files", async () => {
-  const t = page({ catalog: null });
-  t.p.open();
-  await settle();
-  t.answerReads();
-  await settle();
-  await settle();
-  assert.deepEqual(t.find("skills-tab").map((n) => n.textContent), ["On · 1", "Library · 0"]);
-  assert.deepEqual(t.find("skills-desc").map((n) => n.textContent), ["Publish and share apps."]);
-  t.find("skills-files")[0].onclick();
-  assert.deepEqual(t.opened, [["app", "skills--z8w6"]]);
-  t.find("skills-tab")[1].onclick();
-  assert.match(t.find("skills-empty")[0].children[0].textContent, /The library isn't in this skills fragment/);
-  // one that answers, but no catalog, is a failed read: Try again
-  const bad = page({ catalog: { skills: {} } });
-  bad.p.open();
-  await settle();
-  bad.answerReads();
-  await settle();
-  assert.equal(bad.find("skills-empty")[0].children[0].textContent, "Couldn't load your skills.");
+test("the library is the release's: a catalog that fails to load, or is no catalog, is a failed read, tried again", async () => {
+  for (const catalog of [null, { skills: {} }]) {
+    const t = page({ catalog });
+    t.p.open();
+    await settle();
+    t.answerReads();
+    await settle();
+    await settle();
+    const failed = t.find("skills-empty")[0];
+    assert.equal(failed?.children[0].textContent, "Couldn't load your skills.", JSON.stringify(catalog));
+    assert.equal(t.find("skills-tab")[0].hidden, true, "no tabs on a failed read");
+    // Try again reads both again; the release's catalog answering, the page is whole
+    walk(failed).find((n) => n.tag === "button").onclick();
+    await settle();
+    assert.deepEqual(t.calls.filter((c) => !c.done).map((c) => c.path), ["/api/f/skills--z8w6/files", "/__shell/optional-skills-hermes.json"]);
+    for (const c of t.calls.filter((c) => !c.done)) {
+      c.done = true;
+      c.ok(c.path.endsWith("/files") ? { files: [] } : CATALOG);
+    }
+    await settle();
+    await settle();
+    assert.deepEqual(t.find("skills-tab").map((n) => n.textContent), ["On · 0", "Library · 3"]);
+  }
 });
 
 test("asked twice while it has none, the shell makes one skills fragment, and names the one the computers pick", async () => {
