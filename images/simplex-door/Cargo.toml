@@ -23,7 +23,7 @@ hyper-util.workspace = true
 libc = "0.2"
 # SQLite's online backup, WAL and data_version (save.rs), as Hermes' boot
 # copies its databases: built in (bundled), at the lock's pin
-rusqlite = { version = "0.40", default-features = false, features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "backup"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
