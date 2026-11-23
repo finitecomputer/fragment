@@ -5,8 +5,9 @@
 //! never sits between it and Anthropic: no proxy, no base URL, no key, and
 //! no `ANTHROPIC_*` or `CLAUDE_CODE_*` setting of anyone's reaches it.
 //!
-//! - **A session per agent and chat.** Its id is derived from the two and
-//!   the chat's `/new` count (`session_id`), so every life names the same
+//! - **A session per agent and chat**, and per room of a chat
+//!   (`TurnStart::conversation`). Its id is derived from the two and the
+//!   chat's `/new` count (`session_id`), so every life names the same
 //!   one. A process is started for its first turn, resuming the session
 //!   when its transcript is on disk (under `CLAUDE_CONFIG_DIR`, in `/data`,
 //!   so a save carries it), and stops once idle. A process that dies leaves
@@ -230,7 +231,8 @@ async fn run(cfg: ClaudeConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
         turns.retain(|_, key| sessions.contains_key(key));
         let (key, msg) = match c {
             Command::Start(ts) => {
-                let key = (ts.agent.fragment.clone(), ts.fragment.clone());
+                // a session per conversation: its chat, or a room of it
+                let key = (ts.agent.fragment.clone(), ts.conversation());
                 if !sessions.contains_key(&key) && sessions.len() >= SESSIONS_MAX {
                     let turn = ts.turn.clone();
                     let _ = io.events.send(Event::End { turn, outcome: Outcome::Error("too many Claude conversations are open on this computer; try again in a few minutes".into()) }).await;
@@ -1690,6 +1692,8 @@ mod tests {
             continues: None,
             age: None,
             disk: None,
+            room: None,
+            place: None,
         };
         assert_eq!(message(&ts), "[Recent channel messages]\nthe turn before was cut\n\n[New message]\n[Replying to your previous message: \"earlier\"]\n[paul] hi\n[paul sent a file: 'a.png' (image/png). It is on your computer at: /tmp/m/a.png]");
         // A message's lines after its first are indented, so none of them

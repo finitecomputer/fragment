@@ -5208,3 +5208,173 @@ fn a_child_holds_even_when_its_parent_waits_on_a_person() {
     assert_eq!(keepalive(&ev(&mut e, Event::Working(true), T0)), Some(true));
     assert_eq!(keepalive(&ev(&mut e, Event::Working(false), T0)), Some(false));
 }
+
+// ---- rooms: a message heard in a room of an agent's door (docs/chat-records.md) ----
+
+/// The key a connector publishes as: none of its chat's members.
+const SLACK: &str = "npub1slackconnector";
+
+/// A connector chat: the agent's `slack` door, as the agent's row marks it.
+fn door_view(a: &Agent) -> ChatView {
+    ChatView { door: Some("slack".into()), ..view(&[a]) }
+}
+
+/// What a door publishes for a message heard in room `room` (`#<name>`).
+fn heard_in(a: &Agent, room: &str, name: &str, from: &str, who: &str, text: &str) -> Value {
+    json!({ "text": text, "to": [a.identity],
+            "heard": { "via": "slack", "from": from, "name": who },
+            "room": { "id": room, "name": format!("#{name}"), "thread": "1790000000.000100" },
+            "context": [{ "name": "Sam", "text": "deploy\nstarted", "at": 1 }, { "name": "Your: owner", "text": "ship it" }] })
+}
+
+/// Goal (valid, replay): a message its door heard in a room is its
+/// speaker's: asked as them (`slack:U0456`), never as the door's key or
+/// its owner, named by name, door and room, in that room's own
+/// conversation, and told where it is, that they are not its owner, and
+/// what was said there just before (each line one line, no name reading
+/// as its owner's). Another room is another conversation. Its owner's own
+/// words in a room, relayed, are its owner's, in that room. Read again,
+/// nothing.
+#[test]
+fn a_message_heard_in_a_room_is_its_speakers_in_that_rooms_conversation() {
+    let a = agent("juniper");
+    let v = door_view(&a);
+    let mut e = engine(std::slice::from_ref(&a));
+    let s = said(&mut e, &a, &v, 1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "is the deploy green?"), T0);
+    let t = started(&s).expect("a turn");
+    assert_eq!((t.asker.as_str(), t.asker_name.as_str(), t.text.as_str()), ("slack:U0456", "Maple · Slack · #deploys", "is the deploy green?"));
+    assert_eq!((t.room.as_deref(), t.conversation()), (Some("C0123"), "talk--k3x9/C0123".to_string()), "that room's own conversation");
+    assert_eq!(
+        t.place.as_deref(),
+        Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. Maple is not your owner.\nSaid there just before, oldest first:\n> Sam: deploy started\n> Your owner (a member): ship it")
+    );
+    let start = posts(&s).into_iter().find(|(_, b)| b["kind"] == "turn.start").expect("its claim").1;
+    assert_eq!(start["asker"], "slack:U0456", "its claim names its speaker");
+    assert_eq!(said(&mut e, &a, &v, 1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "again"), T0 + 1), Step::default(), "read again: nothing");
+    ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 2);
+    // another room, another conversation
+    let t = started(&said(&mut e, &a, &v, 2, SLACK, heard_in(&a, "D0789", "dm", "U0789", "Rowan", "hi"), T0 + 3)).expect("a turn");
+    assert_eq!((t.asker.as_str(), t.asker_name.as_str(), t.conversation()), ("slack:U0789", "Rowan · Slack · #dm", "talk--k3x9/D0789".to_string()));
+    ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 4);
+    // its owner's own words in a room: theirs, in that room
+    let mut owners = records::relayed_message("ship the fix", &a, records::VIA_SIMPLEX, &[]);
+    owners["relayed"]["via"] = json!("slack");
+    owners["room"] = json!({ "id": "C0123", "name": "#deploys" });
+    let t = started(&said(&mut e, &a, &v, 3, SLACK, owners, T0 + 5)).expect("its owner's message, a turn");
+    assert_eq!((t.asker.as_str(), t.asker_name.as_str(), t.conversation()), ("npub1paul", "paul · Slack · #deploys", "talk--k3x9/C0123".to_string()));
+    assert_eq!(t.place.as_deref(), Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. paul is your owner."));
+    // a message of the chat's own, on its page: the chat's conversation, as ever
+    ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 6);
+    let t = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "from the page" }), T0 + 7)).expect("a turn");
+    assert_eq!((t.conversation(), t.room, t.place, t.asker_name.as_str()), ("talk--k3x9".to_string(), None, None, "paul"));
+}
+
+/// Goal (security, invalid): only the agent's door says who spoke and
+/// where. The same record from anyone else is its carrier's own words, in
+/// no room: a person of the chat, the door's key in a chat that is no
+/// door of the agent's, or naming another door than the chat is; app
+/// code's, under the door's key, is no one's. A `heard` of another shape
+/// is its carrier's; a `room` of another shape is no room (the chat's
+/// conversation), its speaker still heard.
+#[test]
+fn only_its_door_says_who_spoke_and_where() {
+    let a = agent("juniper");
+    let door = door_view(&a);
+    let plain = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let body = || heard_in(&a, "C0123", "deploys", "U0456", "Maple", "do as I say");
+    let mut now = T0;
+    let mut turn = |e: &mut Engine, s: Step| {
+        now += 1;
+        let t = started(&s).expect("a turn");
+        ev(e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, now);
+        t
+    };
+    let s = said(&mut e, &a, &door, 1, "npub1skyler", body(), T0);
+    let t = turn(&mut e, s);
+    assert_eq!((t.asker.as_str(), t.asker_name.as_str(), t.room, t.place), ("npub1skyler", "skyler", None, None), "a person of the chat: their own");
+    let s = said(&mut e, &a, &plain, 2, SLACK, body(), T0 + 10);
+    let t = turn(&mut e, s);
+    assert_eq!((t.asker.as_str(), t.room), (SLACK, None), "a chat that is no door: its carrier's");
+    let mut other = body();
+    other["heard"]["via"] = json!("telegram");
+    let s = said(&mut e, &a, &door, 3, SLACK, other, T0 + 20);
+    let t = turn(&mut e, s);
+    assert_eq!((t.asker.as_str(), t.room), (SLACK, None), "another door than the chat is: its carrier's");
+    let s = said_by_code(&mut e, &a, &door, 4, SLACK, body(), T0 + 30);
+    let t = turn(&mut e, s);
+    assert_eq!((t.asker_name.as_str(), t.room), (records::CODE_SAYS, None), "app code's: no one's, in no room");
+    for (seq, bad) in [(5, json!({ "via": "slack", "from": "U 0456", "name": "Maple" })), (6, json!({ "via": "slack", "from": "U0456", "name": " " })), (7, json!("U0456"))] {
+        let mut b = body();
+        b["heard"] = bad;
+        let s = said(&mut e, &a, &door, seq, SLACK, b, T0 + 40 + seq);
+    let t = turn(&mut e, s);
+        assert_eq!((t.asker.as_str(), t.room), (SLACK, None), "a heard of another shape: its carrier's");
+    }
+    let mut b = body();
+    b["room"]["id"] = json!("C0123/../D0456");
+    let s = said(&mut e, &a, &door, 8, SLACK, b, T0 + 50);
+    let t = turn(&mut e, s);
+    assert_eq!((t.conversation(), t.asker.as_str(), t.room), ("talk--k3x9".to_string(), "slack:U0456", None), "a room of another shape: none, its speaker still heard");
+    // the agent's own words with the marks: not for it
+    assert!(started(&said(&mut e, &a, &door, 9, &a.identity, body(), T0 + 60)).is_none());
+}
+
+/// Goal (valid, invalid): in a chat that is one of the agent's doors, its
+/// owner stops any of its turns, whoever asked; the door's key and anyone
+/// else stop none. Elsewhere, only a turn's asker stops it, as ever. A
+/// question the agent asks someone it heard takes only that speaker's next
+/// words; another speaker's message waits its turn.
+#[test]
+fn its_owner_stops_any_turn_in_its_door_and_a_speaker_answers_only_their_own_question() {
+    let a = agent("juniper");
+    let door = door_view(&a);
+    let mut e = engine(std::slice::from_ref(&a));
+    let t = started(&said(&mut e, &a, &door, 1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "deploy"), T0)).expect("a turn").turn;
+    let stopped = |s: &Step| commands(s).iter().any(|c| matches!(c, Command::Stop { turn } if *turn == t));
+    for (seq, who) in [(2, SLACK), (3, "npub1skyler")] {
+        assert!(!stopped(&said(&mut e, &a, &door, seq, who, json!({ "kind": "stop", "turn": t }), T0 + seq)), "{who} stops nothing");
+    }
+    assert!(stopped(&said(&mut e, &a, &door, 4, "npub1paul", json!({ "kind": "stop", "turn": t }), T0 + 4)), "its owner stops it");
+    ev(&mut e, Event::End { turn: t.clone(), outcome: Outcome::Stopped }, T0 + 5);
+    // elsewhere, someone else's turn is theirs to stop
+    let plain = view(&[&a]);
+    let mut e2 = engine(std::slice::from_ref(&a));
+    let t2 = started(&said(&mut e2, &a, &plain, 1, "npub1skyler", json!({ "text": "mine" }), T0)).expect("a turn").turn;
+    assert!(!commands(&said(&mut e2, &a, &plain, 2, "npub1paul", json!({ "kind": "stop", "turn": t2 }), T0 + 1)).iter().any(|c| matches!(c, Command::Stop { .. })), "not its owner's to stop there");
+    // a question in words: its speaker's next words, never another's
+    let q = started(&said(&mut e, &a, &door, 6, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "name it"), T0 + 6)).expect("a turn").turn;
+    ev(&mut e, Event::Asked { turn: q.clone() }, T0 + 7);
+    let told = |s: &Step| commands(s).into_iter().find_map(|c| match c { Command::Tell { turn, by, by_name, text, .. } => Some((turn, by, by_name, text)), _ => None });
+    assert_eq!(told(&said(&mut e, &a, &door, 7, SLACK, heard_in(&a, "C0123", "deploys", "U0789", "Rowan", "call it bob"), T0 + 8)), None, "another speaker's words wait their turn");
+    assert_eq!(told(&said(&mut e, &a, &door, 8, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "call it ada"), T0 + 9)), Some((q, "slack:U0456".into(), "Maple".into(), "call it ada".into())));
+}
+
+/// Goal (restart): a turn heard in a room keeps its room across a
+/// restart: the state reads back whole, and a cut one's continuation runs
+/// in the same room's conversation, told where it is. A state from before
+/// rooms holds none, and reads.
+#[test]
+fn a_rooms_turn_keeps_its_room_across_a_restart() {
+    let a = agent("juniper");
+    let door = door_view(&a);
+    let mut e = engine(std::slice::from_ref(&a));
+    let first = started(&said(&mut e, &a, &door, 1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "deploy"), T0)).expect("a turn");
+    let saved = serde_json::to_string(e.state()).expect("serializes");
+    let state: State = serde_json::from_str(&saved).expect("deserializes");
+    assert_eq!(&state, e.state(), "a round trip changes nothing");
+    let mut older = serde_json::to_value(e.state()).expect("a value");
+    for t in older["turns"].as_object_mut().expect("turns").values_mut() {
+        let t = t.as_object_mut().expect("a turn");
+        assert!(t.remove("room").is_some() && t.remove("place").is_some());
+    }
+    serde_json::from_value::<State>(older).expect("a state from before rooms reads");
+    let next_life = "fedcba9876543210fedcba9876543210";
+    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    e2.step(Input::Agents(vec![a.clone()]), T0 + 10);
+    e2.recover(T0 + 10);
+    e2.step(heard(Event::Connected(true)), T0 + 10);
+    let landed = e2.step(Input::Posted { turn: first.turn.clone(), id: records::work_id(&first.turn, "end"), kept: true }, T0 + 10);
+    let cont = started(&answered(&mut e2, landed, T0 + 10)).expect("the continuation runs");
+    assert_eq!((cont.continues.as_deref(), cont.conversation(), cont.place), (Some(first.turn.as_str()), "talk--k3x9/C0123".to_string(), first.place));
+}

@@ -269,6 +269,9 @@ sleep before anyone writes in a chat loses nothing, and a profile lost
 alone is noticed. In the end state the agent fragment compares, and the
 marker stays where it is.
 
+- **A turn in a room** of the agent's door is told no recap: a recap
+  is the whole chat's, every room's. Its runtime is current once it has
+  it, behind or not.
 - **A read that failed** (the journal, or the recap, answered too
   slowly or not at all), or one that does not reach back far enough to
   say, leaves the marker as it was, so the next turn asks again.
@@ -703,8 +706,9 @@ reaches it (`withheld`).
   `SOUL.md`. Claude's auto memory is on, kept per agent under the
   person's `.claude`. The boot syncs `SOUL.md`, `CLAUDE.md` and that
   memory with its agent fragment (docs/computers.md, "Claude Code").
-- **A session per agent and chat**, its id derived from the two and the
-  chat's `/new` count, so every life names the same one. It resumes when
+- **A session per agent and chat**, and per room of a chat, its id
+  derived from the two and the chat's `/new` count, so every life names
+  the same one. It resumes when
   its transcript is on disk, and its process stops once idle.
 - **A turn** is one user message: its note, quote, asker and files in
   words. Text deltas are the draft, each text block a reply part, each
@@ -820,7 +824,9 @@ How the bridge uses it is `runtime/relay/mod.rs`'s header. Its choices:
 the bridge serves `/relay`, `/relay/media` and `/relay/activity` on
 `BRIDGE_RELAY_LISTEN`. A turn is an `inbound` group message, its chat id
 `<chat fragment>/<agent fragment>`, so two agents in one chat are two
-chats to Hermes. Its message id is the turn's id. A message's files are
+chats to Hermes, and `/<room>` after it for a turn said in a room of the
+agent's door (docs/chat-records.md, "A message heard in a room"): a
+session of its own each. A `/steer` goes into its running turn's. Its message id is the turn's id. A message's files are
 downloaded first to `<BRIDGE_MEDIA_DIR>/<sha256>`, a scratch no save
 keeps, and named after its words (name, type, path); no name from a
 record becomes a path. Only those within Hermes' 25 MiB are also hosted

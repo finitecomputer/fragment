@@ -79,10 +79,53 @@ async fn a_reply_with_steps_and_drafts() {
     hermes.with(|s| {
         let e = &s.heard[0];
         assert_eq!(e["source"]["profile"], "juniper--k3x9", "routed to the agent's profile");
-        assert_eq!(e["source"]["chat_id"], wire::chat_id(&chat, "juniper--k3x9"));
+        assert_eq!(e["source"]["chat_id"], wire::chat_id(&chat, "juniper--k3x9", None));
         assert_eq!(e["source"]["user_name"], "paul");
         assert_eq!(e["message_id"], turn);
     });
+    bridge.stop().await;
+}
+
+/// Goal (FIN-508, a session per room): what an agent's door heard in two
+/// rooms of its chat reaches Hermes as two chats of their own (each its
+/// own session), each said by its speaker by name, door and room, told
+/// where it is and what was said there just before; its owner's words on
+/// the chat's page stay the chat's own. The same record from a chat that
+/// is no door of the agent's is its carrier's, in no room.
+#[tokio::test]
+async fn each_room_of_a_door_is_a_chat_of_its_own_to_hermes() {
+    let (fake, bridge, hermes, _dir) = setup("relay-rooms", &["juniper"]).await;
+    let door = fake.connector("slack", "juniper", Some("slack"));
+    let plain = fake.connector("plain", "juniper", None);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 3).await;
+    let heard = |room: &str, from: &str, who: &str, text: &str| {
+        json!({ "text": text, "to": ["npub1juniper"], "heard": { "via": "slack", "from": from, "name": who },
+                "room": { "id": room, "name": format!("#{}", room.to_lowercase()) }, "context": [{ "name": "Sam", "text": "deploy started" }] })
+    };
+    let turn = |chat: &str, said: &Value| records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
+    let ended = |w: &World, chat: &str, t: &str| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t);
+    let a = fake.say(&door, "npub1slack", heard("C0123", "U0456", "Maple", "is it green?"));
+    fake.until(WAIT, "the first room's turn", |w| ended(w, &door, &turn(&door, &a))).await;
+    let b = fake.say(&door, "npub1slack", heard("D0789", "U0789", "Rowan", "hello"));
+    fake.until(WAIT, "the second room's turn", |w| ended(w, &door, &turn(&door, &b))).await;
+    let c = fake.say(&door, "npub1paul", json!({ "text": "from the page" }));
+    fake.until(WAIT, "the page's turn", |w| ended(w, &door, &turn(&door, &c))).await;
+    let d = fake.say(&plain, "npub1plain", heard("C0123", "U0456", "Maple", "not through a door"));
+    fake.until(WAIT, "the plain chat's turn", |w| ended(w, &plain, &turn(&plain, &d))).await;
+    hermes.with(|s| {
+        let of = |t: &str| s.heard.iter().find(|e| e["message_id"] == t).cloned().expect("heard");
+        let (a, b, c, d) = (of(&turn(&door, &a)), of(&turn(&door, &b)), of(&turn(&door, &c)), of(&turn(&plain, &d)));
+        assert_eq!(a["source"]["chat_id"], wire::chat_id(&door, "juniper--k3x9", Some("C0123")));
+        assert_eq!(b["source"]["chat_id"], wire::chat_id(&door, "juniper--k3x9", Some("D0789")));
+        assert_eq!(c["source"]["chat_id"], wire::chat_id(&door, "juniper--k3x9", None), "the page's: the chat's own");
+        assert_eq!(d["source"]["chat_id"], wire::chat_id(&plain, "juniper--k3x9", None), "no door: no room");
+        assert_eq!((a["source"]["user_name"].as_str(), a["source"]["user_id"].as_str()), (Some("Maple · Slack · #c0123"), Some("slack:U0456")));
+        assert_eq!(d["source"]["user_id"], "npub1plain", "its carrier's");
+        let context = |e: &Value| e["context"].as_array().into_iter().flatten().filter_map(|i| i["text"].as_str()).collect::<Vec<_>>().join("\n");
+        assert!(context(&a).contains("You are in Slack #c0123") && context(&a).contains("Maple is not your owner.") && context(&a).contains("> Sam: deploy started"), "{}", context(&a));
+        assert!(!context(&c).contains("You are in"), "the page's turn is told no room: {}", context(&c));
+    });
+    fake.with(|w| assert_eq!(replies(w, &door).iter().find(|r| r["turn"] == turn(&door, &a)).map(|r| r["text"].clone()), Some(json!("echo: [Maple · Slack · #c0123] is it green?"))));
     bridge.stop().await;
 }
 
