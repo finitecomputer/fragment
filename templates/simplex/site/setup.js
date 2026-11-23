@@ -1,7 +1,7 @@
-// The SimpleX connector's setup, its own page (setup.html, README.md):
-// Settings frames it in a dialog of the shell's (cell/shell/connector-setup.js)
-// or, where that frame can't sign in (Safari's cookie rule), it opens in a
-// tab of its own. Its owner's alone, and nothing to fill in: opened, it
+// The SimpleX connector's setup, its own page (setup.html, README.md),
+// drawn as Telegram's is (setup-page.js, Telegram's own, linked): framed in
+// Settings' dialog, or a tab of its own. Its owner's alone, and nothing to
+// fill in: opened, it
 // takes the next step itself, once a visit, each as `state` says it is due:
 // 1. the door: the inbox's secret, made by this browser and set toward
 //    door.fragment.internal (`__secrets`: written, never read back), then
@@ -11,13 +11,12 @@
 //    (`link` watches; an invitation older than its watch is looked at
 //    once, `check`);
 // 3. done: whom it linked, with Unlink (then Link, for another).
-// Each step is the same three parts (its tags, one line, its controls), a
-// failure said in its line in a few words, with Try again. It follows
+// A failure is said in its step's line in a few words, with Try again. It follows
 // `state` live (`fragment.live`), so a step's answer draws as it comes.
 // Settings binds it as its agent's door as it makes it; `__door` is read
 // here only to say so when it is not.
 import * as fragment from "./__fragment.js";
-import { KIND } from "./frame-messages.js";
+import { button, el, platformJson, randomHex, row, signedIn, stepper } from "./setup-page.js";
 
 const DOOR_HOST = "door.fragment.internal";
 const JSON_TYPE = { "content-type": "application/json" };
@@ -27,36 +26,6 @@ const WATCH_MS = 8.5 * 60_000;
 // a QR code's quiet zone, in modules, each side
 const QUIET = 4;
 const SVG_NS = "http://www.w3.org/2000/svg";
-const framed = window.parent !== window;
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
-function button(text, cls, onclick) {
-  const b = el("button", cls, text);
-  b.type = "button";
-  b.addEventListener("click", onclick);
-  return b;
-}
-
-const row = (...items) => {
-  const r = el("div", "setup-row");
-  r.append(...items);
-  return r;
-};
-
-async function platformJson(path, init) {
-  const resp = await fetch(new URL(path, location.href), { credentials: "same-origin", ...init });
-  const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw Object.assign(new Error(body.message || `${resp.status}`), { status: resp.status });
-  return body;
-}
-
-const randomHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 // An invitation's QR code (images/simplex-door `Qr`): its dark modules as
 // one path, each row's runs of them a rectangle, on a light square of its
@@ -93,51 +62,16 @@ export function qrCode({ size, dark }, label) {
 
 // what it is, a word each (Paul, 2026-10-31), as Settings says it: its
 // words end to end between their app and the platform's door
-function tags() {
-  const t = el("div", "setup-tags");
-  const secure = el("span", "setup-tag", "Secure");
-  secure.title = "SimpleX's servers can't read these messages";
-  t.append(el("span", "setup-tag", "Experimental"), secure);
-  return t;
-}
+const TAG = ["Secure", "SimpleX's servers can't read these messages"];
 
 // A step's failure in a few words (`state.why`, the door's code): a
 // deployment that runs no doors, or any other, which Try again asks again.
 const failure = (why) => (why.code === "no_doors" ? "SimpleX isn't available here yet." : "Couldn't reach SimpleX. Try again.");
 
 export async function setup(root) {
-  // the shell's light or dark, from its frame's parent at the platform's
-  // origin alone (frame-messages.js), heard from the start: the shell says
-  // it as the frame loads, before `me` answers
-  let platform = null;
-  const heard = [];
-  const theme = (e) => {
-    if (e.origin === platform && (e.data.mode === "light" || e.data.mode === "dark")) document.documentElement.dataset.theme = e.data.mode;
-  };
-  if (framed) {
-    addEventListener("message", (e) => {
-      if (e.source !== window.parent || e.data?.fragment !== KIND.theme) return;
-      if (platform) theme(e);
-      else heard.push(e);
-    });
-  }
-  const me = await fragment.me();
-  platform = me.platform;
-  heard.splice(0).forEach(theme);
-
-  // a step: its line (or what failed, in its place), and its controls
-  const say = (line, ...parts) => {
-    const head = [];
-    if (!framed) head.push(el("h1", null, "SimpleX"));
-    head.push(tags());
-    root.replaceChildren(...head, line, ...parts);
-    // in a tab, the way back
-    if (!framed && platform) {
-      const back = el("a", "quiet", "Back to Settings");
-      back.href = `${platform}/settings`;
-      root.append(row(back));
-    }
-  };
+  const me = await signedIn();
+  // a step: its line, and its controls
+  const say = stepper(root, { title: "SimpleX", tag: TAG, platform: me.platform });
 
   if (me.role !== "owner") {
     say(el("p", null, "Only its owner sets this up."));
