@@ -1474,6 +1474,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_late_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    send_press_ui(s, &mut b, &page)?;
     knowledge_ui(s, api, &mut b, &page, &me, &shots)?;
     launch_geometry_ui(s, api, &mut b, &page, &me, &shots)?;
 
@@ -7766,6 +7767,57 @@ fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
 fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String> {
     let shown = open_chat(b, page);
     (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
+}
+
+/// The launcher's Send pressed as a hand presses it (shell.css: its bead
+/// grows under the pointer and gives under a press): pressed near its rim,
+/// held until its glass has given all it gives, and let go there. Only the
+/// bead moves: the button, what the press hits, keeps its box, so the
+/// click is Send's. A button that shrank under such a press lost it to
+/// what was beside it, and nothing was sent. Clicks on it are counted and
+/// stopped before the form hears them, so no chat is made.
+fn send_press_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    anyhow::ensure!(b.until(page, "!document.getElementById('search-dialog').open", wait), "the launcher closed before Send's press");
+    b.click(page, "#sidebar-new-chat")?;
+    b.eval(page, &fill("#workspace-search", "Press Send near its rim"))?;
+    // open, its words sendable, and done opening: its panel's way in
+    // finished (it fills both ways, so it stays among its animations)
+    let ready = b.until(
+        page,
+        "document.getElementById('search-dialog').open && !document.getElementById('search-send').disabled && document.querySelector('.search-panel').getAnimations().every((a) => a.playState === 'finished')",
+        wait,
+    );
+    b.eval(
+        page,
+        "(() => { window.sendClicks = []; window.countSend = (e) => { const on = document.getElementById('search-send').contains(e.target); window.sendClicks.push(on); if (on) { e.preventDefault(); e.stopImmediatePropagation(); } }; addEventListener('click', window.countSend, true); return true; })()",
+    )?;
+    let boxed = "(() => { const r = document.getElementById('search-send').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })()";
+    // hovered (or pressed), every transition of its glass done, its box kept
+    let still = |state: &str| {
+        format!("(() => {{ const s = document.getElementById('search-send'); const done = s.matches(':{state}') && s.getAnimations({{ subtree: true }}).length === 0; if (done) window.sendBox = {boxed}; return done; }})()")
+    };
+    let rest = b.eval(page, boxed)?;
+    let px = |v: &Value, i: usize| v[i].as_f64().unwrap_or(0.0);
+    // near its rim: 97% of the way from its middle to its right edge
+    let at = (px(&rest, 0) + px(&rest, 2) * (0.5 + 0.97 / 2.0), px(&rest, 1) + px(&rest, 3) / 2.0);
+    b.pointer_at(page, at)?;
+    let hovered = b.until(page, &still("hover"), wait);
+    let held = b.press_held(page, at, &still("active"), wait)?;
+    let pressed = b.eval(page, "window.sendBox")?;
+    let clicks = b.eval(page, "window.sendClicks")?;
+    b.eval(page, "(removeEventListener('click', window.countSend, true), true)")?;
+    b.pointer_at(page, (1.0, 1.0))?;
+    b.eval(page, &fill("#workspace-search", ""))?;
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let closed = b.until(page, "!document.getElementById('search-dialog').open", wait);
+    let kept = (0..4).all(|i| (px(&rest, i) - px(&pressed, i)).abs() < 0.01);
+    s.ok(
+        "a press on Send near its rim, held while its glass gives, still sends: the button keeps its box under the pointer as its bead gives",
+        ready && hovered && held && kept && clicks == json!([true]) && closed,
+        json!({ "at": [at.0, at.1], "rest": rest, "pressed": pressed, "hovered": hovered, "held": held, "clicks": clicks }),
+    );
+    Ok(())
 }
 
 /// The launcher as a person uses it. Its input
