@@ -405,7 +405,7 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 @media (prefers-reduced-motion: reduce) { .search-dialog[open], .search-dialog[open] .search-panel { animation: none; } }
 .search-input-wrap { display: flex; flex: none; align-items: flex-end; gap: 8px; padding: 10px 12px 10px 22px; background: transparent; }
 /* one line at rest, growing to INPUT_MAX_PX (launcher.js) or the visual viewport's room, then scrolling; files and a status keep their room too */
-#workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; max-height: min(200px, calc(var(--vh) - var(--search-top) - 44px - var(--search-file-room) - var(--search-status-room))); padding: 10px 0; overflow-y: auto; resize: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; line-height: 24px; box-shadow: none; }
+#workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; max-height: min(200px, calc(var(--vh) - var(--search-top) - 44px - var(--search-file-room) - var(--search-agent-room, 0px) - var(--search-status-room))); padding: 10px 0; overflow-y: auto; resize: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; line-height: 24px; box-shadow: none; }
 /* on one line too, cut short on a phone (a textarea's would wrap to a second) */
 #workspace-search::placeholder { color: var(--text-secondary); opacity: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #workspace-search:focus-visible { outline: none; }
@@ -430,10 +430,48 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-status { flex: none; margin: 0; padding: 10px 18px 14px; font-size: 12px; color: var(--text-secondary); background: transparent; }
 .search-result .meta { flex: none; }
 .search-enter { display: flex; align-items: center; }
-/* the start row's agent, with more than one (launcher.js `withPick`) */
-.search-start-row { display: flex; align-items: center; gap: 8px; }
-.search-start-row .search-start { flex: 1; min-width: 0; }
-.search-agent { flex: none; max-width: 40%; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font: 600 13px var(--font-sans); }
+/* the agents, with more than one (launcher.js `renderPick`), under the
+   input as the iOS app's under its composer (HomeView.swift,
+   AgentSegments): their faces in a row, no track behind them, the picked
+   one on a pill round its face, its name beside it; a long row scrolls.
+   The pill is 6 out from the face (iOS's 5, and 1 more: the web's face is
+   a monitor, not a circle, and its corners need the room in the pill's
+   round end). The pill sits as far from the panel's left as from its
+   bottom, 12 each way, so it nests in the panel's round corner (33, the
+   pill's 19 and 12 more); 3 above leave its shadow room in the scroll's
+   clip. A pick opens its name and
+   closes the last one's over --agent-pick-ms, the pill following
+   (launcher.js `choose`, PILL_SLIDE_MS, the same ease-out cubic). The
+   pill's shadow falls below it alone, as under light from above: each
+   offset as far down as its blur reaches past its spread. */
+.search-dialog.has-agents { --search-agent-room: 53px; }
+.search-agent { flex: none; --agent-pill: color-mix(in srgb, var(--chat-composer) 80%, transparent); --agent-pill-shadow: 0 1px 2px -1px rgba(0, 0, 0, .14), 0 3px 6px -3px rgba(0, 0, 0, .12); --agent-pick-ms: 300ms; --agent-pick-ease: cubic-bezier(.33, 1, .68, 1); overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding: 3px 12px 12px; }
+.search-agent[hidden] { display: none; }
+.search-agent::-webkit-scrollbar { display: none; }
+.search-agent-track { position: relative; isolation: isolate; display: flex; gap: 2px; width: max-content; }
+.search-agent-face { position: relative; z-index: 1; display: inline-flex; flex: none; align-items: center; padding: 6px; border: 0; border-radius: 999px; background: transparent; color: var(--text-primary); font: 500 14px/18px var(--font-sans); cursor: pointer; }
+/* the face settles into its pill as it is picked, and lifts a touch under a pointer */
+/* a picture cut to a circle, the image too, so no corner shows while the
+   face scales (a transformed box's rounded clip can let its corners through) */
+.search-agent-face .agent-avatar.picture, .search-agent-face .agent-avatar.picture img { border-radius: 50%; clip-path: circle(50%); }
+.search-agent-face .agent-avatar.small { width: 26px; height: 26px; transform: scale(.94); transition: transform var(--agent-pick-ms) var(--agent-pick-ease); }
+.search-agent-face.on .agent-avatar.small { transform: none; }
+/* the name: a column opening from nothing to its words, which fade in as it opens */
+.search-agent-name { display: grid; grid-template-columns: 0fr; opacity: 0; transition: grid-template-columns var(--agent-pick-ms) var(--agent-pick-ease), opacity 160ms ease; }
+.search-agent-face.on .search-agent-name { grid-template-columns: 1fr; opacity: 1; transition: grid-template-columns var(--agent-pick-ms) var(--agent-pick-ease), opacity 200ms ease 80ms; }
+.search-agent-clip { min-width: 0; overflow: hidden; }
+.search-agent-label { display: block; width: max-content; max-width: 180px; padding: 0 8px 0 7px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.search-agent-face.on, .search-agent-pill { background: var(--agent-pill); box-shadow: var(--agent-pill-shadow); }
+/* the pill on its way (launcher.js `choose`): drawn by itself, under the faces */
+.search-agent-face.on.arriving { background: transparent; box-shadow: none; }
+.search-agent-pill { position: absolute; top: 0; left: 0; z-index: 0; height: 100%; border-radius: 999px; pointer-events: none; will-change: transform, width; }
+@media (hover: hover) {
+  .search-agent-face:not(.on):not(:disabled):hover { background: var(--bg-hover); }
+  .search-agent-face:not(.on):not(:disabled):hover .agent-avatar.small { transform: scale(1.04); }
+}
+.search-dialog .search-agent-face:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 0; }
+.search-agent-face:disabled { cursor: default; opacity: .6; }
+@media (prefers-reduced-motion: reduce) { .search-agent-face .agent-avatar.small, .search-agent-name, .search-agent-face.on .search-agent-name { transition: none; } }
 .search-message .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* the launcher's Knowledge (launcher.js): a page of the person's brains or
    Session Archive, its snippet two lines, its fragment at its end */
