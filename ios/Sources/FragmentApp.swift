@@ -717,9 +717,12 @@ struct FragmentRoot: View {
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
     }
     /// The page an answer named, opened now if nothing must be answered and
-    /// no cover is up or still going (`covered`): else it waits, kept.
+    /// no cover is up or still going (`covered`): else it waits, kept. The
+    /// fan folds first, as it would hide the page (an invite accepted there
+    /// beside another notice); an answer that opens nothing (Later) leaves it.
     private func openAnswered() {
         guard !covered, let fragment = library.takeAnswered() else { return }
+        if noticesFanned { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding) { noticesFanned = false } }
         open(fragment)
     }
     private func open(_ fragment: FragmentSummary) {

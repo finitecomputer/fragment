@@ -298,6 +298,32 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(invite.waitForNonExistence(timeout: 10), "and the invite is told no more")
     }
 
+    /// An invite accepted from the full screen, beside another notice, as
+    /// above: someone shared a chat titled `TEST_RUNNER_FRAGMENT_UITEST_FAN_INVITE`
+    /// with a person who has another notice too. Accept folds the fan and
+    /// shows the chat; the fan, left up, hid it while another stayed.
+    func testAnInviteAcceptedFromTheFanShowsItsPage() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let title = env["FRAGMENT_UITEST_FAN_INVITE"] else {
+            throw XCTSkip("no dev stack or invite beside another notice named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_FAN_INVITE)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let stack = app.descendants(matching: .any)["noticesStack"], close = app.buttons["noticesClose"]
+        XCTAssertTrue(stack.waitForExistence(timeout: 30), "the invite and another, stacked")
+        stack.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.4)).tap()
+        let invite = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:invite:"))
+            .containing(NSPredicate(format: "label == %@", title)).firstMatch
+        XCTAssertTrue(invite.buttons["Accept"].waitForExistence(timeout: 10), "fanned: the invite, with Accept")
+        invite.buttons["Accept"].tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 20), "the fan folds")
+        XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 30), "and the chat its answer names shows")
+        screenshot(app, "Invite accepted from the fan")
+    }
+
     /// Notices that must be answered (FIN-458) show alone over the whole app,
     /// never in the band, the oldest first: an answer refused keeps it,
     /// saying why in the server's words; answered, the next; the last
