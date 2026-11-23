@@ -131,7 +131,7 @@ pub fn agent_sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = api.signed(&owner, "PUT", &at("visibility"), Some(&json!({ "visibility": "members" })))?;
 
     // the owner's own agent, sharing for its owner as it may elsewhere
-    // (`access::agent_shares`): refused alike
+    // (`permit::agent_shares`): refused alike
     let (hand, _) = super::delegation::agent_of(api, &owner)?;
     let owner_id = api.identity(&owner)?;
     let for_owner = |rest: &str| format!("{}?for={owner_id}", at(rest));

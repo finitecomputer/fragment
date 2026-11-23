@@ -1,4 +1,4 @@
-//! `for` names only the agent's own owner (access::may_act_for), shown on
+//! `for` names only the agent's own owner (permit::may_act_for), shown on
 //! a doc's notes, whose rule ("only a note's author or the page's owner",
 //! applib/notes.mjs `mayChange`) trusts `call.principal`. A, a signed-in
 //! reader, leaves a thread on a public doc; B, a stranger to both, has an
