@@ -82,6 +82,33 @@ struct ShellTests {
         #expect(stub.seen.filter { $0.route == "POST /api/fragments" }.count == 1)
     }
 
+    /// While the sidebar's New chat starts a chat, Home's send waits, and
+    /// another New chat too (`creating`, as Home's own send holds them): two
+    /// starts for one agent would share one readied chat.
+    @Test func aChatStartingFromTheSidebarHoldsHomesSend() async throws {
+        let gate = Gate()
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "POST /api/fragments": return (200, #"{"name":"mobile-chat--x2","npub":"npub1c"}"#)
+            case "GET /api/f/moss--a1/status": return (200, #"{"npub":"npub1moss"}"#)
+            case "PUT /api/f/mobile-chat--x2/members/npub1moss": gate.pass(); return (200, "{}")
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library(), agent = FragmentSummary(name: "moss--a1", kind: "agent")
+        library.fragments = [agent]
+        library.home.text = "hello"
+        #expect(library.canLaunch)
+        let starting = Task { try await library.startChat(with: agent, api: api) }
+        try await waitUntil("the join is asked") { stub.seen.contains { $0.route == "PUT /api/f/mobile-chat--x2/members/npub1moss" } }
+        #expect(library.creating && !library.canLaunch, "Home's send waits")
+        gate.open()
+        _ = try await starting.value
+        #expect(!library.creating && library.canLaunch, "and goes once the chat is made")
+    }
+
     /// A chat readied as a memo records is the one its message takes: made
     /// once, and kept across a failed join.
     @Test func aChatReadiedAheadIsMadeOnceAndOutlastsAFailedJoin() async throws {

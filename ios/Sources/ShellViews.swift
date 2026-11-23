@@ -216,6 +216,8 @@ struct SidebarView: View {
                                     .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                             }
                             .buttonStyle(.plain)
+                            // while a chat starts (this or Home's), dimmed: one at a time
+                            .disabled(library.creating)
                             .accessibilityLabel("New chat with \(agent.displayTitle)").accessibilityIdentifier("agentNewChat-\(agent.name)")
                         }
                     }

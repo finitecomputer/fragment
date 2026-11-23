@@ -26,6 +26,8 @@ final class Library {
     }
     var error: String?
     var loading = false
+    /// A chat is being started (Home's send, the sidebar's New chat): one at
+    /// a time, as two for one agent would share one readied chat.
     var creating = false
     var unfinishedChat: FragmentSummary?
     @ObservationIgnored private var readying: (agent: String, chat: Task<FragmentSummary, Error>)?
@@ -165,7 +167,10 @@ final class Library {
 
     /// A new chat with `agent` and nothing in it yet, listed and shown at once
     /// (the sidebar's New chat): the readied one if there is one for them.
+    /// `creating` while it starts (its caller may have set it as it asked).
     func startChat(with agent: FragmentSummary, api: FragmentAPI) async throws -> FragmentSummary {
+        creating = true
+        defer { creating = false }
         let chat = try await readyChat(with: agent, api: api).value
         readying = nil; unfinishedChat = nil
         if !fragments.contains(where: { $0.name == chat.name }) { fragments.insert(chat, at: 0) }
@@ -619,10 +624,11 @@ struct FragmentRoot: View {
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api, newChat: { agent in
+                // one chat starts at a time: taken at once, before the task
+                // runs, so a second tap (its button disabled) finds it taken
+                guard !library.creating else { return }
+                library.creating = true
                 showingApps = false; toggleSidebar()
-                // a chat still starting (this or Home's) opens first; two at once
-                // would race for the page and could share one readied chat
-                guard page != .startingChat else { return }
                 Task { await newChat(api, with: agent) }
             }) { destination in
                 page = destination; showingApps = false; toggleSidebar()
@@ -723,9 +729,10 @@ struct FragmentRoot: View {
     }
     /// The sidebar's New chat: a chat with `agent`, open and empty, its
     /// composer the first thing; not made, Home again with why. One chat is
-    /// started at a time (a New chat while one, or Home's send, is still
-    /// starting is not taken: `SidebarDrawer`'s), and the account it was
-    /// asked in is the one it answers: removed meanwhile, nothing is shown.
+    /// started at a time (`Library.creating`: the sidebar's New chat buttons
+    /// are disabled, and Home's send waits, until it opens), and the account
+    /// it was asked in is the one it answers: removed meanwhile, nothing is
+    /// shown.
     private func newChat(_ api: FragmentAPI, with agent: FragmentSummary) async {
         let library = library
         library.selectedAgent = agent.name
