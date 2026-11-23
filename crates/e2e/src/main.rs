@@ -766,6 +766,11 @@ impl Suite {
             // a dry run's: it sends nothing
             (Some(preview), _) if self.plan.is_some() => Api::planned(preview, &self.shared),
             (Some(preview), _) => Api::hosted(preview, &self.shared),
+            // a local run's plan (`hosted::plan_local`): it sends nothing
+            (None, rehearsal) if self.plan.is_some() => {
+                let api = Api::planned_local(self.port, SUFFIX, &self.shared);
+                if rehearsal { api.branch(REHEARSAL_BRANCH) } else { api }
+            }
             // a rehearsal's node is shaped as a branch deployment
             (None, true) => Api::new(self.port, SUFFIX, &self.shared).branch(REHEARSAL_BRANCH),
             (None, false) => Api::new(self.port, SUFFIX, &self.shared),
