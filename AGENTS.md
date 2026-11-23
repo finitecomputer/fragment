@@ -109,12 +109,26 @@ tests faster than CI does, so run them here. Work is ready only when you
 can show evidence that it does what it claims and breaks nothing else.
 "It compiles" and "the tests I wrote pass" are not evidence.
 
+A proof is made once, on a base you name. `master` moving is expected,
+and it never interrupts or restarts a proof:
+
+- **When you open the PR:** merge `master` once, as the proof starts, and
+  prove that head. Write "proven on head X, merged with master Y", both
+  SHAs, in the evidence pack. Then you are done.
+- **While it waits:** nothing. A PR behind `master` is correct, not
+  neglected, and nobody asks for a rebase unless there is a conflict.
+- **At merge:** a clean merge just merges. If git reports a conflict,
+  whoever merges resolves it, or hands it back, and re-runs what covers
+  the resolved lines.
+- **After merge:** master's run at the tip is the guard against drift,
+  fixed forward when red (How work lands).
+
 Put an evidence pack in the PR body and in your report:
 
 - **What and why:** what changed and why, in plain words. Say whether it
   touches the wire, stored rows or money.
-- **What ran:** each command with its result and counts, on the final head
-  merged with current `master`:
+- **What ran:** "proven on head X, merged with master Y", then each
+  command with its result and counts on that head:
   - `cargo xtask check`.
   - `cargo xtask e2e --only …` for every section that covers a changed file.
     Grep `crates/e2e` for each file and run every lane that uses it.
