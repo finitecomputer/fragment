@@ -523,6 +523,11 @@ pub struct Fleet {
     /// depend on public DNS (#1017: every save of a boot failed when it did
     /// not answer). `cargo xtask dev`'s are on, as a deployment's are.
     pub computer_internet: bool,
+    /// Whether SimpleX doors reach the internet (`FRAGMENT_DOOR_INTERNET`,
+    /// `off` when not), as `computer_internet` says of computers: the e2e's
+    /// are off but for a run whose door links to SimpleX's servers for real
+    /// (its `simplex-link`); `cargo xtask dev`'s are on.
+    pub door_internet: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
@@ -756,6 +761,9 @@ impl Fleet {
         }
         if !self.computer_internet {
             vars.push(("FRAGMENT_COMPUTER_INTERNET", "off"));
+        }
+        if !self.door_internet {
+            vars.push(("FRAGMENT_DOOR_INTERNET", "off"));
         }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {

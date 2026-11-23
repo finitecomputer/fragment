@@ -4,7 +4,9 @@
 // published to the bound agent as theirs; a reply asked until sent, by
 // one key), invalid (unbound, a member's call, another's reply, a kind not
 // text), replay (a message delivered again taken once), and the
-// invitation kept for its owner alone, never in a run's output.
+// invitation kept for its owner alone, never in a run's output, with its
+// QR code; then whom it linked, watched for and checked, and why a step
+// failed, for its setup page.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -30,11 +32,11 @@ function world(answers = {}) {
   const sql = { exec: (q, ...p) => { const st = db.prepare(q); const rows = /^\s*select\b|\breturning\b/i.test(q) ? st.all(...p) : (st.run(...p), []); return { toArray: () => rows }; } };
   const app = new App({ storage: { sql } }, {});
   app.connected({ door: DOOR });
-  const w = { app, asked: [], published: [], slept: [] };
+  const w = { app, asked: [], published: [], slept: [], calls: [] };
   w.job = (via, door = BOUND) => ({
     via,
     door,
-    call: async (op, input) => app[op](input, { agent: null }),
+    call: async (op, input) => (w.calls.push(op), app[op](input, { agent: null })),
     publish: async (channel, body, kind) => void w.published.push({ channel, body, kind }),
     sleep: async (ms) => void w.slept.push(ms),
     fetch: async (url, init) => {
@@ -113,18 +115,94 @@ test("connect gives the door the inbox's secret as a placeholder the platform fi
   assert.deepEqual(w.asked[0].body, { name: "Juniper" });
   const none = world({ connect: [[409, { error: "no_doors", message: "this deployment runs no doors (no container for them)" }]] });
   assert.deepEqual(await none.app.connect({ name: "Juniper" }, none.job("call")), { connected: false, error: "the door answered 409: this deployment runs no doors (no container for them)" });
+  assert.deepEqual([none.app.state().why.text, none.app.state().why.code], ["the door answered 409: this deployment runs no doors (no container for them)", "no_doors"], "said to its setup page, with the door's code");
 });
 
 test("the invitation for its owner's app is kept for its owner's query alone, never in a run's output", async () => {
   const link = "https://simplex.chat/invitation#/?v=2-7&smp=a-secret-invitation";
   const w = world({ link: [[202, {}]], unlink: [[202, {}]], state: [[200, { runner: { phase: "wanting" } }], [200, { runner: { link, short: "https://smp.example/i#short" } }]] });
   const out = await w.app.link({}, w.job("call"));
-  assert.deepEqual(out, { invited: true });
+  assert.deepEqual(out, { invited: true, linked: false });
   assert.deepEqual(w.asked[0].body, { n: 1 }, "its link numbered to the door");
   assert.ok(!JSON.stringify(out).includes("secret-invitation"), "a run's output, which its agent reads, holds none");
   assert.equal(w.app.state().invitation.link, link);
   assert.deepEqual(await w.app.unlink({}, w.job("call")), { unlinked: true });
   assert.equal(w.app.state().invitation, null, "unlinked, none kept");
+});
+
+// the door's runner's state, as its door answers `state`
+const runner = (r) => [200, { runner: r }];
+const QR = { size: 21, dark: "10".repeat(220) + "1" };
+
+test("a link watches for its owner's app to answer, keeps whom it linked, and lets its invitation go", async () => {
+  const link = "simplex:/invitation#/?v=2-7&smp=a-secret-invitation";
+  const inviting = runner({ phase: "inviting", link, short: "https://smp.example/i#short", qr: QR });
+  const w = world({ link: [[202, {}]], state: [runner({ phase: "asking" }), inviting, inviting, inviting, runner({ phase: "linked", name: "Robin" })] });
+  const out = await w.app.link({}, w.job("call"));
+  assert.deepEqual(out, { linked: true });
+  assert.ok(!JSON.stringify(out).includes("secret-invitation") && !JSON.stringify(out).includes("Robin"), "a run's output holds neither");
+  const s = w.app.state();
+  assert.deepEqual([s.connected, s.invitation, s.linked.name, s.why], [true, null, "Robin", null], "linked: its invitation used");
+  assert.deepEqual(w.slept, [1000, 1000, 2000, 2000, 2000], "a second apart for its invitation, then the watch's waits");
+
+  // its invitation, as kept before it was answered: its QR code whole
+  const v = world({ link: [[202, {}]], state: [inviting, runner({ phase: "off" })] });
+  assert.deepEqual(await v.app.link({}, v.job("call")), { invited: true, linked: false }, "unlinked meanwhile: the watch ends");
+  assert.deepEqual(v.app.state().invitation.qr, QR);
+  assert.equal(v.app.state().invitation.short, "https://smp.example/i#short");
+  // another link asked meanwhile shows another invitation: this watch ends
+  const other = world({ link: [[202, {}]], state: [inviting, runner({ phase: "inviting", link: "simplex:/invitation#/?v=2-7&smp=another" })] });
+  assert.deepEqual(await other.app.link({}, other.job("call")), { invited: true, linked: false });
+});
+
+test("a link's watch is bounded, within a job's steps, and a QR code is kept only whole", async () => {
+  const link = "simplex:/invitation#/?v=2-7&smp=s";
+  const w = world({ link: [[202, {}]], state: Array(200).fill(runner({ phase: "inviting", link, qr: { size: 21, dark: "1".repeat(440) } })) });
+  assert.deepEqual(await w.app.link({}, w.job("call")), { invited: true, linked: false });
+  const steps = w.asked.length + w.slept.length + w.calls.length;
+  assert.ok(steps <= 256, `a job's steps: ${steps}`);
+  assert.ok(w.slept.reduce((a, b) => a + b, 0) >= 8 * 60_000, "about 8 minutes, as long as a person takes to scan");
+  assert.equal(w.app.state().invitation.qr, null, "a QR code short of its square: none");
+  for (const qr of [{ size: 21, dark: "2".repeat(441) }, { size: 20, dark: "1".repeat(400) }, { size: 178, dark: "1".repeat(178 * 178) }, { size: "21", dark: "1".repeat(441) }, null]) {
+    const v = world({ link: [[202, {}]], state: [runner({ phase: "inviting", link, qr }), runner({ phase: "off" })] });
+    await v.app.link({}, v.job("call"));
+    assert.equal(v.app.state().invitation.qr, null, JSON.stringify(qr)?.slice(0, 40));
+  }
+});
+
+test("a door linked already keeps whom it linked; check looks once, for its own link alone", async () => {
+  const w = world({ link: [[202, {}]], state: [runner({ phase: "linked", name: "Robin" })] });
+  assert.deepEqual(await w.app.link({}, w.job("call")), { linked: true });
+  assert.equal(w.app.state().linked.name, "Robin");
+  const c = world({ state: [runner({ phase: "inviting", link: "x" }), runner({ phase: "linked", name: "Robin" })] });
+  assert.deepEqual(await c.app.check({}, c.job("call")), { linked: false });
+  assert.deepEqual(await c.app.check({}, c.job("call")), { linked: true });
+  assert.equal(c.app.state().linked.name, "Robin");
+  // an unlink asked while check looked: what it saw is no one's
+  const late = world({ unlink: [[202, {}]] });
+  const job = late.job("call");
+  job.fetch = async (url) => {
+    assert.ok(url.endsWith("/state"));
+    await late.app.asking();
+    return { ok: true, status: 200, json: () => ({ runner: { phase: "linked", name: "Robin" } }) };
+  };
+  assert.deepEqual(await late.app.check({}, job), { linked: false, why: "unlinked since" });
+  assert.equal(late.app.state().linked, null);
+});
+
+test("a step that fails says why to its setup page, until another is asked", async () => {
+  const w = world({ link: [[409, { message: "not running" }], [202, {}]], state: Array(30).fill(runner({ phase: "asking" })) });
+  assert.deepEqual(await w.app.link({}, w.job("call")), { invited: false, why: "the door answered 409: not running" });
+  assert.equal(w.app.state().why.text, "the door answered 409: not running");
+  assert.deepEqual(await w.app.link({}, w.job("call")), { invited: false, why: "no invitation yet" });
+  assert.equal(w.app.state().why.text, "no invitation yet", "the newer step's");
+  const u = world({ unlink: [[503, { error: "starting", message: "starting" }]] });
+  assert.deepEqual(await u.app.unlink({}, u.job("call")), { unlinked: false });
+  assert.deepEqual([u.app.state().why.text, u.app.state().why.code], ["the door answered 503: starting", "starting"]);
+  u.app.asking();
+  assert.equal(u.app.state().why, null, "let go as another step is asked");
+  // a failure of a link asked before the newest is no one's
+  assert.deepEqual(u.app.failed({ n: 1, why: "late" }), { kept: false });
 });
 
 test("an invitation found after an unlink was asked is kept by no one", async () => {

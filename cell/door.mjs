@@ -364,7 +364,7 @@ export class SimplexDoor extends DurableObject {
     if (!startable(this.#saves(), d.saved)) return this.#stop("no save of this door restores");
     const started = d.generation + 1;
     this.ctx.storage.sql.exec("UPDATE door SET started = ?, generation = ? WHERE id = 1", started, started);
-    const opts = { env: { DOOR_GENERATION: String(started), DOOR_NAME: d.agent }, enableInternet: this.env.FRAGMENT_COMPUTER_INTERNET !== "off", instance: "lite" };
+    const opts = { env: { DOOR_GENERATION: String(started), DOOR_NAME: d.agent }, enableInternet: this.env.FRAGMENT_DOOR_INTERNET !== "off", instance: "lite" };
     if (c.images && c.images.door) opts.image = c.images.door;
     const egress = this.ctx.exports.DoorEgress({ props: { door: d.door } });
     // a stop asked while its egress registered starts nothing

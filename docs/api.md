@@ -2327,6 +2327,10 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  While it invites, the door's `state` has the invitation's QR code
+  (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of
+  its short link where there is one), for its owner's setup page to draw
+  (templates/simplex `site/setup.html`, which Settings opens).
   **Its door ends with it** (`/door/end`): its container with no last
   save, every file under its prefix in the bucket, and its object's
   storage. Its owner's unlink ends it before the binding goes (502, still

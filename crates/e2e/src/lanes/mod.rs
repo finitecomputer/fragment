@@ -63,6 +63,7 @@ pub(crate) mod simplex_door;
 mod shell;
 mod signin;
 mod simplex_settings;
+pub(crate) mod simplex_setup;
 mod site;
 mod slides;
 mod sync;

@@ -560,9 +560,15 @@ impl Suite {
     }
 
     /// Whether a local stack builds the door's image: for a run that names
-    /// the door's lane alone (`Fleet::doors`).
+    /// the door's lane, or a real link (`Fleet::doors`).
     fn builds_doors(&self) -> bool {
-        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME))
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME || o == lanes::simplex_setup::LINK))
+    }
+
+    /// Whether the run names a real SimpleX link (`simplex-link`): its
+    /// doors then reach the internet (`Fleet::door_internet`).
+    fn links_simplex(&self) -> bool {
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_setup::LINK))
     }
 
     /// Whether the stack runs SimpleX doors: a deployment whose config names
@@ -621,6 +627,14 @@ impl Suite {
     /// rehearsal (whose fakes no lane reaches, but which answer the node).
     pub fn on_fakes(&self) -> bool {
         self.preview.is_none()
+    }
+
+    /// Whether `--only` names `name`, a part of a section that runs by name
+    /// alone, the section named beside it: counted as asked, so naming it
+    /// is no unknown name.
+    pub fn names(&mut self, name: &str) -> bool {
+        self.asked.push(name.to_string());
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
@@ -945,8 +959,10 @@ impl Suite {
             computer_snapshots: false,
             // the door's image built only for a run that names its lane
             doors: self.builds_doors(),
-            // a run must not depend on public DNS (devstack::Fleet)
+            // a run must not depend on public DNS (devstack::Fleet), but
+            // for a door that links to SimpleX's servers for real
             computer_internet: false,
+            door_internet: self.links_simplex(),
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;

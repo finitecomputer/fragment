@@ -13,8 +13,12 @@
 //   webhook's do (fragment.json `inbox`).
 // - `link` asks the door for a one-time invitation for its owner's
 //   SimpleX app, kept for its owner alone (`state`, an owner's query):
-//   never in a run's output, which its agent, a viewer here, reads.
-//   `unlink` ends that link.
+//   never in a run's output, which its agent, a viewer here, reads. It
+//   then watches for their app to answer it, for as long as a person takes
+//   to scan its code, and keeps whom it linked; `check` looks once, later.
+//   `unlink` ends that link. A step that fails says why in `state`.
+//   Its owner's setup page (site/setup.html, opened from Settings) runs
+//   them: the inbox's secret and `connect` first, then `link`.
 // - `intake` (the inbox's trigger alone) takes each message the door
 //   delivers, once by its SimpleX id (`seen`), and publishes it here as
 //   its owner's words to their agent (`job.door`'s `relayed`, `to` that
@@ -44,6 +48,12 @@ const REPLY_WAIT_MAX_MS = 30_000;
 // The door's invitation, looked for this many times a second apart once
 // asked (two steps a round).
 const INVITE_LOOKS_MAX = 30;
+// Its owner's app answering that invitation, looked for after each of
+// these waits: about 8 minutes, as long as a person takes to scan a code
+// (two steps a look: with the invitation's, 212 of a job's 256).
+const LINK_WAITS_MS = [...Array(30).fill(2_000), ...Array(24).fill(5_000), ...Array(20).fill(15_000)];
+// A QR code's side, in modules, at most (version 40's).
+const QR_SIZE_MAX = 177;
 
 // An ask of its door, as its job's fetch: its status, and what it said.
 async function door(job, ask, body = {}, headers = {}) {
@@ -53,6 +63,25 @@ async function door(job, ask, body = {}, headers = {}) {
     said = resp.json() ?? {};
   } catch {}
   return { status: resp.status, said };
+}
+
+// The door's runner's own state (images/simplex-door `View`), or none.
+async function runnerOf(job) {
+  const { said } = await door(job, "state");
+  return said.runner ?? {};
+}
+
+// A failure, for its owner's setup page to say: its words, and the
+// door's code for it (`no_doors`: this deployment runs none).
+const answered = (status, said) => `the door answered ${status}: ${String(said.message ?? "").slice(0, 200)}`;
+const codeOf = (said) => (typeof said.error === "string" ? said.error.slice(0, 40) : null);
+
+// An invitation's QR code as the door drew it, kept only whole: a square
+// of modules, each a `1` or a `0` (images/simplex-door `Qr`).
+function qrOf(qr) {
+  const size = qr?.size;
+  if (!Number.isInteger(size) || size < 21 || size > QR_SIZE_MAX || typeof qr.dark !== "string" || qr.dark.length !== size * size || /[^01]/.test(qr.dark)) return null;
+  return { size, dark: qr.dark };
 }
 
 // A reply through the door, by `key`, asked until its runner says it is
@@ -94,14 +123,20 @@ export class App extends DurableObject {
     else this.ctx.storage.sql.exec("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", k, JSON.stringify(v));
   }
 
-  // its owner's alone: the invitation waiting for their SimpleX app
+  // its owner's alone: whether its door was started, the invitation
+  // waiting for their SimpleX app, whom it linked, and why its last step
+  // failed
   state() {
-    return { invitation: this.get("invitation") };
+    return { connected: this.get("door") !== null, invitation: this.get("invitation"), linked: this.get("linked"), why: this.get("why") };
   }
 
   async connect({ name } = {}, job) {
     const { status, said } = await door(job, "connect", { name }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
-    if (status !== 200) return { connected: false, error: `the door answered ${status}: ${String(said.message ?? "").slice(0, 200)}` };
+    if (status !== 200) {
+      const error = answered(status, said);
+      await job.call("failed", { why: error, code: codeOf(said) });
+      return { connected: false, error };
+    }
     // its door, its life's: a delivery from any other is no one's here
     await job.call("connected", { door: said.door });
     return { connected: true, started: said.started };
@@ -110,46 +145,108 @@ export class App extends DurableObject {
   // its owner's (its connect job's), never its agent's, a viewer here
   connected({ door }) {
     this.put("door", String(door));
+    this.put("why", null);
     return { ok: true };
+  }
+
+  // its owner's (its jobs'): why a step failed, until another is asked
+  // (`at`: which failure it is, one said again included)
+  failed({ n, why, code }) {
+    if (n !== undefined && this.get("asked") !== n) return { kept: false };
+    this.put("why", { text: String(why).slice(0, 300), code: typeof code === "string" ? code.slice(0, 40) : null, at: Date.now() });
+    return { kept: true };
   }
 
   async link(_, job) {
     // numbered: an unlink after it means its invitation is kept by no one
     const { n } = await job.call("asking", {});
     const asked = await door(job, "link", { n });
-    if (asked.status !== 202) return { invited: false, why: `the door answered ${asked.status}: ${String(asked.said.message ?? "").slice(0, 200)}` };
-    for (let look = 0; look < INVITE_LOOKS_MAX; look += 1) {
-      await job.sleep(1000);
-      const { said } = await door(job, "state");
-      const runner = said.runner ?? {};
-      if (typeof runner.link === "string" && runner.link) {
-        const { kept } = await job.call("invited", { n, link: runner.link, ...(typeof runner.short === "string" && runner.short ? { short: runner.short } : {}) });
-        return kept ? { invited: true } : { invited: false, why: "unlinked since" };
-      }
+    if (asked.status !== 202) {
+      const why = answered(asked.status, asked.said);
+      await job.call("failed", { n, why, code: codeOf(asked.said) });
+      return { invited: false, why };
     }
-    return { invited: false, why: "no invitation yet" };
+    let invitation = null;
+    for (let look = 0; look < INVITE_LOOKS_MAX && !invitation; look += 1) {
+      await job.sleep(1000);
+      const runner = await runnerOf(job);
+      // linked already: its door asks no invitation of a link it holds
+      if (runner.phase === "linked") return this.#linked(job, n, runner);
+      if (typeof runner.link === "string" && runner.link) invitation = runner;
+    }
+    if (!invitation) {
+      await job.call("failed", { n, why: "no invitation yet" });
+      return { invited: false, why: "no invitation yet" };
+    }
+    const short = typeof invitation.short === "string" && invitation.short ? { short: invitation.short } : {};
+    const { kept } = await job.call("invited", { n, link: invitation.link, ...short, qr: invitation.qr ?? null });
+    if (!kept) return { invited: false, why: "unlinked since" };
+    // its owner's app answering it; another link or an unlink asked since
+    // (a phase or an invitation not this one's) ends the watch
+    for (const ms of LINK_WAITS_MS) {
+      await job.sleep(ms);
+      const runner = await runnerOf(job);
+      if (runner.phase === "linked") return this.#linked(job, n, runner);
+      if (runner.phase !== "inviting" || runner.link !== invitation.link) return { invited: true, linked: false };
+    }
+    return { invited: true, linked: false };
+  }
+
+  // whom its door says it is linked to, kept as link `n`'s
+  async #linked(job, n, runner) {
+    const { kept } = await job.call("linked", { n, name: typeof runner.name === "string" ? runner.name : "" });
+    return kept ? { linked: true } : { linked: false, why: "unlinked since" };
+  }
+
+  // a look at whom its door is linked to now, for an invitation answered
+  // after its link stopped watching: kept while no link or unlink is
+  // asked meanwhile
+  async check(_, job) {
+    // the link it looks for, read as a step (a job reads nothing else)
+    const { n } = await job.call("current", {});
+    const runner = await runnerOf(job);
+    if (runner.phase !== "linked") return { linked: false };
+    return this.#linked(job, n, runner);
   }
 
   // its owner's (its link and unlink jobs'), never its agent's, a viewer
-  // here: each link or unlink numbered, its invitation let go
+  // here: each link or unlink numbered, its invitation, its link and why
+  // a step failed let go
   asking() {
     const n = (this.get("asked") ?? 0) + 1;
     this.put("asked", n);
     this.put("invitation", null);
+    this.put("linked", null);
+    this.put("why", null);
     return { n };
   }
 
   // the invitation its link `n` found, kept only while no link or unlink
-  // was asked after it
-  invited({ n, link, short }) {
+  // was asked after it, with its QR code where the door drew it whole
+  invited({ n, link, short, qr }) {
     if (this.get("asked") !== n) return { kept: false };
-    this.put("invitation", { link: String(link).slice(0, 2000), short: short ? String(short).slice(0, 2000) : null, at: Date.now() });
+    this.put("invitation", { link: String(link).slice(0, 2000), short: short ? String(short).slice(0, 2000) : null, qr: qrOf(qr), at: Date.now() });
+    return { kept: true };
+  }
+
+  // the newest link or unlink asked (`check`'s)
+  current() {
+    return { n: this.get("asked") ?? 0 };
+  }
+
+  // whom link `n`'s invitation linked (their SimpleX name), kept only
+  // while no link or unlink was asked after it; its invitation is used
+  linked({ n, name }) {
+    if ((this.get("asked") ?? 0) !== n) return { kept: false };
+    this.put("linked", { name: String(name ?? "").slice(0, 200), at: Date.now() });
+    this.put("invitation", null);
     return { kept: true };
   }
 
   async unlink(_, job) {
     const { n } = await job.call("asking", {});
-    const { status } = await door(job, "unlink", { n });
+    const { status, said } = await door(job, "unlink", { n });
+    if (status !== 202) await job.call("failed", { n, why: answered(status, said), code: codeOf(said) });
     return { unlinked: status === 202 };
   }
 

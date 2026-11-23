@@ -739,7 +739,7 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
 }
 
 // The computer port UI owns its frame-message listener and origin checks.
-export function createSimplex({ api, el, section, actionLine, named, seg, computer, getSeat, titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome }) {
+export function createSimplex({ api, el, actionLine, named, seg, computer, titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh }) {
   // ---- an agent's SimpleX: its link page, a port of its computer's own
   // origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
   // the one-time QR code, and whom it is linked to. Shown in the connector
@@ -756,7 +756,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
       frame.dataset.simplex = agent;
       frame.addEventListener("load", () => nameSimplex(frame));
       // its invitation's QR code, whole, on a wide screen (connector-setup.js)
-      openSetup({ pressed, frame, agent, title: "SimpleX", tall: true, onClose: refreshSimplex });
+      openSetup({ pressed, frame, agent, title: "SimpleX", tall: true, onClose: refresh });
     } catch (e) {
       notice("SimpleX did not open", e.message);
     } finally {
@@ -800,100 +800,86 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     frame.contentWindow?.postMessage(reply, e.origin);
   };
   addEventListener("message", onMessage);
-  // Settings' SimpleX: each agent's link, on an always-on computer. Only on
-  // a computer whose image does SimpleX (its view's `simplex`: its bridge
-  // said so); on any other, the section is hidden, nav link and all. It
-  // follows the view while Settings are shown (`refreshSimplex`), with
-  // nothing else on the page redrawn.
-  function simplexSection() {
-    const s = section("SimpleX");
-    s.id = "settings-simplex";
-    fillSimplex(s);
-    return s;
-  }
-  const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => [a.fragment, simplexChatOf(a.fragment)?.name ?? null]), getSeat()?.good, getSeat()?.kind, getSeat()?.sleeps]);
-  // A computer's view read again (its list's socket told of a change): the
-  // section shown, changed or hidden as the view now says.
-  function refreshSimplex() {
-    const s = document.getElementById("settings-simplex");
-    if (s && s.dataset.key !== simplexKey(computer())) fillSimplex(s);
-  }
-  function fillSimplex(s) {
-    const c = computer();
-    s.replaceChildren(...s.querySelectorAll(":scope > h2"));
-    s.dataset.key = simplexKey(c);
-    s.hidden = !c?.simplex;
-    const jump = document.querySelector('.settings-nav-link[data-section="settings-simplex"]');
-    if (jump) jump.hidden = s.hidden;
-    if (s.hidden) return;
-    const agents = c.agents ?? [];
-    // what it is, a word each (Paul, 2026-10-31), beside Telegram's
-    // "Less secure" (templates/telegram): not in the heading, which names
-    // its nav link
-    const tags = el("div", "connector-tags");
-    const secure = el("span", "role-tag connector-tag", "Secure");
-    secure.title = "End-to-end encrypted to your computer";
-    tags.append(el("span", "role-tag connector-tag", "Experimental"), secure);
-    s.append(tags, el("p", "muted", "Message your agents from SimpleX Chat."));
-    if (!agents.length) {
-      s.append(el("p", "muted", "Make an agent first."));
-      return;
+  // An agent's SimpleX on its computer, where its computer keeps it: an
+  // always-on computer whose image does SimpleX (its view's `simplex`: its
+  // bridge said so), with its links and a moved chat to keep there
+  // (FIN-463), until they move to doors (D4). Its row: Set up, its
+  // computer's link page, and Open once it has its SimpleX chat (its
+  // computer makes one as its link is made: the list says so, never a
+  // guess). Anywhere else, none: Settings' SimpleX is its connector's
+  // (createConnector's `SIMPLEX`), on every seat.
+  const onComputer = () => !!(computer()?.simplex && computer()?.alwaysOn);
+  function computerRow(a) {
+    if (!onComputer()) return null;
+    const go = el("button", "row", "Set up");
+    go.type = "button";
+    go.dataset.simplexFor = a.fragment;
+    go.dataset.simplexComputer = "";
+    go.onclick = () => openSimplex(a.fragment);
+    const actions = [go];
+    const chat = simplexChatOf(a.fragment);
+    if (chat) {
+      const open = el("button", "row", "Open");
+      open.type = "button";
+      open.dataset.simplexOpen = chat.name;
+      open.onclick = () => openChat(chat.name);
+      actions.unshift(open);
     }
-    if (!c.alwaysOn) {
-      // an always-on seat whose holder let its computer sleep (Billing's
-      // checkbox) is told how to take it back; anyone else, what keeps it on
-      const seat = getSeat();
-      const chose = seat?.good && seat.kind === "seat_always_on" && seat.sleeps;
-      s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Turn off "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
-      return;
-    }
-    // Set up, and Open once it has its SimpleX chat (its computer makes
-    // one as its link is made: the list says so, never a guess)
-    for (const a of agents) {
-      const go = el("button", "row", "Set up");
-      go.type = "button";
-      go.dataset.simplexFor = a.fragment;
-      go.onclick = () => openSimplex(a.fragment);
-      const actions = [go];
-      const chat = simplexChatOf(a.fragment);
-      if (chat) {
-        const open = el("button", "row", "Open");
-        open.type = "button";
-        open.dataset.simplexOpen = chat.name;
-        open.onclick = () => openChat(chat.name);
-        actions.unshift(open);
-      }
-      s.append(actionLine(named(el("span"), a.fragment), ...actions));
-    }
+    return markOffer(actionLine(named(el("span"), a.fragment), ...actions), a.fragment, "doors");
   }
-  return { simplexSection, refreshSimplex, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
+  // what its rows are drawn from: a change redraws the section
+  const computerKey = () => JSON.stringify([onComputer(), (computer()?.agents ?? []).map((a) => [a.fragment, simplexChatOf(a.fragment)?.name ?? null])]);
+  return { computerRow, computerKey, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
 }
 
-// Settings' Telegram (templates/telegram/README.md): each agent's Telegram
-// chat, a connector of the person's own and a hosted door (docs/api.md, "An
+// Settings' connectors, Telegram's and SimpleX's (templates/telegram,
+// templates/simplex: their READMEs): each agent's chat on that messenger,
+// a connector of the person's own and a hosted door (docs/api.md, "An
 // agent's doors"), for an agent whose runtime takes one (agent-runtimes.js
-// `doors`). Its row: Set up, its connector's own setup page in the connector
-// setup dialog (connector-setup.js), a connector made first and bound as
-// the agent's door when it has none; and, with one, Open, its chat.
-// Setting up again is how a person reconnects (a new token, on that page).
+// `doors`), on any seat. Its row: Set up, its connector's own setup page in
+// the connector setup dialog (connector-setup.js), a connector made first
+// and bound as the agent's door when it has none; and, with one, Open, its
+// chat. Setting up again is how a person reconnects (a new token, a new
+// link, on that page). Where its computer keeps an agent's SimpleX
+// (createSimplex `computerRow`), its row is that one instead.
 // Which chat is whose is read, never assumed: each of the person's own
 // chats with reach (a door is reach: reach.rs) and each this page bound,
-// its door as its owner reads it (`GET /api/f/{name}/door`), as Settings
-// opens, as the list's chats with reach change, and again as Set up is
-// pressed, the list read anew first (another tab may have made one since,
-// which this page's list may not show yet). Its doors are the latest
-// read's, whole, or none: while that read failed (or the list was not
-// read) its rows say Try again, which reads the list again first.
+// its door as its owner reads it (`GET /api/f/{name}/door`), once for
+// every connector, as Settings opens, as the list's chats with reach
+// change, and again as Set up is pressed, the list read anew first
+// (another tab may have made one since, which this page's list may not
+// show yet). Its doors are the latest read's, whole, or none: while that
+// read failed (or the list was not read) its rows say Try again, which
+// reads the list again first.
 // A connector Set up makes whose binding is refused (a 4xx) is deleted
 // again; one whose binding's answer was lost is read: bound to its agent,
 // it is set up; bound to another meanwhile (its owner, elsewhere), kept as
 // theirs; not bound, deleted; unreadable, kept (its row finds it once its
 // door reads). So a press never deletes one it could not account for.
-export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load }) {
-  const DOOR = "telegram";
-  const TITLE = "Telegram";
-  const SETUP = "/setup.html";
-  const BOT_KEY = "TELEGRAM_BOT_TOKEN";
+
+// Each connector: its door (its template's), its name, its section's line,
+// what it is (a tag each, beside "Experimental": Paul, 2026-10-31,
+// literally so), and its setup page for an agent (`name`, as Settings
+// names it). Telegram's offers a bot its owner's Vault holds (`vault`: its
+// host); SimpleX's page shows a QR code (`tall`).
+export const TELEGRAM = {
+  door: "telegram",
+  title: "Telegram",
+  said: "Message your agents from Telegram.",
+  tag: ["Less secure", "Telegram's servers can read these messages"],
+  setup: () => "/setup.html",
+  vault: { host: "api.telegram.org", key: "TELEGRAM_BOT_TOKEN" },
+};
+export const SIMPLEX = {
+  door: "simplex",
+  title: "SimpleX",
+  said: "Message your agents from SimpleX Chat.",
+  tag: ["Secure", "SimpleX's servers can't read these messages"],
+  setup: (name) => `/setup.html?name=${encodeURIComponent(name)}`,
+  tall: true,
+};
+
+export function createConnectors({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow = () => null, computerKey = () => "" }) {
   // each read connector's door by its name ({door, agent}, or null), as the
   // latest read says; null while it has not answered whole
   let doors = null;
@@ -901,12 +887,12 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   const bound = new Set();
   // the chats with reach the last read asked about
   let asked = "";
-  // the agents whose Set up is under way
+  // each Set up under way: its door and its agent
   const making = new Set();
   const agentsNow = () => computer()?.agents ?? [];
   const reaching = () => [...new Set([...fragments().filter((f) => own(f) && f.kind === "chat" && f.sharing?.reach === true).map((f) => f.name), ...bound])].sort();
   // Its doors read now; whether that read answered whole (and is the latest).
-  async function readTelegram() {
+  async function readDoors() {
     const mine = ++reads;
     // a list not read is no word that no chat is a connector
     if (!listed()) {
@@ -922,19 +908,21 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
     doors = whole ? new Map(answers) : null;
     return whole;
   }
-  // the connector bound as `agent`'s Telegram door, if any
-  const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
+  // the connector bound as `agent`'s `door`, if any
+  const boundOf = (door, agent) => [...(doors ?? [])].find(([, b]) => b?.door === door && b.agent === agent)?.[0] ?? null;
   // its setup page, offering the bot token its owner's Vault holds for
-  // `agent` (a bot moved from finite.computer, FIN-463 F11): a secret bound
-  // to it toward api.telegram.org alone. A Vault not read offers none
-  async function openConnector(pressed, name, agent) {
-    const vault = await api("GET", "/api/vault").then((v) => v.secrets ?? [], () => []);
-    const bot = vault.find((v) => v.hosts?.length === 1 && v.hosts[0] === "api.telegram.org" && v.agents?.includes(agent));
-    const src = bot ? `${SETUP}?vault=${encodeURIComponent(bot.name)}` : SETUP;
-    const frame = frameOf(framed(name, src), `${TITLE} setup`, name);
-    const opened = openSetup({ pressed, src: framed(name, src), name, agent, frame, title: TITLE, onClose: () => { offers.delete(frame); refreshTelegram(true); } });
+  // `agent` where its kind takes one (Telegram's, a bot moved from
+  // finite.computer, FIN-463 F11): a secret bound to it toward that host
+  // alone. A Vault not read offers none
+  async function openConnector(kind, pressed, name, agent) {
+    const vault = kind.vault ? await api("GET", "/api/vault").then((v) => v.secrets ?? [], () => []) : [];
+    const bot = vault.find((v) => v.hosts?.length === 1 && v.hosts[0] === kind.vault.host && v.agents?.includes(agent));
+    const page = kind.setup(titleOf(agent));
+    const src = bot ? `${page}${page.includes("?") ? "&" : "?"}vault=${encodeURIComponent(bot.name)}` : page;
+    const frame = frameOf(framed(name, src), `${kind.title} setup`, name);
+    const opened = openSetup({ pressed, src: framed(name, src), name, agent, frame, title: kind.title, tall: !!kind.tall, onClose: () => { offers.delete(frame); refreshConnectors(true); } });
     // the offer its page's Use it asks the shell to move (`onVaultMove`)
-    if (opened && bot) offers.set(frame, { name, vault: bot.name, hosts: bot.hosts });
+    if (opened && bot) offers.set(frame, { name, vault: bot.name, hosts: bot.hosts, key: kind.vault.key });
   }
   // Each setup frame's offer: the Vault bot Settings found for its agent
   // and the connector it opened. A page may not move a Vault secret itself
@@ -951,7 +939,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
     if (!offer || e.origin !== originAt(offer.name)) return;
     const reply = { fragment: KIND.vaultMove, nonce: e.data.nonce, ok: false };
     try {
-      await api("PUT", `/api/f/${seg(offer.name)}/secrets/${BOT_KEY}`, { fromVault: offer.vault, hosts: offer.hosts });
+      await api("PUT", `/api/f/${seg(offer.name)}/secrets/${offer.key}`, { fromVault: offer.vault, hosts: offer.hosts });
       reply.ok = true;
     } catch (err) {
       reply.status = err.status;
@@ -964,91 +952,93 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   // reads: the binding to `agent`; a refusal, or no binding, throws (the
   // connector deleted), and so do a read that fails and a binding to
   // another agent (`keep`: the connector is left be).
-  async function bind(name, agent) {
+  async function bind(door, name, agent) {
     try {
       return await api("POST", `/api/f/${seg(name)}/door`, { act: "link", agent });
     } catch (e) {
       if (e.status >= 400 && e.status < 500) throw e;
       const now = await api("GET", `/api/f/${seg(name)}/door`).then((r) => r.bound ?? null, () => undefined);
       if (now === undefined) throw Object.assign(new Error("Couldn't tell whether it was set up. Try again."), { keep: true });
-      if (now?.door === DOOR && now.agent === agent) return now;
+      if (now?.door === door && now.agent === agent) return now;
       if (now) throw Object.assign(new Error("It was linked to another agent meanwhile."), { keep: true });
       throw e;
     }
   }
-  async function setUp(agent) {
-    if (making.has(agent)) return;
-    making.add(agent);
+  async function setUp(kind, agent) {
+    const key = `${kind.door} ${agent}`;
+    if (making.has(key)) return;
+    making.add(key);
     const pressed = pressSetup();
-    refreshTelegram();
+    refreshConnectors();
     let made = null;
     try {
       // the list read anew, then its doors: a connector another tab made is
       // found, whatever this page's list said (a list that fails, none made)
       await load().catch(() => {});
-      if (!(await readTelegram())) throw new Error("Couldn't read your Telegram chats. Try again.");
-      const connector = boundOf(agent);
+      if (!(await readDoors())) throw new Error(`Couldn't read your ${kind.title} chats. Try again.`);
+      const connector = boundOf(kind.door, agent);
       if (connector) {
-        await openConnector(pressed, connector, agent);
+        await openConnector(kind, pressed, connector, agent);
         return;
       }
-      made = await api("POST", "/api/fragments", { label: connectorLabel(agent, DOOR), template: DOOR });
+      made = await api("POST", "/api/fragments", { label: connectorLabel(agent, kind.door), template: kind.door });
       bound.add(made.name);
-      const door = await bind(made.name, agent);
+      const door = await bind(kind.door, made.name, agent);
       reads++;
       doors = new Map(doors ?? []);
       doors.set(made.name, { door: door.door, agent: door.agent });
       // the list read first, so its chat is under its agent as its setup opens
       await load().catch(() => {});
-      await openConnector(pressed, made.name, agent);
+      await openConnector(kind, pressed, made.name, agent);
     } catch (e) {
       if (made && !e.keep) {
         bound.delete(made.name);
         await api("DELETE", `/api/f/${seg(made.name)}`).catch(() => {});
       }
-      notice("Telegram was not set up", e.message);
+      notice(`${kind.title} was not set up`, e.message);
     } finally {
-      making.delete(agent);
-      await refreshTelegram();
+      making.delete(key);
+      await refreshConnectors();
     }
   }
   // Try again: the list first when it was not read, then the doors
   async function again() {
     if (!listed()) await load().catch(() => {});
-    await refreshTelegram(true);
+    await refreshConnectors(true);
   }
-  function telegramSection() {
-    const s = section(TITLE);
-    s.id = "settings-telegram";
+  const sectionId = (kind) => `settings-${kind.door}`;
+  function sectionOf(kind) {
+    const s = section(kind.title);
+    s.id = sectionId(kind);
     // hidden, nav link and all, with none of its rows shown (agent-runtimes.js `renderOffers`)
     s.dataset.offers = "";
-    fillTelegram(s);
+    fill(kind, s);
     return s;
   }
-  const telegramKey = () => JSON.stringify([agentsNow().map((a) => a.fragment), doors && [...doors], [...making]]);
-  function fillTelegram(s) {
+  const keyOf = (kind) => JSON.stringify([agentsNow().map((a) => a.fragment), doors && [...doors], [...making], kind === SIMPLEX ? computerKey() : ""]);
+  function fill(kind, s) {
     s.replaceChildren(...s.querySelectorAll(":scope > h2"));
-    s.dataset.key = telegramKey();
-    // what it is, a word each, as on its setup page (Paul, 2026-10-31):
-    // less secure, literally, as Telegram's servers read its messages
+    s.dataset.key = keyOf(kind);
     const tags = el("div", "connector-tags");
-    const less = el("span", "role-tag connector-tag", "Less secure");
-    less.title = "Telegram's servers can read these messages";
-    tags.append(el("span", "role-tag connector-tag", "Experimental"), less);
-    s.append(tags, el("p", "muted", doors ? "Message your agents from Telegram." : "Couldn't read your Telegram chats."));
+    const what = el("span", "role-tag connector-tag", kind.tag[0]);
+    what.title = kind.tag[1];
+    tags.append(el("span", "role-tag connector-tag", "Experimental"), what);
+    s.append(tags, el("p", "muted", doors ? kind.said : `Couldn't read your ${kind.title} chats.`));
     const rows = agentsNow().map((a) => {
-      const connector = boundOf(a.fragment);
-      const busy = making.has(a.fragment);
+      const its = kind === SIMPLEX ? computerRow(a) : null;
+      if (its) return its;
+      const connector = boundOf(kind.door, a.fragment);
+      const busy = making.has(`${kind.door} ${a.fragment}`);
       const go = el("button", "row", busy ? "Setting up…" : doors ? "Set up" : "Try again");
       go.type = "button";
       go.disabled = busy;
-      go.dataset.telegramFor = a.fragment;
-      go.onclick = () => (doors ? setUp(a.fragment) : again());
+      go.dataset[`${kind.door}For`] = a.fragment;
+      go.onclick = () => (doors ? setUp(kind, a.fragment) : again());
       const actions = [go];
       if (connector) {
         const open = el("button", "row", "Open");
         open.type = "button";
-        open.dataset.telegramOpen = connector;
+        open.dataset[`${kind.door}Open`] = connector;
         open.onclick = () => openChat(connector);
         actions.unshift(open);
       }
@@ -1056,17 +1046,20 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
     });
     s.append(...rows);
     s.hidden = !rows.some((r) => !r.hidden);
-    const jump = document.querySelector('.settings-nav-link[data-section="settings-telegram"]');
+    const jump = document.querySelector(`.settings-nav-link[data-section="${sectionId(kind)}"]`);
     if (jump) jump.hidden = s.hidden;
   }
-  // The section drawn again as its view and doors now say, while Settings
-  // show it; its doors read first when asked (`read`) or when the list's
-  // chats with reach changed since they were.
-  async function refreshTelegram(read = false) {
-    if (!document.getElementById("settings-telegram")) return;
-    if (read || (listed() && JSON.stringify(reaching()) !== asked)) await readTelegram();
-    const s = document.getElementById("settings-telegram");
-    if (s && s.dataset.key !== telegramKey()) fillTelegram(s);
+  // The sections drawn again as their view and doors now say, while
+  // Settings show them; the doors read first when asked (`read`) or when
+  // the list's chats with reach changed since they were.
+  async function refreshConnectors(read = false) {
+    const shown = [TELEGRAM, SIMPLEX].filter((kind) => document.getElementById(sectionId(kind)));
+    if (!shown.length) return;
+    if (read || (listed() && JSON.stringify(reaching()) !== asked)) await readDoors();
+    for (const kind of shown) {
+      const s = document.getElementById(sectionId(kind));
+      if (s && s.dataset.key !== keyOf(kind)) fill(kind, s);
+    }
   }
-  return { telegramSection, refreshTelegram, readTelegram };
+  return { telegramSection: () => sectionOf(TELEGRAM), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors };
 }

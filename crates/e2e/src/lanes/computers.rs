@@ -2742,6 +2742,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             // SimpleX's connector, on a door (run by name: its stack builds the door's image)
             let sx = super::simplex_door::Agent { owner: &owner, owner_id: &owner_id, computer: &id, agent: &agent_name, identity: &identity, wake };
             super::simplex_door::connector(s, api, &sx)?;
+            // and set up from Settings, its connector's (D3)
+            super::simplex_setup::from_settings(s, api, &sx)?;
         }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
