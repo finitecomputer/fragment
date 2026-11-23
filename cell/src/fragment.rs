@@ -958,6 +958,31 @@ impl FragmentCell {
         })
     }
 
+    /// Whom a request acts as here: as the router named it, but an
+    /// agent's for its owner where its owner holds no membership and it
+    /// holds one is its own (`permit::acts_as_itself`): from here it reads,
+    /// acts and is named as the agent alone, as if it had signed without
+    /// `for`, so an app is never told its owner with the agent's role.
+    fn as_whom(&self, signed: Option<Signed>) -> CellResult<Option<Signed>> {
+        let Some(mut signed) = signed else { return Ok(None) };
+        let Some(owner) = signed.acting_for.as_deref() else { return Ok(Some(signed)) };
+        #[derive(serde::Deserialize)]
+        struct Row {
+            owner: Option<String>,
+            agent: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT (SELECT role FROM members WHERE principal = ?) AS owner, (SELECT role FROM members WHERE principal = ?) AS agent",
+            vec![owner.into(), signed.id.as_str().into()],
+        )?;
+        let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
+        let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
+        if permit::acts_as_itself(role(row.owner), role(row.agent)) {
+            signed.acting_for = None;
+        }
+        Ok(Some(signed))
+    }
+
     /// Whether the caller sees the fragment as themselves (a member, or an
     /// agent's owner), not by its link or its visibility: their sockets are
     /// tagged `p:<id>` and close when that standing is revoked.
@@ -1138,7 +1163,7 @@ impl FragmentCell {
                 return Err(CellError::new(ErrorCode::NotFound, "the app at this address has ended"));
             }
         }
-        let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
+        let caller = Caller { signed: self.as_whom(signed)?, unresolved: credential, url, site: path.starts_with("/serve/") };
         // every request the router hands a fragment is its owner's to pay for
         self.count_request().await;
         self.meter_soon().await;

@@ -23,7 +23,18 @@
 //!    `editor`. The owner's part is the owner's own role capped at
 //!    `editor`, not `editor` outright: an agent never reaches further than
 //!    its owner could, so a key that signs `for` someone else gains nothing
-//!    its owner does not hold.
+//!    its owner does not hold. **Where its owner is not in**, and it is,
+//!    a request it signs for its owner is its own: it acts as itself, with
+//!    its own membership, under its own name (`acts_as_itself`; FIN-615,
+//!    Paul, 2026-11-21: "something that should OBVIOUSLY work is if ben is
+//!    talking to my agent and he asks it to do something with a fragment
+//!    he's shared as an editor on"). An app is never told its owner with a
+//!    role its owner does not hold. The same key reaches that much signing
+//!    as itself, so this reaches no further; and as nothing yet says who
+//!    asked the agent, whoever talks to it reaches it, as they reach its
+//!    owner's access (`TRUST_WARNING`). Once a request proves who asked
+//!    (FIN-615's mandates), an asker other than its owner reaches it only
+//!    through the place's lend.
 //! 4. **A hold** (decision 36): an agent its owner holds below them acts
 //!    with at most its hold with its owner's access, whomever it acts for,
 //!    and as itself where its person is a guest (decision 64: the whole
@@ -510,6 +521,18 @@ pub fn may_act_for(kind: IdentityKind, owner: Option<&str>, named: &str) -> Resu
     }
 }
 
+/// Whether a request an agent signs `for` its own owner is the agent's own
+/// on a fragment (rule 3, where its owner is not in), from their two
+/// memberships there: where its owner holds none and the agent holds one,
+/// that membership is all the request brings, so it acts as itself, under
+/// its own name. Its owner's other standing there (reading through it, a
+/// share link, a visibility floor) is not the agent's to act with. An
+/// agent owning a fragment never does: owning is never an agent's
+/// (`AGENT_ROLE_MAX`), so that stays its owner's request.
+pub fn acts_as_itself(owner: Option<Role>, agent: Option<Role>) -> bool {
+    owner.is_none() && agent.is_some_and(|role| role <= AGENT_ROLE_MAX)
+}
+
 /// Why a membership change is refused, or `None` when it is allowed. Only
 /// the owner manages members (their own agent sharing for them acts with
 /// their role: `agent_shares`); the owner's own row is never changed here
@@ -766,30 +789,47 @@ mod tests {
     /// talking to my agent and he asks it to do something with a fragment
     /// he's shared as an editor on"). Every later change keeps this table
     /// green. Method: each case as the facts its request reads today (the
-    /// agent's terminal signs `for` its owner, Ana, whoever asked), its
-    /// verdict today, and the one it must have. A row whose two differ is
-    /// a known gap, named in `GAPS`: fixing it moves it out of there, and
-    /// a change that breaks any other row fails here.
+    /// agent's terminal signs `for` its owner, Ana, whoever asked; where
+    /// she is not in and it is, the request is its own: `acts_as_itself`),
+    /// its verdict today, and the one it must have. A row whose two differ
+    /// is a known gap, named in `GAPS`: fixing it moves it out of there,
+    /// and a change that breaks any other row fails here. Then whom else
+    /// acting as itself reaches, each with its verdict: nobody past what
+    /// the same agent holds signing as itself.
     #[test]
     fn the_obvious_cases() {
         use Action::{Act, Read};
-        // Juniper is Ana's agent, Fred her second; Ben is in Ana's shared chat
-        let for_ana = |ana: Option<Role>, juniper: Option<Role>| Standing {
-            member: ana,
-            // her agent is in where she is not: she reads through it
-            owns_member_agent: ana.is_none() && juniper.is_some(),
-            link: false,
-            signed: true,
-            cap: Some(Cap { agent: juniper, owner: ana }),
-            ..Standing::default()
+        // Juniper is Ana's agent, Fred her second; Ben is in Ana's shared
+        // chat; the facts as the cell reads them (fragment.rs `standing`,
+        // after `as_whom`)
+        let for_ana = |ana: Option<Role>, juniper: Option<Role>| match acts_as_itself(ana, juniper) {
+            // its own membership, as itself; its person is not in, so none of hers beside it
+            true => Standing { member: juniper, signed: true, ..Standing::default() },
+            false => Standing {
+                member: ana,
+                // her agent is in where she is not: she reads through it
+                owns_member_agent: ana.is_none() && juniper.is_some(),
+                link: false,
+                signed: true,
+                cap: Some(Cap { agent: juniper, owner: ana }),
+                // she is in here, and not its owner
+                beside_person: ana.is_some_and(|r| r != Owner),
+                ..Standing::default()
+            },
         };
-        const GAPS: &[&str] = &["Ben asks Juniper to edit the fragment he shared with it as an editor"];
+        let held = |s: Standing| Standing { held: Some(Viewer), ..s };
+        // Ben's fragment, Juniper an editor of its own and Ana not in it: a
+        // membership from before decision 64 (today an agent comes in only
+        // with its person)
+        let bens = Facts { visibility: V::Members, standing: for_ana(None, Some(Editor)), action: Act(Editor) };
+        const GAPS: &[&str] = &[];
         let rows: &[(&str, Facts, Verdict, Verdict)] = &[
+            ("Ben asks Juniper to edit the fragment he shared with it as an editor", bens, Verdict::Allow(Editor), Verdict::Allow(Editor)),
             (
-                "Ben asks Juniper to edit the fragment he shared with it as an editor",
-                // Ben's fragment: Juniper an editor, Ana not in it
-                Facts { visibility: V::Members, standing: for_ana(None, Some(Editor)), action: Act(Editor) },
-                refused(Editor, Why::Capped, false),
+                "Ben asks Juniper to edit a fragment he invited Ana to as an editor",
+                // her yes brought her agents in beside her, at her role (decisions 63, 64)
+                Facts { visibility: V::Members, standing: for_ana(Some(Editor), Some(Editor)), action: Act(Editor) },
+                Verdict::Allow(Editor),
                 Verdict::Allow(Editor),
             ),
             (
@@ -823,6 +863,39 @@ mod tests {
                 Verdict::Allow(Viewer),
                 Verdict::Allow(Viewer),
             ),
+            // whom else acting as itself reaches
+            (
+                "Carol, in Ana's chat and not in Ben's fragment, asks Juniper to edit it",
+                // the same request as Ben's: until a mandate says who asked
+                // (PR 6), whoever talks to Juniper reaches what it does, as
+                // with all of Ana's own access today (`TRUST_WARNING`); then
+                // the place's lend asks Ana (PR 9)
+                bens,
+                Verdict::Allow(Editor),
+                Verdict::Allow(Editor),
+            ),
+            (
+                "Ana holds Juniper at viewer, and Ben asks it to edit the fragment he shared with it",
+                // a hold limits what it does with Ana's access, never its own
+                // memberships (decision 36), as signing as itself
+                Facts { standing: held(bens.standing), ..bens },
+                Verdict::Allow(Editor),
+                Verdict::Allow(Editor),
+            ),
+            (
+                "Juniper is in beside Ana, a viewer, and held: for her it never edits",
+                // she is in, so it acts for her (R17), and her guest standing secures the whole entity (decision 64)
+                Facts { visibility: V::Members, standing: held(for_ana(Some(Viewer), Some(Editor))), action: Act(Editor) },
+                refused(Editor, Why::Capped, false),
+                refused(Editor, Why::Capped, false),
+            ),
+            (
+                "Ana, signed in herself, still only reads Ben's fragment through Juniper",
+                Facts { visibility: V::Members, standing: Standing { owns_member_agent: true, signed: true, ..Standing::default() }, action: Act(Editor) },
+                refused(Editor, Why::ThroughAgent, false),
+                refused(Editor, Why::ThroughAgent, false),
+            ),
+            ("Juniper, for Ana, never owns Ben's fragment", Facts { action: Act(Owner), ..bens }, refused(Owner, Why::Short, false), refused(Owner, Why::Short, false)),
         ];
         for &(case, facts, today, target) in rows {
             assert_eq!(decide(&facts), today, "{case}: today");
@@ -830,7 +903,37 @@ mod tests {
         }
         assert!(GAPS.iter().all(|gap| rows.iter().any(|(case, ..)| case == gap)), "every gap is a row");
         // and what Ana could do herself through Fred includes sharing what she owns
-        assert_eq!(agent_shares(Sharer { for_owner: true, held: None }, Some(Owner)), Ok(Owner), "Fred shares Ana's app for her");
+        let for_ana = Sharer { for_owner: true, held: None };
+        assert_eq!(agent_shares(for_ana, Some(Owner)), Ok(Owner), "Fred shares Ana's app for her");
+        // and Juniper never deletes Ben's fragment or sets its cap, for Ana
+        // (the router refuses), nor shares it: its request there is its own,
+        // and as itself it shares nothing
+        assert_eq!(agent_may_ask(Reserved::Dangerous, for_ana), Err(ShareRefusal::Dangerous), "nor deletes it or sets its cap");
+        assert_eq!(agent_shares(Sharer { for_owner: false, held: None }, None), Err(ShareRefusal::NotForOwner), "nor shares it");
+    }
+
+    /// Goal: rule 3's "where its owner is not in": a request an agent
+    /// signs for its owner is its own only where its owner holds no
+    /// membership and it holds one, at most an editor's. Method: valid, its
+    /// owner out and it in at viewer or editor; invalid, its owner in at any
+    /// role (R17 as ever, whatever the agent's), neither in, and an agent
+    /// that owns the fragment; decided twice, the same.
+    #[test]
+    fn where_its_owner_is_not_in_an_agent_acts_as_itself() {
+        let rows = [
+            (None, Some(Editor), true, "its owner out, it an editor: its own"),
+            (None, Some(Viewer), true, "its owner out, it a viewer: its own"),
+            (None, None, false, "neither in: its owner's request, which reaches what the visibility gives"),
+            (Some(Viewer), Some(Editor), false, "its owner in, a viewer: for its owner, capped (R17)"),
+            (Some(Editor), Some(Editor), false, "in with its person, at their role: for its owner"),
+            (Some(Owner), Some(Editor), false, "its owner's own fragment: for its owner"),
+            (Some(Editor), None, false, "its owner in, it not: for its owner"),
+            (None, Some(Owner), false, "owning is never an agent's: its owner's request, which reaches nothing there"),
+        ];
+        for (owner, agent, itself, why) in rows {
+            assert_eq!(acts_as_itself(owner, agent), itself, "{why}");
+            assert_eq!(acts_as_itself(owner, agent), acts_as_itself(owner, agent), "{why}: decided again, the same");
+        }
     }
 
     /// Goal: each reason says what the cell said before the rules moved

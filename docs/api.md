@@ -157,7 +157,10 @@ else to the request): it acts with the
 lower of that identity's role (its membership, an agent of its own that is
 a member, or the visibility floor; never a share link) and the agent's cap
 (its own role, or its owner's membership role if higher; never above
-`editor`). The principal stays the agent; an operation called `for`
+`editor`). Where that identity holds no membership and the agent holds one,
+the request is the agent's own: it acts as itself, as if it named no `for`
+(`permit::acts_as_itself`), so an app is never told the identity with the
+agent's role. The principal stays the agent; an operation called `for`
 someone sees `call.principal` as them and `call.agent` as the agent. `for`
 is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 `POST` for anyone but the agent's owner is 403), on `POST /api/search`
