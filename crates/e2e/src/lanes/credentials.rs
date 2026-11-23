@@ -57,7 +57,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "this month's uses, in the owner's ledger: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
     "no one else reads them (a stranger's are their own, none), and a month is YYYY-MM",
     "a request with no placeholder goes on as it came",
-    "an operator key's call its owner's ledger's gate refuses is refused, and reaches no provider",
+    "at zero credit, a gate that has heard nothing of its owner lets one operator key's call start, asking their ledger beside it, and charges it; the next is refused before it is made, reaching no provider",
     "firecrawl: its SDK header is swapped only at its catalog host",
     "fal: its SDK header is swapped only at its catalog host",
     "browser-use: its SDK header is swapped only at its catalog host",
@@ -527,19 +527,33 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[20], said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
 
     // with the owner's paid calls capped at none (their ledger's gate
-    // refuses as at zero credit), the call is not made; the gate, which
-    // heard the owner within the minute, asks afresh each time
+    // refuses as at zero credit), a gate that has heard nothing of them
+    // (as an isolate made anew) lets one key's call start, asking their
+    // ledger beside it (crate::pipe), and refuses the next before it is made
     let cap = |max: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "paid-calls", "max": max })));
     let capped = cap(0)?;
     forget_gate(api, &owner_id)?;
     let seen_before = s.upstream.seen().len();
-    let refused = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let went = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let taught = super::ledger::gate_hears(s, api, &owner_id, "refused");
+    let seen_went = s.upstream.seen().len();
+    let refused = say(s, 127, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let unreached = s.upstream.seen().len() == seen_went;
     let uncapped = cap(u64::from(u32::MAX))?;
     forget_gate(api, &owner_id)?;
+    let charged_once = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows + 1);
     s.ok(
         SWAP_CHECKS[21],
-        capped.status == 200 && uncapped.status == 200 && refused.starts_with("fetched 402") && refused.contains("perplexity's call is not made") && s.upstream.seen().len() == seen_before && held().len() == held_rows,
-        json!({ "refused": refused, "capped": capped.body }),
+        capped.status == 200
+            && uncapped.status == 200
+            && went.starts_with("fetched 200")
+            && seen_went == seen_before + 1
+            && taught
+            && refused.starts_with("fetched 402")
+            && refused.contains("perplexity's call is not made")
+            && unreached
+            && charged_once,
+        json!({ "went": went, "refused": refused, "capped": capped.body }),
     );
 
     // its owner's hourly cap on a shared key (FIN-448), held where the
@@ -567,7 +581,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let unreached = s.upstream.seen().len() == seen_before;
     let other = say(s, 158, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let went = other.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|l| l["host"] == "api.perplexity.ai");
-    let uncharged = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows + calls as usize + 1) && eleven_calls() == counted_before + calls as u64;
+    let uncharged = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows + 1 + calls as usize + 1) && eleven_calls() == counted_before + calls as u64;
     s.ok(
         SWAP_CHECKS[39],
         spoke.iter().all(|said| said.starts_with("fetched 200"))

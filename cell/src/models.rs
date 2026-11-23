@@ -2,19 +2,14 @@
 //! cloudflare/agents" 7 and 8; spike S4): one OpenAI-shaped chat
 //! completion on a route's model, metered on its payer's ledger.
 //!
-//! Every call asks the gate first (ledger.rs `may`, decision 62): its
-//! payer's standing as this isolate heard it within the minute, so it waits
-//! on no ledger in the common case, and only a person out of credit (or a
-//! capped caller past a fragment's cap) is refused; a ledger that does not
-//! answer refuses nothing. Then it is made, bounded
-//! (`fragment_core::models`: the route's model, the capped `max_tokens`,
-//! its `reasoning_effort` clamped, none of the client's headers), and
-//! charged after its answer, never in its way: its last, cumulative usage
-//! (input less what was cached) as one meter row under a reference of its
-//! own (`aig:<hex>`), sent to the payer's ledger on the ledger's queue
-//! (meter.rs `charge`). A call the model refused or that never reached it
-//! used nothing, and is charged nothing; one that reported no usage (its
-//! stream broke) is charged nothing too, said aloud (`ledger.unknown-usage`).
+//! Every call goes through the pipe (crate::pipe): gated beside it, then
+//! made, bounded (`fragment_core::models`: the route's model, the capped
+//! `max_tokens`, its `reasoning_effort` clamped, none of the client's
+//! headers), and charged after its answer, never in its way: its last,
+//! cumulative usage (input less what was cached) as one meter row under a
+//! reference of its own (`aig:<hex>`). A call the model refused or that
+//! never reached it used nothing, and is charged nothing; one that
+//! reported no usage (its stream broke) is charged nothing too, said aloud.
 //! A stream is charged at its `[DONE]`, not at its end: the gateway has held
 //! one open ~150 s after its answer. Nothing of the request or its answer
 //! is kept: only the usage, on the ledger, and the call's timing on its
@@ -83,7 +78,6 @@
 //! as `route`, charged at the input tokens it counted; no fallback (a
 //! decision's answer is its model's).
 
-use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
 use fragment_core::{decide, embed, multipart, transcribe};
@@ -97,7 +91,6 @@ use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::calls::{Call, Whose};
-use crate::ledger::{self, FragmentOpen, MaySpend};
 use crate::{js, read_body};
 
 /// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
@@ -166,15 +159,11 @@ fn refused(why: bounds::Refusal) -> CellError {
     CellError::invalid(why.message())
 }
 
-/// A call's charge, after its answer: who pays, under which reference,
-/// where, and the call's timing for its log line.
+/// A call's charge, after its answer: its bill (crate::pipe), and the
+/// call's timing for its log line.
 struct Charge {
     env: Env,
-    payer: String,
-    reference: String,
-    agent: Option<String>,
-    /// The payer's own fragment the call is in: its month's spend counts it.
-    fragment: Option<String>,
+    bill: crate::pipe::Bill,
     /// The model whose answer the call's is (the fallback's, when it fell back).
     model: &'static str,
     /// What the call named: a route, an alias, a slot, `whisper` or `decide`.
@@ -189,24 +178,18 @@ struct Charge {
 }
 
 impl Charge {
-    /// The call's end, charged once by its reference (meter.rs `charge`): its
-    /// usage, priced by the payer's ledger. A call that reported none is
-    /// charged nothing, said aloud: billing never stops an agent (decision
-    /// 62). Its log line says its timing (docs/api.md, Models: a latency
-    /// lane reads it).
+    /// The call's end, charged through the pipe (`pipe::settle`): its
+    /// usage, priced by the payer's ledger, or none, charged nothing. Its
+    /// log line says its timing (docs/api.md, Models: a latency lane
+    /// reads it).
     async fn charge(self, usage: Option<Usage>, log_id: Option<String>) {
         let ms = js::now_ms() - self.t0;
         // one line per event: `wrangler tail` drops lines (lesson 14)
         console_log!(
             "{}",
-            json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "usage": usage, "first_ms": self.first_ms, "ms": ms, "calls": self.calls })
+            json!({ "event": "model.settled", "ref": self.bill.reference, "logId": log_id, "tier": self.name, "model": self.model, "usage": usage, "first_ms": self.first_ms, "ms": ms, "calls": self.calls })
         );
-        let Some(usage) = usage else {
-            console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "why": "the call reported no usage: charged nothing" }));
-            return;
-        };
-        let row = MeterRow { reference: self.reference, usage, fragment: self.fragment, agent: self.agent, computer: None, at_ms: js::now_ms() };
-        crate::meter::charge(&self.env, &self.payer, vec![row]).await;
+        crate::pipe::settle(&self.env, vec![(self.bill, usage)]).await;
     }
 
     /// `charge`, as work after the answer.
@@ -215,33 +198,12 @@ impl Charge {
     }
 }
 
-/// Asks the gate whether `payer` may make an agent's call (ledger.rs `may`:
-/// what this isolate heard within the minute; a ledger that does not
-/// answer refuses nothing), and the call's charge. Whose cap applies: the
-/// payer's own fragment's, on its ledger; another owner's, asked of
-/// theirs, unless the spender is that owner's (decision 26). The two are
-/// asked side by side (`gate::asked_together`), the payer's refusal said
-/// first, and off the call's path (`ledger::may_beside`): the call waits
-/// on a ledger only when this isolate last heard that question refused.
+/// Asks the pipe's gate whether `payer` may make an agent's call
+/// (`pipe::gate`, beside it), and the call's charge.
 async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str, after: &dyn Background) -> CellResult<Charge> {
-    let own = fragment.filter(|f| f.owner == payer);
-    let capped = own.filter(|f| !f.by_owner).map(|f| f.name.to_string());
-    let may = MaySpend { spend: Spend::AgentTurn, by_owner: capped.is_none(), fragment: capped };
-    let open = fragment.filter(|f| f.owner != payer && !f.by_owner).map(|f| (f.owner, FragmentOpen { fragment: f.name.to_string() }));
-    let theirs = open.as_ref().map(|(owner, open)| ledger::may_beside(env, owner, open, after));
-    fragment_core::ledger::gate::asked_together(ledger::may_beside(env, payer, &may, after), theirs).await?;
-    Ok(Charge {
-        env: env.clone(),
-        payer: payer.to_string(),
-        reference: format!("aig:{}", js::random_hex::<16>()),
-        agent: agent.map(str::to_string),
-        fragment: own.map(|f| f.name.to_string()),
-        model,
-        name,
-        t0: js::now_ms(),
-        calls: 1,
-        first_ms: None,
-    })
+    let fragment = crate::pipe::gate(env, payer, fragment, after).await?;
+    let bill = crate::pipe::Bill { payer: payer.to_string(), reference: format!("aig:{}", js::random_hex::<16>()), agent: agent.map(str::to_string), fragment, computer: None };
+    Ok(Charge { env: env.clone(), bill, model, name, t0: js::now_ms(), calls: 1, first_ms: None })
 }
 
 /// The bytes `body` encodes to, counted as it is written, not kept: a body
@@ -846,7 +808,7 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     // its shape, never its words (`transcribe::shape`): logged, and told
     // the client (`ANSWER_SHAPE_HEADER`)
     let shape = transcribe::shape(&whisper);
-    console_log!("{}", json!({ "event": "model.transcribed", "ref": charge.reference, "shape": shape, "bytes": answer.len() }));
+    console_log!("{}", json!({ "event": "model.transcribed", "ref": charge.bill.reference, "shape": shape, "bytes": answer.len() }));
     charge.later(after, transcribe::usage_of(&whisper), log_id);
     let Some((kind, out)) = transcribe::answer(bounded.format, &whisper) else {
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's transcription carried no text"));

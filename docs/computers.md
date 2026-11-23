@@ -1033,7 +1033,9 @@ provider's own hosts.
   not name, forged or naming an agent not on this computer now, of a
   provider its agent was narrowed from, or of a connection not connected
   or an own key not given (403 `not_connected`); and an operator key's
-  when its owner's gate refuses (402, 403). A body goes as it came, and a
+  when its owner's gate, asked beside the call as for a model call, has
+  heard them refused (402, 403; docs/ledger.md, "The gate"). A body goes
+  as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
 - **Calls an operator key never goes on.** Every agent shares an operator

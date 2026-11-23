@@ -82,11 +82,13 @@ const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// or far ledger costs a call at most this, once a minute, and one that
 /// does not answer lets the call through (decision 62).
 const GATE_WAIT_MS: u64 = 1_500;
-/// How long an ask beside a model call waits on a ledger (`may_beside`):
-/// no call waits on it, so longer than `GATE_WAIT_MS`, a slow ledger's
-/// answer still kept for the next call; within the 30 s a Worker keeps a
-/// request's `waitUntil` work alive after its answer.
-const BESIDE_WAIT_MS: u64 = 20_000;
+/// How long an ask beside a paid call waits on a ledger (`may_beside`):
+/// longer than `GATE_WAIT_MS`, a slow ledger's answer still kept for the
+/// next call; within the 30 s a Worker keeps a request's `waitUntil` work
+/// alive after its answer. The gate marks its question asked as long
+/// (`gate::ASKING_MS`, this value).
+const BESIDE_WAIT_MS: u64 = fragment_core::ledger::gate::ASKING_MS.unsigned_abs();
+const _: () = assert!(GATE_WAIT_MS < BESIDE_WAIT_MS, "an ask beside a call outlasts a call's own wait");
 
 thread_local! {
     /// What each person's ledger last answered this isolate's gate (`may`).
@@ -1329,7 +1331,7 @@ pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R)
 /// or undoes a call already started.
 pub async fn may_beside<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R, after: &dyn crate::models::Background) -> Result<(), LedgerError> {
     let body = serde_json::to_string(question).expect("a gate's question serializes");
-    match GATE.with(|g| g.borrow().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
+    match GATE.with(|g| g.borrow_mut().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
         Step::Go => Ok(()),
         Step::Refuse(why) => Err(why.into()),
         Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await,

@@ -256,13 +256,18 @@ own refusal stops a spend. A ledger that does not answer, or answers
 otherwise, lets the spend start (`ledger.gate-unknown`) and is asked
 again next time.
 
-**A model call waits on no ledger** (Paul, 2026-11-01: "prioritize user
-experience over nickel-and-diming"; `ledger::may_beside`). A fresh
+**An agent's paid call waits on no ledger** (2026-11-01: "prioritize
+user experience over nickel-and-diming"; `ledger::may_beside`):
+its model calls and its calls on an operator key alike go through the
+pipe (`cell/src/pipe.rs`), one gate and one charge. A fresh
 answer answers it at once, a refusal refusing it before its vendor call.
 With none, it starts at once and the ledger is asked beside it, the
 answer kept for the next call. Only a question last heard refused,
 longer ago than the window, is asked first, for at most `GATE_WAIT_MS`
-(the payer may have topped up). An ask beside a call holds nothing of
+(the payer may have topped up), and so is one being asked beside another
+call now, each call for at most as long: a burst on a cold gate starts
+one call, and the rest take the answer heard beside it, or go when the
+ledger answers none of them. An ask beside a call holds nothing of
 the call's: a call started runs to its end, a stream to its `[DONE]`,
 and is charged as any call is. So a payer out of credit, or past a
 fragment's cap, may make one call more in each isolate that has not
@@ -275,9 +280,9 @@ fresh answer is asked once, for at most `GATE_WAIT_MS`. So a payer out
 of credit may overspend by what starts within the minute, and one who
 topped up waits up to a minute.
 
-- A model call (an agent's chat, vision, decision, transcription and
-  embeddings, and a search's embeddings) asks `agent_turn` of its payer,
-  beside it; an operator key's call through the swap asks it first.
+- An agent's paid call (its chat, vision, decision, transcription and
+  embeddings, a search's embeddings, and an operator key's call through
+  its computer's swap) asks `agent_turn` of its payer, beside it.
 - A job's AI step asks `ai_step` of the fragment's owner, capped when
   the run's principal is neither the owner nor an agent of theirs.
 - A fragment's write asks `write` of its owner (402 past the overdraft).
