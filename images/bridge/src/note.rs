@@ -552,8 +552,6 @@ pub fn exchanges_in<'a>(chat: &'a [Record], me: &str, owner: &str, room: Option<
                 if !in_room {
                     continue;
                 }
-            } else if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) {
-                continue;
             }
             said.push(r);
         }
@@ -719,6 +717,15 @@ pub fn room_context(messages: &[records::ContextMessage]) -> Option<String> {
 /// recorded them, on one line, but a cut turn's (the cut note's). `None`
 /// with nothing to tell.
 pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &BTreeMap<String, String>, chat: &str, reached: bool) -> Option<String> {
+    recap_in(said, work, me, owner, names, chat, reached, false)
+}
+
+/// Like `recap`, with `in_room = true` when every record in `said` has been
+/// verified to belong to one hosted-door room, so outside speakers (`heard`)
+/// and owner relays (`relayed`) keep their speaker labels instead of falling
+/// back to `Someone`.
+#[allow(clippy::too_many_arguments)]
+pub fn recap_in(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &BTreeMap<String, String>, chat: &str, reached: bool, in_room: bool) -> Option<String> {
     if said.is_empty() {
         return None;
     }
@@ -772,8 +779,14 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
             "App code".to_string()
         } else if own_words(&r.principal, &r.body, me, owner) {
             "You".to_string()
-        } else if r.principal == owner || r.principal == me {
+        } else if r.principal == owner || r.principal == me || (in_room && records::relayed(&r.body).is_some_and(|rel| rel.for_ == owner)) {
             "Your owner".to_string()
+        } else if in_room {
+            records::heard(&r.body)
+                .map(|h| sayer(&h.name))
+                .filter(|n| !n.is_empty())
+                .or_else(|| names.get(&r.principal).map(|n| sayer(n)))
+                .unwrap_or_else(|| "Someone".to_string())
         } else {
             names.get(&r.principal).map_or_else(|| "Someone".to_string(), |n| sayer(n))
         };

@@ -93,11 +93,11 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
-    // Recover the originating turn's verified room from `turn.start` (or
-    // from `cause` for a turn started before `turn.start` carried `room`).
-    // On a door chat where a connector turn's cause could not be read and
-    // `turn.start` names no room, refuse recovery rather than running in
-    // the connector-wide session.
+    // Recover the originating turn's verified room solely from our own
+    // `turn.start["room"]` record on `work`. Never fall back to raw `cause`
+    // metadata when `turn.start` has no `room`: a missing `room` means a root
+    // or ordinary chat turn, and raw member-written fields must not move a
+    // root card into a room or strip the asker's Stop authority.
     let (room, via) = match start.body.get("room") {
         Some(Value::String(rid)) => {
             if !records::valid_token(rid, limits::ROOM_ID_MAX_BYTES) {
@@ -110,20 +110,13 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
                 .ok_or(Unavailable::Missing)?;
             (Some(full), Some(via))
         }
-        Some(Value::Null) | None => match (door, cause) {
-            (Some(d), Some(c)) => match records::room(&c.body) {
-                Some(r) => (Some(r), Some(d.to_string())),
-                None => (None, None),
-            },
-            (Some(_), None) if asker != agent.owner => return Err(Unavailable::Missing),
-            _ => (None, None),
-        },
+        Some(Value::Null) | None => (None, None),
         Some(_) => return Err(Unavailable::Corrupt),
     };
-    // Match `engine::can_stop`: a `heard` turn (or any non-owner room turn in
-    // a door chat, where `asker` is the connector principal) is stoppable only
-    // by the agent's owner in the door chat, never by the connector itself.
-    let heard_turn = cause.is_some_and(|c| records::heard(&c.body).is_some()) || (door.is_some() && room.is_some() && asker != agent.owner);
+    // Match `engine::can_stop`: a non-owner room turn in a door chat (where
+    // `asker` is the connector principal) is stoppable only by the owner in
+    // that door chat, never by the connector itself.
+    let heard_turn = room.is_some() && door.is_some() && asker != agent.owner;
     let can_stop = |r: &Record| {
         if heard_turn {
             door.is_some() && r.by(&agent.owner)
@@ -148,16 +141,18 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     let by_code = start.body["code"] == true || cause.is_some_and(Record::by_code);
     let asker_label = if by_code {
         records::CODE_SAYS.to_string()
-    } else {
+    } else if room.is_some() {
         cause
             .and_then(|c| records::heard(&c.body))
             .map(|h| note::room_speaker(&h, room.as_ref()))
             .unwrap_or_else(|| name(asker))
+    } else {
+        name(asker)
     };
     let note = note::late(&cut, &asker_label, cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
-    let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked) };
+    let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked), asker_name: room.is_some().then(|| asker_label.clone()) };
     Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late, room, via }) }))
 }
 
@@ -269,6 +264,7 @@ mod tests {
         assert_eq!(fresh.room, Some(records::Room { id: "C0123".into(), name: "#deploys".into(), thread: None }));
         assert_eq!(fresh.via.as_deref(), Some("slack"));
         assert!(fresh.note.contains("Maple · Slack · #deploys"), "{}", fresh.note);
+        assert_eq!(fresh.late.asker_name.as_deref(), Some("Maple · Slack · #deploys"), "late install replay keeps original speaker label");
         // A Stop from the connector principal on a `heard` turn is ignored during
         // late card recovery (matching live `can_stop`), whereas the owner's Stop closes it.
         let conn_stop = rec("chat", 2, 19, "npub1slackconn", json!({ "kind": "stop", "turn": "old" }));
@@ -280,10 +276,14 @@ mod tests {
         let with_owner_stop = vec![chat[0].clone(), owner_stop, answer_after_stop.clone()];
         let r_owner = resolve(&agent(), &answer_after_stop, &work, &with_owner_stop, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
         assert_eq!((r_owner.closed["outcome"].as_str(), r_owner.fresh), (Some("stopped"), None), "owner Stop in door chat closes the card");
-        // Without `room` on turn.start and without cause on a door chat, refuse recovery
-        let mut legacy = work.clone();
-        legacy[0].body.as_object_mut().unwrap().remove("room");
-        assert_eq!(resolve(&agent(), &chat[2], &legacy, &chat, None, Some("slack"), name, 20), Err(Unavailable::Missing));
+        // Without `room` on turn.start (root / ordinary chat turn), raw `room`/`heard`
+        // on `cause` is never trusted: it stays root and honors the asker's Stop.
+        let mut unscoped = work.clone();
+        unscoped[0].body.as_object_mut().unwrap().remove("room");
+        let r_root = resolve(&agent(), &chat[2], &unscoped, &chat, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
+        assert_eq!(r_root.fresh.as_ref().unwrap().room, None, "unscoped turn.start never moves into a room from raw cause");
+        let r_root_stopped = resolve(&agent(), &answer_after_stop, &unscoped, &with_conn_stop, Some(&chat[0]), None, name, 20).unwrap().unwrap();
+        assert_eq!((r_root_stopped.closed["outcome"].as_str(), r_root_stopped.fresh), (Some("stopped"), None), "unscoped turn honors its asker's Stop even if cause carries raw heard");
     }
 
     /// Goal (the rollback's double run): only a closure the late path wrote

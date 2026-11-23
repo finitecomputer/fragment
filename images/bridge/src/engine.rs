@@ -1446,9 +1446,9 @@ impl Engine {
         let running = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.active()).map(|t| t.id.clone());
         match item.how {
             _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default()), &RoomCall::default()),
-            How::Stop => self.stop_all(&agent.fragment, fragment),
+            How::Stop => self.stop_all(&agent.fragment, fragment, false),
             How::Restart => {
-                self.stop_all(&agent.fragment, fragment);
+                self.stop_all(&agent.fragment, fragment, true);
                 self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command, &RoomCall::default());
             }
             How::Message if has_args => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message, &RoomCall::default()),
@@ -1468,9 +1468,16 @@ impl Engine {
 
     /// The agent's owner stopped it in this chat (`How::Stop`): its turn
     /// running there is stopped, whoever asked it, and its waiting ones end
-    /// stopped, never run.
-    fn stop_all(&mut self, agent: &str, fragment: &str) {
-        let mut mine: Vec<(u64, String, Phase)> = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended).map(|t| (t.order, t.id.clone(), t.phase)).collect();
+    /// stopped, never run. When `root_only` is set (`How::Restart`, `/new`),
+    /// only root-session turns are stopped; room sessions keep running.
+    fn stop_all(&mut self, agent: &str, fragment: &str, root_only: bool) {
+        let mut mine: Vec<(u64, String, Phase)> = self
+            .state
+            .turns
+            .values()
+            .filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended && (!root_only || t.room.is_none()))
+            .map(|t| (t.order, t.id.clone(), t.phase))
+            .collect();
         mine.sort_by_key(|(order, _, _)| *order);
         for (_, id, phase) in mine {
             crate::ev!("turn.stopped", { "turn": id, "phase": format!("{phase:?}").to_lowercase(), "by": "command" });
@@ -2259,7 +2266,7 @@ impl Engine {
             .values()
             .filter(mine)
             .filter(|t| t.phase == Phase::Waiting)
-            .filter(|t| room_id.is_none() || t.room.as_ref().map(|r| r.id.as_str()) == room_id)
+            .filter(|t| t.room.as_ref().map(|r| r.id.as_str()) == room_id)
             .find_map(|t| t.prompts.iter().find(|p| !p.closed && !p.words.is_empty()).map(|p| (t.id.clone(), p.id.clone(), p.words[0].clone())));
         let Some((id, prompt, option)) = carded else { return false };
         if principal != agent.owner || heard_from.is_some() {

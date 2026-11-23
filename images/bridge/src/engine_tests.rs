@@ -5397,6 +5397,18 @@ fn outside_speaker_follow_up_owner_stop_and_room_restart() {
     let nope = said(&mut e2, &a, &plain, 2, "npub1paul", json!({ "kind": "stop", "turn": skyler.turn }), T0 + 1);
     assert!(commands(&nope).is_empty(), "owner cannot stop another member's turn in a plain chat");
 
+    // Root `/new` does not stop room turns, and a root message never implicitly
+    // answers an open word-taking card in a room (Council A1, S2).
+    let mut e3 = Engine::new(State::default(), Settings::default(), LIFE).unwrap().with_runtime(crate::runtime::DEFAULT, &[crate::runtime::MenuItem { name: "new", description: "Start over", args: None, how: crate::runtime::How::Restart, refuse: &[] }]);
+    e3.step(Input::Agents(vec![a.clone()]), T0);
+    ev(&mut e3, Event::Connected(true), T0);
+    let room_t = started(&said(&mut e3, &a, &slack, 1, "npub1slackconn", msg("U1", "Maple", "C0123", "#deploys", "deploy?"), T0 + 1)).expect("room turn");
+    ev(&mut e3, Event::Prompt { turn: room_t.turn.clone(), prompt: "p".into(), text: "Notes?".into(), options: vec![PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false }], ttl_ms: None }, T0 + 2);
+    let root_msg = said(&mut e3, &a, &slack, 2, "npub1paul", json!({ "text": "unrelated root note", "to": [a.identity] }), T0 + 3);
+    assert!(!root_msg.effects.iter().any(|ef| matches!(ef, Effect::Post { body, .. } if body["kind"] == "turn.prompt.closed")), "root message must not implicitly answer room card");
+    let root_new = said(&mut e3, &a, &slack, 3, "npub1paul", json!({ "kind": "command", "command": "new", "to": [a.identity] }), T0 + 4);
+    assert!(commands(&root_new).is_empty(), "root /new must not stop active room turn");
+
     // Queue-heavy state snapshot (Codex finding #5): 16 connector chats x 17
     // room turns each (272 open turns), every message carrying a full ~16 KiB
     // context, stays well under STATE_FILE_MAX_BYTES because context is

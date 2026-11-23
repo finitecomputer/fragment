@@ -473,7 +473,13 @@ async fn session(cfg: ClaudeConfig, key: SessionKey, generations: Arc<Mutex<Gene
                                 let _ = events.send(Event::End { turn: ts.turn.clone(), outcome: Outcome::Idle }).await;
                                 continue;
                             };
-                            let asked = TurnStart { text: request, note: None, late: None, ..(*ts).clone() };
+                            let asked = TurnStart {
+                                text: request,
+                                asker_name: late.asker_name.unwrap_or_else(|| ts.asker_name.clone()),
+                                note: None,
+                                late: None,
+                                ..(*ts).clone()
+                            };
                             if proc.is_none() && !ensure_signed_in(&cfg, &asked, &mut rx, &events).await {
                                 continue;
                             }

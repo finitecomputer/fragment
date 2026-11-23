@@ -561,6 +561,11 @@ pub struct LateCard {
     pub option: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
+    /// Original speaker label when a room turn's request is replayed (e.g.
+    /// `Maple · Slack · #deploys`), so approving an install card never replays
+    /// an outside speaker's request under the owner's label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker_name: Option<String>,
 }
 
 /// A runtime's two queues, the bridge's shutdown signal, and the hold.

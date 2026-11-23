@@ -972,7 +972,8 @@ async fn root_new_does_not_erase_room_recap() {
     );
     fake.until(WAIT, "C1 turn before /new finished", |w| reply_for(w, &c1_before).is_some()).await;
 
-    // 3. Owner runs `/new` in the connector's root chat addressed to juniper
+    // 3. Owner runs `/new` in the connector's root chat addressed to juniper,
+    //    and a busy sibling room (C2) writes >24 KiB of agent replies afterward
     let reset = fake.say(
         &door,
         &person("paul"),
@@ -980,6 +981,19 @@ async fn root_new_does_not_erase_room_recap() {
     );
     let reset_turn = turn_of("juniper", &door, seq(&reset));
     fake.until(WAIT, "root /new finished", |w| !w.bodies(&door, "work", "turn.end").into_iter().filter(|r| r["turn"] == reset_turn).collect::<Vec<_>>().is_empty()).await;
+    for i in 0..8 {
+        let sib = fake.say(
+            &door,
+            "npub1slacknew",
+            json!({
+                "text": format!("sibling {i}: {}", "x".repeat(4000)),
+                "to": ["npub1juniper"],
+                "heard": { "via": "slack", "from": "U0789", "name": "Sam" },
+                "room": { "id": "C2", "name": "#general" },
+            }),
+        );
+        fake.until(WAIT, "sibling C2 turn finished", |w| reply_for(w, &sib).is_some()).await;
+    }
 
     // 4. Lose runtime memory and restart
     bridge.stop().await;
@@ -988,7 +1002,8 @@ async fn root_new_does_not_erase_room_recap() {
     let bridge = support::start(cfg, script_with_mem(memory.clone()));
     following(&fake, 2).await;
 
-    // 5. Message room C1: its recap MUST still include "deploy checklist alpha-77"
+    // 5. Message room C1: its recap MUST still include Maple's labeled message
+    //    and exclude both root history and C2 sibling noise
     let c1_after = fake.say(
         &door,
         "npub1slacknew",
@@ -1002,8 +1017,8 @@ async fn root_new_does_not_erase_room_recap() {
     fake.until(WAIT, "C1 turn after restart finished", |w| reply_for(w, &c1_after).is_some()).await;
     fake.with(|w| {
         let text = reply_for(w, &c1_after).unwrap();
-        assert!(text.contains("deploy checklist alpha-77"), "root /new must not erase C1 recap: {text}");
-        assert!(!text.contains("root secret before reset"), "root conversation must not leak into C1: {text}");
+        assert!(text.contains("Maple: deploy checklist alpha-77"), "root /new and busy C2 must not erase labeled C1 recap: {text}");
+        assert!(!text.contains("root secret before reset") && !text.contains("sibling 0"), "root or C2 leaked into C1: {text}");
     });
 
     // 6. Message root chat: root `/new` MUST still stop root recap from recovering pre-reset root history

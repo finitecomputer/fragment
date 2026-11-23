@@ -87,8 +87,10 @@ pub fn check_record(channel: &str, kind: &str, body: &Value, decl: Option<&Chann
     if crate::door::relays(body) && hosted.is_none_or(|h| body["relayed"] != h.relayed()) {
         return Err("a record that relays its agent's owner (`relayed`) is posted through that agent's door: an app publishes one only as the connector its owner bound as that door, `relayed` exactly {via, for, agent}".into());
     }
-    if crate::door::hears(body) && hosted.is_none_or(|h| !crate::door::heard_via_ok(body, h)) {
-        return Err("a record naming an outside speaker (`heard`) is published only by a connector bound as an open door, with `heard.via` matching that door and no `relayed`".into());
+    if let Some(h) = hosted {
+        if crate::door::hears(body) && !crate::door::heard_via_ok(body, h) {
+            return Err("a record naming an outside speaker (`heard`) on a hosted door must carry `heard.via` matching that door and no `relayed`".into());
+        }
     }
     let size = body.to_string().len();
     if size > limits::RECORD_BODY_MAX_BYTES {
@@ -267,7 +269,7 @@ mod tests {
         }
         let heard = json!({ "text": "hi", "to": ["npub1juniper"], "heard": { "via": "telegram", "from": "U1", "name": "Maple" }, "room": { "id": "C1", "name": "#ops" } });
         assert!(check_record("room", "message", &heard, declared().get("room"), Some(&h)).is_ok());
-        assert!(check_record("room", "message", &heard, declared().get("room"), None).is_err(), "unbound: no heard");
+        assert!(check_record("room", "message", &json!({ "heard": true }), declared().get("room"), None).is_ok(), "non-door apps may use their own `heard` field");
         let mut wrong_via = heard.clone();
         wrong_via["heard"]["via"] = json!("slack");
         assert!(check_record("room", "message", &wrong_via, declared().get("room"), Some(&h)).is_err(), "wrong door via");
