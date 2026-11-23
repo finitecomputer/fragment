@@ -789,7 +789,7 @@ mod tests {
                     ("GET", p) if p == format!("/api/f/{NAME}/status") => Response::json(200, &status("public")),
                     ("POST", "/api/ledger/quote") if body["items"][0]["key"] == "boom" => Response::json(402, &json!({ "error": "budget_used_up", "message": "no credit" })),
                     ("POST", "/api/ledger/quote") => Response::json(200, &json!({
-                        "items": [{ "pricedAs": "elevenlabs:speech", "eachMicros": 4_800_000, "calls": 1, "chargeMicros": 4_800_000 }],
+                        "items": [{ "pricedAs": "elevenlabs:character", "eachMicros": 4_800_000, "calls": 1, "chargeMicros": 4_800_000 }],
                         "totalMicros": 4_800_000, "leftMicros": 95_400_000, "ledger": ledger })),
                     _ => Response::json(404, &json!({ "error": "not_found", "message": "no such route" })),
                 }
@@ -797,7 +797,7 @@ mod tests {
         )
         .expect("start the fake host");
         let client = Client::new(&platform.url, crate::auth::fixed(7));
-        let speech = json!({ "items": [{ "key": "elevenlabs:speech", "units": 60000 }] });
+        let speech = json!({ "items": [{ "key": "elevenlabs:character", "units": 60000 }] });
         let answers = session(
             &client,
             NAME,

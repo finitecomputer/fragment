@@ -50,7 +50,7 @@ pub struct Fresh {
 #[allow(clippy::too_many_arguments)]
 pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record], cause: Option<&Record>, door: Option<&str>, name: impl Fn(&str) -> String, now: u64) -> Result<Option<Resolved>, Unavailable> {
     let Said::PromptResponse { prompt, option, text, card } = records::said(&answer.body) else { return Ok(None) };
-    if answer.principal != agent.owner || card.as_ref().is_some_and(|c| c.agent != agent.identity) {
+    if !answer.by(&agent.owner) || card.as_ref().is_some_and(|c| c.agent != agent.identity) {
         return Ok(None);
     }
     let of = |r: &Record, kind: &str| r.principal == agent.identity && r.body["kind"] == kind;
@@ -83,7 +83,7 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     let closed = |how: Closed| records::turn_prompt_closed(turn, &prompt, how, None);
     // the first of its owner's answers given in its life wins, however late read
     let valid = |r: &&Record| {
-        r.channel == records::CHAT && r.principal == agent.owner && r.at >= asked.at && r.at < expires
+        r.channel == records::CHAT && r.by(&agent.owner) && r.at >= asked.at && r.at < expires
             && matches!(records::said(&r.body), Said::PromptResponse { prompt: p, option: o, card: c, .. } if p == prompt && c.as_ref().is_none_or(|c| c.agent == agent.identity && c.turn == turn) && options.iter().any(|x| x["id"] == o.as_str()))
     };
     match chat.iter().filter(valid).min_by_key(|r| r.seq) {
@@ -93,7 +93,7 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
-    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && (r.principal == asker || (door.is_some() && r.principal == agent.owner)) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
+    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && (r.by(asker) || (door.is_some() && r.by(&agent.owner))) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
         return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
     }
     // Recover the originating turn's verified room from `turn.start` (or
@@ -132,10 +132,17 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
         // never a cut of what the owner chose
         return Err(Unavailable::Budget);
     }
-    let asker_label = cause
-        .and_then(|c| records::heard(&c.body))
-        .map(|h| note::room_speaker(&h, room.as_ref()))
-        .unwrap_or_else(|| name(asker));
+    // the turn app code's words started was asked by no one, whoever they
+    // name: as its start says, or its cause, should the start be older
+    let by_code = start.body["code"] == true || cause.is_some_and(Record::by_code);
+    let asker_label = if by_code {
+        records::CODE_SAYS.to_string()
+    } else {
+        cause
+            .and_then(|c| records::heard(&c.body))
+            .map(|h| note::room_speaker(&h, room.as_ref()))
+            .unwrap_or_else(|| name(asker))
+    };
     let note = note::late(&cut, &asker_label, cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
@@ -155,7 +162,7 @@ mod tests {
     }
 
     fn rec(channel: &str, seq: u64, at: i64, by: &str, body: Value) -> Record {
-        Record { channel: channel.into(), seq, at, principal: by.into(), kind: "message".into(), body }
+        Record { channel: channel.into(), seq, at, principal: by.into(), author: None, kind: "message".into(), body }
     }
 
     fn response(option: &str) -> Value {
@@ -215,6 +222,15 @@ mod tests {
         let no_cause = no_cause.fresh.unwrap();
         assert!(no_cause.note.contains("It was answering Robin; what they asked is not in this chat's record."));
         assert_eq!(no_cause.late.request, None, "no request it was not told");
+        // FIN-615: a turn app code's words started was asked by no one, whoever they name
+        let code = Record { author: Some(records::CODE.into()), ..chat[0].clone() };
+        let by_code = resolve(&agent(), &chat[2], &work, &chat, Some(&code), None, name, 20).unwrap().unwrap().fresh.unwrap();
+        assert!(by_code.note.contains("It was answering app code: “Publish my draft") && !by_code.note.contains("Robin"), "{}", by_code.note);
+        // and its start says so when its cause cannot be read (round two of #1444)
+        let mut coded = work.clone();
+        coded[0].body["code"] = json!(true);
+        let unread = resolve(&agent(), &chat[2], &coded, &chat, None, None, name, 20).unwrap().unwrap().fresh.unwrap();
+        assert!(unread.note.contains("It was answering app code; what they asked is not in this chat's record.") && !unread.note.contains("Robin"), "{}", unread.note);
     }
 
     /// Goal (FIN-508): a late answer to a card from a room turn recovers the
@@ -276,6 +292,9 @@ mod tests {
         }
         let stranger = Record { principal: "npub1stranger".into(), ..chat[2].clone() };
         assert_eq!(late(&work, &chat, &stranger, 20), Ok(None));
+        // FIN-615: app code's, under its owner's name, answers no card
+        let code = Record { author: Some(records::CODE.into()), ..chat[2].clone() };
+        assert_eq!(late(&work, &chat, &code, 20), Ok(None), "app code's answer");
         let second = rec("chat", 4, 21, OWNER, response("no"));
         let both = [chat.clone(), vec![second.clone()]].concat();
         assert_eq!(late(&work, &both, &second, 21), Ok(None), "the first answer won");

@@ -30,10 +30,37 @@ pub struct Record {
     #[serde(default)]
     pub at: i64,
     pub principal: String,
+    /// Who wrote it, as the platform stamped it (docs/chat-records.md,
+    /// "Who wrote a record"). None from a platform before the stamp, and
+    /// on a record stored before it: such a record reads as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub body: Value,
+}
+
+/// The author the platform stamps on what app code wrote: a mutation's
+/// effect or a job's step, in a fragment running its author's own code.
+pub const CODE: &str = "code";
+
+/// Whom a turn names as asking when app code wrote the message that
+/// started it: no one, whoever called the code.
+pub const CODE_SAYS: &str = "app code";
+
+impl Record {
+    /// Whether app code wrote it (`CODE`): its words are no one's, whoever
+    /// called the code, so they carry no owner's authority and answer,
+    /// stop and command nothing.
+    pub fn by_code(&self) -> bool {
+        self.author.as_deref() == Some(CODE)
+    }
+
+    /// Whether these are `who`'s own words: written as them, not by code.
+    pub fn by(&self, who: &str) -> bool {
+        self.principal == who && !self.by_code()
+    }
 }
 
 /// A file a record carries: one of the fragment's blobs, by hash.
@@ -678,17 +705,21 @@ pub struct Cause {
 /// platform answers the same id and body again as a replay and another
 /// body as 409, so with the life in the body this life's own retry is a
 /// replay and any other life's claim of the turn is a 409.
-pub fn turn_start(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &str) -> Value {
-    turn_start_in(turn, asker, agent, cause, life, None)
+pub fn turn_start(turn: &str, asker: &str, by_code: bool, agent: &str, cause: &Cause, life: &str) -> Value {
+    turn_start_in(turn, asker, by_code, agent, cause, life, None)
 }
 
 /// A turn's claim, naming its room id when it runs in a hosted door's room
 /// (so last-seen markers, cut-turn notes, recaps, and late card recovery
 /// stay scoped to that room).
-pub fn turn_start_in(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &str, room: Option<&str>) -> Value {
+pub fn turn_start_in(turn: &str, asker: &str, by_code: bool, agent: &str, cause: &Cause, life: &str, room: Option<&str>) -> Value {
     assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
     let mut body = json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
         "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life });
+    // app code wrote what started it: its asker is no one (`Record::by_code`)
+    if by_code {
+        body["code"] = json!(true);
+    }
     if let Some(r) = room {
         assert!(valid_token(r, limits::ROOM_ID_MAX_BYTES), "a turn's room id is a valid token: {r}");
         body["room"] = json!(r);
@@ -1362,7 +1393,8 @@ mod tests {
     fn bodies_are_the_docs() {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
-        assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
+        assert_eq!(turn_start("t", "npub1p", false, "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
+        assert_eq!(turn_start("t", "npub1p", true, "npub1a", &c, life)["code"], json!(true), "app code's words started it: said on its start");
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell, evidence: None };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }), "no words: they are a reply");
         assert_eq!(reply("Let me look.", "t", &[], 1, false), json!({ "text": "Let me look.", "turn": "t" }));

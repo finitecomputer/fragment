@@ -58,7 +58,7 @@ use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
-    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
+    limits, valid_secret_name, Author, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -287,6 +287,15 @@ pub(crate) enum Admits {
     Code { inbox: InboxDecl, headers: Headers },
 }
 
+/// What app code is handed of a record (a trigger's run, an inbox's
+/// answer query): `{channel, record}`, the record as it was before the
+/// platform stamped who wrote it (FIN-615), so an app's own input schema
+/// reads it as it always has.
+fn app_input(record: &ChannelRecord) -> Value {
+    let unstamped = ChannelRecord { author: None, ..record.clone() };
+    json!({ "channel": record.channel, "record": unstamped })
+}
+
 impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
     pub(crate) fn own_key(&self) -> CellResult<String> {
@@ -365,10 +374,13 @@ impl FragmentCell {
         } else if let Some(why) = r.owner_read_only.filter(|_| triggered) {
             Some(format!("{}: its triggers start no runs until then", crate::meter::read_only_refusal(why).message))
         } else if triggered
-            && self.count_of(
-                "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND via NOT IN ('call', 'job') AND status != 'blocked' AND created_at > ?",
-                vec![r.op.into(), SqlStorageValue::Integer(now - 3_600_000)],
-            )? >= limits::TRIGGERED_RUNS_PER_HOUR
+            && fragment_core::connectors::trips_hourly_breaker(
+                self.count_of(
+                    "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND via NOT IN ('call', 'job') AND status != 'blocked' AND created_at > ?",
+                    vec![r.op.into(), SqlStorageValue::Integer(now - 3_600_000)],
+                )?,
+                self.runs_connector()?,
+            )
         {
             let why = format!("{} triggered runs in the last hour", limits::TRIGGERED_RUNS_PER_HOUR);
             self.set_paused(r.op, true, "auto", &why)?;
@@ -976,7 +988,15 @@ impl FragmentCell {
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
-        let url = egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?;
+        // a SimpleX connector's call to its own door (cell/door.mjs), never
+        // the internet's; any other fragment's fetch of the door's host is refused
+        let blessed = self.blessed().map_err(|e| StepFail::Retry(e.message))?;
+        let door = fragment_core::door::door_route(&f.url, blessed.as_deref()).map_err(permanent)?;
+        let to_door = door.is_some();
+        let url = match door {
+            Some(url) => url,
+            None => egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?,
+        };
         // a connector bound as a door that is shut sends nothing (doors.rs)
         if let Some(why) = self.door_shut().map_err(|e| StepFail::Retry(e.message))? {
             return Err(permanent(why));
@@ -1039,6 +1059,21 @@ impl FragmentCell {
             headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
         }
         headers.set(HOPS_HEADER, &(run.depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
+        // its door is its own life's (`door_id`: a name made again reaches
+        // another), told so by the platform alone (whatever headers the job
+        // set), and asked only its jobs' routes (`/job/…`), never its
+        // runner's or its levers'
+        let door = match to_door {
+            true => {
+                let retry = |e: CellError| StepFail::Retry(e.message);
+                let (name, life) = (self.name().map_err(retry)?, self.must(MetaKey::Npub).map_err(retry)?);
+                let id = fragment_core::door::door_id(&name, &life).ok_or_else(|| permanent(format!("{name} names no door")))?;
+                headers.set(fragment_core::door::CONNECTOR_HEADER, &name).map_err(|e| permanent(e.to_string()))?;
+                headers.set(fragment_core::door::DOOR_NAME_HEADER, &id).map_err(|e| permanent(e.to_string()))?;
+                Some(id)
+            }
+            false => None,
+        };
         let mut init = RequestInit::new();
         // A redirect comes back to the job as its 3xx: following it here
         // would skip the egress check for where it points.
@@ -1049,10 +1084,16 @@ impl FragmentCell {
             }
             init.with_body(Some(JsValue::from_str(&body)));
         }
-        let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(redact(e.to_string())))?;
+        let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
+        let req = Request::new_with_init(&to, &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;
-        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
+        let deadline = Duration::from_millis(limits::FETCH_TIMEOUT_MS);
+        let answer = match &door {
+            Some(name) => crate::cs::answer_all(crate::routed::send(&self.env, "SIMPLEX_DOOR", name, req), deadline, max).await,
+            None => crate::cs::fetch_all(req, deadline, max).await,
+        };
+        let answer = answer.map_err(|e| StepFail::Retry(redact(format!("{host}: {}", e.message))))?;
         let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
@@ -1072,9 +1113,11 @@ impl FragmentCell {
         // the one check a mutation's records meet too, on its channel's
         // declaration alone
         let decl = self.declared_channel(channel).map_err(retry)?;
-        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
+        let hosted = self.hosted_door().map_err(retry)?;
+        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), hosted.as_ref()).map_err(permanent)?;
+        let author = self.code_author(run.code.as_deref(), hosted.is_some()).map_err(retry)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
-        let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
+        let (record, appended) = self.append_once(channel, &run.principal, author, kind, &body, (&key, i64::from(index))).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
@@ -1118,7 +1161,7 @@ impl FragmentCell {
         // read after the wait, so the runs start from the code installed now
         let ops = self.channel_triggers(record)?;
         let own = self.own_key()?;
-        let input = json!({ "channel": record.channel, "record": record });
+        let input = app_input(record);
         let mut started = vec![];
         for (i, op) in ops.iter().enumerate() {
             if i + 1 == ops.len() {
@@ -1720,7 +1763,7 @@ impl FragmentCell {
         };
         // unkeyed: a sender's retry is a new record, so a failure of its
         // triggers is the sender's error to see, never a silent 200
-        let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
+        let record = self.append("inbox", "inbox", Author::Door, "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
         let answered = match answer {
             Some(op) => self.inbox_answer(&op, &record, hops).await?,
@@ -1747,7 +1790,7 @@ impl FragmentCell {
         // its install checked it, and stored both in one step
         assert!(decl.kind == OpKind::Query, "an inbox's answer is a query (manifest::parse)");
         let own = self.own_key()?;
-        let input = json!({ "channel": record.channel, "record": record });
+        let input = app_input(record);
         let inv = Invocation { principal: &own, asker: None, role: Role::Editor, op, decl, id: format!("record:inbox:{}:{op}", record.seq), input, depth, via: Via::Channel, trigger: Some("inbox".into()) };
         let result: Value = crate::json_text(self.invoke(inv).await?.result.get()).map_err(|e| CellError::host(format!("{op}'s result is not JSON: {e}")))?;
         fragment_core::inbox::answer(&result).map_err(|why| CellError::new(ErrorCode::AppFailed, format!("{op}: {why}")))

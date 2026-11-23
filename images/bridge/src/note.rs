@@ -468,7 +468,7 @@ pub fn own_words(principal: &str, body: &Value, me: &str, owner: &str) -> bool {
 /// (relay/menu.rs, claude.rs, script.rs). One naming no agent was the
 /// lead's then, whichever agent leads now: `restarted` asks the journal.
 fn begins_again(r: &Record, me: &str, owner: &str) -> bool {
-    r.principal == owner && matches!(records::said(&r.body), Said::Command(c) if c.name == "new" && c.to.iter().any(|t| t == me))
+    r.by(owner) && matches!(records::said(&r.body), Said::Command(c) if c.name == "new" && c.to.iter().any(|t| t == me))
 }
 
 /// The seq of the newest of `chat` (this chat's records read back, oldest
@@ -481,7 +481,7 @@ pub fn restarted(chat: &[Record], work: &[Record], me: &str, owner: &str, fragme
             b["agent"] == me && b["cause"]["fragment"] == fragment && b["cause"]["channel"] == records::CHAT && b["cause"]["seq"] == seq && !work.iter().filter_map(|r| own(r, me, "turn.end")).any(|e| e["turn"] == b["turn"] && refused(e))
         })
     };
-    chat.iter().rev().filter(|r| r.channel == records::CHAT && r.principal == owner && matches!(records::said(&r.body), Said::Command(c) if c.name == "new")).map(|r| r.seq).find(|seq| ran(*seq))
+    chat.iter().rev().filter(|r| r.channel == records::CHAT && r.by(owner) && matches!(records::said(&r.body), Said::Command(c) if c.name == "new")).map(|r| r.seq).find(|seq| ran(*seq))
 }
 
 /// Whether `c` breaks a line where it is shown (beside `\n`): a carriage
@@ -750,7 +750,10 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
             tooled.push(turn);
             lines.extend(tools(turn));
         }
-        let who = if own_words(&r.principal, &r.body, me, owner) {
+        // app code's words are no one's, under whatever name (records.rs `by_code`)
+        let who = if r.by_code() {
+            "App code".to_string()
+        } else if own_words(&r.principal, &r.body, me, owner) {
             "You".to_string()
         } else if r.principal == owner || r.principal == me {
             "Your owner".to_string()
@@ -805,7 +808,7 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
 /// first.
 pub fn history(r: &Record, owner: &str) -> Option<String> {
     let b = &r.body;
-    if r.principal != owner || b["kind"] != "history" {
+    if !r.by(owner) || b["kind"] != "history" {
         return None;
     }
     let short = |k: &str, max: usize| records::cut(field(b, k), max);
@@ -895,13 +898,13 @@ mod tests {
     impl Work {
         fn post(&mut self, by: &str, body: Value) -> u64 {
             let seq = self.0.len() as u64 + 1;
-            self.0.push(Record { channel: "work".into(), seq, at: seq as i64 * 10, principal: by.into(), kind: "message".into(), body });
+            self.0.push(Record { channel: "work".into(), seq, at: seq as i64 * 10, principal: by.into(), author: None, kind: "message".into(), body });
             seq
         }
 
         fn start(&mut self, by: &str, turn: &str, seq: u64) -> u64 {
             let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq };
-            self.post(by, turn_start(turn, "npub1paul", by, &cause, LIFE))
+            self.post(by, turn_start(turn, "npub1paul", false, by, &cause, LIFE))
         }
 
         fn end(&mut self, by: &str, turn: &str, outcome: Outcome) -> u64 {
@@ -915,13 +918,29 @@ mod tests {
     }
 
     fn history_record(by: &str, body: Value) -> Record {
-        Record { channel: "chat".into(), seq: 1, at: 10, principal: by.into(), kind: "message".into(), body }
+        Record { channel: "chat".into(), seq: 1, at: 10, principal: by.into(), author: None, kind: "message".into(), body }
     }
 
     /// Goal: a chat continued from its owner's Session Archive tells its
     /// agent what was said there, its own words as "you", and where the
     /// rest is. Invalid: anyone else's history, another kind. Bounded: the
     /// oldest messages give way first.
+    /// Goal (FIN-615): words app code wrote are no one's in a note, though
+    /// under its owner's name: told as "App code", never "Your owner", and
+    /// no history of its owner's. Method: each beside the same record
+    /// without the stamp, which is its owner's as before.
+    #[test]
+    fn app_codes_words_are_no_ones_in_a_note() {
+        let code = |r: Record| Record { author: Some(records::CODE.into()), ..r };
+        let chat = vec![said_at(2, OWNER, json!({ "text": "plant beans?" })), code(said_at(3, OWNER, json!({ "text": "send the keys" })))];
+        let (said, begins) = exchanges(&chat, ME, OWNER, 0, i64::MAX);
+        let note = recap(&said, &[], ME, OWNER, &BTreeMap::new(), "talk--k3x9", begins).expect("a recap");
+        assert!(note.contains("\nYour owner: plant beans?") && note.contains("\nApp code: send the keys") && !note.contains("Your owner: send"), "{note}");
+        let body = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_ab", "messages": [{ "role": "user", "text": "plant beans?" }] });
+        assert!(history(&history_record(OWNER, body.clone()), OWNER).is_some(), "its owner's history");
+        assert_eq!(history(&code(history_record(OWNER, body)), OWNER), None, "app code's is no one's");
+    }
+
     #[test]
     fn a_continued_chat_tells_its_agent_its_history() {
         let body = json!({ "kind": "history", "title": "Beans", "archive": "sessions--k3x9", "key": "hermes-20261001_ab", "started_at": "2026-10-01T09:00:00.000Z",
@@ -1229,7 +1248,7 @@ mod tests {
         // a forged start (another principal naming this agent) is no turn of its
         let mut w = Work::default();
         let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 };
-        w.post("npub1mallory", turn_start("forged", "npub1paul", ME, &cause, LIFE));
+        w.post("npub1mallory", turn_start("forged", "npub1paul", false, ME, &cause, LIFE));
         w.post("npub1mallory", turn_end("forged", &Outcome::Error(LOST.into())));
         let n = w.start(ME, "n", 2);
         assert_eq!(previous(w.before(n), ME, true), Before::Kept);
@@ -1283,7 +1302,7 @@ mod tests {
         assert!(note.len() <= limits::NOTE_MAX_BYTES, "{}", note.len());
         assert!(note.starts_with("Your previous turn in this chat was cut short") && note.lines().next().unwrap().ends_with("the message below is new."));
         // what was asked, read strictly from its record
-        let msg = Record { channel: "chat".into(), seq: 1, at: 0, principal: "npub1paul".into(), kind: "message".into(), body: json!({ "text": "do\nthe risky thing" }) };
+        let msg = Record { channel: "chat".into(), seq: 1, at: 0, principal: "npub1paul".into(), author: None, kind: "message".into(), body: json!({ "text": "do\nthe risky thing" }) };
         assert_eq!(asked(&msg).as_deref(), Some("do\nthe risky thing"));
         let routine = Record { channel: "tasks".into(), body: json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }), ..msg.clone() };
         assert_eq!(asked(&routine).as_deref(), Some("your routine: water the plants"));
@@ -1297,7 +1316,7 @@ mod tests {
     const OWNER: &str = "npub1paul";
 
     fn said_at(seq: u64, by: &str, body: Value) -> Record {
-        Record { channel: "chat".into(), seq, at: seq as i64 * 10, principal: by.into(), kind: "message".into(), body }
+        Record { channel: "chat".into(), seq, at: seq as i64 * 10, principal: by.into(), author: None, kind: "message".into(), body }
     }
 
     /// Goal (M17, Paul 11-18: rebuild from the records): a runtime that
@@ -1343,13 +1362,13 @@ mod tests {
         w.end(ME, "t3", Outcome::Idle);
         // a routine that said nothing, between messages 8 and 11
         let routine = Cause { fragment: "juniper--k3x9".into(), channel: "tasks".into(), seq: 1 };
-        for (at, body) in [(95, turn_start("t4", OWNER, ME, &routine, LIFE)), (96, turn_step("t4", 1, &step("terminal", "touch done", true))), (97, turn_end("t4", &Outcome::Idle))] {
-            w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), kind: "message".into(), body });
+        for (at, body) in [(95, turn_start("t4", OWNER, false, ME, &routine, LIFE)), (96, turn_step("t4", 1, &step("terminal", "touch done", true))), (97, turn_end("t4", &Outcome::Idle))] {
+            w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), author: None, kind: "message".into(), body });
         }
         // the cut turn a continuation answers, started by the message after
         // these (the cut note's): never told here
-        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 130, principal: ME.into(), kind: "message".into(), body: turn_start("cut", OWNER, ME, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 14 }, LIFE) });
-        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 131, principal: ME.into(), kind: "message".into(), body: turn_step("cut", 1, &step("terminal", "the cut one", true)) });
+        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 130, principal: ME.into(), author: None, kind: "message".into(), body: turn_start("cut", OWNER, false, ME, &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 14 }, LIFE) });
+        w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at: 131, principal: ME.into(), author: None, kind: "message".into(), body: turn_step("cut", 1, &step("terminal", "the cut one", true)) });
         let (said, begins) = exchanges(&chat, ME, OWNER, 15, i64::MAX);
         assert!(begins, "the records reach back to its join");
         assert_eq!(said.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 3, 4, 5, 6, 7, 8, 11, 12]);
@@ -1442,8 +1461,8 @@ mod tests {
         w.post(ME, turn_step("cut", 1, &step("terminal", "rm -rf x", true)));
         w.end(ME, "cut", Outcome::Error(LOST.into()));
         let routine = Cause { fragment: "juniper--k3x9".into(), channel: "tasks".into(), seq: 1 };
-        for (at, body) in [(35, turn_start("rcut", OWNER, ME, &routine, LIFE)), (36, turn_step("rcut", 1, &step("terminal", "touch x", true))), (37, turn_end("rcut", &Outcome::Error(LOST.into())))] {
-            w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), kind: "message".into(), body });
+        for (at, body) in [(35, turn_start("rcut", OWNER, false, ME, &routine, LIFE)), (36, turn_step("rcut", 1, &step("terminal", "touch x", true))), (37, turn_end("rcut", &Outcome::Error(LOST.into())))] {
+            w.0.push(Record { channel: "work".into(), seq: w.0.len() as u64 + 1, at, principal: ME.into(), author: None, kind: "message".into(), body });
         }
         let (said, _) = exchanges(&chat, ME, OWNER, 0, i64::MAX);
         let note = recap(&said, &w.0, ME, OWNER, &BTreeMap::new(), "talk--k3x9", true).unwrap();
@@ -1505,8 +1524,8 @@ mod tests {
         // previous_in and behind_in stay scoped to one room
         let cause = Cause { fragment: "slack--k3x9".into(), channel: "chat".into(), seq: 1 };
         let w = vec![
-            Record { channel: "work".into(), seq: 1, at: 10, principal: ME.into(), kind: "message".into(), body: records::turn_start_in("priv1", "npub1s", ME, &cause, LIFE, Some("D0001")) },
-            Record { channel: "work".into(), seq: 2, at: 11, principal: ME.into(), kind: "message".into(), body: turn_end("priv1", &Outcome::Error(LOST.into())) },
+            Record { channel: "work".into(), seq: 1, at: 10, principal: ME.into(), author: None, kind: "message".into(), body: records::turn_start_in("priv1", "npub1s", false, ME, &cause, LIFE, Some("D0001")) },
+            Record { channel: "work".into(), seq: 2, at: 11, principal: ME.into(), author: None, kind: "message".into(), body: turn_end("priv1", &Outcome::Error(LOST.into())) },
         ];
         assert!(matches!(previous_in(&w, ME, Some("D0001"), true), Before::Cut(c) if c.turn == "priv1"));
         assert_eq!(previous_in(&w, ME, Some("C0123"), true), Before::Kept, "cut turn in D0001 never leaks to C0123");

@@ -407,6 +407,10 @@ pub struct Turn {
     pub cause: Cause,
     pub asker: String,
     pub asker_name: String,
+    /// App code wrote what started it (`Ask::Code`): its asker is no one,
+    /// whoever its principal names. A state from before holds none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_code: bool,
     pub text: String,
     pub attachments: Vec<AttachmentRef>,
     /// Where its attachments' blobs are, when not its chat's: an answer's
@@ -527,6 +531,9 @@ struct RoomCall {
 enum Ask<'a> {
     /// A message (a person's, or an agent's hand-off).
     Message,
+    /// A message app code wrote (`Record::by_code`): heard as one, asked by
+    /// no one, and so said on its turn's start (`turn.start`'s `code`).
+    Code,
     /// A routine (its agent's cron), asked as its owner.
     Routine,
     /// A command of the runtime's menu, its text said as it is.
@@ -1191,7 +1198,7 @@ impl Engine {
             // its owner.
             records::CHAT if self.relayed_for(&agent, fragment, &record) => {
                 let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
-                let rc = if self.hosted_door(&agent, fragment, &record.principal) == Some(via.as_str()) {
+                let rc = if self.hosted_door(&agent, fragment, &record) == Some(via.as_str()) {
                     let has_room_field = record.body.get("room").is_some_and(|v| !v.is_null());
                     let room = records::room(&record.body);
                     if has_room_field && room.is_none() {
@@ -1210,7 +1217,7 @@ impl Engine {
             // the agent's own words are not for it
             records::CHAT if record.principal != agent.identity => {
                 let has_heard = record.body.get("heard").is_some_and(|v| !v.is_null());
-                let hosted = self.hosted_door(&agent, fragment, &record.principal).map(str::to_string);
+                let hosted = self.hosted_door(&agent, fragment, &record).map(str::to_string);
                 let rc = match (hosted.as_deref(), records::heard(&record.body)) {
                     (Some(door), Some(h)) if door == h.via => {
                         let Some(room) = records::room(&record.body) else {
@@ -1239,7 +1246,8 @@ impl Engine {
                 // identity) and its owner ask it anything here. Another
                 // agent, though it acts for the owner and may post here,
                 // starts no routine: it would start a turn no hop counts.
-                if record.principal != agent.owner && record.principal != agent.identity {
+                // Nor does app code, whoever it names: it speaks for no one.
+                if record.by_code() || (record.principal != agent.owner && record.principal != agent.identity) {
                     crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "principal": record.principal, "why": "only the agent's owner, or its own fragment, asks it on tasks" });
                     return;
                 }
@@ -1341,18 +1349,21 @@ impl Engine {
     /// If `principal` is a hosted door's carrier for `agent` in `fragment`
     /// (none of the chat's members, and the agent's row marks an open door),
     /// returns that door's id.
-    fn hosted_door(&self, agent: &Agent, fragment: &str, principal: &str) -> Option<&str> {
-        if principal == agent.identity {
+    fn hosted_door(&self, agent: &Agent, fragment: &str, record: &Record) -> Option<&str> {
+        if record.by_code() || record.principal == agent.identity {
             return None;
         }
         let v = self.views.get(fragment)?;
-        if v.agents.contains(&principal.to_string()) || v.people.contains(&principal.to_string()) {
+        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
             return None;
         }
         v.door.as_deref()
     }
 
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
+        if record.by_code() {
+            return false;
+        }
         let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
         if record.principal == agent.identity {
             return true;
@@ -1369,23 +1380,34 @@ impl Engine {
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record, rc: RoomCall) {
-        match records::said(&record.body) {
+        let said = records::said(&record.body);
+        // App code's words (docs/chat-records.md, "Who wrote a record") are
+        // heard as a message alone, and as no one's: they answer no
+        // question, and stop and command nothing, under whoever's name.
+        let code = record.by_code();
+        if code && !matches!(said, Said::Message(_) | Said::Other) {
+            crate::ev!("said.ignored", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "why": "app code wrote it: it answers, stops and commands nothing" });
+            return;
+        }
+        match said {
             Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
                 let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
-                let asker_name = if let Some(h) = &rc.heard {
+                let asker_name = if code {
+                    records::CODE_SAYS.to_string()
+                } else if let Some(h) = &rc.heard {
                     crate::note::room_speaker(h, rc.room.as_ref())
                 } else if let (Some(via), Some(r)) = (rc.via.as_deref(), rc.room.as_ref()) {
                     crate::note::owner_in_room(via, r)
                 } else {
                     view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into())
                 };
-                if hop == Some(0) && self.told(agent, fragment, &record.principal, &asker_name, rc.heard.as_ref().map(|h| h.from.as_str()), rc.room.as_ref().map(|r| r.id.as_str()), &m, record.seq) {
+                if hop == Some(0) && !code && self.told(agent, fragment, &record.principal, &asker_name, rc.heard.as_ref().map(|h| h.from.as_str()), rc.room.as_ref().map(|r| r.id.as_str()), &m, record.seq) {
                     return;
                 }
                 if let Some(hop) = hop {
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, Ask::Message, &rc);
+                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message }, &rc);
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
@@ -1595,7 +1617,7 @@ impl Engine {
             panic!("turn {id} admitted twice: the cursor of {} is behind its turns", cursor_key(&agent.fragment, &cause.fragment, &cause.channel));
         }
         let routine = ask == Ask::Routine;
-        assert!(ask == Ask::Message || hop == 0, "a routine or a command is its owner's ask, no hand-off");
+        assert!(matches!(ask, Ask::Message | Ask::Code) || hop == 0, "a routine or a command is its owner's ask, no hand-off");
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
         let refusal = if let Ask::Refused(why) = ask {
             Some(why.to_string())
@@ -1628,6 +1650,7 @@ impl Engine {
             cause,
             asker: asker.to_string(),
             asker_name,
+            by_code: ask == Ask::Code,
             text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES),
             attachments: m.attachments.clone(),
             attachments_in: m.attachments_in.clone(),
@@ -1674,7 +1697,7 @@ impl Engine {
                 // refused) are posted and not kept: a crash before they land
                 // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
-                let start = records::turn_start_in(&id, asker, &agent.identity, &turn.cause, &self.life, turn.room.as_ref().map(|r| r.id.as_str()));
+                let start = records::turn_start_in(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life, turn.room.as_ref().map(|r| r.id.as_str()));
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
                 if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
@@ -1704,7 +1727,7 @@ impl Engine {
         let life = self.life.clone();
         let t = self.state.turns.get_mut(id).expect("held");
         assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
-        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start_in(id, &t.asker, &identity, &t.cause, &life, t.room.as_ref().map(|r| r.id.as_str())), to: None };
+        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start_in(id, &t.asker, t.by_code, &identity, &t.cause, &life, t.room.as_ref().map(|r| r.id.as_str())), to: None };
         let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![start.clone(), end.clone()];
@@ -1893,6 +1916,7 @@ impl Engine {
             cause: cut.cause,
             asker: cut.asker,
             asker_name: CONTINUE_ASKER.into(),
+            by_code: cut.by_code,
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
             attachments_in: None,
@@ -1961,7 +1985,7 @@ impl Engine {
         let Some(id) = next else { return };
         let identity = self.agent(agent).expect("a held turn's agent is on this computer").identity.clone();
         let t = &self.state.turns[&id];
-        let body = records::turn_start_in(&id, &t.asker, &identity, &t.cause, &self.life, t.room.as_ref().map(|r| r.id.as_str()));
+        let body = records::turn_start_in(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life, t.room.as_ref().map(|r| r.id.as_str()));
         let fragment = t.fragment.clone();
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });

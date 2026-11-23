@@ -1565,6 +1565,7 @@ async fn rooms_in_a_connector_chat_get_separate_sessions_and_context() {
     fake.until(WAIT, "third turn ended", |w| w.bodies(&chat, "work", "turn.end").len() == 3).await;
 
     // 4. Slow turn by Maple in #deploys, stopped by owner (paul)
+    hermes.with(|s| s.turn_ms = 200);
     let slow = fake.say(
         &chat,
         conn,
@@ -1576,7 +1577,7 @@ async fn rooms_in_a_connector_chat_get_separate_sessions_and_context() {
         }),
     );
     let slow_turn = records::turn_id("juniper--k3x9", &chat, "chat", slow["seq"].as_u64().unwrap());
-    fake.until(WAIT, "slow turn started", |w| !work_of(w, &chat, &slow_turn, "turn.start").is_empty()).await;
+    fake.until(WAIT, "slow turn streaming draft", |w| w.drafts.iter().any(|d| d.2 == slow_turn)).await;
     fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": slow_turn }));
     fake.until(WAIT, "slow turn stopped", |w| !work_of(w, &chat, &slow_turn, "turn.end").is_empty()).await;
 
