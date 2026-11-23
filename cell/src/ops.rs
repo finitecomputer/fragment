@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::access::Purpose;
+use fragment_core::permit::Action;
 use fragment_core::facet::{self, Answer, Answered, Refusal};
 use fragment_core::npub;
 use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, Role, Via};
@@ -246,12 +246,12 @@ impl FragmentCell {
         let standing = self.standing(caller, link)?;
         // Whether the caller can see the fragment at all comes before
         // anything about its operations.
-        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        decide(facts.visibility, standing, Action::Read(Role::Public))?;
         let decl = self.declared(op)?;
         // a query reads (docs/MODEL.md), so an agent's owner may ask it; a
         // mutation or a job acts, which takes a membership of one's own
-        let purpose = if decl.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
-        let role = decide(facts.visibility, standing, purpose, decl.role)?;
+        let action = if decl.kind == OpKind::Query { Action::Read(decl.role) } else { Action::Act(decl.role) };
+        let role = decide(facts.visibility, standing, action)?;
         // a mutation or a job writes: past its owner's overdraft the fragment
         // takes none, and its queries still answer
         let writes = decl.kind != OpKind::Query;

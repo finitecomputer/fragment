@@ -19,7 +19,7 @@
 //! not read (`reader`), or when the answer is someone's (`answers_someone`,
 //! and the app's own routes).
 
-use fragment_core::access::Purpose;
+use fragment_core::permit::Action;
 use fragment_core::site::VIEW_COOKIE;
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
@@ -474,7 +474,7 @@ impl FragmentCell {
             return Err(CellError::invalid("__watch is a WebSocket; send Upgrade: websocket"));
         }
         let standing = self.standing(caller, link)?;
-        decide(facts.visibility, standing, Purpose::Read, Role::Viewer)?;
+        decide(facts.visibility, standing, Action::Read(Role::Viewer))?;
         let pair = WebSocketPair::new()?;
         let who = match caller.principal() {
             Some(p) if as_themselves(standing) => format!("p:{p}"),

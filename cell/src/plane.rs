@@ -1097,19 +1097,14 @@ impl FragmentCell {
     /// `GET /api/storage-token`: a token that writes the repo (an editor
     /// and up), or with `?access=read` one that only reads it (viewer and
     /// up). Either reads the repo's whole history, not only main's files,
-    /// so it is decided by membership (`access::repo_role`): a visibility
+    /// so it is decided by membership (`permit::Action::Repo`): a visibility
     /// floor, a share link, or an agent of theirs that is in lends none.
     pub(crate) async fn storage_token(&self, caller: &Caller, asked: StorageAccess) -> CellResult<Response> {
         let write = asked == StorageAccess::Write;
         let needs = if write { Role::Editor } else { Role::Viewer };
-        // whoever may not have the role at all is refused as anywhere (401,
-        // 403); a share link counts for nothing here, and a public
-        // fragment's floor is below a viewer's
-        self.require(caller, false, needs)?;
-        // the rest read as a viewer through an agent of theirs that is a member
-        if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
-            return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
-        }
+        // a share link counts for nothing here, and a public fragment's
+        // floor is below a viewer's
+        crate::fragment::decide(self.facts()?.visibility, self.standing(caller, false)?, fragment_core::permit::Action::Repo(needs))?;
         let life = self.life()?;
         if write {
             // its token writes the repo: a deploy's first step

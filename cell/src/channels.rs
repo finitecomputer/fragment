@@ -56,7 +56,7 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
     Ok((after, before, limit))
 }
 
-use fragment_core::access::{Purpose, Standing};
+use fragment_core::permit::{Action, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::{door, npub};
 use fragment_proto::{
@@ -494,7 +494,7 @@ impl FragmentCell {
     pub(crate) async fn post(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, channel: &str, id: &str, body: &Value) -> CellResult<(ChannelRecord, bool)> {
         let standing = self.standing(caller, link)?;
         // whether the caller can see the fragment at all comes first
-        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        decide(facts.visibility, standing, Action::Read(Role::Public))?;
         if !valid_channel_name(channel) {
             return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
         }
@@ -596,7 +596,7 @@ impl FragmentCell {
         let Some(needs) = decl.post else {
             return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts: its fragment.json names no post role")));
         };
-        let role = decide(facts.visibility, standing, Purpose::Act, needs)?;
+        let role = decide(facts.visibility, standing, Action::Act(needs))?;
         assert!(role >= decl.read, "whoever may post to a channel may read it (checked at deploy)");
         if decl.signed_in && caller.principal().is_none() {
             return Err(CellError::new(ErrorCode::Unauthenticated, format!("channel {channel} takes posts from people signed in: sign in to post")));
@@ -753,7 +753,7 @@ impl FragmentCell {
         let who = self.caller_id(caller)?.to_string();
         let facts = self.facts()?;
         let standing = self.standing(caller, false)?;
-        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        decide(facts.visibility, standing, Action::Read(Role::Public))?;
         // a draft says a built-in channel is no place for it before the
         // shared checks would (`admit_poster`), as it always has: 400
         if !valid_channel_name(channel) || BUILTIN_CHANNELS.contains(&channel) {

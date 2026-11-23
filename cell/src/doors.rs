@@ -29,7 +29,7 @@
 
 use std::borrow::Cow;
 
-use fragment_core::access::Standing;
+use fragment_core::permit::Standing;
 use fragment_core::connectors::{Action, Policy};
 use fragment_core::door::{self, Hosted};
 use fragment_core::npub;
@@ -112,7 +112,7 @@ impl FragmentCell {
     /// Whether an agent may share here at all: never on a connector, which
     /// its owner shares in person alone, as they alone edit it (its
     /// visibility, members, invites and share link). Elsewhere an agent
-    /// shares for its owner (`access::agent_shares`).
+    /// shares for its owner (`permit::agent_shares`).
     pub(crate) fn agents_share(&self) -> CellResult<()> {
         if self.meta(MetaKey::DoorTemplate)?.is_some() {
             return Err(CellError::new(ErrorCode::Forbidden, "only its owner, in person, shares a connector: never an agent, whomever it acts for"));

@@ -167,7 +167,7 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
-**An agent shares for its owner** (`fragment_core::access::agent_shares`):
+**An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
 owns, an agent manages members, invites, visibility and rotation as its
 owner would (never granting `owner`, never touching the owner). Any other
@@ -666,7 +666,7 @@ offers no invite, and no switch but one to close a link from before.
 
 On a chat one of the owner's agents is in, the sheet, and `fragment
 members add`, say "People in this chat can talk to your agent."
-(`fragment_core::access::TRUST_WARNING`): whoever is in a chat may talk to
+(`fragment_core::permit::TRUST_WARNING`): whoever is in a chat may talk to
 its agents, which act for their owner.
 
 ### Invites by email
@@ -774,7 +774,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
 | `POST /api/f/{name}/door` | its owner, in person (never an agent) | `{act: "link", agent}` → `{door, agent, relayed}`, or `{act: "unlink"}` → `{ok}` (An agent's doors). No connector, one the deployment does not allow, or an agent not the owner's, 403; another `act` 400 |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt, write: true}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S` |
-| `GET /api/f/{name}/storage-token?access=read` | a member, viewer and up | → the same with `write: false`: `git:read` alone. A token reads the repo's whole history, not only main's files, so membership decides either (`access::repo_role`): no visibility floor, share link or agent of theirs in lends one, and an agent acting for someone holds the lower of their membership and its cap (R17). A host before it named no `write` (its tokens all wrote), and a client that sends no `access` is refused as a viewer was before (403): an older CLI never holds a token it cannot push with. Another `access` 400 |
+| `GET /api/f/{name}/storage-token?access=read` | a member, viewer and up | → the same with `write: false`: `git:read` alone. A token reads the repo's whole history, not only main's files, so membership decides either (`permit::decide`, `Action::Repo`): no visibility floor, share link or agent of theirs in lends one, and an agent acting for someone holds the lower of their membership and its cap (R17). A host before it named no `write` (its tokens all wrote), and a client that sends no `access` is refused as a viewer was before (403): an older CLI never holds a token it cannot push with. Another `access` 400 |
 | `POST /api/f/{name}/refresh` | editor | `{ref?: "main" \| "live"}`, the ref the writer moved (none, or no body: both; another ref 400) → `{ok, refs: {main: {pin, moved} \| {absent}, live: …}}`, the refs it read, once a moved live is installed. A writer to the repo asks this after its push; the platform follows its own moves, and a busy fragment's poll is the backstop (`FRAGMENT_POLL_INTERVAL_S`) |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main (at most `FILE_WRITES_MAX` files, 400; `API_FILES_WRITE_MAX_BYTES` decoded in a body of `BODY_MAX_BYTES`, 413; relative paths, no `.` or `..`). The same `key` from the same person answers the first commit again; a write of what main holds commits nothing. Main moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
