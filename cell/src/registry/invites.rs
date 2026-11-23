@@ -24,6 +24,7 @@
 //! tries in all (`fragment_core::backoff::claim_retry_ms`). Past them it
 //! waits on its person's next sign-in, which tries it afresh.
 
+use fragment_core::permit::{self, Reserved, Sharer};
 use fragment_core::{backoff, levers, mail};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, Reason, Role};
 use futures_util::future::join_all;
@@ -253,7 +254,7 @@ impl RegistryCell {
         match (who.kind, who.owner.as_deref()) {
             (IdentityKind::Person, _) if acting_for.is_none() => Ok(who),
             (IdentityKind::Person, _) => Err(CellError::invalid("a person answers their own invites: `for` is an agent's, acting for its owner")),
-            (IdentityKind::Agent, Some(owner)) if acting_for == Some(owner) && who.held.is_none() => self.stored_identity(owner, "an agent's owner"),
+            (IdentityKind::Agent, Some(owner)) if permit::agent_may_ask(Reserved::Sharing, Sharer::of(Some(owner), acting_for, who.held)).is_ok() => self.stored_identity(owner, "an agent's owner"),
             (IdentityKind::Agent, _) => Err(CellError::new(
                 ErrorCode::Forbidden,
                 "an agent reads and answers its owner's invites only acting for them (`for` its owner), and not held below them",

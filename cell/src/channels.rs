@@ -619,7 +619,7 @@ impl FragmentCell {
         // no principal: an anonymous visitor is no member of any kind
         let Some(signed) = &caller.signed else { return Err(refused()) };
         // An agent acting for someone acts with its asker's standing
-        // (`standing_for`): its post would be the asker's say under the
+        // (`standing`): its post would be the asker's say under the
         // agent's name, so it is no post of the agent's own.
         if signed.acting_for.is_some() {
             return Err(refused());
@@ -811,25 +811,27 @@ impl FragmentCell {
 
     /// `GET /api/f/<name>/channels/<channel>?after=|before=&limit=`
     pub(crate) fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
-        self.require(caller, false, Role::Public)?;
-        if !valid_channel_name(channel) {
-            return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
-        }
-        let read = self.channel_read_role(channel)?;
-        self.require(caller, false, read)?;
+        self.channel_reader(caller, channel)?;
         json_response(&self.channel_page(channel, after, before, limit)?)
     }
 
     /// `GET /api/f/<name>/channels/<channel>/newest` (`channel_newest`):
     /// read as the channel is.
     pub(crate) fn newest_api(&self, caller: &Caller, channel: &str) -> CellResult<Response> {
-        self.require(caller, false, Role::Public)?;
+        self.channel_reader(caller, channel)?;
+        json_response(&self.channel_newest(channel)?)
+    }
+
+    /// Whether the caller reads `channel` over the API: the fragment first,
+    /// then the channel's read role, decided over one standing.
+    fn channel_reader(&self, caller: &Caller, channel: &str) -> CellResult<()> {
+        let (facts, standing) = (self.facts()?, self.standing(caller, false)?);
+        decide(facts.visibility, standing, Action::Read(Role::Public))?;
         if !valid_channel_name(channel) {
             return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
         }
-        let read = self.channel_read_role(channel)?;
-        self.require(caller, false, read)?;
-        json_response(&self.channel_newest(channel)?)
+        decide(facts.visibility, standing, Action::Read(self.channel_read_role(channel)?))?;
+        Ok(())
     }
 
     /// A page of `channel` (`GET …/channels/{c}`, `__channel/{c}`): at most

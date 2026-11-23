@@ -897,70 +897,65 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["role"].as_str()).and_then(Role::parse))
     }
 
-    /// What the caller brings, in one statement: their membership, or an
-    /// agent of theirs that is a member (they read what it reads). A
-    /// request reads it once and decides with it (`decide`) as often as
-    /// it asks.
+    /// What the caller brings, in one statement (`permit::Standing`): the
+    /// membership of whom it asks for (an agent's owner, named in `for`;
+    /// else the signer), or an agent of theirs that is a member (they read
+    /// what it reads); an agent's own membership and its person's; and
+    /// whether this is a connector, and the caller its owner in person. The
+    /// rules over them are `permit::decide`'s alone. A request reads it
+    /// once and decides with it as often as it asks.
     pub(crate) fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
-        let Some(principal) = caller.principal() else {
-            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None, held: None });
+        let Some(signed) = caller.signed.as_ref() else {
+            return Ok(Standing { link, ..Standing::default() });
         };
-        if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
-            let standing = self.standing_for(signed, link)?;
-            return self.only_owner_edits(caller, standing);
+        let asker = signed.acting_for.as_deref().unwrap_or(&signed.id);
+        let person = signed.owner.as_deref();
+        if signed.acting_for.is_some() && person.is_none() {
+            return Err(CellError::host("an agent acting for someone has no owner"));
         }
         #[derive(serde::Deserialize)]
         struct Row {
             role: Option<String>,
             agent: i64,
-        }
-        let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent",
-            vec![principal.into(), principal.into()],
-        )?;
-        let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        let mut member = row.role.as_deref().and_then(Role::parse);
-        // as itself, a hold caps an agent in with its person here, a
-        // member who is not the owner (decision 64: the whole entity is
-        // secured; members.rs `entity_of`); never its own memberships, its
-        // owner's chats, its agent fragment, one it holds on its own
-        // (decision 36), where it answers and records its turns
-        if let Some((held, signed)) = caller.signed.as_ref().and_then(|s| Some((s.held?, s))) {
-            let in_with_person = match signed.owner.as_deref() {
-                Some(person) => self.member_role(person)?.is_some_and(|r| r != Role::Owner),
-                None => false,
-            };
-            if in_with_person {
-                member = member.map(|m| m.min(held));
-            }
-        }
-        self.only_owner_edits(caller, Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
-    }
-
-    /// An agent acting for someone (decision R17), in one statement:
-    /// the asker's standing (their membership, or an agent of theirs that is
-    /// a member), capped by the agent's own membership and its owner's
-    /// (`permit::decide`).
-    fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
-        let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
-        let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
-        #[derive(serde::Deserialize)]
-        struct Row {
-            role: Option<String>,
-            agent: i64,
-            agent_role: Option<String>,
-            owner_role: Option<String>,
+            own_role: Option<String>,
+            person_role: Option<String>,
+            door: Option<String>,
+            owner: Option<String>,
         }
         let rows: Vec<Row> = self.typed(
             "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent, \
-             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role",
-            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
+             (SELECT role FROM members WHERE principal = ?) AS own_role, (SELECT role FROM members WHERE principal = ?) AS person_role, \
+             (SELECT value FROM meta WHERE key = ?) AS door, (SELECT value FROM meta WHERE key = ?) AS owner",
+            vec![
+                asker.into(),
+                asker.into(),
+                signed.id.as_str().into(),
+                person.unwrap_or_default().into(),
+                MetaKey::DoorTemplate.key().into(),
+                MetaKey::Owner.key().into(),
+            ],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
-        let member = role(row.role);
-        let cap = permit::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap), held: agent.held })
+        let (member, person_role) = (role(row.role), role(row.person_role));
+        // read only on a connector, where it lifts the viewer ceiling
+        let owner_in_person = match (&row.door, row.owner) {
+            (None, _) => false,
+            (Some(_), Some(owner)) => crate::doors::owner_in_person(signed, &owner),
+            (Some(_), None) => return Err(missing(MetaKey::Owner)),
+        };
+        Ok(Standing {
+            member,
+            owns_member_agent: member.is_none() && row.agent != 0,
+            link,
+            signed: true,
+            cap: signed.acting_for.as_ref().map(|_| permit::Cap { agent: role(row.own_role), owner: person_role }),
+            held: signed.held,
+            // its person is a member here, not its owner (members.rs `entity_of`)
+            beside_person: person_role.is_some_and(|r| r != Role::Owner),
+            connector: row.door.is_some(),
+            owner_in_person,
+        })
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an

@@ -1321,10 +1321,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer_for(env, &req, &url, &body).await?;
-            // what an agent makes is its owner's: only its owner's turns make one
-            if principal.acting_for.as_ref().is_some_and(|asker| principal.owner.as_ref() != Some(asker)) {
-                return Err(CellError::new(ErrorCode::Forbidden, "an agent makes fragments for its owner, in its owner's turns only"));
-            }
+            // what an agent makes is its owner's: `for` names no one else (`signer_of`)
+            assert!(principal.acting_for.is_none() || principal.acting_for == principal.owner, "an agent acts only for its own owner");
             create_fragment(env, cfg, &url, create, principal).await
         }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
@@ -1522,8 +1520,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             // decides the rest from its owner's share there, and decides
             // again on its own (`permit::agent_shares`).
             if let (Some(reserved), Some(agent)) = (reserved, principal.as_ref().filter(|p| p.kind != IdentityKind::Person)) {
-                let for_owner = agent.acting_for.is_some() && agent.acting_for == agent.owner;
-                let sharer = permit::Sharer { for_owner, held: agent.held };
+                let sharer = permit::Sharer::of(agent.owner.as_deref(), agent.acting_for.as_deref(), agent.held);
                 if let Err(refusal) = permit::agent_may_ask(reserved, sharer) {
                     return Err(CellError::new(ErrorCode::Forbidden, refusal.message()));
                 }

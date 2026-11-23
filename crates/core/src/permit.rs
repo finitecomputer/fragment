@@ -25,16 +25,21 @@
 //!    its owner could, so a key that signs `for` someone else gains nothing
 //!    its owner does not hold.
 //! 4. **A hold** (decision 36): an agent its owner holds below them acts
-//!    with at most its hold, wherever it is and whomever it acts for. Its
-//!    other, a share marked "people only" that lent the member's agents
-//!    nothing, went on 2026-10-13 (Paul: "Giving a person access should
-//!    imply giving their agent access. It's basically 'giving all the
-//!    pubkeys under the umbrella of this email' access"): a member's agents
-//!    reach what the member does, capped as above.
-//! 5. **The repo is its members'** (`Action::Repo`): its whole history,
+//!    with at most its hold with its owner's access, whomever it acts for,
+//!    and as itself where its person is a guest (decision 64: the whole
+//!    entity is secured); never in its own memberships elsewhere (its
+//!    chats), where it answers and records its turns. Its other, a share
+//!    marked "people only" that lent the member's agents nothing, went on
+//!    2026-10-13 (Paul: "Giving a person access should imply giving their
+//!    agent access. It's basically 'giving all the pubkeys under the
+//!    umbrella of this email' access"): a member's agents reach what the
+//!    member does, capped as above.
+//! 5. **A connector is its owner's alone to edit**: everyone else, their
+//!    own agent acting for them included, is at most a viewer there.
+//! 6. **The repo is its members'** (`Action::Repo`): its whole history,
 //!    whatever the visibility; no floor, share link or agent of theirs
 //!    that is a member lends it.
-//! 6. **Short of the role**, an anonymous caller is told to sign in (401)
+//! 7. **Short of the role**, an anonymous caller is told to sign in (401)
 //!    and a signed one is refused (403).
 //!
 //! Some control routes need more than a role (`reserved`). Sharing
@@ -78,7 +83,7 @@ pub enum Action {
     Act(Role),
     /// Its repo, through a storage token: its whole git history, not only
     /// main's files. It is read first, as `Read`, then decided by
-    /// memberships alone (rule 5).
+    /// memberships alone (rule 6).
     Repo(Role),
 }
 
@@ -104,8 +109,26 @@ pub struct Standing {
     /// An agent acts for the caller this standing describes (its asker):
     /// what caps it. `None`: the caller acts as themselves.
     pub cap: Option<Cap>,
-    /// The caller is an agent held below its owner: the most it acts with.
+    /// The caller is an agent held below its owner (decision 36): the most
+    /// it acts with wherever a hold applies (rule 4).
     pub held: Option<Role>,
+    /// The caller is an agent acting as itself, and its person is a member
+    /// here who is not the owner (decision 64: the whole entity is
+    /// secured), so its hold caps its own membership too.
+    pub beside_person: bool,
+    /// The fragment is a connector: its owner's alone to edit (rule 5).
+    pub connector: bool,
+    /// The caller is the fragment's owner, a person signing as themselves.
+    pub owner_in_person: bool,
+}
+
+impl Standing {
+    /// A role decided earlier and kept, as a membership is held: a live
+    /// socket's, from when it connected (it reopens when its role changes).
+    /// On a `members` fragment nothing else lends it more.
+    pub fn kept(role: Role) -> Standing {
+        Standing { member: Some(role), signed: true, ..Standing::default() }
+    }
 }
 
 /// What an agent acting for someone brings to a fragment (decision R17).
@@ -160,7 +183,7 @@ pub enum Why {
     MembersOnly,
     /// Their role is below the one it needs.
     Short,
-    /// Its repo is its members' alone, and they read it otherwise (rule 5).
+    /// Its repo is its members' alone, and they read it otherwise (rule 6).
     RepoIsMembers,
 }
 
@@ -240,17 +263,30 @@ enum Purpose {
 /// memberships, so an agent held at viewer still answers in the chats it is
 /// a member of, recording its turns there.
 fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
+    // a hold is set below its owner (registry.rs), never at the `public`
+    // floor: a held agent's floor is the floor anyone has
+    assert!(standing.held.is_none_or(|h| h > Role::Public && h <= AGENT_ROLE_MAX), "a hold is viewer or editor");
     let own = own_role(visibility, standing, purpose);
-    match standing.cap {
+    // `None` is below every role: nothing on either side is nothing
+    let role = match standing.cap {
         None => own,
-        // `None` is below every role: nothing on either side is nothing
-        Some(cap) => {
-            let role = own.min(cap_role(visibility, cap, standing.link));
-            match standing.held {
-                Some(held) => role.map(|r| r.min(held)),
-                None => role,
-            }
-        }
+        Some(cap) => own.min(cap_role(visibility, cap, standing.link)),
+    };
+    // rule 4: with its owner's access, and as itself where its person is a
+    // guest; never its own memberships elsewhere (its chats, its own agent
+    // fragment), where it answers and records its turns
+    let held = match (standing.cap, standing.beside_person) {
+        (Some(_), _) | (None, true) => standing.held,
+        (None, false) => None,
+    };
+    let role = match held {
+        Some(held) => role.map(|r| r.min(held)),
+        None => role,
+    };
+    // rule 5: everyone but its owner, in person, is at most a viewer there
+    match standing.connector && !standing.owner_in_person {
+        true => role.map(|r| r.min(Role::Viewer)),
+        false => role,
     }
 }
 
@@ -273,7 +309,7 @@ fn own_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Opt
 /// anyone has) or its owner's membership, whichever is higher, and never
 /// above `AGENT_ROLE_MAX`.
 fn cap_role(visibility: Visibility, cap: Cap, link: bool) -> Option<Role> {
-    let agent = own_role(visibility, Standing { member: cap.agent, owns_member_agent: false, link, signed: true, cap: None, held: None }, Purpose::Act);
+    let agent = own_role(visibility, Standing { member: cap.agent, link, signed: true, ..Standing::default() }, Purpose::Act);
     agent.max(cap.owner).map(|r| r.min(AGENT_ROLE_MAX))
 }
 
@@ -282,7 +318,7 @@ fn cap_role(visibility: Visibility, cap: Cap, link: bool) -> Option<Role> {
 /// owner's); `None` leaves the fragment out. A call decides again, with
 /// the fragment's visibility.
 pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
-    let standing = Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(cap), held: None };
+    let standing = Standing { member: asker, signed: true, cap: Some(cap), ..Standing::default() };
     // every role is at least `public`: what it acts with at all lists it
     match decide(&Facts { visibility: Visibility::Members, standing, action: Action::Act(Role::Public) }) {
         Verdict::Allow(role) => Some(role),
@@ -366,6 +402,15 @@ pub struct Sharer {
     pub for_owner: bool,
     /// Its owner holds it below them (decision 36): the most it acts with.
     pub held: Option<Role>,
+}
+
+impl Sharer {
+    /// An agent as who it is says (`owner`, whom it names in `for`, its
+    /// hold): it acts for its own owner when it names them. The router
+    /// honors no other `for` (`may_act_for`).
+    pub fn of(owner: Option<&str>, named: Option<&str>, held: Option<Role>) -> Sharer {
+        Sharer { for_owner: owner.is_some() && named == owner, held }
+    }
 }
 
 /// Why an agent's request on a reserved route carries no owner's
@@ -516,17 +561,17 @@ mod tests {
     use Visibility as V;
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {
-        Standing { member, owns_member_agent: false, link, signed, cap: None, held: None }
+        Standing { member, link, signed, ..Standing::default() }
     }
 
     fn owner_of_agent() -> Standing {
-        Standing { member: None, owns_member_agent: true, link: false, signed: true, cap: None, held: None }
+        Standing { owns_member_agent: true, signed: true, ..Standing::default() }
     }
 
     /// An agent acting for someone whose membership is `asker`, beside its
     /// own membership and its owner's.
     fn acting(asker: Option<Role>, agent: Option<Role>, owner: Option<Role>) -> Standing {
-        Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(Cap { agent, owner }), held: None }
+        Standing { member: asker, signed: true, cap: Some(Cap { agent, owner }), ..Standing::default() }
     }
 
     fn verdict(visibility: Visibility, standing: Standing, action: Action) -> Verdict {
@@ -583,6 +628,8 @@ mod tests {
         let signed = st(None, false, true);
         let member = |role| st(Some(role), false, true);
         let held = |held, s: Standing| Standing { held: Some(held), ..s };
+        let beside = |s: Standing| Standing { beside_person: true, ..s };
+        let connector = |s: Standing| Standing { connector: true, ..s };
         let rows: &[(&str, Visibility, Standing, Action, Verdict)] = &[
             // rule 1: a caller's own role
             ("anonymous reads a public page", V::Public, anon, Read(Public), Verdict::Allow(Public)),
@@ -619,7 +666,21 @@ mod tests {
             ("held at viewer, it does not edit", V::Members, held(Viewer, acting(Some(Editor), None, Some(Editor))), Act(Editor), refused(Editor, Why::Capped, false)),
             ("a hold never limits its own memberships", V::Members, held(Viewer, member(Editor)), Act(Editor), Verdict::Allow(Editor)),
             ("a hold never raises", V::Members, held(Editor, acting(Some(Viewer), None, Some(Editor))), Act(Editor), refused(Editor, Why::Capped, false)),
-            // rule 5: the repo is its members'
+            ("as itself beside its guest person, its hold caps it", V::Members, beside(held(Viewer, member(Editor))), Act(Editor), refused(Editor, Why::Short, false)),
+            ("as itself beside its guest person, it reads", V::Members, beside(held(Viewer, member(Editor))), Read(Viewer), Verdict::Allow(Viewer)),
+            ("beside its person, unheld, its membership stands", V::Members, beside(member(Editor)), Act(Editor), Verdict::Allow(Editor)),
+            ("beside its person, the floor stays the floor", V::Public, beside(held(Viewer, signed)), Read(Public), Verdict::Allow(Public)),
+            // rule 5: a connector is its owner's alone to edit
+            ("a connector's editor is a viewer there", V::Members, connector(member(Editor)), Act(Editor), refused(Editor, Why::Short, false)),
+            ("a connector's editor reads", V::Members, connector(member(Editor)), Read(Viewer), Verdict::Allow(Viewer)),
+            ("a connector's owner, in person, deletes", V::Members, Standing { owner_in_person: true, ..connector(member(Owner)) }, Act(Owner), Verdict::Allow(Owner)),
+            ("a connector's owner as their own agent is a viewer", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Act(Editor), refused(Editor, Why::Capped, false)),
+            ("a connector's owner's agent reads", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Read(Viewer), Verdict::Allow(Viewer)),
+            ("a connector, by its link", V::Link, connector(link), Read(Viewer), Verdict::Allow(Viewer)),
+            // a role kept from earlier (a socket's)
+            ("a kept role reaches what it holds", V::Members, Standing::kept(Editor), Read(Editor), Verdict::Allow(Editor)),
+            ("a kept role is short of more", V::Members, Standing::kept(Viewer), Read(Editor), refused(Editor, Why::Short, false)),
+            // rule 6: the repo is its members'
             ("a member reads the repo", V::Members, member(Viewer), Repo(Viewer), Verdict::Allow(Viewer)),
             ("an editor writes the repo", V::Members, member(Editor), Repo(Editor), Verdict::Allow(Editor)),
             ("a viewer does not write the repo", V::Members, member(Viewer), Repo(Editor), refused(Editor, Why::Short, false)),
@@ -635,6 +696,69 @@ mod tests {
             assert_eq!(decide(&facts), want, "{row}");
             assert_eq!(decide(&facts), decide(&facts), "{row}: decided again, the same");
         }
+    }
+
+    /// Goal: the two rules the cell applied itself, by narrowing the
+    /// standing it read before deciding (an agent's hold beside its guest
+    /// person, decision 64; a connector's viewer ceiling), moved here
+    /// unchanged. Method: every standing on every visibility for every
+    /// action, decided once as the cell did (`as_the_cell_did`, the old
+    /// code's narrowing, then `decide` over the narrowed standing with no
+    /// facts) and once from the facts; the two agree, verdict and reason.
+    #[test]
+    fn the_cells_own_rules_moved_in_unchanged() {
+        /// fragment.rs `standing`'s hold and doors.rs `only_owner_edits`, as
+        /// they read before the rules moved here.
+        fn as_the_cell_did(s: Standing) -> Standing {
+            let mut t = Standing { beside_person: false, connector: false, owner_in_person: false, ..s };
+            if s.cap.is_none() {
+                // as itself the hold was never passed on: it narrowed the membership, beside its person
+                t.held = None;
+                if let (true, Some(held)) = (s.beside_person, s.held) {
+                    t.member = t.member.map(|m| m.min(held));
+                }
+            }
+            if s.connector && !s.owner_in_person {
+                t.member = t.member.map(|m| m.min(Viewer));
+                if t.cap.is_some() {
+                    t.held = Some(t.held.map_or(Viewer, |h| h.min(Viewer)));
+                }
+            }
+            t
+        }
+        let roles = [None, Some(Public), Some(Viewer), Some(Editor), Some(Owner)];
+        let mut caps = vec![None];
+        for agent in roles {
+            for owner in roles {
+                caps.push(Some(Cap { agent, owner }));
+            }
+        }
+        let mut actions = vec![];
+        for role in [Public, Viewer, Editor, Owner] {
+            actions.extend([Action::Read(role), Action::Act(role), Action::Repo(role)]);
+        }
+        let mut n: u64 = 0;
+        for visibility in [V::Members, V::Link, V::Public] {
+            for member in roles {
+                for cap in &caps {
+                    for held in [None, Some(Viewer), Some(Editor)] {
+                        for bits in 0u8..32 {
+                            let flag = |i: u8| bits & (1 << i) != 0;
+                            let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap: *cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false };
+                            for standing in [standing, Standing { owner_in_person: true, ..standing }] {
+                                for &action in &actions {
+                                    let new = decide(&Facts { visibility, standing, action });
+                                    let old = decide(&Facts { visibility, standing: as_the_cell_did(standing), action });
+                                    assert_eq!(new, old, "{visibility:?} {standing:?} {action:?}");
+                                    n += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(n, 3 * 5 * 26 * 3 * 32 * 2 * 12, "every combination, once");
     }
 
     /// Goal: what should obviously work works, and stays working (Paul,
@@ -657,7 +781,7 @@ mod tests {
             link: false,
             signed: true,
             cap: Some(Cap { agent: juniper, owner: ana }),
-            held: None,
+            ..Standing::default()
         };
         const GAPS: &[&str] = &["Ben asks Juniper to edit the fragment he shared with it as an editor"];
         let rows: &[(&str, Facts, Verdict, Verdict)] = &[
