@@ -49,7 +49,7 @@ case $mode in
   stop | delete)
     [ -n "$kept" ] || { echo "tools/boat/run: this checkout has no kept sandbox" >&2; exit 0; }
     if [ "$mode" = stop ]; then
-      [ "$(state_of "$kept")" != running ] || "$B" stop "$kept" >/dev/null
+      case $(state_of "$kept") in stopped | gone) ;; *) "$B" stop "$kept" >/dev/null ;; esac
       echo "tools/boat/run: $kept stopped; the next --keep run resumes it" >&2
     else
       [ "$(state_of "$kept")" = gone ] || "$B" delete "$kept" --yes >/dev/null
@@ -82,10 +82,10 @@ trap 'exit 130' INT TERM
 if [ "$mode" = keep ] && [ -n "$kept" ]; then
   for _ in $(seq 1 60); do
     case $(state_of "$kept") in
-      running) "$B" extend "$kept" --ttl "$TTL" >/dev/null; id=$kept; break ;;
       stopped) "$B" resume "$kept" --ttl "$TTL" >/dev/null; id=$kept; break ;;
       gone) break ;;
-      *) sleep 5 ;;  # starting or stopping
+      creating | starting | resuming | stopping | pending) sleep 5 ;;
+      *) "$B" extend "$kept" --ttl "$TTL" >/dev/null; id=$kept; break ;;  # running or idle
     esac
   done
 fi

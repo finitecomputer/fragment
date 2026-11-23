@@ -10,10 +10,12 @@ B=${BOAT_BIN:-$(command -v boat || echo "$HOME/.ascii/bin/boat")}
 SNAPSHOT=${FRAGMENT_BOAT_SNAPSHOT:-fragment-warm}
 TYPE=${FRAGMENT_BOAT_TYPE:-large}
 
-# The first sandbox id in a `boat ... --json` reply.
+# The first sandbox id in a `boat ... --json` reply. It reads the whole
+# reply: stopping early would end boat with SIGPIPE.
 first_id() {
   python3 -I -c '
 import json, sys
+ids = []
 for line in sys.stdin:
     try:
         reply = json.loads(line)
@@ -21,10 +23,10 @@ for line in sys.stdin:
         continue
     found = reply.get("id") or (reply.get("sandbox") or {}).get("id")
     if isinstance(found, str) and found.startswith("bx_"):
-        print(found)
-        break
-else:
+        ids.append(found)
+if not ids:
     sys.exit("tools/boat: no sandbox id in boat'"'"'s reply")
+print(ids[0])
 '
 }
 
