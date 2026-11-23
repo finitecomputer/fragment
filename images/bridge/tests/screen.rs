@@ -339,3 +339,44 @@ async fn a_cards_answer_for_the_computer_reaches_its_runtime_alone() {
     assert!(status == 409 && said.contains("This ended before your answer came"), "{status} {said}");
     running.stop().await;
 }
+
+/// Goal (FIN-682): the screen's sockets open for the platform's proxy
+/// alone. The cell forwards a viewer's handshake with a header set of its
+/// own, with no `Origin` and no Fetch Metadata; a handshake a browser sends
+/// straight to the port carries both, so it is not that caller. Valid: a
+/// socket with neither header opens and answers, as before. Invalid: one
+/// with an `Origin` (any, the port's own included) or a `sec-fetch-site`
+/// is refused, 403, on `/control` and `/websockify` alike, before its agent
+/// is looked at.
+#[tokio::test]
+async fn the_screens_sockets_open_for_the_proxy_alone() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("screens-proxy-alone");
+    let juniper = Display::start("hermes:juniper--k3x9").await;
+    write_screens(&dir, &[("juniper--k3x9", "juniper--k3x9", juniper.target())]);
+    write_ready(&dir, &["juniper--k3x9"]);
+    let (running, base) = bridge(&fake, &dir).await;
+
+    let mut c = control(&base, "w", "juniper--k3x9").await;
+    assert_eq!(next(&mut c).await["agent"], "juniper--k3x9", "with neither header, a control socket opens");
+    let v = Viewer::open(&base, "v", "juniper--k3x9", WAIT).await.unwrap();
+    assert_eq!(v.name, "hermes:juniper--k3x9", "and the desktop's stream");
+
+    let own = format!("http://127.0.0.1:{}", base.port);
+    let browsers: [(&str, String); 4] = [
+        ("origin", "http://example.test".into()),
+        ("origin", own),
+        ("origin", "null".into()),
+        ("sec-fetch-site", "same-origin".into()),
+    ];
+    for path in ["/control?viewer=x&agent=juniper--k3x9", "/websockify?viewer=x&agent=juniper--k3x9"] {
+        for (name, value) in &browsers {
+            let why = fragment_bridge::net::connect_ws(&base, path, &[(name, value.clone())]).await.err().unwrap_or_default();
+            assert!(why.contains("403"), "{path} with {name}: {value}: {why}");
+        }
+    }
+    let mut again = control(&base, "w2", "juniper--k3x9").await;
+    assert_eq!(next(&mut again).await["agent"], "juniper--k3x9", "the proxy's socket still opens after");
+    drop((v, juniper));
+    running.stop().await;
+}
