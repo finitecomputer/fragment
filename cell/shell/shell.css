@@ -421,7 +421,10 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
    rest, once back, then still): it grows, its gloss, pooled light and rim
    brighten, its shadow falls further and softer, and its arrow lifts a
    pixel. Pressed, it gives a little and springs back. Reduced motion keeps
-   the light's change alone. */
+   the light's change alone. Only the bead (its .bead, index.html) moves:
+   the button, what a press hits, holds still under the pointer (the bead
+   past its edge hits nothing), so a press that begins on its rim ends
+   there and sends. */
 /* its light as numbers, so they ease (a gradient's own colours cannot) */
 @property --bead-gloss { syntax: "<number>"; inherits: true; initial-value: .5; }
 @property --bead-pool { syntax: "<number>"; inherits: true; initial-value: .42; }
@@ -429,7 +432,12 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-send {
   --bead: var(--primary); --bead-glyph: var(--primary-foreground); --bead-off: #48484a;
   --bead-spring: linear(0, .009, .035 2.1%, .141, .281 6.7%, .723 12.9%, .938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, .991, .977 51%, .974 53.8%, .975 57.1%, .997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
-  position: relative; isolation: isolate; flex: none; width: 36px; height: 36px; margin-bottom: 4px; border-radius: 50%;
+  position: relative; flex: none; width: 36px; height: 36px; margin-bottom: 4px; border-radius: 50%;
+}
+/* the icon buttons' own hover (.icon-button:hover) is the bead's light here */
+.search-send, .search-send:hover { background: none; }
+.search-send .bead {
+  position: absolute; inset: 0; isolation: isolate; display: grid; place-items: center; border-radius: 50%; pointer-events: none;
   background-color: color-mix(in srgb, var(--bead) 85%, transparent);
   background-image: radial-gradient(circle 21px at 50% 100%, rgba(255, 255, 255, var(--bead-pool)), transparent);
   color: var(--bead-glyph);
@@ -439,25 +447,24 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 @media (prefers-color-scheme: light) { .search-send { --bead-off: #c7c7cc; } }
 /* where linear() is not read (Safari before 17.2), one overshoot and back */
 @supports not (transition-timing-function: linear(0, 1)) { .search-send { --bead-spring: cubic-bezier(.34, 1.56, .64, 1); } }
-.search-send::before, .search-send::after { content: ""; position: absolute; z-index: -1; pointer-events: none; }
+.search-send .bead::before, .search-send .bead::after { content: ""; position: absolute; z-index: -1; pointer-events: none; }
 /* the gloss: an ellipse 24.5 by 12.3, its centre 10.2 above the bead's */
-.search-send::before { top: 1.65px; left: 50%; width: 24.5px; height: 12.3px; border-radius: 50%; background: linear-gradient(rgba(255, 255, 255, var(--bead-gloss)), rgba(255, 255, 255, .03)); transform: translateX(-50%); transition: transform 600ms var(--bead-spring); }
+.search-send .bead::before { top: 1.65px; left: 50%; width: 24.5px; height: 12.3px; border-radius: 50%; background: linear-gradient(rgba(255, 255, 255, var(--bead-gloss)), rgba(255, 255, 255, .03)); transform: translateX(-50%); transition: transform 600ms var(--bead-spring); }
 /* the rim, inside the glass: a .75 ring, bright above, faint at its sides, bright again below */
-.search-send::after { inset: 0; padding: .75px; border-radius: 50%; background: linear-gradient(rgba(255, 255, 255, var(--bead-rim)), rgba(255, 255, 255, .05), rgba(255, 255, 255, calc(var(--bead-rim) - .2))); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
+.search-send .bead::after { inset: 0; padding: .75px; border-radius: 50%; background: linear-gradient(rgba(255, 255, 255, var(--bead-rim)), rgba(255, 255, 255, .05), rgba(255, 255, 255, calc(var(--bead-rim) - .2))); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
 .search-send svg { stroke-width: 2.2; transition: transform 600ms var(--bead-spring); }
 @media (hover: hover) {
-  /* its glass kept over the icon buttons' own hover (.icon-button:hover) */
-  .search-send:not(:disabled):hover { background-color: color-mix(in srgb, var(--bead) 85%, transparent); background-image: radial-gradient(circle 21px at 50% 100%, rgba(255, 255, 255, var(--bead-pool)), transparent); --bead-gloss: .85; --bead-pool: .8; --bead-rim: 1; transform: scale(1.12); box-shadow: 0 1px 2px -1px rgba(0, 0, 0, .2), 0 8px 12px -6px rgba(0, 0, 0, .3); }
-  .search-send:not(:disabled):hover::before { transform: translateX(-50%) translateY(-.5px) scale(1.1, 1.18); }
+  .search-send:not(:disabled):hover .bead { --bead-gloss: .85; --bead-pool: .8; --bead-rim: 1; transform: scale(1.12); box-shadow: 0 1px 2px -1px rgba(0, 0, 0, .2), 0 8px 12px -6px rgba(0, 0, 0, .3); }
+  .search-send:not(:disabled):hover .bead::before { transform: translateX(-50%) translateY(-.5px) scale(1.1, 1.18); }
   .search-send:not(:disabled):hover svg { transform: translateY(-1.5px); }
 }
 /* a press gives at once, and the spring brings it back */
-.search-send:not(:disabled):active { transform: scale(.95); transition-duration: 300ms, 300ms, 90ms, 400ms, 300ms, 300ms, 300ms; transition-timing-function: ease, ease, ease-out, ease, ease, ease, ease; }
+.search-send:not(:disabled):active .bead { transform: scale(.95); transition-duration: 300ms, 300ms, 90ms, 400ms, 300ms, 300ms, 300ms; transition-timing-function: ease, ease, ease-out, ease, ease, ease, ease; }
 .search-send:disabled { --bead: var(--bead-off); --bead-glyph: #fff; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
-  .search-send, .search-send::before, .search-send svg { transition: background-color 300ms ease, color 300ms ease, --bead-gloss 300ms ease, --bead-pool 300ms ease, --bead-rim 300ms ease; }
-  .search-send:not(:disabled):hover, .search-send:not(:disabled):active, .search-send:not(:disabled):hover::before, .search-send:not(:disabled):hover svg { transform: none; }
-  .search-send:not(:disabled):hover::before { transform: translateX(-50%); }
+  .search-send .bead, .search-send .bead::before, .search-send svg { transition: background-color 300ms ease, color 300ms ease, --bead-gloss 300ms ease, --bead-pool 300ms ease, --bead-rim 300ms ease; }
+  .search-send:not(:disabled):hover .bead, .search-send:not(:disabled):active .bead, .search-send:not(:disabled):hover svg { transform: none; }
+  .search-send:not(:disabled):hover .bead::before { transform: translateX(-50%); }
 }
 .search-results { min-height: 0; max-height: 400px; overflow-y: auto; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: transparent; }
 .search-results:empty, .search-status:empty { display: none; }
