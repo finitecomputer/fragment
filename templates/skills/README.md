@@ -37,7 +37,7 @@ default agent. A fragment on it names it and holds nothing else:
   every optional skill of the Hermes image the computers run (id, name,
   description, licence, and a few labels chosen by hand), written by
   `cargo xtask skills-catalog` from the image images/hermes/Dockerfile pins.
-  A test fails when the pin moves without it. The skills themselves stay in
+  A test fails when the pin moves without it, its digest included. The skills themselves stay in
   the image (about 11 MB, past the bounds above).
 - **A switch** is a file of the fragment's own: `optional/hermes/<id>.on`
   for each optional skill its owner switched on (the shell's Skills page

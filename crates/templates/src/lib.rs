@@ -582,7 +582,8 @@ pub(crate) mod tests {
 
     /// The optional skills' catalog (`cargo xtask skills-catalog`) is the
     /// pinned Hermes image's: a move of images/hermes/Dockerfile's pin
-    /// without it fails here. It is the skills template's data, each entry
+    /// without it fails here, its digest's too (one moved under the same
+    /// tag, whose skills may differ). It is the skills template's data, each entry
     /// an id the boot can switch on with a name and a description.
     #[test]
     fn the_optional_skills_catalog_is_the_pinned_hermes() {
@@ -591,6 +592,7 @@ pub(crate) mod tests {
         let catalog: serde_json::Value = serde_json::from_slice(&bytes_of(&SKILLS, f)).unwrap();
         let pin = std::fs::read_to_string(repo().join("images/hermes/Dockerfile")).unwrap();
         let pin = pin.lines().find_map(|l| l.strip_prefix("ARG HERMES=")).expect("the Dockerfile pins Hermes");
+        assert_eq!(catalog["image"].as_str(), Some(pin.trim()), "the catalog was read from another image than the pin: run `cargo xtask skills-catalog`");
         let version = catalog["hermes"].as_str().unwrap();
         assert!(pin.contains(&format!("-{version}-")), "the catalog is Hermes {version}'s, the pin {pin}: run `cargo xtask skills-catalog`");
         assert_eq!(catalog["runtime"], "hermes");
