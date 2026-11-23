@@ -672,7 +672,7 @@ fn e2e(args: &[String]) -> Result<()> {
     // them in place
     devstack::Tools::locate()?;
     if !no_build {
-        build_e2e()?;
+        build_e2e(names_door_lane(&suite_args))?;
     }
     if build_only {
         return Ok(());
@@ -688,16 +688,25 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
+/// Whether a run's arguments name the SimpleX door's lane (`--only
+/// …,simplex-door,…`), which runs by name alone: only that run's node runs
+/// doors and builds their image (the suite's `builds_doors`), so only it
+/// builds the door's image ahead.
+fn names_door_lane(args: &[&String]) -> bool {
+    args.windows(2).any(|w| w[0] == "--only" && w[1].split(',').any(|name| name == devstack::DOOR_LANE))
+}
+
 /// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
 /// suite beside it, and the computer images the node's boot builds, built
-/// ahead beside them all so its build finds every layer cached.
-fn build_e2e() -> Result<()> {
+/// ahead beside them all so its build finds every layer cached: the door's
+/// for a run of its lane alone (`doors`).
+fn build_e2e(doors: bool) -> Result<()> {
     let t0 = std::time::Instant::now();
     // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
     // no images (docs/self-host.md, seam 2)
     let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let built_images = images.then(|| s.spawn(build::images));
+        let built_images = images.then(|| s.spawn(move || build::images(doors)));
         let native = s.spawn(build_native);
         let cell = build::cell();
         let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
@@ -940,6 +949,24 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
+    }
+
+    /// Goal: the door's image is built ahead for a run whose `--only`
+    /// names its lane, as the suite's node then runs doors (its
+    /// `builds_doors`). Valid: named alone or among others. Invalid: named
+    /// by `--except`, a name it is only part of, a shard (CI's runs), no
+    /// selection at all.
+    #[test]
+    fn only_a_run_naming_the_door_lane_builds_its_image() {
+        let names = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            super::names_door_lane(&args.iter().collect::<Vec<_>>())
+        };
+        assert!(names(&["--only", "simplex-door"]));
+        assert!(names(&["--only", "computers,simplex-door"]));
+        for not in [&["--except", "simplex-door"][..], &["--only", "simplex-doors,computers"], &["--shard", "3/5"], &[], &["simplex-door"]] {
+            assert!(!names(not), "{not:?}");
+        }
     }
 
     #[test]

@@ -125,7 +125,9 @@ runs:
             core.setOutput(name, process.env[name] ?? '');
           }
     # the cell, the CLI and the suite, and the computer images the node's
-    # boot builds (xtask/src/build.rs `images`), all at once. The stub's
+    # boot builds (xtask/src/build.rs `images`), all at once: the stub's
+    # two, never the SimpleX door's (its lane runs by name alone, which no
+    # shard does, and the node leaves the door out). The stub's
     # layers come from the Actions cache (scope e2e-stub): an unchanged
     # bridge (images/bridge, images/hermes/boot, the images' manifest and
     # lock: about one master commit in eight changes one) is its layers

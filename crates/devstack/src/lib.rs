@@ -249,7 +249,14 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
 /// node without it still has the door's object, which says it runs none.
 pub const DOOR_CLASS: &str = "SimplexDoor";
 
-fn without_doors(config: &mut serde_json::Value) -> Result<()> {
+/// The e2e's SimpleX door lane, run by name alone (`--only simplex-door`):
+/// only its run's node runs doors (`Fleet::doors`), and only its build
+/// builds the door's image ahead of the node (xtask's `build_e2e`).
+pub const DOOR_LANE: &str = "simplex-door";
+
+/// `config` less the door's container class (`DOOR_CLASS`): a node's that
+/// runs no doors, and the images built ahead of one (xtask's `build::images`).
+pub fn without_doors(config: &mut serde_json::Value) -> Result<()> {
     let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) else { return Ok(()) };
     let before = containers.len();
     containers.retain(|c| c["class_name"] != DOOR_CLASS);
