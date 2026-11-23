@@ -76,7 +76,7 @@ fn unhashed(name: &str) -> String {
 fn a_built_page_names_its_hashed_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let pages: Vec<(&str, &str)> = fragment_templates::BUILT.iter().copied().filter(|(_, p)| p.ends_with("index.html")).collect();
-    assert_eq!(pages.len(), 4, "the shell's page and the chat's three: {pages:?}");
+    assert_eq!(pages.len(), 5, "the shell's page and the chat's four: {pages:?}");
     for (at, _) in pages {
         // its release's files beside it, by name
         let (files, prefix, link, dir) = if at == "shell" {

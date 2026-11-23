@@ -25,7 +25,7 @@ include!("blessed_names.rs");
 /// doors"): a fragment made from one is its owner's alone to edit, and may
 /// be bound as their agent's door of its name while it runs no other code
 /// (cell/src/doors.rs).
-pub const CONNECTORS: &[&str] = &["telegram"];
+pub const CONNECTORS: &[&str] = &["simplex", "telegram"];
 
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
@@ -38,6 +38,7 @@ pub fn template(name: &str) -> Option<&'static Template> {
         "skills" => Some(&crate::SKILLS),
         "sessions" => Some(&crate::SESSIONS),
         "telegram" => Some(&crate::TELEGRAM),
+        "simplex" => Some(&crate::SIMPLEX),
         _ => None,
     }
 }

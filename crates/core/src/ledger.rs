@@ -247,6 +247,14 @@ impl<'de> serde::Deserializer<'de> for &mut FieldNames {
     }
 }
 
+/// The minute a fragment counts a request in (cell/src/meter.rs): now's
+/// (`now`), but above every minute it closed into a row or folded already,
+/// and never below its open count's. A clock step back then keeps counting
+/// into the open minute, and every count is in a minute a fold takes.
+pub fn request_minute(now: i64, closed: i64, folded: i64, open: Option<i64>) -> i64 {
+    now.max(closed + 1).max(folded + 1).max(open.unwrap_or(i64::MIN))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterRow {
@@ -971,22 +979,25 @@ impl Ledger {
     /// standing short of `Ok` for want of credit, with a pack to buy when
     /// packs are `sold` and they hold an active seat the registry gave them
     /// (a pack's buyer holds one: `PackBegin`; a deployment's default plan,
-    /// which no registry pushed, `seat_seq` 0, is none). An org's ledger
-    /// tells no one here.
-    pub fn said(&self, now_ms: i64, sold: bool) -> Vec<fragment_proto::notice::Notice> {
+    /// which no registry pushed, `seat_seq` 0, is none); and what its
+    /// agents' calls on shared keys cost in the last hour, past a step
+    /// (`said::spending`; `spent_hour`, `uses::spent_hour` and when it
+    /// falls below the first step, `uses::spent_until`). An org's
+    /// ledger tells no one here.
+    pub fn said(&self, now_ms: i64, sold: bool, spent_hour: (i64, Option<i64>)) -> Vec<fragment_proto::notice::Notice> {
         if self.org.is_some() {
             return vec![];
         }
         let seat = matches!(self.money.plan, Plan::Seat | Plan::SeatAlwaysOn) && self.money.seat == SeatState::Active && self.money.seat_seq > 0;
-        said::standing(self.standing(now_ms), sold && seat).into_iter().collect()
+        said::standing(self.standing(now_ms), sold && seat).into_iter().chain(said::spending(spent_hour.0, spent_hour.1)).collect()
     }
 
     /// What the ledger keeps of what it last told its person (`told` in its
     /// meta): its notices as `said` says them, so whatever changes them is
     /// told to their pages once (`said::news`), its standing or anything
     /// else they say (a seat's Buy credit). As the route answers them.
-    pub fn told_key(&self, now_ms: i64, sold: bool) -> String {
-        serde_json::to_string(&fragment_proto::notice::NoticeList { notices: self.said(now_ms, sold) }).expect("notices serialize")
+    pub fn told_key(&self, now_ms: i64, sold: bool, spent_hour: (i64, Option<i64>)) -> String {
+        serde_json::to_string(&fragment_proto::notice::NoticeList { notices: self.said(now_ms, sold, spent_hour) }).expect("notices serialize")
     }
 
     pub fn standing(&self, now_ms: i64) -> Standing {

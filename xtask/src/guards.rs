@@ -122,7 +122,8 @@ mod tests {
     /// added (computer.rs, jobs.rs); a job step's results and a file's
     /// content, the facet's arguments and a step's answer (jobs.rs,
     /// files.rs); the queues' messages, whose JSON stays `to_value`'s, keys
-    /// sorted, byte for byte across releases (meter.rs, deliveries.rs); and
+    /// sorted, byte for byte across releases (meter.rs, pipe.rs,
+    /// deliveries.rs); and
     /// the rare calls whose body is a `Value` so `computer::ask` stays one
     /// copy (an own key's sign-in: a body type of its own is about 1.4 KB
     /// more of the Wasm; computer.rs). clippy cannot hold this:
@@ -132,7 +133,7 @@ mod tests {
     fn a_type_is_made_a_value_only_to_be_edited() {
         // the name alone: `to_value::<T>(…)` is one too
         let made = uses(&cell_sources(), "to_value");
-        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 2)].map(|(f, n)| (f.to_string(), n)));
+        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 1), ("pipe.rs", 1)].map(|(f, n)| (f.to_string(), n)));
         assert_eq!(made, edited, "write the type as JSON once (Response::from_json, routed::ask_object, js::to_js), not as a Value written out again");
     }
 
