@@ -131,8 +131,8 @@ not the safety net, and nobody waits on bot reviews. Work is ready only
 when you can show evidence that it does what it claims and breaks nothing
 else. "It compiles" and "the tests I wrote pass" are not evidence.
 
-Evidence is a finished run on the final head, merged with current
-`master`. Where it ran is yours to choose, and each of these counts:
+Evidence is a finished run on a head you name. Where it ran is yours to
+choose, and each of these counts:
 
 - **This machine,** for what is quick here.
 - **A Boat sandbox** (Building on Boat).
@@ -140,20 +140,38 @@ Evidence is a finished run on the final head, merged with current
   <branch>` runs `check` and all five e2e shards on the branch's head;
   `gh workflow run images.yml --ref <branch>` runs the Docker and
   real-Hermes lanes. They are the jobs of master's gate, on its runners,
-  and they deploy nothing. Merge `master` and push first, then link the
-  run: its `check` holds your schema lock to master's newest. A run takes
-  six of the runners master's gate waits for, so start one for a suite,
-  not for what this machine proves in minutes.
+  and they deploy nothing. Push the head you are proving, then link the
+  run. A run takes six of the runners master's gate waits for, so start
+  one for a suite, not for what this machine proves in minutes.
 
 A computer short of memory, disk or Docker is a reason to run elsewhere,
 never to prove less. A run still going is not evidence yet.
+
+A proof is made once, on a base you name. `master` moving is expected,
+and it never interrupts or restarts a proof:
+
+- **When you open the PR:** merge `master` once, as the proof starts, and
+  prove that head. Write "proven on head X, merged with master Y", both
+  SHAs, in the evidence pack. Then you are done.
+- **While it waits:** nothing. `master` moves, and nobody resyncs,
+  rebases or proves again. A PR behind `master` is correct, not
+  neglected. No reviewer, person or bot, asks for a rebase unless there
+  is a conflict.
+- **At merge:** a clean merge just merges. If git reports a conflict,
+  whoever merges resolves it, or hands it back, and re-runs what covers
+  the resolved lines. That covers the schema lock and the wire's
+  retirements too: both are append-only, so two branches that each add a
+  step to one class, or each retire a fact, change the same lines.
+- **After merge:** master's run (`check` and the five shards, at the tip)
+  is the guard against drift, fixed forward when red (How work lands).
 
 Put an evidence pack in the PR body and in your report:
 
 - **What and why:** what changed and why, in plain words. Say whether it
   touches the wire, stored rows or money.
-- **What ran:** each command with its result and counts, on the final head
-  merged with current `master`, and where it ran (a CI run by its link):
+- **What ran:** "proven on head X, merged with master Y", then each
+  command with its result and counts on that head, and where it ran (a
+  CI run by its link):
   - `cargo xtask check`, or the pull request's own `check` run on that
     head, once it is green.
   - `cargo xtask e2e --only …` for every section that covers a changed file.
@@ -191,9 +209,15 @@ one large one.
 
 - Paul reads the evidence and says merge; the coordinating session merges
   directly. There is no merge queue, required check or required approval.
+- A PR is proven once, on the base its evidence names, and waits as it
+  is: `master` moving past it asks nothing of it. A clean merge just
+  merges. If git reports a conflict, whoever merges resolves it, or
+  hands it back, and re-runs what covers the resolved lines (Proving your
+  work).
 - `master` runs one CI at a time (`check` and the e2e). Only the newest
   push waits, so a burst of merges is tested together at the tip. Green
-  deploys preview.
+  deploys preview. That run is the guard against drift between PRs
+  proven on different bases.
 - If that run goes red, preview is not deployed. Fix it forward at once
   with another small PR, proven the same way.
 - When `images/` changes, the Docker and real-Hermes lanes run in their
@@ -221,9 +245,10 @@ one large one.
 - Only Paul updates `production`: his push or merge approves production
   deployment. Master's run is the gate: a green master push deploys
   preview, a red one deploys nothing and is fixed forward. A PR's CI is
-  `check` alone, required by nothing, with no merge queue: validate on
-  this machine and show the evidence. CI and rollout code define proof,
-  preparation and rollback checks; preserve them.
+  `check` alone, required by nothing, with no merge queue: prove it
+  yourself, once, and show the evidence (Proving your work). CI and
+  rollout code define proof, preparation and rollback checks; preserve
+  them.
 - Production deploys by hand, other hosted fleet deploys, DNS changes,
   adding remotes, deleting Sprites, teardown and other irreversible
   actions need Paul's approval. Live Stripe setup is Paul's to run;
