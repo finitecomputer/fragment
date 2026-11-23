@@ -717,9 +717,14 @@ fn selection_only(args: &[&String]) -> bool {
 /// builds none).
 fn build_e2e(selection: &[&String]) -> Result<()> {
     let t0 = std::time::Instant::now();
+    // the suite first, which plans the images, then the CLI beside them
+    // (the two cargo builds share one target, so one at a time)
     let built = std::thread::scope(|s| {
         let cell = s.spawn(build::cell);
-        let rest = build_native().and_then(|()| build_images(selection));
+        let rest = build_suite().and_then(|()| {
+            let images = s.spawn(|| build_images(selection));
+            build_cli().and(images.join().expect("the images' build does not panic"))
+        });
         cell.join().expect("the cell's build does not panic").and(rest)
     });
     println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
@@ -751,10 +756,18 @@ fn node_classes(selection: &[&String]) -> Result<Vec<String>> {
 /// The CLI and the suite, for this machine.
 fn build_native() -> Result<()> {
     let t0 = std::time::Instant::now();
-    let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    build_cli()?;
     build_suite()?;
     println!("built the CLI and the suite in {:.1?}", t0.elapsed());
+    Ok(())
+}
+
+/// The CLI, for this machine (the e2e drives it).
+fn build_cli() -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let manifest = devstack::repo_root().join("Cargo.toml");
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    println!("built the CLI in {:.1?}", t0.elapsed());
     Ok(())
 }
 
