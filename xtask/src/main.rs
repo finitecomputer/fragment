@@ -691,10 +691,15 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
-/// Whether `args` are a run's selection alone: `--only`, `--except` or
-/// `--shard`, each with its value (the suite refuses any two of them).
+/// Whether `args` are a run's selection alone: nothing, or one of `--only`,
+/// `--except` or `--shard` with its value (the suite refuses two; its
+/// values are the suite's to check, as the run starts).
 fn selection_only(args: &[&String]) -> bool {
-    args.chunks(2).all(|pair| matches!(pair, [flag, _] if ["--only", "--except", "--shard"].contains(&flag.as_str())))
+    match args {
+        [] => true,
+        [flag, _] => ["--only", "--except", "--shard"].contains(&flag.as_str()),
+        _ => false,
+    }
 }
 
 /// Whether a run's arguments name the SimpleX door's lane (`--only
@@ -981,8 +986,9 @@ mod tests {
     /// Goal: `--build-only` takes a run's selection, which picks the
     /// images it builds ahead (so a build for `--no-build --only
     /// simplex-door` builds the door's too), and nothing else it would
-    /// ignore. Valid: none (CI's), `--only`, `--except`, `--shard` with
-    /// values. Invalid: a flag with no value, any other argument.
+    /// ignore. Valid: none (CI's), `--only`, `--except` or `--shard` with
+    /// its value. Invalid: a flag with no value, two of them (the suite
+    /// refuses that run), any other argument.
     #[test]
     fn a_build_alone_takes_a_runs_selection_alone() {
         let selection = |args: &[&str]| {
@@ -992,7 +998,7 @@ mod tests {
         for valid in [&[][..], &["--only", "simplex-door"], &["--except", "computers"], &["--shard", "1/5"]] {
             assert!(selection(valid), "{valid:?}");
         }
-        for invalid in [&["--only"][..], &["--rehearse"], &["--only", "auth", "--rehearse"], &["simplex-door"], &["--hosted", "x"]] {
+        for invalid in [&["--only"][..], &["--rehearse"], &["--only", "auth", "--rehearse"], &["--only", "simplex-door", "--except", "computers"], &["simplex-door"], &["--hosted", "x"]] {
             assert!(!selection(invalid), "{invalid:?}");
         }
     }
