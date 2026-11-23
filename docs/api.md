@@ -56,6 +56,11 @@ gets the 404 a missing route gets, word for word. On a branch the levers
 reach the e2e's own things alone: a fragment lever only an `e2e-…`
 fragment, a ledger or computer lever only an e2e person's (403
 otherwise); the registry's, the move's and the mail lever are no route.
+A fragment lever that acts as or for someone (`member`'s `who`,
+`records`' `principal`: `levers::acting_for`) also needs the fragment's
+owner and that one each an e2e person or one's agent (403 otherwise).
+An `e2e-` label is not reserved: the other fragment levers reach a real
+person's fragment so labelled.
 
 | Route | Body |
 |---|---|
