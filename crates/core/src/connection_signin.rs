@@ -794,7 +794,7 @@ mod tests {
         assert_eq!(f.fence_all(&theirs, 1_000), Err(Importing), "an import timed out after it was sent: the wipe waits");
         assert!(!f.settled("issuer", "user-a", 1_000), "and its end waits too");
         assert_eq!(f.fence_all(&theirs, 1_000 + HOLD - 1), Err(Importing), "until its hold runs out");
-        assert_eq!(f.fence_all(&[other.clone()], 1_000), Ok(0), "another person's wipe does not wait for it");
+        assert_eq!(f.fence_all(std::slice::from_ref(&other), 1_000), Ok(0), "another person's wipe does not wait for it");
         assert!(f.settled("issuer", "user-b", 1_000) && f.settled("other-issuer", "user-a", 1_000));
         assert_eq!(f.fence_all(&theirs, 1_000 + HOLD), Ok(0), "its hold out: the wipe fences, then lists again");
         assert!(f.settled("issuer", "user-a", 1_000 + HOLD));
