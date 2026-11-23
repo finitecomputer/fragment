@@ -1,7 +1,8 @@
 //! `cargo xtask skills-catalog`: the catalog of
 //! Hermes' optional skills a person can switch on (the shell's Skills
-//! page), written to `templates/skills/catalog/hermes.json`, the skills
-//! template's data, so every skills fragment reads it from the release.
+//! page), written to `cell/shell/optional-skills-hermes.json`, a file the
+//! shell publishes, so every skills fragment's page reads it from the
+//! release, whether or not the fragment still follows its template.
 //!
 //! It is read from the Hermes image images/hermes/Dockerfile pins (`ARG
 //! HERMES`), the one the computers' image is built on, and only that one,
@@ -11,8 +12,7 @@
 //! `SKILL.md` at any depth there; its id is its directory's path, as the
 //! boot finds it (images/hermes/boot/src/skills.rs, `settle_optional`).
 //! Only the index is written (id, name, description, license, labels):
-//! the tree is about 11 MB, past the template's bounds, and every
-//! computer already has it.
+//! the tree is about 11 MB, and every computer already has it.
 //!
 //! Run it again when the pin moves: crates/templates' test holds the
 //! catalog's `image` to the Dockerfile's whole pin, digest included, so a
@@ -26,7 +26,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 
 /// Where the catalog is written, under the repo.
-pub const CATALOG: &str = "templates/skills/catalog/hermes.json";
+pub const CATALOG: &str = "cell/shell/optional-skills-hermes.json";
 /// Where Hermes' image keeps its optional skills.
 const OPTIONAL_DIR: &str = "/opt/hermes/optional-skills";
 /// Bounds: skills, how deep one sits, a description.

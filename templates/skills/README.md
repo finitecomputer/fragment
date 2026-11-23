@@ -33,12 +33,15 @@ default agent. A fragment on it names it and holds nothing else:
   Hermes: this template is data, served as any fragment's files are.
 - Bounds: at most 1,000 files and 4 MiB of data, each file at most 256 KiB
   (`blessed::DATA_*`; a test holds the template to them).
-- **The optional skills' catalog**, `catalog/hermes.json`, is data too:
-  every optional skill of the Hermes image the computers run (id, name,
-  description, licence, and a few labels chosen by hand), written by
-  `cargo xtask skills-catalog` from the image images/hermes/Dockerfile pins.
-  A test fails when the pin moves without it, its digest included. The skills themselves stay in
-  the image (about 11 MB, past the bounds above).
+- **The optional skills' catalog** is not in this template: the shell
+  publishes it (`cell/shell/optional-skills-hermes.json`, at
+  `/__shell/optional-skills-hermes.json`), so a skills fragment that left
+  the template still has the library. It lists every optional skill of the
+  Hermes image the computers run (id, name, description, licence, and a
+  few labels chosen by hand), written by `cargo xtask skills-catalog` from
+  the image images/hermes/Dockerfile pins. A test fails when the pin moves
+  without it, its digest included. The skills themselves stay in the image
+  (about 11 MB).
 - **A switch** is a file of the fragment's own: `optional/hermes/<id>.on`
   for each optional skill its owner switched on (the shell's Skills page
   writes and removes it; what it holds is not read). One file a switch, so

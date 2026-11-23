@@ -361,7 +361,7 @@ mod tests {
         assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
         let mut names = std::collections::BTreeSet::new();
         for f in files {
-            assert!(f.path.starts_with("skills/") || f.path == "catalog/hermes.json", "the managed set is under skills/, beside the optional skills' catalog: {}", f.path);
+            assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
             assert!(f.size <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.size);
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
             assert_eq!(data_file("skills", f.path), Some(f));

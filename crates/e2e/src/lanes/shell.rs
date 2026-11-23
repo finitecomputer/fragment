@@ -6225,7 +6225,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
 }
 
 /// The Skills page's library: the pinned Hermes image's optional skills
-/// (the release's catalog in the skills fragment), each a switch. Valid:
+/// (the release's catalog the shell publishes), each a switch. Valid:
 /// switched on, the fragment holds its `optional/hermes/<id>.on`, which
 /// is what the image's boot installs; switched off, it is gone. A labelled
 /// skill asks first. Replay: loaded again, the switch is as it was left.
