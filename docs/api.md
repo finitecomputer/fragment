@@ -1093,8 +1093,11 @@ does not ship is never answered from its repo (Serving).
   blessed template's changed release, at the fragment's next request; its
   input `{ref: "live", commit, code}`); `{"woke": true, "run": op}` (at
   most once per activation of the fragment's object, at the first request
-  of it a person or an agent makes: signed, or a page's session; never an
-  alarm, the platform's own calls, or an anonymous visitor; and only when
+  of it a person or an agent makes: signed, or a page's session, by
+  someone the fragment answers (a member, or anyone on a public fragment:
+  `fragment_core::permit::wakes`), so a stranger's refused request starts
+  nothing; never an alarm, the platform's own calls, or an anonymous
+  visitor; and only when
   there is something to catch up: `main` moved since the operation's last
   triggered run started, or that run did not succeed, with none queued or
   running; its input `{}`, its run's `via` `woke`).
