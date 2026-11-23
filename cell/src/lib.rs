@@ -175,10 +175,23 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
 #[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
-    match route(req, &env, &ctx).await {
-        Ok(resp) => Ok(resp),
-        Err(e) => e.response(),
-    }
+    let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
+    let resp = match route(req, &env, &ctx).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    strict_transport(resp, url.scheme())
+}
+
+/// Every answer reached over HTTPS, on every host the cell answers (the
+/// platform's, each fragment's, each computer's, an error's), tells the
+/// browser to come back only over HTTPS (`answer_headers::hsts`). Cloned,
+/// as `platform_origin` does, which keeps a socket's 101 and its WebSocket.
+fn strict_transport(resp: Response, scheme: &str) -> Result<Response> {
+    let Some(hsts) = fragment_core::answer_headers::hsts(scheme) else { return Ok(resp) };
+    let h = resp.headers().clone();
+    h.set("strict-transport-security", hsts)?;
+    Ok(resp.with_headers(h))
 }
 
 /// The admin Worker's `fetch` (admin.rs): the requests the cell hands it.
@@ -1039,7 +1052,7 @@ async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, res
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
-    fragment_origin(resp)
+    fragment_origin(resp, &cfg.platform())
 }
 
 /// The headers every answer on a fragment's origin carries, set over any
@@ -1047,17 +1060,26 @@ async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, res
 /// browser takes bytes as the type they name, never a page or a script
 /// guessed from them), and no referrer beyond the origin (a page's URL may
 /// hold its share link, `?view=`, and every fragment is another origin;
-/// a page's own `<meta name="referrer">` still governs its own links).
+/// a page's own `<meta name="referrer">` still governs its own links),
+/// and framing by its own pages and the platform's alone
+/// (`answer_headers::fragment_frame_ancestors`; appended unless the
+/// answer has that very directive already, a frame's `bound` among them,
+/// so an app's own `frame-ancestors` can narrow it and never widen it). No other policy:
+/// a fragment's scripts and styles are its app's to decide.
 /// Scriptable media (an SVG, the XML types: `site::opened_as`) is sandboxed
 /// besides, so opened directly it runs no script and has an opaque origin,
 /// while a page's `<img>` of it is unaffected (a subresource's policy is
 /// ignored); appended, so an app's own policy still applies beside it. A
 /// Durable Object's or a fetch's answer has immutable headers: cloned, as
 /// `bound` does, which keeps a socket's 101 and its WebSocket.
-fn fragment_origin(resp: Response) -> CellResult<Response> {
+fn fragment_origin(resp: Response, platform: &str) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.set("x-content-type-options", "nosniff")?;
     h.set("referrer-policy", "same-origin")?;
+    let framing = fragment_core::answer_headers::fragment_frame_ancestors(platform);
+    if !fragment_core::answer_headers::has_directive(&h.get("content-security-policy")?.unwrap_or_default(), &framing) {
+        h.append("content-security-policy", &framing)?;
+    }
     let content_type = h.get("content-type")?.unwrap_or_default();
     if fragment_core::site::opened_as(&content_type) == fragment_core::site::Opened::ScriptableMedia {
         h.append("content-security-policy", "sandbox")?;
@@ -1240,6 +1262,8 @@ const DEPLOY_HEADER: &str = "x-fragment-deploy";
 /// sign-in's and `/cli`'s, a callback's, the API's JSON, a refusal): no
 /// type sniffing, no referrer beyond the origin unless the answer chose
 /// its own (sign-in's hand-offs send none; the shell's pages say theirs),
+/// framing by the platform's own pages alone (`answer_headers`), unless
+/// the answer named its own `frame-ancestors`,
 /// and the release that answered (`DEPLOY_HEADER`: the shell compares it
 /// with its page's, to reload once the platform under it changed;
 /// docs/api.md, The shell). `x-fragment-cli`, when set, names a published
@@ -1249,6 +1273,15 @@ const DEPLOY_HEADER: &str = "x-fragment-deploy";
 fn platform_origin(resp: Response, release: &str, cli_version: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.set("x-content-type-options", "nosniff")?;
+    // framed only by the platform's own pages, unless the answer said who
+    // may frame it (the shell's pages say no one): every policy here is
+    // the platform's own, and appended it could only narrow
+    if !h.get("content-security-policy")?.is_some_and(|p| p.contains("frame-ancestors")) {
+        h.append("content-security-policy", fragment_core::answer_headers::PLATFORM_FRAME_ANCESTORS)?;
+    }
+    if !h.has("x-frame-options")? {
+        h.set("x-frame-options", fragment_core::answer_headers::PLATFORM_FRAME_OPTIONS)?;
+    }
     h.set(DEPLOY_HEADER, release)?;
     if let Some(version) = cli_version {
         h.set("x-fragment-cli", version)?;

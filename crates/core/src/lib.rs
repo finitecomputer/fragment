@@ -36,6 +36,7 @@ pub mod searchable;
 pub mod search_index;
 pub mod facet;
 pub mod form;
+pub mod answer_headers;
 pub mod frames;
 pub mod gather;
 pub mod grants;
