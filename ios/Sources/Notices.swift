@@ -242,7 +242,11 @@ struct NoticesFan: View {
                 if count == 0 { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
             }
         }
-        .accessibilityAddTraits(.isModal)
+        // Not `.isModal`: VoiceOver skips a modal element's siblings, and the
+        // header with its X is one, so Close was out of reach. The page under
+        // the fan is hidden from VoiceOver already (`FragmentRoot`); the
+        // escape gesture folds the fan too, as it closes a sheet.
+        .accessibilityAction(.escape) { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
     }
 }
 
@@ -314,6 +318,11 @@ private struct NoticeItemView: View {
     /// The card's tap (anywhere but a button).
     let tap: () -> Void
     @Environment(\.openURL) private var openURL
+    /// At the accessibility text sizes a label on one line beside the title
+    /// outgrows the screen (it pushed the page's own toolbar off it): there
+    /// the main action goes under the title, actions stack, and labels wrap.
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var roomy: Bool { !typeSize.isAccessibilitySize }
 
     var body: some View {
         switch item {
@@ -361,8 +370,9 @@ private struct NoticeItemView: View {
                             .rotationEffect(.degrees(open ? 180 : 0))
                     }
                     Spacer(minLength: 4)
-                    if !full, let main = notice.actions.first { button(notice, main, main: true) }
+                    if !full && roomy, let main = notice.actions.first { button(notice, main, main: true) }
                 }
+                if !full && !roomy, let main = notice.actions.first { button(notice, main, main: true).padding(.leading, 28) }
                 if open {
                     // every word it says, however little room the page leaves (the keyboard up)
                     VStack(alignment: .leading, spacing: 2) {
@@ -377,7 +387,8 @@ private struct NoticeItemView: View {
                     // sharing the card's width; the band: the rest, small
                     let shown = full ? Array(notice.actions) : Array(notice.actions.dropFirst())
                     if !shown.isEmpty {
-                        HStack(spacing: full ? 12 : 8) {
+                        let row = roomy ? AnyLayout(HStackLayout(spacing: full ? 12 : 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                        row {
                             ForEach(Array(shown.enumerated()), id: \.offset) { index, action in
                                 button(notice, action, main: full && index == 0, wide: full)
                             }
@@ -405,9 +416,10 @@ private struct NoticeItemView: View {
             // Pressed, it dims and gives a little, as iOS's buttons do (interactive
             // glass lit a light pill dark, its words lost in dark mode)
             Button(action: tap) {
-                Text(action.label).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(action.label).font(.subheadline.weight(.semibold)).lineLimit(roomy ? 1 : nil).multilineTextAlignment(.center)
                     .foregroundStyle(main ? Color(.systemBackground) : Color.primary)
-                    .frame(maxWidth: .infinity).frame(height: 44)
+                    .padding(.vertical, roomy ? 0 : 10)
+                    .frame(maxWidth: .infinity).frame(minHeight: 44, maxHeight: roomy ? 44 : nil)
                     .background {
                         Capsule().strokeBorder(LinearGradient(colors: [.white.opacity(0.6), .white.opacity(0.05), .white.opacity(0.35)],
                                                               startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
@@ -427,7 +439,9 @@ private struct NoticeItemView: View {
         }
     }
     @ViewBuilder private func label(_ text: String, wide: Bool) -> some View {
-        if wide { Text(text).lineLimit(1).frame(maxWidth: .infinity) } else { Text(text).lineLimit(1).fixedSize() }
+        if wide { Text(text).lineLimit(1).frame(maxWidth: .infinity) }
+        else if roomy { Text(text).lineLimit(1).fixedSize() }
+        else { Text(text).fixedSize(horizontal: false, vertical: true) }
     }
 
     private func card(@ViewBuilder _ content: () -> some View) -> some View {

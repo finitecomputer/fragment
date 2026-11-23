@@ -244,6 +244,31 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(close.waitForNonExistence(timeout: 5))
     }
 
+    /// At the largest text size, as above: a notice's title still shows, and
+    /// Home's own bar stays on the screen. Its main action, on one line
+    /// beside the title, once took the title's room and pushed the page
+    /// past the screen's edges, the sidebar's button and Your Apps with it.
+    func testAtTheLargestTextSizeANoticeKeepsItsTitleAndThePageItsBar() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key,
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let title = app.staticTexts["Your computer can't save right now"]
+        XCTAssertTrue(title.waitForExistence(timeout: 30), "the saves failing, told")
+        let screen = app.windows.firstMatch.frame
+        screenshot(app, "Notices, the largest text")
+        XCTAssertGreaterThan(title.frame.width, screen.width / 3, "its title has room")
+        for bar in ["sidebar", "yourApps"] {
+            XCTAssertTrue(screen.contains(app.buttons[bar].frame), "\(bar) on the screen")
+        }
+    }
+
     /// An invite (FIN-458), against a real platform as above: someone shared
     /// an app titled `TEST_RUNNER_FRAGMENT_UITEST_INVITE` with this person's
     /// email. It is told over Home like any notice, from whom and as what;
