@@ -31,10 +31,14 @@
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...],
 //!                    --except <section>[,...], or --shard <k>/<n> (the table's, as CI
 //!                    splits it); --rehearse keeps the hosted lane's rules on the
-//!                    local node). The build builds the computer images ahead of
-//!                    the node beside the Rust. CI splits it in two steps, so the
-//!                    cache saves between them: --build-only (builds, runs
-//!                    nothing), then --no-build (runs what the build left)
+//!                    local node). The build builds ahead of the node the images
+//!                    its node will build: those of the container classes the
+//!                    suite says the run's node keeps (`fragment-e2e --containers`),
+//!                    so a run none of whose sections uses a computer builds no
+//!                    image and needs no Docker. CI splits it in two steps, so the
+//!                    cache saves between them: --build-only (builds every image
+//!                    beside the Rust, runs nothing), then --no-build (runs what
+//!                    the build left)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
 //!       [--dry-run | --sweep] [--max-paid-calls <n>] [--operator-key-file <file>]
 //!       [--upgrade-from <image>]
@@ -401,6 +405,8 @@ fn dev(args: &[String]) -> Result<()> {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
         },
+        // dev's node keeps its computers' containers on either runtime
+        computer_containers: true,
         computer_snapshots: false,
         // a door's image is built only for a stack that runs them (the e2e's door lane)
         doors: false,
@@ -672,7 +678,9 @@ fn e2e(args: &[String]) -> Result<()> {
     // them in place
     devstack::Tools::locate()?;
     if !no_build {
-        build_e2e()?;
+        // a build alone is every run's after it (CI's shards): every image.
+        // A run's own builds what its node will
+        build_e2e((!build_only).then_some(suite_args.as_slice()))?;
     }
     if build_only {
         return Ok(());
@@ -689,22 +697,46 @@ fn build_suite() -> Result<()> {
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
 /// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
-/// suite beside it, and the computer images the node's boot builds, built
-/// ahead beside them all so its build finds every layer cached.
-fn build_e2e() -> Result<()> {
+/// suite beside it, and the images the node's boot builds, built ahead so
+/// its build finds every layer cached. Which images: for a build alone
+/// (`run` none: CI's, whose runs come after it), every one the cell's
+/// config names, beside the Rust; for a run (`run`: its suite arguments),
+/// those of the container classes its node keeps, which the suite says
+/// once it is built (`node_classes`). A run of sections that use no
+/// computer builds none, and asks nothing of Docker.
+fn build_e2e(run: Option<&[&String]>) -> Result<()> {
     let t0 = std::time::Instant::now();
     // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
     // no images (docs/self-host.md, seam 2)
     let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let built_images = images.then(|| s.spawn(build::images));
-        let native = s.spawn(build_native);
+        let every = (images && run.is_none()).then(|| s.spawn(|| build::images(None)));
+        let native = s.spawn(move || -> Result<()> {
+            build_native()?;
+            match run {
+                Some(args) if images => build::images(Some(&node_classes(args)?)),
+                _ => Ok(()),
+            }
+        });
         let cell = build::cell();
-        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
-        cell.and(native.join().expect("the native build does not panic")).and(built_images)
+        let every = every.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
+        cell.and(native.join().expect("the native build does not panic")).and(every)
     });
-    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
+    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and its node's images" } else { "" }, t0.elapsed());
     built
+}
+
+/// The container classes the node of a local run with `suite_args` keeps,
+/// as the suite plans it (`fragment-e2e --containers`: one a line, and
+/// nothing run): the classes whose images the node's boot will build.
+fn node_classes(suite_args: &[&String]) -> Result<Vec<String>> {
+    let mut cmd = Command::new(devstack::repo_root().join(E2E_BIN));
+    cmd.args(suite_args).arg("--containers");
+    let out = cmd.output().with_context(|| format!("could not start {}", shown(&cmd)))?;
+    if !out.status.success() {
+        bail!("{} failed: {}\n{}", shown(&cmd), out.status, String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8(out.stdout).context("the suite names its node's container classes in UTF-8")?.lines().map(str::to_string).collect())
 }
 
 /// The CLI and the suite, for this machine.

@@ -81,6 +81,8 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   while dev runs. `fragment new|init|create --template` for other templates.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
   build and test on fresh workerd with fakes; Docker/Chrome as needed.
+  Docker is needed only when a section the run runs uses a computer: a
+  run of sections that use none builds no image and never calls Docker.
   Section definitions: `crates/e2e/src/lanes/mod.rs`; prerequisites:
   `crates/e2e/src/needs.rs`. Real-Hermes tests run only by name.
 - `cargo xtask e2e --hosted --config <file> --branch <b>`: real vendors;

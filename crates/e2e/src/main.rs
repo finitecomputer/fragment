@@ -20,6 +20,14 @@
 //! (needs.rs), and one that needs what a preview lacks (a fake, the node,
 //! the whole deployment, local Docker) is a skip that says why.
 //!
+//! A local node is given its computers' containers (their images built and
+//! run in Docker) only when a section the run runs uses one: each says so
+//! in what it needs, or in what it also uses where there is one
+//! (`Suite::section_also`), and `local_containers` plans the run to see.
+//! A run of sections that use none builds no image and needs no Docker;
+//! `--containers` prints the container classes a run's node keeps and
+//! runs nothing (xtask builds their images ahead of the node).
+//!
 //! `FRAGMENT_E2E_RUNTIME=celld` runs the local node on `celld dev` instead
 //! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes: a section
 //! that needs the runtime's own containers is a skip (needs.rs), and so is
@@ -371,12 +379,38 @@ impl<T> Deref for Fake<T> {
     }
 }
 
-/// One section as a dry run plans it: what it needs, and why it would be
+/// One section as a dry run plans it: what it needs, what it also uses
+/// where the run has it (`Suite::section_also`), and why it would be
 /// skipped (`None`: it would run).
 pub struct Planned {
     pub section: String,
     pub needs: Vec<Need>,
+    pub also: Vec<Need>,
     pub skip: Option<String>,
+}
+
+impl Planned {
+    /// Whether it uses the runtime's containers, where it runs: it needs
+    /// one, or checks one where there is one.
+    pub fn uses_containers(&self) -> bool {
+        self.needs.iter().chain(&self.also).any(|n| n.containers())
+    }
+}
+
+/// The container classes a local run's node keeps (`local_containers`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Containers {
+    /// The computers' (`devstack::COMPUTER_CLASS`): the node makes computers.
+    pub computers: bool,
+    /// The SimpleX doors' (`devstack::DOOR_CLASS`).
+    pub doors: bool,
+}
+
+impl Containers {
+    /// The classes kept, as the cell's config names them.
+    pub fn classes(self) -> Vec<&'static str> {
+        [(self.computers, devstack::COMPUTER_CLASS), (self.doors, devstack::DOOR_CLASS)].into_iter().filter_map(|(kept, class)| kept.then_some(class)).collect()
+    }
 }
 
 /// Phase 2's cutoff on the local node (2100-01-01): the move lane moves its
@@ -419,6 +453,13 @@ pub struct Suite {
     skipped: Vec<String>,
     /// The sections that ran, in order: the last is the one running.
     ran: Vec<String>,
+    /// What the section running said it uses: what it needs, and what it
+    /// also uses where the run has it (`section_also`).
+    declared: Vec<Need>,
+    /// The container classes the local node keeps (`local_containers`): on
+    /// celld, its computers by its engine. A hosted run's are its
+    /// deployment's (`computers` true, read by no check).
+    containers: Containers,
     /// A lane stopped early: the next section to run gets the node back as
     /// the lanes expect it first.
     recovery_due: bool,
@@ -508,7 +549,83 @@ impl Drop for Suite {
     }
 }
 
+/// What a suite with no node is made of (`Suite::bare`).
+pub struct Bare {
+    pub only: Option<Vec<String>>,
+    pub except: Vec<String>,
+    pub shard: Option<u32>,
+    pub rung: needs::Rung,
+    /// A hosted run's preview (`None`: a local run's plan).
+    pub preview: Option<api::Preview>,
+    pub hosted_rules: bool,
+    pub upgrade_from: Option<String>,
+    pub shared: Arc<api::Run>,
+    pub cli: PathBuf,
+    pub scratch: PathBuf,
+}
+
 impl Suite {
+    /// A suite with no node and no fakes: a hosted run's, on its preview's
+    /// API (hosted.rs), and the one a local run is planned on
+    /// (`local_containers`), which starts and sends nothing.
+    pub fn bare(b: Bare) -> Suite {
+        Suite {
+            only: b.only,
+            except: b.except,
+            shard: b.shard,
+            rung: b.rung,
+            hosted_rules: b.hosted_rules,
+            preview: b.preview,
+            upgrade_from: b.upgrade_from,
+            plan: None,
+            shared: b.shared,
+            owners: Default::default(),
+            asked: vec![],
+            passed: 0,
+            failed: vec![],
+            skipped: vec![],
+            ran: vec![],
+            declared: vec![],
+            // a deployment's own: no local node to keep any for
+            containers: Containers { computers: true, doors: false },
+            recovery_due: false,
+            lost: None,
+            cron: None,
+            chrome: browser::Shared::new(&b.scratch),
+            tools: None,
+            celld: None,
+            openbao: None,
+            node: None,
+            listener: None,
+            port: 0,
+            run: run_name(),
+            fake: Fake::absent("code.storage"),
+            ai: Fake::absent("Workers AI"),
+            push: Fake::absent("push service"),
+            mail: Fake::absent("mail"),
+            stripe: Fake::absent("Stripe"),
+            observability: Fake::absent("Workers Observability"),
+            org_key: String::new(),
+            host_secret: String::new(),
+            test_secret: String::new(),
+            workos: Fake::absent("WorkOS"),
+            upstream: Fake::absent("upstream"),
+            openrouter: Fake::absent("OpenRouter"),
+            // no operator the deployment names: a section that needs one declares Need::Deployment
+            operator: Keys::generate(),
+            // read as the run starts (hosted.rs `sections`): a dry run reads no secret
+            mover: Keys::generate(),
+            wiper: None,
+            cli: b.cli,
+            scratch: b.scratch,
+            project: PathBuf::new(),
+            shape: Shape::Plain,
+            door_url: None,
+            secrets: devstack::Secrets::Store,
+            containers_removed: false,
+        }
+    }
+
     /// The deployment's secrets (label, value): the platform Worker holds
     /// them, never an app. A local run's alone: a section that reads them
     /// declares `Need::Deployment`.
@@ -559,10 +676,25 @@ impl Suite {
         self.celld.is_some()
     }
 
-    /// Whether the local node runs computers: wrangler's always, celld's on
-    /// the krun engine alone (docs/self-host.md, seam 2).
+    /// Whether the local node runs computers: wrangler's when a section the
+    /// run runs uses one (`local_containers`), celld's on the krun engine
+    /// alone (docs/self-host.md, seam 2). The section asking has said it
+    /// uses one, or the plan could not have known to give the node any.
     pub fn runs_computers(&self) -> bool {
-        self.celld.as_ref().is_none_or(|c| c.engine.computers())
+        self.declares_containers("runs_computers");
+        self.containers.computers
+    }
+
+    /// The section running said it uses the runtime's containers (in what
+    /// it needs, or in what it also uses): `asked` is how it asks for one
+    /// now. One that had not would be planned as using none, and run alone
+    /// its node would have none.
+    fn declares_containers(&self, asked: &str) {
+        let section = self.ran.last().map(String::as_str).unwrap_or_default();
+        assert!(
+            self.declared.iter().any(|n| n.containers()),
+            "{section} asks for a computer ({asked}) and never said it uses one: name Need::Computers in what it needs, or in what it also uses (Suite::section_also)"
+        );
     }
 
     /// Whether the node runs its Worker and every object in one isolate
@@ -626,7 +758,7 @@ impl Suite {
                 (None, None) => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
             };
             match &mut self.plan {
-                Some(plan) => plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip: Some(why) }),
+                Some(plan) => plan.push(Planned { section: name.into(), needs: needs.to_vec(), also: vec![], skip: Some(why) }),
                 None => self.skip(&format!("the {name} section"), &why),
             }
         }
@@ -642,6 +774,10 @@ impl Suite {
     /// Whether the section `name`, needing `needs`, runs in this suite:
     /// selected, on a rung that has what it needs, and not a dry run.
     pub fn runs(&self, name: &str, needs: &[Need]) -> bool {
+        // the section running, asking whether it has a computer to check
+        if self.plan.is_none() && self.ran.last().is_some_and(|running| running == name) && needs.iter().any(|n| n.containers()) {
+            self.declares_containers("Suite::runs");
+        }
         self.selected(name) && self.plan.is_none() && needs::unmet(needs, self.rung).is_none()
     }
 
@@ -649,6 +785,17 @@ impl Suite {
     /// It needs `needs`: on a rung without one of them it is a skip that
     /// says which, and a dry run plans it instead.
     pub fn section(&mut self, name: &str, needs: &[Need]) -> bool {
+        self.section_also(name, needs, &[])
+    }
+
+    /// `section`, for one that also uses what `also` names where the run
+    /// has it: a check it makes only there and skips elsewhere (the lane
+    /// says which), or a step of the node's own that goes through it (a
+    /// person's wipe, through their computer's container host). A local
+    /// node is given what it names: a section that uses a computer where
+    /// there is one says so here, or run alone it would find none
+    /// (`local_containers`).
+    pub fn section_also(&mut self, name: &str, needs: &[Need], also: &[Need]) -> bool {
         self.asked.push(name.to_string());
         if !self.selected(name) {
             return false;
@@ -656,7 +803,7 @@ impl Suite {
         let unmet = needs::unmet(needs, self.rung);
         if let Some(plan) = &mut self.plan {
             let skip = unmet.map(|(need, why)| format!("{why} ({})", need.name()));
-            plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip });
+            plan.push(Planned { section: name.into(), needs: needs.to_vec(), also: also.to_vec(), skip });
             return false;
         }
         if let Some((need, why)) = unmet {
@@ -665,6 +812,7 @@ impl Suite {
         }
         println!("\n# {name}");
         self.ran.push(name.to_string());
+        self.declared = needs.iter().chain(also).copied().collect();
         // a section that stopped early leaves Stripe's events as it held
         // them: each starts with them going out (billing-page's early stop
         // once held trials' webhooks back, failing its checks besides)
@@ -745,6 +893,8 @@ impl Suite {
             // a dry run's: it sends nothing
             (Some(preview), _) if self.plan.is_some() => Api::planned(preview, &self.shared),
             (Some(preview), _) => Api::hosted(preview, &self.shared),
+            // a local run's plan (`local_containers`): it sends nothing
+            (None, _) if self.plan.is_some() => Api::planned_local(SUFFIX, &self.shared),
             // a rehearsal's node is shaped as a branch deployment
             (None, true) => Api::new(self.port, SUFFIX, &self.shared).branch(REHEARSAL_BRANCH),
             (None, false) => Api::new(self.port, SUFFIX, &self.shared),
@@ -925,14 +1075,19 @@ impl Suite {
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            // on celld, computers only on the krun engine: they need the
-            // runtime's egress intercepts and snapshots (docs/self-host.md,
-            // seam 2)
-            computer_image: self.runs_computers().then(|| "stub".into()),
+            // computers when a section the run runs uses one
+            // (`local_containers`); on celld, only on the krun engine: they
+            // need the runtime's egress intercepts and snapshots
+            // (docs/self-host.md, seam 2)
+            computer_image: self.containers.computers.then(|| "stub".into()),
             images: vec![],
+            // wrangler's node keeps their container class, whose images it
+            // builds in Docker as it boots, only when it makes computers;
+            // celld's keeps it always, and binds it (devstack/celld.rs)
+            computer_containers: self.containers.computers || self.on_celld(),
             computer_snapshots: false,
             // the door's image built only for a run that names its lane
-            doors: self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME)),
+            doors: self.containers.doors,
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
@@ -1055,6 +1210,11 @@ impl Suite {
     /// once, its node stopped: none on a hosted run, which starts no node.
     fn remove_containers(&mut self) -> Result<Option<devstack::containers::Removed>> {
         if self.tools.is_none() || self.containers_removed {
+            return Ok(None);
+        }
+        // a wrangler node given no container class made none: Docker is not
+        // asked what it left, as it was asked for nothing (it may not be there)
+        if !self.on_celld() && self.containers.classes().is_empty() {
             return Ok(None);
         }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
@@ -1364,9 +1524,63 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args = hosted::parse(&args)?;
     match args.hosted {
+        // what xtask asks before it builds: the node's container classes,
+        // one a line (none: no image to build, and no Docker)
+        None if args.containers => {
+            anyhow::ensure!(std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld"), "--containers plans wrangler's node: celld's builds its own images, by its engine");
+            for class in local_containers(&args.only, &args.except, args.shard, args.rehearse).classes() {
+                println!("{class}");
+            }
+            Ok(())
+        }
         None => local(args.only, args.except, LocalRun { rehearse: args.rehearse, shard: args.shard }),
         Some(hosted) => hosted::run(args.only, args.except, hosted),
     }
+}
+
+/// What a rehearsal's node offers, as a preview with computers and no
+/// doors would (`computers`: whether its node is given any): its computers
+/// answer through the scripted model, so no real agent.
+fn rehearsal_offers(paid_calls: u64, computers: bool) -> needs::Offers {
+    needs::Offers { levers: true, computers, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true }
+}
+
+/// The container classes a local run's node on wrangler keeps: the
+/// computers' when a section the run would run uses the runtime's
+/// containers (`Need::containers`, in what it needs or also uses), and
+/// the door's for a run that names its lane (its stack builds SimpleX's
+/// core). The run is planned to see, as a hosted dry run is: every lane is
+/// asked for its section, and nothing is started or sent. A run of
+/// sections that use none keeps neither, so its node builds no image and
+/// asks nothing of Docker.
+fn local_containers(only: &Option<Vec<String>>, except: &[String], shard: Option<u32>, rehearse: Option<u64>) -> Containers {
+    let planned = local_plan(only, except, shard, rehearse);
+    let doors = names_the_door(only);
+    let computers = planned.iter().any(|p| p.skip.is_none() && p.uses_containers());
+    // a door's lane runs beside the computers its agents are
+    Containers { computers: computers || doors, doors }
+}
+
+/// Whether `--only` names the door's lane, the one run whose node runs
+/// SimpleX doors: their image is built only for it.
+fn names_the_door(only: &Option<Vec<String>>) -> bool {
+    only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME))
+}
+
+/// A local run on wrangler as its lanes plan it, its node given every
+/// container: each section the run selects, with what it needs and also
+/// checks, and why it would be skipped. Nothing is started or sent.
+fn local_plan(only: &Option<Vec<String>>, except: &[String], shard: Option<u32>, rehearse: Option<u64>) -> Vec<Planned> {
+    // never sent: a plan makes no request
+    let unsent = "0".repeat(fragment_core::levers::SECRET_BYTES_MIN);
+    let (rung, shared) = match rehearse {
+        None => (needs::Rung::Local { containers: true }, api::Run::new(unsent, 0)),
+        Some(paid_calls) => (needs::Rung::Hosted(rehearsal_offers(paid_calls, true)), api::Run::signing_in_by_levers(unsent, paid_calls)),
+    };
+    let mut s = Suite::bare(Bare { only: only.clone(), except: except.to_vec(), shard, rung, preview: None, hosted_rules: rehearse.is_some(), upgrade_from: None, shared, cli: PathBuf::new(), scratch: devstack::repo_root().join("target/e2e/plan") });
+    s.plan = Some(vec![]);
+    lanes::run(&mut s);
+    s.plan.take().unwrap_or_default()
 }
 
 /// The CLI the lanes drive (`FRAGMENT_BIN`, else the release build).
@@ -1443,13 +1657,29 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
         Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
     };
+    // the node's containers: wrangler's, its computers' when a section the
+    // run runs uses one (so a run of sections that use none needs no
+    // Docker); celld's, its computers by its engine
+    let containers = match &celld {
+        Some(c) => Containers { computers: c.engine.computers(), doors: names_the_door(&only) },
+        None => local_containers(&only, &except, shard, rehearse),
+    };
+    if celld.is_none() && containers.classes().is_empty() {
+        println!("containers: none (no section of this run uses a computer or a door: its node builds no image and asks nothing of Docker)");
+    }
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
     // kills it and all else it started (the Chromes: `on_termination`),
     // then removes the containers it left (on celld's krun engine, its VMs)
     let leftovers = project.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
+    // a wrangler node given no container class left none (`remove_containers`)
+    let left_none = celld.is_none() && containers.classes().is_empty();
     devstack::signals::on_termination(move |signal| {
+        if left_none {
+            println!("\nsignal {signal}: the run stopped its node and browsers");
+            return;
+        }
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
         let krun = engine.as_ref().map_or(Ok(0), |e| e.remove(&leftovers));
         match devstack::containers::remove(&leftovers).and_then(|r| Ok(r.containers + krun?)) {
@@ -1471,13 +1701,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
-        None if celld.is_some() => (needs::Rung::Celld { computers: celld.as_ref().is_some_and(|c| c.engine.computers()) }, api::Run::new(test_secret.clone(), 0)),
-        None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
-        Some(paid_calls) => {
-            // its computers answer through the scripted model: no real agent
-            let offers = needs::Offers { levers: true, computers: true, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
-            (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
-        }
+        None if celld.is_some() => (needs::Rung::Celld { computers: containers.computers }, api::Run::new(test_secret.clone(), 0)),
+        None => (needs::Rung::Local { containers: containers.computers }, api::Run::new(test_secret.clone(), 0)),
+        Some(paid_calls) => (needs::Rung::Hosted(rehearsal_offers(paid_calls, containers.computers)), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls)),
     };
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
@@ -1498,6 +1724,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         failed: vec![],
         skipped: vec![],
         ran: vec![],
+        declared: vec![],
+        containers,
         recovery_due: false,
         lost: None,
         cron: None,
@@ -1635,6 +1863,92 @@ fn finish(s: &mut Suite) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{local_containers, local_plan, Containers};
+
+    const COMPUTERS: Containers = Containers { computers: true, doors: false };
+    const NONE: Containers = Containers { computers: false, doors: false };
+
+    fn names(list: &[&str]) -> Option<Vec<String>> {
+        Some(list.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// The sections of a whole local run that use the runtime's containers,
+    /// and those that use none, each in the lanes' order.
+    fn by_containers() -> (Vec<String>, Vec<String>) {
+        let (with, without): (Vec<_>, Vec<_>) = local_plan(&None, &[], None, None).into_iter().partition(|p| p.uses_containers());
+        let name = |list: Vec<super::Planned>| list.into_iter().map(|p| p.section).collect();
+        (name(with), name(without))
+    }
+
+    /// Goal: a local run's node keeps its computers' containers exactly
+    /// when a section the run runs uses one, so a run of sections that use
+    /// none builds no image and needs no Docker, and no other run loses a
+    /// check. Valid: a whole run, and each of CI's shards, keeps them (CI
+    /// is as it was); a section that needs a computer keeps them, alone or
+    /// beside one that does not; so does each that only checks one where
+    /// there is one (`section_also`: admin, restart, migrations), which
+    /// alone would otherwise lose that check without a word, and each that
+    /// wipes a person (billing, governance, move: a wipe's computer step
+    /// needs the container class, FIN-661). Invalid: a
+    /// section that uses none keeps none, alone or with others like it,
+    /// and so does a run of every such section at once (`--except` the
+    /// rest); a name no section has plans nothing. The door's lane, by
+    /// name, keeps its class and the computers'. Replay: planned twice,
+    /// the same. Method: the lanes themselves, planned as a dry run plans
+    /// them, with nothing started.
+    #[test]
+    fn a_local_node_keeps_containers_only_for_a_section_that_uses_one() {
+        let of = |only: Option<Vec<String>>, except: &[&str]| local_containers(&only, &except.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None, None);
+        assert_eq!(of(None, &[]), COMPUTERS, "a whole run");
+        for k in 1..=crate::lanes::SHARDS.len() as u32 {
+            assert_eq!(local_containers(&None, &[], Some(k), None), COMPUTERS, "shard {k}, as CI runs it");
+        }
+        let (with, without) = by_containers();
+        assert!(with.len() >= 12 && without.len() >= 60, "{} sections use a container, {} none", with.len(), without.len());
+        for section in ["computers", "computer-room", "shell-ui", "chat", "sessions-ui", "billing-page", "agent-sharing", "export", "faces", "move-import", "move-ui", "wipe"] {
+            assert!(with.iter().any(|w| w == section), "{section} needs a container");
+            assert_eq!(of(names(&[section]), &[]), COMPUTERS, "{section} alone");
+            assert_eq!(of(names(&["shell", section]), &[]), COMPUTERS, "{section} beside one that uses none");
+        }
+        for section in ["admin", "restart", "migrations", "billing", "governance", "move"] {
+            assert!(with.iter().any(|w| w == section), "{section} uses a computer where there is one");
+            assert_eq!(of(names(&[section]), &[]), COMPUTERS, "{section} alone keeps the computer it uses");
+        }
+        for section in ["shell", "auth", "connections", "signin", "ledger", "templates", "search", "orgs", "sessions"] {
+            assert!(without.iter().any(|w| w == section), "{section} uses no container");
+            assert_eq!(of(names(&[section]), &[]), NONE, "{section} alone");
+        }
+        assert_eq!(of(names(&["shell", "auth", "ledger"]), &[]), NONE);
+        let rest: Vec<&str> = with.iter().map(String::as_str).collect();
+        for _ in 0..2 {
+            assert_eq!(of(None, &rest), NONE, "every section that uses none, at once");
+        }
+        assert_eq!(of(names(&["nonesuch"]), &[]), NONE, "nothing planned, nothing kept");
+        // by name, the door's lane: its class, beside the computers'
+        let door = of(names(&[crate::lanes::simplex_door::NAME]), &[]);
+        assert_eq!(door, Containers { computers: true, doors: true });
+        assert_eq!(door.classes(), [fragment_devstack::COMPUTER_CLASS, fragment_devstack::DOOR_CLASS]);
+        assert_eq!(COMPUTERS.classes(), [fragment_devstack::COMPUTER_CLASS]);
+        assert!(NONE.classes().is_empty());
+        // the real-Hermes lane builds its own image beside the stubs
+        assert_eq!(of(names(&[crate::lanes::hermes::SECTION]), &[]), COMPUTERS);
+    }
+
+    /// Goal: a rehearsal's node keeps containers by the hosted lane's
+    /// rules: only for a section that runs under them and uses one. Valid:
+    /// `computers` (it needs models, so paid calls to lend). Invalid: a
+    /// section a preview skips (it scripts a fake) keeps none though it
+    /// uses Docker locally; `computers` with no paid call to lend is
+    /// skipped, and keeps none.
+    #[test]
+    fn a_rehearsals_node_keeps_containers_by_the_hosted_rules() {
+        let of = |section: &str, paid_calls: u64| local_containers(&names(&[section]), &[], None, Some(paid_calls));
+        assert_eq!(of("computers", 5), COMPUTERS);
+        assert_eq!(of("computers", 0), NONE, "no paid calls: no models, so it is skipped");
+        assert_eq!(of("chat", 5), NONE, "it needs a fake, which a preview hides");
+        assert_eq!(of("templates", 5), NONE);
+    }
+
     /// Goal: a Worker's JSON line is read from a node's log whether the
     /// node runs one Worker (the line alone) or several (`[<worker>] `
     /// before it, as wrangler writes it), and nothing else is read as one.

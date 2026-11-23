@@ -333,20 +333,41 @@ fn worker_build_installed() -> Result<()> {
 /// that read them for itself warmed nothing here (BuildKit takes a remote
 /// cache's hits without fetching them, and a build that exports nothing
 /// keeps nothing), so the stub compiled its bridge on every shard.
-pub fn images() -> Result<()> {
+///
+/// `classes`: the container classes whose images are built (`None`: every
+/// class's), which for a run are those its node keeps (xtask's
+/// `node_classes`). None of them, nothing is built, and Docker is never
+/// started: a run whose sections use no computer needs none.
+pub fn images(classes: Option<&[String]>) -> Result<()> {
     let cell = devstack::cell_dir();
     let mut config = devstack::read_config(&cell)?;
     devstack::absolute_images(&mut config, &cell)?;
-    let containers = config["containers"].as_array().cloned().unwrap_or_default();
+    let images = images_of(&config, classes)?;
+    if images.is_empty() {
+        println!("no image built ahead of the node: it keeps no container class (no section of this run uses a computer or a door), so it asks nothing of Docker");
+    }
     let env = |k: &str| std::env::var(k).ok();
     // bounded: the images one config names
-    for (n, (name, image)) in containers.iter().flat_map(|c| c["images"].as_object().into_iter().flatten()).enumerate() {
+    for (n, (name, image)) in images.iter().enumerate() {
         let t0 = Instant::now();
         let built = docker_build(image, None, &["--load".as_ref()], &image_cache_args(env, n == 0)).with_context(|| format!("building the {name} image ahead of the node"))?;
         let (cached, steps) = cached_steps(&built);
         println!("image {name} built ahead of the node in {:.1?} ({cached} of {steps} steps cached)", t0.elapsed());
     }
     Ok(())
+}
+
+/// The images `config` names for the container classes `classes` (`None`:
+/// every class's), by name, in the config's order. A class the config
+/// does not name is refused: the suite and the cell's config disagree.
+fn images_of(config: &serde_json::Value, classes: Option<&[String]>) -> Result<Vec<(String, serde_json::Value)>> {
+    let containers = config["containers"].as_array().cloned().unwrap_or_default();
+    let named = |class: &str| containers.iter().any(|c| c["class_name"] == class);
+    if let Some(unknown) = classes.into_iter().flatten().find(|class| !named(class)) {
+        bail!("the cell's config names no container class {unknown:?}");
+    }
+    let kept = |c: &&serde_json::Value| classes.is_none_or(|classes| classes.iter().any(|class| c["class_name"] == class.as_str()));
+    Ok(containers.iter().filter(kept).flat_map(|c| c["images"].as_object().into_iter().flatten()).map(|(name, image)| (name.clone(), image.clone())).collect())
 }
 
 /// The Actions cache an image built ahead of the node reads, and writes
@@ -430,6 +451,32 @@ fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    /// Goal: the images built ahead of a node are those its boot will
+    /// build: of the container classes it keeps, and no other, so a node
+    /// that keeps none has no image built and Docker is never asked.
+    /// Valid: every class (a build alone, CI's) is the stubs and the door,
+    /// in the config's order, so the first, which alone writes CI's cache,
+    /// is the stub; the computers' class alone, the two stubs; the door's
+    /// beside it, all three. Invalid: no class, no image; a class the
+    /// config does not name is refused. Method: cell/wrangler.jsonc itself,
+    /// by the class names devstack gives the suite.
+    #[test]
+    fn the_images_built_ahead_are_those_of_the_classes_the_node_keeps() {
+        use fragment_devstack as devstack;
+        let config = devstack::read_config(&devstack::cell_dir()).unwrap();
+        let names = |classes: Option<&[&str]>| -> Vec<String> {
+            let classes: Option<Vec<String>> = classes.map(|c| c.iter().map(|s| s.to_string()).collect());
+            super::images_of(&config, classes.as_deref()).unwrap().into_iter().map(|(name, _)| name).collect()
+        };
+        assert_eq!(names(None), ["stub", "stub-next", "door"]);
+        assert_eq!(names(Some(&[devstack::COMPUTER_CLASS])), ["stub", "stub-next"]);
+        assert_eq!(names(Some(&[devstack::COMPUTER_CLASS, devstack::DOOR_CLASS])), ["stub", "stub-next", "door"]);
+        assert_eq!(names(Some(&[devstack::DOOR_CLASS])), ["door"]);
+        assert!(names(Some(&[])).is_empty(), "a node that keeps no class has no image built");
+        let e = super::images_of(&config, Some(&["Nonesuch".to_string()])).unwrap_err().to_string();
+        assert!(e.contains("Nonesuch"), "{e}");
+    }
 
     /// Goal: an image built ahead of the node reads the Actions cache only
     /// when CI names one, and writes it only when asked, from the config's

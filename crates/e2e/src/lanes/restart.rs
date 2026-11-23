@@ -201,7 +201,9 @@ fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
 }
 
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers]) {
+    // on a runtime with computers, an agent's face and an own key their
+    // computer kept cross the restart too
+    if !s.section_also("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers], &[crate::Need::Computers]) {
         return Ok(());
     }
     let api = s.api();

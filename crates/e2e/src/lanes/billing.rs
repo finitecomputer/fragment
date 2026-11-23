@@ -83,7 +83,10 @@ pub(super) fn subscription_of(s: &Suite, org: &str) -> Option<String> {
 }
 
 pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("billing", &[Need::Fakes]) {
+    // its people are wiped, and a wipe's computer step goes through their
+    // computer's container host: on a node with no container class that
+    // step never finishes (FIN-661), so its node keeps the computers'
+    if !s.section_also("billing", &[Need::Fakes], &[Need::Computers]) {
         return Ok(());
     }
     let op_session = api.sign_in("operator@e2e.test")?;

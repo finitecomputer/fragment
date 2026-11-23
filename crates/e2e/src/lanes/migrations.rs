@@ -48,7 +48,8 @@ fn members(api: &Api, owner: &fragment_nip98::Keys, name: &str) -> Vec<String> {
 }
 
 pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("migrations", &[Need::Levers]) {
+    // where the node makes computers, a new one's steps are read too
+    if !s.section_also("migrations", &[Need::Levers], &[Need::Computers]) {
         return Ok(());
     }
     let api = s.api();

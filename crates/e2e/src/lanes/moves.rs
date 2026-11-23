@@ -51,7 +51,10 @@ fn person(workos_id: &str, olds: &[&str]) -> RosterPerson {
 }
 
 pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Move]) {
+    // its people are wiped, and a wipe's computer step goes through their
+    // computer's container host: on a node with no container class that
+    // step never finishes (FIN-661), so its node keeps the computers'
+    if !s.section_also("move", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Move], &[Need::Computers]) {
         return Ok(());
     }
     let mover = Mover::new(&api.base, s.mover.clone());

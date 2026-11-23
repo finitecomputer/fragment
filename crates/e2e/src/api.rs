@@ -370,8 +370,19 @@ impl Api {
     /// about 40 ms in debug; one per lane made each plan cost 1.7 s, and
     /// the plan's tests 10 s of the check (FIN-452).
     pub fn planned(preview: &Preview, run: &Arc<Run>) -> Api {
+        Api::hosted_with(preview, run, Api::unsent())
+    }
+
+    /// `new` for a local run's plan (`local_containers`), which sends
+    /// nothing either: no node, so no port, and the plans' one client.
+    pub fn planned_local(suffix: &str, run: &Arc<Run>) -> Api {
+        Api { http: Api::unsent(), base: "http://127.0.0.1:0".into(), port: 0, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
+    }
+
+    /// The client every plan's lanes share (`planned`).
+    fn unsent() -> reqwest::blocking::Client {
         static UNSENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-        Api::hosted_with(preview, run, UNSENT.get_or_init(|| client(Pool::Fresh)).clone())
+        UNSENT.get_or_init(|| client(Pool::Fresh)).clone()
     }
 
     fn hosted_with(preview: &Preview, run: &Arc<Run>, http: reqwest::blocking::Client) -> Api {

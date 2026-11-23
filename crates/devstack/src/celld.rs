@@ -465,7 +465,7 @@ mod tests {
         fs::copy(crate::cell_dir().join(crate::ADMIN_CONFIG), dir.join(crate::ADMIN_CONFIG)).unwrap();
         let e = celld_config(&dir).unwrap_err().to_string();
         assert!(e.contains("wrangler.local.jsonc"), "{e}");
-        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], &[], false).unwrap();
+        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], &[], crate::Classes { computers: true, doors: false }).unwrap();
         let local = json(&crate::local_config(&dir));
         for _ in 0..2 {
             let v = json(&celld_config(&dir).unwrap());

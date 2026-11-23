@@ -21,7 +21,10 @@ use crate::api::{Api, Reply};
 use crate::{Need, Suite};
 
 pub fn governance(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("governance", &[Need::Fakes]) {
+    // its people are wiped, and a wipe's computer step goes through their
+    // computer's container host: on a node with no container class that
+    // step never finishes (FIN-661), so its node keeps the computers'
+    if !s.section_also("governance", &[Need::Fakes], &[Need::Computers]) {
         return Ok(());
     }
     let pam = api.person()?;

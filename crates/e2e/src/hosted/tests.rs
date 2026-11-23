@@ -28,7 +28,12 @@ fn hosted(args: &[&str]) -> Hosted {
 /// hosted lane's rules on the local node.
 #[test]
 fn a_local_run_reads_as_before() {
-    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None });
+    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, containers: false });
+    // a local run planned for its node's container classes, and not run
+    let planned = parse(&strings(&["--only", "shell", "--containers"])).unwrap();
+    assert_eq!((planned.containers, planned.only, planned.hosted), (true, Some(strings(&["shell"])), None));
+    assert!(parse(&strings(&["--shard", "1/5", "--containers"])).unwrap().containers);
+    assert!(parse(&strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--containers"])).is_err(), "a hosted run's containers are its deployment's");
     let only = parse(&strings(&["--only", "ledger,ai"])).unwrap();
     assert_eq!((only.only, only.hosted), (Some(strings(&["ledger", "ai"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));

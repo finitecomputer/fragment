@@ -60,14 +60,14 @@ use serde_json::{json, Value};
 
 use crate::api::{self, Api, Preview};
 use crate::needs::{Need, Offers, Rung};
-use crate::{browser, Fake, Planned, Shape, Suite};
+use crate::{browser, Planned, Suite};
 
 /// A hosted run's paid calls unless `--max-paid-calls` says otherwise,
 /// and the most it may say: a hosted run spends test cents.
 pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
-const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
+const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]] [--containers]
        fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,models]
                     [--max-paid-calls <n>] [--upgrade-from <image>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
@@ -84,6 +84,10 @@ pub struct Args {
     /// A local run of one shard's sections, `k` of `--shard k/n` (the
     /// table's split: lanes/mod.rs `SHARDS`), as CI runs the suite.
     pub shard: Option<u32>,
+    /// `--containers`: a local run planned, not run: the container classes
+    /// its node keeps are printed (`local_containers`), for xtask to build
+    /// their images ahead of it.
+    pub containers: bool,
 }
 
 /// A hosted run's settings.
@@ -139,7 +143,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
     let (mut operator_key_file, mut operators, mut upgrade_from) = (None, vec![], None);
     let (mut dry_run, mut sweep, mut rehearse) = (false, None, false);
-    let mut shard = None;
+    let (mut shard, mut containers) = (None, false);
     let mut it = args.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(arg) = it.next() {
@@ -167,6 +171,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
             }
             "--sweep-all" if sweep.is_none() => sweep = Some(SweepOf::All),
             "--rehearse" => rehearse = true,
+            "--containers" => containers = true,
             _ => return Err(usage()),
         }
     }
@@ -191,7 +196,10 @@ pub fn parse(args: &[String]) -> Result<Args> {
             true => Some(max_paid_calls_or_default()?),
             false => None,
         };
-        return Ok(Args { only, except, hosted: None, rehearse, shard });
+        return Ok(Args { only, except, hosted: None, rehearse, shard, containers });
+    }
+    if containers {
+        bail!("--containers plans a local run's node: a hosted run's containers are its deployment's");
     }
     if rehearse {
         bail!("--rehearse is the hosted lane on the local node: not with --hosted");
@@ -236,7 +244,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
     let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, doors, models, max_paid_calls, upgrade_from, action };
-    Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None })
+    Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None, containers: false })
 }
 
 /// `--upgrade-from <image>`'s name, as a pin takes it: 1 to 64 visible
@@ -297,58 +305,7 @@ fn offers(hosted: &Hosted) -> Offers {
 /// A hosted suite: no node and no fakes, the preview's API, its levers'
 /// secret in `shared`.
 fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared: Arc<api::Run>, cli: PathBuf, scratch: PathBuf) -> Suite {
-    Suite {
-        only,
-        except,
-        shard: None,
-        rung: Rung::Hosted(offers(hosted)),
-        hosted_rules: true,
-        preview: Some(hosted.preview.clone()),
-        upgrade_from: hosted.upgrade_from.clone(),
-        plan: None,
-        shared,
-        owners: Default::default(),
-        asked: vec![],
-        passed: 0,
-        failed: vec![],
-        skipped: vec![],
-        ran: vec![],
-        recovery_due: false,
-        lost: None,
-        cron: None,
-        chrome: browser::Shared::new(&scratch),
-        tools: None,
-        celld: None,
-        openbao: None,
-        node: None,
-        listener: None,
-        port: 0,
-        run: crate::run_name(),
-        fake: Fake::absent("code.storage"),
-        ai: Fake::absent("Workers AI"),
-        push: Fake::absent("push service"),
-        mail: Fake::absent("mail"),
-        stripe: Fake::absent("Stripe"),
-        observability: Fake::absent("Workers Observability"),
-        org_key: String::new(),
-        host_secret: String::new(),
-        test_secret: String::new(),
-        workos: Fake::absent("WorkOS"),
-        upstream: Fake::absent("upstream"),
-        openrouter: Fake::absent("OpenRouter"),
-        // no operator the deployment names: a section that needs one declares Need::Deployment
-        operator: Keys::generate(),
-        // read as the run starts (`sections`): a dry run reads no secret
-        mover: Keys::generate(),
-        wiper: None,
-        cli,
-        scratch,
-        project: PathBuf::new(),
-        shape: Shape::Plain,
-        door_url: None,
-        secrets: devstack::Secrets::Store,
-        containers_removed: false,
-    }
+    Suite::bare(crate::Bare { only, except, shard: None, rung: Rung::Hosted(offers(hosted)), preview: Some(hosted.preview.clone()), hosted_rules: true, upgrade_from: hosted.upgrade_from.clone(), shared, cli, scratch })
 }
 
 /// The plan of a hosted run: each section the lanes ask for, in order,

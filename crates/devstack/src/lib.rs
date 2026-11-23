@@ -249,12 +249,35 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
 /// node without it still has the door's object, which says it runs none.
 pub const DOOR_CLASS: &str = "SimplexDoor";
 
-fn without_doors(config: &mut serde_json::Value) -> Result<()> {
+/// The computers' container class (docs/computers.md): in a local node's
+/// config unless its fleet makes no computers and says so
+/// (`Fleet::computer_containers`). `wrangler dev` asks Docker for every
+/// image its config names as it starts; a node with no container class
+/// asks it for nothing, and runs without it.
+pub const COMPUTER_CLASS: &str = "Computer";
+
+/// The config less the container class `class`, and less `containers`
+/// itself once it names none (as a deployment's with no computers and no
+/// doors: xtask's deploy).
+fn without_class(config: &mut serde_json::Value, class: &str) -> Result<()> {
     let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) else { return Ok(()) };
     let before = containers.len();
-    containers.retain(|c| c["class_name"] != DOOR_CLASS);
-    anyhow::ensure!(containers.len() + 1 >= before, "one door container class at most");
+    containers.retain(|c| c["class_name"] != class);
+    anyhow::ensure!(containers.len() + 1 >= before, "one {class} container class at most");
+    if containers.is_empty() {
+        config.as_object_mut().context("a wrangler config is an object")?.remove("containers");
+    }
     Ok(())
+}
+
+/// The container classes a local node's config keeps
+/// (`write_local_config`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Classes {
+    /// `COMPUTER_CLASS` (`Fleet::computer_containers`).
+    pub computers: bool,
+    /// `DOOR_CLASS` (`Fleet::doors`).
+    pub doors: bool,
 }
 
 /// Bindings `wrangler dev` always runs against Cloudflare itself: it starts
@@ -282,11 +305,16 @@ pub fn admin_local_config(project: &Path) -> PathBuf {
 /// or celld's backend), as a deploy binds them in the account's, `images`
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
-/// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], doors: bool) -> Result<PathBuf> {
+/// teardown removes its computers. Its container classes are those
+/// `classes` keeps: the computers', the doors'.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], classes: Classes) -> Result<PathBuf> {
     let mut config = read_config(project)?;
-    if !doors {
-        without_doors(&mut config)?;
+    if !classes.computers {
+        anyhow::ensure!(images.is_empty(), "a node without the computers' containers is given no computer image");
+        without_class(&mut config, COMPUTER_CLASS)?;
+    }
+    if !classes.doors {
+        without_class(&mut config, DOOR_CLASS)?;
     }
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
@@ -508,6 +536,12 @@ pub struct Fleet {
     /// as its config names one: dev's Hermes image (`hermes_image`), with
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
+    /// Whether its config keeps the computers' container class
+    /// (`COMPUTER_CLASS`), whose images `wrangler dev` builds in Docker as
+    /// it boots. Without it the node makes no computers (`computer_image`
+    /// unset, as a deployment whose config names none) and needs no Docker:
+    /// the e2e's, for a run none of whose sections uses a computer.
+    pub computer_containers: bool,
     pub computer_snapshots: bool,
     /// Whether it runs SimpleX doors (`DOOR_CLASS`'s container, and its
     /// image built as the node starts): the e2e's door lane's alone.
@@ -647,7 +681,8 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.doors)?;
+        anyhow::ensure!(self.computer_containers || self.computer_image.is_none(), "a fleet without the computers' containers makes no computers: it pins no image");
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, Classes { computers: self.computer_containers, doors: self.doors })?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -1476,6 +1511,46 @@ mod tests {
         for fine in ["", "[wrangler:info] Ready on http://127.0.0.1:35523\n", "Build failed with", "Build failed with errors", "Build failed with 1"] {
             assert!(!build_failed(fine), "{fine:?}");
         }
+    }
+
+    /// Goal: a local node's config names the container classes its fleet
+    /// keeps and no other, so a node that keeps none asks nothing of
+    /// Docker (wrangler builds each image a config names as it boots).
+    /// Valid: the computers' alone (dev's, most e2e runs'), with both stub
+    /// images, each a Dockerfile of the project's own; the door's beside
+    /// it. Invalid: neither kept, `containers` is gone whole, as from a
+    /// deployment that makes no computers; a computer image handed to a
+    /// node without the computers' class is refused. Replay: written again,
+    /// the same. Method: cell/wrangler.jsonc, as a staged copy holds it.
+    #[test]
+    fn a_local_config_names_the_container_classes_its_fleet_keeps() {
+        let dir = std::env::temp_dir().join(format!("local-config-classes-{}", random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        let mut config = read_config(&cell_dir()).unwrap();
+        absolute_images(&mut config, &cell_dir()).unwrap();
+        fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        fs::copy(cell_dir().join(ADMIN_CONFIG), dir.join(ADMIN_CONFIG)).unwrap();
+        let written = |classes: Classes| -> serde_json::Value {
+            write_local_config(&dir, &[], &[], &[], classes).unwrap();
+            serde_json::from_str(&fs::read_to_string(local_config(&dir)).unwrap()).unwrap()
+        };
+        let classes = |v: &serde_json::Value| -> Vec<String> { v["containers"].as_array().into_iter().flatten().filter_map(|c| c["class_name"].as_str().map(str::to_string)).collect() };
+        let computers = written(Classes { computers: true, doors: false });
+        assert_eq!(classes(&computers), [COMPUTER_CLASS]);
+        let images = computers["containers"][0]["images"].as_object().expect("the computers' images");
+        assert_eq!(images.keys().collect::<Vec<_>>(), ["stub", "stub-next"]);
+        assert!(images.values().all(|i| i["dockerfile"].as_str().is_some_and(|d| d.starts_with(dir.to_str().unwrap()))), "each a Dockerfile of the project's own: {images:?}");
+        assert_eq!(classes(&written(Classes { computers: true, doors: true })), [COMPUTER_CLASS, DOOR_CLASS]);
+        assert_eq!(classes(&written(Classes { computers: false, doors: true })), [DOOR_CLASS]);
+        for _ in 0..2 {
+            let none = written(Classes { computers: false, doors: false });
+            assert!(none.get("containers").is_none(), "no container class, so no `containers`: {}", none["containers"]);
+            assert!(none["durable_objects"].is_object() && none["migrations"].is_array(), "its objects are the cell's still");
+        }
+        let hermes = [("hermes".to_string(), hermes_image())];
+        let e = write_local_config(&dir, &[], &[], &hermes, Classes { computers: false, doors: false }).unwrap_err().to_string();
+        assert!(e.contains("no computer image"), "{e}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Comments go, strings keep what looks like one, and the result is JSON.

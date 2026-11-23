@@ -1,6 +1,8 @@
 //! What a section needs to run (`Suite::section`), so a run's set is
 //! chosen by where it runs, never by a hand-kept list. A local run has
-//! everything; one on celld everything but the move, and its computers only
+//! everything, its node's containers when a section it runs uses one (so a
+//! run of sections that use none needs no Docker: `Suite::section_also`,
+//! `local_containers`); one on celld everything but the move, and its computers only
 //! on a krun engine; a hosted one (a branch deployment on real vendors) has the levers its
 //! test secret opens, Chrome when it is installed, and the computers,
 //! doors and models its deployment offers, and nothing that stands in for a vendor
@@ -73,6 +75,12 @@ impl Need {
         Need::Move,
     ];
 
+    /// Whether it is met by the runtime's own containers, which a local
+    /// node builds and runs in Docker: a computer's, or a door's.
+    pub fn containers(self) -> bool {
+        matches!(self, Need::LocalDocker | Need::Computers | Need::Doors)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Need::Fakes => "fakes",
@@ -117,8 +125,10 @@ pub struct Offers {
 /// Where a run runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
-    /// Under `wrangler dev`, with the fakes: everything.
-    Local,
+    /// Under `wrangler dev`, with the fakes: everything, its node's
+    /// containers (the computers' images, built and run in Docker) when a
+    /// section the run runs uses one (`local_containers`).
+    Local { containers: bool },
     /// Under `celld dev`, with the fakes (`FRAGMENT_E2E_RUNTIME=celld`;
     /// docs/self-host.md, seam 1): everything but the move, and the
     /// runtime's own containers only when its node runs computers, on this
@@ -130,11 +140,18 @@ pub enum Rung {
 }
 
 const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model";
+const NO_CONTAINERS: &str = "it needs the runtime's own containers, and this run's node has none: no section it runs says it uses one, in what it needs or in what it also uses (Suite::section_also), so its node builds no image and asks nothing of Docker";
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     let offers = match rung {
-        Rung::Local => return (need == Need::RealAgent).then_some(NO_REAL_AGENT),
+        Rung::Local { containers } => {
+            return match need {
+                Need::RealAgent => Some(NO_REAL_AGENT),
+                _ if need.containers() && !containers => Some(NO_CONTAINERS),
+                _ => None,
+            };
+        }
         Rung::Celld { computers } => {
             return match need {
                 Need::RealAgent => Some(NO_REAL_AGENT),
@@ -183,15 +200,37 @@ mod tests {
     const EVERYTHING: Offers = Offers { levers: true, computers: true, doors: true, models: true, chrome: true, real_agent: true, operator: true };
     const NOTHING: Offers = Offers { levers: false, computers: false, doors: false, models: false, chrome: false, real_agent: false, operator: false };
 
+    const LOCAL: Rung = Rung::Local { containers: true };
+
     /// A local run has everything but a real agent: every other need is
     /// met, as before.
     #[test]
     fn a_local_run_has_everything_but_a_real_agent() {
         let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealAgent).collect();
-        assert_eq!(unmet(&local, Rung::Local), None);
+        assert_eq!(unmet(&local, LOCAL), None);
         for need in local {
-            assert_eq!(missing(need, Rung::Local), None, "{need:?}");
+            assert_eq!(missing(need, LOCAL), None, "{need:?}");
         }
+    }
+
+    /// Goal: a local run whose node was given no containers (none of its
+    /// sections uses one) has everything else, and says why a section that
+    /// needs one cannot run there. Valid: every need but the containers'
+    /// and a real agent is met. Invalid: Docker, a computer or a door is
+    /// missing, each saying that no section asked for one.
+    #[test]
+    fn a_local_run_without_containers_has_all_but_them() {
+        let bare = Rung::Local { containers: false };
+        let of_containers: Vec<Need> = Need::ALL.into_iter().filter(|n| n.containers()).collect();
+        assert_eq!(of_containers, [Need::LocalDocker, Need::Computers, Need::Doors]);
+        for need in Need::ALL {
+            let without = need.containers() || need == Need::RealAgent;
+            assert_eq!(missing(need, bare).is_some(), without, "{need:?}");
+        }
+        let (need, why) = unmet(&[Need::Levers, Need::Fakes, Need::Computers], bare).expect("no computers without containers");
+        assert_eq!(need, Need::Computers);
+        assert!(why.contains("no section it runs says it uses one") && why.contains("Docker"), "{why}");
+        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::Chrome, Need::TwoSites, Need::Operator, Need::Move, Need::Models], bare), None);
     }
 
     /// A celld node without an engine runs no containers of its own: no
@@ -218,7 +257,7 @@ mod tests {
     /// local run and a rehearsal answer through the scripted model.
     #[test]
     fn a_real_agent_is_a_previews_alone() {
-        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local).expect("no real agent locally");
+        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], LOCAL).expect("no real agent locally");
         assert_eq!(need, Need::RealAgent);
         assert!(why.contains("scripted model"), "{why}");
         let rehearsal = Offers { real_agent: false, ..EVERYTHING };
@@ -262,7 +301,7 @@ mod tests {
         let no_secret = Offers { levers: false, ..EVERYTHING };
         assert_eq!(unmet(&[], Rung::Hosted(no_secret)).map(|(n, _)| n), Some(Need::Levers));
         assert_eq!(unmet(&[Need::Computers], Rung::Hosted(no_secret)).map(|(n, _)| n), Some(Need::Levers));
-        assert_eq!(unmet(&[], Rung::Local), None);
+        assert_eq!(unmet(&[], LOCAL), None);
     }
 
     /// The first need missing is the one said, in the order declared.
