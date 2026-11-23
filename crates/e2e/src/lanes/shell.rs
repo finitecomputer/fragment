@@ -7761,8 +7761,13 @@ fn send_press_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     anyhow::ensure!(b.until(page, "!document.getElementById('search-dialog').open", wait), "the launcher closed before Send's press");
     b.click(page, "#sidebar-new-chat")?;
     b.eval(page, &fill("#workspace-search", "Press Send near its rim"))?;
-    // open, its words sendable, and done opening (its panel moves in)
-    let ready = b.until(page, "document.getElementById('search-dialog').open && !document.getElementById('search-send').disabled && document.querySelector('.search-panel').getAnimations().length === 0", wait);
+    // open, its words sendable, and done opening: its panel's way in
+    // finished (it fills both ways, so it stays among its animations)
+    let ready = b.until(
+        page,
+        "document.getElementById('search-dialog').open && !document.getElementById('search-send').disabled && document.querySelector('.search-panel').getAnimations().every((a) => a.playState === 'finished')",
+        wait,
+    );
     b.eval(
         page,
         "(() => { window.sendClicks = []; window.countSend = (e) => { const on = document.getElementById('search-send').contains(e.target); window.sendClicks.push(on); if (on) { e.preventDefault(); e.stopImmediatePropagation(); } }; addEventListener('click', window.countSend, true); return true; })()",
