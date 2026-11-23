@@ -796,9 +796,9 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
-| `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
+| `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first, each one whose channel the asker may read (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed` 403; past the overdraft 402 |
-| `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
+| `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402; one whose channel the asker may not read 404 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
 | `POST /api/f/{name}/inbox` | the inbox token, or the secret its code's `inbox` names (Apps) | the token in `x-fragment-inbox-token` or `?t=`, or, when its code names an inbox, its secret in its header or its HMAC signature (and no token: 403 otherwise, saying why a signature is refused); JSON `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`, or its `answer` query's. Bad token 403; `INBOX_PENDING_MAX` pending 429 |
@@ -1810,7 +1810,11 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   channel no longer taking its records, or a record that relays someone
   (kept before that was refused), skips it (`schedule.unfired`).
 - Viewers list them; editors add, pause, resume and remove them (an agent
-  on its own fragment is its editor: no special case).
+  on its own fragment is its editor: no special case). A schedule holds
+  the record it appends, so it is shown, listed or answered by a pause or
+  resume, only to a role that may read its channel; one on a channel no
+  longer declared, to the owner alone (`fragment_core::schedule::shown`).
+  To anyone else it is not there (a pause or resume: 404).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five
   fields read as triggers' are (weekdays by name too), at most every
   `RECORD_SCHEDULE_EVERY_MIN_MINUTES` (each fire wakes and costs its owner;

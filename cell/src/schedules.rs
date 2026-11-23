@@ -19,8 +19,9 @@
 //! so a pass that fires it again appends nothing twice; one the alarm came
 //! to late is one fire, the minutes it missed skipped; past the owner's
 //! overdraft none fires, each moving on, and one event says so. Viewers
-//! list them; editors (an agent for its owner among them, at most an
-//! editor) add, pause, resume and remove them.
+//! list them, each only where they may read its channel (a schedule holds
+//! the record it appends: `schedule::shown`); editors (an agent for its
+//! owner among them, at most an editor) add, pause, resume and remove them.
 //!
 //! The pure rules (the bounds, the channel's admission, the key, the words)
 //! are `fragment_core::schedule`.
@@ -107,10 +108,24 @@ impl FragmentCell {
     }
 
     /// Its scheduled records, for its page (`__schedules`) and the API:
-    /// viewers and up.
+    /// viewers and up, each schedule only to a role that may read its
+    /// channel (`schedule::shown`), since it carries the record each fire
+    /// appends there.
     pub(crate) fn schedule_list(&self, caller: &Caller) -> CellResult<ScheduleList> {
-        self.require(caller, false, Role::Viewer)?;
-        Ok(ScheduleList { schedules: self.schedule_rows()?.into_iter().map(Row::view).collect() })
+        let role = self.require(caller, false, Role::Viewer)?;
+        let shown = self.schedule_rows()?.into_iter().map(|row| Ok(self.schedule_shown(role, &row.channel)?.then(|| row.view()))).collect::<CellResult<Vec<_>>>()?;
+        Ok(ScheduleList { schedules: shown.into_iter().flatten().collect() })
+    }
+
+    /// Whether `role` sees a schedule on `channel` (`schedule::shown`):
+    /// its read role, as `channel_read_role` answers it now.
+    fn schedule_shown(&self, role: Role, channel: &str) -> CellResult<bool> {
+        let read = match self.channel_read_role(channel) {
+            Ok(read) => Some(read),
+            Err(gone) if gone.code == ErrorCode::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        Ok(schedule::shown(role, read))
     }
 
     /// `GET /api/f/<name>/schedules`
@@ -155,13 +170,18 @@ impl FragmentCell {
     /// fires no more; resumed (a write, as an add is), from its next minute
     /// after now, none it missed. Asked again, the same answer.
     pub(crate) async fn set_schedule(&self, caller: &Caller, id: &str, body: SetSchedule) -> CellResult<Response> {
-        self.require(caller, false, Role::Editor)?;
+        let role = self.require(caller, false, Role::Editor)?;
         let by = self.caller_id(caller)?.to_string();
         let id = schedule_id(id)?;
         if !body.paused {
             self.writable().await?;
         }
         let row = self.schedule_row(id)?;
+        // its answer carries the record: one the caller may not read is
+        // one they are not shown, as the list does not
+        if !self.schedule_shown(role, &row.channel)? {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no schedule #{id}")));
+        }
         if row.next_at.is_none() == body.paused {
             return json_response(&json!({ "schedule": row.view() }));
         }

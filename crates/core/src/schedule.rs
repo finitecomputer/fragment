@@ -142,6 +142,16 @@ pub fn admit_channel(channel: &str, decl: Option<&ChannelDecl>, builtin: bool, r
     Ok(())
 }
 
+/// Whether someone holding `role` sees a schedule on a channel whose read
+/// role is `read` (`None`: the fragment declares it no longer). A schedule
+/// carries the body each fire appends, so it is shown as that record is:
+/// to a role that may read its channel (cell/src/channels.rs
+/// `channel_read_role`, the one read check). One on a channel no longer
+/// declared has no reader but its owner, who may still see and remove it.
+pub fn shown(role: Role, read: Option<Role>) -> bool {
+    role >= read.unwrap_or(Role::Owner)
+}
+
 /// The key a fire appends under: the schedule and the minute it was due,
 /// so an alarm that fires it again (a retry, a pass cut short) appends
 /// nothing twice (docs/cloudflare-v1.md, lesson 2).
@@ -361,5 +371,23 @@ mod tests {
         ] {
             assert_eq!(said(expr), words, "{expr}");
         }
+    }
+
+    /// A schedule's record is shown as its channel's records are: to a
+    /// role that may read the channel, and to no one less (a viewer sees
+    /// no record of an editors' or an owner's channel). One whose channel
+    /// is no longer declared, to its owner alone.
+    #[test]
+    fn a_schedule_shows_as_its_channel_reads() {
+        let roles = [Role::Public, Role::Viewer, Role::Editor, Role::Owner];
+        for read in roles {
+            for role in roles {
+                assert_eq!(shown(role, Some(read)), role >= read, "{role:?} on a channel {read:?} reads");
+            }
+        }
+        assert!(!shown(Role::Viewer, Some(Role::Editor)), "a viewer sees no schedule of an editors' channel");
+        assert!(!shown(Role::Editor, Some(Role::Owner)), "an editor sees no schedule of an owner's channel");
+        assert!(shown(Role::Viewer, Some(Role::Viewer)), "a viewer sees one of a viewers' channel");
+        assert!(shown(Role::Owner, None) && !shown(Role::Editor, None) && !shown(Role::Viewer, None), "a channel no longer declared: its owner alone");
     }
 }
