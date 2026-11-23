@@ -65,9 +65,17 @@ impl Binding {
 
 impl FragmentCell {
     /// The blessed template this fragment's installed code is, if any.
-    fn blessed(&self) -> CellResult<Option<String>> {
+    pub(crate) fn blessed(&self) -> CellResult<Option<String>> {
         let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
         Ok(rows.first().and_then(|r| r["loader_id"].as_str()).and_then(door::blessed_template).map(str::to_string))
+    }
+
+    /// Whether this fragment runs a connector's own code: made from a
+    /// blessed connector template (`door_template`, unmarked for good by
+    /// any other install) and running it now.
+    pub(crate) fn runs_connector(&self) -> CellResult<bool> {
+        let Some(template) = self.meta(MetaKey::DoorTemplate)? else { return Ok(false) };
+        Ok(self.blessed()?.as_deref() == Some(template.as_str()))
     }
 
     /// The connector policy its doors ask: the deployment's, or, on a test
