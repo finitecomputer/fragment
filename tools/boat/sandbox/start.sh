@@ -60,7 +60,9 @@ git cat-file -e "$sha^{commit}" 2>/dev/null || { echo "start.sh: no commit $sha 
 # HEAD and the index only: the files stay as they are, so a file is
 # written (and its time moves) only when its contents differ.
 git reset -q "$sha"
-rsync -rlcp --exclude=/.git --exclude=/target "$src"/ "$REPO"/
+# -E, not -p: this computer's permissions (644) would replace the
+# sandbox's (664), and Docker's build cache counts them in every COPY.
+rsync -rlcE --exclude=/.git --exclude=/target "$src"/ "$REPO"/
 # Remove what the checkout does not have: files deleted there, and files a
 # previous run on this sandbox sent that are gone since.
 git ls-files -z --cached --others --exclude-standard | python3 -I -c '
