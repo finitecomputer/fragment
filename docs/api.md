@@ -66,7 +66,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?}`: a SimpleX door's (cell/door.mjs): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -746,7 +746,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`, a default its face, made with `title`, has already) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): no repo until its first file (Names), whose seed makes main's first commit `{"template"}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `board`, `notes`, `slides` are the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400): it is the face's from its making (An agent's name and picture). A blessed template's `repo` is `""`: made at its first file (Names); its agent's computer is told it joined once the release's install stands. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `key`, `repo`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a blessed template's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
+| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`, a default its face, made with `title`, has already) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram`, `simplex` are blessed (decision 40): no repo until its first file (Names), whose seed makes main's first commit `{"template"}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `board`, `notes`, `slides` are the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400): it is the face's from its making (An agent's name and picture). A blessed template's `repo` is `""`: made at its first file (Names); its agent's computer is told it joined once the release's install stands. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `key`, `repo`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a blessed template's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
 | `GET /api/fragments` | any signer | → `FragmentList` (docs/wire, `fragments.list`): a `ListedFragment` row for each fragment they hold a role on. `limits` (`UploadLimits`), what a message of theirs may carry. An agent's `?for=<id>` lists that identity's, as the agent acts with them, with the agent's own `limits` |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket of `ListWatchFrame`s (docs/wire, `fragments.watch`). A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `SetArchived` → `Archived` (docs/wire): their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
@@ -1572,7 +1572,7 @@ the wire shows of its rules:
 | `GET /api/ledger/uses` | a person (an agent: its owner's) | → `LedgerUses {month, uses: [{provider, agent, calls, micros}]}`: this UTC month's calls by their agents through a computer's swap that a provider answered (under 500), and their charge (an operator key's, as the swap priced it; others 0), by provider then agent. Thirteen months kept (docs/ledger.md, Usage) |
 | `GET /api/ledger/uses/{YYYY-MM}` | a person (an agent: its owner's) | → the same for that month; not a month 400 |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`; `null` is the default |
-| `POST /api/ledger/quote` | a person (an agent: its owner's) | `QuoteAsk {items}` → `Quote {items: [{pricedAs?, eachMicros?, calls, chargeMicros?, unknown?: no_price \| no_units \| invalid \| too_large}], totalMicros, leftMicros, ledger: LedgerStatus}`: what a planned job would be charged (docs/ledger.md, A quote), each item priced as its payer's ledger charges a row, with the answering release's book, in the order asked. An item is `{key, units?, calls?}` (an operator key or a part of its calls, `elevenlabs:speech`, `fal:image`, by the book's name; `units` each call's, required of a part that counts more than one a call), `{model, input?, cachedInput?, cacheWrite?, output?, calls?}` (a name the model route takes, or the book's id) or `{usage, calls?}` (a ledger row's `Usage`); `calls` 1 to `QUOTE_CALLS_MAX` (1,000,000), absent one; at most `QUOTE_ITEMS_MAX` (64) items, else 400. A name the book does not price is `unknown`, never guessed, and adds nothing to `totalMicros`; `leftMicros` is the balance, at least 0. No items reads the ledger alone. It reads and keeps nothing |
+| `POST /api/ledger/quote` | a person (an agent: its owner's) | `QuoteAsk {items}` → `Quote {items: [{pricedAs?, eachMicros?, calls, chargeMicros?, unknown?: no_price \| no_units \| invalid \| too_large}], totalMicros, leftMicros, ledger: LedgerStatus}`: what a planned job would be charged (docs/ledger.md, A quote), each item priced as its payer's ledger charges a row, with the answering release's book, in the order asked. An item is `{key, units?, calls?}` (a vendor's unit, `elevenlabs:character`, `xai:tick`, `perplexity:call`, by the book's name; `units` each call's, required of a unit its vendor's answer counts), `{model, input?, cachedInput?, cacheWrite?, output?, calls?}` (a name the model route takes, or the book's id) or `{usage, calls?}` (a ledger row's `Usage`); `calls` 1 to `QUOTE_CALLS_MAX` (1,000,000), absent one; at most `QUOTE_ITEMS_MAX` (64) items, else 400. A name the book does not price is `unknown`, never guessed, and adds nothing to `totalMicros`; `leftMicros` is the balance, at least 0. No items reads the ledger alone. It reads and keeps nothing |
 | `POST /api/ledger/{person}/grant` | operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit; `by` the signing operator |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat holder's next push wins (debt ledger) |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}` |
@@ -1714,7 +1714,8 @@ steps:
   `{{name}}` naming no secret goes as written
   (`fragment_core::secrets`). A connector bound as a door that is shut
   fetches nothing (An agent's doors). http(s) only;
-  loopback, private and `.internal` addresses refused; redirects answered,
+  loopback, private and `.internal` addresses refused (but a SimpleX
+  connector's door, An agent's doors); redirects answered,
   not followed; a body of at most `FETCH_BODY_MAX_BYTES`, a response of
   `FETCH_RESPONSE_MAX_BYTES`, `FETCH_TIMEOUT_MS`. Each carries
   `x-fragment-hops`, and one not GET or HEAD an `Idempotency-Key:
@@ -1761,7 +1762,9 @@ d + 1 (a delivery's `x-fragment-hops`), and past `HOP_DEPTH_MAX` a run is
 `blocked` (`cycle.detected`). An operation's triggers pause themselves
 (`op.auto-paused`) after `AUTO_PAUSE_HELD` held runs in
 `AUTO_PAUSE_WINDOW_MS` or `TRIGGERED_RUNS_PER_HOUR` triggered runs in an
-hour; paused, a trigger records a `blocked` run. Past the owner's
+hour, but a connector's own code (An agent's doors) never by the hourly
+count: its triggers relay a conversation and fire on nothing they publish
+(`connectors::trips_hourly_breaker`); paused, a trigger records a `blocked` run. Past the owner's
 overdraft every trigger's run is `blocked`. A deploy dropping an operation
 drops its pause. A cron tick whose last run still goes is skipped. The
 inbox's pending records are its unfinished runs (`inbox.rejected` past
@@ -2189,7 +2192,6 @@ share of the disk").
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` → the view once the restart is under way, its start owed to its alarm: `phase` `starting` (`generation` the start it restarted until that start is made). Running, it answers after its save (done or failed) and its stop; asleep or `wont_wake`, at once; going to sleep, at once with `sleeping` (that sleep is the restart's, its start owed at its end). The start is fresh from the image and its newest good save; follow the view (`GET`) to `awake` with a newer `generation`, or `wont_wake`. `generation` names the start the owner saw: one already restarted is not restarted again (the view as it is). At zero credit 402, a guest 403 |
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view, that `went_back` notice told no more; a `life` past the newest, or 0, 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view, that update put off; not its next start's, or not 12 hex, 400 |
-| `POST /api/computers/{id}/key-caps/{provider}` | its owner (an agent 403) | `KeyCapAsk {from?, micros?}` → the view: `from`, the cap a `key_paused` notice showed, lifts it a step (`key_hour::next_lift`) while it is still that one; `micros` sets it, 1 to `key_hour::KEY_CAP_MAX` (else 400); neither, the default. A provider that is no shared key 404 |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: its next start's image; one the deployment lacks 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it, its own key the agent's identity, an editor of its own fragment. Again, nothing changes |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on. One gone or not on it: the view, unchanged |
@@ -2214,9 +2216,9 @@ than 4, or two agents' in one request), 403 `forbidden` (another host than
 its provider's, a tag naming no agent here, an agent narrowed from it, an
 operator key on a call its row denies or on a path that row can't read
 plainly: docs/computers.md, "Calls an operator key never goes on"), 403
-`not_connected`, the ledger's 402 or 403, or 429 `rate_limited` (reason
-`key_paused`, with `retry_after_ms`) for a shared key whose charges this
-last hour reached its owner's cap (docs/computers.md, `key_paused`).
+`not_connected`, or the ledger's 402 or 403. No shared key pauses: past
+$5 of its agents' calls on them in an hour, then each doubling, its owner's
+ledger tells them so (`spending`, docs/ledger.md, "Usage").
 
 ### An agent's routines (decision 38)
 
@@ -2265,7 +2267,8 @@ nor speak through one (`fragment_core::door`):
   is 403; an app's
   operation or job publishes none (400), but a hosted door's.
 - **A hosted door** is a fragment made from a blessed connector template
-  (`blessed::CONNECTORS`: `telegram`, templates/telegram) that has never
+  (`blessed::CONNECTORS`: `telegram`, templates/telegram; `simplex`,
+  templates/simplex) that has never
   run other code (another install unbinds it for good and removes its
   secrets, `door.unmade`). Only its owner
   edits or shares it: anyone else, an agent for its owner included, is at
@@ -2281,6 +2284,25 @@ nor speak through one (`fragment_core::door`):
   (docs/chat-records.md). The binding is the connector's, so several
   connectors may each be a door of one agent; an unlink leaves the agent
   a viewer. Its rules are cell/src/doors.rs's.
+- **A SimpleX connector's door** (`simplex`) is the platform's SimpleX
+  door of the connector's life (cell/door.mjs): named for its name and
+  its npub's digits (`fragment_core::door::door_id`), as its repo is, so
+  a name made again, by anyone, reaches a door of its own, never the
+  earlier one's link. Its jobs reach it at
+  `https://door.fragment.internal/<ask>` (`connect`, `state`, `link`,
+  `unlink`, `reply`), which the platform sends to that door alone, naming
+  it and the connector (`x-fragment-door`, `x-fragment-connector`) over
+  whatever the job set; any other fragment's fetch of that host fails its
+  step unsent (`fragment_core::door::door_route`). `connect` gives the
+  door the connector's inbox secret (`x-door-secret`, a `{{SECRET}}`
+  filled at the egress); the door posts its owner's messages to the
+  connector's inbox with it, as a webhook does, in order, each naming the
+  door (the connector takes its own life's door's alone), holding at
+  most 256 the inbox has not taken (past them its runner is refused and
+  delivers again later). A link or unlink names the connector's number
+  for it (`n`), and one older than the newest the door was asked is 409
+  `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
+  its config) answers `connect` 409 `no_doors` and keeps nothing.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.

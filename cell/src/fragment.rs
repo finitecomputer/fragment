@@ -124,6 +124,10 @@ pub struct FragmentCell {
     pub(crate) live: RefCell<crate::live::LiveMemory>,
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
+    /// The open minute's request count (meter.rs `count_request`), as the
+    /// storage's key-value API holds it: not read yet (`None`), none, or
+    /// one.
+    pub(crate) meter_open: RefCell<Option<Option<crate::meter::OpenCount>>>,
     /// A record woke an idle search cursor, and the alarm is not armed for
     /// it yet (search.rs `log_search`; `after_answer` arms it).
     pub(crate) search_woke: Cell<bool>,
@@ -185,6 +189,7 @@ impl DurableObject for FragmentCell {
             app,
             live: RefCell::default(),
             meter_armed: Cell::new(-1),
+            meter_open: RefCell::new(None),
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
@@ -510,6 +515,9 @@ pub(crate) enum MetaKey {
     TestFailMeterAcks,
     /// The last minute whose request count was closed into a row (meter.rs).
     MeterClosed,
+    /// The last minute whose open request count was folded into its row
+    /// (meter.rs `fold_open`): a count at or below it is never folded again.
+    MeterFolded,
     /// When storage was last sampled (meter.rs).
     StorageSampledAt,
     /// The preview card and its schedule (card.rs: `fragment_core::card::Cards`, as JSON).
@@ -609,6 +617,7 @@ impl MetaKey {
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
 
             MetaKey::MeterClosed => "meter_closed",
+            MetaKey::MeterFolded => "meter_folded",
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
@@ -1144,7 +1153,7 @@ impl FragmentCell {
         }
         let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
         // every request the router hands a fragment is its owner's to pay for
-        self.count_request();
+        self.count_request().await;
         self.meter_soon().await;
         // a fragment on a blessed template runs the release this build
         // serves (decision 40): one installed from an older release (the

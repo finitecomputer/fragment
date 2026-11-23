@@ -307,6 +307,7 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragment_core::models::Models, version: u32) -> fragment_core::price::PriceBook {
     let mut book = models.priced(fragment_core::price::PriceBook::defaults());
     book.keys = providers.key_prices();
+    book.keys.extend(models.cost_keys());
     book.version = book.version.max(version);
     match book.validate() {
         Ok(()) => book,
@@ -598,6 +599,18 @@ impl Config {
         if arrived.host_str().and_then(|host| self.address_of_host(host)).is_some() {
             return arrived.origin().ascii_serialization();
         }
+        // A request that came by a host neither the platform's nor under
+        // the suffix (a box's loopback port, where its own CLI calls past
+        // the door in front of it) names links on the platform's scheme
+        // and port, which a device opens; it has none of its own to give.
+        let platform;
+        let arrived = match arrived.host_str() {
+            Some(host) if !self.is_platform_host(host) && self.subdomain(host).is_none() => {
+                platform = url::Url::parse(&self.platform_url).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
+                &platform
+            }
+            _ => arrived,
+        };
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
         let host = name;
         let branch = self.host_label_suffix.as_deref().unwrap_or("");
