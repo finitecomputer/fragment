@@ -1094,10 +1094,14 @@ does not ship is never answered from its repo (Serving).
   input `{ref: "live", commit, code}`); `{"woke": true, "run": op}` (at
   most once per activation of the fragment's object, at the first request
   of it a person or an agent makes: signed, or a page's session, by
-  someone the fragment answers (a member, or anyone on a public fragment:
-  `fragment_core::permit::wakes`), so a stranger's refused request starts
-  nothing; never an alarm, the platform's own calls, or an anonymous
-  visitor; and only when
+  someone the fragment answers at its floor for reading (a member, a
+  person whose agent is one, or anyone signed on a public fragment; never
+  by the share link alone: `fragment_core::permit::wakes`), so a stranger
+  to a members-only or link fragment starts nothing. That is the
+  fragment's floor, not each route's check: a route that needs more can
+  refuse the request that woke it (a signed nonmember's `status` on a
+  public fragment is 403, its wake already started). Never an alarm, the
+  platform's own calls, or an anonymous visitor; and only when
   there is something to catch up: `main` moved since the operation's last
   triggered run started, or that run did not succeed, with none queued or
   running; its input `{}`, its run's `via` `woke`).

@@ -535,10 +535,15 @@ pub fn acts_as_itself(owner: Option<Role>, agent: Option<Role>) -> bool {
 
 /// Whether a request of `standing` may start a fragment's `woke` trigger
 /// (cell/src/jobs.rs `woke_chance`, FIN-372): it is signed, by someone the
-/// fragment would answer, at its floor for reading at least. A request
-/// its route will refuse (a stranger to a members-only fragment) starts no
-/// run its owner pays for (FIN-660).
+/// fragment would answer at its floor for reading (`public`), so a
+/// stranger to a members-only or link fragment starts no run its owner
+/// pays for (FIN-660). The share link never counts: the wake is offered
+/// before the site reads its link (cell/src/jobs.rs `woke_run` reads the
+/// standing without it). This is the fragment's floor, not each route's
+/// decision: a route that needs more (`status` needs a viewer) can still
+/// refuse a signed visitor to a public fragment whose request woke it.
 pub fn wakes(visibility: Visibility, standing: Standing) -> bool {
+    let standing = Standing { link: false, ..standing };
     standing.signed && matches!(decide(&Facts { visibility, standing, action: Action::Read(Role::Public) }), Verdict::Allow(_))
 }
 
@@ -1249,10 +1254,17 @@ mod tests {
         }
         assert!(wakes(V::Public, signed(None)), "a signed visitor to a public fragment");
         assert!(wakes(V::Members, Standing { owns_member_agent: true, ..signed(None) }), "a person whose agent is in reads");
-        assert!(wakes(V::Link, Standing { link: true, ..signed(None) }), "a link holder on a link fragment");
         // invalid: a signed stranger the route refuses, and anyone unsigned
         assert!(!wakes(V::Members, signed(None)), "a stranger to a members-only fragment");
         assert!(!wakes(V::Link, signed(None)), "a stranger without the link");
+        // the share link lends a wake nothing, whatever standing says of it
+        // (the Worker reads it without the link): a link holder who is no
+        // member wakes no link fragment
+        assert!(!wakes(V::Link, Standing { link: true, ..signed(None) }), "a link holder on a link fragment");
+        assert!(!wakes(V::Members, Standing { link: true, ..signed(None) }), "a link holder on a members-only fragment");
+        // a signed visitor to a public fragment wakes it, though a route
+        // that needs a viewer (`status`) refuses them after
+        assert!(wakes(V::Public, Standing { link: true, ..signed(None) }), "a public fragment's visitor, link or not");
         for v in [V::Members, V::Link, V::Public] {
             assert!(!wakes(v, Standing { signed: false, ..signed(None) }), "unsigned on {v:?}");
         }
