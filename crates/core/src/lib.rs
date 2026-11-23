@@ -80,6 +80,7 @@ pub mod session_search;
 pub mod secrets_store;
 pub mod webpush;
 pub mod site;
+pub mod site_signin;
 pub mod steps;
 pub mod stripe;
 pub mod wipe;

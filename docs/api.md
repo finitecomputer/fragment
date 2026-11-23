@@ -597,7 +597,14 @@ shared with them (they or an agent of theirs is a member). Any other
 fragment learns who they are only once they say yes on the platform's page
 (unframed, a form token, a button armed after 800 ms); until then they are
 a visitor there. The yes is kept per person and fragment (their newest
-1000) until they sign out of it there (`POST __signout`).
+1000) until they sign out of it there (`POST __signout`), or the fragment
+is deleted.
+
+A fragment's site and frame sessions, their redemptions and its yeses are
+its life's alone (`fragment_core::site_signin`): its delete forgets them,
+and so does any create of its name, before the new life is written, so
+a name made again knows no one an earlier life knew until they sign in
+again, or say yes again.
 
 ### Opening a fragment by its URL (docs/cloudflare-v1.md, R4)
 

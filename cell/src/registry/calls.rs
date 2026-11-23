@@ -862,6 +862,30 @@ impl Call for EndSession {
     type Answer = ();
 }
 
+/// `POST /session/forget`: a fragment's name begins a life (its create,
+/// before the life is written) or ends one (its delete): every site and
+/// frame session, unspent redemption and remembered yes the registry keys
+/// by the name is forgotten (`fragment_core::site_signin`), so no life of
+/// a name signs anyone in to, or says yes for, the next. A second forget
+/// finds nothing, and is no error.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForgetSite {
+    pub fragment: String,
+}
+
+/// `ForgetSite`'s answer: how many of each it forgot.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SiteForgotten {
+    pub redemptions: u64,
+    pub sessions: u64,
+    pub consents: u64,
+}
+
+impl Call for ForgetSite {
+    const PATH: &'static str = "/session/forget";
+    type Answer = SiteForgotten;
+}
+
 /// `POST /logout`: the platform session ends, and every site session made
 /// from it.
 #[derive(Serialize, Deserialize)]

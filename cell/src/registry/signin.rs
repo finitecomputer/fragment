@@ -28,6 +28,12 @@
 //! ("Continue to X as you?") is remembered (`consents`) until they sign
 //! out of it there.
 //!
+//! Site sessions, their redemptions and yeses are keyed by the fragment's
+//! name, and are its life's alone (`fragment_core::site_signin`): its
+//! create forgets every one the name keys before the life is written, and
+//! its delete again once the life ended (`forget_site`), so no one is
+//! signed in to, or said yes to, a name's new life by an earlier one.
+//!
 //! A person's approved key (an iPhone's) has no browser, so no platform
 //! session: it signs `POST /api/f/{name}/session` for a top-level
 //! redemption (`mint`), minted from a parent session of the key's own
@@ -59,7 +65,7 @@ use sha2::{Digest, Sha256};
 
 use super::calls::{
     ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, ExchangeIn, Exchanged, KeyAdded,
-    LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
+    ForgetSite, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SiteForgotten, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
@@ -687,6 +693,25 @@ impl RegistryCell {
             }
         }
         Ok(())
+    }
+
+    /// A fragment's name begins a life, or ended one (calls.rs
+    /// `ForgetSite`): its site and frame sessions, their unspent
+    /// redemptions and its people's yeses go (`site_signin::FORGETS`), in
+    /// one turn with no await, so no request reads a name half forgotten.
+    pub(super) fn forget_site(&self, b: ForgetSite) -> CellResult<SiteForgotten> {
+        if !fragment_proto::valid_fragment_name(&b.fragment) {
+            return Err(CellError::invalid("a forgotten site is named by its fragment"));
+        }
+        let gone = |sql: &str| -> CellResult<u64> { Ok(self.rows::<IgnoredAny>(sql, vec![b.fragment.as_str().into()])?.len() as u64) };
+        let [redemptions, sessions, consents] = fragment_core::site_signin::FORGETS;
+        let forgot = SiteForgotten { redemptions: gone(redemptions)?, sessions: gone(sessions)?, consents: gone(consents)? };
+        assert_eq!(
+            self.count("SELECT COUNT(*) AS n FROM sessions WHERE fragment = ?", vec![b.fragment.as_str().into()])?,
+            0,
+            "a forgotten name keeps no site session"
+        );
+        Ok(forgot)
     }
 
     pub(super) fn logout(&self, b: Logout) -> CellResult<LoggedOut> {

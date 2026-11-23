@@ -1434,6 +1434,15 @@ impl FragmentCell {
         let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
+            // no sign-in of an earlier life of the name's carries into this
+            // one (`fragment_core::site_signin`): forgotten before the life
+            // is written, so no one is known here until it knows them or
+            // they say yes to it. A registry that cannot answer makes nothing
+            let forgot = crate::ask_registry(&self.env, &crate::registry::calls::ForgetSite { fragment: body.name.clone() }).await?;
+            laps.lap("signins");
+            if forgot.sessions + forgot.consents + forgot.redemptions > 0 {
+                console_log!("{}", json!({ "event": "create.signins-forgotten", "fragment": body.name, "sessions": forgot.sessions, "consents": forgot.consents, "redemptions": forgot.redemptions }));
+            }
             // its maker's own agent, if it names one: asked before anything
             // is written, so one that is not theirs makes nothing
             let agent = match &body.agent {
@@ -1636,8 +1645,20 @@ impl FragmentCell {
         };
         self.tell_ended(Some(&ended.owner)).await;
         self.forget_invites(&name).await;
+        self.forget_signins(&name).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
+    }
+
+    /// The ended life's site sessions, their redemptions and its people's
+    /// yeses go now (`fragment_core::site_signin`), so none outlives it.
+    /// A registry that does not answer leaves them for the name's next
+    /// create, which forgets them before its life is written.
+    async fn forget_signins(&self, name: &str) {
+        let forget = crate::registry::calls::ForgetSite { fragment: name.to_string() };
+        if let Err(e) = crate::ask_registry(&self.env, &forget).await {
+            console_error!("{name}: its ended life's sign-ins were not forgotten by the registry ({:?}): {}", e.code, e.message);
+        }
     }
 
     pub(crate) fn code_status(&self) -> CellResult<CodeStatus> {
