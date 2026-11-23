@@ -102,6 +102,8 @@ impl Stripe {
             400..=499 => ErrorCode::InvalidRequest,
             _ => ErrorCode::UpstreamFailed,
         };
-        Err(CellError::new(code, format!("Stripe refused {path} ({}): {why}", a.status)).because(Reason::StripeRefused))
+        // its words and our path (which names its ids) are the logs' alone
+        crate::error::vendor_said("Stripe", path, a.status, &why);
+        Err(CellError::new(code, format!("Stripe refused the call ({})", a.status)).because(Reason::StripeRefused))
     }
 }

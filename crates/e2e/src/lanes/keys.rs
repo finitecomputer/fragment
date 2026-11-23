@@ -46,7 +46,11 @@ pub fn keys(s: &mut Suite, api: &Api) -> Result<()> {
     let r = ask(&a, json!({ "op": "open", "sealed": sealed }))?;
     s.ok("it opens its own value", r.status == 200 && r.body["plaintext"] == "sk-e2e-sealed-value", &r);
     let r = ask(&b, json!({ "op": "open", "sealed": sealed }))?;
-    s.ok("another fragment cannot open it", r.status == 500 && r.message().contains("cannot open"), &r);
+    s.ok(
+        "another fragment cannot open it, and its refusal names a reference, not why (the platform's own failure: fragment_core::public_error)",
+        r.status == 500 && r.error() == "host_failed" && r.message().contains("(reference ") && !r.message().contains("cannot open"),
+        &r,
+    );
 
     let peek = s.named(api, &owner, "keys-peek")?;
     let c = s.create(api, &owner, &peek)?;

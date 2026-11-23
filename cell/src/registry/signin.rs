@@ -480,8 +480,11 @@ impl RegistryCell {
             // a 400 is the code's: used (a callback sent again), expired, or
             // never WorkOS's. The browser starts again; the Registry answered,
             // so this is no outage. Anything else is WorkOS failing.
-            let code = if status == 400 { ErrorCode::InvalidRequest } else { ErrorCode::UpstreamFailed };
-            return Err(CellError::new(code, format!("WorkOS refused the sign-in ({status}): {why}")));
+            crate::error::vendor_said("WorkOS", "authenticate", status, &why);
+            return Err(match status {
+                400 => CellError::invalid("this sign-in was used already or is too old: start again"),
+                _ => CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status})")),
+            });
         }
         let signed_in = serde_json::from_slice::<Authenticated>(&answer)
             .ok()

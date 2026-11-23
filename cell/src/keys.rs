@@ -335,7 +335,8 @@ pub async fn pipes_accounts(env: &Env, api: &str, user: &str) -> CellResult<Valu
     let key = required(env, store::WORKOS_KEY).await?;
     let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/data_providers?supports_multiple_connections=true"), Method::Get, Some(&key), None, "WorkOS").await?;
     if status != 200 {
-        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not list the connected accounts ({status}): {}", answer["message"].as_str().unwrap_or("no reason given"))));
+        crate::error::vendor_said("WorkOS", "list connected accounts", status, answer["message"].as_str().unwrap_or_default());
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not list the connected accounts ({status})")));
     }
     Ok(answer)
 }
@@ -355,7 +356,10 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     match status {
         200 => Ok(fragment_core::connection_accounts::described(&answer)),
         404 => Ok(PipesAccount::none()),
-        s => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
+        s => {
+            crate::error::vendor_said("WorkOS", "connected account", s, answer["message"].as_str().unwrap_or_default());
+            Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s})")))
+        }
     }
 }
 
@@ -476,7 +480,10 @@ pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str, acco
     let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}{one}"), Method::Delete, Some(&key), None, "WorkOS").await?;
     match status {
         200 | 204 | 404 => Ok(()),
-        s => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not disconnect {provider} ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
+        s => {
+            crate::error::vendor_said("WorkOS", "disconnect", s, answer["message"].as_str().unwrap_or_default());
+            Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not disconnect {provider} ({s})")))
+        }
     }
 }
 

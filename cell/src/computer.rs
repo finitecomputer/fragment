@@ -4151,8 +4151,8 @@ impl ComputerCell {
             Some(_) => crate::keys::pipes_credential(&self.env, api, provider, &user, account.as_deref()).await?,
         };
         if status != 200 {
-            let why = answer["message"].as_str().unwrap_or("no reason given");
-            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
+            crate::error::vendor_said("WorkOS", "token", status, answer["message"].as_str().unwrap_or_default());
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status})")));
         }
         if answer["active"] != true {
             // the guest's next read lists the connection no more
@@ -4353,9 +4353,10 @@ async fn send_api(env: &Env, who: &str, method: Method, id: &str, url: String, b
 /// and 41), never by a fragment's, which is one site with this origin.
 pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
     let platform = Config::from_env(env).platform();
+    let reference = crate::error::reference_of(&req)?;
     let answered = match host_answer(req, env, url, id, signer).await {
         Ok(resp) => resp,
-        Err(e) => e.response()?,
+        Err(e) => e.public_response(&reference)?,
     };
     framed_by(answered, &platform)
 }
