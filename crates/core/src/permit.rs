@@ -69,8 +69,8 @@
 //! asking its owner to confirm), and a record whose `answers` names it is
 //! its answer, taken only as that identity's own post: never an agent's
 //! for its owner, so an agent never answers its own card. The cell checks
-//! it as it appends any record (docs/api.md, "Questions and answers"), so
-//! no template's page or agent checks it again. Invites and offers are
+//! it as it takes a post (docs/api.md, "Questions and answers"); app code
+//! and the platform's own records answer nothing. Invites and offers are
 //! asked on the person's own routes (registry/invites.rs, offers.rs).
 //!
 //! Deleting a fragment and setting its money cap are dangerous
@@ -569,13 +569,17 @@ pub fn answers(body: &Value) -> Option<Result<Answers, &'static str>> {
 }
 
 /// A question is answered only by whom it asks (FIN-615): `asks` is whom
-/// the record an answer names asks (`None`: no such record, or it asks no
-/// one). Only that identity's own post answers it, written as itself
-/// (`Author::Person` or `Author::Agent`): never anyone else, an agent for
-/// its owner (an agent never answers its own card), app code, the platform
-/// or a door.
-pub fn may_answer(asks: Option<&str>, poster: &str, author: Author) -> bool {
-    matches!(author, Author::Person | Author::Agent) && asks.is_some_and(|asks| crate::npub::display(asks) == crate::npub::display(poster))
+/// the record an answer names asks (`None`: no such record, one its poster
+/// may not read, or one asking no one). An answer is an action, and its
+/// asker (`acts_for`, an agent's `for`, else the poster) and its writer
+/// are both that identity: its own post, written as itself
+/// (`Author::Person` or `Author::Agent`). Never anyone else, an agent for
+/// whom it asks (an agent never answers its own card), an agent asked a
+/// question answering it for someone, app code, the platform or a door.
+pub fn may_answer(asks: Option<&str>, poster: &str, author: Author, acts_for: Option<&str>) -> bool {
+    let asker = acts_for.unwrap_or(poster);
+    let same = |a: &str, b: &str| crate::npub::display(a) == crate::npub::display(b);
+    matches!(author, Author::Person | Author::Agent) && same(asker, poster) && asks.is_some_and(|asks| same(asks, poster))
 }
 
 /// Why a membership change is refused, or `None` when it is allowed. Only
@@ -1283,22 +1287,26 @@ mod tests {
         let ana = crate::npub::encode(hex);
         let juniper = crate::npub::encode(&"1".repeat(64));
         let ben = crate::npub::encode(&"2".repeat(64));
-        let rows: &[(&str, Option<&str>, &str, Author, bool)] = &[
-            ("Ana answers her card", Some(&ana), &ana, Author::Person, true),
-            ("Ana's signed key, as 64 hex", Some(&ana), hex, Author::Person, true),
-            ("a card naming Ana as 64 hex", Some(hex), &ana, Author::Person, true),
-            ("Ben answers Ana's card", Some(&ana), &ben, Author::Person, false),
-            ("Juniper answers its own card, for Ana or as itself", Some(&ana), &juniper, Author::Agent, false),
-            ("a question asking Juniper, answered by Juniper", Some(&juniper), &juniper, Author::Agent, true),
-            ("app code Ana called writes the answer", Some(&ana), &ana, Author::Code, false),
-            ("the platform writes it as Ana", Some(&ana), &ana, Author::Platform, false),
-            ("a door relays Ana's answer", Some(&ana), &ana, Author::Door, false),
-            ("an answer to what asks no one, or is not there", None, &ana, Author::Person, false),
+        // (case, whom it asks, poster, author, whom the poster acts for, answered)
+        type Row<'a> = (&'a str, Option<&'a str>, &'a str, Author, Option<&'a str>, bool);
+        let rows: &[Row] = &[
+            ("Ana answers her card", Some(&ana), &ana, Author::Person, None, true),
+            ("Ana's signed key, as 64 hex", Some(&ana), hex, Author::Person, None, true),
+            ("a card naming Ana as 64 hex", Some(hex), &ana, Author::Person, None, true),
+            ("Ben answers Ana's card", Some(&ana), &ben, Author::Person, None, false),
+            ("Juniper answers its own card, as itself", Some(&ana), &juniper, Author::Agent, None, false),
+            ("Juniper answers its own card, for Ana", Some(&ana), &juniper, Author::Agent, Some(&ana), false),
+            ("a question asking Juniper, answered by Juniper", Some(&juniper), &juniper, Author::Agent, None, true),
+            ("a question asking Juniper, answered by Juniper for Ana", Some(&juniper), &juniper, Author::Agent, Some(&ana), false),
+            ("app code Ana called writes the answer", Some(&ana), &ana, Author::Code, None, false),
+            ("the platform writes it as Ana", Some(&ana), &ana, Author::Platform, None, false),
+            ("a door relays Ana's answer", Some(&ana), &ana, Author::Door, None, false),
+            ("an answer to what asks no one, is not there, or its poster may not read", None, &ana, Author::Person, None, false),
         ];
-        for (case, asks, poster, author, ok) in rows {
-            assert_eq!(may_answer(*asks, poster, *author), *ok, "{case}");
+        for (case, asks, poster, author, acts_for, ok) in rows {
+            assert_eq!(may_answer(*asks, poster, *author, *acts_for), *ok, "{case}");
             // replay: the same post again decides the same
-            assert_eq!(may_answer(*asks, poster, *author), *ok, "{case}, again");
+            assert_eq!(may_answer(*asks, poster, *author, *acts_for), *ok, "{case}, again");
         }
 
         let named = |answers: Value| super::answers(&serde_json::json!({ "kind": "prompt_response", "option": "yes", "answers": answers }));

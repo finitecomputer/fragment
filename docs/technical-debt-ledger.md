@@ -25,22 +25,6 @@ unfinished design, not debt.
   repos no live fragment names (FIN-540), and `repo_goes` takes every
   deleted life's repo.
 
-## The bridge still checks who answered a card
-
-- **Shortcut:** the platform appends an answer naming its card's record
-  (`answers`) only from whom the card asks (docs/api.md, "Questions and
-  answers"), and the chat's page counts only those. The bridge still
-  finds a card by the answer's prompt, agent and turn, and takes only its
-  owner's (`images/bridge/src/cards.rs` `resolve`, `Record::by`).
-- **Why:** an image runs beside cells of other releases, and a bridge
-  trusting `answers` before every cell it hears refuses the rest would
-  take anyone's.
-- **Risk:** none to people: two places hold one rule, and an API answer
-  naming no record still reaches the bridge, which checks it.
-- **Delete when:** production's cell refuses answers from anyone a card
-  does not ask. Then the bridge finds a card by `answers` alone and drops
-  its owner check on answers.
-
 ## No mail without Email Sending
 
 - **Shortcut:** the platform's mail (invites, a key added, an org's seat,

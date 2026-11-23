@@ -224,56 +224,100 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
 /// Goal: a question is answered only by whom it asks, in any app
 /// (docs/api.md, "Questions and answers"): a record naming whom it `asks`
 /// is a question, and a post whose `answers` names it is taken only as
-/// that identity's own post. Method: in an app of no code, the owner's
-/// agent asks its owner on its channel; then an editor person, the agent
-/// as itself and acting for its owner each answer it, the owner answers
-/// it, again under the same id, and answers what asks no one, what is not
-/// there, and with an `answers` of the wrong shape or of none.
+/// that identity's own post, of a question they may read. Method: in an
+/// app of no code, the owner's agent asks its owner on its channel, and a
+/// viewer and an editor on a desk only editors read; the owner asks the
+/// agent. Each is answered by whom it asks and by others: an editor, the
+/// agent as itself and acting for its owner, the viewer it asks but who
+/// may not read it. Then answers to what asks no one, is not there or is
+/// misshapen, an `answers` of the app's own, and the owner's answer again
+/// once its question is no longer kept.
 fn questions(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = s.named(api, owner, "questions")?;
     let c = s.create(api, owner, &name)?;
-    let editor = api.person()?;
+    let (editor, viewer) = (api.person()?, api.person()?);
     let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
-    let owner_id = api.identity(owner)?;
-    for who in [api.identity(&editor)?, agent_id.clone()] {
-        let r = api.share(&name, &who, "editor")?;
-        anyhow::ensure!(r.status == 200, "adding {who} as an editor: {r}");
+    let (owner_id, editor_id, viewer_id) = (api.identity(owner)?, api.identity(&editor)?, api.identity(&viewer)?);
+    for (who, role) in [(&editor_id, "editor"), (&agent_id, "editor"), (&viewer_id, "viewer")] {
+        let r = api.share(&name, who, role)?;
+        anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
     }
-    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"chat":{"read":"viewer","post":"viewer"}}}"#))]);
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"chat":{"read":"viewer","post":"viewer"},"desk":{"read":"editor","post":"editor"}}}"#))]);
     s.deploy(&c);
-    let asked = post(api, &agent, &name, "work", "card", json!({ "kind": "turn.prompt", "prompt": "p1", "text": "Delete it?", "asks": owner_id }))?;
-    let plain = post(api, &agent, &name, "work", "step", json!({ "kind": "turn.step", "text": "a step asks no one" }))?;
-    anyhow::ensure!(asked.status == 200 && plain.status == 200, "the agent's records: {asked} {plain}");
-    let (card, step) = (asked.body["record"]["seq"].as_i64().unwrap_or(0), plain.body["record"]["seq"].as_i64().unwrap_or(0));
-    let answer = |seq: i64| json!({ "kind": "prompt_response", "option": "yes", "answers": { "channel": "work", "seq": seq } });
+    let seq = |r: &Reply| r.body["record"]["seq"].as_i64().unwrap_or(0);
+    let mut asked = vec![];
+    for (channel, id, body) in [
+        ("work", "card", json!({ "kind": "turn.prompt", "prompt": "p1", "text": "Delete it?", "asks": owner_id })),
+        ("work", "step", json!({ "kind": "turn.step", "text": "a step asks no one" })),
+        ("desk", "ask-viewer", json!({ "text": "Viewer, may I?", "asks": viewer_id })),
+        ("desk", "ask-editor", json!({ "text": "Editor, may I?", "asks": editor_id })),
+    ] {
+        let r = post(api, &agent, &name, channel, id, body)?;
+        anyhow::ensure!(r.status == 200, "the agent's record {id}: {r}");
+        asked.push(seq(&r));
+    }
+    let [card, step, desk_viewer, desk_editor] = asked[..] else { unreachable!("four records") };
+    let answer = |channel: &str, seq: i64| json!({ "kind": "prompt_response", "option": "yes", "answers": { "channel": channel, "seq": seq } });
     let chat = || records(api, owner, &name, "chat").len();
+    let refused = |r: &Reply| r.status == 403 && r.code() == Some(ErrorCode::Forbidden) && r.message().contains("answered only by whom it asks");
+    let for_owner = |id: &str, body: Value| api.signed(&agent, "POST", &format!("/api/f/{name}/channels/chat?for={owner_id}"), Some(&json!({ "id": id, "body": body })));
 
-    let before = chat();
-    let editors = post(api, &editor, &name, "chat", "a1", answer(card))?;
-    let agents = post(api, &agent, &name, "chat", "a2", answer(card))?;
-    let for_owner = api.signed(&agent, "POST", &format!("/api/f/{name}/channels/chat?for={owner_id}"), Some(&json!({ "id": "a3", "body": answer(card) })))?;
+    let editors = post(api, &editor, &name, "chat", "a1", answer("work", card))?;
+    let agents = post(api, &agent, &name, "chat", "a2", answer("work", card))?;
+    let agents_for = for_owner("a3", answer("work", card))?;
     s.ok(
         "an answer from anyone the question does not ask is refused (403) and appends nothing: an editor, the asking agent as itself, and the agent acting for whom it asks",
-        [&editors, &agents, &for_owner].iter().all(|r| r.status == 403 && r.code() == Some(ErrorCode::Forbidden) && r.message().contains("answered only by whom it asks")) && chat() == before,
-        format!("{editors} {agents} {for_owner}"),
+        [&editors, &agents, &agents_for].iter().all(|r| refused(r)) && chat() == 0,
+        format!("{editors} {agents} {agents_for}"),
     );
-    let mine = post(api, owner, &name, "chat", "a4", answer(card))?;
-    let again = post(api, owner, &name, "chat", "a4", answer(card))?;
+    let mine = post(api, owner, &name, "chat", "a4", answer("work", card))?;
+    let again = post(api, owner, &name, "chat", "a4", answer("work", card))?;
     s.ok(
         "whom it asks answers it in their own post, and the same post again is that record, appended once",
-        mine.status == 200 && mine.body["record"]["principal"] == owner_id.as_str() && again.status == 200 && again.body["replayed"] == true && again.body["record"]["seq"] == mine.body["record"]["seq"] && chat() == before + 1,
+        mine.status == 200 && mine.body["record"]["principal"] == owner_id.as_str() && again.status == 200 && again.body["replayed"] == true && seq(&again) == seq(&mine) && chat() == 1,
         format!("{mine} {again}"),
     );
-    let no_one = post(api, owner, &name, "chat", "a5", answer(step))?;
-    let nothing = post(api, owner, &name, "chat", "a6", answer(card + 100))?;
-    let shape = post(api, owner, &name, "chat", "a7", json!({ "answers": { "channel": "work", "seq": card.to_string() } }))?;
+    let unread = post(api, &viewer, &name, "chat", "a5", answer("desk", desk_viewer))?;
+    let read = post(api, &editor, &name, "chat", "a6", answer("desk", desk_editor))?;
     s.ok(
-        "an answer to a record that asks no one, or to one not there, is refused (403); one naming a seq in another shape is 400; none appends",
-        no_one.status == 403 && nothing.status == 403 && shape.status == 400 && chat() == before + 1,
-        format!("{no_one} {nothing} {shape}"),
+        "a question on a channel its poster may not read is no question to them, though it asks them (403); one they may read, they answer",
+        refused(&unread) && read.status == 200 && chat() == 2,
+        format!("{unread} {read}"),
     );
-    let quiz = post(api, owner, &name, "chat", "a8", json!({ "answers": { "q1": "b", "q2": "c" } }))?;
-    s.ok("an `answers` naming no seq is the app's own field, and appends as any post", quiz.status == 200 && chat() == before + 2, &quiz);
+    let q = post(api, owner, &name, "chat", "ask-agent", json!({ "text": "Agent, are you done?", "asks": agent_id }))?;
+    let as_itself = post(api, &agent, &name, "chat", "a7", answer("chat", seq(&q)))?;
+    let for_someone = for_owner("a8", answer("chat", seq(&q)))?;
+    s.ok(
+        "a question asking the agent is answered by it as itself, never acting for its owner (that answer would be its owner's say)",
+        q.status == 200 && as_itself.status == 200 && refused(&for_someone) && chat() == 4,
+        format!("{q} {as_itself} {for_someone}"),
+    );
+    let no_one = post(api, owner, &name, "chat", "a9", answer("work", step))?;
+    let nothing = post(api, owner, &name, "chat", "a10", answer("work", card + 100))?;
+    let elsewhere = post(api, owner, &name, "chat", "a11", answer("nowhere", 1))?;
+    let shape = post(api, owner, &name, "chat", "a12", json!({ "answers": { "channel": "work", "seq": card.to_string() } }))?;
+    s.ok(
+        "an answer to a record that asks no one, to one not there or on no channel, is refused (403); one naming a seq in another shape is 400; none appends",
+        refused(&no_one) && refused(&nothing) && refused(&elsewhere) && shape.status == 400 && chat() == 4,
+        format!("{no_one} {nothing} {elsewhere} {shape}"),
+    );
+    let quiz = post(api, owner, &name, "chat", "a13", json!({ "answers": { "q1": "b", "q2": "c" } }))?;
+    s.ok("an `answers` naming no seq is the app's own field, and appends as any post", quiz.status == 200 && chat() == 5, &quiz);
+    // the owner's answer sent again once its card is no longer kept: a
+    // lower cap trims `work` at its next appends, and `chat` keeps all 5
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": 5 })))?;
+    anyhow::ensure!(r.status == 200, "lowering the cap: {r}");
+    for i in 0..5 {
+        let r = post(api, &agent, &name, "work", &format!("more-{i}"), json!({ "kind": "turn.step", "text": "more" }))?;
+        anyhow::ensure!(r.status == 200, "a step past the cap: {r}");
+    }
+    let kept = records(api, owner, &name, "work");
+    let replay = post(api, owner, &name, "chat", "a4", answer("work", card))?;
+    s.ok(
+        "an answer sent again after its question is no longer kept is still its record, replayed",
+        !kept.iter().any(|r| r["seq"] == card) && replay.status == 200 && replay.body["replayed"] == true && seq(&replay) == seq(&mine) && chat() == 5,
+        format!("{replay}; work keeps {:?}", kept.iter().map(|r| r["seq"].clone()).collect::<Vec<_>>()),
+    );
     Ok(())
 }
 

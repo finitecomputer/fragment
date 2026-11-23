@@ -869,16 +869,19 @@ A question is answered only by whom it asks (FIN-615,
 - **An answer** is a record whose body names the question's record in the
   same fragment: `"answers": {"channel": "work", "seq": 12}`, exactly
   those two fields. An `answers` naming no `seq` is the app's own field.
-- **Who answers.** The platform appends an answer only as the asked
-  identity's own post, written as itself (`author` `person` or `agent`).
-  Anyone else's is 403 and appends nothing: another person, an agent
-  acting for whom it asks (an agent never answers its own card), app code
-  (a mutation's effect or a job step that answers is refused), the
-  platform's own records and a door's. So is an answer to a record that
-  asks no one, or is not kept. A malformed `answers` is 400.
+- **Who answers.** An answer comes only as a post: the asked identity's
+  own, written as itself (`author` `person` or `agent`, acting for no
+  one). Anyone else's is 403 and appends nothing: another person, an
+  agent acting for whom it asks (an agent never answers its own card), an
+  agent answering for someone. App code answers nothing (a mutation's
+  effect or a job step that answers is refused), nor does a scheduled
+  record (403 at its add) or a door. So is an answer to a record that asks
+  no one, is not kept, or is on a channel its poster may not read: one
+  refusal for all three. A malformed `answers` is 400. The same post again
+  is the record it appended, whatever became of its question.
 
-A reader takes any record naming its question as the asked identity's
-answer, and checks no poster itself.
+A reader still attributes an answer by its `principal`, as any record: a
+record stored before this rule promises nothing.
 
 ### Listed records
 
