@@ -44,24 +44,34 @@ The pure rule and its tests are in `crates/core/src/public_error.rs`. The
 cell applies it at every edge where a refusal leaves for someone outside
 (`cell/src/error.rs`, `public_response` and `public_answer`):
 
-- `fetch`, `route`, and the platform's host (`route_inner`), including a
+- `fetch`, the one door every answer of the cell's leaves by, on every
+  host: it says any refusal still marked as an object's (below) as the
+  edges within do, an early return's among them;
+- `route`, and the platform's host (`route_inner`), including a
   Durable Object's refusal that a platform route passes on as it came;
 - a fragment's host (`serve`), including every refusal the fragment
   object itself answers a site request with (a storage failure reading
   its facts, say), not only a 401 or 403 (`serve::REFUSAL`);
 - a computer's host (`computer::serve_host`), including the computer
   object's own refusal on `/p/<port>/…` (its sessions' storage, its
-  port's runtime).
+  port's runtime);
+- a computer's egress (`ComputerEgress::handle`, its guest's own door,
+  which is not `fetch`): the computer object's refusal on
+  `/api/computer/keepalive` is said as at any edge, and no answer leaves
+  there with the mark.
 
 The edge tells the platform's refusal from an app's answer by a mark:
 every refusal one of the platform's objects answers carries
 `x-fragment-platform-refusal` (`error::PLATFORM_REFUSAL`, set by
 `CellError::response`). Only a marked JSON answer at a redacted code's
 status is read and redacted (`public_error::rereads`), and the mark is
-dropped from every answer the edge passes. A fragment app's answer, or a
-computer image's, is never marked, so it passes unread. An app that sent
-the mark itself would only have its own JSON refusal said as the fixed
-sentence.
+dropped from every answer that leaves the Worker. The mark cannot be
+forged: a foreign answer is stripped of it, in any case, where it enters
+the platform (`error::foreign`, `public_error::forged`): a fragment app's
+answer (`js.rs`, the facet's `fetch`), a computer image's on a port
+(`computer.rs`, `port`), and code.storage's passed to a guest. So an app
+cannot have its words logged as a platform failure under a request's
+reference, and no guest or browser ever reads the mark.
 
 Inside the platform, when one of its own objects answers the router, a
 refusal keeps its whole message. The router needs it to decide and to log.
@@ -92,6 +102,11 @@ what the asker sent or may already see.
     it is logged too, and the refusal says "Stripe refused the call
     (<status>)". Its timeout, an over-long answer and one that does not
     decode say so with no path or id ("Stripe did not answer").
+  - a model call that got no answer (`cell/src/models.rs`, `unanswered`):
+    the Workers AI binding's exception, or a fetch's failure, names the
+    runtime's internals, so it is logged and the refusal says only "the
+    model did not answer". A fragment's search, which embeds through
+    this, passes on only that.
   - The rest of the 502s that still quote a vendor's or the runtime's
     text are tracked in FIN-654.
 - `schema_refused` (500) names the fragment and why its stored data and
@@ -111,9 +126,10 @@ what the asker sent or may already see.
 - **A computer's egress** (its guest's calls out through the cell): a
   call to the platform's API or a model re-enters the cell's own router
   (`crate::route`), so a platform failure there is redacted as at any
-  edge before the guest reads it. Only a refusal the egress handler makes
-  itself (`ComputerEgress::handle`: signing, a route it has no answer
-  for) keeps its whole message, and only that computer's own agent reads
-  it.
+  edge before the guest reads it, and so is the computer object's refusal
+  on `/api/computer/keepalive`. A refusal the egress handler makes itself
+  (`ComputerEgress::handle`: signing, a route it has no answer for, an
+  internal call's failure it wraps) keeps its whole message, unmarked:
+  only that computer's guest (its owner's agent) reads it.
 - **404s** echo the path that was asked for (`no route /x`), which the
   asker already knows.

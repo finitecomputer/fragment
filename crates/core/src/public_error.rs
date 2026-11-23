@@ -41,6 +41,23 @@ pub fn rereads(marked: bool, status: u16, content_type: &str) -> bool {
     marked && content_type.starts_with("application/json") && REDACTED.iter().any(|c| c.status() == status)
 }
 
+/// Marks a refusal one of the platform's objects answered (the cell's
+/// `CellError::response`), so the edge rereads it (`rereads`). Never a
+/// foreign answer's: an app's, a computer image's or a vendor's is
+/// stripped of it where it enters the platform (`forged`), and every
+/// answer leaving the Worker is stripped of it (the cell's
+/// `error::public_answer`), so no one outside sends or reads it.
+pub const MARK: &str = "x-fragment-platform-refusal";
+
+/// The names among a foreign answer's headers that it is stripped of
+/// where it enters the platform (an app's facet, a computer's port, a
+/// vendor's answer passed through): `MARK`, in any case, so nothing from
+/// outside passes for the platform's own refusal, nor has its message
+/// logged as one under a request's reference.
+pub fn forged<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    names.into_iter().filter(|n| n.eq_ignore_ascii_case(MARK)).collect()
+}
+
 /// The codes `redacted` says words for.
 pub const REDACTED: [ErrorCode; 2] = [ErrorCode::HostFailed, ErrorCode::RegistryUnavailable];
 
@@ -167,6 +184,21 @@ mod tests {
         for code in REDACTED {
             assert!(redacted(code).is_some(), "{code:?}");
         }
+    }
+
+    /// Goal: an app (or a computer image, or a vendor) cannot pass its
+    /// answer off as the platform's refusal: the mark it sent, in any
+    /// case, is dropped where its answer enters, so the edge never rereads
+    /// it nor logs its words under a reference. Method: an app's headers
+    /// with the mark forged two ways among headers that stay.
+    #[test]
+    fn a_foreign_answer_cannot_forge_the_platforms_mark() {
+        let sent = ["content-type", "X-Fragment-Platform-Refusal", "x-fragment-refusal", "x-fragment-platform-refusal", "x-fragment-platform-refusals", "set-cookie"];
+        assert_eq!(forged(sent), ["X-Fragment-Platform-Refusal", "x-fragment-platform-refusal"]);
+        let kept: Vec<&str> = sent.into_iter().filter(|n| !forged([*n]).contains(n)).collect();
+        let marked = kept.iter().any(|n| n.eq_ignore_ascii_case(MARK));
+        assert!(!rereads(marked, 500, "application/json"), "a forged refusal is reread: {kept:?}");
+        assert!(forged(["content-type", ""]).is_empty());
     }
 
     /// Goal: a sign-in's page names only an OAuth error code, never words

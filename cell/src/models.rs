@@ -444,7 +444,7 @@ pub(crate) async fn run_form(env: &Env, model: &str, fields: &Value, payer: &str
         Some(_) => workers_ai(env, cfg, model, fields, &Metadata { user_id: opaque(payer), agent_id: None }).await?,
         None => {
             let fields = fields.as_object().ok_or_else(|| CellError::host("a form's fields are an object"))?;
-            js::ai_run_form(env.as_ref(), model, fields).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))?
+            js::ai_run_form(env.as_ref(), model, fields).await.map_err(|e| unanswered("run-form", &e.message))?
         }
     };
     let status = resp.status_code();
@@ -487,7 +487,7 @@ async fn keyed(key: &str, base_url: &str, path: &str, body: &str) -> CellResult<
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(h).with_body(Some(body.into()));
     let req = Request::new_with_init(&format!("{base_url}{path}"), &init)?;
-    Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
+    Fetch::Request(req).send().await.map_err(|e| unanswered("fetch", &e.to_string()))
 }
 
 /// Makes a bounded call: `input` to Workers AI's `model`, through the AI
@@ -514,13 +514,22 @@ async fn workers_ai(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(h).with_body(Some(input.to_string().into()));
         let req = Request::new_with_init(&format!("{url}/run/{model}"), &init)?;
-        return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")));
+        return Fetch::Request(req).send().await.map_err(|e| unanswered("fetch", &e.to_string()));
     }
     let Some(gateway) = &cfg.ai_gateway_id else {
         return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)"));
     };
     let options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
-    js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
+    js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| unanswered("run", &e.message))
+}
+
+/// A model call that got no answer: the binding's exception, or the
+/// fetch's failure, names the runtime's or the gateway's internals, so it
+/// goes to the logs alone (`error::vendor_said`, status 0: none came) and
+/// the refusal says only that (docs/security/error-responses.md).
+fn unanswered(call: &str, said: &str) -> CellError {
+    crate::error::vendor_said("models", call, 0, said);
+    CellError::new(ErrorCode::UpstreamFailed, "the model did not answer")
 }
 
 /// An answer's body, at most `ANSWER_MAX_BYTES` (read no further).

@@ -3,7 +3,7 @@
 
 use fragment_core::public_error;
 use fragment_proto::{ErrorBody, ErrorCode, Reason};
-use worker::{console_error, Request, Response, ResponseBody};
+use worker::{console_error, console_log, Headers, Request, Response, ResponseBody};
 
 #[derive(Debug)]
 pub struct CellError {
@@ -58,6 +58,13 @@ impl CellError {
         let mut resp = self.answered(self.message.clone())?;
         resp.headers_mut().set(PLATFORM_REFUSAL, "1")?;
         Ok(resp)
+    }
+
+    /// The refusal, its whole message kept and unmarked: a computer's
+    /// egress's own (`computer::ComputerEgress::handle`), which only that
+    /// computer's own agent reads (docs/security/error-responses.md).
+    pub fn unmarked_response(&self) -> worker::Result<Response> {
+        self.answered(self.message.clone())
     }
 
     /// The refusal as whoever asked from outside reads it: the platform's
@@ -120,6 +127,7 @@ const VENDOR_SAID_MAX_CHARS: usize = 300;
 /// nowhere else: a refusal's message names the vendor and its status,
 /// never its words (they may name its internals, an id, a path of ours),
 /// so they reach no one outside the platform (docs/security/error-responses.md).
+/// `status` 0: no answer came (a fetch's or a binding's failure).
 pub fn vendor_said(vendor: &str, call: &str, status: u16, said: &str) {
     let said: String = said.chars().take(VENDOR_SAID_MAX_CHARS).collect();
     console_error!("{}", serde_json::json!({ "vendor": vendor, "call": call, "status": status, "said": said }));
@@ -132,11 +140,39 @@ fn logged(code: ErrorCode, message: &str, reference: &str) {
 }
 
 /// Marks a refusal one of the platform's objects answered (`response`):
-/// the edge rereads only an answer with it (`public_answer`), never an
-/// app's or a computer image's, and drops it from every answer it passes.
-/// An app or image that sent it would only have its own JSON refusal of a
-/// redacted code said as a fixed sentence.
-pub const PLATFORM_REFUSAL: &str = "x-fragment-platform-refusal";
+/// the edge rereads only an answer with it (`public_answer`), and drops
+/// it from every answer it passes. A foreign answer (an app's, a computer
+/// image's, a vendor's passed through) is stripped of it where it enters
+/// (`foreign`), so it can never pass for the platform's
+/// (`public_error::MARK`).
+pub const PLATFORM_REFUSAL: &str = public_error::MARK;
+
+/// A foreign answer (an app's facet, a computer's port, a vendor's answer
+/// passed through) as it enters the platform, or any answer as it leaves
+/// for a computer's guest: without the platform's mark, which it may have
+/// sent to pass its words off as the platform's refusal
+/// (`public_error::forged`). Unchanged when it carries none (`has` is
+/// case-blind, as every header lookup is); else its headers copied whole
+/// but the mark (a fetched answer's are immutable), which keeps a socket's
+/// 101 and its WebSocket.
+pub fn foreign(resp: Response) -> worker::Result<Response> {
+    if !resp.headers().has(PLATFORM_REFUSAL)? {
+        return Ok(resp);
+    }
+    let names: Vec<String> = resp.headers().keys().collect();
+    let forged = public_error::forged(names.iter().map(String::as_str));
+    if forged.is_empty() {
+        return Ok(resp);
+    }
+    console_log!("{}", serde_json::json!({ "foreign": "dropped", "headers": forged }));
+    let h = Headers::new();
+    for (k, v) in resp.headers().entries() {
+        if !k.eq_ignore_ascii_case(PLATFORM_REFUSAL) {
+            h.append(&k, &v)?;
+        }
+    }
+    Ok(resp.with_headers(h))
+}
 
 /// The bytes an answer's refusal may hold for `public_answer` to read it
 /// (an `ErrorBody` is a code and a sentence); a longer body is no refusal

@@ -178,7 +178,11 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let reference = error::reference_of(&req)?;
     match route(req, &env, &ctx).await {
-        Ok(resp) => Ok(resp),
+        // The one door every answer of the cell's leaves by: a refusal
+        // still marked as an object's (`CellError::response`), on any host,
+        // an early return's among them, is said here as at the edges
+        // within, and the mark leaves no answer (`error::public_answer`).
+        Ok(resp) => error::public_answer(resp, &reference).await,
         Err(e) => e.public_response(&reference),
     }
 }

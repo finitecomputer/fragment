@@ -4184,7 +4184,8 @@ impl ComputerCell {
         let every = JsValue::from_f64(fragment_core::computer::TAB_USED_EVERY_MS as f64);
         let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner()), every]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
-        Ok(Response::from(resp))
+        // the image's answer is never the platform's refusal, whatever it sent
+        Ok(crate::error::foreign(Response::from(resp))?)
     }
 }
 
@@ -4433,7 +4434,10 @@ impl ComputerEgress {
                 console_log!("{}", json!({ "egress": route, "computer": computer, "method": method, "path": path, "status": r.status_code() }));
             }
         }
-        let resp = answered.or_else(|e| e.response().map_err(CellError::from)).unwrap_or_else(|_| Response::error("egress failed", 500).expect("a plain response"));
+        // the egress's own refusal keeps its message, for this computer's
+        // agent alone (docs/security/error-responses.md), never the
+        // platform's mark; nor does any answer it passes on (`error::foreign`)
+        let resp = answered.or_else(|e| e.unmarked_response().map_err(CellError::from)).and_then(|r| Ok(crate::error::foreign(r)?)).unwrap_or_else(|_| Response::error("egress failed", 500).expect("a plain response"));
         // only the relay route's own answer may tell the shim to pipe
         // (fragment_core::relay::HEADER): any other, a fragment's or an
         // app's passed through among them, is stripped of the family
@@ -4500,7 +4504,10 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             let mut init = RequestInit::new();
             init.with_method(Method::Get).with_headers(headers);
             let inner = Request::new_with_init("https://computer.internal/keepalive", &init)?;
-            return crate::routed::send(env, "COMPUTER", computer, inner).await;
+            // the computer object's refusal, said to its guest as the edge says one
+            let reference = crate::error::reference_of(&req)?;
+            let answered = crate::routed::send(env, "COMPUTER", computer, inner).await?;
+            return Ok(crate::error::public_answer(answered, &reference).await?);
         }
         _ => {}
     }
@@ -4646,7 +4653,8 @@ async fn egress_codestorage(mut req: Request, env: &Env) -> CellResult<Response>
     if !body.is_empty() {
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
-    Ok(Fetch::Request(Request::new_with_init(&target, &init)?).send().await?)
+    // code.storage's answer, passed to the guest as it came but the mark
+    Ok(crate::error::foreign(Fetch::Request(Request::new_with_init(&target, &init)?).send().await?)?)
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST
