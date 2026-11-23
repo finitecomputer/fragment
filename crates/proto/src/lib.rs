@@ -788,16 +788,13 @@ pub enum Reason {
     /// takes no secret and no door: it is made members only first (FIN-352;
     /// `Sharing::beyond`).
     UnshareFirst,
-    /// A shared key's calls are paused: its charges this last hour reached
-    /// the cap its person holds them to (FIN-448, `fragment_core::key_hour`).
-    KeyPaused,
     /// A trial is for a seat of one: while the org's subscription is a
     /// trial, it takes no further paid seat (offered, given or accepted).
     TrialSeatOfOne,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 29] = [
+    pub const ALL: [Reason; 28] = [
         Reason::TrialUnknown,
         Reason::TrialEnded,
         Reason::TrialUsed,
@@ -825,7 +822,6 @@ impl Reason {
         Reason::LastPaidSeat,
         Reason::PrivateWhileReaching,
         Reason::UnshareFirst,
-        Reason::KeyPaused,
         Reason::TrialSeatOfOne,
     ];
 
@@ -859,7 +855,6 @@ impl Reason {
             Reason::LastPaidSeat => "last_paid_seat",
             Reason::PrivateWhileReaching => "private_while_reaching",
             Reason::UnshareFirst => "unshare_first",
-            Reason::KeyPaused => "key_paused",
             Reason::TrialSeatOfOne => "trial_seat_of_one",
         }
     }
@@ -3033,7 +3028,6 @@ mod tests {
             (LastPaidSeat, "last_paid_seat"),
             (PrivateWhileReaching, "private_while_reaching"),
             (UnshareFirst, "unshare_first"),
-            (KeyPaused, "key_paused"),
             (TrialSeatOfOne, "trial_seat_of_one"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");

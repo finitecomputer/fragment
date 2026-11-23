@@ -71,6 +71,7 @@ mod members;
 mod meter;
 mod migrations;
 mod models;
+mod pipe;
 mod notices;
 mod ops;
 mod orgs;
@@ -745,7 +746,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         let ask: fragment_proto::ledger::QuoteAsk = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a quote is {{items}}, each {{key, units?, calls?}}, {{model, input?, cachedInput?, cacheWrite?, output?, calls?}} or {{usage, calls?}}: {e}")))?;
         fragment_core::ledger::quote::check(&ask.items).map_err(|f| CellError::invalid(f.to_string()))?;
         let ledger = ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?;
-        let (items, total_micros) = fragment_core::ledger::quote::quote(&ask.items, &cfg.book, &cfg.models, ledger.plan);
+        let (items, total_micros) = fragment_core::ledger::quote::quote(&ask.items, &cfg.book, &cfg.models, ledger.plan, &cfg.providers.counted());
         return json_answer(&fragment_proto::ledger::Quote { items, total_micros, left_micros: ledger.balance_micros.max(0), ledger });
     }
     let (Method::Post, [person, command]) = (req.method(), rest) else {

@@ -1572,7 +1572,7 @@ the wire shows of its rules:
 | `GET /api/ledger/uses` | a person (an agent: its owner's) | → `LedgerUses {month, uses: [{provider, agent, calls, micros}]}`: this UTC month's calls by their agents through a computer's swap that a provider answered (under 500), and their charge (an operator key's, as the swap priced it; others 0), by provider then agent. Thirteen months kept (docs/ledger.md, Usage) |
 | `GET /api/ledger/uses/{YYYY-MM}` | a person (an agent: its owner's) | → the same for that month; not a month 400 |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`; `null` is the default |
-| `POST /api/ledger/quote` | a person (an agent: its owner's) | `QuoteAsk {items}` → `Quote {items: [{pricedAs?, eachMicros?, calls, chargeMicros?, unknown?: no_price \| no_units \| invalid \| too_large}], totalMicros, leftMicros, ledger: LedgerStatus}`: what a planned job would be charged (docs/ledger.md, A quote), each item priced as its payer's ledger charges a row, with the answering release's book, in the order asked. An item is `{key, units?, calls?}` (an operator key or a part of its calls, `elevenlabs:speech`, `fal:image`, by the book's name; `units` each call's, required of a part that counts more than one a call), `{model, input?, cachedInput?, cacheWrite?, output?, calls?}` (a name the model route takes, or the book's id) or `{usage, calls?}` (a ledger row's `Usage`); `calls` 1 to `QUOTE_CALLS_MAX` (1,000,000), absent one; at most `QUOTE_ITEMS_MAX` (64) items, else 400. A name the book does not price is `unknown`, never guessed, and adds nothing to `totalMicros`; `leftMicros` is the balance, at least 0. No items reads the ledger alone. It reads and keeps nothing |
+| `POST /api/ledger/quote` | a person (an agent: its owner's) | `QuoteAsk {items}` → `Quote {items: [{pricedAs?, eachMicros?, calls, chargeMicros?, unknown?: no_price \| no_units \| invalid \| too_large}], totalMicros, leftMicros, ledger: LedgerStatus}`: what a planned job would be charged (docs/ledger.md, A quote), each item priced as its payer's ledger charges a row, with the answering release's book, in the order asked. An item is `{key, units?, calls?}` (a vendor's unit, `elevenlabs:character`, `xai:tick`, `perplexity:call`, by the book's name; `units` each call's, required of a unit its vendor's answer counts), `{model, input?, cachedInput?, cacheWrite?, output?, calls?}` (a name the model route takes, or the book's id) or `{usage, calls?}` (a ledger row's `Usage`); `calls` 1 to `QUOTE_CALLS_MAX` (1,000,000), absent one; at most `QUOTE_ITEMS_MAX` (64) items, else 400. A name the book does not price is `unknown`, never guessed, and adds nothing to `totalMicros`; `leftMicros` is the balance, at least 0. No items reads the ledger alone. It reads and keeps nothing |
 | `POST /api/ledger/{person}/grant` | operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit; `by` the signing operator |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat holder's next push wins (debt ledger) |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}` |
@@ -2192,7 +2192,6 @@ share of the disk").
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` → the view once the restart is under way, its start owed to its alarm: `phase` `starting` (`generation` the start it restarted until that start is made). Running, it answers after its save (done or failed) and its stop; asleep or `wont_wake`, at once; going to sleep, at once with `sleeping` (that sleep is the restart's, its start owed at its end). The start is fresh from the image and its newest good save; follow the view (`GET`) to `awake` with a newer `generation`, or `wont_wake`. `generation` names the start the owner saw: one already restarted is not restarted again (the view as it is). At zero credit 402, a guest 403 |
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view, that `went_back` notice told no more; a `life` past the newest, or 0, 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view, that update put off; not its next start's, or not 12 hex, 400 |
-| `POST /api/computers/{id}/key-caps/{provider}` | its owner (an agent 403) | `KeyCapAsk {from?, micros?}` → the view: `from`, the cap a `key_paused` notice showed, lifts it a step (`key_hour::next_lift`) while it is still that one; `micros` sets it, 1 to `key_hour::KEY_CAP_MAX` (else 400); neither, the default. A provider that is no shared key 404 |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: its next start's image; one the deployment lacks 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it, its own key the agent's identity, an editor of its own fragment. Again, nothing changes |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on. One gone or not on it: the view, unchanged |
@@ -2217,9 +2216,9 @@ than 4, or two agents' in one request), 403 `forbidden` (another host than
 its provider's, a tag naming no agent here, an agent narrowed from it, an
 operator key on a call its row denies or on a path that row can't read
 plainly: docs/computers.md, "Calls an operator key never goes on"), 403
-`not_connected`, the ledger's 402 or 403, or 429 `rate_limited` (reason
-`key_paused`, with `retry_after_ms`) for a shared key whose charges this
-last hour reached its owner's cap (docs/computers.md, `key_paused`).
+`not_connected`, or the ledger's 402 or 403. No shared key pauses: past
+$5 of its agents' calls on them in an hour, then each doubling, its owner's
+ledger tells them so (`spending`, docs/ledger.md, "Usage").
 
 ### An agent's routines (decision 38)
 

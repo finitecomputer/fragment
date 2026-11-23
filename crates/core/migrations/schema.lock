@@ -33,6 +33,7 @@ step Principal 3 memberships_dock 607987fd7686be8b
 step Principal 4 memberships_pinned e55965f09c24b2e1
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Ledger 2 uses b9ed112a7c91d546
+step Ledger 3 spend_slots 50a6b5e96c1ded82
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 step Computer 3 key_hour 6c22fff2c2414701
@@ -40,6 +41,8 @@ step Computer 4 key_caps 3a6f4f9976a3efe3
 step Computer 5 grants_forward_only 88b35e74ad3f41fe
 step Computer 6 grants_owed a3e6ebc05fade9e1
 step Computer 7 uses_owed 0c7771bd82064913
+step Computer 8 key_hour_gone ef34ecfeb9814b7f
+step Computer 9 key_calls d0b9981c9fb6d1b7
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
@@ -214,13 +217,13 @@ Ledger index entries_at: CREATE INDEX entries_at ON entries (at_ms)
 Ledger table head: CREATE TABLE head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL)
 Ledger table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Ledger table spend: CREATE TABLE spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment))
+Ledger table spend_slots: CREATE TABLE spend_slots (slot INTEGER PRIMARY KEY, micros INTEGER NOT NULL)
 Ledger table uses: CREATE TABLE uses (month INTEGER NOT NULL, agent TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, agent, provider))
 Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL)
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
-Computer table key_caps: CREATE TABLE key_caps (provider TEXT PRIMARY KEY, micros INTEGER NOT NULL)
-Computer table key_hour: CREATE TABLE key_hour (provider TEXT NOT NULL, slot INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (provider, slot))
+Computer table key_calls: CREATE TABLE key_calls (provider TEXT PRIMARY KEY, hour INTEGER NOT NULL, used INTEGER NOT NULL)
 Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL)
 Computer table own_signins: CREATE TABLE own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)

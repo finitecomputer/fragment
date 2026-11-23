@@ -215,7 +215,8 @@ computers) returns once this product works.
     deletes or sets a cap (`access::agent_shares`).
 37. **Agents can do anything they could do in Finite.** Services that act
     as you are connections (22); paid APIs that need only a key use the
-    operator's keys, priced per call (`price::DEFAULT_KEYS`); a person's
+    operator's keys, each call charged what its vendor said it cost
+    (`price::DEFAULT_CHARGES`, FIN-616); a person's
     own keys are sealed in their Vault and never metered.
 38. **Routines are fragment cron:** scheduled records on any fragment, an
     agent's on its own `tasks` (`fragment schedule add --routine`).

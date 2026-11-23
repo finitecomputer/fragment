@@ -307,6 +307,9 @@ impl FragmentCell {
             let _ = ws.close(Some(4004), Some("the fragment was deleted"));
         }
         crate::schema::remake(self.sql(), &fragment_core::migrate::FRAGMENT)?;
+        // its open request count, held in memory, ends with it (the stored
+        // one names its life, which no later life counts: meter.rs)
+        *self.meter_open.borrow_mut() = Some(None);
         assert!(self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
         assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it goes, is recorded beside it");
         Ok(Ended { owner })

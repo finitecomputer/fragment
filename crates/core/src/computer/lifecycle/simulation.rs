@@ -418,7 +418,6 @@ fn simulated_interleavings_keep_the_invariants() {
                         reached[10] += 1;
                     }
                     ComputerNotice::DiskFilling { room, .. } => assert!(*room < ROOM_CLEAR_MIN, "a disk told filling has no clear room (seed {seed0}): {n:?}"),
-                    ComputerNotice::KeyPaused { .. } => panic!("a lifecycle tells no key's pause (seed {seed0})"),
                 }
             }
             // its owner puts an update off, now and then

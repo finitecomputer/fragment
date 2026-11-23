@@ -770,7 +770,14 @@ impl FragmentCell {
                 self.flush_meters(true).await?;
                 self.meter_state()?
             }
-            Some("meter") => self.meter_state()?,
+            Some("meter") => {
+                // this life's open count read in, so a first ask after a
+                // reactivation shows it too
+                if let Some(life) = self.meta(MetaKey::CreatedAt)? {
+                    self.open_count(&life).await?;
+                }
+                self.meter_state()?
+            }
             Some("forget-standing") => {
                 // the isolate's whole gate: every person's answers, not only this owner's
                 crate::ledger::forget_gate();
