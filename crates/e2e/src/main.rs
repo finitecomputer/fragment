@@ -1726,6 +1726,9 @@ mod tests {
         assert_eq!(classes(Some(&["simplex-door"]), &[], None), (false, true));
         assert_eq!(classes(Some(&["computers", "simplex-door"]), &[], None), (true, true));
         assert_eq!(classes(Some(&["admin"]), &[], None), (true, false), "admin uses computers where the run makes them");
+        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer"), ("billing", "its wipes"), ("move", "its wipes"), ("governance", "its wipes")] {
+            assert_eq!(classes(Some(&[section]), &[], None), (true, false), "{section} uses computers: {uses}");
+        }
         assert_eq!(classes(Some(&["auth", "create", "keys"]), &[], None), (false, false));
         assert_eq!(classes(Some(&["chat"]), &[], None), (true, false), "this machine's Docker");
     }
