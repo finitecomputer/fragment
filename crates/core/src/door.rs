@@ -182,6 +182,20 @@ pub fn relayed(body: &Value) -> Option<Result<Relayed, &'static str>> {
     Some(read())
 }
 
+/// Whether a relayed record may be appended to a fragment `fragment_owner`
+/// owns, posted by an agent whose owner is `agent_owner` (each as the
+/// platform holds it: an npub, or 64 hex): only into its agent's owner's
+/// own fragment. A door signs the fragment's name, not its life, and a
+/// name is free the moment its fragment is deleted; anyone may make one by
+/// that full name, public, taking posts from anyone, and it would take
+/// their words (security candidate 10: a SimpleX mirror chat deleted and
+/// made again by a stranger). Every door relays only into its owner's
+/// own: a SimpleX door into the chat its agent made for them, a hosted
+/// door into its own channels (`Hosted`, its binding its owner's).
+pub fn lands_in_owners(fragment_owner: &str, agent_owner: &str) -> bool {
+    !agent_owner.is_empty() && crate::npub::display(fragment_owner) == crate::npub::display(agent_owner)
+}
+
 /// What a door signs a relayed record by: the fragment, channel and post
 /// id it is posted under, and its body as canonical JSON (`canonical`)
 /// less `relayed.sig`.
@@ -234,6 +248,29 @@ mod tests {
 
     pub(crate) fn ticket() -> Ticket {
         Ticket { door: SIMPLEX.into(), act: Act::Link, agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: "0f".repeat(16), exp: 1_790_000_600_000, sig: String::new() }
+    }
+
+    /// Goal (security candidate 10): a relayed record lands only in a
+    /// fragment its agent's owner owns. Valid: theirs, however each side
+    /// holds the owner (npub or hex). Invalid: a stranger's (a name its
+    /// owner deleted, made again by someone else), by either form; no
+    /// owner at all.
+    #[test]
+    fn a_relayed_record_lands_only_in_its_owners_fragment() {
+        let owner = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let owner_npub = crate::npub::display(owner);
+        assert!(owner_npub.starts_with("npub1"));
+        for (fragment, agent) in [(owner, owner_npub.as_str()), (owner_npub.as_str(), owner), (owner_npub.as_str(), owner_npub.as_str()), (owner, owner)] {
+            assert!(lands_in_owners(fragment, agent), "its owner's own: {fragment} {agent}");
+        }
+        let stranger = "cd".repeat(32);
+        let stranger_npub = crate::npub::display(&stranger);
+        for fragment in [stranger.as_str(), stranger_npub.as_str()] {
+            assert!(!lands_in_owners(fragment, &owner_npub), "a stranger's fragment by its name: {fragment}");
+            assert!(!lands_in_owners(fragment, owner), "{fragment}");
+        }
+        assert!(!lands_in_owners("", ""), "no owner is no one's");
+        assert!(!lands_in_owners(owner, ""), "an agent with no owner relays no one");
     }
 
     /// The relayed record of images/bridge/src/simplex/door.rs's vector.

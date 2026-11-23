@@ -26,7 +26,9 @@
 //! - a connection's account host (`account_host`): where each account
 //!   lives at a host of its own under the provider's (a Salesforce org at
 //!   its My Domain), the suffix those hosts are under and the Pipes
-//!   metadata field naming each account's, to which alone its token goes.
+//!   metadata field naming each account's, to which alone its token goes;
+//! - an operator key's denied calls (`deny`): the account-wide calls its
+//!   vendor can't scope away, which every agent shares the key for.
 //!
 //! Adding a provider is a catalog row (and, for a connection, the provider
 //! enabled in the WorkOS environment): nothing in code names one.
@@ -65,6 +67,10 @@ pub const SCOPE_NAMES_MAX: usize = 64;
 /// The most accounts a person connects at one provider: Pipes' own limit
 /// (it answers 409 `connected_account_limit_reached` past it).
 pub const ACCOUNTS_MAX: u8 = 25;
+/// The most calls one operator row denies.
+pub const DENY_MAX: usize = 32;
+/// A denied call as a row names it, at most.
+pub const DENY_ENTRY_MAX_BYTES: usize = 256;
 
 /// What a provider's credential is (decisions 22 and 37): a `connection`
 /// (WorkOS Pipes, a short-lived token acting as the person), an `operator`
@@ -141,6 +147,85 @@ impl Placement {
             Placement::Basic { half: Half::User } => "basic auth's user".into(),
             Placement::Basic { half: Half::Password } => "basic auth's password".into(),
         }
+    }
+}
+
+/// A call an operator key never goes on (`deny`): one that reaches the
+/// whole account its vendor gave the key for (every agent's history, a
+/// key minted from it), which every agent shares. On the wire `"GET
+/// /v1/history"`: a method or `*`, then a path in which a `*` segment is
+/// any one segment and a last `**` the rest, none or more. Without `**`
+/// the path is the whole path: `GET /v2/agent` denies the list and not
+/// `/v2/agent/{id}`. Matched case aside (`matches`); a GET entry covers
+/// HEAD, which a server answers as GET.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Deny {
+    /// `None` is any method.
+    method: Option<String>,
+    /// Each a literal segment, or `*`.
+    segments: Vec<String>,
+    /// A last `**`.
+    rest: bool,
+}
+
+/// The methods a denied call names, or `*`.
+const DENY_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// A literal segment of a denied call's path: a path's plain characters,
+/// never `.` or `..` (nothing a swap's reading of a path would let by:
+/// `swap::plain_segments`).
+fn deny_segment_ok(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~:@!$&'()+,=".contains(&b))
+}
+
+impl TryFrom<String> for Deny {
+    type Error = String;
+    fn try_from(text: String) -> Result<Deny, String> {
+        let bad = || format!("{text:?} is not a call to deny: METHOD /path (a method or *; a * segment is any one, a last ** the rest), at most {DENY_ENTRY_MAX_BYTES} bytes");
+        let (method, path) = text.split_once(' ').ok_or_else(bad)?;
+        let path = path.strip_prefix('/').filter(|_| text.len() <= DENY_ENTRY_MAX_BYTES).ok_or_else(bad)?;
+        let method = match method {
+            "*" => None,
+            m if DENY_METHODS.contains(&m) => Some(m.to_string()),
+            _ => return Err(bad()),
+        };
+        let mut segments: Vec<String> = path.split('/').filter(|_| !path.is_empty()).map(str::to_string).collect();
+        let rest = segments.last().is_some_and(|s| s == "**");
+        if rest {
+            segments.pop();
+        }
+        if !segments.iter().all(|s| s == "*" || deny_segment_ok(s)) {
+            return Err(bad());
+        }
+        Ok(Deny { method, segments, rest })
+    }
+}
+
+impl From<Deny> for String {
+    fn from(d: Deny) -> String {
+        d.to_string()
+    }
+}
+
+impl std::fmt::Display for Deny {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let rest = self.rest.then_some("**");
+        let path: Vec<&str> = self.segments.iter().map(String::as_str).chain(rest).collect();
+        write!(f, "{} /{}", self.method.as_deref().unwrap_or("*"), path.join("/"))
+    }
+}
+
+impl Deny {
+    /// Whether a call of `method` on a path read as `segments` (each
+    /// decoded, none empty: `swap::plain_segments`) is this one. A literal
+    /// segment is also itself and a `.` suffix (`history.json`), as some
+    /// servers route a format suffix to the path without it.
+    pub fn matches(&self, method: &str, segments: &[Vec<u8>]) -> bool {
+        let method_is = |m: &str| m.eq_ignore_ascii_case(method) || (m == "GET" && method.eq_ignore_ascii_case("HEAD"));
+        let length = if self.rest { segments.len() >= self.segments.len() } else { segments.len() == self.segments.len() };
+        let segment_is = |p: &String, s: &Vec<u8>| p == "*" || (s.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes())) && s.get(p.len()).is_none_or(|b| *b == b'.'));
+        self.method.as_deref().is_none_or(method_is) && length && self.segments.iter().zip(segments).all(|(p, s)| segment_is(p, s))
     }
 }
 
@@ -401,6 +486,12 @@ pub struct Provider {
     /// connection is added with no change to the shell (FIN-509).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub scope_names: std::collections::BTreeMap<String, String>,
+    /// An operator key's denied calls (`Deny`), at most `DENY_MAX`: the
+    /// swap refuses them before any provider is reached
+    /// (`swap::SwapError::Denied`). Empty denies nothing. Not an allowlist:
+    /// every other call the vendor offers goes as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<Deny>,
 }
 
 impl Provider {
@@ -483,6 +574,8 @@ pub enum CatalogError {
     /// A title or a scope's name that is blank, too long or more than one
     /// line, or scope names on a row that is no connection.
     Names { provider: String, why: String },
+    /// `deny` on a row that is no operator key, or more than `DENY_MAX`.
+    Deny { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -505,6 +598,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::AccountHost { provider, why } => write!(f, "{provider}'s account_host: {why}"),
             CatalogError::ClientAuth { provider, why } => write!(f, "{provider}'s client_auth: {why}"),
             CatalogError::Names { provider, why } => write!(f, "{provider}'s names: {why}"),
+            CatalogError::Deny { provider, why } => write!(f, "{provider}'s deny: {why}"),
         }
     }
 }
@@ -825,6 +919,12 @@ impl Catalog {
             if p.client_auth != ClientAuth::Post && (p.kind != Kind::Connection || p.connection_oauth.is_none()) {
                 return Err(CatalogError::ClientAuth { provider, why: "only a connection with connection_oauth has an OAuth client to authenticate".into() });
             }
+            if !p.deny.is_empty() && p.kind != Kind::Operator {
+                return Err(CatalogError::Deny { provider, why: format!("a {} is its person's own: only an operator key, which every agent shares, denies calls", p.kind.name()) });
+            }
+            if p.deny.len() > DENY_MAX {
+                return Err(CatalogError::Deny { provider, why: format!("at most {DENY_MAX} calls, not {}", p.deny.len()) });
+            }
             if let Some(a) = &p.account_host {
                 if p.kind != Kind::Connection {
                     return Err(CatalogError::AccountHost { provider, why: format!("a {} has no accounts: only a connection does", p.kind.name()) });
@@ -1114,6 +1214,64 @@ mod tests {
         let mut key = router();
         key["scope_names"] = json!({ "repo": "Repositories" });
         assert_eq!(parse(json!([key])).unwrap_err().to_string(), "openrouter's names: a own has no scopes to name: only a connection does");
+    }
+
+    /// Valid: an operator key's denied calls, read back as written, and a
+    /// row without them written as before. Invalid: a malformed call, one
+    /// on a row that is no operator key, and more than `DENY_MAX`.
+    #[test]
+    fn an_operator_key_names_the_calls_it_denies() {
+        let key = |deny: serde_json::Value| parse(json!([{ "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["PERPLEXITY_API_KEY"], "deny": deny }]));
+        let calls = ["* /generate_auth_token", "GET /v1/files", "* /*/team/**", "GET /api/*/browsers", "* /**", "GET /", "DELETE /v1/places:batch/x.json"];
+        let c = key(json!(calls)).unwrap();
+        let row = c.get("perplexity").unwrap();
+        assert_eq!(row.deny.iter().map(Deny::to_string).collect::<Vec<_>>(), calls, "each as written");
+        assert_eq!(serde_json::to_value(row).unwrap()["deny"], json!(calls), "and so in FRAGMENT_PROVIDERS");
+        assert!(serde_json::to_value(parse(json!([google()])).unwrap().get("google").unwrap()).unwrap().get("deny").is_none(), "none, not written");
+        assert!(key(json!([])).unwrap().get("perplexity").unwrap().deny.is_empty());
+        for bad in ["GET", "/v1/files", "get /v1/files", "FETCH /v1/files", "GET v1/files", "GET  /v1/files", "GET /v1/files/", "GET /v1//files", "GET /v1/**/x", "GET /v1/f*", "GET /v1/./x", "GET /v1/../x", "GET /v1/%2F", "GET /v1/a;b", "GET /v1/a b", "* /***"] {
+            assert!(matches!(key(json!([bad])), Err(CatalogError::Shape(_))), "{bad}");
+        }
+        assert!(matches!(key(json!([format!("GET /{}", "a".repeat(DENY_ENTRY_MAX_BYTES))])), Err(CatalogError::Shape(_))));
+        assert!(key(json!(vec!["GET /a"; DENY_MAX])).is_ok());
+        let over = key(json!(vec!["GET /a"; DENY_MAX + 1]));
+        assert!(matches!(&over, Err(CatalogError::Deny { .. })) && over.unwrap_err().to_string() == "perplexity's deny: at most 32 calls, not 33");
+        let mut g = google();
+        g["deny"] = json!(["GET /gmail/v1/users"]);
+        assert!(matches!(parse(json!([g])), Err(CatalogError::Deny { .. })), "a connection is its person's own");
+        let mut own = router();
+        own["deny"] = json!(["GET /api/v1/keys"]);
+        assert!(matches!(parse(json!([own])), Err(CatalogError::Deny { .. })), "and an own key");
+    }
+
+    /// A denied call matches its method (a GET also HEAD) and its path
+    /// case aside, a `*` segment any one, a last `**` the rest or none, a
+    /// literal also with a `.` suffix; nothing else.
+    #[test]
+    fn a_denied_call_matches_its_method_and_path() {
+        let deny = |text: &str| Deny::try_from(text.to_string()).unwrap();
+        let path = |p: &str| p.split('/').filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec()).collect::<Vec<_>>();
+        let cases = [
+            ("GET /v1/history", "GET", "/v1/history", true),
+            ("GET /v1/history", "head", "/V1/HISTORY", true),
+            ("GET /v1/history", "GET", "/v1/history.json", true),
+            ("GET /v1/history", "POST", "/v1/history", false),
+            ("GET /v1/history", "GET", "/v1/history/abc", false),
+            ("GET /v1/history", "GET", "/v1/historyx", false),
+            ("GET /v1/history", "GET", "/v1", false),
+            ("* /*/team/**", "DELETE", "/v2/team", true),
+            ("* /*/team/**", "GET", "/v1/team/activity/x", true),
+            ("* /*/team/**", "GET", "/team", false),
+            ("GET /api/*/browsers", "GET", "/api/v3/browsers", true),
+            ("GET /api/*/browsers", "GET", "/api/v3/browsers/abc", false),
+            ("HEAD /x", "GET", "/x", false),
+            ("* /**", "PATCH", "/", true),
+            ("GET /", "GET", "/", true),
+            ("GET /", "GET", "/a", false),
+        ];
+        for (entry, method, p, denied) in cases {
+            assert_eq!(deny(entry).matches(method, &path(p)), denied, "{entry} on {method} {p}");
+        }
     }
 
     fn org() -> serde_json::Value {

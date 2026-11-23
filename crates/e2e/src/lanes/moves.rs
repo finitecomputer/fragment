@@ -488,6 +488,16 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let carol = crate::Keys::generate();
     let c_id = s.workos.user(&Api::email_of(&carol)).id;
     mover.push(&roster("s6", vec![person(&alice_id, &[&a1, &a2, &w1]), person(&dave_id, &[&d1, &d2]), person(&c_id, &[&c1])]))?;
+    // dave is wiped before the cutoff, his move still bound to him (a wipe
+    // is an operator key's that no person holds)
+    let wiped = match s.runs("move", &[Need::Operator]) {
+        true => {
+            let dave = moved(&d1)?["person"].as_str().context("dave's move names him")?.to_string();
+            let wiper = s.wiper.clone().context("Need::Operator lends an operator key")?;
+            Some(super::billing::wipe_until_done(api, &wiper, &dave)?.0)
+        }
+        false => None,
+    };
     let cutoff = crate::MIGRATIONS_CUTOFF_MS;
     let now = lever(json!({ "op": "clock", "offsetMs": offset.get() }))?["now"].as_i64().context("the object's now")?;
     later_by(cutoff - now + 1)?;
@@ -498,7 +508,15 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2."))) && c["secrets"].is_null()) && !f_cut && state(&w1) == "withdrawn",
         format!("{p2:?} {f_cut} {}", state(&w1)),
     );
+    // each archive carries its owner's SimpleX chat
+    mover.simplex(true);
     mover.run_once()?;
+    mover.simplex(false);
+    s.ok(
+        "an archive that carries a SimpleX chat lands for someone wiped since the move bound them: they hold no seat to keep on, so its complete goes on",
+        wiped.as_ref().is_none_or(|w| w.status == 200 && w.body["state"] == "wiped") && moved(&d1)?["staged_ms"].is_i64() && objects(&format!("p2/{d1}/")).len() == 2,
+        format!("{} {} {:?}", wiped.as_ref().map(|w| w.to_string()).unwrap_or_default(), moved(&d1)?, objects(&format!("p2/{d1}/"))),
+    );
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
     s.ok("staged, then retired as archived: archived", retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "archived" && c.get("stage").is_none()) && state(&c1) == "archived" && state(&a2) == "archived", format!("{retire:?}"));
@@ -714,8 +732,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
+    super::computers::members_only(api, &owner, &agent_name)?;
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200 && !identity.is_empty(), "the agent assigned: {r}");
@@ -735,6 +752,8 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
     anyhow::ensure!(visit.status == 200 && visit.body["bound"] == 1, "its owner opens the move, and is bound: {visit}");
+    let seat = || api.signed(&owner, "GET", "/api/seat", None).map(|r| r.body["seat"].clone()).unwrap_or(Value::Null);
+    let comped = seat();
     let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": identity })))?;
     anyhow::ensure!(yes.status == 200, "Yes: {yes}");
     let tag = crate::Keys::generate().pubkey_hex()[..16].to_string();
@@ -781,7 +800,16 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let replay = mover.hand_off(&old, &cmd.id, all.clone())?;
     let after = vault()?;
     s.ok("the same hand-off again answers the same and changes nothing", replay.status == 200 && replay.body == again.body && after == v, format!("{} {}", replay.status, replay.body));
+    // its stage carries its owner's SimpleX chat
+    mover.simplex(true);
     mover.run_once()?;
+    mover.simplex(false);
+    let on = s.eventually(crate::lanes::billing::PUSHED, || seat()["kind"] == "seat_always_on");
+    s.ok(
+        "its stage carries its SimpleX chat: its owner's comped `seat`, which sleeps, is made always-on as it completes, which SimpleX needs",
+        comped["kind"] == "seat" && comped["comped"] == true && on && seat()["comped"] == true,
+        json!([comped, seat()]),
+    );
     let late = mover.hand_off(&old, &cmd.id, all)?;
     s.ok("once its stage is staged, its command is done: a hand-off is stale (409)", late.status == 409, format!("{} {}", late.status, late.body));
     let logged = super::vault::logs(s);
@@ -1418,11 +1446,20 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "the agent edits it: {r}");
     let brought = run(s, &["home", "files", &source, "--layout", &layout, "--into", &name, "--json"])?;
     let file = |p: &str| api.signed(&owner, "GET", &format!("/api/f/{name}/file?path={}", crate::api::url_enc(p)), None);
-    let video = file("files/videos/trip.mp4")?;
+    // every file it says it brought reads back whole where it went
+    let (mut whole, mut bad) = (vec![], vec![]);
+    for (path, want) in &files {
+        let Some(rel) = path.strip_prefix("workspace/") else { continue };
+        match file(&format!("files/{rel}"))? {
+            r if r.status == 200 && r.bytes == *want => whole.push(rel),
+            r if r.status == 404 => {}
+            r => bad.push(format!("{rel}: {} ({} bytes)", r.status, r.bytes.len())),
+        }
+    }
     s.ok(
-        "its files come from the stage into a fragment of files, the video larger than the computer's room among them, whole",
-        brought["files"].as_u64().is_some_and(|n| n >= 3) && video.status == 200 && video.bytes == extra[0].1 && file("files/datasets/readings.csv")?.bytes == extra[2].1,
-        json!({ "brought": brought, "video": video.status }),
+        "its files come from the stage into a fragment of files, each it says it brought read back whole, the video larger than the computer's room among them",
+        brought["files"].as_u64() == Some(whole.len() as u64) && whole.len() >= 3 && bad.is_empty() && whole.contains(&"videos/trip.mp4"),
+        json!({ "brought": brought, "whole": whole, "bad": bad }),
     );
     let kept = disk_used(&home);
     s.ok("what the import keeps on the computer is within its room: the stage never came onto it", kept <= BIG_ROOM, format!("{kept} bytes"));

@@ -23,10 +23,9 @@
   <link rel="manifest" href="/__shell/manifest.webmanifest">
   <link rel="icon" href="/__shell/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/__shell/apple-touch-icon.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <!-- Funnel Sans is the release's own (platform-pages.css, with the
-       onboarding design's tokens and card); JetBrains Mono, Google's -->
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <!-- its type, the release's own (fonts.css: Funnel Sans and JetBrains
+       Mono); platform-pages.css has the onboarding design's tokens and card -->
+  <link rel="stylesheet" href="/__shell/fonts.css">
   <link rel="stylesheet" href="/__shell/platform-pages.css">
   <link rel="stylesheet" href="/__shell/shell.css">
 </head>
@@ -101,6 +100,8 @@
       <section class="page" id="brains-page" hidden></section>
       <section class="page" id="history-page" hidden></section>
       <section class="page" id="schedules-page" hidden></section>
+      <!-- what their agents know, and the optional skills they switch on (skills-page.js) -->
+      <section class="page" id="skills-page" hidden></section>
       <!-- a person's old finite.computer agents, and their moves (move-page.js) -->
       <section class="page" id="move-page" hidden></section>
     </main>

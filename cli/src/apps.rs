@@ -47,8 +47,8 @@ pub fn default_title(name: &str) -> String {
     title.chars().take(fragment_proto::limits::TITLE_MAX_CHARS).collect()
 }
 
-/// Change just the title, retaining the manifest's operations, metadata
-/// and unknown fields. The platform's manifest is main's, not live's.
+/// A local `fragment.json`'s title (a template's default, `fragment init`),
+/// retaining its operations, metadata and unknown fields.
 pub fn set_title(manifest: &mut Value, title: &str) -> Result<()> {
     ensure!(manifest.is_object(), "fragment.json is not an object");
     if manifest["meta"].is_null() { manifest["meta"] = json!({}); }
@@ -57,20 +57,13 @@ pub fn set_title(manifest: &mut Value, title: &str) -> Result<()> {
     Ok(())
 }
 
+/// A fragment's new name: its face's title, set at once, with no commit
+/// and no deploy (docs/api.md, "An agent's name and picture").
 pub fn rename(c: &Client, name: &str, title: &str) -> Result<Value> {
     let title = checked_title(title)?;
     let name = c.fragment(name)?;
-    let path = format!("/api/f/{name}");
-    let mut manifest: Value = c.call_as(c.get(&format!("{path}/manifest"))?)?;
-    set_title(&mut manifest, &title)?;
-    let files = json!([{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }]);
-    // A new request is a new operation, even when returning to an earlier
-    // title. The HTTP client's retries retain this same body and key.
-    let key = format!("rename-{:032x}", rand::random::<u128>());
-    c.call(c.post_json(&format!("{path}/files"), &json!({ "files": files, "message": "rename", "key": key }))?)?;
-    let crate::Deployed::Live { live_tip, .. } = crate::deploy(c, &name, None, None)? else { unreachable!("no folder is synced") };
-    crate::refused_live(c, &name, &live_tip)?;
-    Ok(json!({ "name": name, "title": title, "live": live_tip }))
+    let face: fragment_proto::FaceChange = c.call_as(c.put_json(&format!("/api/f/{name}/face"), &fragment_proto::FaceChange { title: Some(title), ..Default::default() })?)?;
+    Ok(json!({ "name": name, "title": face.title }))
 }
 
 #[derive(Deserialize)]

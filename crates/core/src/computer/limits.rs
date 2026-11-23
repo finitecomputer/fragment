@@ -1,16 +1,13 @@
 //! The bounds a computer's lifecycle keeps: its holds, deadlines, pauses and
 //! counts, each checked against the others as it builds.
 
-/// With nothing open, how long a record or a closed socket holds a
-/// computer awake (decision 39).
+/// With nothing open, how long a wake or a closed socket holds a computer
+/// awake (decision 39): the one number (Paul, 2026-11-18).
 pub const IDLE_MS: i64 = 20 * 60_000;
-/// How long a pre-wake holds one that nothing else holds (decision 39:
-/// "it stops again after 60 s if nothing arrives").
-pub const PREWAKE_MS: i64 = 60_000;
 /// Starts that fail in a row before the computer stops trying.
 pub const STARTS_FAILED_MAX: u32 = 3;
 /// How long a computer that won't wake waits before a wake that is not its
-/// owner's (a record, a page's presence, a join, a port tab) tries one
+/// owner's (a record, typing begun, a join, a port tab) tries one
 /// start again: "won't wake" is never for good, since what failed may have
 /// passed (a storage error, a disk a release made room on), yet a computer
 /// that still fails costs at most one start this often, and only while
@@ -55,6 +52,13 @@ pub const RETRY_PAUSE_MS: i64 = 5_000;
 /// After the guest's last keepalive closes, a save is asked for this much
 /// later, unless one opens first: turns back to back save once.
 pub const SAVE_SETTLE_MS: i64 = 30_000;
+/// A port tab's use (a message from its page) is told to the lifecycle at
+/// most this often, the first at once and the rest at the window's end or
+/// its tab's close (cell/entry.mjs, `#used`: one lifecycle write a minute
+/// for a person at work, not one a keystroke). So a use the lifecycle has
+/// not heard yet is never more than this after the last it heard, while
+/// that tab stays open (`Lifecycle`'s `tab_used_ms`).
+pub const TAB_USED_EVERY_MS: i64 = 60_000;
 /// While a keepalive stays open, it is saved this often (Cloudflare's
 /// auto-save guide: a sandbox that never goes idle is saved on a timer).
 pub const SAVE_EVERY_MS: i64 = 15 * 60_000;
@@ -90,6 +94,15 @@ pub const SAVE_DEADLINE_MS: i64 = 13 * 60_000;
 /// every 15 minutes, and its three newest would otherwise all be its own,
 /// none a start ever came up from.
 pub const SAVES_KEPT: usize = 3;
+/// How long a save an operator set aside (`Saves::choose`) is kept past
+/// the `SAVES_KEPT` rotation, from when it was set aside: time for its owner
+/// to export it, or an operator to choose it again, once its computer starts
+/// from an older one. Let go of at the first save or choice after it.
+pub const SET_ASIDE_KEPT_MS: i64 = 30 * 24 * 60 * 60_000;
+/// Saves set aside kept at most: two operators' choices' worth (each sets
+/// aside at most `SAVES_KEPT`, the saves newer than the one chosen). Past
+/// it, the oldest set aside are let go of.
+pub const SET_ASIDE_MAX: usize = 2 * SAVES_KEPT;
 /// Starts owed one after another at most (`Lifecycle::gone`, each due at
 /// once): the one after its container went, one past a snapshot that
 /// would not start, and one past each kept save that would not restore
@@ -112,13 +125,14 @@ pub const ALIVE_MS: i64 = 45_000;
 /// the next event closes the rest.
 pub const KEEPALIVES_LOST_MAX: u32 = 16;
 
-const _: () = assert!(PREWAKE_MS < IDLE_MS, "a pre-wake holds less than a record");
 const _: () = assert!(RETRY_PAUSE_MS << STARTS_FAILED_MAX < START_DEADLINE_MS, "retries stay within a start's deadline");
 const _: () = assert!(SAVE_SETTLE_MS < IDLE_MS, "work that ended is saved before an idle sleep would save it");
+const _: () = assert!(TAB_USED_EVERY_MS < IDLE_MS && TAB_USED_EVERY_MS < SAVE_EVERY_MS, "a tab in use is heard well within its hold and its saves");
 const _: () = assert!(SAVE_RETRY_MS < SAVE_EVERY_MS && SAVE_EVERY_MS < UNSAVED_MAX_MS_DEFAULT, "a failed save is tried again within its bound");
 const _: () = assert!(HOLD_WAIT_MS < HOLD_DEADLINE_MS, "a hold's wait fits its deadline");
 const _: () = assert!(STOP_LOOK_MS < SLEEP_DEADLINE_MS, "a stop is looked at before its deadline");
 const _: () = assert!(SAVES_KEPT >= 2, "a save to fall back to");
+const _: () = assert!(SET_ASIDE_MAX >= SAVES_KEPT, "a choice's newer saves are all set aside");
 const _: () = assert!(UNSAVED_NOTICE_FAILURES >= 1, "told after a failure, never before");
 const _: () = assert!(ALIVE_MS < START_DEADLINE_MS, "a start's wait for its guest fits its deadline");
 const _: () = assert!(WONT_WAKE_RETRY_MS > START_DEADLINE_MS, "a computer that won't wake tries one start at a time");

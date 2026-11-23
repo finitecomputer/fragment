@@ -183,7 +183,7 @@ mod tests {
             (T - 30_000, ours(json!({ "computer": "computer:a", "phase": { "phase": "awake" } }))),
             (T - 3_600_000, ours(json!({ "computer": "computer:b", "phase": { "phase": "awake" } }))),
             (T - 1_000, ours(json!({ "computer": "computer:c", "phase": { "phase": "failed" } }))),
-            (T - 1_000, ours(json!({ "computer": "computer:d", "disk": { "total": 20, "free": 1_000_000_000_u64 } }))),
+            (T - 1_000, ours(json!({ "computer": "computer:d", "disk": { "total": 20, "free": 1_000_000_000_u64, "room": 1_000_000_000_u64 } }))),
             (T - 1_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f1" }))),
             (T - 2_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f1" }))),
             (T - 3_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f2" }))),

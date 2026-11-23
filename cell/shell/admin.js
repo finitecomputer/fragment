@@ -8,7 +8,7 @@
 // and sees only that. Every value reaches the page as text, never as
 // markup.
 
-import { troubleWhat } from "./admin-glance.js";
+import { ago, troubleWhat } from "./admin-glance.js";
 
 const $ = (id) => document.getElementById(id);
 const status = $("status");
@@ -207,8 +207,9 @@ async function trials() {
 }
 
 // ---- the glance: who joined, from the registry; what runs, from the
-// deployment's logs (`GET /api/admin/glance`). Read afresh each minute
-// while it is shown, never cached (Paul, 2026-11-04).
+// deployment's logs (`GET /api/admin/glance`). Asked each minute while it
+// is shown; the logs' numbers say when they were read (the admin keeps a
+// read two minutes, and longer only when a newer one fails, saying why).
 const GLANCE_EVERY_MS = 60_000;
 let glanceTimer = null;
 
@@ -249,13 +250,17 @@ async function glance() {
     tile("Signed in, last 24 hours", v.signedIn.day, `${v.signedIn.week} in the last 7 days`),
   );
   $("glance-logs").textContent =
-    logs.state === "notConfigured" ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)." : logs.state === "failed" ? `The logs couldn't be read: ${logs.why}` : logs.whyUnread ? `Why saves failed couldn't be read: ${logs.whyUnread}` : "";
+    logs.state === "notConfigured"
+      ? "Computers and fragments come from the deployment's logs, which aren't configured here (observability_read)."
+      : logs.state === "failed"
+        ? `The logs couldn't be read: ${logs.why}`
+        : [logs.whyKept && `Newer numbers couldn't be read: ${logs.whyKept}`, logs.whyUnread && `Why saves failed couldn't be read: ${logs.whyUnread}`].filter(Boolean).join(" ");
   const trouble = read ? logs.trouble : [];
   $("trouble-head").hidden = $("trouble").hidden = trouble.length === 0;
   $("trouble-rows").replaceChildren(...trouble.map((t) => row([t.email || t.npub || "no one's", el("code", t.computer), troubleCell(t), String(t.lines)], t.npub ? openFromGlance(t.npub) : undefined)));
   const up = (p) => (p.computerUp == null ? "–" : p.computerUp ? "yes" : "not yet");
   $("new-rows").replaceChildren(...v.newPeople.map((p) => row([p.email || p.npub, when(p.joinedAt), seatText(p.seat) || "none", p.agentAt ? when(p.agentAt) : "none", up(p)], openFromGlance(p.npub))));
-  $("glance-at").textContent = `Updated ${new Date(v.at).toLocaleTimeString()}; again each minute.`;
+  $("glance-at").textContent = `Updated ${new Date(v.at).toLocaleTimeString()}${read ? ` · logs read ${ago(logs.at, v.at)}` : ""}; again each minute.`;
   say("");
 }
 

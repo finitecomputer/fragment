@@ -27,7 +27,7 @@ mod skills;
 mod skill_references;
 mod sync;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -508,7 +508,7 @@ fn screen_start(agent: Option<&str>) -> ! {
     let Some(agent) = agent else { fail("screen-start <agent fragment>") };
     let ready = std::fs::read(format!("{RUN}/{READY_FILE}")).map_err(|e| e.to_string()).and_then(|b| fragment_bridge::ready::parse(&b));
     match ready {
-        Ok(set) if set.contains(agent) => {}
+        Ok(ready) if ready.agents.contains(agent) => {}
         Ok(_) => fail(&format!("no desktop to start: {agent} is no agent of this computer's")),
         Err(e) => fail(&format!("no desktop to start: the ready file does not read: {e}")),
     }
@@ -704,7 +704,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
     write_credentials(a, home, ids);
-    let synced = sync::round(api, a, &dir, &own).await;
+    let synced = sync::round(api, a, &[sync::Place::hermes(&dir)], &own).await;
     // its identity (its title, its role else its job's first line: bots.rs)
     write_identity(a, &dir, ids, &face);
     // Bot Mode's hook, linked by images before route A, links to nothing now
@@ -715,6 +715,135 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "model": main.map(|m| m.name()), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
+}
+
+/// A Hermes agent whose profile was written while the gateway runs (one
+/// assigned, or switched back to Hermes) is ready for Hermes once the
+/// running gateway serves it: a turn relayed before is refused
+/// (`profile_mismatch`) and acknowledged, so lost. The gateway's answer to
+/// `rescan-profiles` (the one `follow_agents` asks as it writes the
+/// profile, and those asked here) lists, pending or not, the profiles it
+/// serves now, never a past launch's. Here it is asked again only while
+/// one waits, one ask at a time, at most every `SERVE_ASK_EVERY_MS` (a
+/// pending rescan runs on in the gateway, which rescans as often on its
+/// own). A start's profiles, written before it starts, are ready at once.
+fn serve_check(home: &Path, agents: &[Agent], restoring: &Restoring) {
+    let mut r = restoring.lock().expect("the restores are never poisoned");
+    let waiting: Vec<Agent> = agents::hermes(agents).into_iter().filter(|a| !r.done.contains(&agents::restored_key(a))).collect();
+    if r.serving || waiting.is_empty() || r.asked.is_some_and(|t| t.elapsed() < Duration::from_millis(SERVE_ASK_EVERY_MS)) {
+        return;
+    }
+    (r.serving, r.asked) = (true, Some(Instant::now()));
+    let (home, restoring) = (home.to_path_buf(), restoring.clone());
+    tokio::spawn(async move {
+        let answer = ask_gateway(&home, "rescan-profiles").await;
+        restoring.lock().expect("the restores are never poisoned").serving = false;
+        if let Ok(answer) = answer {
+            served(&answer, &waiting, &restoring);
+        }
+    });
+}
+
+/// How often the gateway is asked again for the profiles it serves while a
+/// Hermes agent waits for its own (`serve_check`): Hermes' own rescan's.
+const SERVE_ASK_EVERY_MS: u64 = 30_000;
+
+/// Each of `agents` whose profile the gateway's `rescan-profiles` answer
+/// lists as served: ready for Hermes.
+fn served(answer: &serde_json::Value, agents: &[Agent], restoring: &Restoring) {
+    let served: Vec<&str> = answer["served_profiles"].as_array().map(|l| l.iter().filter_map(|p| p.as_str()).collect()).unwrap_or_default();
+    let mut r = restoring.lock().expect("the restores are never poisoned");
+    for a in agents.iter().filter(|a| agents::of_hermes(a) && served.contains(&wire::profile(&a.fragment).as_str())) {
+        if r.done.insert(agents::restored_key(a)) {
+            ev!("profile.served", { "agent": a.fragment });
+        }
+    }
+}
+
+/// One sync of an agent's own files with its agent fragment, where its
+/// runtime keeps them (agents.rs, `places`): said when it did something.
+/// None: it failed, and said so.
+async fn sync_own(api: &Api, a: &Agent, home: &Path, own: &(dyn Fn(&Path) + Sync)) -> Option<sync::Done> {
+    let places = agents::places(a, home);
+    if places.is_empty() {
+        return Some(sync::Done::default());
+    }
+    match sync::round(api, a, &places, own).await {
+        Ok(d) => {
+            if d != sync::Done::default() {
+                ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted });
+            }
+            Some(d)
+        }
+        Err(e) => {
+            ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() });
+            None
+        }
+    }
+}
+
+/// The restores of agents' own files (`restore`): those done, by (fragment,
+/// runtime), and the one under way for each agent, by its fragment.
+#[derive(Default)]
+struct Restores {
+    done: agents::Restored,
+    running: BTreeMap<String, Running>,
+    /// An ask of the gateway for the profiles it serves under way
+    /// (`serve_check`), and when the last was asked.
+    serving: bool,
+    asked: Option<Instant>,
+}
+
+/// A restore under way: for which runtime, and whether its assignment
+/// changed since it began (it then makes the agent ready for none).
+struct Running {
+    runtime: String,
+    stale: bool,
+}
+
+type Restoring = std::sync::Arc<std::sync::Mutex<Restores>>;
+
+/// A restore started for each agent of another runtime than Hermes' whose
+/// own files are not restored for the runtime it names now (FIN-542): done
+/// once its sync succeeds. One that failed is not, so it is ready for no
+/// runtime (agents.rs, `ready_file`), and is tried again at the next read
+/// of the computer's agents. An agent that left, or names another runtime,
+/// is forgotten, and its restore under way makes it ready for none: back,
+/// it is restored again once that one ended (one sync of an agent's files
+/// at a time; none is cut short, so each ends with what it agreed saved).
+/// Each runs on its own, a round under way for a hold (`Busy`; none starts
+/// while held), so a slow one keeps no other agent waiting; a start waits
+/// for them.
+fn restore(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, quiet: &std::sync::Arc<Quiet>, restoring: &Restoring) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut r = restoring.lock().expect("the restores are never poisoned");
+    let here = |(f, rt): &(String, String)| agents.iter().any(|a| &a.fragment == f && agents::runtime_of(a) == rt);
+    r.done.retain(here);
+    for (f, run) in r.running.iter_mut() {
+        run.stale |= !here(&(f.clone(), run.runtime.clone()));
+    }
+    let mut started = Vec::new();
+    for a in agents.iter().filter(|a| !agents::of_hermes(a)) {
+        let key = agents::restored_key(a);
+        if r.done.contains(&key) || r.running.contains_key(&a.fragment) {
+            continue;
+        }
+        // counted before the hold is looked at: a hold begun since waits for it
+        let busy = Busy::new(quiet);
+        if quiet.paused() {
+            break;
+        }
+        r.running.insert(a.fragment.clone(), Running { runtime: key.1.clone(), stale: false });
+        let (api, a, home, restoring) = (api.clone(), a.clone(), home.to_path_buf(), restoring.clone());
+        started.push(tokio::spawn(async move {
+            let _busy = busy;
+            let restored = sync_own(&api, &a, &home, &move |p: &Path| chown(p, ids)).await.is_some();
+            let mut r = restoring.lock().expect("the restores are never poisoned");
+            if r.running.remove(&a.fragment).is_some_and(|run| !run.stale) && restored {
+                r.done.insert(key);
+            }
+        }));
+    }
+    started
 }
 
 /// An agent's agent fragment's title and role, its name and what it does
@@ -848,6 +977,9 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
         .env("BRIDGE_RELAY_SECRET_FILE", format!("{RUN}/relay.secret"))
         .env("GATEWAY_RELAY_ID", GATEWAY_ID)
         .env("BRIDGE_STATE_DIR", "/data/bridge")
+        // each agent's profile is its memory of its chats, where the bridge
+        // keeps what it last handed it in each (the bridge's seen.rs)
+        .env("BRIDGE_RELAY_HOME", home())
         // its answer to a hold is this image's to wait for: the platform's
         // `held` comes once Hermes' databases are copied too (held.rs)
         .env("BRIDGE_HELD", held::BRIDGE_HELD)
@@ -888,9 +1020,11 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
 /// The bridge's screens file (each of Hermes' agents' own desktop), then its
 /// ready file (every agent it may run: agents.rs, `ready_file`): a screen is
 /// named before its agent runs, and goes with it.
-fn write_ready(agents: &[Agent], home: &Path) {
+fn write_ready(agents: &[Agent], restored: &agents::Restored, home: &Path) -> String {
     write_whole(Path::new(&format!("{RUN}/{SCREENS_FILE}")), &desktop::screens_file(&agents::hermes(agents), home), None);
-    write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
+    let ready = agents::ready_file(agents, restored);
+    write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &ready, None);
+    ready
 }
 
 /// The chat each agent's route names (bots.rs, `profile_routes`): a chat
@@ -1006,7 +1140,7 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// names `now`, every agent the bridge may run: one that left leaves it, so
 /// the bridge stops at once.
 #[allow(clippy::too_many_arguments)]
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) {
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], restoring: &Restoring, home: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], team: &[hermes::Teammate]) -> (String, agents::Restored) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
     ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "credentials": names(&change.credentials), "agents": now.len() });
@@ -1025,15 +1159,23 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
     }
     if !change.added.is_empty() {
         let asked = Instant::now();
+        restoring.lock().expect("the restores are never poisoned").asked = Some(Instant::now());
         match ask_gateway(home, "rescan-profiles").await {
-            Ok(answer) => ev!("agents.served", { "added": answer["added"], "pending": answer["pending"], "unserved": agents::unserved(&change.added, &answer), "ms": asked.elapsed().as_millis() as u64 }),
+            // the profiles it serves now ready for Hermes, every agent's
+            // it lists, not only the added ones' (`serve_check`)
+            Ok(answer) => {
+                served(&answer, now, restoring);
+                ev!("agents.served", { "added": answer["added"], "pending": answer["pending"], "unserved": agents::unserved(&change.added, &answer), "ms": asked.elapsed().as_millis() as u64 })
+            }
             // every relayed turn resolves its profile as it arrives, and Hermes
             // rescans every 30 s: the agent is run either way
             Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
         }
     }
-    write_ready(now, home);
+    let restored = restoring.lock().expect("the restores are never poisoned").done.clone();
+    let ready = write_ready(now, &restored, home);
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
+    (ready, restored)
 }
 
 /// The managed skills' directory (skills.rs), made if it is missing: the
@@ -1049,10 +1191,16 @@ fn managed_dir() {
 }
 
 /// The platform skill shown to the profiles unless a managed skill takes
-/// its name (skills.rs, `settle_platform`).
+/// its name (skills.rs, `settle_platform`); and beside it, Hermes' bundled
+/// skills and the optional ones the owner switched on.
 fn settle_platform() -> Option<bool> {
     if let Err(e) = skills::settle_bundled(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::BUNDLED_DIR), Path::new(skills::PLATFORM_VIEW)) {
         ev!("skills.bundled_failed", { "error": e.to_string() });
+    }
+    let (bundled, optional, chosen, shown, view) = (Path::new(skills::BUNDLED_DIR), Path::new(skills::OPTIONAL_DIR), Path::new(skills::OPTIONAL_CHOSEN), Path::new(skills::OPTIONAL_SHOWN), Path::new(skills::PLATFORM_VIEW));
+    match skills::settle_optional(&skills::managed_dir(), Path::new(skills::MANIFEST), bundled, optional, chosen, shown, view) {
+        Ok(o) => ev!("skills.optional", { "shown": o.shown.len(), "missing": o.missing, "withheld": o.withheld, "failed": o.failed }),
+        Err(e) => ev!("skills.optional_failed", { "error": e.to_string() }),
     }
     let shown = skills::settle_platform(&skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::PLATFORM_DIR), Path::new(skills::PLATFORM_VIEW));
     if let Err(e) = &shown {
@@ -1078,12 +1226,12 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
     Some(tokio::spawn(async move {
         let _busy = busy;
         let t = Instant::now();
-        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await;
+        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::OPTIONAL_CHOSEN)).await;
         *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
         match done {
             Ok(d) => {
                 let platform = settle_platform();
-                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
+                ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "optional": d.optional, "platform": platform, "ms": t.elapsed().as_millis() as u64 });
                 // a skill added, changed or gone: the open chats list it at
                 // their next turn (nothing asked when the set is the same).
                 // Never under a hold: its databases are being copied, and a
@@ -1486,11 +1634,24 @@ async fn boot_main() {
             ev!("prompts.refresh_failed", { "why": "boot", "error": "still running", "ms": refresh_wait });
         }
     }
-    write_ready(&agents, &home);
+    // the other runtimes' agents' own files, as each Hermes agent's came
+    // with its profile: back before the ready file names them
+    let own = move |p: &Path| chown(p, ids);
+    // what a hold waits for, for its whole life (answered from the
+    // gateway's start, below): the restores are rounds of it
+    let quiet = std::sync::Arc::new(Quiet::default());
+    let restoring = Restoring::default();
+    futures_util::future::join_all(restore(&api, &agents, &home, ids, &quiet, &restoring)).await;
+    // each Hermes agent's profile is written before the gateway starts,
+    // which serves every profile it finds then
+    let mut published = {
+        let mut r = restoring.lock().expect("the restores are never poisoned");
+        r.done.extend(agents::hermes(&agents).iter().map(agents::restored_key));
+        r.done.clone()
+    };
+    let mut ready_now = write_ready(&agents, &published, &home);
     let mut bridge = spawn_bridge(card_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
-    // its answer to the platform's holds, for its whole life
-    let quiet = std::sync::Arc::new(Quiet::default());
     tokio::spawn(answer_holds(quiet.clone(), ids));
     ev!("boot.ready", { "ms": t0.elapsed().as_millis() as u64 });
 
@@ -1521,7 +1682,6 @@ async fn boot_main() {
     // idle desktops: looked at on their cadence, never while held
     let mut last_idle_look = Instant::now();
     let stopping = Stopping::default();
-    let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
     loop {
         // SIGTERM first: it means stop now (docs/computers.md)
@@ -1587,7 +1747,9 @@ async fn boot_main() {
                         // at its next start
                         if c.credential_env != credential_env {
                             credential_env = c.credential_env.clone();
-                            for a in agents::hermes(&agents).iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
+                            // none whose files a restore is syncing (`restore`)
+                            let running = restoring.lock().expect("the restores are never poisoned").running.keys().cloned().collect::<BTreeSet<String>>();
+                            for a in agents::hermes(&agents).iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment) && !running.contains(&a.fragment)) {
                                 write_profile(&api, a, &home, ids, &route, &credential_env, &team).await;
                             }
                         }
@@ -1610,11 +1772,24 @@ async fn boot_main() {
                             last_runtimes = Instant::now();
                         }
                         let (read, _) = with_runtimes(&api, c.agents, &runtime_names, again).await;
-                        let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&read));
-                        if !change.is_empty() || agents::ready_file(&agents) != agents::ready_file(&read) {
-                            follow_agents(&api, &change, &read, &home, ids, &route, &credential_env, &team).await;
+                        // another runtime's agent new here, switched to it, or
+                        // whose last try failed: its own files restored on
+                        // their own, and it ready for that runtime once they
+                        // are (meanwhile in the roster, its turns held)
+                        restore(&api, &read, &home, ids, &quiet, &restoring);
+                        let running = restoring.lock().expect("the restores are never poisoned").running.keys().cloned().collect::<BTreeSet<String>>();
+                        // one switched back to Hermes while a restore of its
+                        // files runs waits alone (agents.rs, `until_restored`)
+                        let now = agents::until_restored(&agents, read, &running);
+                        let restored = restoring.lock().expect("the restores are never poisoned").done.clone();
+                        let change = agents::diff(&agents::hermes(&agents), &agents::hermes(&now));
+                        if !change.is_empty() || agents::ready_file(&now, &restored) != ready_now {
+                            (ready_now, published) = follow_agents(&api, &change, &now, &restoring, &home, ids, &route, &credential_env, &team).await;
+                        } else {
+                            published = restored;
                         }
-                        agents = read;
+                        serve_check(&home, &now, &restoring);
+                        agents = now;
                     }
                     // once per outage: the next read that answers ends it
                     Err(e) if !agents_unread => {
@@ -1639,18 +1814,15 @@ async fn boot_main() {
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
-                for a in &agents::hermes(&agents) {
-                    let dir = hermes::profile_dir(&home, &a.fragment);
-                    match sync::round(&api, a, &dir, &own).await {
-                        Ok(d) if d != sync::Done::default() => {
-                            // its job may have changed: its role with it
-                            if d.pulled > 0 {
-                                write_identity(a, &dir, ids, &read_face(&api, a).await);
-                            }
-                            ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted })
-                        }
-                        Ok(_) => {}
-                        Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),
+                // another runtime's agent only once the bridge was told it
+                // is ready (the ready file written), and no agent whose
+                // files a restore is syncing: the restore is the one sync
+                // of its files while it runs
+                let running = restoring.lock().expect("the restores are never poisoned").running.keys().cloned().collect::<BTreeSet<String>>();
+                for a in agents.iter().filter(|a| (agents::of_hermes(a) || published.contains(&agents::restored_key(a))) && !running.contains(&a.fragment)) {
+                    // a Hermes agent's job may have changed: its role with it
+                    if sync_own(&api, a, &home, &own).await.is_some_and(|d| d.pulled > 0) && agents::of_hermes(a) {
+                        write_identity(a, &hermes::profile_dir(&home, &a.fragment), ids, &read_face(&api, a).await);
                     }
                 }
             }

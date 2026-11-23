@@ -360,9 +360,6 @@ impl FragmentCell {
             let page = req.headers().get("origin")?.is_some() && !matches!(credential, Some(Credential::Key(_)));
             match self.live(&req, caller, credential, &principal, link) {
                 Ok(resp) => {
-                    // a page following this fragment may soon post to a computer's
-                    // channel (an agent's own socket wakes no computer it runs on)
-                    self.prewake(&principal);
                     laps.lap("accept");
                     laps.stamp(resp)?
                 }
@@ -536,7 +533,7 @@ impl FragmentCell {
             }
             "__files" => {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
-                    return Ok(Response::ok(files_page(name, &self.title_now(name)?))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
+                    return Ok(Response::ok(files_page(name, &self.title()?.unwrap_or_else(|| name.to_string())))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
                 }
                 // a path on both is the one `__file` reads (`content_pins`),
                 // with its version (`commit`: `__file?path=&v=`, FIN-340)
@@ -561,7 +558,7 @@ impl FragmentCell {
                         None => json!({ "path": path, "size": size }),
                     })
                     .collect();
-                let mut answer = json!({ "type": "files", "count": files.len(), "files": files, "title": self.title_now(name)? });
+                let mut answer = json!({ "type": "files", "count": files.len(), "files": files, "title": self.title()?.unwrap_or_else(|| name.to_string()) });
                 // the files view's layer (FIN-372): its search, and what its manifest says
                 if self.search_indexed()? {
                     answer["searchable"] = json!(true);
@@ -628,16 +625,16 @@ impl FragmentCell {
         // a fragment whose page is the files view (its manifest's
         // `files.page`, FIN-372), with its Open Graph tags as a page's
         if path.is_empty() && self.files_live()?.is_some_and(|f| f.page) {
-            let mut page = files_page(name, &self.title_now(name)?);
-            if let Some(meta) = self.meta(MetaKey::MetaLive)? {
-                let meta: fragment_core::manifest::Meta = crate::json_text(&meta).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
+            let mut page = files_page(name, &self.title()?.unwrap_or_else(|| name.to_string()));
+            if let Some(meta) = self.og()? {
                 page = site::inject_og(&page, name, &meta, &format!("{}__preview.svg", self.cfg.canonical(&caller.url, name)));
             }
             let h = headers("text/html; charset=utf-8", "no-store")?;
             return Ok(if head { Response::empty()?.with_headers(h) } else { Response::from_html(page)?.with_headers(h) });
         }
         // a blessed template's fragment: its site is the platform release's (decision 40)
-        if let Some(installed) = self.meta(MetaKey::Blessed)? {
+        let blessed_site = self.meta(MetaKey::Blessed)?;
+        if let Some(installed) = &blessed_site {
             let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
             for candidate in site::site_candidates(path) {
                 if let Some(file) = blessed::site_file(t, &candidate) {
@@ -645,11 +642,21 @@ impl FragmentCell {
                 }
             }
         }
+        // and only the release's: none of its own files is a page of its
+        // site (a path the release does not ship goes on as none was found,
+        // to its code's routes, else a 404). Its code's name says its pages
+        // are the platform's (shell.js, alerts-sw.js), and its repo holds
+        // only its face and data, read at `__file` (inert): a page of its
+        // own here would run as whoever opened it, written by any of its
+        // editors or anyone with a write token. None, not inert, so a path
+        // of the origin answers no bytes that the release did not ship.
         let mut found = None;
-        for candidate in site::site_candidates(path) {
-            if let Some(row) = self.tree_row("live", &candidate)? {
-                found = Some(row);
-                break;
+        if blessed_site.is_none() {
+            for candidate in site::site_candidates(path) {
+                if let Some(row) = self.tree_row("live", &candidate)? {
+                    found = Some(row);
+                    break;
+                }
             }
         }
         let Some(row) = found else {
@@ -680,15 +687,11 @@ impl FragmentCell {
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
         // Only a page gets Open Graph tags, so only a page reads `meta`.
         let page = pointer.is_none() && mime.starts_with("text/html") && row.size <= OG_MAX_BYTES;
-        let stored = if page { self.meta(MetaKey::MetaLive)? } else { None };
-        let og: Option<fragment_core::manifest::Meta> = match stored {
-            Some(text) => Some(crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
-            None => None,
-        };
+        let og = if page { self.og()? } else { None };
         // Revalidation is answered here, before code.storage is asked for
         // anything: the tree row already names the bytes.
-        let etag = match og {
-            Some(_) => site::page_etag(&row.last_commit, live),
+        let etag = match &og {
+            Some(meta) => site::page_etag(&row.last_commit, live, &site::og_tag(meta.title.as_deref())),
             None => site::file_etag(&row.last_commit),
         };
         if let Some(resp) = not_modified(req, &etag, cache)? {
@@ -745,13 +748,10 @@ impl FragmentCell {
         // the release's own files: kept for good by the platform's hash alone
         let cache = site::cache_control(site::hashed(path), public);
         let page = mime.starts_with("text/html");
-        let og: Option<fragment_core::manifest::Meta> = match page.then(|| self.meta(MetaKey::MetaLive)).transpose()?.flatten() {
-            Some(text) => Some(crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
-            None => None,
-        };
+        let og = if page { self.og()? } else { None };
         let live = facts.pin_live.as_deref().unwrap_or("");
-        let etag = match og {
-            Some(_) => format!("\"b-{release}-{}\"", &live[..live.len().min(12)]),
+        let etag = match &og {
+            Some(meta) => format!("\"b-{release}-{}-{}\"", &live[..live.len().min(12)], site::og_tag(meta.title.as_deref())),
             None => format!("\"b-{release}\""),
         };
         if let Some(resp) = not_modified(req, &etag, cache)? {
@@ -846,14 +846,17 @@ impl FragmentCell {
             .transpose()
     }
 
-    /// Its title now: as its manifest at main names it (a rename lands
-    /// there first), else as live's does, else its name.
-    fn title_now(&self, name: &str) -> CellResult<String> {
-        let [main, live] = self.metas([MetaKey::ManifestMain, MetaKey::MetaLive])?;
-        let at = |text: Option<String>, meta: fn(&Value) -> &Value| -> Option<String> {
-            let v: Value = crate::json_text(&text?).ok()?;
-            meta(&v)["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+    /// The Open Graph tags its pages carry (`site::inject_og`), when its
+    /// live manifest has a `meta` or its face a title: that `meta`, titled
+    /// as its face is (a rename moves no commit: `site::og_tag` names it in
+    /// a page's tag).
+    fn og(&self) -> CellResult<Option<fragment_core::manifest::Meta>> {
+        let stored = self.meta(MetaKey::MetaLive)?;
+        let mut meta: fragment_core::manifest::Meta = match &stored {
+            Some(text) => crate::json_text(text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?,
+            None => Default::default(),
         };
-        Ok(at(main, |v| &v["meta"]).or_else(|| at(live, |v| v)).unwrap_or_else(|| name.to_string()))
+        meta.title = self.title()?;
+        Ok((stored.is_some() || meta.title.is_some()).then_some(meta))
     }
 }

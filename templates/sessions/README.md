@@ -50,12 +50,14 @@ import reads are cli/src/session/.
   conversations of one kind, newest first (by `ended_at`, else
   `started_at`). An entry is `{key, id, origin, reader, kind, title,
   agent?, source?, with?, started_at?, ended_at?, messages, preview,
-  sha256, bytes}`:
+  sha256, bytes, commit?}`:
   `agent` is the agent it was with, as its origin named it (an entry an
   import made before it has none), `messages` counts what was said (a
   person's or the agent's words, not tool calls, results or summaries),
-  `preview` is the first words its person said (160 characters), and
-  `sha256` and `bytes` are its file's.
+  `preview` is the first words its person said (160 characters),
+  `sha256` and `bytes` are its file's, and `commit` the commit its file
+  was last changed in as the entry describes it (none from an import
+  before it, or one that could not say).
 
 A conversation's key is its origin and its id there,
 `hermes-20261029_183012_ab12cd`; an id that is no file name's (another
@@ -81,16 +83,17 @@ fragment's is.
   copy set aside for a newer one (the import's own or the archive's).
 - **Conversations first, then the indexes.** An import writes its new and
   newer conversations a batch a commit (at most 256 files and 16 MiB of
-  them), then every index they change in one last commit, made from main
-  as it is then. That commit also lists by its file any conversation the
-  indexes lack, or whose file changed in a commit after theirs (an import
-  stopped before its last commit, whatever the copy's size: a file's last
-  commit, with its path, names its bytes), or that they describe as
-  another copy (its size in git, or a blob's pointer, is not their
-  entry's), and drops an entry whose file is gone, so the next import of
-  anything puts a crash right. Each commit names the head it read; one
-  another writer beat, or whose answer was lost, is made again on main as
-  it is then, the indexes listing what this import wrote as it wrote it.
+  them; one another writer beat is made again on main as it is then),
+  then every index whose bytes change, in one last commit. It trusts an
+  index entry only while it names its file's last commit (a file's last
+  commit, with its path, names its bytes): a file no entry describes (an
+  import stopped before its indexes, another writer, a commit whose
+  answer was lost, whatever the copy's size) is read, and an entry whose
+  file is gone dropped, so the next import of anything puts a crash
+  right. Its indexes are made from main as it is after its own commits
+  (another writer may have come between), and again whenever their commit
+  is beaten: each entry kept while it names its file's last commit, the
+  rest read, so they never describe a file another copy.
 - **Bounded as it reads.** Each conversation is filed as it is read, its
   file spooled to a folder of the import's own (gone with it), so an
   import never holds every conversation's bytes.
@@ -127,7 +130,7 @@ the question, best first, each with its best snippet.
   places of its first and last message.
 - **Reconciled, each import, with the archive as it stands then.** After
   its writes, an import reads search's sources and the archive at main's
-  head (its indexes, and the files changed since them: another import may
+  head (its indexes, and the files no entry of theirs describes: another import may
   have written meanwhile), and writes each conversation whose sha256 is
   not the revision search holds, its bytes read at that head and its
   revision theirs. Search is read first, so what it holds is never of a

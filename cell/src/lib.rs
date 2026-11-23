@@ -27,9 +27,17 @@
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
 
+// the admin Worker's build reaches a part of the crate by design (and
+// leaves the macros' imports unused), and the cell's build lints the
+// whole ("Two Workers, one crate", below)
+#![cfg_attr(feature = "admin", allow(dead_code, unused_imports))]
+
+// public: only the admin Worker's build calls its router (`fetch` below)
+pub mod admin;
 mod across;
 mod ai;
 mod address;
+mod alone;
 mod assets;
 mod auth;
 mod billing;
@@ -138,6 +146,23 @@ const SEEN_BODY_MAX_BYTES: usize = 1024;
 const LLMS_TXT: &fragment_templates::File = &fragment_templates::SKILL_MD;
 const LLMS_FULL_TXT: &fragment_templates::File = &fragment_templates::GUIDE_MD;
 
+// Two Workers, one crate (M19, FIN-475: the platform split by who uses
+// it). The cell is this crate's default build: its router (`fetch`,
+// `queue`) and every object class. The operators' admin is the same crate
+// built with the `admin` feature, a Worker of its own (admin.rs): its
+// `fetch` is the admin's router, and it exports no class, reaching the
+// cell's objects through bindings to the cell's script. Only the exports
+// differ, each cfg'd here or at its class (its export and its object
+// impl: "exported by the cell's build alone"), never the code they call:
+// link-time optimization keeps in each Wasm only what its exports reach,
+// so code only the admin reaches costs no fragment's isolate, and the
+// objects cost the admin nothing. The one
+// crate shares the cell's own callers' code (its config, errors, calls
+// and sessions) without moving it into another; what it costs is the
+// crate compiled twice per build (xtask/src/build.rs). In the admin's
+// build most of the crate is code it never reaches by design: the cell's
+// build lints all of it, the admin's router included (public above).
+#[cfg(not(feature = "admin"))]
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     // a branch deployment's queue is named for its branch after this
@@ -147,9 +172,20 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     deliveries::consume(batch, env).await
 }
 
+#[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     match route(req, &env, &ctx).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => e.response(),
+    }
+}
+
+/// The admin Worker's `fetch` (admin.rs): the requests the cell hands it.
+#[cfg(feature = "admin")]
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    match admin::route(req, &env).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -288,8 +324,11 @@ pub(crate) async fn registry_round_trip(env: &Env, path: &str, body: String) -> 
     }
 }
 
-/// The identity a request's signed URL names in `for`: an agent acting
-/// for whoever asked it (decision R17). At most one, an identity.
+/// The identity a request's signed URL names in `for` (decision R17). Today
+/// only the agent's owner (`access::may_act_for`, checked in `signer_of`): a
+/// bare claim naming anyone else is refused, since nothing proves they asked;
+/// acting for another member will come with that proof (such as their own
+/// signed chat record). At most one, an identity.
 pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();
@@ -325,7 +364,8 @@ pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8])
 
 /// The signer for any payload: a body the router read, or one it streams
 /// through unread (a blob, whose URL names its hash). `for` is inside the
-/// signed URL, and only an agent may name it: a person acts as themselves.
+/// signed URL, and only an agent may name it, and only its own owner
+/// (`access::may_act_for`): a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
     let (identity, key) = match caller(env, req, url, payload)? {
@@ -333,8 +373,8 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
         // the shell's: a person, signed in on the platform
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
-    if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
-        return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
+    if let Some(named) = &acting_for {
+        fragment_core::access::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
     }
     Ok(Signed { identity, key, acting_for })
 }
@@ -619,7 +659,8 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
 pub(crate) use json_response::{json_answer, json_passed};
 
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
-/// reaches for whoever asked (docs/cloudflare-v1.md, R17): the asker's, where the
+/// reaches for whom it names (docs/cloudflare-v1.md, R17; today only its
+/// owner, see `acting_for`): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
 /// there (`access::listed_role`). A call decides again, live.
 async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
@@ -1043,6 +1084,10 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     if shell::is_fragment_sheet(rest) && matches!(req.method(), Method::Get | Method::Head) {
         return shell::fragment_sheet_asset(&req, env).await;
     }
+    // and the platform's type, which its pages load from it (shell.rs `fragment_font`)
+    if let Some(font) = shell::fragment_font(rest).filter(|_| matches!(req.method(), Method::Get | Method::Head)) {
+        return shell::fragment_font_asset(&req, env, font).await;
+    }
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
     }
@@ -1247,10 +1292,12 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings, `/apps` the person's apps, `/brains`
         // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
-        // `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
-        // the operators' admin page: to anyone else, the 404 below
-        (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
+        // `/skills` what their agents know and the optional skills to turn on, `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["skills"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
+        // the operators' admin, its page and API, and its probe of every
+        // object class: the admin Worker's (admin.rs), handed to it as they
+        // came. It answers anyone else the 404 below, word for word.
+        (Method::Get, ["admin"] | ["healthz", "admin"]) | (_, ["api", "admin", ..]) => admin::forward(req, env).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
         (Method::Get | Method::Head, ["about"]) => shell::legal_page(&req, env, "about.html").await,
         (Method::Get | Method::Head, ["privacy"]) => shell::legal_page(&req, env, "privacy.html").await,
@@ -1376,10 +1423,6 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "orgs", org, rest @ ..]) => {
             let (org, rest) = (org.to_string(), rest.to_vec());
             orgs::named(req, env, &url, &org, &rest).await
-        }
-        (_, ["api", "admin", rest @ ..]) => {
-            let rest = rest.to_vec();
-            orgs::admin(req, env, cfg, &url, &rest).await
         }
         // the finite.computer move's mover (migrations.rs)
         (_, ["api", "migrations", rest @ ..]) => {

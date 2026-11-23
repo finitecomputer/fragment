@@ -11,6 +11,12 @@ description = "The fragment platform on Cloudflare Workers: the router and the D
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# The operators' admin Worker: this crate's build with another `fetch` and
+# no object class exported (src/lib.rs, "Two Workers, one crate"), into
+# build/admin (`cargo xtask build`), deployed from cell/wrangler.admin.jsonc.
+admin = []
+
 [dependencies]
 # 0.8.5, not 0.8.6: 0.8.6 is younger than the two-week dependency cooldown.
 worker = { version = "=0.8.5", features = ["queue"] }

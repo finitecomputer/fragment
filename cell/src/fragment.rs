@@ -82,8 +82,12 @@ use calls::{
 pub(crate) const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
+/// The longest a due card's shot waits for queued runs to start first
+/// (`fragment_core::alarm::card_waits`).
+const CARD_WAIT_MAX_MS: i64 = 10_000;
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct FragmentCell {
     pub(crate) state: State,
     pub(crate) raw: JsValue,
@@ -97,6 +101,9 @@ pub struct FragmentCell {
     /// refused (publish.rs). Its stage is in its rows, not here
     /// (`fragment_core::seed`).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
+    /// Serializes an agent's renames: each reads its job, commits it and
+    /// sets its face (members.rs `face_put`).
+    pub(crate) renaming: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -133,15 +140,25 @@ pub struct FragmentCell {
     /// waiting now. In memory: a life's end, which remakes its storage,
     /// leaves it as the test set it.
     pub(crate) test_hold_install: Cell<(bool, bool)>,
-    /// Serializes `launch_queued`: two at once would each start a queued
-    /// run's Workflow and say so.
-    pub(crate) launching: futures_util::lock::Mutex<()>,
+    /// A test fleet's `hold-launch` lever (ops.rs): whether a launch's
+    /// batch, made, waits before it is written (jobs.rs `launch_queued`),
+    /// and whether one is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_launch: Cell<(bool, bool)>,
+    /// A test fleet's `hold-card` lever (ops.rs): whether the alarm's pass
+    /// waits where it chooses its card's shot (`on_alarm`), and whether one
+    /// is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_card: Cell<(bool, bool)>,
+    /// A launch is under way (`launch_queued`): one at a time, without an
+    /// await before its `createBatch`; another finding one leaves its runs
+    /// queued for the alarm's next pass.
+    pub(crate) launching: Cell<bool>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     pub(crate) schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for FragmentCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -158,6 +175,7 @@ impl DurableObject for FragmentCell {
             cfg,
             plane: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
+            renaming: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             woke: Cell::new(false),
@@ -171,7 +189,9 @@ impl DurableObject for FragmentCell {
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
-            launching: futures_util::lock::Mutex::new(()),
+            test_hold_launch: Cell::new((false, false)),
+            test_hold_card: Cell::new((false, false)),
+            launching: Cell::new(false),
             dw_noted: RefCell::new(None),
             schema,
         }
@@ -191,6 +211,11 @@ impl DurableObject for FragmentCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // Queued runs' Workflows start first, before anything here calls out
+        // (`launch_queued`; xtask/src/guards.rs holds this order). The alarm
+        // begins with a fresh subrequest budget, and a Workflow keeps the
+        // budget of the call that made it.
+        self.launch_queued().await;
         if self.schema.refused() {
             // a delete's cleanup goes on, refused or not: it ends in its
             // storage's release, which makes the fragment current (ended.rs)
@@ -330,12 +355,16 @@ pub(crate) enum MetaKey {
     /// When the next pass runs (a day after the last, or within the poll
     /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
+    /// A queued run's Workflow could not be started: queued runs wait
+    /// until then to be tried again (`runs_due_at`).
+    LaunchRetryAt,
     /// When the pins last may have fallen behind the repo: a storage token
     /// was minted for it, or a move failed to follow (plane.rs `may_lag`).
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The title a template's fragment starts with (`TemplatePending`'s).
+    /// The title a copied template's fragment starts with
+    /// (`TemplatePending`'s), stamped into its `fragment.json`.
     TemplateTitle,
     /// The commits the cell pins (plane.rs).
     PinMain,
@@ -365,12 +394,24 @@ pub(crate) enum MetaKey {
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
-    /// What its members' lists show of it (`{kind, title, picture?}`), as
-    /// last sent.
+    /// What its members' lists show of it (`{kind, title?, role?,
+    /// picture?}`): its title and an agent's role are kept here alone, set
+    /// at its making and through its face route (members.rs `face_put`).
     Face,
-    /// An agent fragment's picture as live's install read it (`<sha256>
-    /// <type> <commit>`): what `calls::Picture` answers.
+    /// An agent fragment's picture as main's last move read it (`<sha256>
+    /// <type> <commit>`, plane.rs `read_picture`): what `calls::Picture`
+    /// answers.
     Picture,
+    /// An agent's rename whose job commit's answer was lost, and the
+    /// renames before it the job may hold: a JSON array of `[name, sha256
+    /// of the job it wrote]`. The next takes a name for an old one only
+    /// while its job is the one that rename wrote (members.rs `job_says`).
+    Renaming,
+    /// The marks `GET manifest` gave its editors with the title each read
+    /// showed (a JSON array of `[mark, title]`, at most `TITLE_READS_MAX`,
+    /// newest last): a write of `fragment.json` naming one is an older CLI
+    /// renaming it (plane.rs `title_from_read`; the debt ledger).
+    TitleRead,
     /// The channels that list records, their kinds, fields and read
     /// roles, as the rows last carried them (listed.rs `listed_fence`).
     Listed,
@@ -457,8 +498,6 @@ pub(crate) enum MetaKey {
     DoorTemplate,
     /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
     ReachTold,
-    /// The next time a page may pre-wake the computers its channels wake.
-    PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
     /// call was paid and kept (`fail-after-paid`), so the step is retried.
     TestFailAfterPaid,
@@ -515,6 +554,7 @@ impl MetaKey {
             MetaKey::RepoOfLife => "repo_of_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
+            MetaKey::LaunchRetryAt => "launch_retry_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::TemplateTitle => "template_title",
@@ -531,6 +571,8 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Renaming => "renaming",
+            MetaKey::TitleRead => "title_read",
             MetaKey::Listed => "listed",
             MetaKey::ListedSentAt => "listed_sent_at",
             MetaKey::ListedDue => "listed_due",
@@ -562,7 +604,6 @@ impl MetaKey {
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
             MetaKey::ReachTold => "reach_told",
-            MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -609,8 +650,8 @@ pub(crate) struct Facts {
     pub name: String,
     pub visibility: Visibility,
     pub view_token: String,
-    /// Its repo at code.storage: `None` until its template's seed makes
-    /// it, when its create answered first (publish.rs `seeds_later`).
+    /// Its repo at code.storage: `None` until its first writer's seed makes
+    /// it, a blessed template's (`seed::Making::SeedsLater`).
     pub repo: Option<String>,
     pub pin_main: Option<String>,
     pub pin_live: Option<String>,
@@ -1213,6 +1254,10 @@ impl FragmentCell {
                 let bytes = req.bytes().await?;
                 self.upload_card(&caller, bytes).await
             }
+            (Method::Put, ["api", "face"]) => {
+                let body = body_json(&mut req).await?;
+                self.face_put(&caller, body).await
+            }
             (Method::Get, ["api", "icon"]) => self.icon_get(&caller, &req).await,
             (Method::Put, ["api", "icon"]) => self.icon_put(&caller, &mut req).await,
             (Method::Delete, ["api", "icon"]) => self.icon_delete(&caller).await,
@@ -1349,7 +1394,8 @@ impl FragmentCell {
         let cs_cfg = self.cfg.codestorage();
         let making = match body.template.as_deref() {
             None => seed::Making::Plain,
-            Some(t) if crate::publish::seeds_later(t) => seed::Making::SeedsLater,
+            // the release's code: its repo comes at its first file
+            Some(t) if blessed::template(t).is_some() => seed::Making::SeedsLater,
             Some(_) => seed::Making::SeedsNow,
         };
         // Claim the name before the first await: a concurrent create for the
@@ -1377,6 +1423,26 @@ impl FragmentCell {
                 }
                 None => None,
             };
+            // its face from the start, its own from then on (docs/api.md, "An
+            // agent's name and picture"): the title given, else its blessed
+            // template's; that template's kind, so the owner's list says it is
+            // a chat or an agent at once. A copied template's (an app), or a
+            // blessed one whose manifest did not read, is an app's until its
+            // install says, its title, if none was given, the install's
+            // default. An agent's own is made shared with no one (alone.rs):
+            // refused before anything is made
+            let face = match body.template.as_deref() {
+                Some(t) => {
+                    let blessed = crate::assets::blessed_manifest(&self.env, t).await.ok().and_then(Result::ok);
+                    if blessed.as_ref().is_some_and(|m| m.kind() == fragment_proto::FragmentKind::Agent) && body.visibility.is_some_and(|v| v != Visibility::Members) {
+                        return Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT));
+                    }
+                    laps.lap("manifest");
+                    let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
+                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
+                }
+                None => None,
+            };
             // its own key, this life's alone, which names its repo
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             let fragment_npub = npub::encode(&pubkey);
@@ -1389,21 +1455,6 @@ impl FragmentCell {
                     Some(repo)
                 }
                 false => None,
-            };
-            // a blessed template's face is known now: the owner's list says
-            // it is a chat or an agent from the start, not once it installs
-            // (a read of the release that fails leaves it to the install,
-            // which sets it from the same manifest)
-            let face = match body.template.as_deref() {
-                Some(t) => {
-                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
-                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
-                        _ => None,
-                    };
-                    laps.lap("manifest");
-                    face
-                }
-                None => None,
             };
             Ok::<_, CellError>((agent, repo, fragment_npub, sealed, face))
         };
@@ -1509,7 +1560,7 @@ impl FragmentCell {
                 // did not land is retried by the alarm, and whichever seed
                 // lands it tells its agents they joined
                 seed::Effect::Commit => {
-                    if let Err(e) = self.seed().await {
+                    if let Err(e) = self.seed(seed::Event::Write, None).await {
                         self.event("template.failed", &e.message, json!({ "code": e.code }));
                     }
                     laps.lap("seed");
@@ -1540,7 +1591,7 @@ impl FragmentCell {
             visibility,
             view_token,
             inbox_token,
-            // empty until its seed makes it (publish.rs `seeds_later`)
+            // a blessed template's: empty until its first file makes it
             repo: repo.unwrap_or_default(),
             canonical: self.cfg.canonical(&caller.url, &body.name),
         })?;
@@ -1586,7 +1637,7 @@ impl FragmentCell {
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,
             visibility: facts.visibility,
-            // empty until its repo is made (publish.rs `seeds_later`)
+            // empty until its repo is made (`seed::Making::SeedsLater`)
             repo: facts.repo.unwrap_or_default(),
             pins: Pins { main: facts.pin_main, live: facts.pin_live },
             counts: Counts {
@@ -1638,15 +1689,17 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
-    /// life was made since; then the life's index, search, joined and
-    /// delivery outboxes, due schedules (the code's and its records'), queued runs, and the pass: the
-    /// trims, the poll backstop (while the pins may lag), the blob
-    /// collection, running runs checked, and the storage sample. The next
-    /// pass is a day away, or within the poll interval while the fragment
-    /// is busy (`arm`). Last, a preview card due is shot (card.rs): the
-    /// seconds a browser takes hold up only the work that comes due
-    /// meanwhile. Then it re-arms.
+    /// After queued runs' starts (`alarm`), the alarm runs an ended life's
+    /// cleanup (ended.rs) whether or not a life was made since; then the
+    /// life's index, search, joined and delivery outboxes, due schedules
+    /// (the code's and its records'), and the pass: the trims, the poll
+    /// backstop (while the pins may lag), the blob collection, running runs
+    /// checked, and the storage sample. The next pass is a day away, or
+    /// within the poll interval while the fragment is busy (`arm`), and
+    /// soon when runs were queued meanwhile (`launch_due_at`): a run queued
+    /// while this pass works waits for its end. Last, a preview card due is
+    /// shot (card.rs), unless runs were queued meanwhile: they start first,
+    /// in the next pass. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1668,10 +1721,10 @@ impl FragmentCell {
         }
         self.flush_search().await;
         self.search_forget_due().await;
-        // a template still to land takes its next step (publish.rs `seed`);
-        // a chat made a moment ago takes its first here, its create having
-        // armed this pass at once
-        if let Err(e) = self.seed().await {
+        // a template still to land that the release does not run takes its
+        // next step (publish.rs `seed`); one it runs waits for its first
+        // writer, and asks code.storage nothing here
+        if let Err(e) = self.seed(seed::Event::Alarm, None).await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         // after its seed: an agent's notice waits until its template is in
@@ -1685,7 +1738,6 @@ impl FragmentCell {
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
         self.fire_cron().await?;
-        self.launch_queued().await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
@@ -1701,12 +1753,20 @@ impl FragmentCell {
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
-            self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
-        if let Err(e) = self.drain_card().await {
-            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+        if self.cfg.test_hooks {
+            self.held_card().await;
+        }
+        // A run queued while this pass worked starts before a card's shot
+        // (a browser's seconds, which an object's next alarm waits for): the
+        // shot waits for the next pass, armed at once, which starts the run
+        // first (`launch_queued`), for at most CARD_WAIT_MAX_MS of its due.
+        if !fragment_core::alarm::card_waits(self.launch_waiting()?, self.card_due_at()?, js::now_ms(), CARD_WAIT_MAX_MS) {
+            if let Err(e) = self.drain_card().await {
+                self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+            }
         }
         self.schedule().await
     }
@@ -1737,7 +1797,7 @@ impl FragmentCell {
     }
 
     /// After the answer: the delivery outbox drained (a computer's wakes
-    /// among it), queued runs' Workflows started, and the alarm armed for a
+    /// among it), the alarm armed for queued runs (`arm_launch`) and for a
     /// search cursor a record woke, none of which the answer waits on. Each
     /// is the alarm's too (the outbox's rows and a woken cursor stay due,
     /// queued runs stay queued), so whatever this cuts short or fails is
@@ -1771,12 +1831,12 @@ impl FragmentCell {
         // waits on no wake
         let t0 = js::now_ms();
         let drain = async { (self.drain_deliveries().await, js::now_ms() - t0) };
-        let launch = async { (self.launch_queued().await, js::now_ms() - t0) };
+        let launch = async { (self.arm_launch().await, js::now_ms() - t0) };
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || listed || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || launched || drained.queued + drained.woken > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "armed": launched }));
         }
     }
 
@@ -1803,7 +1863,10 @@ impl FragmentCell {
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
         let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
-        let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
+        let now = js::now_ms();
+        let at = due.into_iter().flatten().fold(poll_at, i64::min).max(now + min_ms);
+        // an alarm still to come that is sooner stays (`alarm::to_set`)
+        let Some(at) = fragment_core::alarm::to_set(self.state.storage().get_alarm().await?, at, now, min_ms) else { return Ok(()) };
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())
     }

@@ -24,15 +24,15 @@ own index and log.
       datasets/     manifests, schemas, samples, query recipes
       output/       reports, plans, summaries and other deliverables
 
-At the top level, fragment.json holds the brain's title, and index.md is
+At the top level, fragment.json names its template, and index.md is
 its front page: the platform's, unless the brain holds one of its own.
 Each folder at the top level is a wiki.
 
 ## Working on a brain
 
 Sync a folder with the brain, read, write with ordinary file tools, and
-sync again. A brain needs no deploy: it reads its files at main. Only a
-change to fragment.json (its title) needs one.
+sync again. A brain needs no deploy: it reads its files at main. Its
+title is its own: fragment rename <brain> "<title>" renames it.
 
     fragment sync <brain> --dir ~/brains/<brain>
     fragment sync <brain> --dir ~/brains/<brain> --watch

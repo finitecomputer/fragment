@@ -2,7 +2,8 @@
    UI handoff, 2026-10-02), tokens from finitecomputer-v2's dashboard. Dark
    unless the system asks for light; the shell that frames it may say which
    (`data-theme` on the root, chat.js). Fonts: Funnel Sans and JetBrains
-   Mono from Google Fonts (index.html), system fonts until they load. */
+   Mono from its own origin (index.html, ./__fonts/fonts.css), system fonts
+   until they load. */
 :root {
   --icon-size: 16px;
   --chat-message-radius: 12px;
