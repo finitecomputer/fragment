@@ -6,7 +6,8 @@
 #
 # The e2e runs in five shards (crates/e2e/src/lanes/mod.rs, SHARDS: every
 # section in exactly one, a host test checks), each on a runner of its own
-# with its own build and node; the `e2e` job is green when every shard is.
+# with its own node, all from one build (`e2e-build`); the `e2e` job is
+# green when every shard is.
 #
 # A pull request's run is `check` alone, which nothing requires: an agent
 # proves its change on its own machine, and Paul's merge lands at once,
@@ -27,9 +28,8 @@
 # empty tree, which xtask would take for the pinned Node. The e2e's builds,
 # our own crates' with them, are actions/cache's, one entry per master
 # commit, with the tree they were built from, so cargo rebuilds only what
-# a change touched (.github/actions/e2e-build, saved by the first shard
-# or, when a push's shards skip, by `e2e-build`; `prune` keeps the newest
-# alone);
+# a change touched (.github/actions/e2e-build, saved by `e2e-build`;
+# `prune` keeps the newest alone);
 # their tools are rust-cache's, and the stub image's layers BuildKit's,
 # in the same Actions cache. The pinned Node and the JavaScript caches are
 # actions/cache's, each key naming what it holds below, saved right after
@@ -149,8 +149,8 @@ jobs:
       # the pinned Node `node --check` runs on, unpacked, and the npm cache
       # its `npm ci` installs node_modules from, which the build of the
       # platform's files runs for esbuild (crates/templates/bundle.rs,
-      # docs/pinned-node.md): the e2e's keys, which its first shard saves
-      # from master
+      # docs/pinned-node.md): the e2e's keys, which `e2e-build` saves from
+      # master
       - uses: actions/cache/restore@v4
         with:
           path: target/tools
@@ -170,26 +170,65 @@ jobs:
       # registry writes. The real image job is master-only.
       - run: cargo xtask image preview --dry-run --output "$RUNNER_TEMP/preview-image-plan.json"
 
+  # The e2e's build, once per run but a pull request's
+  # (.github/actions/e2e-build): the cell, the CLI and the suite, and the
+  # stub's images, their layers into the Actions cache. Every shard runs
+  # what it built (an artifact), where each built it all for itself before,
+  # 7 to 10 minutes apiece. It saves this commit's builds, the stub's layers
+  # and the tools on master's pushes, a proven one's too (its shards skip):
+  # later runs (master's next push, production's, a run by hand) and
+  # `deploy` restore master's newest. Never after `proven` fails.
+  e2e-build:
+    needs: proven
+    if: >-
+      ${{ !cancelled() && github.event_name != 'pull_request'
+      && (needs.proven.result == 'skipped' || needs.proven.result == 'success') }}
+    runs-on: ubuntu-latest
+    # a hang's guard, not a pace: about 4 minutes from the last master's
+    # cache, more when a push rebuilds more, and a new Rust release builds
+    # from nothing
+    timeout-minutes: 30
+    env:
+      # xtask/src/build.rs, WORKER_BUILD_VERSION
+      WORKER_BUILD_VERSION: 0.8.5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/e2e-build
+        with:
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
+      # what a shard runs, for shards that run: xtask (its debug info
+      # stripped: most of its 200 MB), the CLI, the suite and the built
+      # cell, in a tarball, as an artifact keeps no file's mode
+      - if: needs.proven.outputs.proven != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack/target/debug"
+          strip --strip-debug -o "$RUNNER_TEMP/pack/target/debug/xtask" target/debug/xtask
+          tar --zstd -cf "$RUNNER_TEMP/e2e-build.tar.zst" -C "$RUNNER_TEMP/pack" target/debug/xtask -C "$GITHUB_WORKSPACE" target/release/fragment target/release/fragment-e2e cell/build
+          ls -l "$RUNNER_TEMP/e2e-build.tar.zst"
+      - if: needs.proven.outputs.proven != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-build
+          path: ${{ runner.temp }}/e2e-build.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/5
     # on every run but a pull request's (master's push is the gate) and a
     # push whose tree a run proved (`proven`, which skips on a run by hand:
-    # `!cancelled()` keeps its skip from skipping this), and never after
-    # `proven` fails
-    needs: proven
+    # `!cancelled()` keeps its skip from skipping this), never after
+    # `proven` fails, and only on the run's build
+    needs: [proven, e2e-build]
     if: >-
-      ${{ !cancelled() && github.event_name != 'pull_request'
+      ${{ !cancelled() && github.event_name != 'pull_request' && needs.e2e-build.result == 'success'
       && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     # a hang's guard, not a pace: the slowest shard (`computers`'s,
-    # lanes/mod.rs SHARDS) takes about 16 minutes, 4 of them its build
-    # from the last master's cache. A push that rebuilds more takes
-    # longer (cc93c5ad4's build took 8 minutes, and 20 cut two shards off
-    # with no test failed), and a new Rust release builds from nothing.
-    timeout-minutes: 35
-    env:
-      # xtask/src/build.rs, WORKER_BUILD_VERSION
-      WORKER_BUILD_VERSION: 0.8.5
+    # lanes/mod.rs SHARDS) takes about 20 minutes
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -206,28 +245,62 @@ jobs:
           sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
           if [ -e /proc/sys/net/ipv6/conf/docker0 ]; then sudo sysctl -w net.ipv6.conf.docker0.disable_ipv6=1; fi
       - uses: actions/checkout@v4
-      # the caches, the stub image and the build (.github/actions/e2e-build);
-      # the first shard saves them on master's pushes
-      - id: build
-        uses: ./.github/actions/e2e-build
+      # the run's build (`e2e-build`), in place
+      - uses: actions/download-artifact@v4
         with:
-          save: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-          worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
+          name: e2e-build
+          path: ${{ runner.temp }}
+      - run: tar --zstd -xf "$RUNNER_TEMP/e2e-build.tar.zst"
+      # the pinned Node and the JavaScript caches, as the build restored
+      # them (.github/actions/e2e-build says what each holds)
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      - id: js
+        uses: actions/cache/restore@v4
+        with:
+          path: target/cache
+          key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
+      # the builder the computer images build in, and the Actions runtime
+      # its cache needs, handed to the images' step alone, as the build's
+      # are (.github/actions/e2e-build says why each)
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: runtime
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            if (process.env.ACTIONS_RUNTIME_TOKEN) core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            for (const name of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_URL', 'ACTIONS_CACHE_SERVICE_V2']) {
+              core.setOutput(name, process.env[name] ?? '');
+            }
+      # the images the shard's node builds as it boots, built ahead from the
+      # stub's layers `e2e-build` wrote to the Actions cache (read only
+      # here); none for a shard whose sections make no computer
+      - run: target/debug/xtask e2e --images-only --shard ${{ matrix.shard }}/5
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+          FRAGMENT_IMAGE_CACHE: type=gha,scope=e2e-stub
+          ACTIONS_RUNTIME_TOKEN: ${{ steps.runtime.outputs.ACTIONS_RUNTIME_TOKEN }}
+          ACTIONS_RESULTS_URL: ${{ steps.runtime.outputs.ACTIONS_RESULTS_URL }}
+          ACTIONS_CACHE_URL: ${{ steps.runtime.outputs.ACTIONS_CACHE_URL }}
+          ACTIONS_CACHE_SERVICE_V2: ${{ steps.runtime.outputs.ACTIONS_CACHE_SERVICE_V2 }}
       # one shard's sections on a fresh node; the run's scratch (each node
       # boot's log, the lanes' screenshots) is kept when a check fails, and
       # uploaded below
-      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/5
+      - run: target/debug/xtask e2e --no-build --shard ${{ matrix.shard }}/5
         env:
-          BUILDX_BUILDER: ${{ steps.build.outputs.builder }}
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           CHROME_BIN: /usr/bin/google-chrome
       # after the run, from any shard that shot a preview card: miniflare
       # fetches its Chrome for the first one during the run (the first
       # shard to save wins; the others find the key taken)
-      - if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.build.outputs.js-cache-hit != 'true' && hashFiles('target/cache/.wrangler/chrome/**/.miniflare-install-complete') != ''
+      - if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.js.outputs.cache-hit != 'true' && hashFiles('target/cache/.wrangler/chrome/**/.miniflare-install-complete') != ''
         uses: actions/cache/save@v4
         with:
           path: target/cache
-          key: ${{ steps.build.outputs.js-cache-key }}
+          key: ${{ steps.js.outputs.cache-primary-key }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -452,14 +525,14 @@ jobs:
       # its build does (xtask in target/debug, the cell's wasm32 builds, with
       # worker-build and its tools). Every input of each but save-if is the
       # e2e build's own (.github/actions/e2e-build), as the paths are part
-      # of a cache's version. Its builds are this commit's when its first
-      # shard saved them (a master push the e2e ran on; a proven push's
-      # `e2e-build` saves them beside this job, and so mostly after its
-      # restore), and their mtimes are made as there: the cell's
+      # of a cache's version. Its builds are this commit's when `e2e-build`
+      # saved them (a master push's: on a proven push it runs beside this
+      # job, and so mostly after its restore), and their mtimes are made
+      # as there: the cell's
       # crates are then all fresh, and the Wasm this ships is made from the
       # compile the e2e ran. On production they are master's newest (a
-      # branch reads the default branch's caches), as its shards save none,
-      # and a proven push runs none; what changed since then is rebuilt.
+      # branch reads the default branch's caches), as its build saves none;
+      # what changed since then is rebuilt.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: e2e-tools-worker-build-${{ env.WORKER_BUILD_VERSION }}
@@ -478,7 +551,7 @@ jobs:
             cell/target
           key: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-${{ github.sha }}
           restore-keys: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
-      # as e2e-shard's
+      # as the e2e build's (.github/actions/e2e-build)
       - run: |
           rustc --edition 2021 -O -o "$RUNNER_TEMP/stamp" xtask/src/stamp.rs
           "$RUNNER_TEMP/stamp" restore target/built-tree "$RUNNER_TEMP/stamp-state"
@@ -609,36 +682,13 @@ jobs:
       tag: ${{ needs.cli-version.outputs.tag }}
       sha: ${{ github.sha }}
 
-  # A master push whose shards skip (`proven`) still builds the e2e and
-  # saves it, as the first shard does on any other master push: later
-  # runs (master's next push, production's, a run by hand) restore
-  # master's newest build, the stub image's layers and the tools, and
-  # without this they built from the
-  # last master push that ran its shards (on 2026-10-30, about 160 s more
-  # for the stub's bridge and 100 s more of Rust in every shard). Nothing
-  # waits for it: `deploy` restores whatever is newest, as it did.
-  e2e-build:
-    needs: proven
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.proven.result == 'success' && needs.proven.outputs.proven == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      # xtask/src/build.rs, WORKER_BUILD_VERSION
-      WORKER_BUILD_VERSION: 0.8.5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/e2e-build
-        with:
-          save: true
-          worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
-
-  # The e2e's builds are kept one entry per master commit (`e2e-shard`'s
-  # first shard, or `e2e-build`), each about 0.5 GB of the repository's
+  # The e2e's builds are kept one entry per master commit (`e2e-build`'s),
+  # each about 0.5 GB of the repository's
   # 10 GB of caches, and a run restores the newest: after a master push's
   # shards or its `e2e-build`, every older entry is deleted. A job of its own, as deleting one needs `actions: write`,
   # which no job that runs the repo's code is given.
   prune:
-    needs: [e2e-shard, e2e-build]
+    needs: e2e-build
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

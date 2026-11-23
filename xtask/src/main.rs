@@ -658,24 +658,31 @@ fn e2e(args: &[String]) -> Result<()> {
         }
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
-    // CI's split: `--build-only` builds (and the cache is saved after it,
-    // so a red run still saves), then `--no-build` runs what it left
-    let build_only = args.iter().any(|a| a == "--build-only");
-    let no_build = args.iter().any(|a| a == "--no-build");
-    if build_only && no_build {
-        bail!("--build-only and --no-build are two steps of one run, not one");
+    // CI's split (ci.yml): `--build-only` builds once, in a job of its own
+    // (and the cache is saved after it, so a red run still saves); each
+    // shard's runner, given what it built, builds the images its node runs
+    // ahead (`--images-only`, from the Actions cache), then `--no-build`
+    // runs the shard
+    const STEPS: [&str; 3] = ["--build-only", "--images-only", "--no-build"];
+    let steps: Vec<&String> = args.iter().filter(|a| STEPS.contains(&a.as_str())).collect();
+    if steps.len() > 1 {
+        bail!("{} are steps of one run, one at a time", STEPS.join(", "));
     }
-    let suite_args: Vec<&String> = args.iter().filter(|a| *a != "--build-only" && *a != "--no-build").collect();
-    if build_only && !suite_args.is_empty() {
+    let step = steps.first().map(|s| s.as_str());
+    let suite_args: Vec<&String> = args.iter().filter(|a| !STEPS.contains(&a.as_str())).collect();
+    if step == Some("--build-only") && !suite_args.is_empty() {
         bail!("--build-only builds what every run needs, and takes no suite arguments");
+    }
+    if step == Some("--images-only") {
+        return build_images(&suite_args);
     }
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
-    if !no_build {
+    if step.is_none() {
         build_e2e(&suite_args)?;
     }
-    if build_only {
+    if step == Some("--build-only") {
         return Ok(());
     }
     run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
