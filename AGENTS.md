@@ -135,9 +135,10 @@ Put an evidence pack in the PR body and in your report:
 - **Gaps:** what you didn't verify and what could still go wrong. Never
   claim more than you checked.
 
-Then get a Codex review of the diff, one round. Only a bug a person would
-hit blocks: wrong money, lost or wrong data, a crash, a broken or slowed
-call, or a security hole. Fix those, and file anything else in Linear. A
+A Codex review of the diff then runs by itself when the PR opens and posts
+its verdict on the PR: don't start one, read it. One round. Only a bug a
+person would hit blocks: wrong money, lost or wrong data, a crash, a broken
+or slowed call, or a security hole. Fix those, and file anything else in Linear. A
 second round only checks the fixes, and there is no third.
 
 Keep PRs small and many. Ten small proven PRs land faster and safer than
