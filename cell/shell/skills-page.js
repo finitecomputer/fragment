@@ -10,11 +10,11 @@
 //
 // It reads the person's skills fragment (`skillsFragment`, made from the
 // blessed template when they have none): its listing, whose `optional/
-// hermes/<id>.on` files are the switches, and the release's catalog in it
-// (`catalog/hermes.json`, cargo xtask skills-catalog; one that no longer
-// follows the template has none, and shows the On tab alone). A switch on
-// an id the catalog no longer names stays in On, to be switched off. A
-// switch is one file
+// hermes/<id>.on` files are the switches. The library is the release's
+// catalog, which the shell publishes (`/__shell/optional-skills-hermes.json`,
+// cargo xtask skills-catalog), so a skills fragment that no longer follows
+// the template has it too. A switch on an id the catalog no longer names
+// stays in On, to be switched off. A switch is one file
 // written or removed (`POST /api/f/{name}/files`), so two pages switching
 // two skills never undo each other. The platform keeps the names alone:
 // our Hermes image installs each from its own copy within ten minutes
@@ -23,11 +23,12 @@
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `seg`, `skillsFragment`, `text` (a file's text: `api` reads JSON),
-// `openApp` and `openFiles`.
+// `releaseJson` (a file the shell publishes, as JSON), `openApp` and
+// `openFiles`.
 
 export const ON_PREFIX = "optional/hermes/";
 export const ON_SUFFIX = ".on";
-export const CATALOG = "catalog/hermes.json";
+export const CATALOG = "optional-skills-hermes.json";
 const MANAGED = /^skills\/(?:(.+)\/)?([^/]+)\/SKILL\.md$/;
 // managed skills' SKILL.md read at once, for their descriptions
 const READS_AT_ONCE = 6;
@@ -363,14 +364,13 @@ export function createSkillsPage(page, h) {
         any = true;
         out.push(heading(words(c), rows.length), ...rows.map(optionalRow));
       }
-      if (!skills.length) out.push(empty("The library isn't in this skills fragment: it no longer follows Fragment's skills template."));
-      else if (!any) out.push(empty(`No skills match “${query}”.`, button("Clear search", clear)));
+      if (!any) out.push(empty(`No skills match “${query}”.`, button("Clear search", clear)));
     }
     parts.list.replaceChildren(...out);
     refocus = null;
     if (focusing) takeFocus(focusing);
     focusing = null;
-    parts.note.hidden = !skills.length;
+    parts.note.hidden = false;
     parts.note.textContent = `The library is Hermes' optional skills (${got.catalog.hermes}), by Nous Research and their authors; Fragment doesn't write or review them. Switches apply to your Hermes agents. An agent's own skills are under Settings → Agents.`;
   }
 
@@ -443,11 +443,8 @@ export function createSkillsPage(page, h) {
       const name = await h.skillsFragment();
       if (mine === visit) fragment = name;
       await Promise.allSettled([...writes]);
-      // the catalog is the release's, beneath the fragment's files: one
-      // that no longer follows the template has none, and keeps the On tab
-      const [listing, read] = await Promise.all([h.api("GET", `/api/f/${h.seg(name)}/files`), h.api("GET", `/api/f/${h.seg(name)}/file?path=${encodeURIComponent(CATALOG)}`).catch((e) => (e?.status === 404 ? { skills: [] } : Promise.reject(e)))]);
+      const [listing, catalog] = await Promise.all([h.api("GET", `/api/f/${h.seg(name)}/files`), h.releaseJson(CATALOG)]);
       if (mine !== visit) return;
-      const catalog = read;
       if (!Array.isArray(catalog?.skills)) throw new Error("no catalog");
       got = { name, catalog, ...readListing(listing.files) };
       render();

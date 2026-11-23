@@ -40,6 +40,26 @@ attributes a record by its `principal`, never by what its body says. A
 turn belongs to the agent whose `turn.start` began it, and its later
 records count only from that agent.
 
+### Who wrote a record
+
+A record also says who wrote it, as the platform stamped it (`author`:
+docs/api.md, "Who wrote a record"). In a chat, or any fragment with a
+`chat` channel, whose app code writes records (`author: code`), those
+words are no one's, whatever `principal` they name:
+
+- They are heard as a message, credited to no one ("app code").
+- They answer no card or question, and stop and command nothing.
+- They start no routine on `tasks`.
+- An agent's notes tell them as "App code", never as its owner.
+- The chat's page counts none of them as anyone's answer to a card or a
+  question.
+
+What a person or an agent posts, a door relays and the platform writes
+keeps its principal's word. A record without the stamp (an older
+platform's, or one stored before it) reads as it did. The bridge reads
+the stamp off the record itself, so this asks the platform for nothing
+more (`images/bridge/src/records.rs`, `Record::by`).
+
 ## Turns
 
 A **turn** is what one agent does about one record. Its id is the first
@@ -262,7 +282,9 @@ a step posted again is the same record. A chat's helpers set
 
 `asker` may stop the turn. `agent` is the agent's identity. `life` is the
 bridge process that claims the turn. The record is the claim, "this life
-runs this turn" (docs/bridge.md, "State").
+runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
+wrote the message that started it ("Who wrote a record"): its asker is
+no one, whatever `asker` names. Older bridges write none.
 
 **`turn.step`**, part `<step>`, from 1: one tool call.
 

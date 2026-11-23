@@ -11,6 +11,7 @@ its home; everything that uses it reads it from there.
 |---|---|---|
 | The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, a read-only Workers Observability key (the operators' glance reads the account's Workers Logs with it: an account API token with Workers Observability Read and nothing else), each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
 | A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`), and removed when it installs other code (a fork: Paul, 2026-10-31) |
+| A SimpleX connector's inbox secret, as its door delivers with it | the connector's door (cell/door.mjs), in its Durable Object's own storage, unsealed, as a webhook's sender holds one: given by the connector's `connect`, filled at the egress, never told back | its owner, setting the connector's `SIMPLEX_DOOR_SECRET` and connecting again |
 | A person's own key for an `own` provider | their Vault, sealed (below; M16: a computer from before hands its own over once) | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
 | A person's secret for their agents (a token, a bot's, a Nostr key) | their Vault, a Durable Object of theirs, sealed (below) | the person alone, never an agent: `PUT /api/vault/{secret}` (docs/api.md, "A person's Vault"); or the platform's own code for them (`vault::put`: FIN-463's hand-off) |
 | A sign-in under way (its PKCE verifier) | sealed in the person's Vault (an own key's; one begun before the move, in their computer) or the registry (a connection's), until used or ten minutes pass | no one |
@@ -107,8 +108,12 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   https URL, method and body's SHA-256) in `Authorization: Nostr …`, and
   such a request carries no other placeholder.
 - **Echoes are hidden**: an answer to a request a Vault filled is read
-  whole (not an event stream, at most 8 MiB) and each value it echoes
-  named `{{name}}`, as a job's fetch names its own.
+  whole (text, at most 8 MiB) and each value it echoes named `{{name}}`,
+  as a job's fetch names its own; one that streams as it is made (an event
+  stream, newline-delimited JSON, audio, video, an image, octet-stream) is
+  named as it streams, each value's own bytes. The operator's keys on the
+  request are named first, in a pass of their own, so a value its person
+  chose never cuts into one (`secrets::redact_passes`).
 - **Their own keys are its too** (M16), each its own kind (Paul,
   2026-11-18): one per `own` provider of the catalog, used by every agent
   of theirs not narrowed from it, as before. Its person sets or removes

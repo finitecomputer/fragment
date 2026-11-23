@@ -10,7 +10,6 @@
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
-pub mod access;
 pub mod across;
 pub mod alarm;
 pub mod address;
@@ -45,7 +44,6 @@ pub mod glob;
 pub mod governance;
 pub mod icon;
 pub mod inbox;
-pub mod key_hour;
 pub mod ledger;
 pub mod levers;
 pub mod listed;
@@ -64,6 +62,7 @@ pub mod own_signin;
 pub mod connection_accounts;
 pub mod connection_signin;
 pub mod org;
+pub mod permit;
 pub mod price;
 pub mod ratelimit;
 pub mod retention;

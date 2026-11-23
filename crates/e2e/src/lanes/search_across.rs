@@ -218,7 +218,7 @@ pub fn search_across(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "mcp": answers }),
     );
 
-    // ---- an agent names only its own owner in `for` (access::may_act_for):
+    // ---- an agent names only its own owner in `for` (permit::may_act_for):
     // naming anyone else is refused before any fragment is asked
     let hand = fragment_nip98::Keys::generate();
     let reg = "/api/identities";
