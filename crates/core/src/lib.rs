@@ -65,6 +65,7 @@ pub mod permit;
 pub mod price;
 pub mod ratelimit;
 pub mod retention;
+pub mod run_retention;
 pub mod registry;
 pub mod relay;
 pub mod release;

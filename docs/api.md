@@ -1793,7 +1793,10 @@ overdraft every trigger's run is `blocked`. A deploy dropping an operation
 drops its pause. A cron tick whose last run still goes is skipped. The
 inbox's pending records are its unfinished runs (`inbox.rejected` past
 `INBOX_PENDING_MAX`). Finished runs are kept `RUN_RETENTION_MS` (at most
-`RUNS_KEPT`).
+`RUNS_KEPT`), except that a run with a call id (a job's call, a record's
+trigger) outlives the count for the retry window, so a retry never starts
+it twice: past the count it keeps only its id, status and input hash, its
+input, output and error shed, and it is not replayed (400).
 
 ### Scheduled records
 

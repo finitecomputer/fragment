@@ -317,7 +317,9 @@ pub mod limits {
     const _: () = assert!(UPLOAD_MAX_BYTES_DEFAULT <= BLOB_MAX_BYTES);
     /// Files one chat message carries, at most (docs/chat-records.md).
     pub const FILES_PER_MESSAGE: u32 = 8;
-    /// Finished runs are kept this long, and at most this many.
+    /// Finished runs are kept this long, and at most this many, but for a
+    /// run that guards a call, kept past the count for the retry window
+    /// (core `run_retention`).
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
     /// Search (docs/api.md, Search): the text of one record a fragment

@@ -55,7 +55,7 @@ use fragment_core::inbox::Answer;
 use fragment_core::manifest::{InboxCheck, InboxDecl};
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
-use fragment_core::{cron::Cron, egress, glob, npub};
+use fragment_core::{cron::Cron, egress, glob, npub, run_retention};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, Author, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
@@ -1557,12 +1557,22 @@ impl FragmentCell {
         }
     }
 
-    /// From the alarm: finished runs past their retention go.
+    /// From the alarm: finished runs past their retention go, and past the
+    /// count kept, all but those that guard a call a retry may still repeat
+    /// (`run_retention`): those keep only their guard until their window
+    /// ends, so a retry never starts a run twice.
     pub(crate) fn trim_runs(&self) -> CellResult<()> {
+        let now = js::now_ms();
+        let window_start = now - crate::channels::retry_horizon_ms();
         self.exec(
-            "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
-            vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
+            run_retention::RUNS_TRIM_SQL,
+            vec![
+                SqlStorageValue::Integer(now - limits::RUN_RETENTION_MS),
+                SqlStorageValue::Integer(limits::RUNS_KEPT),
+                SqlStorageValue::Integer(window_start),
+            ],
         )?;
+        self.exec(run_retention::RUNS_SHED_SQL, vec![SqlStorageValue::Integer(window_start), SqlStorageValue::Integer(limits::RUNS_KEPT)])?;
         // a run's charges, what its steps bought and asked for go with it (the ledger keeps the month's usage)
         self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
         self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
@@ -1643,16 +1653,13 @@ impl FragmentCell {
     pub(crate) async fn replay(&self, caller: &Caller, body: Replay) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
-        let rows = self.rows(
-            "UPDATE runs SET status = 'queued', attempt = attempt + 1, error = NULL, output = NULL, finished_at = NULL, launched_at = NULL
-             WHERE id = ? AND status IN ('held', 'blocked') RETURNING op, attempt",
-            vec![SqlStorageValue::Integer(body.run)],
-        )?;
+        let rows = self.rows(run_retention::RUN_REPLAY_SQL, vec![SqlStorageValue::Integer(body.run)])?;
         let Some(row) = rows.first() else {
-            let exists = !self.rows("SELECT id FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(body.run)])?.is_empty();
-            return Err(match exists {
-                true => CellError::invalid(format!("run #{} is not held or blocked", body.run)),
-                false => CellError::new(ErrorCode::NotFound, format!("no run #{}", body.run)),
+            let found = self.rows("SELECT error FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(body.run)])?;
+            return Err(match found.first() {
+                Some(r) if r["error"].as_str() == Some(run_retention::SHED_NOTE) => CellError::invalid(format!("run #{}: {}", body.run, run_retention::SHED_NOTE)),
+                Some(_) => CellError::invalid(format!("run #{} is not held or blocked", body.run)),
+                None => CellError::new(ErrorCode::NotFound, format!("no run #{}", body.run)),
             });
         };
         let by = npub::display(self.caller_id(caller)?);
