@@ -5,9 +5,10 @@
 //! locked one. Both hold the tree's lock to master's too, step for step
 //! (`host::lost`): a released step edited, its line deleted by hand and
 //! locked again, passes the tree's own check, and not master's. Master is
-//! `FRAGMENT_SCHEMA_BASE` (a git ref: CI's, a pull request's base or what
-//! a push to master moved it from), or else `fragment-rs/master` or
-//! `origin/master`, whichever git knows.
+//! `FRAGMENT_SCHEMA_BASE` (a git ref: CI's, a pull request's base, what
+//! a push to master moved it from, or for a run by hand where its branch
+//! last took master), or else `fragment-rs/master` or `origin/master`,
+//! whichever git knows.
 
 use std::path::Path;
 use std::process::Command;
