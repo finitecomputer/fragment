@@ -66,13 +66,15 @@ fn end_of(api: &Api, door: &str) -> Result<(bool, Value)> {
     Ok((r.status == 410, lever(api, door, "files", json!({}))?["files"].clone()))
 }
 
-/// Its end, once it has (within `within`): its files left.
-fn ended(api: &Api, door: &str, within: Duration) -> Result<(bool, Value)> {
+/// Its end, once it has and its files are gone (within `within`): whether
+/// it ended, and its files left. A door refuses its asks (410) from the
+/// moment its end begins, before its files are deleted.
+pub(super) fn ended(api: &Api, door: &str, within: Duration) -> Result<(bool, Value)> {
     let t0 = Instant::now();
     // bounded by `within`
     loop {
         let (gone, files) = end_of(api, door)?;
-        if gone || t0.elapsed() >= within {
+        if (gone && files.as_array().is_some_and(Vec::is_empty)) || t0.elapsed() >= within {
             return Ok((gone, files));
         }
         std::thread::sleep(Duration::from_millis(250));
