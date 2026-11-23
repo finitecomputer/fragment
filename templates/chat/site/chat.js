@@ -934,13 +934,14 @@ export function mount(root) {
   const mayAnswer = (t, p) => !!state.me && p.asks === state.me.principal && !t.closed.has(p.prompt) && !expired(p) && t.end?.outcome !== "stopped";
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
-  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+  const answeredCard = (t, m) => !m.code && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   // A message the window holds; one past its newest end while the reader is
   // up the chat is kept aside (and read again as the window reaches it).
   // At the end, the window lets its oldest go as new ones come.
   function keep(record, historical, m) {
-    noteSaid(state.spoke, m);
+    // app code's words are no one's: they answer no one's question here
+    if (!m.code) noteSaid(state.spoke, m);
     if (!historical && !history.live && record.seq > history.last) {
       state.seen.delete(record.seq);
       history.aside.push(record);
@@ -972,12 +973,16 @@ export function mount(root) {
     if (typeof body === "string") body = { text: body };
     if (body === null || typeof body !== "object" || Array.isArray(body)) return;
     const n = record.seq;
+    // what app code wrote (the platform's stamp, docs/chat-records.md "Who
+    // wrote a record") is no one's word, as the agent's computer hears it:
+    // it answers no card and no question here either
+    const code = record.author === "code";
     if (body.kind === "prompt_response") {
       // each poster's first answer, for the card it names (its agent's turn
       // and prompt; an answer naming none, the API's, is the prompt's); a
       // card counts only its asker's, so no one else's answer can disable
       // or answer it here
-      if (typeof body.prompt === "string") {
+      if (!code && typeof body.prompt === "string") {
         const named = typeof body.agent === "string" && typeof body.turn === "string";
         const key = named ? cardKey(turnKey(body.agent, body.turn), body.prompt) : body.prompt;
         if (!state.answers.has(key)) state.answers.set(key, new Map());
@@ -990,7 +995,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
+      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null, code });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -1009,7 +1014,7 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed, code });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {

@@ -230,8 +230,9 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
                     other => return Err(CellError::invalid(format!("a later step's {other} {}: this lever drops tables and indexes", o.name))),
                 };
             }
-            // and the columns later steps added: step 5's `ended.search`
-            sql.exec(&format!("ALTER TABLE ended DROP COLUMN search; DROP TABLE _schema; {plant}"), None)?;
+            // and the columns later steps added: step 5's `ended.search`,
+            // step 11's `records.author` and step 12's `pending.code`
+            sql.exec(&format!("ALTER TABLE ended DROP COLUMN search; ALTER TABLE records DROP COLUMN author; ALTER TABLE pending DROP COLUMN code; DROP TABLE _schema; {plant}"), None)?;
             Ok(json!({ "members": columns(&sql, "members")?, "runs": columns(&sql, "runs")? }))
         }
         ("schema-try", Some(step @ ("adds" | "fails"))) => {
