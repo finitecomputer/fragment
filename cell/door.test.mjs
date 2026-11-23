@@ -151,7 +151,7 @@ function door({ noDoors = false } = {}) {
   // its connector's life over (deleted, wiped, other code)
   d.end = (name = DOOR, last = false) => call("POST", "/door/end", {}, JSON.stringify({ door: name, final: last }));
   // the same object started again over its storage (an eviction)
-  d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
+  d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
   return d;
 }
