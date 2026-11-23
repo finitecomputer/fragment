@@ -192,7 +192,8 @@ informational. The fee is AI Gateway's on credits, so it applies to
   first charge that is for the call and whose number its answer says is
   the call's usage, `<provider>:<unit>`; else the row's own price a call,
   if it names one; else nothing, logged `pipe.uncharged` (Google Places:
-  kept uncharged, 2026-11-20). Only a 2xx is charged: a call its vendor
+  kept uncharged, 2026-11-20, and held to 120 calls an hour a computer,
+  `catalog::DEFAULT_CALLS_AN_HOUR`). Only a 2xx is charged: a call its vendor
   refused made nothing. A status poll that repeats a running total (a
   crawl's), or a read that says a cost again (a stored response, a
   video's poll), is for no charge. A release whose book lacks a unit

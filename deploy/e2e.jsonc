@@ -84,7 +84,10 @@
         "GET /v1/monitors", "GET /v1/skills"] },
     { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"],
       "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }],
-      "env": ["GOOGLE_PLACES_API_KEY"], "key": "fragment-google-places-api-key" },
+      "env": ["GOOGLE_PLACES_API_KEY"], "key": "fragment-google-places-api-key",
+      // the book's 120 calls an hour (catalog DEFAULT_CALLS_AN_HOUR), as few
+      // as the computers lane reaches
+      "calls_an_hour": 4 },
     { "name": "xai", "kind": "operator", "hosts": ["api.x.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },

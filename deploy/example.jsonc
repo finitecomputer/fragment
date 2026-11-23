@@ -315,7 +315,9 @@
   // ["METHOD /path", …], "header"?|"json"?, "unit", "price": {"micros",
   // "per"}}`, the whole number of units its answer names in that header or
   // JSON pointer, or one, the first that is for the call and says it.
-  // Name them only once a release that knows the field is deployed.
+  // Name them only once a release that knows the field is deployed. An
+  // operator row's `calls_an_hour` holds each computer to that many calls
+  // on its key an hour (Google Places: 120 unless it names its own).
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
