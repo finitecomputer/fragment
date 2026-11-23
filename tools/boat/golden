@@ -28,7 +28,10 @@ case "${1:-}" in
 esac
 
 # The saved snapshot's id, or nothing when there is none yet.
-snapshot_id=$("$B" snapshots --limit 1 --json | python3 -I -c '
+# Boat answers a refused call (an API key without the action, say) on
+# stdout: show it rather than end silently.
+listing=$("$B" snapshots --limit 1 --json 2>&1) || { echo "tools/boat/golden: boat snapshots failed: $listing" >&2; exit 1; }
+snapshot_id=$(printf '%s' "$listing" | python3 -I -c '
 import json, sys
 ids = [s.get("snapshotId", "") for s in json.load(sys.stdin).get("named", [])
        if s.get("name") == sys.argv[1] and s.get("status") == "ready"]
@@ -38,7 +41,8 @@ print(ids[0] if ids else "")
 if [ $force = 0 ]; then
   master=$(git ls-remote "$REMOTE" refs/heads/master | cut -f1)
   [ -n "$master" ] || { echo "tools/boat/golden: no master at $REMOTE" >&2; exit 1; }
-  warm=$("$B" snapshot tree "$snapshot_id" --json | python3 -I -c '
+  tree=$("$B" snapshot tree "$snapshot_id" --json 2>&1) || { echo "tools/boat/golden: boat snapshot tree failed: ${tree:0:500}" >&2; exit 1; }
+  warm=$(printf '%s' "$tree" | python3 -I -c '
 import json, sys
 mark = ".boat-keep/warm-at/"
 found = [e["path"][len(mark):] for e in json.load(sys.stdin).get("entries", [])

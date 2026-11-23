@@ -21,6 +21,8 @@ for line in sys.stdin:
         reply = json.loads(line)
     except ValueError:
         continue
+    if reply.get("error"):
+        sys.stderr.write("boat: %s\n" % reply["error"])
     found = reply.get("id") or (reply.get("sandbox") or {}).get("id")
     if isinstance(found, str) and found.startswith("bx_"):
         ids.append(found)
