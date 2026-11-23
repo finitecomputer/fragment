@@ -8,6 +8,10 @@
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
+# linux/amd64 is Cloudflare's. linux/arm64 is a self-hosted box's on arm64
+# (an Apple silicon Mac's Linux VM, docs/self-host.md): Hermes' image is
+# published for both, and each download below is pinned for each
+# (`downloads`, picked by BuildKit's TARGETARCH).
 #
 # Its layers, by how often each changes: a deploy pushes, and a computer's
 # first start after it pulls, only the layers that changed (a layer is
@@ -110,14 +114,51 @@ RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
+# The pinned binaries the image takes from their releases, for the
+# architecture it is built for (TARGETARCH, BuildKit's), each by the
+# release's own SHA-256 (GitHub's digest of the asset). What each is, and
+# why, is said where it is installed.
+# - simplex-chat v7.0.3: Ubuntu 24.04's x86_64 build; Ubuntu 22.04's for
+#   aarch64, the only Linux arm64 build the release has.
+# - cua-driver-rs 0.28.3: its Linux binary tarball.
+# - gws 0.22.5: musl's x86_64 build; glibc's for aarch64, the only Linux
+#   arm64 build the release has (the base is Debian's).
+FROM alpine:3.20 AS downloads-amd64
+ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
+ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /cua-driver.tgz
+ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /gws.tgz
+FROM alpine:3.20 AS downloads-arm64
+ADD --checksum=sha256:91f332edc813cab78a848da7ba75ed91bcb8d09abf1fc92eca74330dc29ec970 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-22_04-aarch64 /simplex-chat
+ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67d0f83b https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-arm64-binary.tar.gz /cua-driver.tgz
+ADD --checksum=sha256:94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz /gws.tgz
+FROM downloads-${TARGETARCH} AS downloads
+
+# sandbox-shim, the Sandbox SDK's in-container half (its DirectoryBackup's
+# saves and restores run through it): Cloudflare's own build on amd64, from
+# its sandbox image at 1.0.0, the SDK the cell runs; on arm64, which that
+# image is not published for, the same source at the same commit (the
+# image's revision label), built as Cloudflare builds it (its
+# images/sandbox-tools/Dockerfile: Alpine's Rust, statically linked).
+# The source is that commit's archive, pinned by hash like every remote
+# input here (its files are the commit's tree, checked 2026-11-16).
+FROM docker.io/cloudflare/sandbox:1.0.0 AS sandbox-shim-amd64
+FROM rust:1.99-alpine AS sandbox-shim-arm64
+ADD --checksum=sha256:7ef2580bebc5753eb2a974ec1345b68dfc76b5517ca6c379be7a2a4cc332341a https://github.com/cloudflare/sandbox-sdk/archive/f9e972a14123bef3b93e9bb337bab6e83419fe7e.tar.gz /sandbox-sdk.tgz
+RUN mkdir /src && tar -xzf /sandbox-sdk.tgz -C /src --strip-components=1
+WORKDIR /src
+RUN --mount=type=cache,id=sandbox-shim-registry,target=/usr/local/cargo/registry \
+    cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
+ && install -D -m 0755 target/release/sandbox-shim /usr/local/bin/sandbox-shim
+FROM sandbox-shim-${TARGETARCH} AS sandbox-shim
+
 # SimpleX's core (the bridge's simplex/run.rs: one per agent its owner
 # links, run only while the computer is always on): simplex-chat v7.0.3,
-# the latest stable release on 2026-10-22, its Ubuntu 24.04 x86_64 binary
-# by the release's own SHA-256. It runs on the base's Debian trixie with the
-# libraries the base already has (libgmp, libffi, libssl, zlib: the
-# bridge's SimpleX lab, tests/simplex.rs). It reports itself as v7.0.0.12.
+# the latest stable release on 2026-10-22 (`downloads`). It runs on the
+# base's Debian trixie with the libraries the base already has (libgmp,
+# libffi, libssl, zlib: the bridge's SimpleX lab, tests/simplex.rs). It
+# reports itself as v7.0.0.12.
 FROM alpine:3.20 AS simplex
-ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
+COPY --from=downloads /simplex-chat /simplex-chat
 RUN chmod 0755 /simplex-chat
 
 # noVNC, the screen page's RFB client (pinned by hash).
@@ -131,20 +172,24 @@ FROM ${HERMES} AS hermes
 # them, and checks it does. Builder trace context changes per step and is
 # not upstream runtime configuration; never capture it into the image.
 RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=sandbox-shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+# it runs on this architecture: with no command it says so (a binary of
+# another architecture cannot, and every save of /data would fail)
+RUN test "$(/usr/local/bin/sandbox-shim 2>&1)" = 'sandbox-shim: missing command'
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's; Hermes' image has none,
 # and its PM's pin is older), named to Hermes by HERMES_CUA_DRIVER_CMD
-# below, which Hermes takes over its PM's.
-ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
+# below, which Hermes takes over its PM's (`downloads`).
+COPY --from=downloads /cua-driver.tgz /tmp/cua-driver.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
  && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
 # gws, Google's Workspace CLI (github.com/googleworkspace/cli), pinned. Its
 # wrapper hands it the agent's Google connection: the placeholder in
 # GOOGLE_OAUTH_ACCESS_TOKEN as its access token (GOOGLE_WORKSPACE_CLI_TOKEN),
-# which the computer's egress swaps for the real token on Google's hosts.
-ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /tmp/gws.tgz
+# which the computer's egress swaps for the real token on Google's hosts
+# (`downloads`).
+COPY --from=downloads /gws.tgz /tmp/gws.tgz
 RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.tgz \
  && printf '%s\n' '#!/bin/sh' '# gws with the agent'"'"'s Google connection (images/hermes/Dockerfile).' \
       '[ -n "$GOOGLE_WORKSPACE_CLI_TOKEN" ] || [ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ] || export GOOGLE_WORKSPACE_CLI_TOKEN="$GOOGLE_OAUTH_ACCESS_TOKEN"' \
@@ -177,11 +222,17 @@ RUN apt-get -o Acquire::Retries=3 update \
 # (sqlite3). Upstream puts its newer SQLite library in /usr/local/lib,
 # which the loader finds first for every program, and Debian's shell
 # refuses a library not its own ("SQLite header and source version
-# mismatch"), so `sqlite3` by name runs it with Debian's library first.
-COPY --chmod=755 <<'EOF' /usr/local/bin/sqlite3
+# mismatch"), so `sqlite3` by name runs it with Debian's library first: its
+# multiarch directory, named for the machine the image is built for (Debian
+# names both of ours by the kernel's machine name).
+RUN <<'EOF'
+set -eu
+cat > /usr/local/bin/sqlite3 <<WRAPPER
 #!/bin/sh
 # Debian's sqlite3 with Debian's SQLite library (images/hermes/Dockerfile).
-LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec /usr/bin/sqlite3 "$@"
+LD_LIBRARY_PATH="/usr/lib/$(uname -m)-linux-gnu\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" exec /usr/bin/sqlite3 "\$@"
+WRAPPER
+chmod 0755 /usr/local/bin/sqlite3
 EOF
 RUN DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends unzip zip jq sqlite3 \
  && unzip -v > /dev/null && zip -v > /dev/null && jq --version \
@@ -626,9 +677,15 @@ export NODE_DISABLE_COMPILE_CACHE=1
 browsers=/usr/local/lib/node_modules/playwright/node_modules/playwright-core/browsers.json
 rev() { /usr/local/bin/node -p "require('$browsers').browsers.find(b => b.name === '$1').revision"; }
 # Chromium's two names, and FFmpeg's (which `install chromium` brings, for
-# a page's video: the image's own, libvpx's VP8 and MJPEG in it)
-for link in "chromium-$(rev chromium)/chrome-linux64/chrome /opt/fragment/bin/chromium" \
-  "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-linux64/chrome-headless-shell /opt/fragment/bin/chromium" \
+# a page's video: the image's own, libvpx's VP8 and MJPEG in it), each where
+# Playwright looks on this architecture (its registry's EXECUTABLE_PATHS)
+case "$(uname -m)" in
+  x86_64) arch=linux64 ;;
+  aarch64) arch=linux-arm64 ;;
+  *) echo "Playwright's browser directories are named here for x86_64 and aarch64, not $(uname -m)" >&2; exit 1 ;;
+esac
+for link in "chromium-$(rev chromium)/chrome-$arch/chrome /opt/fragment/bin/chromium" \
+  "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-$arch/chrome-headless-shell /opt/fragment/bin/chromium" \
   "ffmpeg-$(rev ffmpeg)/ffmpeg-linux /usr/local/bin/ffmpeg"; do
   at="${link% *}"
   mkdir -p "$PLAYWRIGHT_BROWSERS_PATH/${at%/*}"
