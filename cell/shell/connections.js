@@ -1,6 +1,7 @@
 import { KIND } from "./frame-messages.js";
 import { icon } from "./icons.js";
 import { providerMark } from "./provider-marks.js";
+import { closeOnOutsidePress } from "./dialog.js";
 
 // A provider's name for people: the platform's (`ProviderView.name`), or
 // its id where an older release answered without one (a deploy going out,
@@ -561,9 +562,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     inner.append(block);
     sheet.append(top, inner);
     // closed by its X, Escape or a press outside it (its backdrop)
-    sheet.onclick = (e) => {
-      if (e.target === sheet) sheet.close();
-    };
+    closeOnOutsidePress(sheet);
     sheet.addEventListener("close", () => {
       // (not one a reload took away: its replacement is shown)
       if (openSheet?.provider === p.provider && sheet.isConnected) openSheet = null;
@@ -890,10 +889,11 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
 // it is set up; bound to another meanwhile (its owner, elsewhere), kept as
 // theirs; not bound, deleted; unreadable, kept (its row finds it once its
 // door reads). So a press never deletes one it could not account for.
-export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load }) {
+export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load }) {
   const DOOR = "telegram";
   const TITLE = "Telegram";
   const SETUP = "/setup.html";
+  const BOT_KEY = "TELEGRAM_BOT_TOKEN";
   // each read connector's door by its name ({door, agent}, or null), as the
   // latest read says; null while it has not answered whole
   let doors = null;
@@ -931,8 +931,35 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
     const vault = await api("GET", "/api/vault").then((v) => v.secrets ?? [], () => []);
     const bot = vault.find((v) => v.hosts?.length === 1 && v.hosts[0] === "api.telegram.org" && v.agents?.includes(agent));
     const src = bot ? `${SETUP}?vault=${encodeURIComponent(bot.name)}` : SETUP;
-    openSetup({ pressed, src: framed(name, src), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+    const frame = frameOf(framed(name, src), `${TITLE} setup`, name);
+    const opened = openSetup({ pressed, src: framed(name, src), name, agent, frame, title: TITLE, onClose: () => { offers.delete(frame); refreshTelegram(true); } });
+    // the offer its page's Use it asks the shell to move (`onVaultMove`)
+    if (opened && bot) offers.set(frame, { name, vault: bot.name, hosts: bot.hosts });
   }
+  // Each setup frame's offer: the Vault bot Settings found for its agent
+  // and the connector it opened. A page may not move a Vault secret itself
+  // (`fromVault` on `__secrets`: the cell refuses it, members.rs
+  // `put_secret`), since a page runs its authors' code with its visitor's
+  // session; so its Use it asks here (`KIND.vaultMove`), and the
+  // shell moves only what it offered that frame, into that connector,
+  // toward the Vault's own hosts. The page names nothing it could change.
+  const offers = new Map();
+  const onVaultMove = async (e) => {
+    if (e.data?.fragment !== KIND.vaultMove) return;
+    const frame = [...offers.keys()].find((f) => f.contentWindow === e.source);
+    const offer = frame && offers.get(frame);
+    if (!offer || e.origin !== originAt(offer.name)) return;
+    const reply = { fragment: KIND.vaultMove, nonce: e.data.nonce, ok: false };
+    try {
+      await api("PUT", `/api/f/${seg(offer.name)}/secrets/${BOT_KEY}`, { fromVault: offer.vault, hosts: offer.hosts });
+      reply.ok = true;
+    } catch (err) {
+      reply.status = err.status;
+      reply.error = err.message;
+    }
+    frame.contentWindow?.postMessage(reply, e.origin);
+  };
+  addEventListener("message", onVaultMove);
   // Its binding, as `POST …/door` answers or, its answer lost, as its door
   // reads: the binding to `agent`; a refusal, or no binding, throws (the
   // connector deleted), and so do a read that fails and a binding to

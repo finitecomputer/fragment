@@ -386,11 +386,9 @@ final class Library {
     /// A chat of the person's still titled `untitled` that has a message is
     /// titled from its first message with words, as the web titles it
     /// (cell/shell/shell.js `titleFromFirst`): its first line's words, cut
-    /// to `titleMax` characters; one its manifest no longer titles so keeps
-    /// its name. Once per chat a session, unless it had no words to take yet.
-    /// As the web's, the check is of the manifest read, not the write: a
-    /// rename landing between them is overwritten (last writer wins), as
-    /// `POST files` takes no expectation of what main holds.
+    /// to `titleMax` characters, set only while it is still untitled (the
+    /// face's `was`: a rename made meanwhile is refused, 409, and kept).
+    /// Once per chat a session, unless it had no words to take yet.
     static let untitled = "New chat"
     static let titleMax = 48
     private func titleUntitled(_ api: FragmentAPI) async {
@@ -400,9 +398,10 @@ final class Library {
                 struct Page: Decodable { let records: [ChannelRecord] }
                 let page: Page = try await api.request("api/f/\(chat.name)/channels/chat", query: [URLQueryItem(name: "after", value: "0"), URLQueryItem(name: "limit", value: "20")])
                 guard let said = Self.firstSaid(page.records) else { titling.remove(chat.name); continue }
-                if try await api.retitle(chat, exactly: Self.title(from: said), from: Self.untitled, message: "its title, from its first message") {
-                    listChanged(api)
-                }
+                try await api.retitle(chat, exactly: Self.title(from: said), was: Self.untitled)
+                listChanged(api)
+            } catch APIError.refused {
+                // renamed meanwhile (409), or refused for good: not asked again this session
             } catch { titling.remove(chat.name) }
         }
     }
@@ -552,6 +551,10 @@ struct FragmentRoot: View {
         }
         .task(id: scenePhase) { if scenePhase == .active { await connection.validate() } }
     }
+    /// Your Apps' +: Home, its words already asking to build one.
+    private func startApp() {
+        showingApps = false; library.home.text = "I want to build an app"; page = .launcher
+    }
     private func resetNavigation() {
         ImageCache.shared.removeAll()
         BlobStore.shared.removeAll()
@@ -567,8 +570,9 @@ struct FragmentRoot: View {
             // as the web's band is over every chat and Settings: one band,
             // never one per page.
             VStack(spacing: 0) {
+                // its notices glass, as iOS's banners are, over what the page
+                // beneath has (below: Home's wallpaper meets it without a seam)
                 NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
-                    .background(FragmentStyle.background.ignoresSafeArea(edges: .top))
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
@@ -578,6 +582,18 @@ struct FragmentRoot: View {
                             .toolbar {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
+                                }
+                                // Home's name is a glass button, as its neighbors are: Settings
+                                if page == .launcher {
+                                    ToolbarItem(placement: .principal) {
+                                        // the center gets no toolbar glass of its own: drawn as its neighbors'
+                                        Button { page = .settings } label: {
+                                            Text(title).font(.headline).padding(.horizontal, 16).frame(height: 44)
+                                                .glassEffect(.regular.interactive(), in: .capsule)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityHint("Opens Settings").accessibilityIdentifier("homeSettings")
+                                    }
                                 }
                                 ToolbarItemGroup(placement: .topBarTrailing) {
                                     // a chat has no New chat of its own: the sidebar's starts one
@@ -590,10 +606,15 @@ struct FragmentRoot: View {
                                 }
                             }
                             .navigationDestination(isPresented: $showingApps) {
-                                AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
+                                AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
                             }
                     }
+            }
+            // behind the notices and the page alike: on Home the whole window's
+            // wallpaper, which Home's own lines up with, so it shows behind them
+            .background {
+                if page == .launcher { DesktopWallpaper() } else { FragmentStyle.background.ignoresSafeArea() }
             }
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
@@ -665,7 +686,7 @@ struct FragmentRoot: View {
                 ContentUnavailableView("This chat isn’t in your list", systemImage: "bubble.left.and.bubble.right")
             }
         case .history: HistoryView(library: library, api: api, open: { open($0) })
-        case .apps: AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
+        case .apps: AppsLibraryView(library: library, api: api, open: { openedApp = $0 }, startApp: { startApp() })
         case .settings: SettingsView(library: library, api: api, connect: { showingConnection = true }, open: { open($0) })
         }
     }

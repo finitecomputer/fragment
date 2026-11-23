@@ -51,7 +51,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, SetRole,
+    SetVisibility, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -63,6 +64,7 @@ use crate::ask_registry;
 use crate::auth::{self, enc, esc};
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{FaceOf, Named};
 use crate::js;
 use crate::registry::calls::{self, Profile};
 use crate::registry::invites::{AnswerInvite, InvitesFor};
@@ -230,7 +232,8 @@ pub(crate) fn sheet_html(sheet: &str, title: &str, body: &str) -> String {
 const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classList.add(\"framed\")</script>";
 
 /// A page on the platform's origin, in the onboarding's look: the base
-/// sheet and platform-pages.css over it, and the pointer-following rim's
+/// sheet and platform-pages.css over it, in the platform's type
+/// (fonts.css), and the pointer-following rim's
 /// script (platform-pages.js, a module: it waits for the page, and nothing
 /// waits for it), each linked by its version and kept by the browser
 /// (shell.rs `versioned`); the logo only where it shows (lazy: a framed
@@ -238,9 +241,10 @@ const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classL
 pub(crate) fn platform_html(title: &str, body: &str) -> String {
     use crate::shell::versioned;
     let head = format!(
-        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
+        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
          <div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\" loading=\"lazy\"></div>",
         versioned("sheet.css"),
+        versioned("fonts.css"),
         versioned("platform-pages.css"),
         versioned("platform-pages.js"),
     );
@@ -306,29 +310,24 @@ pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &
 /// A fragment's handler at `inner`, asked as the signed-in person: its
 /// answer, read from its bytes once as `T` (`IgnoredAny`: only whether it
 /// answered), or its refusal as it made it.
-pub(crate) async fn ask<T: DeserializeOwned>(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<T> {
+pub(crate) async fn ask<T: DeserializeOwned>(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<String>) -> CellResult<T> {
     let bytes = answered(env, url, name, who, method, inner, body).await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{inner}'s answer: {e}")))
 }
 
+/// A request's body, as JSON.
+fn body(value: &impl serde::Serialize) -> Option<String> {
+    Some(serde_json::to_string(value).expect("a request's body serializes"))
+}
+
 /// `ask`'s round trip, one copy for every answer's type: its 200's bytes,
 /// or its refusal.
-async fn answered(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<Vec<u8>> {
+async fn answered(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<String>) -> CellResult<Vec<u8>> {
     // the page's own query string is nothing the fragment reads
     let mut at = url.clone();
     at.set_query(None);
-    let headers = Headers::new();
-    Routed { name: name.to_string(), url: at, signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
-    if body.is_some() {
-        headers.set("content-type", "application/json")?;
-    }
-    let mut init = RequestInit::new();
-    init.with_method(method).with_headers(headers);
-    if let Some(b) = body {
-        init.with_body(Some(b.to_string().into()));
-    }
-    let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
-    let mut resp = crate::routed::send(env, "FRAGMENT", name, req).await?;
+    let routed = Routed { name: name.to_string(), url: at, signed: Some(who.clone()), credential: None };
+    let mut resp = routed.ask(env, method, inner, body.as_deref(), None).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
     if status == 200 {
@@ -346,6 +345,7 @@ struct SheetStatus {
     title: Option<String>,
     view_token: Option<String>,
     reach: Option<bool>,
+    npub: String,
 }
 
 /// Emails and pictures for identities, asked of the registry
@@ -385,14 +385,13 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
             asked.push(f);
         }
     }
-    let none = json!({});
-    let faces = join_all(asked.iter().map(|f| crate::fragment::ask(env, f, "computer/face", &none))).await;
-    let faces: BTreeMap<&String, Value> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
-    let face = |f: &Option<String>, key: &str| f.as_ref().and_then(|f| faces.get(f)).and_then(|v| v[key].as_str()).map(str::to_string);
+    let faces = join_all(asked.iter().map(|f| crate::fragment::call(env, f, &FaceOf {}))).await;
+    let faces: BTreeMap<&String, Named> = asked.iter().zip(faces).filter_map(|(f, face)| Some((f, face.ok()?))).gathered();
     for p in profiles.values_mut() {
         if p.kind == IdentityKind::Agent && p.fragment.is_some() {
-            p.title = face(&p.fragment, "title");
-            p.picture = face(&p.fragment, "picture");
+            let face = p.fragment.as_ref().and_then(|f| faces.get(f));
+            p.title = face.and_then(|n| n.title.clone());
+            p.picture = face.and_then(|n| n.picture.clone());
         }
     }
 }
@@ -484,6 +483,9 @@ struct Sheet {
     /// once that the people added can use its keys, and its Copy link is
     /// its address, never the share link.
     reach: bool,
+    /// An agent's own, its owner's alone (alone.rs): by its kind, or its
+    /// own key among its members, as it is once it has run as an agent.
+    alone: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -531,6 +533,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     // an agent in with its person is no entry of its own (decision 64):
     // its person is the one, "with their agents", never named
     let all = members.members;
+    let alone = kind == FragmentKind::Agent || all.iter().any(|m| m.principal == status.npub);
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // an agent by its title and picture, as the shell shows it, read
@@ -556,6 +559,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         link,
         canonical,
         reach: status.reach == Some(true),
+        alone,
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -678,15 +682,21 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // that means, then its address and Copy
     out += "<section><h2>Link</h2><div class=\"link-card\">";
     let (path, named, means) = general(sheet.visibility);
-    // with reach, With link and Public show, unavailable, saying why (reach.rs)
-    let locked = |v: Visibility| sheet.reach && v != Visibility::Members;
-    if sheet.owner() {
+    // an agent's own is its owner's alone (alone.rs): no switch, but one
+    // to close a link from before the rule
+    let alone = sheet.alone;
+    let alone_now = alone && sheet.visibility == Visibility::Members;
+    // with reach, or an agent's, With link and Public show, unavailable,
+    // saying why (reach.rs)
+    let locked = |v: Visibility| (sheet.reach || alone) && v != Visibility::Members;
+    let why = if alone { crate::alone::AGENT } else { REACH_LINE };
+    if sheet.owner() && !alone_now {
         let option = |v: Visibility| {
             let (path, named, _) = general(v);
             let face = format!("{}{named}", svg("i", path));
             match (sheet.visibility == v, locked(v)) {
                 (true, _) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"true\">{face}</button>", v.as_str()),
-                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{REACH_LINE}\" disabled>{face}</button>", v.as_str()),
+                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{why}\" disabled>{face}</button>", v.as_str()),
                 (false, false) => format!("<button name=\"visibility\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{face}</button>", v.as_str()),
             }
         };
@@ -695,15 +705,15 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     } else {
         out += &format!("<div class=\"access-now\">{}<span>{named}</span></div>", svg("i", path));
     }
-    let note = if sheet.owner() && sheet.reach { REACH_LINE } else { means };
+    let note = if alone_now || (sheet.owner() && sheet.reach && !alone) { why } else { means };
     out += &format!("<p class=\"hint\" data-link-note>{note}</p>");
     // the share link: its owner's, while it is what opens it. With reach,
     // Copy link never gives it, though one from before the rule still
     // opens it: the sheet gives it to no one more (reach.rs); New link, in
     // its field, still ends it
     let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
-    let copied = shared.filter(|_| !sheet.reach).unwrap_or(&sheet.canonical);
-    let rotate = match sheet.owner() && shared.is_some() {
+    let copied = shared.filter(|_| !sheet.reach && !alone).unwrap_or(&sheet.canonical);
+    let rotate = match sheet.owner() && shared.is_some() && !alone {
         true => action_form(
             sheet,
             "rotate",
@@ -724,7 +734,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
 
     // the people: the owner's invite form, then everyone in and invited
     out += "<section><h2>People with access</h2>";
-    if sheet.owner() {
+    if sheet.owner() && !alone {
         let radio = |value: &str, name: &str, checked: bool| {
             format!(
                 "<label class=\"menu-radio\"><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span>{}</label>",
@@ -748,8 +758,8 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         // whoever comes into a chat can talk to the owner's agent in it
         // (Paul, 2026-10-23: the design, and this its safeguard; 10-24:
         // only on a chat, one short line, and no other paragraph here)
-        if fragment_core::access::talks_to_owners_agent(sheet.kind, &sheet.members) {
-            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        if fragment_core::permit::talks_to_owners_agent(sheet.kind, &sheet.members) {
+            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::permit::TRUST_WARNING);
         }
         if sheet.reach {
             out += &format!("<p class=\"hint keys\">{KEYS_LINE}</p>");
@@ -895,7 +905,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             Err(e) => Err(e),
         },
         "role" => match (member(), role()) {
-            (Ok(m), Ok(r)) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{m}"), Some(json!({ "role": r }))).await,
+            (Ok(m), Ok(r)) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{m}"), body(&SetRole { role: r })).await,
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
         "remove" => match member() {
@@ -907,12 +917,12 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             _ => Err(CellError::invalid("name an invite by its email")),
         },
         "visibility" => match Visibility::parse(field("visibility")) {
-            Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", Some(json!({ "visibility": v }))).await,
+            Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", body(&SetVisibility { visibility: v })).await,
             None => Err(CellError::invalid("choose who can open it")),
         },
         // the share link only: the inbox's token is an integration's,
         // rotated with the CLI
-        "rotate" => match ask::<IgnoredAny>(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await {
+        "rotate" => match ask::<IgnoredAny>(env, url, name, &who, Method::Post, "/api/rotate", Some(r#"{"scopes":["view"]}"#.to_string())).await {
             Ok(_) => return shown(env, cfg, url, name, &who, &session, Some(Flash::Done("A new share link: the old one no longer opens it.")), 200).await,
             Err(e) => Err(e),
         },
@@ -976,7 +986,7 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
         return drawn(&before, Some(Flash::Already { who: email, role: m.role }), 200);
     }
     let again = before.invites.iter().any(|i| i.email == email);
-    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await? {
+    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", body(&CreateInvite { email: email.to_string(), role })).await? {
         Shared::Invited(i) => Flash::Invited { who: email, role: i.role, again },
         Shared::Member(_) => return Err(CellError::host("an invite made a member at once: invites wait for a yes (decision 63)")),
     };
@@ -1021,7 +1031,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
     if who.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "the access view is a person's: an agent reads each fragment's members"));
     }
-    let owned: Vec<ListedFragment> = crate::listed(env, &who.id).await?.fragments.into_iter().filter(|f| f.role == Role::Owner).collect();
+    let owned: Vec<ListedFragment> = crate::principal::ask(env, &who.id, &crate::principal::calls::List::default()).await?.fragments.into_iter().filter(|f| f.role == Role::Owner).collect();
     let asked: Vec<String> = owned.iter().filter(|f| f.sharing.is_none_or(|s| s.with_others())).take(limits::ACCESS_ASKED_MAX).map(|f| f.name.clone()).collect();
     assert!(asked.len() <= limits::ACCESS_ASKED_MAX, "the access view asks a bounded number of fragments");
     let mut found: BTreeMap<String, (Vec<Member>, Vec<Invite>)> = BTreeMap::new();
@@ -1091,7 +1101,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
             };
             // a guest's agent named nowhere, its members read or not (decision 64)
             let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
-            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
+            let agents = fragment_core::permit::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
             AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();

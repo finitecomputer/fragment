@@ -112,15 +112,26 @@ jobs:
               # what images/ compiles in from outside it, which a host test
               # (xtask/src/image/preview.rs) holds this list to
               - cli/SKILL.md
+              - cli/GUIDE.md
               - templates/skills/**
               - crates/e2e/fixtures/chat-preview.pdf
+              # the image's disk budget, a computer's disk and the measure
+              # (cargo xtask image disk) the Docker lane holds the Hermes
+              # image to
+              - crates/core/src/computer/disk.rs
+              - crates/core/src/price/instance.rs
+              - xtask/src/image/disk.rs
             docker:
               - images/hermes/**
               - images/bridge/**
               - images/stub/**
               - images/Cargo.toml
               - images/Cargo.lock
+              - images/simplex-door/Cargo.toml
               - .github/workflows/images.yml
+              # the measure the Docker lane holds the Hermes image to its
+              # disk budget with (cargo xtask image disk; Codex on #1422)
+              - xtask/src/image/disk.rs
               # the Hermes image's other inputs, its CLI stage's (#715):
               # xtask/src/image/preview.rs `INPUTS`, which a host test
               # holds this list and the paths above to
@@ -143,6 +154,7 @@ jobs:
               - crates/devstack/Cargo.toml
               - crates/e2e/Cargo.toml
               - crates/fakes/Cargo.toml
+              - crates/identity-door/Cargo.toml
               - xtask/Cargo.toml
 
   # The Docker lane. The images are built first by the runner's own Docker

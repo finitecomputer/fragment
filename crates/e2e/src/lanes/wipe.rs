@@ -104,6 +104,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &paul, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"the old soul\n"))]);
     s.deploy(&agent);
+    super::computers::members_only(api, &paul, &agent_name)?;
     let r = api.signed(&paul, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let agent_id = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     let chat_name = s.named(api, &paul, "chat")?;
@@ -234,6 +235,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         // the repo a fragment made before 2026-10-07 kept: named as the
         // fragment's host was, without its owner
         let old = app_name.clone();
+        // the lever names the fragment's own old name alone: naming another
+        // fragment's repo, its end would delete that one
+        let other = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": repos[0] })))?;
+        s.ok("the lever refuses another fragment's repo (400): it names only this fragment's own old name", other.status == 400, &other);
         s.fake.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
         let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": old })))?;
         s.ok("their app's repo is one named as before repos were their owner's (a lever)", r.status == 200 && r.body["repo"] == old.as_str(), &r);
@@ -397,16 +402,17 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{made} {files}"),
     );
     if scripted {
-        let named = fragment_core::codestorage::repo_name("", &agent_name, &fresh_id).unwrap_or_default();
-        s.ok("its repo is named for its new owner", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
+        let named = fragment_core::codestorage::repo_name("", &agent_name, made.body["npub"].as_str().unwrap_or_default()).unwrap_or_default();
+        s.ok("its repo is named for its new life", s.fake.repo_url(&named).as_deref() == Some(fresh_repo.as_str()), &named);
     } else {
-        s.skip("its repo is named for its new owner", "it reads code.storage's own record, the fake's");
+        s.skip("its repo is named for its new life", "it reads code.storage's own record, the fake's");
     }
     s.owned(&made.body, &fresh);
     s.commit(&made.body, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"a new soul\n"))]);
     s.deploy(&made.body);
     let soul = api.signed(&fresh, "GET", &format!("/api/f/{agent_name}/file?path=SOUL.md"), None)?;
     s.ok("its files are the new person's only", soul.status == 200 && soul.text == "a new soul\n", &soul);
+    super::computers::members_only(api, &fresh, &agent_name)?;
     let r = api.signed(&fresh, "PUT", &format!("/api/computers/{fresh_computer}/agents/{agent_name}"), Some(&json!({})))?;
     let fresh_agent = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("a new agent", r.status == 200 && fragment_core::npub::is_identity(&fresh_agent) && fresh_agent != agent_id, &r);

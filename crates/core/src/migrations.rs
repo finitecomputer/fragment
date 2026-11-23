@@ -14,7 +14,7 @@
 //! Removable with the move (docs/technical-debt-ledger.md).
 
 use fragment_proto::migrations::{
-    command_id, stage_id, stage_prefix, Command, CommandKind, Handoff, Has, HeldReason, Mark, MoveState, Phase, Report, SecretKind, StageDone, ATTEMPTS_MAX, HANDOFF_VALUE_MAX_BYTES, TEXT_MAX_BYTES, WHY_MAX_BYTES,
+    command_id, stage_id, stage_prefix, Command, CommandKind, Handoff, HeldReason, Mark, MoveState, Phase, Report, SecretKind, StageDone, ATTEMPTS_MAX, HANDOFF_VALUE_MAX_BYTES, TEXT_MAX_BYTES, WHY_MAX_BYTES,
 };
 use fragment_proto::vault::{Place, PutSecret};
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
@@ -50,19 +50,6 @@ pub const KEEP_MS: i64 = 14 * DAY_MS;
 pub const ARCHIVE_KEEP_MS: i64 = 90 * DAY_MS;
 /// Phase 2 moves in flight at once: the rest wait their turn.
 pub const ARCHIVING_MAX: usize = 8;
-/// A person on the roster's comp (F5), given once as they open the move:
-/// a seat for this long...
-pub const COMP_MS: i64 = 30 * DAY_MS;
-/// ...and this much credit, granted on their ledger once, by its id
-/// (`comp_grant_id`).
-pub const COMP_GRANT_MICROS: i64 = 25 * crate::price::USD;
-
-/// The comp's grant's id on `person`'s ledger: one a person, ever (a
-/// ledger answers the same id again as it did, granting nothing).
-pub fn comp_grant_id(person: &str) -> String {
-    format!("move:{person}")
-}
-
 /// The routine that starts a stage's import, on its new agent's own
 /// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;
 /// docs/chat-records.md, "A routine"). Its person's answers join it with
@@ -280,6 +267,11 @@ pub enum Refused {
     /// Its old agent may be stopped or retired: a person's Yes, or the
     /// cutoff, began its move (409).
     Begun,
+    /// A Yes into an agent another move is bound to (409).
+    Taken,
+    /// Staff's retry that would import into its agent again while another
+    /// move is bound to that agent (409).
+    RetryTaken,
 }
 
 impl Refused {
@@ -292,6 +284,8 @@ impl Refused {
             Refused::Unfit(why) => (*why).into(),
             Refused::Why => format!("a withdrawal says why, in 1 to {WHY_MAX_BYTES} bytes"),
             Refused::Begun => "its move began (its person said Yes, or the cutoff took it): its old agent may be stopped or retired, so it is not offered again; bring it over by hand".into(),
+            Refused::Taken => "that agent took in another upgrade already: make a new one, or choose another".into(),
+            Refused::RetryTaken => "its agent took in another upgrade since: a retry would import into it beside that one; retire this move, or restart its old agent".into(),
         }
     }
 }
@@ -359,21 +353,22 @@ impl Move {
                 Act::Retire(mark) => Some(mark),
                 _ => None,
             },
-            secrets: vec![],
+            secrets: self.secrets(),
         })
     }
 
     /// The secrets its current command hands to its person's Vault: on a
     /// person's Yes (a phase 1 `stop_and_stage`, bound to their agent),
-    /// every kind its old agent has, with no question of its own (the
-    /// Vault is theirs, and nothing uses an entry until they set
-    /// something up); none otherwise.
-    pub fn secrets(&self, has: &Has) -> Vec<SecretKind> {
+    /// every kind, with no question of its own (the Vault is theirs, and
+    /// nothing uses an entry until they set something up); none
+    /// otherwise. Every kind, not the roster's `has`: the mover's fleet
+    /// can't know which an old agent holds, and the mover hands off only
+    /// those it reads (FIN-498).
+    pub fn secrets(&self) -> Vec<SecretKind> {
         if self.command != Some(Act::StopAndStage) || self.phase != Phase::P1 || self.agent.is_none() {
             return vec![];
         }
-        let held = [has.telegram, has.openrouter, has.nostr];
-        SecretKind::ALL.into_iter().zip(held).filter_map(|(k, h)| h.then_some(k)).collect()
+        SecretKind::ALL.to_vec()
     }
 
     /// Its current attempt's stage id and prefix (none before an attempt).
@@ -397,6 +392,13 @@ impl Move {
         matches!(self.state, MoveState::Listed | MoveState::Open | MoveState::Later | MoveState::Never)
     }
 
+    /// A good import whose old agent waits, stopped, for staff's word to
+    /// retire it (`done`): no command yet, so staff may still restart the
+    /// old agent or try again.
+    pub fn awaits_retire(&self) -> bool {
+        self.state == MoveState::Retiring && self.command.is_none()
+    }
+
     /// When the supervisor next looks at it, if ever: its state's
     /// deadline, or its stage's keep.
     pub fn deadline(&self) -> Option<i64> {
@@ -408,7 +410,8 @@ impl Move {
                 (false, Some(at)) => at + OPEN_MS,
                 _ => self.since_ms + DONE_MS,
             }),
-            MoveState::Retiring => Some(self.since_ms + RETIRE_MS),
+            // its day starts at staff's word: until then it waits for them
+            MoveState::Retiring => self.command.map(|_| self.since_ms + RETIRE_MS),
             MoveState::Archiving => Some(match &self.command {
                 Some(Act::Retire(_)) => self.progress_ms.unwrap_or(self.since_ms) + RETIRE_MS,
                 _ if self.progress_ms.is_none() => self.since_ms + STOP_MS,
@@ -595,6 +598,19 @@ pub fn ask_again(m: &Move, now: i64) -> Outcome {
     }
 }
 
+/// "Yes" into `agent`, a new one or one the person had already (Paul
+/// 11-19), `bound_elsewhere` when another move of theirs is bound to it:
+/// refused then, whatever that move's state, else as `yes`. An agent takes
+/// in one move, ever: two would share its one import folder, its SimpleX
+/// staging and its keys' names in the Vault, and staff's retry of the
+/// first could start while the second imports.
+pub fn yes_into(m: &Move, agent: &str, bound_elsewhere: bool, now: i64) -> Outcome {
+    if bound_elsewhere {
+        return Err(Refused::Taken);
+    }
+    yes(m, agent, now)
+}
+
 /// "Yes", bound to `agent` (the object checked it is the person's own):
 /// a new attempt at its stage; or, archived (phase 2), the import of the
 /// stage kept for it.
@@ -698,11 +714,11 @@ pub fn handoff_kinds(h: &Handoff) -> Result<Vec<SecretKind>, Refused> {
 /// Whether the mover may hand off `kinds` of `m`'s old agent for
 /// `command`: its current command (409 otherwise), whose `secrets` name
 /// each (400), while its old agent is being stopped or staged (409).
-pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Result<(), Refused> {
+pub fn handoff(m: &Move, command: &str, kinds: &[SecretKind]) -> Result<(), Refused> {
     if m.command_id().as_deref() != Some(command) {
         return Err(Refused::Stale);
     }
-    let asked = m.secrets(has);
+    let asked = m.secrets();
     if !kinds.iter().all(|k| asked.contains(k)) {
         return Err(Refused::Unfit("a hand-off names only the secrets its command asks for"));
     }
@@ -712,6 +728,11 @@ pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Resu
     }
 }
 
+/// Where a handed-off Nostr key signs: finite.site, whose API and git
+/// remotes the old agent's sites are under (2026-11-13: a moved
+/// agent brings its own sites over).
+pub const NOSTR_KEY_HOST: &str = "finite.site";
+
 /// A secret handed off, as its person's Vault keeps it: its name there,
 /// bound to the new agent's fragment, toward the hosts its kind goes to.
 /// `None`: a Nostr key that is not one (the Vault takes no other value).
@@ -719,9 +740,11 @@ pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Resu
 /// - Telegram's token, toward `api.telegram.org`: moved from there into
 ///   the new agent's Telegram connector by Settings (`fromVault`).
 /// - OpenRouter's key, toward `openrouter.ai`.
-/// - The Nostr key, as 64 hex, to sign with (NIP-98) and with no host
-///   yet: kept, never sent, until something its person sets up asks for
-///   one.
+/// - The Nostr key, as 64 hex, to sign with (NIP-98) toward
+///   `NOSTR_KEY_HOST`: the new agent brings its old sites over itself,
+///   each finite.site call signed by the old agent's key, which never
+///   leaves the Vault. Its hosts are set only with its value, and a key
+///   is handed off once, so they are right here or never.
 ///
 /// Its name is its kind's and the agent's, at most 32 bytes:
 /// `telegram-<fragment>` whole when it fits; otherwise the label cut short
@@ -733,7 +756,7 @@ pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(St
     let (word, hosts, place, value) = match kind {
         SecretKind::TelegramBotToken => ("telegram", vec!["api.telegram.org".to_string()], Place::default(), value.to_string()),
         SecretKind::OpenrouterKey => ("openrouter", vec!["openrouter.ai".to_string()], Place::default(), value.to_string()),
-        SecretKind::NostrNsec => ("nostr", vec![], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
+        SecretKind::NostrNsec => ("nostr", vec![NOSTR_KEY_HOST.to_string()], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
     };
     let (label, suffix) = fragment_proto::split_fragment_name(fragment)?;
     let whole = format!("{word}-{fragment}");
@@ -745,7 +768,7 @@ pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(St
         let label = label[..label.len().min(room)].trim_end_matches('-');
         format!("{word}-{label}-{hash}--{suffix}")
     };
-    Some((name, PutSecret { value, hosts, place, agents: vec![fragment.to_string()] }))
+    Some((name, PutSecret { value: Some(value), hosts, place, agents: vec![fragment.to_string()] }))
 }
 
 // ---- the mover's upload
@@ -796,22 +819,18 @@ pub fn open(m: &Move, agent: &str, stage: &str) -> Outcome {
     }
 }
 
-/// The agent says its import ended: well, the old agent is retired as
-/// migrated (a phase 2 one is marked again); not, staff take it. Its reads
-/// end either way; a phase 1 stage is swept, a phase 2 one kept to its
-/// expiry (`swept`). The same answer again changes nothing.
+/// The agent says its import ended. It is harmless either way: its reads
+/// end, its stage is kept to its keep, and nothing is asked of the mover.
+/// Well, its move is `retiring` with no command, the old agent stopped
+/// until staff's `retire` (`awaits_retire`); not, it is held for staff.
+/// The same answer again changes nothing.
 pub fn done(m: &Move, agent: &str, stage: &str, d: &StageDone, now: i64) -> Outcome {
     its_stage(m, agent, stage)?;
     match (m.state, d.ok) {
-        (MoveState::Importing, ok) => {
-            let mut effects = vec![];
-            let from = m.clone().swept(&mut effects);
-            let to = match ok {
-                true => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..from.moved(MoveState::Retiring, now) },
-                false => from.held(HeldReason::ImportFailed, now),
-            };
-            Ok(Some(Step { to, effects }))
-        }
+        (MoveState::Importing, ok) => step(match ok {
+            true => Move { command: None, seq: 0, ..m.moved(MoveState::Retiring, now) },
+            false => m.held(HeldReason::ImportFailed, now),
+        }),
         (MoveState::Retiring | MoveState::Moved, true) => Ok(None),
         (MoveState::Held, false) if m.reason == Some(HeldReason::ImportFailed) => Ok(None),
         (s, _) => Err(Refused::NotNow(s)),
@@ -887,12 +906,16 @@ pub fn cutoff(m: &Move, cutoff_ms: i64, now: i64) -> Option<Step> {
 /// Asked again, from where it was held: a new attempt at its stage, or its
 /// retirement again (an archive's, its stage kept), or its import's
 /// routine again (phase 2's kept stage).
+/// A good import waiting for staff's retire is tried again as its import
+/// was (`awaits_retire`).
 pub fn retry(m: &Move, now: i64) -> Outcome {
-    if m.state != MoveState::Held {
-        return Err(Refused::NotNow(m.state));
-    }
+    let from = match m.state {
+        MoveState::Held => m.held_from,
+        _ if m.awaits_retire() => Some(MoveState::Importing),
+        s => return Err(Refused::NotNow(s)),
+    };
     let mut effects = vec![];
-    let to = match (m.held_from, m.phase) {
+    let to = match (from, m.phase) {
         (Some(MoveState::Retiring), _) => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.moved(MoveState::Retiring, now) },
         // an archive staged whose retirement's word never came: its
         // retirement again, its stage kept (the mover may have retired the
@@ -914,12 +937,27 @@ pub fn retry(m: &Move, now: i64) -> Outcome {
     Ok(Some(Step { to, effects }))
 }
 
+/// Staff's `retry`, `bound_elsewhere` when another move is bound to its
+/// agent: one that would stage or import into that agent again (phase 1
+/// asked again, phase 2's kept stage imported again) is refused then, both
+/// moves left as they were, as a Yes into it is (`yes_into`): two imports
+/// would share the agent's one import folder. A retry that only retires,
+/// or stages an archive no Yes bound to an agent, goes on.
+pub fn retry_into(m: &Move, bound_elsewhere: bool, now: i64) -> Outcome {
+    let step = retry(m, now)?;
+    if bound_elsewhere && step.as_ref().is_some_and(|s| matches!(s.to.state, MoveState::Asked | MoveState::Importing)) {
+        return Err(Refused::RetryTaken);
+    }
+    Ok(step)
+}
+
 /// The old agent started again and offered again: a person who changed
-/// their mind after Yes, or a move staff give up on. Never once its
-/// retirement began.
+/// their mind after Yes, or a move staff give up on (a good import's too,
+/// until staff retire it). Never once its retirement began.
 pub fn restart_old(m: &Move, now: i64) -> Outcome {
     let restartable = match m.state {
         MoveState::Asked | MoveState::Staging | MoveState::Importing => m.phase == Phase::P1,
+        MoveState::Retiring => m.phase == Phase::P1 && m.awaits_retire(),
         MoveState::Held => m.phase == Phase::P1 && matches!(m.held_from, Some(MoveState::Asked | MoveState::Staging | MoveState::Importing)),
         _ => false,
     };
@@ -932,16 +970,14 @@ pub fn restart_old(m: &Move, now: i64) -> Outcome {
     Ok(Some(Step { to, effects }))
 }
 
-/// Retired as migrated: a held move staff finished by hand.
+/// Retired as migrated, on staff's word: a good import waiting for it
+/// (`awaits_retire`), or a held move staff finished by hand. Its stage
+/// is kept to its keep (the old agent's retirement cannot be undone).
 pub fn retire(m: &Move, now: i64) -> Outcome {
-    match m.state {
-        MoveState::Held => {
-            let mut effects = vec![];
-            let to = Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.clone().swept(&mut effects).moved(MoveState::Retiring, now) };
-            Ok(Some(Step { to, effects }))
-        }
-        s => Err(Refused::NotNow(s)),
+    if m.state != MoveState::Held && !m.awaits_retire() {
+        return Err(Refused::NotNow(m.state));
     }
+    step(Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.moved(MoveState::Retiring, now) })
 }
 
 /// Out of the move by staff, saying why: offered no more, never archived,
@@ -992,46 +1028,55 @@ pub fn include(m: &Move, bound: bool, now: i64) -> Outcome {
 // ---- what its person is told (F4)
 
 /// An open move, as its person is asked (`GET /api/notices`): a notice that
-/// must be answered, in the server's words. Yes opens `page` (the
-/// platform's `/move`, which asks what the import needs and says Yes);
-/// Not now and Never post to the person's own routes. `picture`: the
-/// roster has one, which the platform reads for them.
+/// must be answered, in the server's words, which call it the agent's
+/// upgrade: the same agent, in a better home. They promise only what
+/// comes: supported files and skills (files past the cap, and a skill
+/// that needs what this platform lacks, stay behind). Its key is new, so
+/// they never promise the same one. Its Yes,
+/// "Upgrade <name>", opens `page` (the platform's `/move`, which asks what
+/// the import needs and says Yes); Not now and Never post to the person's
+/// own routes. `picture`: the roster has one, which the platform reads for
+/// them.
 pub fn offer(old: &str, name: &str, picture: bool, page: &str) -> Notice {
     let post = |label: &str, verb: &str| NoticeAction { label: label.into(), post: Some(format!("/api/migrations/offers/{old}/{verb}")), body: None, open: None };
-    let name = match name.trim() {
-        "" => "your agent",
-        n => n,
+    // a nameless agent: "your agent", "Your agent" where a line starts
+    let (name, lead) = match name.trim() {
+        "" => ("your agent", "Your agent"),
+        n => (n, n),
     };
     Notice {
         id: format!("move:{old}"),
         kind: "move_offer".into(),
         level: NoticeLevel::Info,
-        title: format!("Bring {name} over from finite.computer?"),
-        text: Some("You'll get a month free.".into()),
+        title: format!("{lead}'s upgrade is ready"),
+        text: Some("Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key.".into()),
         detail: None,
         until: None,
-        actions: vec![NoticeAction::open("Yes", page), post("Not now", "later"), post("Never", "never")],
+        actions: vec![NoticeAction::open(format!("Upgrade {name}"), page), post("Not now", "later"), post("Never", "never")],
         must_answer: true,
         image: picture.then(|| format!("/api/migrations/offers/{old}/picture")),
     }
 }
 
 /// Where `m` is, as `/move` tells its person (`Offer.said`), `name` its
-/// old agent's: plain, and only what its state says.
+/// old agent's: plain, and only what its state says. A held move says
+/// nothing is lost only while its stage is kept: past its keep (a phase 2
+/// stage's expiry, the only copy left), a retry has nothing to import.
 pub fn said(m: &Move, name: &str) -> String {
-    let name = match name.trim() {
-        "" => "your agent",
-        n => n,
+    let (name, lead) = match name.trim() {
+        "" => ("your agent", "Your agent"),
+        n => (n, n),
     };
     match m.state {
-        MoveState::Listed | MoveState::Open | MoveState::Later => format!("{name} is on finite.computer."),
+        MoveState::Listed | MoveState::Open | MoveState::Later => format!("{lead}'s upgrade is ready."),
         MoveState::Never => "You said never.".into(),
-        MoveState::Asked => format!("Stopping {name} on finite.computer…"),
-        MoveState::Staging | MoveState::Archiving => format!("Copying {name}…"),
-        MoveState::Importing => format!("Bringing {name} over…"),
-        MoveState::Retiring | MoveState::Moved => "Done.".into(),
+        MoveState::Asked => format!("Pausing {name} for its upgrade…"),
+        MoveState::Staging | MoveState::Archiving => format!("Packing up {name}…"),
+        MoveState::Importing => format!("Upgrading {name}…"),
+        MoveState::Retiring | MoveState::Moved => "Upgraded.".into(),
+        MoveState::Held if m.staged_ms.is_some() => "Paused, with nothing lost: someone from Finite will look at it and be in touch.".into(),
         MoveState::Held => "Paused: someone from Finite will look at it and be in touch.".into(),
-        MoveState::Archived => format!("{name} is archived. You can still bring it over."),
+        MoveState::Archived => format!("{lead} is archived. You can still upgrade it."),
         MoveState::Expired => "Its archive was deleted.".into(),
         MoveState::Withdrawn => "No longer offered.".into(),
     }
@@ -1175,6 +1220,21 @@ mod tests {
         assert_eq!(to(yes(&to(never(&open_move(), T0)), AGENT, T0)).state, MoveState::Asked, "from never too");
     }
 
+    /// Goal: an agent the person had already may take in an old agent, one
+    /// move, ever (Paul 11-19). Valid: no other move bound to it. Invalid:
+    /// another bound to it, whatever its state, a kept stage's import too.
+    /// Replay: this move's own Yes again changes nothing.
+    #[test]
+    fn a_yes_into_an_agent_another_move_is_bound_to_is_refused() {
+        let a = to(yes_into(&open_move(), AGENT, false, T0));
+        assert_eq!((a.state, a.agent.as_deref()), (MoveState::Asked, Some(AGENT)));
+        assert_eq!(yes_into(&a, AGENT, false, T0 + 1), Ok(None), "replay");
+        assert_eq!(yes_into(&open_move(), AGENT, true, T0), Err(Refused::Taken));
+        let archived = Move { state: MoveState::Archived, phase: Phase::P2, attempt: 1, staged_ms: Some(T0), ..open_move() };
+        assert_eq!(yes_into(&archived, AGENT, true, T0), Err(Refused::Taken), "a kept stage's import too");
+        assert_eq!(to(yes_into(&archived, AGENT, false, T0)).state, MoveState::Importing);
+    }
+
     #[test]
     fn the_mover_down_holds_the_move() {
         let a = to(yes(&open_move(), AGENT, T0));
@@ -1272,39 +1332,88 @@ mod tests {
         assert_eq!(held.reason, Some(HeldReason::ImportTimedOut));
     }
 
+    /// Goal (FIN-463, after the first real move): `done` is harmless. A
+    /// good import keeps its stage to its keep and leaves the old agent
+    /// stopped, its retirement waiting for staff's word: the mailbox holds
+    /// nothing for it and no deadline holds it, while its person reads it
+    /// as done.
     #[test]
-    fn done_retires_the_old_agent_and_sweeps_the_stage() {
+    fn done_ok_keeps_the_stage_and_waits_for_staffs_retire() {
         let i = to(open(&importing(), AGENT, "prj_1.p1.1"));
         let d = done(&i, AGENT, "prj_1.p1.1", &ok(), T0 + 100).unwrap().unwrap();
-        assert_eq!(d.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
-        assert_eq!((d.to.state, d.to.command, d.to.staged_ms), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated)), None));
-        assert_eq!(d.to.command_id().as_deref(), Some("prj_1:1:retire_migrated"));
+        assert_eq!(d.effects, vec![], "its stage is kept");
+        assert_eq!((d.to.state, d.to.command, d.to.staged_ms), (MoveState::Retiring, None, Some(T0 + 10)));
+        assert_eq!(d.to.command(), None, "nothing in the mailbox: the old agent stays stopped");
+        assert_eq!(d.to.deadline(), Some(T0 + 10 + KEEP_MS), "no retirement's day: only its stage's keep");
+        assert_eq!(said(&d.to, "Juniper"), "Upgraded.");
         assert_eq!(readable(&d.to, AGENT, "prj_1.p1.1"), Err(Refused::NotNow(MoveState::Retiring)), "its routes refuse at once");
         assert_eq!(done(&restarted(&d.to), AGENT, "prj_1.p1.1", &ok(), T0 + 101), Ok(None), "replay");
         let bad = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
         assert_eq!(done(&d.to, AGENT, "prj_1.p1.1", &bad, T0), Err(Refused::NotNow(MoveState::Retiring)), "the other answer after");
         assert_eq!(done(&i, "npub1other", "prj_1.p1.1", &ok(), T0), Err(Refused::NotYours));
-        // retired: moved
-        let r = d.to;
-        let m = to(report(&r, &report_on(&r, 1, "retired"), T0 + 200));
-        assert_eq!((m.state, m.command, m.deadline()), (MoveState::Moved, None, None));
-        assert_eq!(report(&m, &report_on(&r, 2, "retired"), T0), Err(Refused::Stale), "done with");
+        // no clock retires it, or holds it: past a retirement's day, nothing
+        assert_eq!(tick(&d.to, T0 + 100 + RETIRE_MS), None);
+        // its keep passes: its stage goes, and it still waits for staff
+        let swept = tick(&restarted(&d.to), T0 + 10 + KEEP_MS).expect("its keep");
+        assert_eq!(swept.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
+        assert_eq!((swept.to.state, swept.to.command, swept.to.deadline()), (MoveState::Retiring, None, None));
+        // staff's retire: now the mover retires it, within a day, its stage kept
+        let r = retire(&restarted(&d.to), T0 + 200).unwrap().unwrap();
+        assert_eq!(r.effects, vec![], "its stage is kept to its keep");
+        assert_eq!((r.to.state, r.to.command, r.to.staged_ms), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated)), Some(T0 + 10)));
+        assert_eq!(r.to.command_id().as_deref(), Some("prj_1:1:retire_migrated"));
+        assert_eq!(r.to.deadline(), Some(T0 + 200 + RETIRE_MS), "a day for its word, from staff's retire");
+        assert_eq!(retire(&r.to, T0 + 201), Err(Refused::NotNow(MoveState::Retiring)), "asked once");
+        assert_eq!(done(&r.to, AGENT, "prj_1.p1.1", &ok(), T0 + 201), Ok(None), "replay after");
+        // retired: moved, its stage still kept to its keep
+        let m = to(report(&r.to, &report_on(&r.to, 1, "retired"), T0 + 300));
+        assert_eq!((m.state, m.command, m.deadline()), (MoveState::Moved, None, Some(T0 + 10 + KEEP_MS)));
+        assert_eq!(report(&m, &report_on(&r.to, 2, "retired"), T0), Err(Refused::Stale), "done with");
+        assert_eq!(tick(&m, T0 + 10 + KEEP_MS).expect("its keep").effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
+    }
+
+    /// Until staff retire it, a good import can still be undone or tried
+    /// again: the old agent restarted (offered again), or a new attempt
+    /// staged into the same new agent. Once its retirement is asked, not.
+    #[test]
+    fn after_done_ok_staff_restart_the_old_agent_or_retry() {
+        let d = to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        let back = restart_old(&restarted(&d), T0 + 101).unwrap().unwrap();
+        assert_eq!((back.to.state, back.to.agent.clone(), back.to.command), (MoveState::Open, None, Some(Act::Restart)));
+        assert_eq!(back.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
+        let again = retry(&restarted(&d), T0 + 102).unwrap().unwrap();
+        assert_eq!((again.to.state, again.to.attempt, again.to.agent.as_deref(), again.to.command), (MoveState::Asked, 2, Some(AGENT), Some(Act::StopAndStage)));
+        assert_eq!(again.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }], "the superseded attempt's stage");
+        // the second attempt imports into the same agent, and waits again
+        let s = to(report(&again.to, &report_on(&again.to, 1, "stopped"), T0 + 103));
+        let i2 = to(report(&s, &report_on(&s, 2, staged_event()), T0 + 104));
+        let d2 = to(done(&i2, AGENT, "prj_1.p1.2", &ok(), T0 + 105));
+        assert_eq!((d2.state, d2.command, d2.staged_ms), (MoveState::Retiring, None, Some(T0 + 104)));
+        // once staff asked for its retirement, neither
+        let r = to(retire(&d, T0 + 106));
+        assert_eq!(restart_old(&r, T0 + 107), Err(Refused::NotNow(MoveState::Retiring)), "never once retirement began");
+        assert_eq!(retry(&r, T0 + 107), Err(Refused::NotNow(MoveState::Retiring)));
+        // and a withdrawal waits for the old agent to be restarted first
+        assert_eq!(withdraw(&d, WHY, T0 + 107), Err(Refused::NotNow(MoveState::Retiring)));
     }
 
     #[test]
-    fn a_failed_import_is_held_and_swept() {
+    fn a_failed_import_is_held_and_its_stage_kept() {
         let i = importing();
         let bad = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
         let d = done(&i, AGENT, "prj_1.p1.1", &bad, T0).unwrap().unwrap();
-        assert_eq!((d.to.state, d.to.reason, d.to.staged_ms), (MoveState::Held, Some(HeldReason::ImportFailed), None));
-        assert_eq!(d.effects.len(), 1);
+        assert_eq!((d.to.state, d.to.reason, d.to.staged_ms), (MoveState::Held, Some(HeldReason::ImportFailed), Some(T0 + 10)));
+        assert_eq!((d.effects.as_slice(), d.to.deadline()), (&[][..], Some(T0 + 10 + KEEP_MS)), "kept to its keep");
         assert_eq!(done(&restarted(&d.to), AGENT, "prj_1.p1.1", &bad, T0), Ok(None), "replay");
         assert_eq!(done(&d.to, AGENT, "prj_1.p1.1", &ok(), T0), Err(Refused::NotNow(MoveState::Held)));
+        // staff's retire keeps it too; a retry supersedes it
+        assert_eq!(retire(&d.to, T0 + 1).unwrap().unwrap().effects, vec![]);
+        assert_eq!(retry(&d.to, T0 + 1).unwrap().unwrap().effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
     }
 
     #[test]
     fn a_failed_retirement_is_asked_again_until_its_deadline() {
-        let r = done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0).unwrap().unwrap().to;
+        let r = to(retire(&to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0)), T0));
         // failed: still retiring, its command still the mover's, its deadline unmoved
         let f = to(report(&r, &report_on(&r, 1, "failed"), T0 + 5));
         assert_eq!((f.state, f.command_id().as_deref(), f.deadline()), (MoveState::Retiring, Some("prj_1:1:retire_migrated"), r.deadline()));
@@ -1351,7 +1460,7 @@ mod tests {
         // a Yes after: attempt 3, never mixed with the others
         assert_eq!(to(yes(&restarted_, AGENT, T0 + 4)).attempt, 3);
         assert_eq!(restart_old(&open_move(), T0), Err(Refused::NotNow(MoveState::Open)));
-        let retiring = done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0).unwrap().unwrap().to;
+        let retiring = to(retire(&to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0)), T0));
         assert_eq!(restart_old(&retiring, T0), Err(Refused::NotNow(MoveState::Retiring)), "never once retirement began");
         // retire: a held move finished by hand
         let ret = to(retire(&restarted(&held), T0 + 5));
@@ -1363,6 +1472,43 @@ mod tests {
         assert_eq!(withdraw(&w, WHY, T0), Ok(None), "replay");
         assert_eq!(relisted(&restarted(&w), "user_1", true, T0), None);
         assert_eq!(withdraw(&staging(), WHY, T0), Err(Refused::NotNow(MoveState::Staging)), "in flight: restart it first");
+    }
+
+    /// Goal: staff's retry never starts a second import into an agent
+    /// (fragment#1393's review). The sequence: A imported into the agent and
+    /// waits for staff's retire; B bound to the same agent (a row an older
+    /// release wrote, or one restart-old freed) and importing; then staff
+    /// retry A. Invalid: that retry (phase 1, staged again), and a held
+    /// phase 2 import's retry into its kept stage: 409, A as it was.
+    /// Valid: the same retries with the agent free; a retry that only
+    /// retires; an archive staged again, which no Yes bound to an agent.
+    #[test]
+    fn a_retry_never_imports_into_an_agent_another_move_is_bound_to() {
+        let a = to(done(&to(open(&importing(), AGENT, "prj_1.p1.1")), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        assert!(a.awaits_retire());
+        let b = to(yes(&Move::listed("prj_2", "user_1", true, T0), AGENT, T0 + 200));
+        let b = to(report(&b, &report_on(&b, 1, "stopped"), T0 + 201));
+        let b = to(report(&b, &report_on(&b, 2, staged_event()), T0 + 202));
+        assert_eq!((b.state, b.agent.as_deref()), (MoveState::Importing, Some(AGENT)));
+        assert_eq!(retry_into(&restarted(&a), true, T0 + 300), Err(Refused::RetryTaken), "A staged again beside B");
+        let again = to(retry_into(&a, false, T0 + 300));
+        assert_eq!((again.state, again.attempt, again.agent.as_deref()), (MoveState::Asked, 2, Some(AGENT)), "the agent free");
+        // a retirement held for staff retires again, whatever its agent took in since
+        let held = tick(&to(retire(&a, T0 + 400)), T0 + 400 + RETIRE_MS).expect("its day").to;
+        assert_eq!((held.state, held.held_from), (MoveState::Held, Some(MoveState::Retiring)));
+        assert_eq!(to(retry_into(&held, true, T0 + 500)).state, MoveState::Retiring);
+        // phase 2: an archive staged again (no agent); a held late import's kept stage
+        let cut = T0;
+        let p2 = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let stalled = Move { state: MoveState::Held, held_from: Some(MoveState::Archiving), reason: Some(HeldReason::StageFailed), ..p2.clone() };
+        assert_eq!(to(retry_into(&stalled, true, cut + 1)).state, MoveState::Archiving, "an archive, bound to no agent, staged again");
+        let s = to(report(&p2, &report_on(&p2, 1, "stopped"), cut + 1));
+        let st = to(report(&s, &report_on(&s, 2, staged_event()), cut + 2));
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let failed = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
+        let f = to(done(&to(yes(&ar, AGENT, cut + 10)), AGENT, "o.p2.1", &failed, cut + 11));
+        assert_eq!(retry_into(&f, true, cut + 12), Err(Refused::RetryTaken), "its kept stage, beside B");
+        assert_eq!(to(retry_into(&f, false, cut + 12)).state, MoveState::Importing);
     }
 
     #[test]
@@ -1495,12 +1641,13 @@ mod tests {
         assert_eq!(e.to.state, MoveState::Expired);
         assert_eq!(e.effects, vec![Effect::Sweep { prefix: "p2/prj_1/1/".into() }]);
         assert_eq!(yes(&e.to, AGENT, cut), Err(Refused::NotNow(MoveState::Expired)));
-        // a late Yes before then imports the kept stage, then retires it as migrated
+        // a late Yes before then imports the kept stage; staff then retire it as migrated
         let late = yes(&ar, AGENT, cut + 10).unwrap().unwrap();
         assert_eq!(late.effects, vec![Effect::Routine { agent: AGENT.into(), stage: "prj_1.p2.1".into() }]);
         let d = done(&late.to, AGENT, "prj_1.p2.1", &ok(), cut + 11).unwrap().unwrap();
-        assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated))));
+        assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, None), "staff's word first");
         assert_eq!(d.effects, vec![], "kept to its expiry");
+        assert_eq!(to(retire(&d.to, cut + 12)).command, Some(Act::Retire(Mark::Migrated)));
     }
 
     /// Phase 2's two retirements are two commands: as archived at the
@@ -1516,7 +1663,7 @@ mod tests {
         let archived = st.command_id().expect("retired as archived");
         let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
         let late = to(yes(&ar, AGENT, cut + 10));
-        let d = to(done(&late, AGENT, "o.p2.1", &ok(), cut + 11));
+        let d = to(retire(&to(done(&late, AGENT, "o.p2.1", &ok(), cut + 11)), cut + 11));
         let migrated = d.command_id().expect("retired as migrated");
         assert_ne!(archived, migrated, "two retirements, two commands");
         // the archive's receipt again is stale: it changes nothing
@@ -1526,7 +1673,8 @@ mod tests {
     /// A phase 2 stage is the only copy left (its old agent is retired), so
     /// it is kept until its expiry whatever its import does: a failed
     /// import keeps it for staff's retry; held past its expiry, it goes,
-    /// and a retry is refused.
+    /// and a retry is refused. Its person is told nothing is lost only
+    /// while it is kept.
     #[test]
     fn a_failed_late_import_keeps_its_stage_until_it_expires() {
         let cut = T0;
@@ -1539,12 +1687,14 @@ mod tests {
         let f = done(&late, AGENT, "o.p2.1", &failed, cut + 11).unwrap().unwrap();
         assert_eq!((f.to.state, f.to.reason), (MoveState::Held, Some(HeldReason::ImportFailed)));
         assert_eq!((f.effects.as_slice(), f.to.deadline()), (&[][..], Some(cut + ARCHIVE_KEEP_MS)), "kept, to its expiry");
+        assert_eq!(said(&f.to, "Ada"), "Paused, with nothing lost: someone from Finite will look at it and be in touch.", "its stage kept");
         let again = to(retry(&f.to, cut + 12));
         assert_eq!((again.state, again.stage().as_deref()), (MoveState::Importing, Some("o.p2.1")));
         let gone = tick(&f.to, cut + ARCHIVE_KEEP_MS).expect("its expiry");
         assert_eq!(gone.effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
         assert_eq!((gone.to.state, gone.to.deadline()), (MoveState::Held, None));
         assert!(matches!(retry(&gone.to, cut + ARCHIVE_KEEP_MS + 1), Err(Refused::Unfit(_))), "nothing left to import");
+        assert_eq!(said(&gone.to, "Ada"), "Paused: someone from Finite will look at it and be in touch.", "its stage gone: no promise");
     }
 
     /// Past the cutoff, the alarm wakes for it only while there is room to
@@ -1561,10 +1711,12 @@ mod tests {
         let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
         let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
         let late = to(yes(&ar, AGENT, cut + 10));
-        // done well: retired as migrated, its stage kept
+        // done well, then retired as migrated on staff's word: its stage kept
         let d = done(&late, AGENT, "o.p2.1", &ok(), cut + 11).unwrap().unwrap();
         assert_eq!((d.effects.as_slice(), d.to.staged_ms), (&[][..], Some(cut + 2)), "kept after a good import");
-        let m = to(report(&d.to, &report_on(&d.to, 1, "retired"), cut + 12));
+        assert_eq!(d.to.deadline(), Some(expiry), "waiting for staff: only its expiry");
+        let r = to(retire(&d.to, cut + 12));
+        let m = to(report(&r, &report_on(&r, 1, "retired"), cut + 12));
         assert_eq!((m.state, m.deadline()), (MoveState::Moved, Some(expiry)), "moved, its stage kept to its expiry");
         assert_eq!(tick(&m, expiry - 1), None);
         let gone = tick(&m, expiry).expect("its expiry");
@@ -1729,67 +1881,80 @@ mod tests {
     }
 
     /// Goal: an open move asks its person in the server's words, alone over
-    /// everything (must-answer), with its three answers: Yes opens the page,
-    /// Not now and Never post to the person's own routes; its picture is
-    /// read through the platform, and a nameless agent is still asked.
+    /// everything (must-answer), as their agent's upgrade, with its three
+    /// answers: Upgrade opens the page, Not now and Never post to the
+    /// person's own routes; its picture is read through the platform, and a
+    /// nameless agent is still asked. It promises no free month: the move's
+    /// seat has no end (Paul, 2026-11-19).
     #[test]
     fn an_offer_asks_in_words_with_its_answers() {
         let n = offer("prj_1", " Ada ", true, "https://chat.test/move");
         assert_eq!((n.id.as_str(), n.kind.as_str(), n.level, n.must_answer), ("move:prj_1", "move_offer", NoticeLevel::Info, true));
-        assert_eq!((n.title.as_str(), n.text.as_deref()), ("Bring Ada over from finite.computer?", Some("You'll get a month free.")));
+        assert_eq!(
+            (n.title.as_str(), n.text.as_deref()),
+            ("Ada's upgrade is ready", Some("Its memories, chats, and supported files and skills come with it, to a more secure home with a fresh key."))
+        );
+        let words = format!("{} {}", n.title, n.text.as_deref().unwrap_or_default()).to_lowercase();
+        assert!(!words.contains("month") && !words.contains("free"), "no free month: {words}");
         let acts: Vec<(&str, Option<&str>, Option<&str>)> = n.actions.iter().map(|a| (a.label.as_str(), a.open.as_deref(), a.post.as_deref())).collect();
         assert_eq!(
             acts,
-            vec![("Yes", Some("https://chat.test/move"), None), ("Not now", None, Some("/api/migrations/offers/prj_1/later")), ("Never", None, Some("/api/migrations/offers/prj_1/never"))]
+            vec![("Upgrade Ada", Some("https://chat.test/move"), None), ("Not now", None, Some("/api/migrations/offers/prj_1/later")), ("Never", None, Some("/api/migrations/offers/prj_1/never"))]
         );
         assert!(n.actions.iter().all(|a| a.body.is_none()), "each posts {{}}");
         assert_eq!(n.image.as_deref(), Some("/api/migrations/offers/prj_1/picture"));
         let bare = offer("prj_2", "  ", false, "https://chat.test/move");
-        assert_eq!((bare.title.as_str(), bare.image), ("Bring your agent over from finite.computer?", None));
+        assert_eq!((bare.title.as_str(), bare.actions[0].label.as_str(), bare.image), ("Your agent's upgrade is ready", "Upgrade your agent", None));
     }
 
     /// Goal: `/move` says where each move is in plain words, from its state
-    /// alone: asked, stopping, copying, importing, done, or paused for staff.
+    /// alone, as an upgrade: ready, pausing, packing up, upgrading,
+    /// upgraded, or paused for staff (nothing lost only while its stage is
+    /// kept: held before one was made, it says no more than paused).
     #[test]
     fn where_a_move_is_in_words() {
         let open = open_move();
-        assert_eq!(said(&open, "Ada"), "Ada is on finite.computer.");
+        assert_eq!(said(&open, "Ada"), "Ada's upgrade is ready.");
+        assert_eq!(said(&open, " "), "Your agent's upgrade is ready.");
         assert_eq!(said(&to(never(&open, T0)), "Ada"), "You said never.");
         let asked = to(yes(&open, AGENT, T0));
-        assert_eq!(said(&asked, "Ada"), "Stopping Ada on finite.computer…");
-        assert_eq!(said(&staging(), "Ada"), "Copying Ada…");
-        assert_eq!(said(&importing(), " "), "Bringing your agent over…");
+        assert_eq!(said(&asked, "Ada"), "Pausing Ada for its upgrade…");
+        assert_eq!(said(&staging(), "Ada"), "Packing up Ada…");
+        assert_eq!(said(&importing(), " "), "Upgrading your agent…");
         let held = tick(&asked, T0 + STOP_MS).expect("held").to;
-        assert_eq!((held.state, said(&held, "Ada").as_str()), (MoveState::Held, "Paused: someone from Finite will look at it and be in touch."));
+        assert_eq!((held.state, said(&held, "Ada").as_str()), (MoveState::Held, "Paused: someone from Finite will look at it and be in touch."), "no stage yet");
         assert_eq!(said(&restarted(&held), "Ada"), said(&held, "Ada"), "restart");
     }
 
-    /// Goal: a person's Yes hands every secret its old agent has to their
-    /// Vault (F11), only for that command, while it stops or stages, and
-    /// each into an entry bound to the new agent toward its kind's hosts.
+    /// Goal: a person's Yes asks for every kind of secret for their Vault
+    /// (F11), whatever the roster's `has` says (FIN-498: the mover's fleet
+    /// can't know it), and takes any of them, only for that command, while
+    /// it stops or stages, each into an entry bound to the new agent
+    /// toward its kind's hosts.
     #[test]
     fn a_yes_hands_off_the_old_agents_secrets() {
         use fragment_proto::migrations::HandoffItem;
-        let all = Has { telegram: true, openrouter: true, nostr: true };
-        let some = Has { telegram: true, openrouter: false, nostr: false };
         let asked = to(yes(&open_move(), AGENT, T0));
-        // valid: every kind it has, on its command, while asked or staging
-        assert_eq!(asked.secrets(&all), SecretKind::ALL.to_vec());
-        assert_eq!(asked.secrets(&some), vec![SecretKind::TelegramBotToken]);
+        // valid: every kind asked; all of them, or some (the rest not read), on its command, while asked or staging
+        assert_eq!(asked.secrets(), SecretKind::ALL.to_vec());
+        assert_eq!(asked.command().unwrap().secrets, SecretKind::ALL.to_vec(), "as the mailbox answers it");
         let cmd = asked.command_id().unwrap();
-        assert_eq!(handoff(&asked, &cmd, &all, &SecretKind::ALL), Ok(()));
+        assert_eq!(handoff(&asked, &cmd, &SecretKind::ALL), Ok(()));
         let s = staging();
-        assert_eq!(handoff(&restarted(&s), &s.command_id().unwrap(), &some, &[SecretKind::TelegramBotToken]), Ok(()), "staging, restarted");
-        // invalid: a kind it has not, another command, a move past staging
-        assert_eq!(handoff(&s, &s.command_id().unwrap(), &some, &[SecretKind::OpenrouterKey]), Err(Refused::Unfit("a hand-off names only the secrets its command asks for")));
-        assert_eq!(handoff(&s, "prj_1:2:stop_and_stage", &all, &[SecretKind::NostrNsec]), Err(Refused::Stale));
+        assert_eq!(s.secrets(), SecretKind::ALL.to_vec(), "staging");
+        for kind in SecretKind::ALL {
+            assert_eq!(handoff(&restarted(&s), &s.command_id().unwrap(), &[kind]), Ok(()), "staging, restarted: {kind:?} alone");
+        }
+        // invalid: another command, a move past staging
+        assert_eq!(handoff(&s, "prj_1:2:stop_and_stage", &[SecretKind::NostrNsec]), Err(Refused::Stale));
         let i = importing();
-        assert_eq!(handoff(&i, &cmd, &all, &[SecretKind::NostrNsec]), Err(Refused::Stale), "staged: its command is done");
+        assert_eq!(handoff(&i, &cmd, &[SecretKind::NostrNsec]), Err(Refused::Stale), "staged: its command is done");
         // none without a Yes: phase 2's stop_and_stage, an unasked move, staff's restart
         let p2 = cutoff(&Move::listed("o", "u", false, T0), T0, T0).unwrap().to;
-        assert_eq!(p2.secrets(&all), vec![]);
-        assert!(handoff(&p2, &p2.command_id().unwrap(), &all, &[SecretKind::NostrNsec]).is_err());
-        assert_eq!(open_move().secrets(&all), vec![]);
+        assert_eq!(p2.secrets(), vec![]);
+        assert_eq!(p2.command().unwrap().secrets, vec![], "as the mailbox answers it");
+        assert_eq!(handoff(&p2, &p2.command_id().unwrap(), &[SecretKind::NostrNsec]), Err(Refused::Unfit("a hand-off names only the secrets its command asks for")));
+        assert_eq!(open_move().secrets(), vec![]);
         // its bounds: each kind once, 1 to 3, a value 1 to 4096 bytes
         let item = |kind, value: &str| HandoffItem { kind, value: value.into() };
         let h = |items| Handoff { command: cmd.clone(), items };
@@ -1806,15 +1971,19 @@ mod tests {
     fn each_kind_is_a_vault_entry_of_the_new_agent() {
         use crate::catalog::Catalog;
         let (name, put) = vault_secret(SecretKind::TelegramBotToken, "kestrel--x7k2", "123:abc").unwrap();
-        assert_eq!((name.as_str(), put.hosts.as_slice(), put.agents.as_slice(), put.value.as_str()), ("telegram-kestrel--x7k2", &["api.telegram.org".to_string()][..], &["kestrel--x7k2".to_string()][..], "123:abc"));
+        assert_eq!((name.as_str(), put.hosts.as_slice(), put.agents.as_slice(), put.value.as_deref().unwrap()), ("telegram-kestrel--x7k2", &["api.telegram.org".to_string()][..], &["kestrel--x7k2".to_string()][..], "123:abc"));
         let (name, put) = vault_secret(SecretKind::OpenrouterKey, "kestrel--x7k2", "sk-or-1").unwrap();
         assert_eq!((name.as_str(), put.hosts.as_slice()), ("openrouter-kestrel--x7k2", &["openrouter.ai".to_string()][..]));
-        // NIP-19's example key: kept as hex, to sign with, sent nowhere
+        // NIP-19's example key: kept as hex, to sign with toward finite.site
+        // (its sites' API and git remotes), bound to the new agent alone
         let nsec = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
         let hex = "67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa";
         let (name, put) = vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", nsec).unwrap();
-        assert_eq!((name.as_str(), put.value.as_str(), put.hosts.len(), put.place.sign.as_deref()), ("nostr-kestrel--x7k2", hex, 0, Some("nip98")));
-        assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", hex).unwrap().1.value, hex, "hex too");
+        assert_eq!(
+            (name.as_str(), put.value.as_deref().unwrap(), put.hosts.as_slice(), put.place.sign.as_deref(), put.agents.as_slice()),
+            ("nostr-kestrel--x7k2", hex, &["finite.site".to_string()][..], Some("nip98"), &["kestrel--x7k2".to_string()][..])
+        );
+        assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", hex).unwrap().1.value.as_deref(), Some(hex), "hex too");
         assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", "nsec1nope"), None, "not a key");
         // a long label is cut short to fit a name, beside its whole name's
         // hash: two agents whose cut labels meet still have names of their own
@@ -1832,8 +2001,56 @@ mod tests {
             for fragment in ["kestrel--x7k2", long.as_str()] {
                 let (name, put) = vault_secret(kind, fragment, value).unwrap();
                 assert!(name.len() <= 32 && name.ends_with("--x7k2"), "{name}");
-                crate::vault::check(&name, &put, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let checked = crate::vault::check(&name, &put, None, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+                if kind == SecretKind::NostrNsec {
+                    // it signs toward finite.site: not parked, so its agent's view lists it
+                    assert_eq!((checked.hosts.as_slice(), &checked.placing), (&["finite.site".to_string()][..], &crate::vault::Placing::Nip98), "{name}");
+                }
             }
+        }
+    }
+
+    /// Goal: a good import waiting for staff (`retiring`, no command)
+    /// never reaches the release before #1263, which reads that row but
+    /// not its meaning: its staff ops refuse it, and once its stage's
+    /// keep passes it holds it `retire_timed_out`, whose `retry` retires
+    /// the old agent. Its object holds step 7, which that release refuses
+    /// before it reads a row, at every call and alarm (`schema_refused`),
+    /// whether the stage was kept or swept; nothing changes, and rolled
+    /// forward, staff's retry imports again. Method: a waiting move, before
+    /// and after its keep, written as the cell writes it on this code's
+    /// object; started by the code of six steps; then by this code again.
+    #[test]
+    fn a_move_waiting_for_staff_is_refused_by_the_release_before() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, MIGRATIONS};
+        let before = migrate::Class { steps: &MIGRATIONS.steps[..6], ..MIGRATIONS };
+        let newest = MIGRATIONS.steps.len() as u32;
+        let waiting = to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        assert_eq!((waiting.state, waiting.command, waiting.deadline()), (MoveState::Retiring, None, Some(T0 + 10 + KEEP_MS)));
+        let swept = tick(&waiting, T0 + 10 + KEEP_MS).expect("its keep").to;
+        assert_eq!((swept.state, swept.command, swept.deadline()), (MoveState::Retiring, None, None), "its stage gone, no deadline left");
+        let literal = |c: Col| match c {
+            Col::Null => "NULL".to_string(),
+            Col::Int(n) => n.to_string(),
+            Col::Text(t) => format!("'{}'", t.replace('\'', "''")),
+        };
+        for m in [waiting, swept] {
+            let db = Lite::new();
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &MIGRATIONS, T0)), Ok(Ran::Made { version: newest }));
+            let values: Vec<String> = m.values().into_iter().map(literal).collect();
+            db.exec(&format!("INSERT INTO moves ({}, offer) VALUES ({}, '')", COLUMNS.join(", "), values.join(", "))).expect("written as this code writes it");
+            let refused = db.transaction(|db| migrate::migrate(db, &before, T0 + 200));
+            assert_eq!(refused, Err(SchemaError::Newer { class: "Migrations", held: newest, known: 6 }), "the release before refuses the object");
+            assert_eq!(migrate::held(&db, &MIGRATIONS).expect("held").len() as u32, newest, "unchanged");
+            // rolled forward: this code takes it, the move as it was
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &MIGRATIONS, T0 + 300)), Ok(Ran::Current { version: newest }));
+            let rows = db.rows("SELECT * FROM moves").expect("its moves");
+            let back = Move::read(&rows[0]).expect("a move reads back");
+            assert_eq!(back, m, "nothing changed");
+            // and staff's retry imports again, never retires
+            let again = to(retry(&back, T0 + 400));
+            assert_eq!((again.state, again.phase, again.attempt), (MoveState::Asked, Phase::P1, m.attempt + 1));
+            assert!(!matches!(again.command, Some(Act::Retire(_))), "{:?}", again.command);
         }
     }
 }

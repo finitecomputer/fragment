@@ -30,9 +30,10 @@ in the cell: a self-host change to master does not touch `cell/`,
 | # | Seam | On master |
 |---|---|---|
 | 1 | The runtime: celld | dev and the e2e (below) |
-| 2 | Computers on sandcastle nodes | not yet: no computers on celld |
+| 2 | Computers on the box's microVM engine | dev and the e2e, on celld's krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`) |
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
-| 4, 9 | Sign-in by OpenID Connect; LAN mode | not yet; locally, dev's WorkOS fake |
+| 4 | Sign-in: the identity door, an OpenID Connect relying party behind WorkOS's endpoints | dev on celld and the e2e's `door` section, against the OpenID Connect fake (below) |
+| 9 | LAN mode | not yet |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
@@ -49,8 +50,8 @@ Cloudflare's binding surface) runs the cell from the config a local
 wrangler node runs (`wrangler.local.jsonc`, its secrets bound by name),
 less `build` (`crates/devstack/src/celld.rs`, `DROPPED`), written beside
 the cell's own as `wrangler.celld.jsonc`. Its node's settings are celld's
-own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and no container
-engine (`CELLD_CONTAINER_ENGINE=none`). One `devstack::Node` runs either runtime behind the
+own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and its container
+engine (`CELLD_CONTAINER_ENGINE`: `none`, or the box's krun engine, seam 2). One `devstack::Node` runs either runtime behind the
 node's front door (front.rs): celld listens on a port of its own, which
 the front door is told, as it learns workerd's from wrangler's. Stop
 (SIGINT), crash (the group SIGKILLed) and the e2e's signal handler serve
@@ -62,7 +63,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | Binding or API | On celld | Class | How the cell runs |
 |---|---|---|---|
 | `durable_objects`: Fragment, Principal, Registry, Ledger, SearchIndex, Vault | yes | works | |
-| `durable_objects`: Computer | the class runs, its `ctx.container` not running | off | no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host finds no container running, so a person's wipe still empties their computer's rows |
+| `durable_objects`: Computer | yes; with no engine, its `ctx.container` not running | works on the krun engine | seam 2. With no engine, no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host finds no container running, so a person's wipe still empties their computer's rows |
 | `durable_objects`: Migrations, and R2 `STAGE` | yes | off | the finite.computer move: unconfigured (`FRAGMENT_MIGRATIONS_MOVER` unset), as on any deployment but finite.chat's |
 | `migrations` (`new_sqlite_classes`, v1 to v4) | yes | works | |
 | `durable_objects.code_update_strategy` | accepted, no effect | works | celld reads the bindings alone; `celld dev` deploys once (`--no-watch`), and the e2e's reload restarts the node |
@@ -77,12 +78,13 @@ Every binding and runtime API master's cell uses, against the fork's
 | `send_email` (`EMAIL`) | bound (`SendEmail`); every send rejects, `E_NO_MAILER` | degraded | a failed send: Mail, below. Dev and the e2e keep the mail fake (`FRAGMENT_MAIL_URL`) |
 | `browser` (`BROWSER`) | bound (`Fetcher`); every fetch rejects, "this node has no Browser Rendering" | degraded | a card's shot fails, as one Browser Rendering fails. Seam 7 brings a renderer |
 | `images` (`IMAGES`) | bound (`ImagesBindingImpl`); every output rejects, "this node has no Images" | degraded | an icon's making offers no candidate, and an upload that needs fitting fails (`host_failed`); a PNG at the icon's size is kept as it is |
-| `containers` | accepted; a node with no engine (`CELLD_CONTAINER_ENGINE=none`) builds no image, and each object's `ctx.container` is there, not running, its start throwing "this node runs no computers" | off | celld's Docker engine has no egress intercepts or snapshots, which a computer needs; seam 2 places computers on sandcastle nodes |
+| `containers` | yes on the krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`); a node with no engine (`none`) builds no image, and each object's `ctx.container` is there, not running, its start throwing "this node runs no computers" | works on the krun engine | seam 2. celld's Docker engine has no egress intercepts or snapshots, which a computer needs, so devstack refuses it |
 | `ctx.exports` | yes (`DurableObjectState.exports`) | works | used only by a computer's container host |
-| `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | off | with computers (seam 2) |
-| `connect()` (`cloudflare:sockets`) | yes | off | the XFTP relay is a computer's |
+| `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | works on the krun engine | seam 2: an intercept set during a start, a host intercepted again, a WebSocket and a streamed body through one, all as on Cloudflare |
+| The Sandbox SDK's `DirectoryBackup` | `exec()` and an intercept of `backups.sandbox.internal`; no `snapshotDirectory()` | works on the krun engine | a computer's saves and restores |
+| `connect()` (`cloudflare:sockets`) | yes | works on the krun engine | the XFTP relay is a computer's |
 | `compatibility_flags`: `nodejs_compat` | partial (its `node:` modules) | works | the Sandbox SDK's imports load |
-| `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | off | with computers |
+| `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | works | each krun container is a VM of its own |
 | `build` | refused | n/a | dropped by the render (`DROPPED`): worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length carried, as workerd's (found 47, fixed in the fork) | works | |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
@@ -90,17 +92,81 @@ Every binding and runtime API master's cell uses, against the fork's
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
   worker-build's cache or `CELLD_ESBUILD`): the same fakes and settings as
-  on wrangler, no computers, the secrets bound as on wrangler and read by
-  the node from OpenBao.
-- **The e2e:** `FRAGMENT_E2E_RUNTIME=celld`. Its rung (`needs::Rung::Celld`)
-  has everything a local run has but the runtime's containers and the
-  finite.computer move: a section that needs computers is a skip saying
+  on wrangler, the secrets bound as on wrangler and read by the node from
+  OpenBao, and computers when `CELLD_CONTAINER_ENGINE` names the krun
+  engine (seam 2).
+- **The e2e:** `FRAGMENT_E2E_RUNTIME=celld`. Its rung
+  (`needs::Rung::Celld`) has everything a local run has but the
+  finite.computer move, and the runtime's containers only on the krun
+  engine: without one, a section that needs computers is a skip saying
   seam 2. Checks celld cannot make are skips saying why (a card's shot,
-  an icon's making; found 31's 413); the check local workerd cannot make
-  runs (a job sleeping through a crash). The build makes no computer
-  images.
+  an icon's making; found 31's 413; Telegram, below); the check local
+  workerd cannot make runs (a job sleeping through a crash).
 - **Master's path is unchanged:** nothing here branches on the runtime,
   and the cell has no code of celld's.
+
+## 2. Computers: the box's microVM engine
+
+A computer is the `Computer` class's container, as on Cloudflare: the cell
+calls `ctx.container` and the Sandbox SDK's `DirectoryBackup`, and celld
+runs them on the box's krun engine (sandcastle's `sandcastle-engine`,
+root, a jailed microVM per container), which speaks Cloudflare's container
+API. `CELLD_CONTAINER_ENGINE=krun:<the engine's socket>` names it; the
+cell, the core and the wire know nothing of it, and nothing sits between
+celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #21,
+a stack) are each a gap the e2e's computer lanes found: a dev node's images,
+the intercept socket's path, intercepts set during a start or set again, a
+WebSocket and a large body through one, a `monitor()` whose event had
+answered (its object now woken as the container stops), and an `exec()`
+during a start.
+
+- **Images:** `celld dev` builds the config's images with Docker, as it
+  does for its Docker engine, and loads each into the krun engine under
+  its content key (`celld-image:<sha256>` of its layers and config), so a
+  computer is pinned to an image by its digest. An unchanged image is not
+  loaded again.
+- **Egress:** each start's intercepts (the platform's API and model
+  routes, a connection's hosts, `backups.sandbox.internal`) go from the
+  engine's egress proxy to celld's socket and on to `ComputerEgress`, a
+  WebSocket (`__live`, the keepalive, the XFTP relay) and a body past
+  1 MiB (a 40 MB sync) as on Cloudflare. The run's computers have no
+  internet (`FRAGMENT_COMPUTER_INTERNET=off`): the engine resolves only
+  the hosts they intercept.
+- **Saves:** `DirectoryBackup`'s shim runs through `exec()`, its parts
+  through the backups intercept; `snapshotDirectory()` is never called.
+  Dev and the e2e sleep unsnapshotted (`FRAGMENT_COMPUTER_SNAPSHOTS=off`),
+  as on wrangler.
+- **Crashes:** a container that stops wakes its Computer object, whose
+  `monitor()` settles then, as on Cloudflare.
+- **Capacity:** the engine admits a VM by its instance's memory, up to its
+  `memory_mib_max`; a computer is 2 vCPU and 6 GiB (decision 13), so this
+  box's 32 GiB admits five awake at once, and a start past it is refused
+  (429) and tried again by the cell. The whole e2e keeps more awake than
+  that, so its later computer sections on celld meet refusals; each runs
+  alone within it. A box sizes the budget for the computers it keeps awake
+  (a stub guest uses about 250 MB of its 6 GiB).
+- **Cleanup:** a node reaps its VMs when it stops and when it starts again
+  on its project; a run killed outright has devstack destroy its node's by
+  celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
+- **Skips on celld,** each a gap of celld's:
+  - a turn's keepalive across a deploy: the e2e's reload of `celld dev`
+    restarts its node, which reaps its VMs. A deploy to a running celld
+    node swaps its generation and keeps them, so the fix is a `celld dev`
+    reload that does the same;
+  - a takeover after a crash of the node: a celld node that starts again
+    reaps the VMs it left, so a box's restart restarts every computer from
+    its last save. The fix is a node that keeps them for the cells that
+    come back to it, and reaps the rest after a while;
+  - an export across a crash of the node: celld resumes an R2 multipart
+    upload only in the process that began it;
+  - Telegram (below).
+- **Not yet:** the platform's own hosts from a computer (found 40: an
+  agent opening its app at the box's address, which its VM does not
+  reach): celld would intercept the names a node's config gives and answer
+  them from the Worker. Dev's `.localhost` names are the guest's own
+  loopback (RFC 6761), so that needs a non-loopback dev name too. A real
+  agent (`--real-agent`, our Hermes image) on the krun engine is not run
+  here.
 
 ## 3. Models from a file
 
@@ -125,6 +191,190 @@ self-hosted model names its price in its slot, zero for the box's own:
 ```sh
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
+
+## 4. Sign-in: the identity door
+
+The cell signs people in through WorkOS AuthKit's endpoints, at
+`WORKOS_API_URL` (default `https://api.workos.com`). On a self-hosted box
+those endpoints are the **identity door**'s (`crates/identity-door`): a
+small native service on the box, which the cell reaches by configuration
+alone, as celld reads the Secrets Store's bindings from OpenBao. The cell
+has no code of the door's, and master's WorkOS path is the same path.
+
+Behind those endpoints the door is an **OpenID Connect relying party** of
+the provider its config names: on a tailnet, Tailscale's tsidp, which asks
+tailscaled who the device is; on an intranet, the org's own (Entra, Okta,
+Google Workspace, Keycloak, Authentik, Dex). Identity is the provider's,
+never the network's (Paul, 2026-11-11: "OIDC everywhere, with tsidp as the
+tailnet default"; a true intranet has no Tailscale). Its rules are
+fragment#1244's, brought into the door's crate from the cell.
+
+The cell is configured with:
+
+- `WORKOS_API_URL`: the door's public URL, which browsers and the cell
+  both reach;
+- `WORKOS_CLIENT` (a secret binding): a client id of the door's config;
+- `WORKOS_KEY` (a secret binding): that client's secret, kept in the node's
+  secrets backend as before; the door's config holds its SHA-256 alone;
+- no connection rows in its catalog: WorkOS Pipes stay absent on self-host.
+
+### What the cell assumes of WorkOS, and how the door answers
+
+| The cell's assumption | Where | The door |
+|---|---|---|
+| The browser goes to `{api}/user_management/authorize?client_id&redirect_uri={platform}/auth/callback&response_type=code&provider=authkit&state`, with `login_hint`, `screen_hint` or `invitation_token` when given | `cell/src/auth.rs` `begin` | checks the client and its callback (registered, exactly), then sends the browser to the provider; passes `login_hint` on (tsidp ignores it). `provider`, `screen_hint` and `invitation_token` mean nothing here: who may sign in is the provider's to say |
+| The callback carries `code` and `state`, or `error` and `error_description`, which a page shows | `auth.rs` `callback` | hands the platform's state back as given; a refusal is an OAuth error (`access_denied`, `temporarily_unavailable`, …) whose description says why |
+| `POST {api}/user_management/authenticate` with JSON `client_id`, `client_secret` (`WORKOS_KEY`), `grant_type`, `code`; 200 read for `user.id`, `user.email`, `user.email_verified` and `access_token`; a 400 is the code's (start again), anything else WorkOS failing | `cell/src/keys.rs` `workos_authenticate`; `cell/src/registry/signin.rs` `exchange` | the door's code for `{user: {object, id, email, email_verified: true}}`; 400 `invalid_grant` for a code unknown, spent, expired or another client's; 401 `invalid_client` for a wrong secret |
+| `user.id` names a person, under the issuer `workos:<client id>` | `keys.rs` `WorkOs::issuer`; the registry's `person_for` | `user_` and 32 hex digits of a hash of the provider's issuer and its `sub`: the same person at every sign-in, never another provider's |
+| `email_verified` is true, and an email names one person | `signin.rs` `exchange`, `person_for` | always true, since the door refuses what it cannot vouch for (below); the registry still refuses another person's email (409) |
+| `access_token`, read unverified: `sid` (the session sign-out ends at WorkOS) and `auth_time` (a switch answered from a held session) | `signin.rs` `claims_of`, `answered_from_held` | none: no `sid`, so sign-out ends the platform's session alone and never visits the door; no `auth_time`, so a switch finishes as a sign-in |
+| Sign-out goes to `{api}/user_management/sessions/logout?session_id&return_to` | `auth.rs` `workos_logout` | never reached (no `sid`); answers a redirect to a client's own origin, for a session from before that names one |
+| No JWKS, organization or impersonation of WorkOS's is read | | nothing to answer |
+| Pipes: `/data-integrations/*`, `/user_management/users/*/data_providers` and `connected_accounts` | `keys.rs`, `connections.rs`, `computer.rs`, `registry/connection_signin.rs` | 404. The cell asks only when its catalog has a connection row, and a self-hosted box's has none |
+| The finite.computer move binds a person by their WorkOS user | `cell/src/migrations.rs` | off on self-host (unconfigured) |
+
+### The flow
+
+1. The platform sends the browser to the door's `authorize`, its own state
+   bound to the browser by a cookie, as for WorkOS.
+2. The door sends it to the provider: the code flow, PKCE's S256 (always:
+   tsidp assumes `plain` without it), a nonce, its callback
+   `<public_url>/oidc/callback`, and its own state, which holds the
+   platform's client, callback and state, sealed with an HMAC.
+3. The provider signs the person in and sends the browser to the door's
+   callback. The door redeems the code (`client_secret_basic` or `_post`)
+   and checks the id_token: RS256 or ES256 by a key of the provider's JWKS
+   (ring), then `iss`, `aud`/`azp`, the times, the nonce and `sub`.
+4. The door reads the email (below), issues a one-time code of its own,
+   and sends the browser to the platform's callback with it and the
+   platform's state.
+5. The platform exchanges that code at `authenticate`, with its client's
+   secret, and signs the person in as it signs in WorkOS's.
+
+### Why it is safe
+
+- **The provider is the configured one.** Its metadata's `issuer` is
+  exactly the config's; its endpoints are https (http only beside a
+  loopback issuer: dev and the e2e). An id_token is signed RS256 or ES256
+  by a key its JWKS publishes, never `none`, an HMAC or a key the token
+  carries. A `kid` the JWKS lacks fetches it again at once (a rotation),
+  then not again within 15 s.
+- **Only the door can redeem what it began.** The PKCE verifier and the
+  nonce are derived from the door's secret and its state (HKDF, then an
+  HMAC each), and the state is sealed under that secret: nothing is
+  stored, and no one else can make the verifier.
+- **One browser finishes it.** The platform's own state rides inside the
+  door's and is handed back to its callback, which finishes a sign-in only
+  in the browser holding its cookie.
+- **The email is never guessed.** It must be a mailbox (a domain with a
+  dot), and either the provider verified it (`email_verified: true`) or its
+  domain is one the door's config vouches for (`vouched_domains`). tsidp
+  sends no `email_verified`, so a box on tsidp vouches for its logins'
+  domains; a GitHub login's `user@github` is no mailbox and is refused
+  whatever is vouched.
+- **The door's codes** are 32 random bytes, good for 120 s, once, for the
+  client they were issued to, exchanged only with its secret (its SHA-256,
+  compared in constant time). A wrong secret never burns one.
+- **Callbacks are registered.** The door sends a browser only to a
+  callback its client registered, exactly; before the client and callback
+  are known, or when its state does not open, a refusal is a page, never
+  a redirect.
+- **Its secrets** are files of the operator's, owner-only (refused
+  otherwise): the door's own (32 bytes or more) and its client secret at
+  the provider (docs/secrets.md).
+
+**Restarts.** The door's state lives in the browser, so a door restarted
+while its person is at the provider finishes the sign-in. Its codes for
+the platform live in its memory alone: the one sign-in caught between the
+door's callback and the platform's exchange (about a second) is refused at
+the platform's callback, which says to start the sign-in again (400), and
+no code is replayed after a restart. A changed door secret fails the
+sign-ins under way the same way.
+
+### Running it
+
+```sh
+fragment-identity-door --config /etc/fragment-door/door.json
+```
+
+```json
+{
+  "listen": "127.0.0.1:8803",
+  "public_url": "https://door.<tailnet>.ts.net",
+  "secret_file": "/etc/fragment-door/door.secret",
+  "provider": {
+    "issuer": "https://idp.<tailnet>.ts.net",
+    "client_id": "<tsidp's client id>",
+    "client_secret_file": "/etc/fragment-door/provider.secret"
+  },
+  "vouched_domains": ["example.com"],
+  "clients": [{
+    "client_id": "client_fragment",
+    "client_secret_sha256": "<printf %s \"$WORKOS_KEY\" | sha256sum>",
+    "redirect_uris": ["https://<platform>/auth/callback"]
+  }]
+}
+```
+
+`provider` also takes `scopes` (default `openid email profile`),
+`email_claim` (default `email`; another claim is taken only beside
+`vouched_domains`), `auth` (`client_secret_basic` or `client_secret_post`;
+default, what the provider lists) and `ca_file` (an intranet's CA, beside
+Mozilla's roots). Its log is its standard error, a line a sign-in.
+
+**On tsidp** (v0.0.18, read from its source by fragment#1244, not yet run
+against here): register a client whose redirect URI is the door's
+`<public_url>/oidc/callback`; tsidp signs RS256 alone, requires the client
+secret, sends no `email_verified` (so name the logins' domains in
+`vouched_domains`), ignores `prompt` and `login_hint`, refuses tagged
+devices, and needs the browser on the tailnet.
+
+### Dev and the e2e
+
+- **Dev:** `cargo xtask dev --runtime celld` signs in through the door on
+  :8804, in front of the OpenID Connect fake on :8806, whose form signs in
+  as any email (each email the same person at every start). The door's
+  secret is `target/devstack/identity-door-secret`. Named WorkOS files
+  (`WORKOS_CLIENT_ID_FILE`, `WORKOS_API_KEY_FILE`) still choose a real
+  WorkOS. Dev on wrangler keeps the WorkOS fake.
+- **The e2e:** the `door` section (`crates/e2e/src/lanes/door.rs`, after
+  `signin`) starts the node again shaped as a self-hosted box
+  (`Shape::Door`: the door's client and URL, no Pipes rows), with the
+  OpenID Connect fake
+  behind the door, strict and then shaped as tsidp, on either runtime. The
+  rest of the run signs people in through the WorkOS fake, whose levers
+  and Pipes the other sections drive.
+- **The door's own tests** (`cargo test -p fragment-identity-door`):
+  #1244's rules, the signature checks, the email rule, the sealed state,
+  and the whole flow against the fake: valid, invalid, replay, restart.
+
+### Egress
+
+The door's calls to its provider are its own, a native process outside
+celld's rules. The cell's call to the door (the exchange) is the Worker's
+own `fetch`, under celld's. Dev and the e2e run celld with egress open (no
+`CELLD_EGRESS_PUBLIC_ONLY`), as every fake on loopback needs, so they set
+nothing. A box with `CELLD_EGRESS_PUBLIC_ONLY=1` cannot open a door beside
+celld with `CELLD_EGRESS_ALLOW`: celld never opens loopback, `localhost`
+or the node's own addresses, list or no list, and refuses
+`CELLD_EGRESS_ALLOW` without public-only egress (the fork's
+`crates/celld/egress.rs`; its docs/README.md). Such a box needs celld to
+open one named local service to a Worker's `fetch`: a celld change, not
+built. `FRAGMENT_EGRESS_ALLOW` is never the door's: it is what apps' jobs
+may fetch.
+
+### Not yet
+
+- **A real tsidp run** waits on a tailnet; the fake is shaped as tsidp's
+  source reads.
+- **"Use another account"** goes to the provider again, which signs in
+  whoever it holds a session for (on tsidp, the device's person): the door
+  cannot tell a switch from a sign-in, so it asks for no `prompt=login`.
+- **No TLS of its own:** a box serves it behind the TLS its platform has.
+- **A direct WhoIs mode**, if tsidp proves too weak, would be another
+  source behind the same endpoints: `authorize` asking tailscaled's
+  LocalAPI WhoIs of the connection's own address and port, the door
+  reached directly over the tailnet and never through a proxy.
 
 ## 12. Secrets: the store's bindings, read from the node's backend
 
@@ -241,13 +491,6 @@ The old lane's numbering is kept.
     by it, so every address is `unnamed` and shares one bucket. A front
     proxy that sets the header (a tailnet's, a company's) gives each its
     own.
-49. **The dev WorkOS fake's adoption reads wrangler's state layout**
-    (`devstack::signed_in_subjects`): on celld it finds no one, so a dev
-    stack on celld keeps its fake's subjects in the fake's own file alone.
-    Both runtimes' stacks share that file, so a celld state that outlived
-    it is refused at any dev start, on either runtime
-    (`celld::workos_users_kept`; `--clean` starts afresh): a fresh fake
-    would hand a known subject to another email.
 50. **celld caps an object's requests in flight at 64**
     (`CELLD_MAX_CELL_REQUESTS`; past it, 503 "cell request limit
     reached"). Cloudflare queues an object's requests with no such count,
@@ -261,6 +504,20 @@ The old lane's numbering is kept.
     Cloudflare. On celld the e2e keeps what callers see (the next call
     refused, 402) and skips what a lever reads of the gate
     (`Suite::one_isolate`).
+55. **A fleet of two nodes runs `CELLD_DURABILITY=bucket`** (FIN-517).
+    On the default, `fleet`, a node answers a write once a follower holds
+    it or its bucket upload finishes, and with two nodes the other node is
+    its one follower. When one node dies, the other cannot take its cells:
+    it holds the dead node's log, but will not seal it while a member's
+    state is unverified ("no complete true witness … 1 member(s)
+    undecided; refusing to seal"), so writes to those cells wait until the
+    dead node is back. Nothing acknowledged is lost. On `bucket` every
+    write waits for the bucket (129 ms at p50 to RustFS over a tailnet,
+    2026-11-16), and the survivor takes the dead node's cells in about one
+    lease: 8 to 11 s after a crash, a hang or a lost machine. With three or
+    more nodes another follower can witness, so `fleet` may hold there
+    (untested). This goes when celld takes over a two-node fleet's cells
+    on `fleet`.
 
 Fixed since, in the fork or here:
 
@@ -280,10 +537,11 @@ Fixed since, in the fork or here:
 ## What a self-hosted org won't have, and its setup steps
 
 **A working list** (2026-11-11), for one box on a tailnet with outbound
-internet, no inbound internet, and the cell on celld. Revisit after the tailnet design: it would remove step 4 (the
-org's own WorkOS: the tailnet's identity instead), and change steps 1 and
-2 (MagicDNS names and a box CA pinned in the apps, the org's own domain
-optional) and the iOS row (the app's own trust and tailnet).
+internet, no inbound internet, and the cell on celld. Sign-in is the
+identity door's (seam 4), not an org's own WorkOS. Revisit after the
+tailnet design: it would change steps 1 and 2 (MagicDNS names and a box CA
+pinned in the apps, the org's own domain optional) and the iOS row (the
+app's own trust and tailnet).
 
 ### Works unchanged, given outbound internet
 
@@ -299,18 +557,18 @@ optional) and the iOS row (the app's own trust and tailnet).
 | CLI update notice | speaks only when its host is finite.chat | silent elsewhere |
 | In-app invites, sharing to named people, vanity addresses | the registry | |
 | Export, wipe, keyword search, Vault, doors | the platform | a wipe needs no container (`ContainerHost` reads none running) |
-| Web shell fonts | fonts.googleapis.com, fetched by the client | offline clients fall back |
+| Web fonts (the shell, the chat, `__fragment.css`) | the release's own files, served by the cell | nothing outbound: no page of ours loads from another domain |
 
 ### Works with extra setup
 
 | Feature | Finite's today | What the org brings |
 |---|---|---|
-| Sign-in | Finite's WorkOS AuthKit | its own WorkOS environment: redirect `https://<platform>/auth/callback`, invite URL `/auth/login`, logout `/`; `workos.client_id`, `workos.api_key` |
+| Sign-in | Finite's WorkOS AuthKit | the identity door (seam 4) in front of an OpenID Connect provider: tsidp on a tailnet, the org's own IdP on an intranet; the door's client registered there, the logins' domains vouched for where the provider sends no `email_verified` |
 | Fragment files (git) | Finite's code.storage org | its own code.storage org and PEM key (`codestorage.*`); its files then live at that vendor, off the box, so macrofiche (seam 5) matters |
 | Text models | OpenRouter on Finite's key, or Finite Private | an OpenAI-compatible endpoint and key for every slot (`cheap`, `medium`, `fallback`, `vision`, Deep), each priced; a slot left out falls back to Workers AI, which celld lacks. A deployment's `base_url` is https on a host name, no port; dev's models file takes this machine's `http://127.0.0.1:<port>` (seam 3) |
 | Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI (`models.embeddings`) |
 | Agents' paid tools (X, Firecrawl, fal, Browser Use, Perplexity, Places, xAI, ElevenLabs) | Finite's operator keys | its own key per row, or the row dropped |
-| Google, Linear and Salesforce connections | Finite's WorkOS Pipes and OAuth clients | its own OAuth client per provider in its own Pipes; redirect `https://<platform>/api/connections/<provider>/callback`; for Google, an internal Workspace app |
+| Google connections | Finite's WorkOS Pipes and OAuth clients | its own OAuth client per provider in its own Pipes; redirect `https://<platform>/api/connections/<provider>/callback`; for Google, an internal Workspace app |
 | Usage and credit | every call charged; guests and zero balances refused | no Stripe; `default_plan` `seat` or `seat_always_on`; `operators` grant credit; own keys still priced by the book |
 | Apps calling internal or tailnet services | public addresses only | blocked: 10/8, 192.168/16, 100.64/10 (the tailnet's), `.internal`, single-label names; only `FRAGMENT_EGRESS_LOCAL=allow` lifts it, which is never for a shared fleet. **A decision for an intranet** |
 | CLI | defaults to finite.chat | `fragment login --host https://<platform>`, or `FRAGMENT_HOST` |
@@ -324,12 +582,12 @@ optional) and the iOS row (the app's own trust and tailnet).
 | Feature | Inbound need | Alternative |
 |---|---|---|
 | A fragment's inbox (apps' webhooks, the `inbox` template) | `POST /api/f/<name>/inbox` | poll from a cron trigger, or expose that path alone through a tunnel (not checked) |
-| Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`). `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy, so once computers come to self-host, hiding its row is a wire change (today no agent runs on celld) |
+| Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`), and its door is refused. `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy: with computers on celld (seam 2) Settings still shows the row, and hiding it is a wire change, not made |
 | Public and "anyone with the link" sharing | visitors outside the tailnet | "public" means the tailnet |
 | Stripe | `/api/stripe/webhook` | left out |
 
-OAuth redirects (WorkOS, Google, Linear, Salesforce, OpenRouter) go
-through the person's browser, so the tailnet is enough.
+OAuth redirects (WorkOS, Google, OpenRouter) go through the person's
+browser, so the tailnet is enough.
 
 ### Not on self-host at all
 
@@ -357,15 +615,15 @@ through the person's browser, so the tailnet is enough.
 4. Secrets: OpenBao (or the org's own Vault), its unseal key kept
    safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
    random bytes, among the platform's root secrets there (seam 12).
-5. WorkOS: its own environment and the redirects.
+5. Sign-in: the identity door and its provider (seam 4): tsidp's or the IdP's client for the door, the door's config and secrets, the platform bound to the door (`WORKOS_API_URL`, `WORKOS_CLIENT`, `WORKOS_KEY`).
 6. code.storage: its own org and key (or macrofiche, once ported).
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
    `default_plan`.
-9. Computers: the Hermes image built (with `FRAGMENT_HOST`) and loaded
-   into the engine (seam 2).
-10. Providers: rows dropped or keys brought; OAuth clients for Google,
-    Linear and Salesforce.
+9. Computers: the krun engine installed and running, its memory budget
+   sized for the computers awake at once (6 GiB each); the Hermes image
+   built (with `FRAGMENT_HOST`) and loaded into it (seam 2).
+10. Providers: rows dropped or keys brought; an OAuth client for Google.
 11. Connectors: SimpleX alone, for now.
 12. Left out: `stripe`, `mail_from`, `ai_gateway`, `observability_read`,
     `migrations`, `test_secret_file`.
@@ -387,14 +645,15 @@ CELLD_BIN=…/celld cargo xtask dev --runtime celld
 FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
 # the e2e on celld (its node reads OpenBao unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
+# with computers on the box's krun engine (seam 2)
+CELLD_CONTAINER_ENGINE=krun:/var/lib/sandcastle/engine.sock \
+  FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only computers,…
 ```
 
 ## Not yet
 
-- Computers (seam 2): none on celld. devstack's node has no engine
-  (`CELLD_CONTAINER_ENGINE=none`); celld's Docker engine has no egress
-  intercepts or snapshots, which a computer needs; its krun engine
-  (sandcastle's) has both.
-- Sign-in by OpenID Connect (seams 4, 9).
+- Computers (seam 2): the platform's own hosts from a computer (found
+  40), and a real agent proven on the krun engine.
+- Sign-in: a real tsidp run, and a box whose celld runs public-only egress (seam 4, Egress); LAN mode (seam 9).
 - Own hardware in points (10), cards (7), macrofiche (5).
 - `celld deploy`: no xtask path yet; this is the dev stack and the e2e.

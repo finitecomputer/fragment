@@ -263,7 +263,9 @@ mod tests {
     /// lock of the classes as declared.
     #[test]
     fn the_guard_fails_a_ddl_change_with_no_step() {
-        let lock = lock(&[&FRAGMENT, &LEDGER]).expect("the lock");
+        // the Ledger at its baseline alone, whatever steps it has since
+        let one = Class { steps: &LEDGER.steps[..1], ..LEDGER };
+        let lock = lock(&[&FRAGMENT, &one]).expect("the lock");
         let edited_sql: &'static str = Box::leak(LEDGER.steps[0].sql.replace("caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL)", "caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL, note TEXT)").into_boxed_str());
         assert_ne!(edited_sql, LEDGER.steps[0].sql, "the plant took");
         let edited_steps: &'static [Step] = Box::leak(vec![Step { name: "baseline", sql: edited_sql }].into_boxed_slice());
@@ -274,7 +276,7 @@ mod tests {
         let grown: &'static [Step] = Box::leak(vec![Step { name: "baseline", sql: LEDGER.steps[0].sql }, Step { name: "caps_note", sql: "ALTER TABLE caps ADD COLUMN note TEXT;\n" }].into_boxed_slice());
         let grown = Class { steps: grown, ..LEDGER };
         let longer = super::lock(&[&FRAGMENT, &grown]).expect("the lock of two steps");
-        let found = drift(&longer, &[&FRAGMENT, &LEDGER]);
+        let found = drift(&longer, &[&FRAGMENT, &one]);
         assert!(matches!(&found[..], [Drift::Removed(m)] if m.starts_with("the lock names Ledger step 2 (caps_note)")), "{found:?}");
 
         let found = drift(&lock, &[&FRAGMENT, &grown]);

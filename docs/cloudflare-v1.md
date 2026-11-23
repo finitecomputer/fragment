@@ -48,8 +48,12 @@ computers) returns once this product works.
    Cloudflare Artifacts has a commit API), Stripe (51), and the model
    APIs a deployment names (61).
 2. **The Rust cell, ported to Workers (workers-rs), not rewritten**, with
-   thin JS shims where workers-rs lacks an API. The cell is the one
-   Worker; the CLI is Rust.
+   thin JS shims where workers-rs lacks an API. The cell is the
+   platform's Worker, and the CLI is Rust. The platform splits into
+   Workers by who uses them, so a fragment's isolate carries only what
+   fragments use (FIN-475, 2026-11-20): the operators' admin first, a
+   second Worker of the same crate (cell/src/admin.rs), since nothing
+   in the system reads from it.
 3. **Accounts.** Dev and previews run in a dev account on WorkOS's
    staging environment; production in Finite's production account on
    WorkOS's production one. CI deploys from a clean config, as a
@@ -147,11 +151,11 @@ computers) returns once this product works.
     counting each call by agent and month. Gmail needs Google's
     verification (CASA) past 100 people.
 23. **Models through the platform's route,** on AI Gateway with zero data
-    retention and its logs off. Tiers: `cheap` (the default) and `medium`;
-    `high` is off until Cloudflare raises Unified Billing's Opus limit,
+    retention and its logs off. Routes are the deployment's list (61);
+    Opus stays off until Cloudflare raises Unified Billing's Opus limit,
     with no key of our own on AI Gateway and no sharding to get round
     it (a person's own key is 60's). `vision` is for image calls and is
-    no tier. A call that fails before answering is made once more on its
+    no route. A call that fails before answering is made once more on its
     fallback; an answer that began is final. A call that answers nothing
     is the runtime's to give up on. Jobs ask typed decisions on the Clef
     family.
@@ -208,11 +212,12 @@ computers) returns once this product works.
     added on its own; it comes in with its person (64). Only an owner
     holds an agent below themselves. What an agent makes is its person's.
     An agent shares what its owner owns as its owner would, but never
-    deletes or sets a cap (`access::agent_shares`).
+    deletes or sets a cap (`permit::agent_shares`).
 37. **Agents can do anything they could do in Finite.** Services that act
     as you are connections (22); paid APIs that need only a key use the
-    operator's keys, priced per call (`price::DEFAULT_KEYS`); a person's
-    own keys are sealed by their computer and never metered.
+    operator's keys, each call charged what its vendor said it cost
+    (`price::DEFAULT_CHARGES`, FIN-616); a person's
+    own keys are sealed in their Vault and never metered.
 38. **Routines are fragment cron:** scheduled records on any fragment, an
     agent's on its own `tasks` (`fragment schedule add --routine`).
     Hermes' scheduler is off (docs/api.md, "Scheduled records").
@@ -220,10 +225,13 @@ computers) returns once this product works.
 ### The generic pieces
 
 39. **A subscription wakes a computer.** A record on a channel its bridge
-    follows wakes it. It stays awake while a port tab or the guest's
-    keepalive socket to the Computer DO is open (container traffic does
-    not count), then sleeps after `computer::IDLE_MS`. A page that opens
-    a fragment it follows pre-wakes it (`PREWAKE_MS`). An agent added to
+    follows wakes it. It stays awake while the guest's keepalive socket
+    to the Computer DO is open, or a port tab's page speaks (container
+    traffic does not count; Paul, 2026-11-18: a tab merely open holds
+    nothing), then sleeps after `computer::IDLE_MS`. Its owner's shell
+    pre-wakes it as they pick a chat or open the launcher, held as any
+    wake is; a page opening, reconnecting, or anything its presence says
+    (a page sets its own) does not. An agent added to
     a fragment wakes it with `{kind: "joined"}` on its `tasks`.
 40. **Blessed templates run the platform's release.** A chat, agent, brain
     or skills fragment runs its template's code from the release, so one
@@ -304,12 +312,15 @@ computers) returns once this product works.
     (`models::CLIENT_KEYS`) and the slot's `body`. An OpenRouter slot is
     priced at its ceiling (`max_price`), refused without one; a slot on
     another API at the list price it names (`price`). The platform's own
-    key trouble falls back like a 5xx. A tier slot's `label` names the
-    route Settings offers for it (Private, Standard), picked per agent as
-    its tier. A private tier's every slot must be private, and never
-    falls back to one that is not. Finite Private
-    is priced as Workers AI's GLM-5.3 Flash, so a person pays the same
-    whichever answered.
+    key trouble falls back like a 5xx. The routes people pick are the
+    config's ordered list (Paul, 2026-11-17: "we don't want to hardcode
+    what they all mean"): each a name agents store, a label Settings
+    shows (Private, Standard), its slot, vision and Deep, one the
+    default; nothing in code reads a route's name for its meaning. A
+    private route's every slot must be private, and never falls back to
+    one that is not. Finite Private
+    is priced as Workers AI's GLM-5.3 Flash was ($0.15 in, $0.50 out a
+    million tokens; retired there on 2026-11-20).
 
 ### Billing never stops an agent
 
@@ -391,9 +402,14 @@ appoints control who may use them.
 - **R16. One DNS label per fragment**, so one wildcard certificate covers
   every fragment (one per host runs into Let's Encrypt's limits).
   Sessions are `__Host-` cookies.
-- **R17. An agent acts for whoever asked, capped:** with the lower of the
-  asker's role and its cap (its own role, or its owner's on a fragment
-  the owner belongs to), never above `editor`.
+- **R17. An agent acts for its owner, capped:** with the lower of the
+  owner's role and its cap (its own role, or its owner's on a fragment
+  the owner belongs to), never above `editor`. Where its owner is not in
+  and it is, its request is its own, as itself (2026-11-21, FIN-615: what
+  should obviously work works). `for` names only the
+  agent's own owner (2026-11-19, `permit::may_act_for`): an app is told
+  the named identity as `call.principal`, and nothing proved anyone else
+  asked.
 - **R18. Postable channels.** A declared channel may name a `post` role,
   and the platform appends a member's record itself: the one exception to
   "clients never append" (docs/MODEL.md). `"signedIn": true` refuses an

@@ -18,6 +18,43 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Author": {
+        "description": "Who wrote a record, as the platform stamps it as it appends one, never\nas its caller says (FIN-615): its principal is whom it was written as,\nand this is what wrote the words. Only a person's or an agent's own post\nis its principal's own words.\n\nOpen (`x-fragment-open`, docs/wire): an author this build does not know\nreads as `Other`.",
+        "oneOf": [
+          {
+            "const": "person",
+            "description": "A person's post, signed or in their session (an anonymous visitor's\ntoo).",
+            "type": "string"
+          },
+          {
+            "const": "agent",
+            "description": "An agent's post, as itself or for its owner.",
+            "type": "string"
+          },
+          {
+            "const": "code",
+            "description": "App code: a mutation's effect or a job's step, in a fragment that\nruns its author's own code. It speaks for no one: its principal is\nwhoever called the code, not who chose the words.",
+            "type": "string"
+          },
+          {
+            "const": "platform",
+            "description": "The platform: its own records (`events`, `ops`, a schedule firing),\nand what a release's code writes (a blessed template, unforked).",
+            "type": "string"
+          },
+          {
+            "const": "door",
+            "description": "A door: a relay its owner opened (a connector's release code, a\ndoor's signed post), or a delivery to the fragment's inbox.",
+            "type": "string"
+          },
+          {
+            "const": "other",
+            "description": "An author this build does not know, which a newer platform names:\nread as this so that one new author breaks no shipped CLI or pinned\nimage. Never written. Last: serde's `other` must be.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
       "ChannelNewest": {
         "description": "`GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):\neach poster's newest record of each kind the channel keeps the newest\nof (`ChannelDecl::newest`), the newest first, at most\n`limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past\nits retention) is none; a channel that keeps no kind answers none.",
         "properties": {
@@ -76,6 +113,18 @@
           "at": {
             "format": "int64",
             "type": "integer"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Author"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Who wrote it, as the platform stamped it as it appended it. Absent\non a record stored before the stamp, which reads as it did."
           },
           "body": {
             "description": "The JSON text the cell stored, passed through as it is: the cell\nneither parses a body it just wrote nor one it reads back."
@@ -190,7 +239,7 @@
           },
           "secrets": {
             "default": [],
-            "description": "`stop_and_stage` after a person's Yes (phase 1): the secrets the\nold agent has (the roster's `has`), each to hand to its person's\nVault (`POST …/agents/{old}/secrets`) once it is stopped. None in\nphase 2: no one said Yes.",
+            "description": "`stop_and_stage` after a person's Yes (phase 1): every kind of\nsecret, whatever the roster's `has` says, each the old agent holds\nto hand to its person's Vault (`POST …/agents/{old}/secrets`) once\nit is stopped; one it does not hold is left out. None in phase 2:\nno one said Yes.",
             "items": {
               "$ref": "#/components/schemas/SecretKind"
             },
@@ -546,7 +595,7 @@
           "kind": {
             "$ref": "#/components/schemas/FragmentKind",
             "default": "app",
-            "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
+            "description": "What it is, as its live `fragment.json` last said (an app until it\nhas), and its title, its face's (`PUT /api/f/{name}/face`)."
           },
           "name": {
             "type": "string"
@@ -679,7 +728,7 @@
         "x-fragment-direction": "in"
       },
       "Has": {
-        "description": "Which secrets it holds (never their values).",
+        "description": "Which secrets it holds (never their values), if its roster knows:\nkept as it came, read by nothing here (a Yes asks for every kind).",
         "properties": {
           "nostr": {
             "type": "boolean"
@@ -782,7 +831,7 @@
         "properties": {
           "agentRole": {
             "default": null,
-            "description": "An agent fragment's role (its live `fragment.json`'s `meta.role`,\ntrimmed; none when it says nothing), as its last install said: the\ntag the shell shows beside its name. Never any other fragment's.",
+            "description": "An agent fragment's role, as its face says it (trimmed; none when\nit says nothing): the tag the shell shows beside its name. Never\nany other fragment's.",
             "type": [
               "string",
               "null"
@@ -809,7 +858,7 @@
           "kind": {
             "$ref": "#/components/schemas/FragmentKind",
             "default": "app",
-            "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
+            "description": "What it is, as its live `fragment.json` last said (an app until it\nhas), and its title, its face's (`PUT /api/f/{name}/face`)."
           },
           "listed": {
             "default": [],
@@ -829,7 +878,7 @@
           },
           "picture": {
             "default": null,
-            "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at live (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
+            "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at main (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
             "type": [
               "string",
               "null"
@@ -1606,6 +1655,11 @@
           "phase": {
             "$ref": "#/components/schemas/Phase"
           },
+          "simplex": {
+            "default": false,
+            "description": "It carries its owner's SimpleX chat (docs/migrations.md, \"SimpleX in\na stage\"), which runs only on a computer that stays on: its\nperson's comped `seat` is made always-on as it completes.",
+            "type": "boolean"
+          },
           "zip_bytes": {
             "description": "The zip's size and SHA-256 (hex).",
             "format": "uint64",
@@ -1655,6 +1709,14 @@
           "addedBy": {
             "description": "Who granted it: the owner, or their agent for them (an invite's maker).",
             "type": "string"
+          },
+          "door": {
+            "default": null,
+            "description": "On a connector bound as an agent's door, that agent's row alone: the\ndoor it is (`telegram`), while it is open (docs/api.md, \"An agent's\ndoors\"). Its records relaying that agent's owner come through it, so\nthe agent's bridge and its pages take them as its owner's words\n(docs/chat-records.md). Add-only: absent from an older platform.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "email": {
             "default": null,
@@ -1803,7 +1865,7 @@
           },
           {
             "const": "retiring",
-            "description": "Imported: the mover is told to retire the old one.",
+            "description": "Imported: the old agent, stopped, is retired on staff's word (the\nmover is told to then; until then it holds no command).",
             "type": "string"
           },
           {
@@ -1872,7 +1934,7 @@
             ]
           },
           "kind": {
-            "description": "What it is about (`key_paused`), for tests and logs. No client reads\nit to decide what to draw.",
+            "description": "What it is about (`spending`), for tests and logs. No client reads\nit to decide what to draw.",
             "type": "string"
           },
           "level": {
@@ -2028,10 +2090,10 @@
         "x-fragment-direction": "out"
       },
       "OfferYes": {
-        "description": "`POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a\nnew agent of their own, which the move's stage is imported into.",
+        "description": "`POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an\nagent of their own, which the move's stage is imported into: a new one,\nor one they have already that no other move is bound to.",
         "properties": {
           "agent": {
-            "description": "The new agent: its identity's id or npub.",
+            "description": "The agent: its identity's id or npub.",
             "type": "string"
           }
         },
@@ -2406,7 +2468,7 @@
       },
       "PutSecret": {
         "additionalProperties": false,
-        "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Its\nhosts, place and agents are set only with its value, so no one who\ncannot read a value sends it anywhere its setter did not mean. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
+        "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Only its\nperson sets one, so only they say where its value goes; set again with\nno value, it keeps the one it holds and goes where this says. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
         "properties": {
           "agents": {
             "description": "The agents that may use it, each by its fragment's name: at least\none (Paul, 2026-11-09: per agent).",
@@ -2428,12 +2490,15 @@
             "description": "Where it goes on a request; none, `Authorization: Bearer {}`."
           },
           "value": {
-            "description": "The value: a printable token, or, for `place.sign`, a Nostr secret\nkey as 64 hex.",
-            "type": "string"
+            "default": null,
+            "description": "The value: a printable token, or, for `place.sign`, a Nostr secret\nkey as 64 hex. None, the value it holds is kept: a secret it does\nnot hold yet, or one that would go from signing to filling or back,\nis refused (400).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "value",
           "hosts",
           "agents"
         ],
@@ -2470,7 +2535,7 @@
           "last_paid_seat",
           "private_while_reaching",
           "unshare_first",
-          "key_paused"
+          "trial_seat_of_one"
         ],
         "type": "string",
         "x-fragment-direction": "out",
@@ -2796,7 +2861,7 @@
           },
           {
             "const": "nostr_nsec",
-            "description": "The old agent's Nostr key, an `nsec` (or 64 hex): kept, never sent.",
+            "description": "The old agent's Nostr key, an `nsec` (or 64 hex): it signs the new\nagent's calls to finite.site from the Vault, and is never sent.",
             "type": "string"
           }
         ],
@@ -3001,6 +3066,31 @@
         "required": [
           "manifest_sha256",
           "zip_bytes"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "StageCopied": {
+        "description": "`POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one\nrange of the stage's zip (a file's bytes, or a part of them) copied into\na fragment's blobs on the platform, never through the agent's computer:\nthe blob it is, by its bytes' SHA-256 (hex), their length, and their\nCRC-32, which the caller checks against the zip entry's own.",
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "crc32": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha256",
+          "bytes",
+          "crc32"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -6247,7 +6337,179 @@
             "session": []
           }
         ],
-        "summary": "The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.",
+        "summary": "The person's Yes, bound to an agent of their own, a new one or one they have that no other move took: the old agent is stopped and its stage made, which that agent imports.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/stages/{stage}/copy": {
+      "post": {
+        "operationId": "migrations.copy",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fragment whose blobs it goes into.",
+            "in": "query",
+            "name": "into",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Where in the zip the range starts.",
+            "in": "query",
+            "name": "offset",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Its length: 1 to the caller's upload limit.",
+            "in": "query",
+            "name": "bytes",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageCopied"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "One range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer, for the new agent bound to the move while it imports. The agent, or its owner (`for`), must edit the fragment.",
         "tags": [
           "migrations"
         ]

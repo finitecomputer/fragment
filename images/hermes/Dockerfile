@@ -8,6 +8,10 @@
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
+# linux/amd64 is Cloudflare's. linux/arm64 is a self-hosted box's on arm64
+# (an Apple silicon Mac's Linux VM, docs/self-host.md): Hermes' image is
+# published for both, and each download below is pinned for each
+# (`downloads`, picked by BuildKit's TARGETARCH).
 #
 # Its layers, by how often each changes: a deploy pushes, and a computer's
 # first start after it pulls, only the layers that changed (a layer is
@@ -33,16 +37,17 @@
 # what changes a version). That holds while the deploying machine's build
 # cache keeps the layers: a cold cache rebuilds them, stamped anew.
 
-# Hermes v0.21.7 (git tag v0.21.7, commit 71d34bad1045, 2026-10-12; its
-# install stamp says 0.21.7 at that commit), pinned by digest. Upstream
+# Hermes v0.23.2 (git tag v0.23.2, commit ae2a81ccc00e, 2026-11-16; its
+# install stamp says 0.23.2 at that commit), pinned by digest. Upstream
 # publishes a release as its last attempt's versioned tag
 # (`rc.<N>-vX.Y.Z-desktop`) and moves `stable-desktop` and `latest-desktop`
-# to it; v0.21.7's is rc.15, and no tag `v0.21.7-desktop` exists. A bare
+# to it; v0.23.2's is rc.13 (`v0.23.2-desktop` is the same digest). A bare
 # version tag is not always the release: `v0.21.6-desktop` was an earlier
 # attempt's build, not v0.21.6. A next release is pinned the same way: its
 # attempt's tag and digest, checked against its install stamp's commit and
-# version (`/opt/hermes/install-stamp.json`).
-ARG HERMES=nousresearch/hermes-agent:rc.15-v0.21.7-desktop@sha256:04c1a71a37da7d143202454234cf6952000e827e8ae47b36f7c26f1372a9c138
+# version (`/opt/hermes/install-stamp.json`). The digest is the release's
+# index, for linux/amd64 and linux/arm64 alike.
+ARG HERMES=nousresearch/hermes-agent:rc.13-v0.23.2-desktop@sha256:87f24ae4be14980a3f2334bfe6516695253cb36dee5e9113b4348feea304c2ca
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -56,9 +61,13 @@ WORKDIR /src
 COPY images/Cargo.toml images/Cargo.lock ./
 COPY images/bridge bridge
 COPY images/hermes/boot hermes/boot
+# the SimpleX door's runner, a member of the workspace this image builds
+# none of: its manifest and an empty source, for cargo to read
+COPY images/simplex-door/Cargo.toml simplex-door/Cargo.toml
 RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=images-target,target=/src/target \
-    find bridge hermes/boot -type f -exec touch {} + \
+    mkdir -p simplex-door/src && echo 'fn main() {}' > simplex-door/src/main.rs \
+ && find bridge hermes/boot -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-bridge -p hermes-boot \
  && mkdir -p /out && cp target/release/fragment-bridge target/release/hermes-boot /out/
 
@@ -96,22 +105,60 @@ COPY templates/todo templates/todo
 COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
 COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
 COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
+COPY crates/identity-door/Cargo.toml crates/identity-door/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/src/target \
-    for m in crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+    for m in crates/devstack crates/e2e crates/fakes crates/identity-door xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && find cli crates templates -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
+# The pinned binaries the image takes from their releases, for the
+# architecture it is built for (TARGETARCH, BuildKit's), each by the
+# release's own SHA-256 (GitHub's digest of the asset). What each is, and
+# why, is said where it is installed.
+# - simplex-chat v7.0.3: Ubuntu 24.04's x86_64 build; Ubuntu 22.04's for
+#   aarch64, the only Linux arm64 build the release has.
+# - cua-driver-rs 0.28.3: its Linux binary tarball.
+# - gws 0.22.5: musl's x86_64 build; glibc's for aarch64, the only Linux
+#   arm64 build the release has (the base is Debian's).
+FROM alpine:3.20 AS downloads-amd64
+ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
+ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /cua-driver.tgz
+ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /gws.tgz
+FROM alpine:3.20 AS downloads-arm64
+ADD --checksum=sha256:91f332edc813cab78a848da7ba75ed91bcb8d09abf1fc92eca74330dc29ec970 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-22_04-aarch64 /simplex-chat
+ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67d0f83b https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-arm64-binary.tar.gz /cua-driver.tgz
+ADD --checksum=sha256:94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz /gws.tgz
+FROM downloads-${TARGETARCH} AS downloads
+
+# sandbox-shim, the Sandbox SDK's in-container half (its DirectoryBackup's
+# saves and restores run through it): Cloudflare's own build on amd64, from
+# its sandbox image at 1.0.0, the SDK the cell runs; on arm64, which that
+# image is not published for, the same source at the same commit (the
+# image's revision label), built as Cloudflare builds it (its
+# images/sandbox-tools/Dockerfile: Alpine's Rust, statically linked).
+# The source is that commit's archive, pinned by hash like every remote
+# input here (its files are the commit's tree, checked 2026-11-16).
+FROM docker.io/cloudflare/sandbox:1.0.0 AS sandbox-shim-amd64
+FROM rust:1.99-alpine AS sandbox-shim-arm64
+ADD --checksum=sha256:7ef2580bebc5753eb2a974ec1345b68dfc76b5517ca6c379be7a2a4cc332341a https://github.com/cloudflare/sandbox-sdk/archive/f9e972a14123bef3b93e9bb337bab6e83419fe7e.tar.gz /sandbox-sdk.tgz
+RUN mkdir /src && tar -xzf /sandbox-sdk.tgz -C /src --strip-components=1
+WORKDIR /src
+RUN --mount=type=cache,id=sandbox-shim-registry,target=/usr/local/cargo/registry \
+    cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
+ && install -D -m 0755 target/release/sandbox-shim /usr/local/bin/sandbox-shim
+FROM sandbox-shim-${TARGETARCH} AS sandbox-shim
+
 # SimpleX's core (the bridge's simplex/run.rs: one per agent its owner
 # links, run only while the computer is always on): simplex-chat v7.0.3,
-# the latest stable release on 2026-10-22, its Ubuntu 24.04 x86_64 binary
-# by the release's own SHA-256. It runs on the base's Debian trixie with the
-# libraries the base already has (libgmp, libffi, libssl, zlib: the
-# bridge's SimpleX lab, tests/simplex.rs). It reports itself as v7.0.0.12.
+# the latest stable release on 2026-10-22 (`downloads`). It runs on the
+# base's Debian trixie with the libraries the base already has (libgmp,
+# libffi, libssl, zlib: the bridge's SimpleX lab, tests/simplex.rs). It
+# reports itself as v7.0.0.12.
 FROM alpine:3.20 AS simplex
-ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
+COPY --from=downloads /simplex-chat /simplex-chat
 RUN chmod 0755 /simplex-chat
 
 # noVNC, the screen page's RFB client (pinned by hash).
@@ -125,40 +172,30 @@ FROM ${HERMES} AS hermes
 # them, and checks it does. Builder trace context changes per step and is
 # not upstream runtime configuration; never capture it into the image.
 RUN mkdir -p /opt/fragment && env | grep -Ev '^(TRACEPARENT|TRACESTATE)=' | sort > /opt/fragment/upstream.env
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=sandbox-shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+# it runs on this architecture: with no command it says so (a binary of
+# another architecture cannot, and every save of /data would fail)
+RUN test "$(/usr/local/bin/sandbox-shim 2>&1)" = 'sandbox-shim: missing command'
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's; Hermes' image has none,
 # and its PM's pin is older), named to Hermes by HERMES_CUA_DRIVER_CMD
-# below, which Hermes takes over its PM's.
-ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
+# below, which Hermes takes over its PM's (`downloads`).
+COPY --from=downloads /cua-driver.tgz /tmp/cua-driver.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
  && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
 # gws, Google's Workspace CLI (github.com/googleworkspace/cli), pinned. Its
 # wrapper hands it the agent's Google connection: the placeholder in
 # GOOGLE_OAUTH_ACCESS_TOKEN as its access token (GOOGLE_WORKSPACE_CLI_TOKEN),
-# which the computer's egress swaps for the real token on Google's hosts.
-ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /tmp/gws.tgz
+# which the computer's egress swaps for the real token on Google's hosts
+# (`downloads`).
+COPY --from=downloads /gws.tgz /tmp/gws.tgz
 RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.tgz \
  && printf '%s\n' '#!/bin/sh' '# gws with the agent'"'"'s Google connection (images/hermes/Dockerfile).' \
       '[ -n "$GOOGLE_WORKSPACE_CLI_TOKEN" ] || [ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ] || export GOOGLE_WORKSPACE_CLI_TOKEN="$GOOGLE_OAUTH_ACCESS_TOKEN"' \
       'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
-# agent-browser, the CLI Hermes' built-in browser tools drive (each
-# profile's `browser.backend: "off"`: boot/src/hermes.rs). Hermes' image
-# carries none (its default browser is Browser Use's browser_exec), and its
-# browser tools look for it only in its PM's store or on PATH, never
-# installing it to see whether to offer themselves: without it an agent has
-# no browser_* tool. Fetched by Hermes' own PM, at the version and hash its
-# lock pins, and put on PATH: PM writes beside a sealed store (the image's)
-# only into its home's (HERMES_HOME/tools, which /data would replace), so it
-# fetches into a scratch home, and its one binary (a native one) is
-# installed from there.
-RUN HERMES_HOME=/tmp/pm-agent-browser /opt/hermes/.venv/bin/python -c 'from pm import ensure, installed_package; ensure("agent-browser", explicit=True); print(installed_package("agent-browser").binary)' > /tmp/agent-browser.path \
- && install -m 0755 "$(tail -n 1 /tmp/agent-browser.path)" /usr/local/bin/agent-browser \
- && rm -rf /tmp/pm-agent-browser /tmp/agent-browser.path \
- && /usr/local/bin/agent-browser --version | grep -q '^agent-browser [0-9]'
 
 # Root for the session (Paul, 2026-10-05: "hermes needs to be able to
 # install binaries (not persisted)"). Hermes stays its unprivileged user, as
@@ -185,11 +222,17 @@ RUN apt-get -o Acquire::Retries=3 update \
 # (sqlite3). Upstream puts its newer SQLite library in /usr/local/lib,
 # which the loader finds first for every program, and Debian's shell
 # refuses a library not its own ("SQLite header and source version
-# mismatch"), so `sqlite3` by name runs it with Debian's library first.
-COPY --chmod=755 <<'EOF' /usr/local/bin/sqlite3
+# mismatch"), so `sqlite3` by name runs it with Debian's library first: its
+# multiarch directory, named for the machine the image is built for (Debian
+# names both of ours by the kernel's machine name).
+RUN <<'EOF'
+set -eu
+cat > /usr/local/bin/sqlite3 <<WRAPPER
 #!/bin/sh
 # Debian's sqlite3 with Debian's SQLite library (images/hermes/Dockerfile).
-LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec /usr/bin/sqlite3 "$@"
+LD_LIBRARY_PATH="/usr/lib/$(uname -m)-linux-gnu\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" exec /usr/bin/sqlite3 "\$@"
+WRAPPER
+chmod 0755 /usr/local/bin/sqlite3
 EOF
 RUN DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends unzip zip jq sqlite3 \
  && unzip -v > /dev/null && zip -v > /dev/null && jq --version \
@@ -206,10 +249,31 @@ RUN mv /opt/hermes/skills /opt/fragment/bundled-skills \
 
 # The gateway is hermes-boot's main program (preloaded): no s6 gateway
 # service, which upstream's reconciler starts from a restored
-# gateway_state.json, a second gateway (S3b, cut b). The build fails if no
-# script of that name is there to remove, or another still runs it.
+# gateway_state.json, a second gateway (S3b, cut b). Nor upstream's
+# `profile-gateways` service (v0.23): an s6-svscan, as Hermes' user, over
+# the per-profile gateways `hermes gateway start` registers in
+# /run/hermes-service, which only that reconciler makes; without it the
+# scan fails and s6 restarts it every second. The build fails if no script
+# or service of those names is there to remove, or another still runs or
+# scans them.
 RUN rm /etc/cont-init.d/02-reconcile-profiles \
- && ! grep -rqs container_boot /etc/cont-init.d
+ && rm /etc/s6-overlay/s6-rc.d/user/contents.d/profile-gateways \
+ && rm -r /etc/s6-overlay/s6-rc.d/profile-gateways \
+ && ! grep -rqs container_boot /etc/cont-init.d \
+ && ! grep -rqs 'exec .*s6-svscan' /etc/s6-overlay/s6-rc.d
+
+# A login shell's PATH is Debian's with the computer's Python environment
+# first (fragment-python.sh, below), as each command of an agent's terminal
+# runs in one: `python` and `pip` are that environment's, and `hermes` is
+# the image's shim (/usr/local/bin/hermes, which refuses `cron`). Upstream's
+# hermes.sh (v0.23) would put Hermes' venv and its own bin ahead of both,
+# and its home's .local/bin (/opt/data, not ours). Hermes' terminal already
+# appends the gateway's PATH directories a login profile dropped, after the
+# login PATH (`tools/environments/local.py`, `_append_dropped_path_entries`),
+# so nothing it needs is lost. The build fails if it is not there to remove,
+# or another login script still names Hermes' directories.
+RUN rm /etc/profile.d/hermes.sh \
+ && ! grep -rqs /opt/hermes /etc/profile.d /etc/profile /etc/environment
 
 # What our agents use is in the image, never installed at run time (lazy
 # installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
@@ -271,6 +335,25 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
  && rm -rf /tmp/uv-cache /tmp/npm-cache /tmp/playwright-requirements.txt /opt/fragment/python/playwright/driver/node \
  && /usr/local/bin/python3 -m compileall -q --invalidation-mode unchecked-hash /opt/fragment/python > /dev/null \
  && test "$(PYTHONPATH=/opt/fragment/python /usr/local/bin/python3 -c 'from importlib.metadata import version; print(version("playwright"))')" = "$(/usr/local/bin/playwright --version | sed 's/^Version //')"
+# Hermes' own Chrome for Testing (its PM's `chromium`, 405 MB) goes: no
+# browser here runs it. Each profile names the system Chromium to Hermes
+# (`browser.executable_path`: boot/src/hermes.rs), the desktop's Browser
+# icon runs it, and Chrome for Testing fails Cloudflare's bot check where
+# the system Chromium passes (Paul's prod agent, 2026-10-28). Its PM names
+# the store's directory after the Playwright release Hermes pins, which
+# since v0.23.2 is the image's own (`chromium-1248`), so it would also
+# stand where Playwright looks for its Chromium (the final stage's links).
+# The path upstream baked for it (`/etc/hermes/chromium-executable-path`,
+# under `chrome-linux64` or `chrome-linux-arm64`) goes with it, and its PM
+# then reports chromium `outdated`, as for any package not in the store.
+RUN for d in /opt/hermes/tools/chromium-*; do \
+      [ -e "$d" ] || continue; \
+      exe="$(cat /etc/hermes/chromium-executable-path)" \
+      && case "$exe" in "$d"/*) ;; *) exit 1 ;; esac \
+      && "$exe" --version | grep -q '^Google Chrome for Testing ' && rm -r "$d" || exit 1; \
+    done \
+ && rm -f /etc/hermes/chromium-executable-path \
+ && ! ls -d /opt/hermes/tools/chromium* 2>/dev/null
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
@@ -278,6 +361,26 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
 # count proves the rest compiled. Our plugin's is compiled with it, below.
 RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchecked-hash /opt/hermes > /dev/null || true; \
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
+# And read by `hermes` commands: Hermes' launcher (libexec/hermes, which
+# `hermes` and the venv's `hermes` both run) points Python's bytecode at
+# $HOME/.cache/hermes-pycache unless a prefix is set, and under a prefix
+# Python reads none of the bytecode beside a source, so each command
+# compiled its imports and PYTHONDONTWRITEBYTECODE kept none (`hermes
+# --version` 0.87 s, 0.22 s with this bytecode, on a computer of the cell's
+# size, 2026-11-22). The gateway's preload runs Python directly and reads
+# it already; its fallback start goes through the launcher. What
+# upstream's prefix protects, an install Python must not write into,
+# /opt/hermes already is here (root's, and the image writes no bytecode),
+# so the line goes, an exact match (docs/technical-debt-ledger.md, "Hermes
+# reads the image's bytecode"). The check: a launcher run with bytecode
+# writes on puts nothing in that cache.
+RUN line='export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/hermes-pycache}"' \
+ && test "$(grep -cxF "$line" /opt/hermes/libexec/hermes)" = 1 \
+ && grep -vxF "$line" /opt/hermes/libexec/hermes > /tmp/launcher \
+ && cat /tmp/launcher > /opt/hermes/libexec/hermes && rm /tmp/launcher \
+ && ! grep -q PYTHONPYCACHEPREFIX /opt/hermes/libexec/hermes \
+ && mkdir /tmp/rh && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u XDG_CACHE_HOME HOME=/tmp/rh HERMES_HOME=/tmp/rh /opt/hermes/.venv/bin/hermes --version > /dev/null \
+ && test ! -e /tmp/rh/.cache/hermes-pycache && rm -rf /tmp/rh
 
 # The files the gateway loads, read ahead on the second CPU while /data is
 # restored (S3b, cut h). And the base's directories that ours (below) lands
@@ -392,8 +495,8 @@ fi
 exec /usr/local/bin/node "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py
-COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/tool_threads.py /opt/fragment/tool_threads.py
+COPY images/hermes/relay_stop.py /opt/fragment/relay_stop.py
 COPY images/hermes/deploy_wait.py /opt/fragment/deploy_wait.py
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
 COPY --from=plugin /opt/hermes/plugins/fragment-deploy-wait /opt/hermes/plugins/fragment-deploy-wait
@@ -496,20 +599,31 @@ RUN uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium
 # (regular /usr/bin/chromium from the pinned desktop base, always with the
-# flags a container needs: boot/src/hermes.rs); and the platform skill every profile
-# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs).
-# The adapter extends the pinned Bot Desktop's start, attach and stop paths;
-# the boot refuses upstream source changes before it installs those hooks.
-COPY images/hermes/desktop_browser.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+# flags a container needs and `navigator.webdriver` false: boot/src/hermes.rs);
+# and the platform skill every profile has, from the fragment CLI above
+# (`fragment skill`: boot/src/skills.rs).
 # A link opened on an agent's desktop (a terminal's `claude auth login`
 # sign-in, xdg-open) opens in that agent's own Chromium: the desktop's
 # default web browser, as Xfce's helper (exo-open reads it), in place of
 # Debian's sensible-browser, which names none here, so Xfce asked its person
-# which browser to use (FIN-351).
+# which browser to use (FIN-351). It runs what the desktop's Browser icon
+# runs (Hermes' `dock_argv`) with the link: a browser already on the
+# agent's profile takes it (Chromium's own profile singleton), and
+# browser_exec attaches to one it starts.
 COPY --chmod=755 <<'EOF' /opt/fragment/bin/desktop-browser
 #!/bin/sh
 # The desktop's web browser (images/hermes/Dockerfile): the agent's own.
-exec /opt/hermes/.venv/bin/python /opt/hermes/tools/bot_desktop/fragment_browser.py --open "${1:-about:blank}"
+exec /opt/hermes/.venv/bin/python -c '
+import os, sys
+sys.path.insert(0, "/opt/hermes")
+if not os.environ.get("DISPLAY"):
+    sys.exit("desktop browser: the desktop is not running; open the link on it")
+from tools.bot_desktop import browser
+launch = browser.dock_launch()
+if launch is None:
+    sys.exit("desktop browser: this computer has no Chromium")
+os.execv(launch[0], [*browser.dock_argv(*launch), sys.argv[1]])
+' "${1:-about:blank}"
 EOF
 COPY <<'EOF' /usr/share/xfce4/helpers/fragment-browser.desktop
 [Desktop Entry]
@@ -525,10 +639,11 @@ X-XFCE-CommandsWithParameter=%B "%s";
 EOF
 RUN sed -i 's/^WebBrowser=.*/WebBrowser=fragment-browser/' /etc/xdg/xfce4/helpers.rc \
  && grep -qx 'WebBrowser=fragment-browser' /etc/xdg/xfce4/helpers.rc
+# It also changes one line of Hermes' browser_exec: the agent's tab on its
+# Bot Desktop comes to the front (boot/src/desktop.rs, `front_tabs`), its
+# bytecode compiled again here.
 RUN /opt/fragment/bin/hermes-boot build-info \
- && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash \
-    /opt/hermes/tools/browser_tool_session.py /opt/hermes/tools/bot_desktop/browser.py \
-    /opt/hermes/tools/bot_desktop/runtime.py /opt/hermes/tools/bot_desktop/fragment_browser.py
+ && /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/tools/browser_use_cli.py
 # Playwright launches the system Chromium, the one the desktop and Hermes'
 # browser run (/opt/fragment/bin/chromium: /usr/bin/chromium with a
 # container's flags), never a browser of its own: Chrome for Testing fails
@@ -562,9 +677,15 @@ export NODE_DISABLE_COMPILE_CACHE=1
 browsers=/usr/local/lib/node_modules/playwright/node_modules/playwright-core/browsers.json
 rev() { /usr/local/bin/node -p "require('$browsers').browsers.find(b => b.name === '$1').revision"; }
 # Chromium's two names, and FFmpeg's (which `install chromium` brings, for
-# a page's video: the image's own, libvpx's VP8 and MJPEG in it)
-for link in "chromium-$(rev chromium)/chrome-linux64/chrome /opt/fragment/bin/chromium" \
-  "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-linux64/chrome-headless-shell /opt/fragment/bin/chromium" \
+# a page's video: the image's own, libvpx's VP8 and MJPEG in it), each where
+# Playwright looks on this architecture (its registry's EXECUTABLE_PATHS)
+case "$(uname -m)" in
+  x86_64) arch=linux64 ;;
+  aarch64) arch=linux-arm64 ;;
+  *) echo "Playwright's browser directories are named here for x86_64 and aarch64, not $(uname -m)" >&2; exit 1 ;;
+esac
+for link in "chromium-$(rev chromium)/chrome-$arch/chrome /opt/fragment/bin/chromium" \
+  "chromium_headless_shell-$(rev chromium-headless-shell)/chrome-headless-shell-$arch/chrome-headless-shell /opt/fragment/bin/chromium" \
   "ffmpeg-$(rev ffmpeg)/ffmpeg-linux /usr/local/bin/ffmpeg"; do
   at="${link% *}"
   mkdir -p "$PLAYWRIGHT_BROWSERS_PATH/${at%/*}"

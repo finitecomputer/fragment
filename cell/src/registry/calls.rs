@@ -127,19 +127,6 @@ impl Call for InviteEmail {
     type Answer = ();
 }
 
-/// A fragment's `invites/claim` (and `invites/decline`): the person
-/// `identity`, who signs in as `email`, verified, accepts (declines) the
-/// invite waiting on it there; or, for an invite from before invites
-/// waited for a yes, signed in as it and meets it. `agents` are theirs,
-/// which come in with them (decision 64), at most `AGENTS_PER_OWNER_MAX`.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ClaimInvite {
-    pub email: String,
-    pub identity: String,
-    #[serde(default)]
-    pub agents: Vec<String>,
-}
-
 /// `POST /agents`: an agent its owner vouches for (the key's proof was
 /// checked by the router).
 #[derive(Serialize, Deserialize)]
@@ -497,6 +484,10 @@ pub(crate) enum TestHook {
     /// waited for a yes (decision 63: no role, title or sharer kept), which
     /// a sign-in as it still meets (`{before}`: how many).
     InvitesBefore(String),
+    /// When each comped seat held by, or offered to, this email ends by
+    /// itself (`{ends}`, each null when it never does), which no route
+    /// shows.
+    CompEnds(String),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the
@@ -922,15 +913,28 @@ pub(crate) struct Mint {
     /// answers to that frame may show in. `None`: a top-level one.
     #[serde(default)]
     pub embedder: Option<String>,
+    /// A top-level sign-in's (`/auth/fragment`, FIN-502): an invite to the
+    /// fragment waiting on the person's emails is answered (`Minted::invite`)
+    /// in place of a redemption, whatever they said yes to before, so its
+    /// person is asked to accept it rather than signed in as a stranger.
+    #[serde(default)]
+    pub invite_first: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Minted {
-    /// `None`: the person has not said yes to this fragment.
+    /// `None`: the person has not said yes to this fragment, or an invite
+    /// to it waits (`invite`).
     pub redeem: Option<String>,
     /// Whom the session names, and their latest sign-in's email.
     pub identity: Identity,
     pub email: Option<String>,
+    /// The invite to the fragment waiting on their emails, when the mint
+    /// asked first (`invite_first`) and one does: a row of `GET
+    /// /api/invites` (proto's `WaitingInvite`), passed on as read, as
+    /// that route passes it (registry/invites.rs `waiting_on`).
+    #[serde(default)]
+    pub invite: Option<serde_json::Value>,
 }
 
 impl Call for Mint {

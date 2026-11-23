@@ -27,9 +27,17 @@
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
 
+// the admin Worker's build reaches a part of the crate by design (and
+// leaves the macros' imports unused), and the cell's build lints the
+// whole ("Two Workers, one crate", below)
+#![cfg_attr(feature = "admin", allow(dead_code, unused_imports))]
+
+// public: only the admin Worker's build calls its router (`fetch` below)
+pub mod admin;
 mod across;
 mod ai;
 mod address;
+mod alone;
 mod assets;
 mod auth;
 mod billing;
@@ -63,6 +71,7 @@ mod members;
 mod meter;
 mod migrations;
 mod models;
+mod pipe;
 mod notices;
 mod ops;
 mod orgs;
@@ -87,7 +96,7 @@ mod subscriptions;
 mod updating;
 mod wipe;
 
-use fragment_core::access;
+use fragment_core::permit;
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
@@ -101,6 +110,7 @@ use worker::*;
 
 use config::Config;
 use error::{CellError, CellResult};
+use principal::calls::{Own, SetOwn};
 use registry::calls::{self, Call};
 use routed::{Credential, Routed, Signed};
 
@@ -120,7 +130,7 @@ const PASSED_HEADERS: [&str; 9] =
 
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.
-const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
+pub(crate) const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
 /// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, `…/dock`'s,
 /// `{dock}`, and `…/pinned`'s, `{pinned}`, are a few bytes.
@@ -137,6 +147,23 @@ const SEEN_BODY_MAX_BYTES: usize = 1024;
 const LLMS_TXT: &fragment_templates::File = &fragment_templates::SKILL_MD;
 const LLMS_FULL_TXT: &fragment_templates::File = &fragment_templates::GUIDE_MD;
 
+// Two Workers, one crate (M19, FIN-475: the platform split by who uses
+// it). The cell is this crate's default build: its router (`fetch`,
+// `queue`) and every object class. The operators' admin is the same crate
+// built with the `admin` feature, a Worker of its own (admin.rs): its
+// `fetch` is the admin's router, and it exports no class, reaching the
+// cell's objects through bindings to the cell's script. Only the exports
+// differ, each cfg'd here or at its class (its export and its object
+// impl: "exported by the cell's build alone"), never the code they call:
+// link-time optimization keeps in each Wasm only what its exports reach,
+// so code only the admin reaches costs no fragment's isolate, and the
+// objects cost the admin nothing. The one
+// crate shares the cell's own callers' code (its config, errors, calls
+// and sessions) without moving it into another; what it costs is the
+// crate compiled twice per build (xtask/src/build.rs). In the admin's
+// build most of the crate is code it never reaches by design: the cell's
+// build lints all of it, the admin's router included (public above).
+#[cfg(not(feature = "admin"))]
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     // a branch deployment's queue is named for its branch after this
@@ -146,9 +173,20 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     deliveries::consume(batch, env).await
 }
 
+#[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     match route(req, &env, &ctx).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => e.response(),
+    }
+}
+
+/// The admin Worker's `fetch` (admin.rs): the requests the cell hands it.
+#[cfg(feature = "admin")]
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    match admin::route(req, &env).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -287,8 +325,11 @@ pub(crate) async fn registry_round_trip(env: &Env, path: &str, body: String) -> 
     }
 }
 
-/// The identity a request's signed URL names in `for`: an agent acting
-/// for whoever asked it (decision R17). At most one, an identity.
+/// The identity a request's signed URL names in `for` (decision R17). Today
+/// only the agent's owner (`permit::may_act_for`, checked in `signer_of`): a
+/// bare claim naming anyone else is refused, since nothing proves they asked;
+/// acting for another member will come with that proof (such as their own
+/// signed chat record). At most one, an identity.
 pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();
@@ -303,7 +344,7 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
 
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
-pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments and the model routes (/api/models/…) only";
+pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments, the model routes (/api/models/…) and a move's copy (POST /api/migrations/stages/…/copy) only";
 
 /// The signer of a request that must be signed, resolved, with the body
 /// the router read. It acts as itself: a `for` is refused here
@@ -317,14 +358,15 @@ pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> 
 }
 
 /// `signer`, honoring `for`: an agent's request acts for the identity it
-/// names, capped (the fragment decides: `fragment_core::access`).
+/// names, capped (the fragment decides: `fragment_core::permit`).
 pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
     signer_of(env, req, url, Payload::Read(body)).await
 }
 
 /// The signer for any payload: a body the router read, or one it streams
 /// through unread (a blob, whose URL names its hash). `for` is inside the
-/// signed URL, and only an agent may name it: a person acts as themselves.
+/// signed URL, and only an agent may name it, and only its own owner
+/// (`permit::may_act_for`): a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
     let (identity, key) = match caller(env, req, url, payload)? {
@@ -332,8 +374,8 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
         // the shell's: a person, signed in on the platform
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
-    if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
-        return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
+    if let Some(named) = &acting_for {
+        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
     }
     Ok(Signed { identity, key, acting_for })
 }
@@ -547,19 +589,7 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
             ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity.id
         }
     };
-    // a fresh request: the upgrade's handshake, nothing else of the caller's
-    let headers = Headers::new();
-    headers.set("upgrade", "websocket")?;
-    headers.set("connection", "Upgrade")?;
-    for k in WEBSOCKET_HEADERS {
-        if let Some(v) = req.headers().get(k)? {
-            headers.set(k, &v)?;
-        }
-    }
-    let mut init = RequestInit::new();
-    init.with_method(Method::Get).with_headers(headers);
-    let watch = Request::new_with_init("https://principal.internal/watch", &init)?;
-    crate::routed::send(env, "PRINCIPAL", &identity, watch).await
+    principal::watch(env, &identity, req).await
 }
 
 /// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
@@ -602,7 +632,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
         let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![] }).await?;
         let agent = named.profiles.get(identity).filter(|p| p.kind == IdentityKind::Agent);
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
-        return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
+        return fragment::pass(env, &fragment, &fragment::calls::Picture {}).await;
     };
     let blob = js::blob_get(env, js::BLOBS, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
     let headers = Headers::new();
@@ -629,31 +659,28 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
 
 pub(crate) use json_response::{json_answer, json_passed};
 
-/// An identity's fragments, as its `Principal` cell lists them.
-pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
-    let list = Request::new("https://principal.internal/list", Method::Get)?;
-    Ok(crate::routed::send(env, "PRINCIPAL", identity, list).await?.read_json().await?)
-}
-
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
-/// reaches for whoever asked (docs/cloudflare-v1.md, R17): the asker's, where the
+/// reaches for whom it names (docs/cloudflare-v1.md, R17; today only its
+/// owner, see `acting_for`): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
-/// there (`access::listed_role`). A call decides again, live.
+/// there (`permit::listed_role`). A call decides again, live.
 async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
     let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?;
-    let (askers, own, owners) = futures_util::future::join3(listed(env, asker), listed(env, &agent.id), listed(env, owner)).await;
+    let list = principal::calls::List::default();
+    let lists = futures_util::future::join3(principal::ask(env, asker, &list), principal::ask(env, &agent.id, &list), principal::ask(env, owner, &list));
+    let (askers, own, owners) = lists.await;
     let roles = |l: FragmentList| -> HashMap<String, Role> { l.fragments.into_iter().map(|f| (f.name, f.role)).collect() };
     let (own, owners) = (roles(own?), roles(owners?));
     let fragments = askers?
         .fragments
         .into_iter()
         .filter_map(|f| {
-            let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
+            let cap = permit::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
             // the asker's own view (their search's preview and unread, their
             // archiving and their dock) stays theirs, as do the listed
             // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
+            permit::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments, limits: Some(Config::from_env(env).uploads_for(agent.identity.kind)) })
@@ -685,7 +712,8 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 }
 
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
-/// signer's (an agent's: its owner's); the deployment's operators grant
+/// signer's (an agent's: its owner's), and `GET uses` its agents' uses; the
+/// deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
 /// or identity, and grant an org's own credit and set its budget, named
 /// `org:<org id>` (orgs pay out of band: Paul, 2026-10-30). A seat's state
@@ -697,6 +725,19 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         let who = signer(env, &req, url, &body).await?;
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
     }
+    // what the signer's agents (an agent's: its owner's) used of each
+    // provider, this month or `YYYY-MM`'s (docs/ledger.md, "Usage"),
+    // passed on as its ledger answered it
+    if let (Method::Get, ["uses", month @ ..]) = (req.method(), rest) {
+        let who = signer(env, &req, url, &body).await?;
+        let month = match month {
+            [] => None,
+            [m] => Some(fragment_core::ledger::Month::parse(m).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?),
+            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route GET {}", url.path()))),
+        };
+        let q = serde_json::to_string(&ledger::UsesOf { month }).expect("a month serializes");
+        return crate::json_response::json_bytes(ledger::asked(env, &payer_of(&who)?, <ledger::UsesOf as ledger::Route>::PATH, q).await?);
+    }
     // a quote (FIN-448): a planned job priced with this release's book, as
     // its payer's ledger would charge it, beside that ledger; it reads and
     // keeps nothing
@@ -705,7 +746,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         let ask: fragment_proto::ledger::QuoteAsk = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a quote is {{items}}, each {{key, units?, calls?}}, {{model, input?, cachedInput?, cacheWrite?, output?, calls?}} or {{usage, calls?}}: {e}")))?;
         fragment_core::ledger::quote::check(&ask.items).map_err(|f| CellError::invalid(f.to_string()))?;
         let ledger = ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?;
-        let (items, total_micros) = fragment_core::ledger::quote::quote(&ask.items, &cfg.book, &cfg.models, ledger.plan);
+        let (items, total_micros) = fragment_core::ledger::quote::quote(&ask.items, &cfg.book, &cfg.models, ledger.plan, &cfg.providers.counted());
         return json_answer(&fragment_proto::ledger::Quote { items, total_micros, left_micros: ledger.balance_micros.max(0), ledger });
     }
     let (Method::Post, [person, command]) = (req.method(), rest) else {
@@ -963,6 +1004,19 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
     routed::send(env, "FRAGMENT", &f.routed.name, inner).await
 }
 
+/// `len` bytes the platform holds (a move's stage, read from R2) streamed
+/// to a fragment's route (`inner`), as `routed` says who asks: a copy's
+/// blob upload, which the fragment checks as its client's.
+pub(crate) async fn stream_to(env: &Env, routed: Routed, method: Method, inner: &str, body: worker::web_sys::ReadableStream, len: u64) -> CellResult<Response> {
+    let headers = Headers::new();
+    routed.to_headers(&headers)?;
+    headers.set("content-length", &len.to_string())?;
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers).with_body(Some(body.into()));
+    let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
+    routed::send(env, "FRAGMENT", &routed.name, req).await
+}
+
 /// Whether a request is a browser's navigation to a page (its `Accept`
 /// names HTML): a refusal answers it as one (`auth::refused`), and an API
 /// call, a fetch, or a request that asks for no HTML keeps the JSON.
@@ -1030,6 +1084,10 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     // (share.rs `sheet_html`): the release's, whoever asks
     if shell::is_fragment_sheet(rest) && matches!(req.method(), Method::Get | Method::Head) {
         return shell::fragment_sheet_asset(&req, env).await;
+    }
+    // and the platform's type, which its pages load from it (shell.rs `fragment_font`)
+    if let Some(font) = shell::fragment_font(rest).filter(|_| matches!(req.method(), Method::Get | Method::Head)) {
+        return shell::fragment_font_asset(&req, env, font).await;
     }
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
@@ -1235,10 +1293,12 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings, `/apps` the person's apps, `/brains`
         // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
-        // `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
-        // the operators' admin page: to anyone else, the 404 below
-        (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
+        // `/skills` what their agents know and the optional skills to turn on, `/welcome` a new person's welcome
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["skills"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
+        // the operators' admin, its page and API, and its probe of every
+        // object class: the admin Worker's (admin.rs), handed to it as they
+        // came. It answers anyone else the 404 below, word for word.
+        (Method::Get, ["admin"] | ["healthz", "admin"]) | (_, ["api", "admin", ..]) => admin::forward(req, env).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
         (Method::Get | Method::Head, ["about"]) => shell::legal_page(&req, env, "about.html").await,
         (Method::Get | Method::Head, ["privacy"]) => shell::legal_page(&req, env, "privacy.html").await,
@@ -1261,10 +1321,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer_for(env, &req, &url, &body).await?;
-            // what an agent makes is its owner's: only its owner's turns make one
-            if principal.acting_for.as_ref().is_some_and(|asker| principal.owner.as_ref() != Some(asker)) {
-                return Err(CellError::new(ErrorCode::Forbidden, "an agent makes fragments for its owner, in its owner's turns only"));
-            }
+            // what an agent makes is its owner's: `for` names no one else (`signer_of`)
+            assert!(principal.acting_for.is_none() || principal.acting_for == principal.owner, "an agent acts only for its own owner");
             create_fragment(env, cfg, &url, create, principal).await
         }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
@@ -1286,9 +1344,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 return json_answer(&reachable(env, &principal, asker).await?);
             }
             // the list says what this signer's messages carry (`uploads_for`)
-            let kind = if principal.identity.kind == IdentityKind::Agent { "?agent" } else { "" };
-            let list = Request::new(&format!("https://principal.internal/list{kind}"), Method::Get)?;
-            crate::routed::send(env, "PRINCIPAL", &principal.id, list).await
+            let list = crate::principal::calls::List { agent: principal.identity.kind == IdentityKind::Agent };
+            crate::principal::pass(env, &principal.id, &list).await
         }
         // the signer's own view of a fragment of theirs (principal.rs): it
         // changes nothing of the fragment's, nor anyone else's list
@@ -1297,11 +1354,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name, "archived": set.archived }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/archived", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Archived, on: set.archived }).await?;
+            json_answer(&fragment_proto::Archived { name, archived: set.archived })
         }
         // whether the signer's dock shows a fragment of theirs (principal.rs):
         // their own view again, as archiving is
@@ -1310,11 +1364,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let set: fragment_proto::SetDock = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name, "dock": set.dock }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/dock", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Dock, on: set.dock }).await?;
+            json_answer(&fragment_proto::Docked { name, dock: set.dock })
         }
         // whether the signer pinned a fragment of theirs (principal.rs):
         // their own view again, as archiving is
@@ -1323,11 +1374,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let set: fragment_proto::SetPinned = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name, "pinned": set.pinned }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/pinned", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Pinned, on: set.pinned }).await?;
+            json_answer(&fragment_proto::Pinned { name, pinned: set.pinned })
         }
         // the signer has seen a chat's messages (principal.rs): their own
         // view again, so their row counts none of them unread
@@ -1338,11 +1386,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 return Err(CellError::invalid("PUT …/seen takes no body: it marks what the list holds now"));
             }
             let name = named_fragment(name)?;
-            let inner = json!({ "fragment": name }).to_string();
-            let mut init = RequestInit::new();
-            init.with_method(Method::Put).with_body(Some(inner.into()));
-            let put = Request::new_with_init("https://principal.internal/seen", &init)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+            principal::pass(env, &who.identity.id, &principal::calls::MarkSeen { fragment: name }).await
         }
         // search over the signer's own list (principal.rs): agents need none,
         // and acting for someone (`for`) is not honored here
@@ -1352,10 +1396,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let (Some(q), None) = (asked.next(), asked.next()) else {
                 return Err(CellError::invalid("name what to look for, once: ?q="));
             };
-            let mut inner = Url::parse("https://principal.internal/search").map_err(|e| CellError::host(e.to_string()))?;
-            inner.query_pairs_mut().append_pair("q", &q);
-            let search = Request::new(inner.as_str(), Method::Get)?;
-            crate::routed::send(env, "PRINCIPAL", &who.identity.id, search).await
+            principal::pass(env, &who.identity.id, &principal::calls::Search { q }).await
         }
         // one question asked of several fragments' indexes, as the signer
         // (across.rs): the meta-brain's search
@@ -1381,10 +1422,6 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "orgs", org, rest @ ..]) => {
             let (org, rest) = (org.to_string(), rest.to_vec());
             orgs::named(req, env, &url, &org, &rest).await
-        }
-        (_, ["api", "admin", rest @ ..]) => {
-            let rest = rest.to_vec();
-            orgs::admin(req, env, cfg, &url, &rest).await
         }
         // the finite.computer move's mover (migrations.rs)
         (_, ["api", "migrations", rest @ ..]) => {
@@ -1450,7 +1487,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
                 return Err(CellError::invalid("a fragment's name is <label>--<suffix>"));
             }
-            let reserved = access::reserved(method.as_ref(), rest);
+            let reserved = permit::reserved(method.as_ref(), rest);
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -1481,11 +1518,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             // its, and it shares only for its own owner, unheld (Paul,
             // 2026-10-04). Who it is decides that much here; the fragment
             // decides the rest from its owner's share there, and decides
-            // again on its own (`access::agent_shares`).
+            // again on its own (`permit::agent_shares`).
             if let (Some(reserved), Some(agent)) = (reserved, principal.as_ref().filter(|p| p.kind != IdentityKind::Person)) {
-                let for_owner = agent.acting_for.is_some() && agent.acting_for == agent.owner;
-                let sharer = access::Sharer { for_owner, held: agent.held };
-                if let Err(refusal) = access::agent_may_ask(reserved, sharer) {
+                let sharer = permit::Sharer::of(agent.owner.as_deref(), agent.acting_for.as_deref(), agent.held);
+                if let Err(refusal) = permit::agent_may_ask(reserved, sharer) {
                     return Err(CellError::new(ErrorCode::Forbidden, refusal.message()));
                 }
             }

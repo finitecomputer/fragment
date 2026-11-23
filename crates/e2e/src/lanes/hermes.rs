@@ -194,6 +194,40 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, agen
         followed,
         json!({ "agent": stopped, "status": said(&mut chrome), "streams": streams }),
     );
+
+    // its computer sleeps under the open screen (its owner's sleep here: an
+    // idle one comes IDLE_MS after the screen goes quiet, PAUSE_MS after
+    // its last touch, which the lifecycle's and attend.js's tests run): the
+    // page says so over its last frame, calmly, opens nothing by itself, and
+    // its person's press wakes it, once (Paul, 2026-11-18). Shown as a pane
+    // shows it, the frame filling the page, at 1280 and 390 px.
+    let shots = s.dir("hermes");
+    let framed = format!("[...document.querySelectorAll('iframe')].find((f) => f.src.includes({}))", serde_json::to_string(&computer)?);
+    chrome.eval(&shell, &format!("(Object.assign({framed}.style, {{ position: 'fixed', inset: '0', width: '100vw', height: '100vh', border: '0', zIndex: '2147483647' }}), true)"))?;
+    chrome.viewport(&shell, 1280, 800, false)?;
+    let view = || api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body["phase"].clone()).unwrap_or_default();
+    let r = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let asleep = "document.body.dataset.state === 'asleep' && document.getElementById('status').textContent === 'Your computer is asleep. Press anywhere to wake it.' && !document.getElementById('note').hidden";
+    let told = r.body["phase"] == "asleep" && s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, asleep).ok() == Some(json!(true)));
+    let _ = chrome.screenshot(&shell, &shots.join("screen-asleep-1280.png"));
+    chrome.viewport(&shell, 390, 844, true)?;
+    let _ = chrome.screenshot(&shell, &shots.join("screen-asleep-390.png"));
+    chrome.viewport(&shell, 1280, 800, false)?;
+    // nothing opens by itself: asleep, its page still saying so, a while on
+    std::thread::sleep(Duration::from_secs(15));
+    let stayed = view() == "asleep" && chrome.eval_in_frame(&shell, &computer, asleep).ok() == Some(json!(true));
+    s.ok(
+        "its computer asleep under the open screen, the page says so over its last frame (4000, asleep, from its sleep), and opens nothing by itself: still asleep 15 s on",
+        told && stayed,
+        json!({ "sleep": r.body["phase"], "phase": view(), "status": said(&mut chrome) }),
+    );
+    // its person presses on it (a real press, in the middle of the page the
+    // frame fills): it wakes, once, and streams again
+    let before = chrome.eval_in_frame(&shell, &computer, connects).unwrap_or_default().as_u64().unwrap_or(0);
+    chrome.click_at(&shell, (640.0, 400.0))?;
+    let woke = s.eventually(Duration::from_secs(240), || chrome.eval_in_frame(&shell, &computer, &format!("{connects} === {} && document.body.dataset.state === 'watching'", before + 1)).ok() == Some(json!(true)));
+    let _ = chrome.screenshot(&shell, &shots.join("screen-woken-1280.png"));
+    s.ok("a press on it wakes its computer and the screen streams again: one stream more", woke && view() == "awake", json!({ "phase": view(), "status": said(&mut chrome), "streams": chrome.eval_in_frame(&shell, &computer, connects).unwrap_or_default() }));
     Ok(())
 }
 
@@ -220,6 +254,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         ],
     );
     s.deploy(&agent);
+    super::computers::members_only(api, &owner, &agent_name)?;
     // its owner has no skills fragment yet (one is made below, as settings'
     // "Add the managed skills" makes it): the agent still knows its platform
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
@@ -758,6 +793,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let maple = s.create(api, &owner, &maple_name)?;
     s.commit(&maple, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"You are Maple, who tends the trees.\n")), ("agent.json", Some(br#"{"tier":"medium"}"#))]);
     s.deploy(&maple);
+    super::computers::members_only(api, &owner, &maple_name)?;
     let grove_name = s.named(api, &owner, "grove")?;
     let grove = s.create(api, &owner, &grove_name)?;
     s.commit(&grove, &[("fragment.json", Some(CHAT_JSON))]);
@@ -795,7 +831,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // its eyes (Paul, 2026-10-05): Maple is on the medium tier, whose
     // GLM-5.3 reads no images; its computer_use screenshot goes to the
-    // route's `vision` (the deployment's vision model, GLM-5.3 Flash), as
+    // route's `vision` (the deployment's vision model, DeepSeek V4.1 Flash), as
     // Maple, metered to its owner, and its answer is what that model saw
     let calls_before = s.ai.calls().len();
     let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g2", "body": { "text": "look at your screen" } })))?;
@@ -808,7 +844,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let seen: Vec<Value> = calls.iter().map(|c| json!({ "model": c.model, "agent": c.metadata["agent_id"], "image": shown(c) })).collect();
     let looks: Vec<&fragment_fakes::workers_ai::AiCall> = calls.iter().filter(|c| shown(c)).collect();
     s.ok(
-        "a medium-tier agent's computer_use screenshot goes to the route's vision model (GLM-5.3 Flash), as that agent, its main calls on GLM-5.3 and none of them shown an image",
+        "a medium-tier agent's computer_use screenshot goes to the route's vision model (DeepSeek V4.1 Flash), as that agent, its main calls on GLM-5.3 and none of them shown an image",
         !looks.is_empty()
             && looks.iter().all(|c| c.model == fragment_core::models::VISION_MODEL_DEFAULT && c.metadata["agent_id"] == maple_opaque.as_str())
             && calls.iter().any(|c| c.model == fragment_core::models::MEDIUM_MODEL && c.metadata["agent_id"] == maple_opaque.as_str())

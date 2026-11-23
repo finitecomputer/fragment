@@ -81,8 +81,11 @@ const WINDOW_MAX = 600;
 // window reaches the end (each counted when it comes); the newest kept.
 const ASIDE_MAX = 1000;
 // After a message of one's own, wait for the agent's turn. Past this long
-// the line says plainly that no reply has started; a wake can be slow.
+// the line says plainly that no reply has started; a wake can be slow, so
+// while its computer starts (or owes a start) it doesn't count, and once
+// it is up it counts from then.
 const PENDING_MS = 90000;
+const GETTING_READY = new Set(["starting", "sleeping"]);
 // Typing shows to others until this long after the last keystroke.
 const TYPING_MS = 4000;
 // A draft no word came for in this long is let go (its writer went away).
@@ -418,6 +421,7 @@ export function mount(root) {
     toComputer: new Map(), // a nonce -> the `cardKey` whose answer it handed the shell, until the shell says
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
+    readyAt: 0, // when this page last heard its agents' computer come up
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> true, once someone opened it whole
     openSteps: new Set(), // turn:step, a step someone opened to its arguments and result
@@ -930,13 +934,14 @@ export function mount(root) {
   const mayAnswer = (t, p) => !!state.me && p.asks === state.me.principal && !t.closed.has(p.prompt) && !expired(p) && t.end?.outcome !== "stopped";
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
-  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+  const answeredCard = (t, m) => !m.code && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   // A message the window holds; one past its newest end while the reader is
   // up the chat is kept aside (and read again as the window reaches it).
   // At the end, the window lets its oldest go as new ones come.
   function keep(record, historical, m) {
-    noteSaid(state.spoke, m);
+    // app code's words are no one's: they answer no one's question here
+    if (!m.code) noteSaid(state.spoke, m);
     if (!historical && !history.live && record.seq > history.last) {
       state.seen.delete(record.seq);
       history.aside.push(record);
@@ -968,12 +973,16 @@ export function mount(root) {
     if (typeof body === "string") body = { text: body };
     if (body === null || typeof body !== "object" || Array.isArray(body)) return;
     const n = record.seq;
+    // what app code wrote (the platform's stamp, docs/chat-records.md "Who
+    // wrote a record") is no one's word, as the agent's computer hears it:
+    // it answers no card and no question here either
+    const code = record.author === "code";
     if (body.kind === "prompt_response") {
       // each poster's first answer, for the card it names (its agent's turn
       // and prompt; an answer naming none, the API's, is the prompt's); a
       // card counts only its asker's, so no one else's answer can disable
       // or answer it here
-      if (typeof body.prompt === "string") {
+      if (!code && typeof body.prompt === "string") {
         const named = typeof body.agent === "string" && typeof body.turn === "string";
         const key = named ? cardKey(turnKey(body.agent, body.turn), body.prompt) : body.prompt;
         if (!state.answers.has(key)) state.answers.set(key, new Map());
@@ -986,7 +995,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
+      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null, code });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -1005,7 +1014,7 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed, code });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -2163,13 +2172,12 @@ export function mount(root) {
     const name = agent ? who(agent).name : "The agent";
     const phase = inRoster(agent)?.phase;
     const present = state.here.some((p) => p.principal === agent);
-    const starting = phase === "starting" || phase === "asleep";
-    const late = !t && !starting && state.pending && Date.now() - state.pending.since >= PENDING_MS;
+    const readying = GETTING_READY.has(phase);
+    const late = !t && !readying && state.pending && Date.now() - Math.max(state.pending.since, state.readyAt) >= PENDING_MS;
     const said = t ? `${name} is working${forWhom}`
       : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
       : late ? `${name} has not started a reply yet.`
-      : starting ? `${name} is starting up…`
-      : phase === "sleeping" ? `${name}'s computer is going to sleep…`
+      : readying || phase === "asleep" ? `${name} is getting ready…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.key : "pending"}`;
     return [
@@ -2945,10 +2953,16 @@ export function mount(root) {
     }
     if (d?.fragment === KIND.agents && Array.isArray(d.agents)) {
       rosterOrigin = event.origin;
+      const was = new Map(state.roster.map((a) => [a.identity, a.phase]));
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
         .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+      // its computer came up: a message waiting on it is late only PENDING_MS from now
+      if (state.roster.some((a) => a.phase === "awake" && was.get(a.identity) && was.get(a.identity) !== "awake")) {
+        state.readyAt = Date.now();
+        if (state.pending) setTimeout(schedule, PENDING_MS + 50);
+      }
       if (d.setup && typeof d.setup === "object" && Array.isArray(d.setup.steps)) {
         setup = {
           steps: d.setup.steps

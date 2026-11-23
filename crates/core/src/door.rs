@@ -69,6 +69,64 @@ pub fn blessed_template(loader_id: &str) -> Option<&str> {
     loader_id.strip_prefix("blessed:")?.split_once('@').map(|(t, _)| t)
 }
 
+/// Where a SimpleX connector's jobs reach their own door (cell/door.mjs):
+/// a name of the platform's, never one on the internet.
+pub const DOOR_HOST: &str = "door.fragment.internal";
+
+/// The headers that tell a door which door is asked (`door_id`) and the
+/// connector that asks (its name, its inbox's): the platform's alone to
+/// set, over whatever a job set (cell/src/jobs.rs; cell/door.mjs reads them).
+pub const DOOR_NAME_HEADER: &str = "x-fragment-door";
+pub const CONNECTOR_HEADER: &str = "x-fragment-connector";
+
+/// A door id's digits of its connector's life.
+pub const DOOR_LIFE_HEX: usize = 12;
+
+/// A SimpleX connector's door: its name and the first `DOOR_LIFE_HEX` hex
+/// digits of a digest of its life's own key (its npub, drawn new for each
+/// life), as its repo is named (`codestorage::repo_name`). A name made
+/// again, by anyone, never reaches a door an earlier life made, nor the
+/// SimpleX link it holds. `None`: not a fragment's name, or not a key's npub.
+pub fn door_id(fragment: &str, life: &str) -> Option<String> {
+    if !valid_fragment_name(fragment) || !crate::npub::is_identity(life) {
+        return None;
+    }
+    let digest = hex::encode(Sha256::digest(format!("fragment door life\0{life}").as_bytes()));
+    Some(format!("{fragment}--{}", &digest[..DOOR_LIFE_HEX]))
+}
+
+/// The fragment a door's id is of: a connector's (`door_id`), or, for a
+/// door the e2e's lever starts by a fragment's name alone, that name.
+pub fn door_of(id: &str) -> Option<&str> {
+    if valid_fragment_name(id) {
+        return Some(id);
+    }
+    let (fragment, life) = id.rsplit_once("--")?;
+    let digits = life.len() == DOOR_LIFE_HEX && life.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (digits && valid_fragment_name(fragment)).then_some(fragment)
+}
+
+/// Where a job's fetch of `raw` goes, from a fragment whose installed code
+/// is the blessed template `blessed`: to its own door (the URL, `Some`)
+/// when it names `DOOR_HOST`, or out (`None`: the egress check's to judge).
+/// Only a SimpleX connector reaches a door, the one named as its fragment
+/// is (cell/src/jobs.rs): any other fragment's fetch of the door's host is
+/// refused, never sent out, as is one with a port or credentials.
+pub fn door_route(raw: &str, blessed: Option<&str>) -> Result<Option<url::Url>, String> {
+    let Ok(url) = url::Url::parse(raw) else { return Ok(None) };
+    if url.host_str().map(|h| h.trim_end_matches('.')) != Some(DOOR_HOST) {
+        return Ok(None);
+    }
+    if blessed != Some(SIMPLEX) {
+        return Err(format!("{DOOR_HOST} is a SimpleX connector's own door: no other fragment reaches it"));
+    }
+    let plain = url.scheme() == "https" && url.host_str() == Some(DOOR_HOST) && url.port().is_none() && url.username().is_empty() && url.password().is_none();
+    if !plain {
+        return Err(format!("its door is https://{DOOR_HOST}/<what it asks>, with no port or credentials"));
+    }
+    Ok(Some(url))
+}
+
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
 pub const TICKET_MS: i64 = 10 * 60_000;
@@ -182,6 +240,20 @@ pub fn relayed(body: &Value) -> Option<Result<Relayed, &'static str>> {
     Some(read())
 }
 
+/// Whether a relayed record may be appended to a fragment `fragment_owner`
+/// owns, posted by an agent whose owner is `agent_owner` (each as the
+/// platform holds it: an npub, or 64 hex): only into its agent's owner's
+/// own fragment. A door signs the fragment's name, not its life, and a
+/// name is free the moment its fragment is deleted; anyone may make one by
+/// that full name, public, taking posts from anyone, and it would take
+/// their words (security candidate 10: a SimpleX mirror chat deleted and
+/// made again by a stranger). Every door relays only into its owner's
+/// own: a SimpleX door into the chat its agent made for them, a hosted
+/// door into its own channels (`Hosted`, its binding its owner's).
+pub fn lands_in_owners(fragment_owner: &str, agent_owner: &str) -> bool {
+    !agent_owner.is_empty() && crate::npub::display(fragment_owner) == crate::npub::display(agent_owner)
+}
+
 /// What a door signs a relayed record by: the fragment, channel and post
 /// id it is posted under, and its body as canonical JSON (`canonical`)
 /// less `relayed.sig`.
@@ -234,6 +306,73 @@ mod tests {
 
     pub(crate) fn ticket() -> Ticket {
         Ticket { door: SIMPLEX.into(), act: Act::Link, agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: "0f".repeat(16), exp: 1_790_000_600_000, sig: String::new() }
+    }
+
+    /// Goal: a SimpleX connector's jobs reach their own door alone, and no
+    /// other fragment's fetch of the door's host leaves the platform.
+    /// Valid: the connector's, to the door's host. Invalid: any other
+    /// fragment's (another connector, an app, none blessed), in any
+    /// spelling of the host; the connector's with a port, credentials or
+    /// cleartext. Every other URL is the egress check's.
+    /// Goal: a connector's door is its life's (the review of #1450: a name
+    /// deleted and made again by someone else, keyed by the name alone,
+    /// took over the earlier owner's door, its SimpleX link and its
+    /// messages). Valid: one life, one door, whose fragment it names back.
+    /// Invalid: another life's, the same name; a name or key that is none.
+    #[test]
+    fn a_connectors_door_is_its_lifes() {
+        let (one, two) = (crate::npub::encode(&"3b".repeat(32)), crate::npub::encode(&"5c".repeat(32)));
+        let a = door_id("juniper-sx--k3x9", &one).expect("a door");
+        assert_eq!(a, door_id("juniper-sx--k3x9", &one).unwrap(), "one life, one door");
+        assert_ne!(a, door_id("juniper-sx--k3x9", &two).unwrap(), "a name made again: another door");
+        assert!(a.starts_with("juniper-sx--k3x9--") && a.len() <= 63 + 2 + DOOR_LIFE_HEX && a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "{a}: a door's name (cell/door-rules.mjs nameOk)");
+        assert_eq!(door_of(&a), Some("juniper-sx--k3x9"));
+        assert_eq!(door_of("juniper-sx--k3x9"), Some("juniper-sx--k3x9"), "the lever's door, named as a fragment is");
+        for bad in ["juniper-sx--k3x9--0123456789AB", "juniper-sx--k3x9--0123", "juniper--0123456789ab", "../x", ""] {
+            assert_eq!(door_of(bad), None, "{bad}");
+        }
+        assert_eq!(door_id("not a name", &one), None);
+        assert_eq!(door_id("juniper-sx--k3x9", "npub1nope"), None);
+    }
+
+    #[test]
+    fn only_a_simplex_connector_reaches_its_door() {
+        let asked = door_route("https://door.fragment.internal/reply", Some("simplex")).expect("its own door");
+        assert_eq!(asked.map(|u| u.path().to_string()).as_deref(), Some("/reply"));
+        for raw in ["https://door.fragment.internal/reply", "https://DOOR.fragment.internal/x", "https://door.fragment.internal./x", "http://door.fragment.internal:8080/x"] {
+            for blessed in [Some("telegram"), Some("chat"), None] {
+                assert!(door_route(raw, blessed).is_err(), "{raw} from {blessed:?}");
+            }
+        }
+        for raw in ["http://door.fragment.internal/x", "https://door.fragment.internal:444/x", "https://a:b@door.fragment.internal/x", "https://door.fragment.internal./x"] {
+            assert!(door_route(raw, Some("simplex")).is_err(), "{raw}");
+        }
+        for raw in ["https://api.telegram.org/bot", "https://fragment.internal/x", "https://door.fragment.internal.example.com/x", "not a url"] {
+            assert_eq!(door_route(raw, Some("simplex")), Ok(None), "{raw}: the egress check's");
+        }
+    }
+
+    /// Goal (security candidate 10): a relayed record lands only in a
+    /// fragment its agent's owner owns. Valid: theirs, however each side
+    /// holds the owner (npub or hex). Invalid: a stranger's (a name its
+    /// owner deleted, made again by someone else), by either form; no
+    /// owner at all.
+    #[test]
+    fn a_relayed_record_lands_only_in_its_owners_fragment() {
+        let owner = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let owner_npub = crate::npub::display(owner);
+        assert!(owner_npub.starts_with("npub1"));
+        for (fragment, agent) in [(owner, owner_npub.as_str()), (owner_npub.as_str(), owner), (owner_npub.as_str(), owner_npub.as_str()), (owner, owner)] {
+            assert!(lands_in_owners(fragment, agent), "its owner's own: {fragment} {agent}");
+        }
+        let stranger = "cd".repeat(32);
+        let stranger_npub = crate::npub::display(&stranger);
+        for fragment in [stranger.as_str(), stranger_npub.as_str()] {
+            assert!(!lands_in_owners(fragment, &owner_npub), "a stranger's fragment by its name: {fragment}");
+            assert!(!lands_in_owners(fragment, owner), "{fragment}");
+        }
+        assert!(!lands_in_owners("", ""), "no owner is no one's");
+        assert!(!lands_in_owners(owner, ""), "an agent with no owner relays no one");
     }
 
     /// The relayed record of images/bridge/src/simplex/door.rs's vector.

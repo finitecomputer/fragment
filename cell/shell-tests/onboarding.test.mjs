@@ -18,8 +18,10 @@ const SUFFIX = "abcdefghjkmnpqrstuvwxyz23456789";
 const labelOf = (name) => name.replace(/--[a-km-np-z2-9]{4}$/, "");
 
 // The platform: fragments as the list says them, files at main, members,
-// one computer, and each agent's `tasks`.
-function platform() {
+// one computer, and each agent's `tasks`. `first`: their first agent made
+// and talked to already (none: a mover's account, whose first agent is the
+// move's).
+function platform({ first: seeded = true } = {}) {
   const rows = [];
   const files = new Map();
   const members = new Map();
@@ -56,17 +58,20 @@ function platform() {
     if (method === "GET" && rest === "file") {
       const text = files.get(name).get(new URLSearchParams(query).get("path"));
       if (text === undefined) throw Object.assign(new Error("not found"), { status: 404 });
-      return { text };
+      // JSON as the shell's api answers it
+      return path.includes(".json") ? JSON.parse(text) : { text };
     }
     if (method === "GET" && rest === "manifest") return JSON.parse(files.get(name).get("fragment.json"));
     if (method === "POST" && rest === "files") {
       for (const f of body.files) files.get(name).set(f.path, f.text);
       return { commit: "c" };
     }
-    if (method === "POST" && rest === "deploy") {
-      const role = JSON.parse(files.get(name).get("fragment.json")).meta?.role;
-      if (role) row(name).agentRole = role;
-      return {};
+    if (method === "POST" && rest === "deploy") return {};
+    // its face: its title, and an agent's role ("" takes it away)
+    if (method === "PUT" && rest === "face") {
+      if (body.title) row(name).title = body.title.trim();
+      if (body.role !== undefined) row(name).agentRole = body.role.trim() || undefined;
+      return { title: row(name).title, role: row(name).agentRole };
     }
     if (method === "GET" && rest === "members") return { members: [...members.get(name)].map((principal) => ({ principal })) };
     if (method === "PUT" && rest.startsWith("members/")) return (join(name, decodeURIComponent(rest.slice("members/".length))), {});
@@ -74,6 +79,11 @@ function platform() {
     if (method === "POST" && rest === "channels/tasks") {
       const kept = tasks.get(name) ?? new Map();
       tasks.set(name, kept);
+      // a post's id again is the same post only with the same body
+      // (cell/src/channels.rs `posted`): else 409
+      if (kept.has(body.id) && JSON.stringify(kept.get(body.id)) !== JSON.stringify(body.body)) {
+        throw Object.assign(new Error("this post id was already used with a different body"), { status: 409, code: "conflicting_body" });
+      }
       if (!kept.has(body.id)) kept.set(body.id, body.body);
       return {};
     }
@@ -90,13 +100,17 @@ function platform() {
     return structuredClone(answer(method, path, body));
   };
   // Their first agent, made and talked to: on their computer, in its chat.
-  const first = make("xbt-2000", "agent", "XBT-2000");
-  const firstChat = make("xbt-2000-chat", "chat", "Your first chat");
-  computer.agents.push({ fragment: first, identity: "npub1xbt" });
-  files.get(first).set("agent.json", "{}");
-  join(firstChat, "npub1xbt");
-  Object.assign(row(firstChat), { preview: "Hello!", previewAt: 1 });
+  if (seeded) {
+    const first = make("xbt-2000", "agent", "XBT-2000");
+    const firstChat = make("xbt-2000-chat", "chat", "Your first chat");
+    computer.agents.push({ fragment: first, identity: "npub1xbt" });
+    files.get(first).set("agent.json", "{}");
+    join(firstChat, "npub1xbt");
+    Object.assign(row(firstChat), { preview: "Hello!", previewAt: 1 });
+  }
+  const before = rows.length;
   return {
+    before,
     api,
     rows: () => structuredClone(rows),
     computer: () => structuredClone(computer),
@@ -179,11 +193,11 @@ function madeWhole(world) {
   const [wren] = wrens;
   const chats = rows.filter((f) => f.kind === "chat" && labelOf(f.name).startsWith("wren"));
   assert.deepEqual(chats.map((f) => labelOf(f.name)), ["wren-chat"], "one chat of Wren's");
-  assert.equal(rows.length, 4, "nothing else made");
+  assert.equal(rows.length, world.before + 2, "nothing else made");
   const id = world.computer().agents.find((a) => a.fragment === wren.name)?.identity;
   assert.ok(id, "Wren is on the computer");
   assert.ok(world.members(chats[0].name).has(id), "Wren is in its chat");
-  assert.equal(JSON.parse(world.files(wren.name).get("fragment.json")).meta.role, "Researcher", "its role");
+  assert.equal(wren.agentRole, "Researcher", "its role, its face's");
   assert.match(world.files(wren.name).get("SOUL.md"), /one of kim@e2e\.test's agents/, "its job");
   assert.equal(world.tasks(wren.name)?.get("hello")?.chat, chats[0].name, "its hello, in its chat");
 }
@@ -300,6 +314,141 @@ for (const stray of [false, true]) {
     await page(world).opened();
     assert.equal(JSON.stringify([world.rows(), world.computer()]), before);
     assert.deepEqual(world.writes().map((w) => w.replace(/--[a-z0-9]{4}/g, "")), ["POST /api/f/wren/channels/tasks"]);
+  });
+}
+
+// FIN-492 (11-22): a move's new agent is empty until its import's routine
+// runs, minutes later, so its hello says its upgrade is under way, never a
+// new agent's "who I am" (one greeted its person as a stranger, in
+// Chinese). Every hello names the language their browser is set to.
+const said = (world) => world.tasks(world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name).get("hello").text;
+const language = `browser is set to (${globalThis.navigator?.language || "en"}) until they write to you in another.`;
+
+test("a move's agent says its upgrade is under way; an added one says who it is; each in the browser's language", async () => {
+  for (const from of [null, "old1"]) {
+    const world = platform();
+    const p = page(world, from ? { at: "move" } : {});
+    await p.load();
+    await p.onboarding.addAgent({ name: "Wren", role: "Researcher", ...(from ? { quiet: true, from } : {}) });
+    madeWhole(world);
+    const text = said(world);
+    if (from) {
+      assert.match(text, /your upgrade is under way/, "the move's hello");
+      assert.match(text, /never guess who they are/, "and it says nothing as if it knew them");
+      assert.doesNotMatch(text, /SOUL\.md/, "never a new agent's");
+    } else {
+      assert.match(text, /what you will do for them \(your SOUL\.md\)/, "a new agent's hello");
+      assert.doesNotMatch(text, /upgrade/, "never the move's");
+    }
+    assert.ok(text.endsWith(language), `in the browser's language: ${text}`);
+  }
+});
+
+// Each place a move's Add may be cut once its chat is made: the page opened
+// next (home's, which knows nothing of the move) makes it on from what was
+// made, and its hello is still the move's, from its agent.json's `from`.
+const helloCut = at(/^\/api\/f\/wren--[^/]+\/channels\/tasks$/, "POST");
+for (const [where, when, done] of [
+  ["its chat made, its answer lost", create("wren-chat"), true],
+  ["its chat made, before its computer took it", at(/\/agents\/wren--/, "PUT"), false],
+  ["on its computer, before its deploy", at(/^\/api\/f\/wren--[^/]+\/deploy$/, "POST"), false],
+  ["deployed, before it joined its chat", at(/\/members\/npub1wren$/, "PUT"), false],
+  ["in its chat, before its hello", helloCut, false],
+]) for (const seeded of [true, false]) {
+  // none before it: the page opened next owes their first agent, and makes it on as the first run's
+  test(`a move's agent cut short (${where})${seeded ? "" : ", their first here"}: the page opened next says the move's hello`, async () => {
+    const world = platform({ first: seeded });
+    const first = page(world, { at: "move" });
+    await first.load();
+    world.cut(when, done);
+    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    await page(world).opened();
+    madeWhole(world);
+    assert.match(said(world), /your upgrade is under way/);
+  });
+}
+
+// Its hello posted, its answer lost, and asked again in other words (a
+// browser set to another language, or an older release's hello): the hello
+// already there is its hello, kept, and the making goes on to its Yes.
+for (const how of ["on the same page", "after a reload"]) {
+  test(`a move's agent whose hello is there in other words is made whole ${how}`, async () => {
+    const world = platform();
+    const first = page(world, { at: "move" });
+    await first.load();
+    world.cut(helloCut, true);
+    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
+    world.tasks(wren).get("hello").text = "Older words.";
+    const p = how === "after a reload" ? page(world, { at: "move" }) : first;
+    await p.load();
+    const made = await p.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1", agent: wren });
+    madeWhole(world);
+    assert.ok(made?.id, "Add answers what it made, for its Yes");
+    assert.equal(said(world), "Older words.", "the hello there is kept");
+  });
+}
+
+// An agent.json already written is its own whatever it holds (here JSON
+// `null`, as one set up by hand may be): a making gone on with writes
+// neither it nor its job again.
+test("a making gone on with keeps an agent.json of null, and its job", async () => {
+  const world = platform();
+  const first = page(world);
+  await first.load();
+  world.cut(at(/\/agents\/wren--/, "PUT"));
+  await adding(first);
+  const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
+  world.files(wren).set("agent.json", "null");
+  world.files(wren).set("SOUL.md", "Its own job.\n");
+  await page(world).opened();
+  assert.equal(world.files(wren).get("agent.json"), "null", "its agent.json kept");
+  assert.equal(world.files(wren).get("SOUL.md"), "Its own job.\n", "its job kept");
+  assert.equal(world.tasks(wren)?.get("hello")?.chat, world.rows().find((f) => labelOf(f.name) === "wren-chat").name, "made whole: its hello in its chat");
+});
+
+// Its agent.json unread on the page opened next: no hello yet, never the
+// other one. In its chat already, its hello waits for a read that answers;
+// not yet in it, the making says what failed in its chat, and its Try again
+// says the move's.
+test("a move's agent cut short in its chat, its agent.json unread next: its hello waits for a read", async () => {
+  const world = platform();
+  const first = page(world, { at: "move" });
+  await first.load();
+  world.cut(helloCut);
+  await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+  const next = page(world);
+  world.cut(at(/\/file\?path=agent\.json$/, "GET"));
+  await next.opened();
+  const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
+  assert.equal(world.tasks(wren)?.get("hello"), undefined, "no hello on an unread agent.json");
+  assert.ok(next.onboarding.putOff(), "put off till a read answers");
+  await next.onboarding.resumeFirstRun();
+  madeWhole(world);
+  assert.match(said(world), /your upgrade is under way/);
+});
+
+for (const seeded of [true, false]) {
+  test(`a move's agent cut short before it joined its chat, its agent.json unread next${seeded ? "" : ", their first here"}: its Try again says the move's hello`, async () => {
+    const world = platform({ first: seeded });
+    const first = page(world, { at: "move" });
+    await first.load();
+    world.cut(at(/\/members\/npub1wren$/, "PUT"));
+    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    const next = page(world);
+    world.cut(at(/\/file\?path=agent\.json$/, "GET"));
+    await next.opened();
+    const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
+    assert.equal(world.tasks(wren)?.get("hello"), undefined, "no hello on an unread agent.json");
+    // made on as Add's, it failed before its chat was set (home says it);
+    // as the first run's, in its chat (its steps): each with its Try again
+    const chat = next.onboarding.setupChat();
+    if (seeded) assert.deepEqual(next.notices.slice(-1), ["Your agent could not start"], "home says what failed");
+    else assert.ok(chat && next.onboarding.setupFor(chat).error, "its chat says what failed");
+    if (chat) next.onboarding.retrySetup(chat);
+    await next.onboarding.creatingAgent();
+    madeWhole(world);
+    assert.match(said(world), /your upgrade is under way/);
   });
 }
 

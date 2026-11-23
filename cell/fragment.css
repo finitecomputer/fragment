@@ -6,7 +6,9 @@
    or `"dark"`). Theme variables and a few base styles; element rules
    use :where(), so a page's own rules override them. The variables'
    names hold across releases (docs/api.md, Serving). */
-@import url("https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+/* its type, from this origin (cell/shell/fonts.css, served as __fonts/):
+   never from another domain (xtask/src/remote_loads.rs) */
+@import url("__fonts/fonts.css");
 :root {
   color-scheme: light dark;
   --bg: light-dark(#f7f6f3, #212121);

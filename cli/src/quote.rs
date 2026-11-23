@@ -8,16 +8,16 @@
 //! The friendly form is items one after another, each a name and its
 //! amounts:
 //!
-//! - a name: an operator key, a part of one (`elevenlabs:speech`), or a
-//!   model (`cheap`, `medium`, a model's id);
+//! - a name: a vendor's unit (`elevenlabs:character`, `xai:tick`,
+//!   `perplexity:call`), or a model (`cheap`, `medium`, a model's id);
 //! - `<n>`, `<n>x` or `x<n>`: its calls (absent, one);
 //! - `<n>in`, `<n>cached`, `<n>write`, `<n>out`: a model's tokens a call;
-//! - `<n>` and any other word (`60000chars`, `1048576px`): a key's units a
-//!   call, in its own unit (a part that counts more than one a call must
-//!   say them: speech's characters, an image's pixels).
+//! - `<n>` and any other word (`60000chars`, `5credits`): a key's units a
+//!   call, in its own unit (a unit its vendor counts must say them:
+//!   speech's characters, Grok's ticks).
 //!
-//! `fragment quote elevenlabs:speech 60000chars`, `fragment quote fal:image
-//! 40x 1048576px`, `fragment quote cheap 2000in 500out 40x`.
+//! `fragment quote elevenlabs:character 60000chars`, `fragment quote
+//! perplexity:call 40x`, `fragment quote cheap 2000in 500out 40x`.
 
 use anyhow::Result;
 use fragment_core::price::dollars;
@@ -76,7 +76,7 @@ pub fn parse(words: &[String]) -> Result<Vec<Planned>, String> {
             None => items.push((word.clone(), vec![])),
             Some(a) => match items.last_mut() {
                 Some((_, amounts)) => amounts.push(a?),
-                None => return Err(format!("{word:?} comes before any name: name what it counts first (elevenlabs:speech {word})")),
+                None => return Err(format!("{word:?} comes before any name: name what it counts first (elevenlabs:character {word})")),
             },
         }
     }
@@ -177,7 +177,7 @@ pub fn tool() -> Value {
     let tokens = |what: &str| json!({ "type": "integer", "minimum": 0, "description": format!("{what} tokens a call") });
     json!({
         "name": TOOL,
-        "description": "What a planned job would cost your owner (you, if you are a person), priced with the same book the platform charges with, and what they have left this month. Quote before anything likely to cost more than about $1, or repeated or looping, and say both in one sentence. Each item is an operator key or part's calls (`elevenlabs:speech`, its units each call's characters), a model's calls with their tokens (`cheap`, `medium`), or any other usage. An item the book does not price is said to be unknown, never guessed. It spends nothing; with no items it reads what is left.",
+        "description": "What a planned job would cost your owner (you, if you are a person), priced with the same book the platform charges with, and what they have left this month. Quote before anything likely to cost more than about $1, or repeated or looping, and say both in one sentence. Each item is calls on a vendor's unit (`elevenlabs:character`, its units each call's characters; `perplexity:call`), a model's calls with their tokens (`cheap`, `medium`), or any other usage. An item the book does not price is said to be unknown, never guessed. It spends nothing; with no items it reads what is left.",
         "inputSchema": {
             "type": "object",
             "required": ["items"],
@@ -187,8 +187,8 @@ pub fn tool() -> Value {
                     "maxItems": QUOTE_ITEMS_MAX,
                     "items": { "oneOf": [
                         { "type": "object", "required": ["key"], "additionalProperties": false, "properties": {
-                            "key": { "type": "string", "description": "An operator key (`perplexity`, `fal`) or a part of one (`elevenlabs:speech`)" },
-                            "units": { "type": "integer", "minimum": 0, "description": "Each call's units in the key's own unit: a part counting more than one a call must say them (`elevenlabs:speech` its text's characters, `fal:image` its pixels); absent, one" },
+                            "key": { "type": "string", "description": "A vendor's unit, `<vendor>:<unit>` (`perplexity:call`, `elevenlabs:character`, `xai:tick`)" },
+                            "units": { "type": "integer", "minimum": 0, "description": "Each call's units: a unit its vendor counts must say them (`elevenlabs:character` its text's characters, `xai:tick` its cost in ticks, 10^10 a dollar); absent, one" },
                             "calls": calls,
                         } },
                         { "type": "object", "required": ["model"], "additionalProperties": false, "properties": {
@@ -226,11 +226,11 @@ mod tests {
     /// guide's examples and each amount's spellings.
     #[test]
     fn the_friendly_form_names_its_items() {
-        assert_eq!(parse(&words("elevenlabs:speech 60000chars")), Ok(vec![key("elevenlabs:speech", Some(60_000), None)]));
+        assert_eq!(parse(&words("elevenlabs:character 60000chars")), Ok(vec![key("elevenlabs:character", Some(60_000), None)]));
         assert_eq!(parse(&words("fal 40")), Ok(vec![key("fal", None, Some(40))]));
-        assert_eq!(parse(&words("fal:image 40x 1048576px")), Ok(vec![key("fal:image", Some(1_048_576), Some(40))]));
-        assert_eq!(parse(&words("elevenlabs:speech x300 200chars perplexity 7")), Ok(vec![key("elevenlabs:speech", Some(200), Some(300)), key("perplexity", None, Some(7))]));
-        assert_eq!(parse(&words("elevenlabs:speech 60,000chars")), parse(&words("elevenlabs:speech 60_000Chars")));
+        assert_eq!(parse(&words("fal:flux-2-klein-9b 40x 2units")), Ok(vec![key("fal:flux-2-klein-9b", Some(2), Some(40))]));
+        assert_eq!(parse(&words("elevenlabs:character x300 200chars perplexity 7")), Ok(vec![key("elevenlabs:character", Some(200), Some(300)), key("perplexity", None, Some(7))]));
+        assert_eq!(parse(&words("elevenlabs:character 60,000chars")), parse(&words("elevenlabs:character 60_000Chars")));
         assert_eq!(
             parse(&words("cheap 2000in 300cached 500out 40calls")),
             Ok(vec![Planned::Model(PlannedModel { model: "cheap".into(), input: 2_000, cached_input: 300, cache_write: 0, output: 500, calls: Some(40) })])
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(parse(&words("medium 10out")), Ok(vec![Planned::Model(PlannedModel { model: "medium".into(), input: 0, cached_input: 0, cache_write: 0, output: 10, calls: None })]));
         assert_eq!(parse(&[]), Ok(vec![]), "nothing: what is left, alone");
         // a part with no units is the platform's to name (`no_units`), not a guess here
-        assert_eq!(parse(&words("elevenlabs:speech")), Ok(vec![key("elevenlabs:speech", None, None)]));
+        assert_eq!(parse(&words("elevenlabs:character")), Ok(vec![key("elevenlabs:character", None, None)]));
     }
 
     /// Invalid: an amount before any name, one named twice, units and
@@ -278,15 +278,15 @@ mod tests {
     /// job, one with an unknown item, and an owing payer.
     #[test]
     fn the_answer_is_one_line_a_person_can_say() {
-        let asked = [key("elevenlabs:speech", Some(60_000), None)];
+        let asked = [key("elevenlabs:character", Some(60_000), None)];
         let q = Quote { items: vec![priced(4_800_000, 1)], total_micros: 4_800_000, left_micros: 95_400_000, ledger: ledger(95_400_000, Standing::Ok) };
         assert_eq!(said(&asked, &q), ["about $4.80; you have $95.40 left this month"]);
-        let asked = [key("elevenlabs:speech", Some(200), Some(300)), key("nope", None, None)];
+        let asked = [key("elevenlabs:character", Some(200), Some(300)), key("nope", None, None)];
         let unknown = Quoted { priced_as: None, each_micros: None, calls: 1, charge_micros: None, unknown: Some(Unquoted::NoPrice) };
         let q = Quote { items: vec![priced(24_000, 300), unknown], total_micros: 7_200_000, left_micros: 0, ledger: ledger(-3_000_000, Standing::AgentsStopped { why: Why::NoCredit }) };
         let lines = said(&asked, &q);
         assert_eq!(lines[0], "about $7.20 for what is priced; you owe $3.00");
-        assert_eq!(lines[1], "  elevenlabs:speech\t300 × $0.024");
+        assert_eq!(lines[1], "  elevenlabs:character\t300 × $0.024");
         assert!(lines[2].starts_with("  nope: not priced here"), "{lines:?}");
         assert_eq!(lines[3], "(now: agents and AI are stopped (no_credit))");
         // nothing asked: what is left, alone, in cents never above it
@@ -303,7 +303,7 @@ mod tests {
     fn the_tools_items_are_the_routes() {
         let t = tool();
         assert_eq!(t["name"], TOOL);
-        let items = parse(&words("elevenlabs:speech 60000chars cheap 2000in 500out 40x")).unwrap();
+        let items = parse(&words("elevenlabs:character 60000chars cheap 2000in 500out 40x")).unwrap();
         let back: QuoteAsk = serde_json::from_value(json!({ "items": items })).unwrap();
         assert_eq!(back.items, items);
         assert_eq!(t["inputSchema"]["properties"]["items"]["items"]["oneOf"].as_array().map(Vec::len), Some(3));

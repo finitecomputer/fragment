@@ -7,9 +7,13 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { connect } from "cloudflare:sockets";
-import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
+import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
+import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import * as rs from "./build/index.js";
+// A SimpleX door's object and its container's egress: JavaScript of its
+// own (door.mjs), no Rust in the cell's Wasm
+export { SimplexDoor, DoorEgress } from "./door.mjs";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
@@ -95,14 +99,15 @@ export class Registry extends DurableObject {
 
 // The app's read access to its files (files.rs), handed to its facet as
 // `env.FILES` bound to one fragment by `props`: the app cannot name another.
-// Both it and the job driver call the supervisor's internal routes through
-// `rs.InternalRoute.request` (routed.rs), which marks the request as that route
-// expects and stamps it with this release (an object refuses another's:
+// It, `Search` and the job driver make the fragment's typed calls
+// (`call/…`, fragment/calls.rs, which defines each one's body) through
+// `rs.InternalRoute.request` (routed.rs), which marks the request as a call
+// and stamps it with this release (an object refuses another's:
 // docs/MODEL.md, "Calls between releases"): the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
-    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/files/${op}`, JSON.stringify(body)));
+    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/files/${op}`, JSON.stringify(body)));
   }
 
   async #answer(op, body) {
@@ -129,7 +134,7 @@ export class Files extends WorkerEntrypoint {
 export class Search extends WorkerEntrypoint {
   async #answer(op, body) {
     const { fragment } = this.ctx.props;
-    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/search/${op}`, JSON.stringify(body)));
+    const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/search/${op}`, JSON.stringify(body)));
     const answer = await resp.json().catch(() => ({}));
     if (resp.ok) return { answer };
     return {
@@ -173,9 +178,9 @@ export class Job extends WorkflowEntrypoint {
     const retrying = { retries: { limit: 4, delay: `${delay} seconds`, backoff: "exponential" }, timeout: "5 minutes" };
     const post = async (path, body) => {
       const call = JSON.stringify({ incarnation, run, attempt, ...body });
-      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `job/${path}`, call));
+      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/job/${path}`, call));
       const out = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(out.message || `job/${path} answered ${resp.status}`);
+      if (!resp.ok) throw new Error(out.message || `call/job/${path} answered ${resp.status}`);
       return out;
     };
     // the step before this round, when it ran out of retries
@@ -276,6 +281,29 @@ class ContainerHost {
   #report;
   #generation = 0;
   #backups;
+  // A message from a tab's page is its person's use (an open tab holds
+  // the computer only by its use, IDLE_MS after the last: fragment_core's
+  // lifecycle, `Event::TabUsed`). One is told at once, then at most one
+  // every `#usedEvery` ms across its tabs (TAB_USED_EVERY_MS, which `port`
+  // hands over), so a person at work costs a lifecycle write a minute, not
+  // one a keystroke: a use within that window is told at its end
+  // (`#usedLater`), or with its tab's close, whichever comes first.
+  #usedEvery = 60_000;
+  #usedAt = 0;
+  #usedLater = null;
+  // each open tab's close (`port`), for a sleep to close them (`closeTabs`)
+  #tabs = new Set();
+  // the sleeps begun (`closeTabs`), and the last one's why: a socket
+  // admitted before one, its upgrade still on its way as it began, is
+  // closed as the open ones were, never registered (`port`)
+  #sleeps = 0;
+  #sleptWhy = "asleep";
+  // Until when the lever's `slow-snapshot` holds the container, as the
+  // runtime's own snapshot does: a signal or a destroy lands once it ends.
+  #heldUntil = 0;
+  // The destroys begun of whatever runs or of the start that runs: a start
+  // that sees one begin while it registers its intercepts starts nothing.
+  #destroys = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -320,10 +348,18 @@ class ContainerHost {
     return true;
   }
 
-  // Starts `image` (or a snapshot of it), then watches it: its exit, for
-  // any reason, is reported as `computer/exited` for this generation.
-  start(generation, image, snapshot, env, instance) {
+  // Starts `image` (or a snapshot of it) for `computer` once every egress
+  // intercept of its guest is registered (`startIntercepted`), so the
+  // guest's first call never races them; then watches it (its exit, for
+  // any reason, is reported as `computer/exited` for this generation) and
+  // sets the runtime's idle stop. Its call to the runtime's start comes
+  // after its registrations, never in the same turn as this call: one
+  // overtaken meanwhile (a start after it, or a destroy begun: a sleep's
+  // or a wipe's) starts nothing, answering false, and one overtaken by the
+  // time its idle stop is set answers false too (that destroy ends it).
+  async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs) {
     this.#generation = generation;
+    const destroys = this.#destroys;
     // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
     // depend on public DNS, which local workerd's sidecar asks first for
     // the intercepted hosts while the internet is on (devstack::Fleet)
@@ -331,50 +367,57 @@ class ContainerHost {
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
-    this.#c.start(opts);
+    const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
+    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage), overtaken))) return false;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
-  }
-
-  // A start from a snapshot answers "temporarily unavailable" for a while
-  // (spike S3b): the calls right after it are tried again for up to two
-  // minutes.
-  async #settled(f) {
-    const t0 = Date.now();
-    for (;;) {
-      try {
-        return await f();
-      } catch (e) {
-        if (!/temporarily unavailable/.test(String(e)) || Date.now() - t0 > 120_000) throw e;
-        await new Promise((r) => setTimeout(r, 100));
-      }
+    try {
+      await settled(() => this.#c.setInactivityTimeout(idleMs));
+    } catch (e) {
+      // overtaken meanwhile, its failure is no one's: the destroy ends it
+      if (overtaken()) return false;
+      throw e;
     }
+    return !overtaken();
   }
 
-  // The egress intercepts (one entry per host: `ComputerEgress` with the
-  // route as props) and the runtime's idle stop, the safety net under the
-  // Computer DO's own sleep. Neither survives a stop, so each start sets
-  // them again. `swapHosts` are the connections' and operator keys' hosts,
-  // caught on HTTPS and on plain HTTP alike: the swap always sends on over
-  // HTTPS, so a credential never crosses the internet in the clear.
-  // `codestorage`: a local fleet's code.storage, at a loopback address the
-  // container cannot reach, is reached through the egress too.
+  // Every egress intercept of `computer`'s guest, all at once (one entry
+  // per host: `ComputerEgress` with the route as props; intercepts.mjs).
+  // `swapHosts` are the connections' and operator keys' hosts, and on a
+  // takeover its agents' Vault secrets' too. Not the backups' host: each
+  // save and restore registers its own grant there and puts its refusal
+  // back after (the Sandbox SDK's `DirectoryBackup`), and its
+  // `intercept()`, a refusal registered again, is for beside a catch-all
+  // intercept, which a computer has none of. One registered late (a
+  // start's that was overtaken) would replace the grant of a restore under
+  // way.
+  #intercept(computer, swapHosts, codestorage) {
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage);
+  }
+
+  #egress(computer) {
+    return (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
+  }
+
+  // Its running start `generation`'s intercepts again (a new isolate's),
+  // and the runtime's idle stop, the safety net under the Computer DO's
+  // own sleep.
   async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return false;
-    const c = this.#c;
-    const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
-    await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
-    await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
-    if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
-    for (const host of swapHosts) {
-      await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
-      await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
-    }
-    await this.#settled(() => this.#backups.intercept());
-    await this.#settled(() => c.setInactivityTimeout(idleMs));
-    return true;
+    await this.#intercept(computer, swapHosts, codestorage);
+    await settled(() => this.#c.setInactivityTimeout(idleMs));
+    return generation === this.#generation;
+  }
+
+  // `hosts` more for its running start `generation`'s swap (its agents'
+  // Vault secrets'), those alone (`interceptSwap`). False: that start was
+  // superseded, before or while they registered.
+  async armSwap(generation, computer, hosts) {
+    if (generation !== this.#generation) return false;
+    await interceptSwap(this.#c, this.#egress(computer), hosts);
+    return generation === this.#generation;
   }
 
   // Waits until the container takes an exec (it is up), for at most `ms`.
@@ -446,10 +489,11 @@ class ContainerHost {
   }
 
   // Restores `record` into its directory within `ms` (`Overdue` past it):
-  // null once it is in place, or `{unusable}` when the save itself will
-  // never restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND
-  // and BACKUP_INTEGRITY), which the Rust side tells from a failure that
-  // may pass (it throws).
+  // null once it is in place, `{unusable}` when the save itself will never
+  // restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND and
+  // BACKUP_INTEGRITY), or `{noRoom}` when it found no room on the disk (a
+  // restore's SandboxFileError ENOSPC), which the Rust side tells from a
+  // failure that may pass (it throws).
   async restore(generation, record, ms) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     try {
@@ -458,6 +502,9 @@ class ContainerHost {
     } catch (e) {
       if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
         return { unusable: `${e.code}: ${e.detail || e.message}` };
+      }
+      if (SandboxFileError.is(e) && e.operation === "restore" && e.code === "ENOSPC") {
+        return { noRoom: `${e.code}: ${e.detail || e.message}` };
       }
       throw e;
     }
@@ -469,8 +516,14 @@ class ContainerHost {
   }
 
   // A snapshot of the container within `ms` (`Overdue` past it): its id.
-  async snapshot(generation, name, ms) {
+  // `slowMs` (the lever's `slow-snapshot`, where local workerd takes none):
+  // one made up that takes that long, holding the container.
+  async snapshot(generation, name, ms, slowMs) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    if (slowMs > 0) {
+      this.#heldUntil = Date.now() + slowMs;
+      return bounded("the snapshot", ms, () => this.#unheld().then(() => `lever-${name}`));
+    }
     const s = await bounded("the snapshot", ms, () => this.#c.snapshotContainer({ name }));
     return s.id;
   }
@@ -478,7 +531,7 @@ class ContainerHost {
   // Sends signal `n` to the guest's PID 1 (from outside its PID namespace,
   // so SIGKILL lands as a crash's would). Answers whether it was sent.
   signal(generation, n) {
-    if (generation !== this.#generation || !this.#c.running) return false;
+    if (generation !== this.#generation || !this.#c.running || Date.now() < this.#heldUntil) return false;
     this.#c.signal(n);
     return true;
   }
@@ -490,10 +543,16 @@ class ContainerHost {
   async destroy(generation, reason, ms) {
     if (generation !== 0 && generation !== this.#generation) return false;
     if (!(ms > 0)) throw new Error("a destroy is bounded");
+    this.#destroys++;
     const t0 = Date.now();
-    if (this.#c.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
+    if (this.#c.running) await bounded("the destroy", ms, () => this.#unheld().then(() => this.#c.destroy(reason))).catch(() => {});
     while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
     return !this.#c.running;
+  }
+
+  // Once the lever's snapshot no longer holds the container (at once if none does).
+  #unheld() {
+    return new Promise((r) => setTimeout(r, Math.max(0, this.#heldUntil - Date.now())));
   }
 
   // Waits up to `ms` for the container to exit on its own (after a signal).
@@ -504,9 +563,12 @@ class ContainerHost {
   }
 
   // A request to one of the container's ports. A WebSocket is bridged
-  // through this Durable Object (both ends accepted here, so an open tab
-  // keeps the computer awake), its opening and closing reported as
-  // `computer/tab`. Each end's listeners are added before it is accepted
+  // through this Durable Object (both ends accepted here), its opening,
+  // closing and use reported as `computer/tab`: a message from the page's
+  // end after its opening was told is its use (`#used`), and a tab whose
+  // page says nothing holds the computer no longer than its opening does.
+  // The container's end speaking is no use: a screen draws by itself.
+  // Each end's listeners are added before it is accepted
   // and before anything is awaited: a message that arrives with no
   // listener is gone, and a container's socket may speak first (an RFB
   // server's version, the screen's control socket's holder), whose first
@@ -522,15 +584,40 @@ class ContainerHost {
   // (workerd's own answer to a peer's close comes in the step that
   // dispatches the close event `close` hears), so `closed` covers every
   // such send.
-  async port(port, request) {
+  async port(port, request, usedEvery) {
+    if (usedEvery > 0) this.#usedEvery = usedEvery;
+    const sleeps = this.#sleeps;
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return resp;
     const [client, server] = Object.values(new WebSocketPair());
+    if (this.#sleeps !== sleeps) {
+      // a sleep began as its upgrade waited: closed with its why, as the
+      // tabs open then were, so nothing its page sends reaches the
+      // container that sleep saves (nothing awaited from here to its
+      // registering below, so no sleep slips in after this)
+      for (const ws of [upstream, server]) {
+        try {
+          ws.accept();
+          ws.close(4000, this.#sleptWhy);
+        } catch {}
+      }
+      return new Response(null, { status: 101, webSocket: client });
+    }
     let closed = false;
+    // its opening is told (before that, a word from its page is the opening's)
+    let told = false;
     const close = (code, reason) => {
       if (closed) return;
       closed = true;
+      this.#tabs.delete(close);
+      // a use not told yet goes with the close, told first
+      const used = this.#usedLater !== null;
+      if (used) {
+        clearTimeout(this.#usedLater);
+        this.#usedLater = null;
+        this.#usedAt = Date.now();
+      }
       const sendable = code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code);
       for (const ws of [upstream, server]) {
         try {
@@ -542,13 +629,15 @@ class ContainerHost {
           } catch {}
         }
       }
-      this.#report("computer/tab", { open: false });
+      this.#report("computer/tab", { open: false, used });
     };
     upstream.addEventListener("message", (e) => {
       if (!closed) server.send(e.data);
     });
     server.addEventListener("message", (e) => {
-      if (!closed) upstream.send(e.data);
+      if (closed) return;
+      upstream.send(e.data);
+      if (told) this.#used();
     });
     for (const ws of [upstream, server]) {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
@@ -556,8 +645,41 @@ class ContainerHost {
     }
     server.accept();
     upstream.accept();
+    this.#tabs.add(close);
     await this.#report("computer/tab", { open: true });
+    told = true;
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // A sleep (or a restart's) begins, before its hold: each open port tab
+  // closes with 4000 and `why` ("asleep" or "restarting"), so nothing its
+  // page sends after reaches the container the sleep saves, and its page
+  // says why and waits for its person (images/hermes/screen/index.html).
+  // Answers how many it closed.
+  closeTabs(why) {
+    this.#sleeps += 1;
+    this.#sleptWhy = why;
+    const tabs = [...this.#tabs];
+    for (const close of tabs) close(4000, why);
+    return tabs.length;
+  }
+
+  // A port tab's page spoke: told at once, or at the end of the window of
+  // the last told (once however many came), or with its tab's close. A
+  // report that fails is logged; the next use tells it.
+  #used() {
+    if (this.#usedLater !== null) return;
+    const wait = this.#usedAt + this.#usedEvery - Date.now();
+    if (wait <= 0) return this.#tellUsed();
+    this.#usedLater = setTimeout(() => {
+      this.#usedLater = null;
+      if (this.#tabs.size > 0) this.#tellUsed();
+    }, wait);
+  }
+
+  #tellUsed() {
+    this.#usedAt = Date.now();
+    this.#report("computer/tab", { open: true, used: true }).catch((e) => console.error(JSON.stringify({ tab: "used", error: String((e && e.message) || e) })));
   }
 }
 

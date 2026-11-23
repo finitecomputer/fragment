@@ -743,26 +743,17 @@ struct ShellTests {
         #expect(again === library.sessions["draft-3"])
     }
 
-    @Test func renameKeepsTheManifestAndDeploysIt() async throws {
+    @Test func renameSetsItsFaceAndCommitsNothing() async throws {
         let stub = Stub { seen, _ in
-            switch seen.route {
-            case "GET /api/f/talk--c1/manifest": (200, #"{"name":"talk--c1","meta":{"title":"Old","template":"chat"},"channels":{"chat":{}}}"#)
-            case "POST /api/f/talk--c1/files": (200, #"{"commit":"abc"}"#)
-            case "POST /api/f/talk--c1/deploy": (200, #"{"live":"abc","canonical":"https://talk--c1.finite.test/"}"#)
-            default: (404, "{}")
-            }
+            seen.route == "PUT /api/f/talk--c1/face" ? (200, #"{"title":"A name to keep"}"#) : (404, "{}")
         }
         let api = try stub.api()
         let chat = FragmentSummary(name: "talk--c1", kind: "chat")
         await #expect(throws: APIError.self) { try await api.rename(chat, title: "   ") }
         #expect(stub.seen.isEmpty)
         try await api.rename(chat, title: "  A name to keep ")
-        #expect(stub.seen.map(\.route) == ["GET /api/f/talk--c1/manifest", "POST /api/f/talk--c1/files", "POST /api/f/talk--c1/deploy"])
-        let file = stub.seen[1].json["files"].array.first
-        #expect(file?["path"].string == "fragment.json")
-        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data(try #require(file?["text"].string).utf8))
-        #expect(manifest["meta"] == .object(["title": .string("A name to keep"), "template": .string("chat")]))
-        #expect(manifest["channels"] == .object(["chat": .object([:])]))
+        #expect(stub.seen.map(\.route) == ["PUT /api/f/talk--c1/face"])
+        #expect(stub.seen[0].json == .object(["title": .string("A name to keep")]))
     }
 
     @Test func archivingIsThePersonsOwnView() async throws {
@@ -822,11 +813,9 @@ struct ShellTests {
             case "GET /api/fragments": (200, list)
             case "GET /api/f/moss--a1/status": (200, #"{"npub":"npub1moss","urls":{"canonical":"https://moss--a1.finite.test/"}}"#)
             case "GET /api/f/trip--c1/channels/chat", "GET /api/f/named--c2/channels/chat": (200, first)
-            case "GET /api/f/trip--c1/manifest": (200, #"{"template":"chat","meta":{"title":"New chat"}}"#)
-            // renamed on the web after the list was read
-            case "GET /api/f/named--c2/manifest": (200, #"{"template":"chat","meta":{"title":"Our plans"}}"#)
-            case "POST /api/f/trip--c1/files": (200, #"{"commit":"c1"}"#)
-            case "POST /api/f/trip--c1/deploy": (200, #"{"deployed":true}"#)
+            case "PUT /api/f/trip--c1/face": (200, #"{"title":"Plan a weekend trip to the coast with the whole…"}"#)
+            // renamed on the web after the list was read: its title is no longer untitled
+            case "PUT /api/f/named--c2/face": (409, #"{"error":"conflict","message":"its title is no longer \"New chat\""}"#)
             default: (404, #"{"error":"not_found","message":"no route \#(seen.route)"}"#)
             }
         }
@@ -834,12 +823,10 @@ struct ShellTests {
         let library = Library()
         await library.load(api)
         await library.load(api)
-        let writes = stub.seen.filter { $0.method == "POST" }
-        #expect(writes.map(\.path) == ["/api/f/trip--c1/files", "/api/f/trip--c1/deploy"])
-        let files = try #require(writes.first?.json)
-        #expect(files["message"].string == "its title, from its first message")
-        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data((files["files"].array.first?["text"].string ?? "").utf8))
-        #expect(manifest["meta"]["title"].string == "Plan a weekend trip to the coast with the whole…" && manifest["template"].string == "chat")
+        let writes = stub.seen.filter { $0.method == "PUT" }
+        #expect(writes.map(\.path).sorted() == ["/api/f/named--c2/face", "/api/f/trip--c1/face"], "each once: one renamed meanwhile is not asked again")
+        let trip = try #require(writes.first { $0.path == "/api/f/trip--c1/face" }?.json)
+        #expect(trip == .object(["title": .string("Plan a weekend trip to the coast with the whole…"), "was": .string("New chat")]))
         #expect(stub.seen.filter { $0.path == "/api/f/trip--c1/channels/chat" }.count == 1, "once a session")
         #expect(stub.seen.first { $0.path == "/api/f/trip--c1/channels/chat" }?.query == ["after": "0", "limit": "20"])
         // another's chat, and one with nothing said, are never read for it
@@ -855,16 +842,13 @@ struct ShellTests {
             switch seen.route {
             case "GET /api/fragments": (200, list)
             case "GET /api/f/nel--c1/channels/chat": (200, page)
-            case "GET /api/f/nel--c1/manifest": (200, #"{"template":"chat","meta":{"title":"New chat"}}"#)
-            case "POST /api/f/nel--c1/files": (200, #"{"commit":"c1"}"#)
-            case "POST /api/f/nel--c1/deploy": (200, #"{"deployed":true}"#)
+            case "PUT /api/f/nel--c1/face": (200, #"{"title":"x"}"#)
             default: (404, #"{"error":"not_found","message":"no route"}"#)
             }
         }
         await Library().load(try stub.api())
-        let files = try #require(stub.seen.first { $0.route == "POST /api/f/nel--c1/files" }?.json)
-        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data((files["files"].array.first?["text"].string ?? "").utf8))
-        #expect(manifest["meta"]["title"].string == "x\u{85}", "as the web writes it")
+        let face = try #require(stub.seen.first { $0.route == "PUT /api/f/nel--c1/face" }?.json)
+        #expect(face["title"].string == "x\u{85}", "as the web writes it")
     }
 
     /// The web's semantics, code point for code point: lines split on LF

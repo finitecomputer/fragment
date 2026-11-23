@@ -170,7 +170,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     // what it waited on, in its answer (docs/api.md): the router's parts, then its object's
     let waited = crate::api::timing_parts(&r.header("server-timing"));
     s.ok(
-        "its answer says what it waited on (Server-Timing): the ledger and its object, then the object's repo, key, list and alarm, and no seed (it has no template to land)",
+        "its answer says what it waited on (Server-Timing): the ledger and its object, then the object's key, repo, list and alarm, and no seed (it has no template to land)",
         ["ledger", "object", "repo", "key", "list", "alarm"].iter().all(|p| waited.iter().any(|w| w == p)) && !waited.iter().any(|w| w == "seed"),
         r.header("server-timing"),
     );
@@ -201,10 +201,10 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
     // the one derivation of a repo's name (crates/core codestorage.rs):
-    // `<name>--<12 hex of its owner>`; a local node has no prefix
-    let named = fragment_core::codestorage::repo_name("", &name, &owner_id).unwrap_or_default();
+    // `<name>--<12 hex of its life's key>`; a local node has no prefix
+    let named = fragment_core::codestorage::repo_name("", &name, c["npub"].as_str().unwrap_or_default()).unwrap_or_default();
     s.ok(
-        "the repo exists in code.storage as <name>--<its owner's 12 hex>",
+        "the repo exists in code.storage as <name>--<its life's key's 12 hex>",
         named.starts_with(&format!("{name}--")) && s.fake.repo_url(&named).as_deref() == Some(repo.as_str()),
         format!("{repo} ({named})"),
     );
@@ -278,14 +278,14 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.create_with(&owner, json!({ "name": public, "visibility": "public" }))?;
     s.ok("create takes a visibility", r.status == 200 && r.body["visibility"] == "public", &r);
     // a name deleted, made again by someone else: a repo of their own,
-    // never its earlier maker's (a repo's name carries its owner)
+    // never its earlier maker's (a repo's name carries its life's key)
     let reused = s.named(api, &owner, "reused")?;
     let first = s.create(api, &owner, &reused)?;
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{reused}"), None)?;
     let remade = api.create(&other, &reused)?;
-    let theirs = fragment_core::codestorage::repo_name("", &reused, &api.identity(&other)?).unwrap_or_default();
+    let theirs = fragment_core::codestorage::repo_name("", &reused, remade.body["npub"].as_str().unwrap_or_default()).unwrap_or_default();
     s.ok(
-        "a name deleted and made again by someone else: a fresh repo, named for its new owner",
+        "a name deleted and made again by someone else: a fresh repo, named for its new life",
         deleted.status == 200 && remade.status == 200 && remade.body["repo"] != first["repo"] && s.fake.repo_url(&theirs).as_deref() == remade.body["repo"].as_str(),
         format!("{deleted} {remade} (the earlier maker's repo {})", first["repo"]),
     );
@@ -314,6 +314,9 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "add_todo", "a1", json!({ "text": "x" }))?;
     s.ok("an operation before any deploy is 404 no_code", r.status == 404 && r.error() == "no_code", &r);
 
+    // a file of its own, so a repo that held it again would show
+    s.owned(c, &owner);
+    s.commit(c, &[("notes.md", Some(b"the first life\n"))]);
     let r = api.signed(&other, "DELETE", &format!("/api/f/{name}"), None)?;
     s.ok("another key deleting is 403", r.status == 403, &r);
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
@@ -322,11 +325,114 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a deleted fragment is 404", r.status == 404, &r);
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
     s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
-    // a busy org: the repo is on a later page of the org's newest-first list
-    s.fake.seed_filler(150);
+    // its repo goes too, by its alarm, with the rest of its cleanup (Paul,
+    // 2026-11-18: a delete is when the files are really gone)
+    let (cleaned, last) = s.ended_cleaned(api, &name);
+    s.ok("its repo is deleted at code.storage by its alarm, with the rest of its cleanup", cleaned && s.fake.repo_deleted(&repo), format!("{last} ({repo})"));
+    // made again once that is done: a fresh, empty repo, never the deleted one
     let r = api.create(&owner, &name)?;
+    let second = r.body.clone();
+    let second_repo = second["repo"].as_str().unwrap_or("").to_string();
+    let named = fragment_core::codestorage::repo_name("", &name, second["npub"].as_str().unwrap_or_default()).unwrap_or_default();
+    let files = api.signed(&owner, "GET", &format!("/api/f/{name}/files"), None)?;
     s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&owner)?.as_str(), &r);
-    s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);
+    s.ok(
+        "made again once its repo is deleted, it has a fresh, empty repo, named for its new life",
+        !second_repo.is_empty() && second_repo != repo && s.fake.repo_url(&named).as_deref() == Some(second_repo.as_str()) && s.fake.paths(&second_repo, "main").is_empty() && files.body["files"] == json!([]),
+        format!("{r} {files}"),
+    );
+    s.owned(&second, &owner);
+    s.commit(&second, &[("notes.md", Some(b"the second life\n"))]);
+    // whatever each checks, code.storage takes repo deletes again after
+    let held = made_again_while_its_repo_delete_waits(s, api, &owner, &name, &second_repo);
+    s.fake.refuse_repo_deletes(false);
+    held?;
+    let kept = a_delete_leaves_an_owner_named_repo(s, api, &owner);
+    s.fake.refuse_repo_deletes(false);
+    kept
+}
+
+/// A fragment made before repos were named by the life's key has a repo
+/// named by its owner (here the older `<name>` the `repo` lever sets). Its
+/// delete never queues that repo (FIN-538: a release rolled back to would
+/// find it again by name while its delete was still to come); a per-life
+/// repo's delete is queued. Both deleted while code.storage refuses repo
+/// deletes, so what each queued is read before anything is deleted.
+fn a_delete_leaves_an_owner_named_repo(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let queued = |name: &str| -> Result<(u64, bool)> {
+        let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended" })))?;
+        let lives = r.body["ended"].as_array().cloned().unwrap_or_default();
+        Ok((lives.iter().filter_map(|l| l["repos"].as_u64()).sum(), lives.iter().any(|l| l["held"] == true)))
+    };
+    let (older, newer) = (s.named(api, owner, "owner-named")?, s.named(api, owner, "life-named")?);
+    s.create(api, owner, &older)?;
+    let made = s.create(api, owner, &newer)?;
+    let newer_repo = made["repo"].as_str().unwrap_or("").to_string();
+    s.fake.seed_repo(&older, &[("notes.md", b"an older life's\n")]);
+    let set = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": older, "op": "repo", "repo": older })))?;
+    s.fake.refuse_repo_deletes(true);
+    let gone = [api.signed(owner, "DELETE", &format!("/api/f/{older}"), None)?, api.signed(owner, "DELETE", &format!("/api/f/{newer}"), None)?];
+    let held = s.eventually(Duration::from_secs(30), || queued(&newer).is_ok_and(|q| q == (1, true)));
+    let (older_queued, _) = queued(&older)?;
+    s.ok(
+        "deleted, a fragment whose repo is named by its owner (made before repos were named by its life's key) queues no repo delete; one whose repo is named by its life's key queues its repo",
+        set.status == 200 && gone.iter().all(|r| r.status == 200) && older_queued == 0 && held,
+        json!({ "lever": set.body, "olderQueued": older_queued, "newerHeld": held }),
+    );
+    s.fake.refuse_repo_deletes(false);
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": newer, "op": "ended-due" })))?;
+    let (older_clean, older_last) = s.ended_cleaned(api, &older);
+    let (newer_clean, newer_last) = s.ended_cleaned(api, &newer);
+    s.ok(
+        "their cleanups done, the per-life repo is deleted and the owner-named one stays, files and all",
+        older_clean && newer_clean && s.fake.repo_deleted(&newer_repo) && !s.fake.repo_deleted(&older) && s.fake.file_at(&older, "main", "notes.md").as_deref() == Some(&b"an older life's\n"[..]),
+        format!("{older_last} / {newer_last}"),
+    );
+    Ok(())
+}
+
+/// The name made again while its ended life's repo delete is still to come
+/// (held: code.storage refuses it), the race a delete taking its repo has
+/// to win: the new life gets a fresh repo of its own (a repo's name is its
+/// life's key's), and the held delete, once it passes, deletes the ended
+/// life's repo alone.
+fn made_again_while_its_repo_delete_waits(s: &mut Suite, api: &Api, owner: &Keys, name: &str, old: &str) -> Result<()> {
+    let ended = || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended" })));
+    s.fake.refuse_repo_deletes(true);
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let held = s.eventually(Duration::from_secs(30), || ended().is_ok_and(|r| r.body["ended"][0]["repos"] == 1 && r.body["ended"][0]["held"] == true));
+    let view = ended()?;
+    s.ok(
+        "deleted again, code.storage refusing its repo's delete: that delete is held, the repo still there",
+        deleted.status == 200 && held && !s.fake.repo_deleted(old),
+        &view,
+    );
+    let r = api.create(owner, name)?;
+    s.owned(&r.body, owner);
+    let new = r.body["repo"].as_str().unwrap_or("").to_string();
+    let files = api.signed(owner, "GET", &format!("/api/f/{name}/files"), None)?;
+    s.ok(
+        "made again while that delete waits: a fresh, empty repo of its own, not the one waiting to be deleted",
+        r.status == 200 && !new.is_empty() && new != old && !s.fake.repo_deleted(old) && s.fake.paths(&new, "main").is_empty() && files.body["files"] == json!([]),
+        format!("{r} {files}"),
+    );
+    s.commit(&r.body, &[("notes.md", Some(b"the third life\n"))]);
+    // code.storage takes repo deletes again, and the held one is tried now
+    s.fake.refuse_repo_deletes(false);
+    let due = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended-due" })))?;
+    let (cleaned, last) = s.ended_cleaned(api, name);
+    let file = api.signed(owner, "GET", &format!("/api/f/{name}/file?path=notes.md"), None)?;
+    s.ok(
+        "once code.storage takes it, the held delete deletes the ended life's repo alone: the new life's repo, and its file, stay",
+        due.status == 200
+            && cleaned
+            && s.fake.repo_deleted(old)
+            && !s.fake.repo_deleted(&new)
+            && s.fake.file_at(&new, "main", "notes.md").as_deref() == Some(&b"the third life\n"[..])
+            && file.status == 200
+            && file.text == "the third life\n",
+        format!("{due} / {last} / {file}"),
+    );
     Ok(())
 }
 
@@ -339,7 +445,9 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     let name = s.named(api, &owner, "lock")?;
     s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    // every header the router sets for a fragment, forged to name the owner
+    // every header the router sets for a fragment, forged to name the
+    // owner, and the platform's call marker (cell fragment/calls.rs): one
+    // that reached the fragment would be answered `no call`
     let owner_id = api.identity(&owner)?;
     let claims_owner = json!({ "id": owner_id, "kind": "person", "owner": null, "key": owner.pubkey_hex() }).to_string();
     let owner_key_unsigned = json!({ "key": owner.pubkey_hex() }).to_string();
@@ -355,12 +463,13 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
                 };
                 (*h, v)
             })
+            .chain([("x-fragment-call", "1".to_string())])
             .collect::<Vec<_>>()
     };
     let forged = |keys: Option<&Keys>, url: String| api.call(Call { method: "GET", url, keys, extra: forged_headers(), ..Call::default() });
     let status_url = format!("{}/api/f/{name}/status", api.base);
     let r = forged(Some(&stranger), status_url.clone())?;
-    s.ok("a client's routing headers are dropped: the router's own say who signed (403)", r.status == 403, &r);
+    s.ok("a client's routing headers and call marker are dropped: the router's own say who signed (403)", r.status == 403, &r);
     let r = forged(None, status_url)?;
     s.ok("and an unsigned request stays unsigned (401)", r.status == 401, &r);
     let r = forged(None, api.site_url(&name, ""))?;

@@ -17,7 +17,9 @@
 //!                    the text tiers on a deployment's own models, without
 //!                    the image (docs/self-host.md, seam 3)
 //!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
-//!                    docs/self-host.md, seam 1): no computers, no cards,
+//!                    docs/self-host.md, seam 1): no cards, computers only
+//!                    on this machine's krun engine
+//!                    (CELLD_CONTAINER_ENGINE=krun:<socket>; seam 2),
 //!                    the secrets bound as on wrangler and read by celld
 //!                    from OpenBao on :8802, its audit log on, or with
 //!                    FRAGMENT_SECRETS_BACKEND=vars from its node's file
@@ -58,6 +60,10 @@
 //!                    (docs/wire) and its lock (crates/proto/wire.lock) from
 //!                    crates/proto, then says what it breaks of master's
 //!                    (xtask/src/wire/)
+//!   skills-catalog
+//!                    writes cell/shell/optional-skills-hermes.json, the Hermes
+//!                    optional skills a person can switch on, read from the
+//!                    pinned Hermes image (xtask/src/skills_catalog.rs)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -77,16 +83,22 @@
 //!                    --pinned-only, and changes only its in-memory pins
 //!   image preview --output <file> [--build | --dry-run] [--summary <file>]
 //!                    resolve master's input-keyed Hermes image, or build it,
-//!                    and prepare it (--build); write its input key and digest
+//!                    and prepare it (--build; one it builds held to the disk
+//!                    budget first); write its input key and digest
 //!                    for CI's preview deploy. --dry-run prints its plan
 //!                    without credentials or calls
+//!   image disk <reference>
+//!                    an image's share of a fresh computer's disk, refused past
+//!                    IMAGE_DISK_MAX (xtask/src/image/disk.rs; images/'s
+//!                    Docker lane runs it on the Hermes image)
 //!   cli-release plan | record <tag>
 //!                    CI's CLI input lookup/version plan, or record and
 //!                    verify inputs after publishing all four tarballs
 //!   image push <image> --repository <name> --tag <tag> [--summary <file>]
 //!                    build a computer image (hermes) as a deploy builds it and
 //!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
-//!                    names, then print the digest a config pins it at
+//!                    names, held to the disk budget (image disk), then print
+//!                    the digest a config pins it at
 //!                    (xtask/src/image.rs; the Image workflow runs it)
 //!   image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]
 //!                    copy an image another account's registry holds
@@ -131,12 +143,14 @@ mod image;
 mod inputs;
 mod js_syntax;
 mod prepare;
+mod remote_loads;
 #[cfg(test)]
 mod markdown_dom;
 #[cfg(test)]
 mod continue_js;
 mod rollout;
 mod schema_lock;
+mod skills_catalog;
 mod wire;
 // CI's freshness of its cached builds, compiled by itself with rustc
 // (ci.yml); here for its tests alone
@@ -167,6 +181,16 @@ const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
+/// The identity door (crates/identity-door), dev's sign-in on celld, as a
+/// self-hosted box's (docs/self-host.md, seam 4): its port, the client the
+/// cell is bound as; and the OpenID Connect provider behind it (the fake,
+/// with its one-field form), its port and the door's client there.
+const DEV_DOOR_PORT: u16 = 8804;
+const DEV_DOOR_CLIENT: &str = "client_fragment_dev_door";
+const DEV_DOOR_KEY: &str = "sk_door_fragment_dev";
+const DEV_OIDC_PORT: u16 = 8806;
+const DEV_OIDC_CLIENT: &str = "fragment-dev-door";
+const DEV_OIDC_SECRET: &str = "fragment-dev-door-secret";
 const DEV_ORG: &str = "fragment-dev";
 /// Dev's one connection: the WorkOS fake's stand-in OAuth provider (the
 /// e2e `connections` lane's `e2e-oauth`), so settings' Connections can be
@@ -240,9 +264,6 @@ fn dev_args(args: &[String]) -> Result<DevArgs> {
     if out.models.is_some() && !out.real_agent {
         bail!("--models picks --real-agent's models: name --real-agent too");
     }
-    if out.celld && out.real_agent {
-        bail!("--real-agent runs computers on our Hermes image, and celld runs no computers here (docs/self-host.md, seam 2)");
-    }
     Ok(out)
 }
 
@@ -251,6 +272,9 @@ fn dev(args: &[String]) -> Result<()> {
     // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
     // seam 1), located first: a missing CELLD_BIN stops the run at once
     let celld = args.celld.then(devstack::celld::CelldTools::locate).transpose()?;
+    if args.real_agent && celld.as_ref().is_some_and(|c| !c.engine.computers()) {
+        bail!("--real-agent runs computers on our Hermes image, and this celld node runs none: set CELLD_CONTAINER_ENGINE=krun:<the engine's socket> (docs/self-host.md, seam 2)");
+    }
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
     // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
@@ -283,15 +307,24 @@ fn dev(args: &[String]) -> Result<()> {
         ..Default::default()
     })?;
     // sign-in: a real WorkOS environment when its files are named (its
-    // redirect URI must include http://127.0.0.1:8790/auth/callback), else the fake
+    // redirect URI must include http://127.0.0.1:8790/auth/callback); else
+    // on celld the identity door, as a self-hosted box signs people in;
+    // else the WorkOS fake
     let read = |var: &str| -> Result<Option<String>> {
         match std::env::var_os(var) {
             Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string())),
             None => Ok(None),
         }
     };
+    let mut door = None;
     let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
+        _ if celld.is_some() => {
+            let d = dev_door(DEV_DOOR_PORT)?;
+            let vars = devstack::WorkOsVars { client_id: DEV_DOOR_CLIENT.into(), api_key: DEV_DOOR_KEY.into(), api_url: Some(d.door.url.clone()) };
+            door = Some(d);
+            (vars, None)
+        }
         _ => {
             let fake = dev_workos_fake(&devstack::cell_dir(), &workos_users, DEV_WORKOS_PORT)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
@@ -310,9 +343,10 @@ fn dev(args: &[String]) -> Result<()> {
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
     stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
-    let workos_label = match &workos.api_url {
-        Some(u) => format!("{u} (the fake)"),
-        None => format!("WorkOS {}", workos.client_id),
+    let workos_label = match (&workos.api_url, &door) {
+        (Some(u), Some(d)) => format!("the identity door at {u}, signing people in at {} (the OpenID Connect fake: sign in as any email)", d.provider.url),
+        (Some(u), None) => format!("{u} (the fake)"),
+        (None, _) => format!("WorkOS {}", workos.client_id),
     };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
@@ -325,7 +359,6 @@ fn dev(args: &[String]) -> Result<()> {
         poll_interval_s: 10,
         egress_local: true,
         job_retry_delay_s: 2,
-        blob_grace_s: None,
         upload_max_bytes: None,
         // text and images: the Workers AI fake, every tier on it, unless
         // --real-agent puts the text tiers on real models
@@ -360,14 +393,17 @@ fn dev(args: &[String]) -> Result<()> {
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        // celld runs no computers here: they need the runtime's egress
-        // intercepts and snapshots (docs/self-host.md, seam 2)
-        computer_image: celld.is_none().then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        // on celld, computers only on the krun engine: they need the
+        // runtime's egress intercepts and snapshots (docs/self-host.md,
+        // seam 2)
+        computer_image: celld.as_ref().is_none_or(|c| c.engine.computers()).then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
         images: match &real {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
         },
         computer_snapshots: false,
+        // a door's image is built only for a stack that runs them (the e2e's door lane)
+        doors: false,
         computer_internet: true,
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
@@ -403,6 +439,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     match &celld {
         None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) if c.engine.computers() => println!("  runtime:      celld dev ({}): computers on {}, no cards, no icons drawn (docs/self-host.md)", c.celld.display(), c.engine.value()),
         Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
     }
     println!("  node log:     {}", node.log.display());
@@ -444,20 +481,27 @@ fn dev(args: &[String]) -> Result<()> {
     // SIGTERM or SIGHUP to xtask alone, which the node never hears: it would
     // run on, orphaned, starting Chromes; so all xtask started dies with it
     // (`on_termination`; Ctrl-C, ignored here, still reaches the node itself)
-    devstack::signals::on_termination(|signal| {
+    let engine = celld.as_ref().map(|c| c.engine.clone());
+    devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: dev stopped its node and browsers, and removes its containers");
-        match devstack::containers::remove(&devstack::cell_dir()) {
-            Ok(r) => println!("removed {} containers the dev node left", r.containers),
+        let removed = match &engine {
+            Some(engine) => engine.remove(&devstack::cell_dir()),
+            None => devstack::containers::remove(&devstack::cell_dir()).map(|r| r.containers),
+        };
+        match removed {
+            Ok(n) => println!("removed {n} containers the dev node left"),
             Err(e) => println!("could not remove the dev node's containers: {e:#}"),
         }
     })?;
     let status = node.wait()?;
     println!("the node exited: {status}");
-    // the runtime's own containers: celld runs none here
-    if celld.is_none() {
-        let removed = devstack::containers::remove(&devstack::cell_dir())?;
-        println!("removed {} containers the dev node left", removed.containers);
-    }
+    // the runtime's own containers: wrangler's in Docker, or celld's VMs on
+    // its krun engine (a node that stops reaps its own)
+    let removed = match &celld {
+        Some(c) => c.engine.remove(&devstack::cell_dir())?,
+        None => devstack::containers::remove(&devstack::cell_dir())?.containers,
+    };
+    println!("removed {removed} containers the dev node left");
     Ok(())
 }
 
@@ -492,21 +536,41 @@ fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::
     Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
 }
 
-/// Dev's WorkOS fake on `port`, its users kept in `users_file`, and every
+/// Dev's WorkOS fake on `port` (wrangler's: dev on celld signs in through
+/// the identity door, `dev_door`), its users kept in `users_file`, and every
 /// subject `project`'s node signs someone in by taken as it is (a node from
 /// before the file, or one whose file went): a fake made new each start
 /// would give the first email to sign in the subject of whoever had it
-/// before. A celld state's subjects are in that file alone (devstack reads
-/// wrangler's state, not celld's), and both runtimes' stacks share it, so a
-/// celld state that outlived it is refused whichever runtime starts
-/// (`celld::workos_users_kept`): a start on wrangler would otherwise make the
-/// file afresh, for celld to take as its record.
+/// before.
 fn dev_workos_fake(project: &Path, users_file: &Path, port: u16) -> Result<fragment_fakes::workos::WorkOs> {
-    devstack::celld::workos_users_kept(project, users_file)?;
     let fake = fragment_fakes::workos::WorkOs::start_on(port, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
     fake.keep_users_in(users_file)?;
     fake.adopt(&devstack::signed_in_subjects(project, &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
     Ok(fake)
+}
+
+/// Dev's sign-in on celld: the identity door on `port`, as a self-hosted
+/// box's (docs/self-host.md, seam 4), in front of the OpenID Connect fake
+/// on `DEV_OIDC_PORT`, whose form signs in as any email (a person's subject
+/// is derived from their email, so each is the same person at every
+/// start). The door's own secret is kept in target/devstack, so a sign-in
+/// under way when dev restarts still finishes.
+struct DevDoor {
+    door: fragment_identity_door::Door,
+    provider: fragment_fakes::oidc::Oidc,
+}
+
+fn dev_door(port: u16) -> Result<DevDoor> {
+    use fragment_identity_door::oidc::{Settings, Vars};
+    let provider = fragment_fakes::oidc::Oidc::start_on(DEV_OIDC_PORT, DEV_OIDC_CLIENT, DEV_OIDC_SECRET).context("start the OpenID Connect fake")?;
+    let secret = devstack::dev_secret("identity-door-secret", || devstack::random_hex(32))?;
+    let settings = Settings::parse(Vars { issuer: &provider.url, client_id: DEV_OIDC_CLIENT, ..Vars::default() })?;
+    let provider_config = fragment_identity_door::ProviderConfig { settings, client_secret: DEV_OIDC_SECRET.into(), ca_pem: None };
+    let client = fragment_identity_door::Client::with_secret(DEV_DOOR_CLIENT, DEV_DOOR_KEY, &[&format!("http://127.0.0.1:{DEV_PORT}/auth/callback")])?;
+    let url = format!("http://127.0.0.1:{port}");
+    let config = fragment_identity_door::Config::new(std::net::SocketAddr::from(([127, 0, 0, 1], port)), &url, secret.into_bytes(), provider_config, Default::default(), vec![client])?;
+    let door = fragment_identity_door::Door::start(config)?;
+    Ok(DevDoor { door, provider })
 }
 
 /// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
@@ -719,11 +783,22 @@ fn no_eval_sinks(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No page of this repo loads a script, stylesheet or font from another
+/// domain (xtask/src/remote_loads.rs): a security hole and a privacy leak.
+/// We serve our own, from the release, on the page's own origin.
+fn no_remote_loads(root: &Path) -> Result<()> {
+    let files = remote_loads::sources(root)?;
+    remote_loads::check(&files, &remote_loads::ALLOWED)?;
+    println!("remote loads: none in {} pages, stylesheets and scripts ({} allowed, each with why)", files.len(), remote_loads::ALLOWED.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
+    no_remote_loads(&root)?;
     schema_lock::holds(&root)?;
     wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
@@ -736,10 +811,17 @@ fn check() -> Result<()> {
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
         .current_dir(&root))?;
-    run(Command::new("cargo")
-        .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
-        .current_dir(Path::new(&devstack::cell_dir())))
+    // the cell's build, then the admin Worker's (cell/src/lib.rs, "Two
+    // Workers, one crate"): each its own exports
+    for features in [&[][..], &["--features", "admin"]] {
+        run(Command::new("cargo")
+            .args(["clippy", "--target", "wasm32-unknown-unknown"])
+            .args(features)
+            .args(["--", "-D", "warnings"])
+            .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
+            .current_dir(Path::new(&devstack::cell_dir())))?;
+    }
+    Ok(())
 }
 
 /// Where the one-line install fetches the CLI from.
@@ -788,48 +870,19 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("wire") => wire::write(&devstack::repo_root()),
+        Some("skills-catalog") => skills_catalog::run(&args[1..]),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> | disk <reference> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    /// Goal: a celld state that outlived dev's WorkOS users file is
-    /// refused whichever runtime starts next, so a start on wrangler never
-    /// makes the shared file afresh for celld to take as its record (a
-    /// review of #1253: a known subject handed to another email). Method:
-    /// a project with celld's state and the fake's file; the file lost;
-    /// starts as each runtime would; then `--clean`'s clearing. Replay: the
-    /// refusal again, and the file still not made.
-    #[test]
-    fn a_lost_users_file_beside_celld_state_is_refused_on_either_runtime() {
-        let dir = std::env::temp_dir().join(format!("dev-workos-{}", super::devstack::random_hex(6)));
-        let (project, users) = (dir.join("cell"), dir.join("workos.json"));
-        std::fs::create_dir_all(&project).unwrap();
-        // a first celld stack: its fake's file, then its node's state
-        let alice = super::dev_workos_fake(&project, &users, 0).expect("a first start").user("alice@example.com").id;
-        std::fs::create_dir_all(super::devstack::celld::state_dir(&project)).unwrap();
-        assert!(users.exists(), "the fake kept its users");
-        assert!(super::dev_workos_fake(&project, &users, 0).is_ok_and(|f| f.user("alice@example.com").id == alice), "a restart with both");
-        std::fs::remove_file(&users).unwrap();
-        // a start on wrangler, then celld, then wrangler again: one path
-        for start in ["wrangler", "celld", "wrangler"] {
-            let refused = super::dev_workos_fake(&project, &users, 0).map(|f| f.user("bob@example.com").id);
-            assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("--clean")), "{start}: {refused:?} (alice was {alice})");
-            assert!(!users.exists(), "a refused start makes no users file for the next to take");
-        }
-        // --clean clears both runtimes' state and the file: a fresh start
-        super::devstack::clear_state(&project).unwrap();
-        assert!(super::dev_workos_fake(&project, &users, 0).is_ok(), "after --clean, a fresh start");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
     /// `--models` without its config, and `--models` without `--real-agent`
     /// are refused before anything builds.

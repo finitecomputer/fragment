@@ -40,6 +40,26 @@ attributes a record by its `principal`, never by what its body says. A
 turn belongs to the agent whose `turn.start` began it, and its later
 records count only from that agent.
 
+### Who wrote a record
+
+A record also says who wrote it, as the platform stamped it (`author`:
+docs/api.md, "Who wrote a record"). In a chat, or any fragment with a
+`chat` channel, whose app code writes records (`author: code`), those
+words are no one's, whatever `principal` they name:
+
+- They are heard as a message, credited to no one ("app code").
+- They answer no card or question, and stop and command nothing.
+- They start no routine on `tasks`.
+- An agent's notes tell them as "App code", never as its owner.
+- The chat's page counts none of them as anyone's answer to a card or a
+  question.
+
+What a person or an agent posts, a door relays and the platform writes
+keeps its principal's word. A record without the stamp (an older
+platform's, or one stored before it) reads as it did. The bridge reads
+the stamp off the record itself, so this asks the platform for nothing
+more (`images/bridge/src/records.rs`, `Record::by`).
+
 ## Turns
 
 A **turn** is what one agent does about one record. Its id is the first
@@ -132,7 +152,7 @@ mirrors:
 - `via` is the door's id (a connector's: `simplex`, `telegram`); `for`
   is the agent's owner; `agent` is the agent fragment whose door it came
   through. The platform takes a relayed record only through a door its
-  owner opened, and no other.
+  owner opened, and no other, and only into a fragment its owner owns.
 - SimpleX's (docs/bridge.md, "SimpleX") is posted by the agent on its
   SimpleX chat. Its id is `sx:<first 32 hex digits of SHA-256 of "<agent
   fragment>|<the sender's message id>">`, so a message read again is one
@@ -141,12 +161,15 @@ mirrors:
 - A hosted door's (a connector chat) is published by the connector's
   own app, as its own key, in its own `chat`, its `relayed` exactly
   `{via, for, agent}`.
-- Only that agent's own bridge honors it, and only when it is carried by
-  the agent itself or by a key that is none of the chat's members: it is
-  the owner's message, asked as them, whether or not a link is bound now.
-  Any other `relayed` is read as the record without it: another `for`,
-  another agent's door, a `via` that is no door's id, or carried by
-  another member.
+- Only that agent's own bridge honors it, and only when its door carried
+  it: the agent itself (SimpleX's), or a key that is none of the chat's
+  members in a chat whose members list marks that agent's row as that
+  door (`door`, a connector's binding while open: a hosted door's). Then
+  it is the owner's message, asked as them, whether or not a SimpleX
+  link is bound now. Any other `relayed` is read as the record without it:
+  another `for`, another agent's door, a `via` that is no door's id,
+  carried by another member, or by any other key (a chat's own, firing a
+  record an editor scheduled, say).
 - A page shows it as the owner's, "via" its door, once the members say
   its poster is their agent or none of the chat's members.
 
@@ -259,7 +282,9 @@ a step posted again is the same record. A chat's helpers set
 
 `asker` may stop the turn. `agent` is the agent's identity. `life` is the
 bridge process that claims the turn. The record is the claim, "this life
-runs this turn" (docs/bridge.md, "State").
+runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
+wrote the message that started it ("Who wrote a record"): its asker is
+no one, whatever `asker` names. Older bridges write none.
 
 **`turn.step`**, part `<step>`, from 1: one tool call.
 

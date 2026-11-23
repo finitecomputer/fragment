@@ -4,17 +4,21 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `PUT /api/vault/{secret}`: a secret set (or set again), whole. Its
-/// hosts, place and agents are set only with its value, so no one who
-/// cannot read a value sends it anywhere its setter did not mean. Its
+/// `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only its
+/// person sets one, so only they say where its value goes; set again with
+/// no value, it keeps the one it holds and goes where this says. Its
 /// `Debug` shows the value, as the wire's checker needs: never print one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PutSecret {
     /// The value: a printable token, or, for `place.sign`, a Nostr secret
-    /// key as 64 hex.
-    pub value: String,
+    /// key as 64 hex. None, the value it holds is kept: a secret it does
+    /// not hold yet, or one that would go from signing to filling or back,
+    /// is refused (400).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub value: Option<String>,
     /// The only hosts it is ever sent to (exact DNS names); none, it is
     /// parked and fills nothing.
     pub hosts: Vec<String>,

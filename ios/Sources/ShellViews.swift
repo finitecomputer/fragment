@@ -4,8 +4,14 @@ import UIKit
 struct DesktopWallpaper: View {
     var body: some View {
         GeometryReader { proxy in
+            // laid out over the whole window, from its top to this view's foot,
+            // and shown where this view is: two of it meet without a seam (Home's,
+            // and the one behind the notices above it)
+            let frame = proxy.frame(in: .global)
             Image("DesktopWallpaper").resizable().scaledToFill()
-                .frame(width: proxy.size.width, height: proxy.size.height).clipped()
+                .frame(width: proxy.size.width, height: frame.maxY)
+                .offset(y: -frame.minY)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top).clipped()
         }.ignoresSafeArea().accessibilityHidden(true)
     }
 }
@@ -306,35 +312,54 @@ struct SidebarView: View {
 }
 
 private enum AppsLibrarySheet: Identifiable {
-    case settings(FragmentSummary), manage
-    var id: String { switch self { case .settings(let app): "settings-" + app.name; case .manage: "manage" } }
+    case settings(FragmentSummary)
+    var id: String { switch self { case .settings(let app): "settings-" + app.name } }
 }
 
 struct AppsLibraryView: View {
     let library: Library
     let api: FragmentAPI
     @State private var sheet: AppsLibrarySheet?
+    @State private var query = ""
     let open: (FragmentSummary) -> Void
+    /// A new chat that starts on building an app.
+    let startApp: () -> Void
     static let addApp = FragmentSummary(name: "add-app", kind: "app", title: "Add an app")
+    /// The apps whose name or preview has every word searched for.
+    private var found: [FragmentSummary] {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return library.shownApps }
+        return library.shownApps.filter { app in
+            words.allSatisfy { app.displayTitle.localizedStandardContains($0) || (app.preview ?? "").localizedStandardContains($0) }
+        }
+    }
     var body: some View {
         ZStack {
             DesktopWallpaper()
             List {
                 Section {
-                    ForEach(library.shownApps) { app in
+                    ForEach(found) { app in
                         appRow(app, symbol: app.kind == "brain" ? "brain" : "app")
                     }
                 }
-                Section {
-                    appRow(Self.addApp, symbol: "plus")
+                if query.isEmpty {
+                    Section {
+                        appRow(Self.addApp, symbol: "plus")
+                    }
                 }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            // its first card close under the bar, not a header's height down
+            .contentMargins(.top, 12, for: .scrollContent)
+            .overlay { if found.isEmpty && !query.isEmpty { ContentUnavailableView.search(text: query) } }
         }
+        // the system's glass search field, floating at the foot
+        .searchable(text: $query, prompt: "Search apps")
         .toolbar {
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Manage Apps", systemImage: "slider.horizontal.3") { sheet = .manage }.accessibilityIdentifier("manageApps")
+                Button("Build an app", systemImage: "plus", action: startApp).accessibilityIdentifier("buildApp")
             }
         }
         .sheet(item: $sheet) { destination in
@@ -342,7 +367,6 @@ struct AppsLibraryView: View {
                 Group {
                     switch destination {
                     case .settings(let app): AppSettingsView(fragment: app, library: library, api: api)
-                    case .manage: AppManagementList(library: library, api: api)
                     }
                 }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close", systemImage: "xmark") { sheet = nil } } }

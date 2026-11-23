@@ -38,7 +38,10 @@
 //!   an inbound in the same chat at once (`Command::Tell`), which Hermes'
 //!   clarify intercept takes as the answer mid-turn; files sent with it
 //!   come as lines of its words (the driver's), as the clarify takes words
-//!   alone. A clarify card's owner's message is its "Other" with those
+//!   alone, and its audio as its media too, which Hermes transcribes and
+//!   answers the clarify with (its `_prepare_clarify_reply_text`: a voice
+//!   memo's words are the answer, and one it hears nothing in leaves the
+//!   question open). A clarify card's owner's message is its "Other" with those
 //!   words (`Command::Answer`): the answer, then the words. A Stop while it asks,
 //!   or while a clarify's card of choices is open, interrupts, then answers
 //!   `skip` (`wire::STOP_WORDS`) so the waiting clarify lets go;
@@ -124,6 +127,10 @@ pub struct RelayConfig {
     /// A file sent by URL may come over plain http from a local address (a
     /// test's fake server; `BRIDGE_MEDIA_LOCAL=allow`).
     pub media_local: bool,
+    /// Hermes' home (`HERMES_HOME`): each agent's profile there is its
+    /// memory of its chats (`Runtime::memory`). None: a test's Hermes that
+    /// keeps none.
+    pub home: Option<PathBuf>,
 }
 
 pub struct Relay {
@@ -219,6 +226,11 @@ struct Inflight {
     stopped: bool,
     /// It asked its asker something to answer in words, not yet told.
     asking: bool,
+    /// Its question was answered by a voice memo alone (`Command::Tell`'s
+    /// `voice`), which Hermes hears or not: it is `asking` still (a Stop
+    /// says `skip` to the clarify) until the turn speaks, calls or steps
+    /// (`went_on`).
+    hearing: bool,
     /// A clarify's card of choices is open, not yet answered.
     carded: bool,
     /// A clarify's "Other" was answered in words on its card, which went to
@@ -265,6 +277,16 @@ struct Inflight {
 }
 
 impl Inflight {
+    /// The turn spoke or stepped after a voice answer (`hearing`): Hermes
+    /// heard it, and its clarify let go; a question it asks next is a new
+    /// one.
+    fn went_on(&mut self) {
+        if self.hearing {
+            self.hearing = false;
+            self.asking = false;
+        }
+    }
+
     /// Something of the turn is not whole yet, so what comes after it waits.
     fn waits(&self) -> bool {
         self.pictures > 0 || self.words_at.is_some()
@@ -313,6 +335,11 @@ impl Runtime for Relay {
 
     fn menu(&self) -> &'static [crate::runtime::MenuItem] {
         menu::MENU
+    }
+
+    fn memory(&self) -> Option<crate::runtime::Memory> {
+        let home = self.config.home.clone()?;
+        Some(std::sync::Arc::new(move |agent: &str| wire::profile_dir(&home, agent)))
     }
 
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
@@ -649,7 +676,7 @@ impl Loop {
                     crate::ev!("relay.interrupt", { "turn": turn });
                     self.send(frame);
                     if let Some((by, by_name)) = asking {
-                        self.tell(&turn, 0, &by, &by_name, wire::STOP_WORDS);
+                        self.tell(&turn, 0, &by, &by_name, wire::STOP_WORDS, &[]);
                     }
                 } else {
                     // Never sent: it never starts.
@@ -679,11 +706,11 @@ impl Loop {
                 let _ = self.send(frame.clone());
                 self.answers.push(PendingAnswer { buffer, frame });
                 if let Some(words) = words {
-                    self.tell(&turn, seq, &by, "owner", &words);
+                    self.tell(&turn, seq, &by, "owner", &words, &[]);
                 }
             }
             Command::Forget { turn } => self.forget(&turn),
-            Command::Tell { turn, seq, by, by_name, text, .. } => self.tell(&turn, seq, &by, &by_name, &text),
+            Command::Tell { turn, seq, by, by_name, text, files, voice, .. } => self.tell(&turn, seq, &by, &by_name, &text, if voice { &files } else { &[] }),
             Command::Aside { agent, fragment, chat_name, simplex, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the
@@ -705,15 +732,38 @@ impl Loop {
     }
 
     /// The asker's words for a turn that asked them (`Command::Tell`): an
-    /// inbound in the turn's chat, kept until Hermes acks it.
-    fn tell(&mut self, turn: &str, seq: u64, by: &str, by_name: &str, text: &str) {
+    /// inbound in the turn's chat, kept until Hermes acks it. A voice memo
+    /// alone (`voice`: its `files` are given only then) is hosted as its
+    /// media, within Hermes' media cap, as a turn's start hosts its files,
+    /// so Hermes transcribes it and answers its clarify with its words
+    /// (Austin, 2026-11-17: the clarify got only its file's line, and the
+    /// agent transcribed it itself); its question stays open until the turn
+    /// goes on (`hearing`), as Hermes keeps it when it hears nothing. Words,
+    /// or other files, are words alone, as the clarify takes them (with
+    /// audio, Hermes would answer with the audio's words alone).
+    fn tell(&mut self, turn: &str, seq: u64, by: &str, by_name: &str, text: &str, files: &[LocalFile]) {
+        if !self.inflight.contains_key(turn) {
+            return;
+        }
+        let mut hosted = Vec::new();
+        {
+            let mut t = self.media.lock().expect("the media table");
+            for (i, f) in files.iter().enumerate().filter(|(_, f)| f.media_type.starts_with("audio/") && f.size <= limits::HERMES_MEDIA_MAX_BYTES) {
+                let id = format!("told-{turn}-{seq}-{i}");
+                let url = format!("http://{}/relay/media/{id}", self.cfg.listen);
+                // unpinned, as a turn's start's: the turn keeps its files
+                t.insert(id, Media { file: LocalFile { pin: Kept::default(), ..f.clone() } });
+                hosted.push((url, f.media_type.clone()));
+            }
+        }
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        f.asking = false;
+        f.hearing = !hosted.is_empty();
+        f.asking = f.hearing;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &hosted, context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
-        crate::ev!("relay.told", { "turn": turn, "seq": seq });
+        crate::ev!("relay.told", { "turn": turn, "seq": seq, "media": hosted.len() });
         let _ = self.send(frame.clone());
         self.answers.push(PendingAnswer { buffer, frame });
     }
@@ -769,14 +819,20 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, worded_since_step: false, unworded_step: false, late_reply: None, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, hearing: false, carded: false, worded: false, drafting: false, worded_since_step: false, unworded_step: false, late_reply: None, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
 
     async fn wire(&mut self, w: Wire) {
         match w {
-            Wire::Call { turn, call } => self.emit(Event::Called { turn, call }).await,
+            Wire::Call { turn, call } => {
+                // a call is the turn going on, past a voice answer heard
+                if let Some(f) = self.inflight.get_mut(&turn) {
+                    f.went_on();
+                }
+                self.emit(Event::Called { turn, call }).await
+            }
             Wire::Tool { turn, step } => self.step(&turn, step).await,
             Wire::Activity { conn, working, child } => {
                 // a helper's end goes before the hold it leaves lets go
@@ -867,6 +923,7 @@ impl Loop {
                             let _ = self.send(frame);
                         }
                         crate::ev!("relay.acked", { "turn": buffer_id });
+                        self.emit(Event::Taken { turn: buffer_id.clone() }).await;
                     }
                 } else {
                     self.answers.retain(|a| a.buffer != buffer_id);
@@ -1256,6 +1313,9 @@ impl Loop {
     /// once (a file still coming is then too late for its reply).
     async fn out(&mut self, turn: &str, e: Event) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
+        if matches!(e, Event::Step { .. }) {
+            f.went_on();
+        }
         if !f.waits() && f.queue.is_empty() {
             self.emit(e).await;
             return;
@@ -1329,10 +1389,12 @@ impl Loop {
         self.drain(turn, !idle).await;
     }
 
-    /// The chat's turn said something (so its next `✅` is its end).
+    /// The chat's turn said something (so its next `✅` is its end), and
+    /// went on from a voice answer (`went_on`).
     fn spoke(&mut self, chat: &str) {
         if let Some(f) = self.by_chat.get(chat).and_then(|t| self.inflight.get_mut(t)) {
             f.said = true;
+            f.went_on();
         }
     }
 }

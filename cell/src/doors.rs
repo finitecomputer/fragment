@@ -13,7 +13,7 @@
 //!   nothing its owner set there (`drop_secrets`).
 //! - **No one but its owner edits it.** Every other caller, an agent acting
 //!   for its owner included, is at most a viewer there, from its making
-//!   (`only_owner_edits`, in `standing`): no one else sets its secrets,
+//!   (`permit::decide`'s connector rule): no one else sets its secrets,
 //!   writes its files or pages, deploys its code or calls an editor's
 //!   operation. Its own triggered runs keep their role. Nor does anyone
 //!   else share it (`agents_share`): no agent sets its visibility, members
@@ -29,7 +29,6 @@
 
 use std::borrow::Cow;
 
-use fragment_core::access::Standing;
 use fragment_core::connectors::{Action, Policy};
 use fragment_core::door::{self, Hosted};
 use fragment_core::npub;
@@ -37,7 +36,9 @@ use fragment_proto::{ErrorCode, IdentityKind, Role, SetRole};
 use serde_json::{json, Value};
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::DoorActor;
 use crate::fragment::{Caller, FragmentCell, MetaKey};
+use crate::routed::Signed;
 
 /// A connector's binding as its `door_actor` holds it.
 struct Binding {
@@ -62,11 +63,26 @@ impl Binding {
     }
 }
 
+/// Whether `signed` is the owner a fragment was made by (`owner`, its
+/// `Owner` row), in person: a person signing (or in their session) as
+/// themselves, by that id or its display, never an agent.
+pub(crate) fn owner_in_person(signed: &Signed, owner: &str) -> bool {
+    signed.kind == IdentityKind::Person && signed.acting_for.is_none() && (signed.id == owner || signed.id == npub::display(owner))
+}
+
 impl FragmentCell {
     /// The blessed template this fragment's installed code is, if any.
-    fn blessed(&self) -> CellResult<Option<String>> {
+    pub(crate) fn blessed(&self) -> CellResult<Option<String>> {
         let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
         Ok(rows.first().and_then(|r| r["loader_id"].as_str()).and_then(door::blessed_template).map(str::to_string))
+    }
+
+    /// Whether this fragment runs a connector's own code: made from a
+    /// blessed connector template (`door_template`, unmarked for good by
+    /// any other install) and running it now.
+    pub(crate) fn runs_connector(&self) -> CellResult<bool> {
+        let Some(template) = self.meta(MetaKey::DoorTemplate)? else { return Ok(false) };
+        Ok(self.blessed()?.as_deref() == Some(template.as_str()))
     }
 
     /// The connector policy its doors ask: the deployment's, or, on a test
@@ -78,32 +94,10 @@ impl FragmentCell {
         })
     }
 
-    /// Whether the caller is this fragment's owner, in person: a person
-    /// signing (or in their session) as themselves, never an agent.
-    fn owner_in_person(&self, caller: &Caller) -> CellResult<bool> {
-        let owner = self.must(MetaKey::Owner)?;
-        let is_owner = |id: &str| id == owner || id == npub::display(&owner);
-        Ok(caller.signed.as_ref().is_some_and(|s| s.kind == IdentityKind::Person && s.acting_for.is_none() && is_owner(&s.id)))
-    }
-
-    /// A connector's fragment is its owner's alone to edit: every other
-    /// caller, an agent acting for its owner included, is at most a viewer
-    /// there (`standing`'s last word).
-    pub(crate) fn only_owner_edits(&self, caller: &Caller, mut standing: Standing) -> CellResult<Standing> {
-        if self.meta(MetaKey::DoorTemplate)?.is_none() || self.owner_in_person(caller)? {
-            return Ok(standing);
-        }
-        standing.member = standing.member.map(|m| m.min(Role::Viewer));
-        if standing.cap.is_some() {
-            standing.held = Some(standing.held.map_or(Role::Viewer, |h| h.min(Role::Viewer)));
-        }
-        Ok(standing)
-    }
-
     /// Whether an agent may share here at all: never on a connector, which
     /// its owner shares in person alone, as they alone edit it (its
     /// visibility, members, invites and share link). Elsewhere an agent
-    /// shares for its owner (`access::agent_shares`).
+    /// shares for its owner (`permit::agent_shares`).
     pub(crate) fn agents_share(&self) -> CellResult<()> {
         if self.meta(MetaKey::DoorTemplate)?.is_some() {
             return Err(CellError::new(ErrorCode::Forbidden, "only its owner, in person, shares a connector: never an agent, whomever it acts for"));
@@ -112,7 +106,7 @@ impl FragmentCell {
     }
 
     /// A role a member may be given here: on a connector, viewer at most, so
-    /// its members list says the role that counts (`only_owner_edits`).
+    /// its members list says the role that counts (`permit::decide`).
     pub(crate) fn connector_role(&self, role: Role) -> CellResult<()> {
         if role > Role::Viewer && self.meta(MetaKey::DoorTemplate)?.is_some() {
             return Err(CellError::invalid("a connector has no editor but its owner: add them as a viewer"));
@@ -133,6 +127,14 @@ impl FragmentCell {
             return Ok(None);
         }
         Ok(Some(b))
+    }
+
+    /// The agent this connector is an open door of, as its members list
+    /// names it (npub), and the door: that agent's row says it
+    /// (`member_list`), so the agent's bridge and pages know which records
+    /// relaying its owner came through its door (docs/chat-records.md).
+    pub(crate) fn door_member(&self) -> CellResult<Option<(String, String)>> {
+        Ok(self.open_binding()?.map(|b| (npub::display(&b.identity), b.door)))
     }
 
     /// What this fragment may relay now (`effects::check_record`).
@@ -192,10 +194,10 @@ impl FragmentCell {
     /// (its chat's `chat` and `work` take its posts); `{act: "unlink"}`
     /// lets it go.
     pub(crate) async fn bind_door(&self, caller: &Caller, body: &Value) -> CellResult<Value> {
-        if !self.owner_in_person(caller)? {
+        let owner = self.must(MetaKey::Owner)?;
+        if !caller.signed.as_ref().is_some_and(|s| owner_in_person(s, &owner)) {
             return Err(CellError::new(ErrorCode::Forbidden, "only its owner, in person, binds a connector as their agent's door: never an agent, whomever it acts for"));
         }
-        let owner = self.must(MetaKey::Owner)?;
         let text = |k: &str| body[k].as_str().unwrap_or("");
         match text("act") {
             "link" => {}
@@ -218,8 +220,8 @@ impl FragmentCell {
         // again in the binding's own turn, below
         self.reach_while_private()?;
         // the agent's fragment says it is theirs, and an agent, and records it
-        let asked = json!({ "owner": owner, "door": door, "actor": self.name()? });
-        let identity = crate::fragment::ask(&self.env, agent, "computer/door-actor", &asked).await?["identity"].as_str().map(str::to_string).ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
+        let asked = DoorActor { owner: owner.clone(), door: door.clone(), actor: self.name()? };
+        let identity = crate::fragment::call(&self.env, agent, &asked).await?.identity;
         // another agent bound before: its binding goes first
         if self.meta(MetaKey::DoorActor)?.is_some() {
             self.unbind_door("bound to another of its owner's agents")?;

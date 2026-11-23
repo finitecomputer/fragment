@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(known.expires_at(now), crate::export::rfc3339(now + 3_600_000));
     }
 
-    /// Salesforce's row (deploy/example.jsonc) and its token endpoint's
+    /// A Salesforce-shaped row, built here, and its token endpoint's
     /// answer as Salesforce documents it (help.salesforce.com,
     /// remoteaccess_oauth_web_server_flow, read 2026-11-10): no
     /// `expires_in`, the scopes granted space-separated, its org's
@@ -953,7 +953,7 @@ mod tests {
         assert_eq!(u.query_pairs().filter(|(k, v)| k == "include_granted_scopes" && v == "true").count(), 1);
     }
 
-    /// Linear's row (deploy/example.jsonc): Linear's authorize takes its
+    /// A Linear-shaped row, built here: Linear's authorize takes its
     /// scopes comma-separated and always grants `read` beside them, so the
     /// row asks for `write` alone, one scope either way; its answer names
     /// both, space-separated (linear.app/developers/oauth-2-0-authentication,

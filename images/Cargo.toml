@@ -1,12 +1,13 @@
 # The computer images' Rust (docs/computers.md): the bridge every image runs,
-# and the Hermes image's boot tool. Its own workspace and lock, apart from the
+# the Hermes image's boot tool, and a SimpleX door's runner (its own image,
+# beside no computer). Its own workspace and lock, apart from the
 # repo's root workspace, so an image's build context is `images/` alone and
 # its dependencies are only these (no async runtime but tokio; TLS only for
 # the bridge's fetch of a file Hermes sends by URL, rustls on ring with
 # webpki's roots, as the root workspace's).
 [workspace]
 resolver = "2"
-members = ["bridge", "hermes/boot"]
+members = ["bridge", "hermes/boot", "simplex-door"]
 
 [workspace.package]
 edition = "2021"

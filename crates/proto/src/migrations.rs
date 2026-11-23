@@ -146,7 +146,8 @@ pub enum MoveState {
     Staging,
     /// Staged: its new agent is bringing itself over.
     Importing,
-    /// Imported: the mover is told to retire the old one.
+    /// Imported: the old agent, stopped, is retired on staff's word (the
+    /// mover is told to then; until then it holds no command).
     Retiring,
     /// Done: the old agent is retired and marked migrated.
     Moved,
@@ -343,7 +344,8 @@ pub struct OldSite {
     pub public: bool,
 }
 
-/// Which secrets it holds (never their values).
+/// Which secrets it holds (never their values), if its roster knows:
+/// kept as it came, read by nothing here (a Yes asks for every kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Has {
@@ -396,10 +398,11 @@ pub struct Command {
     #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub mark: Option<Mark>,
-    /// `stop_and_stage` after a person's Yes (phase 1): the secrets the
-    /// old agent has (the roster's `has`), each to hand to its person's
-    /// Vault (`POST …/agents/{old}/secrets`) once it is stopped. None in
-    /// phase 2: no one said Yes.
+    /// `stop_and_stage` after a person's Yes (phase 1): every kind of
+    /// secret, whatever the roster's `has` says, each the old agent holds
+    /// to hand to its person's Vault (`POST …/agents/{old}/secrets`) once
+    /// it is stopped; one it does not hold is left out. None in phase 2:
+    /// no one said Yes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub secrets: Vec<SecretKind>,
@@ -514,7 +517,8 @@ pub enum SecretKind {
     /// Telegram connector from Settings.
     TelegramBotToken,
     OpenrouterKey,
-    /// The old agent's Nostr key, an `nsec` (or 64 hex): kept, never sent.
+    /// The old agent's Nostr key, an `nsec` (or 64 hex): it signs the new
+    /// agent's calls to finite.site from the Vault, and is never sent.
     NostrNsec,
 }
 
@@ -642,6 +646,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub left_more: Option<u64>,
+    /// It carries its owner's SimpleX chat (docs/migrations.md, "SimpleX in
+    /// a stage"), which runs only on a computer that stays on: its
+    /// person's comped `seat` is made always-on as it completes.
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub simplex: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,6 +670,19 @@ pub struct LeftBehind {
 pub struct StageOpened {
     pub stage: String,
     pub manifest: Manifest,
+}
+
+/// `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one
+/// range of the stage's zip (a file's bytes, or a part of them) copied into
+/// a fragment's blobs on the platform, never through the agent's computer:
+/// the blob it is, by its bytes' SHA-256 (hex), their length, and their
+/// CRC-32, which the caller checks against the zip entry's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageCopied {
+    pub sha256: String,
+    pub bytes: u64,
+    pub crc32: u32,
 }
 
 /// `POST /api/migrations/stages/{stage}/done`: the import ended, well or
@@ -717,12 +740,13 @@ pub struct Offer {
     pub agent: Option<String>,
 }
 
-/// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a
-/// new agent of their own, which the move's stage is imported into.
+/// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an
+/// agent of their own, which the move's stage is imported into: a new one,
+/// or one they have already that no other move is bound to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OfferYes {
-    /// The new agent: its identity's id or npub.
+    /// The agent: its identity's id or npub.
     pub agent: String,
 }
 

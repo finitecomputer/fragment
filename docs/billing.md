@@ -49,9 +49,9 @@ the security audit's H1).
   their own.
 - **A seat is paid or comped.** Paid seats are counted on the org's one
   subscription; comped seats are an operator's, outside Stripe, always
-  good. A comp may end by itself (`CompSeat.untilMs`: the move's month,
-  docs/migrations.md): the registry's alarm ends it then, as an
-  operator's end would. A comp held already keeps its own end.
+  good. A comp may end by itself (`CompSeat.untilMs`, an operator's; the
+  move's have none, docs/migrations.md): the registry's alarm ends it
+  then, as an operator's end would. A comp held already keeps its own end.
 - **Standing is Stripe's status** (decision 53): `trialing`, `active` and
   `past_due` are good (Stripe's retries are the grace); anything else is
   lapsed, both of Stripe's final retry states included, so the shared
@@ -148,6 +148,9 @@ trial's end Stripe charges a card added meanwhile in the portal; with
 none it cancels the subscription (cancel, not pause: Pay again is already
 the way back for any lapsed org). One trial per person ever, for a seat
 of one.
+While it runs, its org adds no further paid seat and no offer of one is
+accepted (`fragment_core::org::seating`, 400 `trial_seat_of_one`); an
+offer waits until the org pays, and an admin's place is offered as ever.
 
 ## The operator's admin
 

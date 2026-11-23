@@ -5,7 +5,12 @@
 //! fragment keeps in its own outbox (`meter_rows`) before anything is sent:
 //!
 //! - requests: each request the router hands it, counted per minute and
-//!   closed into a row once that minute has passed (`req:<f>@<life>:<minute>`);
+//!   closed into a row once that minute has passed (`req:<f>@<life>:<minute>`).
+//!   The open minute's count is written with the storage's
+//!   `allowUnconfirmed`, so no answer waits for it to be durable; a confirmed
+//!   write folds it into its minute's row (`fold_open`), and a crash can lose
+//!   at most that minute's unconfirmed counts, in the owner's favour
+//!   (docs/ledger.md, "Requests");
 //! - dynamic workers: the first time a code version runs on a UTC day
 //!   (`dw:<f>@<life>:<version>:<day>`), the unit Cloudflare bills;
 //! - storage: a daily sample of its SQLite and its blobs' bytes, as
@@ -20,10 +25,11 @@
 //! same order, and the ledger answers it as before: a crash between its
 //! apply and the acknowledgement charges nothing twice.
 //!
-//! A paid call the router makes (a model call) is charged on the same
-//! queue after its answer (`charge`): one row, as a batch of its own under
-//! the row's reference, from no fragment (`source` empty), which the
-//! consumer applies and acknowledges, telling no one.
+//! A paid call the pipe makes (crate::pipe: an agent's model call, or its
+//! call on an operator key) is charged on the same queue after its answer:
+//! one row, as a batch of its own under the row's reference, from no
+//! fragment (`source` empty), which the consumer applies and acknowledges,
+//! telling no one.
 //!
 //! The owner's standing gates the fragment's writes (decision 27): past
 //! the overdraft, the owner's fragments refuse mutations, posts, file
@@ -33,26 +39,24 @@
 //! fragment asks through the gate (ledger.rs `may`): its isolate asks the
 //! owner's ledger at most once a minute, rather than on every write.
 
-use fragment_core::ledger::{Meter, MeterBatch, MeterRow, Metered, Refused, Spend};
+use fragment_core::ledger::{Meter, MeterBatch, MeterRow, Refused, Spend};
 use fragment_core::price::{StorageClass, Usage};
 use fragment_proto::ledger::{PutCap, SetFragmentCap, Why};
 use fragment_proto::{ErrorCode, Role};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::{Acked, Owned};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::ledger::{self, MaySpend};
-use crate::{js, routed};
+use crate::js;
 
 /// The queue a fragment's meter batches travel on (wrangler.jsonc; a
 /// branch deployment's is named for its branch), and its binding.
 pub const QUEUE: &str = "fragment-ledger";
 pub const QUEUE_BINDING: &str = "METERS";
-/// Set on the internal routes below by platform code; the router never
-/// sets or passes it.
-pub const METER_HEADER: &str = "x-fragment-meter";
 /// A row into the outbox, once by its reference: `(ref, row)`.
 pub(crate) const OUTBOX_INSERT: &str = "INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)";
 /// A batch not acknowledged this long after it was sent is sent again.
@@ -75,23 +79,25 @@ const DAY_MS: i64 = 24 * HOUR_MS;
 
 const _: () = assert!(BATCH_ROWS as usize <= fragment_core::ledger::BATCH_ROWS_MAX, "a fragment's batch is one the ledger takes");
 
-/// What the consumer tells the fragment its batch came to.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Acked {
-    pub seq: i64,
-    pub batch: String,
-    /// The ledger's answer, or why it never takes the batch (a guest
-    /// pays for nothing: their fragments are not billed).
-    pub metered: Option<Metered>,
-    pub refused: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct Minute {
     minute: i64,
     count: i64,
 }
+
+/// The open minute's request count, in the storage's key-value API under
+/// `OPEN_COUNT_KEY`: written on every request with `allowUnconfirmed`, read
+/// back once an activation. It names its life (the fragment's `created_at`),
+/// so a life that ends leaves nothing a later life under the name counts.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, Deserialize)]
+pub(crate) struct OpenCount {
+    pub(crate) life: String,
+    pub(crate) minute: i64,
+    pub(crate) count: i64,
+}
+
+/// Where `OpenCount` is kept (the key-value API's, beside the SQL tables).
+const OPEN_COUNT_KEY: &str = "meter:open";
 
 #[derive(Deserialize)]
 struct Waiting {
@@ -123,18 +129,87 @@ impl FragmentCell {
     /// Counts one request the router handed this created fragment: in this
     /// minute's count, or past the last minute closed into a row (a test's
     /// flush closes the minute it is in), so a reference is never sent with
-    /// two counts. A count that fails is lost, never the request.
-    pub(crate) fn count_request(&self) {
-        let minute = js::now_ms() / MINUTE_MS;
-        let counted = self.exec(
-            "INSERT INTO meter_requests (minute, count)
-             SELECT MAX(?, COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?), -1) + 1), 1
-             WHERE EXISTS (SELECT 1 FROM meta WHERE key = ?)
-             ON CONFLICT (minute) DO UPDATE SET count = count + 1",
-            vec![SqlStorageValue::Integer(minute), MetaKey::MeterClosed.key().into(), MetaKey::CreatedAt.key().into()],
-        );
-        if let Err(e) = counted {
+    /// two counts. The count is written with `allowUnconfirmed`: the answer
+    /// does not wait for it (every request would otherwise wait for its own
+    /// count to be durable). An earlier minute's count is folded into its
+    /// row first, by a confirmed write, once a minute at most. A count that
+    /// fails is lost, never the request.
+    pub(crate) async fn count_request(&self) {
+        if let Err(e) = self.count_request_once().await {
             console_error!("{}", json!({ "event": "meter.count-failed", "message": e.message }));
+        }
+    }
+
+    async fn count_request_once(&self) -> CellResult<()> {
+        let Some(life) = self.meta(MetaKey::CreatedAt)? else { return Ok(()) };
+        let closed: i64 = self.meta(MetaKey::MeterClosed)?.and_then(|v| v.parse().ok()).unwrap_or(-1);
+        let mut open = self.open_count(&life).await?;
+        let minute = fragment_core::ledger::request_minute(js::now_ms() / MINUTE_MS, closed, self.folded_minute()?, open.as_ref().map(|o| o.minute));
+        if let Some(earlier) = open.as_ref().filter(|o| o.minute != minute) {
+            // its key is overwritten below, so it needs no delete
+            self.fold_open(earlier)?;
+            open = None;
+        }
+        let now = OpenCount { life, minute, count: open.map_or(0, |o| o.count) + 1 };
+        let value = js::to_js(&now);
+        *self.meter_open.borrow_mut() = Some(Some(now));
+        js::storage_put_unconfirmed(&self.raw, OPEN_COUNT_KEY, &value).await
+    }
+
+    /// This life's open count, not yet folded: read from storage once an
+    /// activation. A stored one of another life, or of a minute folded
+    /// already (its key's delete lost), is none, and its key goes.
+    pub(crate) async fn open_count(&self, life: &str) -> CellResult<Option<OpenCount>> {
+        let held = self.meter_open.borrow().clone();
+        if let Some(open) = held {
+            return Ok(open.filter(|o| o.life == life));
+        }
+        let stored: Option<OpenCount> = self.state.storage().get(OPEN_COUNT_KEY).await.map_err(|e| CellError::host(format!("the open request count: {e}")))?;
+        let folded = self.folded_minute()?;
+        let kept = stored.is_some();
+        let open = stored.filter(|o| o.life == life && o.minute > folded);
+        *self.meter_open.borrow_mut() = Some(open.clone());
+        if kept && open.is_none() {
+            self.forget_open_key().await;
+        }
+        Ok(open)
+    }
+
+    /// The open count into its minute's row, with the minute recorded as
+    /// folded, in one transaction (a confirmed write on Cloudflare and on
+    /// celld alike): a count is folded once. Its key may outlive it (its
+    /// delete is apart, `forget_open_key`); one at or below the minute folded
+    /// is never folded again.
+    fn fold_open(&self, open: &OpenCount) -> CellResult<()> {
+        if open.minute > self.folded_minute()? {
+            let (sql, minute, count) = (self.sql(), open.minute, open.count);
+            js::transaction_sync(&self.raw, move || {
+                sql.exec(
+                    "INSERT INTO meter_requests (minute, count) VALUES (?, ?) ON CONFLICT (minute) DO UPDATE SET count = count + excluded.count",
+                    vec![SqlStorageValue::Integer(minute), SqlStorageValue::Integer(count)],
+                )?;
+                sql.exec(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    vec![MetaKey::MeterFolded.key().into(), minute.to_string().into()],
+                )?;
+                Ok(())
+            })?;
+        }
+        *self.meter_open.borrow_mut() = Some(None);
+        Ok(())
+    }
+
+    /// The last minute folded, or -1.
+    fn folded_minute(&self) -> CellResult<i64> {
+        Ok(self.meta(MetaKey::MeterFolded)?.and_then(|v| v.parse().ok()).unwrap_or(-1))
+    }
+
+    /// The open count's key gone, best effort: one left is never folded
+    /// twice (`fold_open`), nor counted by another life (`open_count`).
+    async fn forget_open_key(&self) {
+        let storage = self.state.storage();
+        if let Err(e) = storage.delete(OPEN_COUNT_KEY).await {
+            console_warn!("{}", json!({ "event": "meter.open-key-kept", "message": e.to_string() }));
         }
     }
 
@@ -205,6 +280,11 @@ impl FragmentCell {
         let key = self.meter_key()?;
         let now = js::now_ms();
         let upto = if close_all { i64::MAX } else { now / MINUTE_MS - 1 };
+        let life = self.must(MetaKey::CreatedAt)?;
+        if let Some(open) = self.open_count(&life).await?.filter(|o| o.minute <= upto) {
+            self.fold_open(&open)?;
+            self.forget_open_key().await;
+        }
         let minutes: Vec<Minute> = self.typed("SELECT minute, count FROM meter_requests WHERE minute <= ? ORDER BY minute", vec![SqlStorageValue::Integer(upto)])?;
         // bounded: one row per minute counted since the last flush
         for m in &minutes {
@@ -273,12 +353,19 @@ impl FragmentCell {
                 SqlStorageValue::Integer(js::now_ms()),
             ],
         )?;
-        Ok(rows.first().and_then(|r| r["at"].as_i64()))
+        let at = rows.first().and_then(|r| r["at"].as_i64());
+        // the open minute's count, as this activation holds it: its end
+        let open = self.meter_open.borrow().clone().flatten().map(|o| (o.minute + 1) * MINUTE_MS);
+        Ok(at.into_iter().chain(open).min())
     }
 
-    /// Test fleets: the outbox as it stands (`/test/fragment meter`).
+    /// Test fleets: the outbox as it stands (`/test/fragment meter`): the
+    /// minutes counted, the open one's among them.
     pub(crate) fn meter_state(&self) -> CellResult<Value> {
-        let counted = self.rows("SELECT minute, count FROM meter_requests ORDER BY minute", vec![])?;
+        let mut counted = self.rows("SELECT minute, count FROM meter_requests ORDER BY minute", vec![])?;
+        if let Some(open) = self.meter_open.borrow().clone().flatten() {
+            counted.push(json!({ "minute": open.minute, "count": open.count }));
+        }
         #[derive(Deserialize)]
         struct Row {
             r#ref: String,
@@ -297,17 +384,16 @@ impl FragmentCell {
         Ok(json!({ "counted": counted, "rows": rows, "batches": batches, "key": self.meter_key()? }))
     }
 
-    /// `POST meter/acked`: the consumer's word on batch `seq`. Its rows go
+    /// The consumer's word on batch `seq` (`calls::Acked`). Its rows go
     /// (the ledger has them, or never takes them), and the next batch is
     /// due. A batch of another life of this name, or one acknowledged
     /// before, changes nothing.
-    pub(crate) async fn meter_acked(&self, acked: &Acked) -> CellResult<Value> {
+    pub(crate) async fn meter_acked(&self, acked: &Acked) -> CellResult<()> {
         let key = self.meter_key()?;
         if acked.batch != format!("frag:{key}:{}", acked.seq) {
-            return Ok(json!({ "acked": 0, "why": "another life's batch" }));
+            return Ok(());
         }
         self.test_countdown(MetaKey::TestFailMeterAcks, "the batch's acknowledgement was lost")?;
-        let rows = self.count_of("SELECT COUNT(*) AS n FROM meter_rows WHERE batch = ?", vec![SqlStorageValue::Integer(acked.seq)])?;
         self.exec("DELETE FROM meter_rows WHERE batch = ?", vec![SqlStorageValue::Integer(acked.seq)])?;
         self.exec("DELETE FROM meter_batches WHERE id = ?", vec![SqlStorageValue::Integer(acked.seq)])?;
         match (&acked.metered, &acked.refused) {
@@ -318,7 +404,7 @@ impl FragmentCell {
             _ => {}
         }
         self.schedule().await?;
-        Ok(json!({ "acked": rows }))
+        Ok(())
     }
 
     /// `PUT /api/f/<name>/cap {id, micros}` (the owner): the fragment's
@@ -337,12 +423,9 @@ impl FragmentCell {
         json_response(&json!({ "fragment": name, "capMicros": body.micros.unwrap_or(fragment_core::ledger::CAP_DEFAULT), "default": body.micros.is_none() }))
     }
 
-    /// `POST meter/whose {principal}`: the fragment's owner, and whether
-    /// `principal` is a member (the model route: a call names a fragment its
-    /// agent is in).
-    pub(crate) fn whose(&self, principal: &str) -> CellResult<Value> {
-        let owner = self.must(MetaKey::Owner)?;
-        Ok(json!({ "owner": owner, "member": self.member_role(principal)?.is_some() }))
+    /// Whose it is (`calls::Whose`).
+    pub(crate) fn whose(&self, principal: &str) -> CellResult<Owned> {
+        Ok(Owned { owner: self.must(MetaKey::Owner)?, member: self.member_role(principal)?.is_some() })
     }
 
     /// Whether the fragment takes writes now (decision 27): refused, 402,
@@ -379,32 +462,12 @@ pub(crate) fn read_only_refusal(why: Why) -> CellError {
     CellError::new(ErrorCode::BudgetUsedUp, format!("this fragment's owner's {}", Refused::ReadOnly { why }.message()))
 }
 
-/// Charges `rows`, each a paid call's usage that happened, to `payer`'s
-/// ledger after the call answered, never in its way (decision 62): each a
-/// batch of its own, under its row's reference, on the ledger's queue,
-/// whose consumer applies it (once by its reference: a batch sent again
-/// charges nothing twice) and asks again while the ledger does not
-/// answer. A send that fails is said aloud with its references: the
-/// charge is lost, and the call stands.
-pub async fn charge(env: &Env, payer: &str, rows: Vec<MeterRow>) {
-    let refs: Vec<String> = rows.iter().map(|r| r.reference.clone()).collect();
-    let bodies: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            let meter = Meter { batch: row.reference.clone(), rows: vec![row] };
-            serde_json::to_value(MeterBatch { payer: payer.to_string(), source: String::new(), seq: 0, meter }).expect("a batch serializes")
-        })
-        .collect();
-    if let Err(e) = js::queue_send(env.as_ref(), QUEUE_BINDING, &bodies).await {
-        console_error!("{}", json!({ "event": "ledger.charge-lost", "refs": refs, "message": e.message }));
-    }
-}
-
 /// The ledger queue's consumer: each batch applied on its payer's ledger,
-/// then its fragment told (a paid call's charge tells no one). A ledger that does not answer, or a fragment
-/// that does not hear, gets the message again; a refusal is final (a
-/// guest's fragments are billed nothing; a batch the ledger refuses as
-/// another body is a source's bug, kept in its event log).
+/// then its fragment told (a paid call's charge tells no one). A ledger
+/// that does not answer, or a fragment that does not hear, gets the
+/// message again; a refusal is final (a guest's fragments are billed
+/// nothing; a batch the ledger refuses as another body is a source's bug,
+/// kept in its event log).
 pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
     let messages: Vec<RawMessage> = batch.raw_iter().collect();
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a ledger batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
@@ -430,7 +493,7 @@ async fn consume_one(raw: RawMessage, env: &Env) {
         }
     };
     if b.source.is_empty() {
-        // a paid call's charge (`charge`): no outbox to tell, and nothing to send again
+        // a paid call's charge (`pipe::settle`): no outbox to tell, and nothing to send again
         let rows_refused = metered.as_ref().map_or(0, |m| m.refused.len());
         if refused.is_some() || rows_refused > 0 {
             console_error!("{}", json!({ "event": "ledger.charge-refused", "batch": b.meter.batch, "refused": refused, "rows": metered.map(|m| m.refused) }));
@@ -439,13 +502,7 @@ async fn consume_one(raw: RawMessage, env: &Env) {
         return;
     }
     let acked = Acked { seq: b.seq, batch: b.meter.batch.clone(), metered, refused };
-    let body = serde_json::to_string(&acked).expect("an acknowledgement serializes");
-    let heard = async {
-        let req = routed::internal_request("meter/acked", &body)?;
-        let resp = crate::routed::send(env, "FRAGMENT", &b.source, req).await?;
-        Ok::<u16, CellError>(resp.status_code())
-    };
-    match heard.await {
+    match crate::fragment::pass(env, &b.source, &acked).await.map(|resp| resp.status_code()) {
         // a fragment deleted since has nothing to forget
         Ok(200 | 404) => raw.ack(),
         _ => raw.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build()),

@@ -18,7 +18,9 @@
 //! sheet, not with a signed call (it holds no key), and not by scripting
 //! the window it opens on the sheet (only the platform's own page frames
 //! it, in a dialog). Every form needs the page's own token, bound to the
-//! session, and arms only after a moment.
+//! session, and arms only after a moment. Someone invited who opens the
+//! fragment is shown the invite as its sign-in begins, and accepts or
+//! declines it there (`at_signin`, FIN-502).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +34,8 @@ use super::templates::{email_of, person};
 use crate::api::{url_enc, Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
+
+mod at_signin;
 
 /// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
@@ -172,7 +176,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // sheet says so by the invite, on a chat their agent is in and nowhere
     // else (Paul, 2026-10-23 and 10-24): not on an app it is in (no agent
     // hears one: this list), nor an app or a chat without it
-    let warning = fragment_core::access::TRUST_WARNING;
+    let warning = fragment_core::permit::TRUST_WARNING;
     let plain = make(&s.name("plain"), "blank")?;
     let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
     let talk = make(&s.name("talk"), "chat")?;
@@ -197,7 +201,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // versions, which a browser keeps: opening the sheet again waits on no
     // round trip for them (shell.rs `versioned`); none is inline
     let linked = |prefix: &str| r.text.split(['"', '\'']).find(|u| u.starts_with(prefix)).unwrap_or("").to_string();
-    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v=")];
+    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v="), linked("/__shell/fonts.css?v=")];
     let kept = files.iter().map(|f| api.unsigned("GET", f, None)).collect::<Result<Vec<_>>>()?;
     let other = api.unsigned("GET", "/__shell/platform-pages.css?v=0000", None)?;
     let named = api.unsigned("GET", "/__shell/platform-pages.css", None)?;
@@ -263,12 +267,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let mailed = s.mail.sent_to(&guest_name);
     let link = api.site_url(&chat, "");
     s.ok(
-        "they are mailed, from the deployment's address: who invites them to what, on the platform the shell names, and the platform's own page to accept it on (never the fragment's address), which holds no secret",
+        "they are mailed, from the deployment's address: who invites them to what, on the platform the shell names, and the platform's own page to accept it on, the fragment's sign-in there (never the fragment's address), which holds no secret",
         mailed.len() == 1
             && mailed[0].from == json!({ "email": "mail@fragment.localhost", "name": "fragment" })
             && mailed[0].subject.starts_with(&format!("{owner_name} invited you to "))
             && mailed[0].text.contains(&format!(" on {}.\n", fragment_core::mail::PRODUCT))
-            && mailed[0].text.contains(&format!("Accept it: {platform}/\n"))
+            && mailed[0].text.contains(&format!("Accept it: {platform}/auth/fragment?name={chat}\n"))
             && mailed[0].text.contains(&format!("Sign in as {guest_name}, then accept or decline it"))
             && !mailed[0].text.contains(&link)
             && !mailed[0].text.contains("?view=")
@@ -1024,5 +1028,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         no_share && shown && text.contains("Leave") && text.contains("Only its owner changes who has access"),
         format!("listed {listed} windowed {windowed} offered {offered} shown {shown}: {text}"),
     );
-    Ok(())
+    drop(chrome);
+    at_signin::invite_asked_first(s, api, &owner)
 }

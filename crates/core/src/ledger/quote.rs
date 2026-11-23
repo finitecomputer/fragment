@@ -3,7 +3,7 @@
 //! month" before it starts. Each item is priced as the ledger prices a row
 //! (`row_charge`, the one function both call) with the book the answering
 //! release charges with (`Config::book`), so a quote reads whatever keys and
-//! parts the book has (`price::KEY_PARTS`) and copies no price. A name the
+//! units the book has (`Catalog::key_prices`) and copies no price. A name the
 //! book does not price is said to be unknown, never guessed. A quote holds
 //! and keeps nothing.
 
@@ -11,7 +11,7 @@ use fragment_proto::ledger::{Plan, Planned, Quoted, Unquoted, QUOTE_CALLS_MAX, Q
 
 use super::row_charge;
 use crate::models::Models;
-use crate::price::{PriceBook, PriceError, Usage, CHARGE_MAX, KEY_PARTS};
+use crate::price::{PriceBook, PriceError, Usage, CHARGE_MAX};
 
 const _: () = assert!(
     (QUOTE_ITEMS_MAX as i128) * (QUOTE_CALLS_MAX as i128) * (CHARGE_MAX as i128) <= i64::MAX as i128,
@@ -60,19 +60,21 @@ pub fn check(items: &[Planned]) -> Result<(), QuoteFault> {
 
 /// What `items` would be charged on a ledger of `plan`, priced with `book`,
 /// a model named by the route's names resolved by `models` as the model
-/// route resolves them: each item's quote, in order, and the priced ones'
-/// total. `items` pass `check` first.
-pub fn quote(items: &[Planned], book: &PriceBook, models: &Models, plan: Plan) -> (Vec<Quoted>, i64) {
+/// route resolves them, a key's units said where they are `counted`
+/// (`Catalog::counted`: a vendor's number, its ticks or characters): each
+/// item's quote, in order, and the priced ones' total. `items` pass
+/// `check` first.
+pub fn quote(items: &[Planned], book: &PriceBook, models: &Models, plan: Plan, counted: &[String]) -> (Vec<Quoted>, i64) {
     assert_eq!(check(items), Ok(()), "a quote's items are checked before they are priced");
-    let quoted: Vec<Quoted> = items.iter().map(|item| quote_one(item, book, models, plan)).collect();
+    let quoted: Vec<Quoted> = items.iter().map(|item| quote_one(item, book, models, plan, counted)).collect();
     let total = quoted.iter().filter_map(|q| q.charge_micros).sum();
     (quoted, total)
 }
 
-fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan) -> Quoted {
+fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan, counted: &[String]) -> Quoted {
     let calls = calls_of(item).unwrap_or(1);
     let unknown = |priced_as: Option<String>, why| Quoted { priced_as, each_micros: None, calls, charge_micros: None, unknown: Some(why) };
-    let usage = match usage_of(item, models) {
+    let usage = match usage_of(item, models, counted) {
         Ok(usage) => usage,
         Err((priced_as, why)) => return unknown(priced_as, why),
     };
@@ -92,13 +94,12 @@ fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan) -> Q
 /// units, a model's tokens on the id its name runs (a route's name, as the
 /// model route reads it; else the book's id), or a usage as a meter counts
 /// it. Else why it is none.
-fn usage_of(item: &Planned, models: &Models) -> Result<Usage, (Option<String>, Unquoted)> {
+fn usage_of(item: &Planned, models: &Models, counted: &[String]) -> Result<Usage, (Option<String>, Unquoted)> {
     match item {
         Planned::Key(k) => {
-            // a part that counts what its vendor does (characters, pixels,
-            // credits) is quoted at the units said; one that counts at most
-            // one a call (an image, a photo), as any key, a call's one
-            let counted = KEY_PARTS.iter().any(|p| p.priced_as == k.key && p.units_max > 1);
+            // a unit a vendor's answer counts (ticks, characters, credits)
+            // is quoted at the units said; a call, a call's one
+            let counted = counted.contains(&k.key);
             match (k.units, counted) {
                 (None, true) => Err((Some(k.key.clone()), Unquoted::NoUnits)),
                 (units, _) => Ok(Usage::Key { key: k.key.clone(), units: units.unwrap_or(1) }),
@@ -106,7 +107,7 @@ fn usage_of(item: &Planned, models: &Models) -> Result<Usage, (Option<String>, U
         }
         Planned::Model(m) => {
             let id = match models.named(Some(&m.model), None) {
-                Ok(named) => models.route(named).map_err(|_| (Some(m.model.clone()), Unquoted::NoPrice))?.id().to_string(),
+                Ok(named) => models.route(named).id().to_string(),
                 Err(_) => m.model.clone(),
             };
             Ok(Usage::Tokens { model: id, input: m.input, cached_input: m.cached_input, cache_write: m.cache_write, output: m.output })
@@ -138,17 +139,20 @@ mod tests {
     use fragment_proto::ledger::{PlannedKey, PlannedModel, PlannedUsage, SetPlan};
     use serde_json::json;
 
-    /// The default book with operator keys and every part of theirs
-    /// (`KEY_PARTS`), as a deployment offering them prices them
-    /// (`Catalog::key_prices`).
+    /// The default book with operator keys and every unit of theirs, as a
+    /// deployment offering them prices them (`Catalog::key_prices`).
     fn book() -> PriceBook {
         let mut book = PriceBook::defaults();
-        let parts = KEY_PARTS.iter().map(|p| p.priced_as);
-        for name in ["elevenlabs", "perplexity", "fal", "xai", "google-places", "firecrawl"].into_iter().chain(parts) {
-            let (micros, per) = crate::price::default_key_price(name).unwrap();
-            book.keys.push(KeyPrice { key: name.into(), micros, per });
-        }
+        let row = |name: &str| json!({ "name": name, "kind": "operator", "hosts": [format!("api.{name}.test")], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [format!("{}_KEY", name.to_uppercase().replace('-', "_"))] });
+        let catalog = crate::catalog::Catalog::parse(&json!(["elevenlabs", "perplexity", "fal", "xai", "google-places", "firecrawl"].map(row)).to_string()).unwrap();
+        book.keys = catalog.key_prices();
         book
+    }
+
+    /// The names whose units a key's item says, as that deployment counts them.
+    fn counted() -> Vec<String> {
+        let row = |name: &str| json!({ "name": name, "kind": "operator", "hosts": [format!("api.{name}.test")], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [format!("{}_KEY", name.to_uppercase().replace('-', "_"))] });
+        crate::catalog::Catalog::parse(&json!(["elevenlabs", "perplexity", "fal", "xai", "google-places", "firecrawl"].map(row)).to_string()).unwrap().counted()
     }
 
     fn key(name: &str, units: Option<u64>, calls: Option<u64>) -> Planned {
@@ -179,11 +183,11 @@ mod tests {
             json!({ "kind": "key", "key": "perplexity", "units": 1 }),
         ];
         for named in every {
-            let (quoted, _) = quote(&[usage(named.clone(), None)], &book(), &Models::defaults(), Plan::Seat);
+            let (quoted, _) = quote(&[usage(named.clone(), None)], &book(), &Models::defaults(), Plan::Seat, &counted());
             assert_eq!(quoted[0].unknown, None, "{named}: {quoted:?}");
             let mut object = named.clone();
             object["kind"] = json!({ named["kind"].as_str().unwrap(): null });
-            let (quoted, total) = quote(&[usage(object.clone(), None)], &book(), &Models::defaults(), Plan::Seat);
+            let (quoted, total) = quote(&[usage(object.clone(), None)], &book(), &Models::defaults(), Plan::Seat, &counted());
             assert_eq!((quoted[0].unknown, total), (Some(Unquoted::Invalid), 0), "{object}: {quoted:?}");
         }
     }
@@ -227,21 +231,20 @@ mod tests {
     #[test]
     fn each_item_is_quoted_what_the_ledger_charges_for_it() {
         let models = Models::defaults();
-        let cheap = models.route(models.named(Some("cheap"), None).unwrap()).unwrap().id().to_string();
+        let cheap = models.route(models.named(Some("cheap"), None).unwrap()).id().to_string();
         let items = [
             // 300 clips of about 200 characters, and an audiobook's 60,000 in one
-            key("elevenlabs:speech", Some(200), Some(300)),
-            key("elevenlabs:speech", Some(60_000), None),
-            // the key's other calls (a minute of music), and a search
-            key("elevenlabs", None, Some(3)),
-            key("perplexity", None, Some(7)),
-            // FIN-445's parts: fal's megapixel image, xAI's X search and its
-            // image (one a call, so none said), a Places photo, Firecrawl's credits
-            key("fal:image", Some(1_048_576), Some(40)),
-            key("xai", None, Some(5)),
-            key("xai:image", None, Some(4)),
-            key("google-places:photo", None, Some(10)),
+            key("elevenlabs:character", Some(200), Some(300)),
+            key("elevenlabs:character", Some(60_000), None),
+            // music, a call a minute, and a search, a call
+            key("elevenlabs:music", Some(1), Some(3)),
+            key("perplexity:call", Some(1), Some(7)),
+            // a Klein megapixel, an X search through Grok at its ticks,
+            // Firecrawl's credits, and an older release's name (a Places photo)
+            key("fal:flux-2-klein-9b", Some(1), Some(40)),
+            key("xai:tick", Some(1_234_567_000), Some(5)),
             key("firecrawl:credit", Some(5), Some(20)),
+            key("google-places:photo", Some(1), Some(10)),
             // 40 turns on the cheap tier, by its name and by its id
             model("cheap", 2_000, 300, 500, Some(40)),
             model(&cheap, 2_000, 300, 500, Some(40)),
@@ -252,17 +255,16 @@ mod tests {
             usage(json!({ "kind": "storage", "class": "r2", "byte_hours": 24_000_000_000u64 }), Some(5)),
         ];
         let mut payer = Payer::on(Plan::Seat);
-        let (quoted, total) = quote(&items, &payer.book.clone(), &models, Plan::Seat);
+        let (quoted, total) = quote(&items, &payer.book.clone(), &models, Plan::Seat, &counted());
         let rows = [
-            (Usage::Key { key: "elevenlabs:speech".into(), units: 200 }, 300),
-            (Usage::Key { key: "elevenlabs:speech".into(), units: 60_000 }, 1),
-            (Usage::Key { key: "elevenlabs".into(), units: 1 }, 3),
-            (Usage::Key { key: "perplexity".into(), units: 1 }, 7),
-            (Usage::Key { key: "fal:image".into(), units: 1_048_576 }, 40),
-            (Usage::Key { key: "xai".into(), units: 1 }, 5),
-            (Usage::Key { key: "xai:image".into(), units: 1 }, 4),
-            (Usage::Key { key: "google-places:photo".into(), units: 1 }, 10),
+            (Usage::Key { key: "elevenlabs:character".into(), units: 200 }, 300),
+            (Usage::Key { key: "elevenlabs:character".into(), units: 60_000 }, 1),
+            (Usage::Key { key: "elevenlabs:music".into(), units: 1 }, 3),
+            (Usage::Key { key: "perplexity:call".into(), units: 1 }, 7),
+            (Usage::Key { key: "fal:flux-2-klein-9b".into(), units: 1 }, 40),
+            (Usage::Key { key: "xai:tick".into(), units: 1_234_567_000 }, 5),
             (Usage::Key { key: "firecrawl:credit".into(), units: 5 }, 20),
+            (Usage::Key { key: "google-places:photo".into(), units: 1 }, 10),
             (Usage::Tokens { model: cheap.clone(), input: 2_000, cached_input: 300, cache_write: 0, output: 500 }, 40),
             (Usage::Tokens { model: cheap.clone(), input: 2_000, cached_input: 300, cache_write: 0, output: 500 }, 40),
             (Usage::Tokens { model: crate::decide::Model::ClefFlash.id().into(), input: 1_000, cached_input: 0, cache_write: 0, output: 0 }, 2),
@@ -280,12 +282,12 @@ mod tests {
         assert_eq!(total, charged_all, "the total is what the whole job was charged");
         // the names each was priced as: a route's name resolved to its model's id
         let names: Vec<_> = quoted.iter().map(|q| q.priced_as.clone().unwrap()).collect();
-        assert_eq!(names, ["elevenlabs:speech", "elevenlabs:speech", "elevenlabs", "perplexity", "fal:image", "xai", "xai:image", "google-places:photo", "firecrawl:credit", cheap.as_str(), cheap.as_str(), crate::decide::Model::ClefFlash.id(), crate::price::INSTANCE, "storage"]);
+        assert_eq!(names, ["elevenlabs:character", "elevenlabs:character", "elevenlabs:music", "perplexity:call", "fal:flux-2-klein-9b", "xai:tick", "firecrawl:credit", "google-places:photo", cheap.as_str(), cheap.as_str(), crate::decide::Model::ClefFlash.id(), crate::price::INSTANCE, "storage"]);
         // FIN-443's example: 60,000 characters at $0.08 per 1,000 with the 50% margin
         assert_eq!(quoted[1].charge_micros, Some(7_200_000));
         assert_eq!(quoted[0].charge_micros, quoted[1].charge_micros, "300 clips of 200 characters cost what 60,000 do");
-        // a megapixel image at $0.006, an X search at $0.12, each with the margin
-        assert_eq!((quoted[4].each_micros, quoted[5].each_micros), (Some(9_000), Some(180_000)));
+        // a Klein megapixel at $0.006, and a Grok call that cost $0.1234567, each with the margin
+        assert_eq!((quoted[4].each_micros, quoted[5].each_micros), (Some(9_000), Some(185_186)));
     }
 
     /// Goal: the always-on seat's awake time is quoted at nothing, as its
@@ -296,7 +298,7 @@ mod tests {
         let models = Models::defaults();
         for (plan, each) in [(Plan::Seat, 64_224 * 3 / 2), (Plan::SeatAlwaysOn, 0)] {
             let mut payer = Payer::on(plan);
-            let (quoted, total) = quote(&hour, &payer.book.clone(), &models, plan);
+            let (quoted, total) = quote(&hour, &payer.book.clone(), &models, plan, &counted());
             let charged = payer.charged(&Usage::Awake { instance: crate::price::INSTANCE.into(), ms: 3_600_000 }, 1);
             assert_eq!((quoted[0].each_micros, total, charged), (Some(each), each, each), "{plan:?}");
         }
@@ -313,8 +315,8 @@ mod tests {
         let items = [
             key("perplexity", None, None),
             key("nope", None, Some(4)),
-            key("elevenlabs:speech", None, Some(4)),
-            key("fal:image", None, None),
+            key("elevenlabs:character", None, Some(4)),
+            key("fal:flux-2-klein-9b", None, None),
             key("firecrawl:credit", None, None),
             model("gpt-nope", 10, 0, 10, None),
             model("high", 10, 0, 10, None),
@@ -322,17 +324,17 @@ mod tests {
             usage(json!({ "kind": "spending", "micros": 5 }), None),
             usage(json!({ "kind": "key", "key": "two words", "units": 1 }), None),
             usage(json!({ "kind": "requests", "count": crate::price::QUANTITY_MAX + 1 }), None),
-            key("elevenlabs:speech", Some(crate::price::QUANTITY_MAX), None),
+            key("elevenlabs:character", Some(crate::price::QUANTITY_MAX), None),
         ];
-        let (quoted, total) = quote(&items, &book(), &models, Plan::Seat);
+        let (quoted, total) = quote(&items, &book(), &models, Plan::Seat, &counted());
         let why: Vec<_> = quoted.iter().map(|q| q.unknown).collect();
         use Unquoted::*;
         assert_eq!(why, [None, Some(NoPrice), Some(NoUnits), Some(NoUnits), Some(NoUnits), Some(NoPrice), Some(NoPrice), Some(NoPrice), Some(Invalid), Some(Invalid), Some(Invalid), Some(TooLarge)]);
         assert!(quoted[1..].iter().all(|q| q.charge_micros.is_none() && q.each_micros.is_none()), "{quoted:?}");
         assert_eq!(total, quoted[0].charge_micros.unwrap(), "only the priced item counts");
-        assert_eq!((quoted[1].calls, quoted[2].priced_as.as_deref()), (4, Some("elevenlabs:speech")), "it says what was asked");
-        // a deployment that offers no ElevenLabs prices none of it: its part unknown too
-        let (bare, _) = quote(&[key("elevenlabs:speech", Some(200), None)], &PriceBook::defaults(), &models, Plan::Seat);
+        assert_eq!((quoted[1].calls, quoted[2].priced_as.as_deref()), (4, Some("elevenlabs:character")), "it says what was asked");
+        // a deployment that offers no ElevenLabs prices none of it: its unit unknown too
+        let (bare, _) = quote(&[key("elevenlabs:character", Some(200), None)], &PriceBook::defaults(), &models, Plan::Seat, &counted());
         assert_eq!(bare[0].unknown, Some(NoPrice));
     }
 
@@ -351,7 +353,7 @@ mod tests {
         }
         // the largest quote's total fits: every item its most calls of the dearest row
         let dearest = PriceBook { keys: vec![KeyPrice { key: "dear".into(), micros: CHARGE_MAX * 2 / 3, per: 1 }], ..PriceBook::defaults() };
-        let (quoted, total) = quote(&vec![key("dear", None, Some(QUOTE_CALLS_MAX)); QUOTE_ITEMS_MAX], &dearest, &Models::defaults(), Plan::Seat);
+        let (quoted, total) = quote(&vec![key("dear", None, Some(QUOTE_CALLS_MAX)); QUOTE_ITEMS_MAX], &dearest, &Models::defaults(), Plan::Seat, &[]);
         assert!(quoted.iter().all(|q| q.unknown.is_none()), "{:?}", quoted[0]);
         assert_eq!(total, QUOTE_ITEMS_MAX as i64 * QUOTE_CALLS_MAX as i64 * quoted[0].each_micros.unwrap());
     }

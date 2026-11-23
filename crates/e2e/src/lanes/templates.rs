@@ -180,6 +180,11 @@ fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank
             }
         }
         if label == "blank" {
+            // the platform's stylesheet brings the platform's type, from this origin
+            let seen = own_type(&mut b, &page)?;
+            s.ok("a page that links __fragment.css draws in Funnel Sans and JetBrains Mono, fetched from its own origin (__fonts/), and fetches nothing from another", drawn_in_own_type(&seen, "/__fonts/"), &seen);
+            let sandboxed = sandboxed_type(&mut b, &page)?;
+            s.ok("and so does a page of it in a sandboxed frame (an opaque origin, whose fonts' fetch is cross-origin)", sandboxed == "loaded", &sandboxed);
             stylesheet(s, &mut b, &page)?;
         }
         b.close(page)?;
@@ -220,6 +225,8 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
         started && seen == json!({ "setup": false }) && chat.is_some() && chat == telegram,
         json!({ "seen": seen, "chat": chat, "telegram": telegram }),
     );
+    let seen = own_type(&mut b, &page)?;
+    s.ok("the chat's page draws in Funnel Sans and JetBrains Mono, fetched from its own origin (__fonts/), and fetches nothing from another", drawn_in_own_type(&seen, "/__fonts/"), &seen);
     b.close(page)?;
 
     // its setup page, in a tab of its own
@@ -237,6 +244,58 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
     );
     b.close(page)?;
     Ok(())
+}
+
+/// The platform's type a page draws in, and where it came from: each face
+/// `document.fonts.load` finds (its weights' statuses), the path of each
+/// font file the page fetched, and every resource it fetched from another
+/// origin (none may be: no page of ours loads from another domain,
+/// xtask/src/remote_loads.rs).
+pub(super) fn own_type(b: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<Value> {
+    b.eval(
+        page,
+        r#"(async () => {
+      const faces = {};
+      for (const face of ['400 1em "Funnel Sans"', '600 1em "Funnel Sans"', '400 1em "JetBrains Mono"', '500 1em "JetBrains Mono"']) {
+        faces[face] = await document.fonts.load(face).then((got) => got.map((f) => f.status).join() || 'none', (e) => 'failed: ' + e);
+      }
+      const fetched = performance.getEntriesByType('resource').map((e) => new URL(e.name));
+      const fonts = fetched.filter((u) => /\.(ttf|woff2?)$/.test(u.pathname)).map((u) => u.pathname).sort();
+      const elsewhere = fetched.filter((u) => u.origin !== location.origin).map((u) => u.href);
+      return { faces, fonts, elsewhere };
+    })()"#,
+    )
+}
+
+/// Whether `own_type` found every face loaded, its fonts fetched from
+/// `folder` of the page's own origin, and nothing from another origin.
+pub(super) fn drawn_in_own_type(seen: &Value, folder: &str) -> bool {
+    let faces = seen["faces"].as_object().is_some_and(|f| f.len() == 4 && f.values().all(|s| s == "loaded"));
+    let fonts = seen["fonts"].as_array().is_some_and(|f| f.len() >= 4 && f.iter().all(|p| p.as_str().is_some_and(|p| p.starts_with(folder))));
+    faces && fonts && seen["elsewhere"] == json!([])
+}
+
+/// What a page of `page`'s origin in a sandboxed frame (an opaque origin
+/// of its own, as a board shows an agent's page) gets when it links the
+/// platform's type (`__fonts/fonts.css`, which `__fragment.css` imports;
+/// linked directly, as a sandboxed frame sends no cookie for a fragment
+/// that is not public): JetBrains Mono's status, as the frame tells it.
+/// A font is fetched with CORS, so from an opaque origin it loads only if
+/// `__fonts/` lets any origin read it.
+fn sandboxed_type(b: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<Value> {
+    b.eval(
+        page,
+        r#"new Promise((resolve) => {
+      const frame = document.createElement('iframe');
+      frame.sandbox = 'allow-scripts';
+      addEventListener('message', (e) => { if (e.source === frame.contentWindow) resolve(e.data); });
+      const sheet = new URL('__fonts/fonts.css', location.href).href;
+      const tell = 'addEventListener("load", () => document.fonts.load(\'400 1em "JetBrains Mono"\').then((got) => parent.postMessage(got.map((f) => f.status).join() || "none", "*"), (e) => parent.postMessage("failed: " + e.name, "*")))';
+      frame.srcdoc = `<link rel="stylesheet" href="${sheet}"><script>${tell}<\/script><p>sandboxed</p>`;
+      document.body.append(frame);
+      setTimeout(() => resolve('no answer in 10 s'), 10000);
+    })"#,
+    )
 }
 
 /// Author CSS keeps control even when declared before the platform link;
@@ -302,8 +361,8 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = r.body["name"].as_str().unwrap_or("").to_string();
     s.ok("a skills fragment is made from the blessed skills template", r.status == 200 && !name.is_empty(), &r);
     let view = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
-    let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
-    s.ok("its repo names the template, nothing else", m.body == json!({ "template": "skills" }), &m);
+    let m = api.signed(owner, "GET", &format!("/api/f/{name}/file?path=fragment.json"), None)?;
+    s.ok("it has no repo until its first file (the release's code and data run it): no fragment.json of its own (404)", m.status == 404 && r.body["repo"] == "", &m);
     let listed = api.signed(owner, "GET", "/api/fragments", None)?;
     let kind = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str())).map(|f| f["kind"].clone());
     s.ok("its owner's list says it is their skills", kind == Some(json!("skills")), &listed);
@@ -314,25 +373,23 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let release: Vec<(String, String)> = rows.iter().filter(|f| f["release"] == true).map(|f| (f["path"].as_str().unwrap_or("").to_string(), f["lastCommitSha"].as_str().unwrap_or("").to_string())).collect();
     let want: Vec<(String, String)> = blessed::data("skills").into_iter().map(|d| (d.path.to_string(), blessed::data_version(d))).collect();
     s.ok(
-        &format!("its files are the release's managed set ({} files), each at its version, beside its own manifest", want.len()),
-        r.status == 200 && !want.is_empty() && release == want && rows.iter().any(|f| f["path"] == "fragment.json" && f["release"].is_null()),
+        &format!("its files are the release's managed set ({} files), each at its version, and none of its own yet", want.len()),
+        r.status == 200 && !want.is_empty() && release == want && rows.len() == want.len(),
         format!("{} release rows, {} wanted; {}", release.len(), want.len(), &r.text[..r.text.len().min(300)]),
     );
-    // the create's seed and the alarm's (the create arms it) take turns:
-    // side by side, the second commit changes nothing and is refused (412
-    // on code.storage), and when it was the create's, the create answered
-    // before its template was live, listing none of the release
+    // its making made no repo, and its alarm's pass (the create arms it)
+    // makes none: its first file will
     let (landed, failed) = (events(api, owner, &name, "template"), events(api, owner, &name, "template.failed"));
     s.ok(
-        "its template lands once, in the create: no second seed beside it, none that failed",
-        landed == 1 && failed == 0,
+        "its template lands nowhere until its first file: no seed in its create or its alarm, none that failed",
+        landed == 0 && failed == 0,
         format!("{landed} template, {failed} template.failed events: {}", api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=20"), None).map(|r| r.text).unwrap_or_default()),
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
-        "the managed set contains twenty skills, including design-finite, slides-finite, gws-docs, gws-slides, import-agent-home, linear-finite and salesforce-finite",
-        skill_names.len() == 20
-            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "linear-finite", "salesforce-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite", "gws-docs", "gws-slides", "import-agent-home"].iter().all(|n| skill_names.contains(n)),
+        "the managed set contains nineteen skills, including design-finite, slides-finite, gws-docs, gws-slides, import-agent-home and disk-space-finite",
+        skill_names.len() == 19
+            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite", "gws-docs", "gws-slides", "import-agent-home", "disk-space-finite"].iter().all(|n| skill_names.contains(n)),
         format!("{skill_names:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";
@@ -348,10 +405,11 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let r = read(owner, apps)?;
     let at: Vec<Value> = files(owner)?.body["files"].as_array().map(|l| l.iter().filter(|f| f["path"] == apps).cloned().collect()).unwrap_or_default();
     let row = at.first().cloned().unwrap_or_default();
+    let landed = events(api, owner, &name, "template");
     s.ok(
-        "a file of its own at a managed path wins over the release's, listed once",
-        w.status == 200 && r.text == own && at.len() == 1 && row["release"].is_null() && !row["lastCommitSha"].as_str().unwrap_or("").starts_with("release:"),
-        json!({ "rows": at, "read": r.status }),
+        "a file of its own at a managed path, its first, makes its repo (its template landed first, once) and wins over the release's, listed once",
+        w.status == 200 && landed == 1 && r.text == own && at.len() == 1 && row["release"].is_null() && !row["lastCommitSha"].as_str().unwrap_or("").starts_with("release:"),
+        json!({ "rows": at, "read": r.status, "landed": landed }),
     );
     let w = api.signed(owner, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "files": [{ "path": apps, "delete": true }], "key": "own-apps-gone" })))?;
     let r = read(owner, apps)?;

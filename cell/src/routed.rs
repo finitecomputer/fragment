@@ -10,11 +10,11 @@
 //! answer alike for everyone who may see the fragment, so the fragment asks
 //! the registry only when its answer depends on who is asking.
 //!
-//! Calls from inside the platform (a run's Workflow, the app's `Files`
-//! capability, the delivery consumer, the router's test hooks) are not
-//! routed requests: they carry no caller and no URL, and the supervisor
-//! answers them before it decodes a `Routed`. `internal_request` builds
-//! them, for Rust and for `entry.mjs`.
+//! Calls from inside the platform (the typed calls of fragment/calls.rs,
+//! a run's Workflow's and the app's capabilities' among them, and a
+//! computer's routes) are not routed requests: they carry no caller and
+//! no URL, and the supervisor answers them before it decodes a `Routed`.
+//! `internal_request` builds them, for Rust and for `entry.mjs`.
 //!
 //! Every call into a platform object goes out through `send` (or
 //! `send_again`), here alone (xtask's guard), stamped with this release,
@@ -50,7 +50,8 @@ pub struct Signed {
     /// signed URL named in `for`, which the router honors on an agent's
     /// request to a fragment only (`crate::acting_for`). The fragment acts
     /// with the lower of that identity's role and the agent's cap
-    /// (`fragment_core::access`).
+    /// (`fragment_core::permit`), or, where that identity is not in and the
+    /// agent is, as the agent itself (`FragmentCell::as_whom`).
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub acting_for: Option<String>,
 }
@@ -165,8 +166,8 @@ impl Routed {
                 if !npub::is_identity(&signed.id) || signed.key.as_deref().is_some_and(|k| !npub::is_hex_key(k)) {
                     return Err(CellError::host("the router named a malformed signer"));
                 }
-                // the router honors `for` for an agent only, naming an identity
-                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || signed.kind != IdentityKind::Agent || signed.owner.is_none()) {
+                // the router honors `for` for an agent only, naming its owner
+                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || fragment_core::permit::may_act_for(signed.kind, signed.owner.as_deref(), f).is_err()) {
                     return Err(CellError::host("the router named a malformed `for`"));
                 }
                 Some(signed)
@@ -185,49 +186,64 @@ impl Routed {
         };
         Ok(Routed { name, url, signed, credential })
     }
+
+    /// A request to the fragment as the router would hand it, made by the
+    /// platform for a person: the share sheet's, their export's reads, a
+    /// search across fragments, a sign-in's look. `inner` is its route
+    /// there (`/api/…`, `/serve/…`, or the platform's own `/search/asked`
+    /// and `/signin/known`, which the router maps no outside path to);
+    /// `body` is JSON, and `range` a byte range of the answer. Asked again
+    /// while the fragment refuses this release (it did nothing); its answer
+    /// as the fragment made it. The router's own forward (lib.rs) is not
+    /// one: it passes a client's headers, and its body may stream through.
+    pub(crate) async fn ask(&self, env: &Env, method: Method, inner: &str, body: Option<&str>, range: Option<&str>) -> CellResult<Response> {
+        let make = || {
+            let headers = Headers::new();
+            self.to_headers(&headers)?;
+            if body.is_some() {
+                headers.set("content-type", "application/json")?;
+            }
+            if let Some(r) = range {
+                headers.set("range", r)?;
+            }
+            let mut init = RequestInit::new();
+            init.with_method(method.clone()).with_headers(headers);
+            if let Some(b) = body {
+                init.with_body(Some(b.into()));
+            }
+            Ok(Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?)
+        };
+        send_again(env, "FRAGMENT", &self.name, make).await
+    }
 }
 
 /// The marker an internal route's caller carries, and its value: the router
 /// never passes these headers, so a request with one came from inside.
-/// `None`: the route needs none (the router's test hooks, which fleets
-/// without them do not answer).
+/// `None`: the route needs none. A fragment's typed calls carry their own
+/// (fragment/calls.rs).
 fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
-    if path.starts_with("job/") {
-        Ok(Some((crate::jobs::JOB_HEADER, "1")))
-    } else if path.starts_with("cap/files/") {
-        Ok(Some((crate::files::CAP_HEADER, "files")))
-    } else if path.starts_with("cap/search/") {
-        Ok(Some((crate::files::CAP_HEADER, "search")))
-    } else if path == "deliver/report" {
-        Ok(Some((crate::deliveries::REPORT_HEADER, "1")))
+    if path.starts_with("call/") {
+        Ok(Some((crate::fragment::calls::HEADER, "1")))
     } else if path.starts_with("computer/") {
         Ok(Some((crate::computer::INTERNAL_HEADER, "1")))
-    } else if path == "meter/acked" || path == "meter/whose" {
-        Ok(Some((crate::meter::METER_HEADER, "1")))
-    } else if path == "invites/claim" || path == "invites/decline" || path == "members/agent" {
-        Ok(Some((crate::members::CLAIM_HEADER, "1")))
-    } else if path == "signin/visibility" {
-        Ok(Some((crate::auth::SIGNIN_HEADER, "1")))
-    } else if path.starts_with("stage/routine/") {
-        Ok(Some((crate::migrations::ROUTINE_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("vault/") {
         Ok(Some((crate::vault::VAULT_HEADER, "1")))
-    } else if path.starts_with("test/") || path.starts_with("index/") || path.starts_with("migrations/") {
+    } else if path.starts_with("index/") || path.starts_with("migrations/") || path.starts_with("door/") {
         // a search index is called by its fragment's supervisor alone:
         // the router never names one; the move's object is the router's
-        // alone (its routes check who asks before they call it)
+        // alone (its routes check who asks before they call it); a SimpleX
+        // door is called by the platform alone (cell/door.mjs)
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
     }
 }
 
-/// A call into a fragment's supervisor from inside the platform: `path`
-/// (`job/advance`, `cap/files/read`, `deliver/report`, `test/keys`), or
-/// into its search index (`index/search`), with a JSON body, marked as
-/// that route expects.
+/// A call into a platform object from inside the platform: `path`
+/// (`call/job/advance`, `computer/view`, `index/search`), with a JSON
+/// body, marked as that route expects.
 pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -376,12 +392,6 @@ pub(crate) fn refusal(bytes: &[u8], what: impl FnOnce() -> String) -> CellError 
     }
 }
 
-/// The internal call `path` on the Durable Object `name` of `binding`, its
-/// answer as it is (a picture's bytes, or its refusal).
-pub(crate) async fn fetch_object(env: &Env, binding: &str, name: &str, path: &str) -> CellResult<Response> {
-    send_again(env, binding, name, || internal_request(path, "{}")).await
-}
-
 /// The path a deploy's probe of an object asks (`probed`, `objects`), with
 /// `PROBE_HEADER`: the router passes no client's header of that name
 /// (lib.rs `PASSED_HEADERS`), so only the Worker's own `/healthz/objects`
@@ -394,7 +404,7 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 8] = [
+const PROBED: [(&str, &str, &str); 9] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
@@ -404,6 +414,8 @@ const PROBED: [(&str, &str, &str); 8] = [
     ("Vault", "VAULT", "__probe"),
     // one object, the move's (migrations.rs): its own name, as the registry's
     ("Migrations", "MIGRATIONS", crate::migrations::NAME),
+    // a SimpleX door's (cell/door.mjs): JavaScript, its own release check
+    ("SimplexDoor", "SIMPLEX_DOOR", "__probe"),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`
@@ -503,15 +515,17 @@ pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
     Ok(Response::from_json(&body)?.with_status(if all { 200 } else { 503 }))
 }
 
-/// `internal_request` for `entry.mjs` (the job driver, the `Files`
-/// capability and a computer's reports to itself), stamped with the
-/// release of `env` (the caller's), so the JavaScript names no header. A
-/// class with a static method, because worker-build exports classes by
-/// name and a free function only as a method of the Worker's entrypoint.
-#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+/// `internal_request` for `entry.mjs` (the job driver's and the `Files`
+/// and `Search` capabilities' calls, and a computer's reports to itself),
+/// stamped with the release of `env` (the caller's), so the JavaScript
+/// names no header. A class with a static method, because worker-build
+/// exports classes by name and a free function only as a method of the
+/// Worker's entrypoint.
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), wasm_bindgen(wasm_bindgen = worker::wasm_bindgen))]
 pub struct InternalRoute;
 
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "admin"), wasm_bindgen)]
 impl InternalRoute {
     pub fn request(env: JsValue, path: &str, body: &str) -> Result<worker::web_sys::Request, JsValue> {
         let env: Env = env.unchecked_into();

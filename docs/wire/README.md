@@ -184,6 +184,17 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: [`StageCompleted`](#stagecompleted)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
+#### `migrations.copy`
+
+`POST /api/migrations/stages/{stage}/copy`: One range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer, for the new agent bound to the move while it imports. The agent, or its owner (`for`), must edit the fragment.
+
+- Credentials: NIP-98
+- Query `into` (`string`, required): The fragment whose blobs it goes into.
+- Query `offset` (`integer`, required): Where in the zip the range starts.
+- Query `bytes` (`integer`, required): Its length: 1 to the caller's upload limit.
+- Answer: [`StageCopied`](#stagecopied)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
 #### `migrations.done`
 
 `POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.
@@ -288,7 +299,7 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 #### `migrations.yes`
 
-`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.
+`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to an agent of their own, a new one or one they have that no other move took: the old agent is stopped and its stage made, which that agent imports.
 
 - Credentials: NIP-98, the shell's session
 - Body: [`OfferYes`](#offeryes)
@@ -347,6 +358,12 @@ out. Its answer: the fragment, and whether it is archived now.
 | `archived` | `boolean` | required |  |
 | `name` | `string` | required |  |
 
+### `Author`
+
+out, open. Who wrote a record, as the platform stamps it as it appends one, never as its caller says (FIN-615): its principal is whom it was written as, and this is what wrote the words. Only a person's or an agent's own post is its principal's own words. Open (`x-fragment-open`, docs/wire): an author this build does not know reads as `Other`.
+
+Values: `person`, `agent`, `code`, `platform`, `door`, `other`.
+
 ### `ChannelNewest`
 
 out. `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader): each poster's newest record of each kind the channel keeps the newest of (`ChannelDecl::newest`), the newest first, at most `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past its retention) is none; a channel that keeps no kind answers none.
@@ -374,6 +391,7 @@ out. One record in a channel. Records are appended by the platform (`events`, `o
 | field | type | | |
 | --- | --- | --- | --- |
 | `at` | `integer` | required |  |
+| `author` | [`Author`](#author) or `null` | optional | Who wrote it, as the platform stamped it as it appended it. Absent on a record stored before the stamp, which reads as it did. |
 | `body` | `any` | required | The JSON text the cell stored, passed through as it is: the cell neither parses a body it just wrote nor one it reads back. |
 | `channel` | `string` | required |  |
 | `kind` | `string` | required |  |
@@ -403,7 +421,7 @@ out. One thing to do to one old agent, flat: its `kind`, and the fields that kin
 | `kind` | [`CommandKind`](#commandkind) | required |  |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) or `null` | optional | `stop_and_stage`: its phase. |
-| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage` after a person's Yes (phase 1): the secrets the old agent has (the roster's `has`), each to hand to its person's Vault (`POST …/agents/{old}/secrets`) once it is stopped. None in phase 2: no one said Yes. |
+| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage` after a person's Yes (phase 1): every kind of secret, whatever the roster's `has` says, each the old agent holds to hand to its person's Vault (`POST …/agents/{old}/secrets`) once it is stopped; one it does not hold is left out. None in phase 2: no one said Yes. |
 | `stage` | `string` or `null` | optional | `stop_and_stage`: the stage to upload (`stage_id`). |
 
 ### `CommandKind`
@@ -482,7 +500,7 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `code` | [`CodeStatus`](#codestatus) | required |  |
 | `counts` | [`Counts`](#counts) | required |  |
 | `inboxToken` | `string` or `null` | required | Editors and up see the inbox token. |
-| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, and its title, as its live `fragment.json` last said (an app with no title until it has). |
+| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `name` | `string` | required |  |
 | `npub` | `string` | required |  |
 | `owner` | `string` | required |  |
@@ -524,7 +542,7 @@ in, closed.
 
 ### `Has`
 
-in. Which secrets it holds (never their values).
+in. Which secrets it holds (never their values), if its roster knows: kept as it came, read by nothing here (a Yes asks for every kind).
 
 | field | type | | |
 | --- | --- | --- | --- |
@@ -564,15 +582,15 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agentRole` | `string` or `null` | optional | An agent fragment's role (its live `fragment.json`'s `meta.role`, trimmed; none when it says nothing), as its last install said: the tag the shell shows beside its name. Never any other fragment's. |
+| `agentRole` | `string` or `null` | optional | An agent fragment's role, as its face says it (trimmed; none when it says nothing): the tag the shell shows beside its name. Never any other fragment's. |
 | `agents` | `array` of `string` | optional | Its agent members, the first added (a chat's lead) first, at most `limits::LISTED_AGENTS_MAX`, as the fragment last said. |
 | `archived` | `boolean` | optional | The signer archived it: their own view, not the fragment's (the shell's sidebar leaves it out; search still finds it). |
 | `dock` | `boolean` | optional | On the signer's dock: their own choice, not the fragment's (`PUT /api/fragments/{name}/dock`), true until they take it off (the shell's dock shows apps and brains, less these and the archived). Left out while true, so a row from before the choice, or from an older platform, reads as on it. |
-| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, and its title, as its live `fragment.json` last said (an app with no title until it has). |
+| `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
 | `name` | `string` | required |  |
 | `owned` | `boolean` | optional | An agent's list `for` someone: whether that someone owns it (beside the role the agent acts with there), as no name says any more. |
-| `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at live (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
+| `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at main (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
 | `pinned` | `boolean` | optional | The signer pinned it: their own view, not the fragment's (`PUT /api/fragments/{name}/pinned`; the shell's sidebar shows it first in its section). Left out while false, so a row from an older platform reads as not pinned. |
 | `preview` | `string` or `null` | optional | A chat's newest message, its first line (at most `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it (none when it holds none: docs/api.md, Search). |
 | `previewAt` | `integer` or `null` | optional | With `preview`: when its message was said (ms), so a list can put its chats newest first. |
@@ -726,6 +744,7 @@ both. `manifest.json`, as the mover writes it beside the zip (last).
 | `left_more` | `integer` or `null` | optional | Paths left behind past the list, if any. |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) | required |  |
+| `simplex` | `boolean` | optional | It carries its owner's SimpleX chat (docs/migrations.md, "SimpleX in a stage"), which runs only on a computer that stays on: its person's comped `seat` is made always-on as it completes. |
 | `zip_bytes` | `integer` | required | The zip's size and SHA-256 (hex). |
 | `zip_sha256` | `string` | required |  |
 
@@ -743,6 +762,7 @@ out.
 | --- | --- | --- | --- |
 | `addedAt` | `integer` | required |  |
 | `addedBy` | `string` | required | Who granted it: the owner, or their agent for them (an invite's maker). |
+| `door` | `string` or `null` | optional | On a connector bound as an agent's door, that agent's row alone: the door it is (`telegram`), while it is open (docs/api.md, "An agent's doors"). Its records relaying that agent's owner come through it, so the agent's bridge and its pages take them as its owner's words (docs/chat-records.md). Add-only: absent from an older platform. |
 | `email` | `string` or `null` | optional | A person member's email, as the share sheet shows it (decision 48): in `GET members` to the owner and their agent for them, and in no other list (add-only: absent from an older platform). |
 | `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`. |
 | `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads. |
@@ -793,7 +813,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 | `detail` | `string` or `null` | optional | The platform's own words, small, for whoever helps (why a start failed, as it said it). |
 | `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
 | `image` | `string` or `null` | optional | A picture beside its words (an agent's): a platform path, read with the person's own credential. A client from before it shows none. |
-| `kind` | `string` | required | What it is about (`key_paused`), for tests and logs. No client reads it to decide what to draw. |
+| `kind` | `string` | required | What it is about (`spending`), for tests and logs. No client reads it to decide what to draw. |
 | `level` | [`NoticeLevel`](#noticelevel) | required |  |
 | `mustAnswer` | `boolean` | optional | It must be answered (FIN-458): a client shows it alone, over everything, until one of its actions goes through, and the read after no longer has it. The first such in the list first: its owner lists its own oldest first. A client from before it shows it as any other. |
 | `text` | `string` or `null` | optional | A sentence or two under it. |
@@ -840,11 +860,11 @@ out. One old agent of the person's, and where its move is.
 
 ### `OfferYes`
 
-in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a new agent of their own, which the move's stage is imported into.
+in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to an agent of their own, which the move's stage is imported into: a new one, or one they have already that no other move is bound to.
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agent` | `string` | required | The new agent: its identity's id or npub. |
+| `agent` | `string` | required | The agent: its identity's id or npub. |
 
 ### `Offers`
 
@@ -993,20 +1013,20 @@ in. `PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post there: a r
 
 ### `PutSecret`
 
-in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Its hosts, place and agents are set only with its value, so no one who cannot read a value sends it anywhere its setter did not mean. Its `Debug` shows the value, as the wire's checker needs: never print one.
+in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only its person sets one, so only they say where its value goes; set again with no value, it keeps the one it holds and goes where this says. Its `Debug` shows the value, as the wire's checker needs: never print one.
 
 | field | type | | |
 | --- | --- | --- | --- |
 | `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
 | `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
 | `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
-| `value` | `string` | required | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. |
+| `value` | `string` or `null` | optional | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. None, the value it holds is kept: a secret it does not hold yet, or one that would go from signing to filling or back, is refused (400). |
 
 ### `Reason`
 
 out, open. A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.
 
-Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `key_paused`.
+Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `trial_seat_of_one`.
 
 ### `Report`
 
@@ -1202,6 +1222,16 @@ out. The manifest as written, by its SHA-256 (hex): what the mover's `staged` re
 | --- | --- | --- | --- |
 | `manifest_sha256` | `string` | required |  |
 | `zip_bytes` | `integer` | required |  |
+
+### `StageCopied`
+
+out. `POST /api/migrations/stages/{stage}/copy?into=&offset=&bytes=`: one range of the stage's zip (a file's bytes, or a part of them) copied into a fragment's blobs on the platform, never through the agent's computer: the blob it is, by its bytes' SHA-256 (hex), their length, and their CRC-32, which the caller checks against the zip entry's own.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `crc32` | `integer` | required |  |
+| `sha256` | `string` | required |  |
 
 ### `StageDone`
 

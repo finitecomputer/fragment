@@ -17,9 +17,13 @@ WORKDIR /src
 COPY images/Cargo.toml images/Cargo.lock ./
 COPY images/bridge bridge
 COPY images/hermes/boot hermes/boot
+# the SimpleX door's runner, a member of the workspace (its manifest and an
+# empty source, for cargo to read; this image builds none of it)
+COPY images/simplex-door/Cargo.toml simplex-door/Cargo.toml
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    find bridge -type f -exec touch {} + \
+    mkdir -p simplex-door/src && echo 'fn main() {}' > simplex-door/src/main.rs \
+ && find bridge -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-bridge \
  && cp target/release/fragment-bridge /fragment-bridge \
  && cp target/release/fake-claude /fake-claude
@@ -47,9 +51,10 @@ COPY crates/templates/Cargo.toml crates/templates/Cargo.toml
 COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
 COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
 COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
+COPY crates/identity-door/Cargo.toml crates/identity-door/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
-    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+    for m in crates/core crates/nip98 crates/proto crates/templates crates/devstack crates/e2e crates/fakes crates/identity-door xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && mkdir -p cli/src && echo 'fn main() {}' > cli/src/main.rs && echo 'fn main() {}' > crates/templates/build.rs \
  && cargo build --release --locked -p fragment-cli
 COPY cli cli

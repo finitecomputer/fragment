@@ -635,6 +635,9 @@ input.check { position: relative; flex: none; width: 18px; height: 18px; margin:
 input.check::before { content: ""; position: absolute; left: 50%; top: 45%; width: 4px; height: 9px; border: solid var(--primary-foreground); border-width: 0 2px 2px 0; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; }
 input.check:checked { border-color: var(--primary); background: var(--primary); }
 input.check:checked::before { opacity: 1; }
+/* the same, one of a group: a dot in place of the tick */
+input.check[type="radio"] { border-radius: 50%; }
+input.check[type="radio"]::before { top: 50%; width: 8px; height: 8px; border: 0; border-radius: 50%; background: var(--primary-foreground); transform: translate(-50%, -50%); }
 input.check:hover:not(:disabled):not(:checked) { border-color: var(--text-tertiary); }
 input.check:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
 input.check:disabled { opacity: .55; cursor: default; }
@@ -642,14 +645,43 @@ input.check:disabled { opacity: .55; cursor: default; }
 @media (forced-colors: active) { input.check { appearance: auto; -webkit-appearance: auto; } input.check::before { display: none; } }
 /* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
 label.settings-line { cursor: pointer; }
-.settings-section input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
-.settings-section input.settings-switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
-.settings-section input.settings-switch:checked { background: var(--accent-blue); }
-.settings-section input.settings-switch:checked::before { transform: translateX(16px); }
-.settings-section input.settings-switch:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
-.settings-section input.settings-switch:disabled { opacity: .55; cursor: default; }
-@media (prefers-reduced-motion: reduce) { .settings-section input.settings-switch, .settings-section input.settings-switch::before { transition: none; } }
-@media (forced-colors: active) { .settings-section input.settings-switch { border: 1px solid CanvasText; } .settings-section input.settings-switch::before { background: CanvasText; } }
+/* Settings → Computer → Storage: a bar of what takes its disk, by kind,
+   the room left, its biggest files (computer.js, `storageBlock`) */
+.settings-section .settings-line.storage { flex-direction: column; align-items: stretch; gap: 10px; }
+.storage-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.storage-left, .storage-size { color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.storage-left.storage-low { color: var(--danger-text); font-weight: 600; }
+.storage-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--border-strong); }
+.storage-piece { height: 100%; min-width: 2px; background: var(--storage-color); }
+.storage-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: .875rem; }
+.storage-kind { display: inline-flex; align-items: center; gap: 6px; }
+.storage-kind::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--storage-color); }
+.storage-projects { --storage-color: var(--accent-blue); }
+.storage-downloads { --storage-color: #9b6bdf; }
+.storage-browser { --storage-color: #e08a2c; }
+.storage-agents { --storage-color: var(--success); }
+.storage-caches { --storage-color: var(--text-tertiary); }
+.storage-other { --storage-color: var(--border-strong); }
+.storage-files { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.storage-files-title, .storage-at { font-size: .8125rem; color: var(--text-tertiary); }
+.storage-file { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr) auto auto; gap: 10px; align-items: baseline; font-size: .875rem; }
+.storage-file-actions { display: inline-flex; gap: 6px; justify-self: end; }
+.storage-file-actions button { padding: 2px 10px; font-size: .8125rem; }
+.storage-file-actions .danger { border-color: transparent; background: var(--danger-text); color: var(--bg-window); }
+.storage-file-name, .storage-file-folder { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-file-folder { color: var(--text-tertiary); }
+@media (max-width: 600px) {
+  .storage-file { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 0; }
+  .storage-file-folder { grid-column: 1; grid-row: 2; font-size: .8125rem; }
+}
+:is(.settings-section, .skills-layout) input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
+:is(.settings-section, .skills-layout) input.settings-switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+:is(.settings-section, .skills-layout) input.settings-switch:checked { background: var(--accent-blue); }
+:is(.settings-section, .skills-layout) input.settings-switch:checked::before { transform: translateX(16px); }
+:is(.settings-section, .skills-layout) input.settings-switch:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+:is(.settings-section, .skills-layout) input.settings-switch:disabled { opacity: .55; cursor: default; }
+@media (prefers-reduced-motion: reduce) { :is(.settings-section, .skills-layout) input.settings-switch, :is(.settings-section, .skills-layout) input.settings-switch::before { transition: none; } }
+@media (forced-colors: active) { :is(.settings-section, .skills-layout) input.settings-switch { border: 1px solid CanvasText; } :is(.settings-section, .skills-layout) input.settings-switch::before { background: CanvasText; } }
 /* Your data's rows, drawn again as its export changes, are the section's own */
 .settings-export { display: contents; }
 .settings-export > p { margin: 0; padding: 12px 2px; }
@@ -917,6 +949,16 @@ label.settings-line { cursor: pointer; }
 .apps-layout { max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
 .apps-intro h1 { margin: 0 0 18px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
 .apps-list { display: flex; flex-direction: column; }
+/* its tabs by who owns it, and Shared with me's filters by access
+   (apps-page.js `accessView`): a segmented switch, then the History
+   page's chips */
+.apps-tabs { display: inline-flex; gap: 2px; margin: 0 0 12px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; }
+.apps-tab { height: 30px; padding: 0 14px; border: 0; border-radius: 7px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
+.apps-tab:hover { color: var(--text-primary); }
+.apps-tab[aria-selected="true"] { background: var(--bg-active); color: var(--text-primary); }
+.apps-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.apps-filter-count { margin-left: 6px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.apps-tabs[hidden], .apps-filters[hidden] { display: none; }
 .apps-empty { margin: 8px 2px; font-size: 14px; }
 .app-row { display: flex; flex-direction: column; gap: 12px; padding: 24px 2px; border-bottom: 1px solid var(--border); }
 .apps-list > .app-row:last-child { border-bottom: 0; }
@@ -940,10 +982,23 @@ label.settings-line { cursor: pointer; }
 .app-row-url:hover { text-decoration: underline; }
 .app-row-art { border: 0; padding: 0; background: none; }
 .app-preview-open { border: 0; padding: 0; background: none; flex: none; }
-.app-row-tools { display: flex; gap: 20px; padding-left: 54px; }
+.app-row-tools { display: flex; flex-wrap: wrap; gap: 8px 20px; padding-left: 54px; }
 .app-row-tools .quiet { border: 0; border-radius: 0; padding: 0 0 3px; background: none; color: var(--text-secondary); font-size: 12px; }
 .app-row-tools .quiet:hover, .app-row-tools .quiet[aria-expanded=true] { color: var(--text-primary); }
 .app-row-tools .quiet[aria-expanded=true] { box-shadow: 0 1px var(--text-secondary); }
+.app-row-tools .quiet:disabled { opacity: .6; cursor: default; }
+/* Archive and Delete, apart from the tabs at the row's end */
+.app-row-ends { display: flex; gap: 20px; margin-left: auto; }
+/* Delete's confirm (apps-page.js): what goes, and the name typed back */
+.app-delete { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 0 54px; padding: 16px 20px; background: var(--bg-window); border: 1px solid color-mix(in srgb, var(--danger-text) 45%, transparent); border-radius: 10px; }
+.app-delete p { margin: 0; font-size: 13px; }
+.app-delete .app-delete-title { font-size: 14px; font-weight: 600; }
+.app-delete-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: 13px; }
+.app-delete-field code { color: var(--text-primary); font: 500 12.5px/1.4 "JetBrains Mono", monospace; overflow-wrap: anywhere; }
+.app-delete-field input { min-width: 0; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-card); color: var(--text-primary); font: 500 13px/1.4 "JetBrains Mono", monospace; }
+.app-delete-actions { display: flex; gap: 8px; }
+.app-delete-actions .danger { border-color: transparent; background: var(--danger-text); color: var(--bg-window); }
+.app-delete-actions button:disabled { opacity: .45; cursor: default; }
 .app-row-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 2px 0 0 54px; padding: 20px; background: var(--bg-window); border: 1px solid var(--border); border-radius: 10px; }
 .app-row-panel[data-share-editor], .app-row-panel[data-address-editor] { display: block; }
 .app-row-panel h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; }
@@ -1012,6 +1067,10 @@ label.settings-line { cursor: pointer; }
 .move-copy strong { display: block; margin-bottom: 2px; color: var(--text-primary); font-size: 15px; }
 .move-copy p { margin: 0; }
 .move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 14px; }
+/* into what: a new one, or an agent they have already (move-page.js `question`) */
+.move-into { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.move-into p { color: var(--text-secondary); }
+.move-into .move-pick { margin-top: 0; }
 .move-row > button { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/28px var(--font-sans); }
 .move-layout .form-error { margin: 0 0 12px; }
 @media (max-width: 640px) { .move-layout { padding: 18px 16px 60px; } }
@@ -1028,9 +1087,9 @@ label.settings-line { cursor: pointer; }
 .history-search input:focus-visible { outline: none; }
 .history-search input::placeholder { color: var(--text-tertiary); opacity: 1; }
 .history-filters { display: flex; gap: 6px; margin: 12px 0 8px; }
-.history-filter { height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
-.history-filter:hover { background: var(--bg-hover); }
-.history-filter[aria-pressed="true"] { border-color: transparent; background: var(--bg-active); color: var(--text-primary); }
+.history-filter, .apps-filter { height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
+.history-filter:hover, .apps-filter:hover { background: var(--bg-hover); }
+.history-filter[aria-pressed="true"], .apps-filter[aria-pressed="true"] { border-color: transparent; background: var(--bg-active); color: var(--text-primary); }
 .history-status { margin: 4px 2px 8px; color: var(--text-tertiary); font-size: 13px; }
 .history-list { display: flex; flex-direction: column; }
 .history-empty { margin: 16px 2px; font-size: 14px; }
@@ -1074,10 +1133,59 @@ label.settings-line { cursor: pointer; }
 .schedules-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .schedules-fragment { flex: none; max-width: 45%; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .schedules-said + .schedules-fragment::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
+/* the Skills page (skills-page.js): Schedules' layout; its tabs, search and
+   category over a list of rows, each a skill's words beside its switch */
+.skills-layout { display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
+.skills-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.skills-files { cursor: pointer; }
+.skills-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.skills-lede { margin: 0 0 22px; max-width: 560px; color: var(--text-secondary); font: var(--type-body-lg); }
+.skills-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+.skills-tabs { display: inline-flex; flex: none; padding: 3px; border-radius: 999px; background: var(--surface-subtle); }
+.skills-tab { height: 30px; padding: 0 14px; border: 0; border-radius: 999px; background: none; color: var(--text-secondary); font: var(--type-control); cursor: pointer; }
+.skills-tab[aria-selected="true"] { background: var(--bg-active); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+.skills-tab:focus-visible, .skills-main:focus-visible, .skills-row-managed:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.skills-search { flex: 1 1 220px; min-width: 0; height: 36px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: var(--type-field); }
+.skills-search:focus-visible { outline: none; border-color: var(--text-tertiary); }
+.skills-category { flex: none; height: 36px; max-width: 100%; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font: var(--type-control); }
+.skills-status { margin: 8px 2px 0; color: var(--text-secondary); font: var(--type-body-sm); }
+.skills-list { display: flex; flex-direction: column; }
+.skills-heading { display: flex; align-items: baseline; gap: 8px; margin: 24px 10px 6px; color: var(--text-secondary); font: var(--type-label); letter-spacing: .04em; text-transform: uppercase; }
+.skills-count { color: var(--text-tertiary); font-weight: 500; }
+.skills-item { border-radius: 12px; }
+.skills-item:has(.skills-details, .skills-ask) { background: var(--surface-subtle); }
+.skills-row { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 4px 12px 4px 0; border-radius: 12px; }
+.skills-row:hover { background: var(--bg-hover); }
+.skills-main, .skills-row-managed { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; padding: 8px 0 8px 10px; border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px; width: 100%; padding-right: 12px; }
+.skills-row-managed .skills-main { padding: 0; cursor: inherit; }
+.skills-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.skills-name { color: var(--text-primary); font: var(--type-body-strong); }
+.skills-desc { overflow: hidden; color: var(--text-tertiary); font: var(--type-body-sm); text-overflow: ellipsis; white-space: nowrap; }
+.skills-chip { flex: none; padding: 0 8px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font: var(--type-caption); line-height: 18px; }
+.skills-chip-spends, .skills-chip-care { background: color-mix(in srgb, var(--danger-text) 16%, transparent); color: var(--danger-text); }
+.skills-always { flex: none; color: var(--text-tertiary); font: var(--type-caption); }
+.skills-details, .skills-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 2px 12px 14px 10px; }
+.skills-ask p { flex: 1 1 260px; margin: 0; color: var(--text-primary); font: var(--type-body-sm); }
+.skills-ask-actions { display: flex; gap: 8px; }
+.skills-ask .primary { height: 32px; padding: 0 16px; font: var(--type-control); cursor: pointer; }
+.skills-ask .quiet { height: 32px; cursor: pointer; }
+.skills-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 0; color: var(--text-tertiary); font: var(--type-body-sm); }
+.skills-facts code { color: var(--text-secondary); font: var(--type-mono-sm); }
+.skills-read { color: var(--accent-blue); font: var(--type-body-sm); text-decoration: none; }
+.skills-read:hover { text-decoration: underline; }
+.skills-read::after { content: " ↗"; }
+.skills-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 6px 10px 4px; }
+.skills-empty p, .skills-loading { margin: 6px 0; font: var(--type-body); }
+.skills-loading { margin: 18px 10px; }
+.skills-empty .quiet { cursor: pointer; }
+.skills-note { margin: 32px 10px 0; color: var(--text-tertiary); font: var(--type-body-sm); }
 @container settings (max-width: 620px) {
   .apps-layout { padding: 18px 16px 60px; }
   .history-layout { padding: 18px 16px 60px; }
   .schedules-layout { padding: 18px 16px 60px; }
+  .skills-layout { padding: 18px 16px 60px; }
+  .skills-desc { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   /* its schedule in words over its fragment, each whole */
   .schedules-sub { flex-direction: column; align-items: flex-start; gap: 0; }
   .schedules-said, .schedules-fragment { max-width: 100%; white-space: normal; }
@@ -1092,6 +1200,7 @@ label.settings-line { cursor: pointer; }
   .app-row-card { width: 72px; height: 45px; }
   .app-row-controls, .app-row-said, .app-row-progress { padding-left: 0; }
   .app-row-panel { margin-left: 0; padding: 16px; gap: 20px; }
+  .app-delete { margin-left: 0; padding: 16px; }
   .app-row-tools { padding-left: 54px; }
 }
 @container settings (max-width: 420px) {

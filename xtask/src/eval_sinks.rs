@@ -52,8 +52,8 @@
 //! another (`(async () => {}).constructor`); a `Worker` or `importScripts` of
 //! a `blob:` URL; a `<script>` or an event handler a page makes
 //! (html_sinks.rs refuses those); and what this repo does not write: Hermes'
-//! own browser tools drive a browser on a computer (images/hermes/Dockerfile
-//! installs the agent-browser they run), as Hermes' code.
+//! own browser tool (browser_exec) drives a browser on a computer, as
+//! Hermes' code.
 //!
 //! An exception is a place that must run a string as script: `ALLOWED`, each
 //! with why, empty today. Like html_sinks' list, an entry that no longer
@@ -66,7 +66,7 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 /// Where runtime code is: what ships or runs for people.
-pub const RUNTIME: [(&str, &str); 9] = [
+pub const RUNTIME: [(&str, &str); 10] = [
     ("ios/", "the native iOS client (its Tests and UITests are tests)"),
     ("cell/", "the Worker: its Rust, entry.mjs and the platform's JavaScript, and the shell"),
     ("templates/", "the templates' apps, sites and skills, which fragments and computers run"),
@@ -76,6 +76,7 @@ pub const RUNTIME: [(&str, &str); 9] = [
     ("crates/proto/", "the wire types"),
     ("crates/templates/", "the release's files, embedded in the cell and the CLI"),
     ("crates/nip98/", "NIP-98 signatures, the cell's and the CLI's"),
+    ("crates/identity-door/", "the identity door: a self-hosted box's sign-in service"),
 ];
 
 /// The repo's other directories, each with why its code is not runtime code.
@@ -1104,7 +1105,7 @@ mod tests {
         let files = sources(&root).expect("the repo's runtime code");
         for path in [
             CARDS,
-            "crates/core/src/card.rs",
+            "crates/core/src/card/heard.rs",
             "cell/entry.mjs",
             "cell/shell/shell.js",
             "cell/src/share.rs",
