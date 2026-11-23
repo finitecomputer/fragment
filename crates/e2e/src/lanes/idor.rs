@@ -2,18 +2,26 @@
 //! lab's broken-access-control check; docs/security/access-control.md).
 //!
 //! One members-only fragment, its owner, a viewer, an editor, and a
-//! stranger (a signed-in person who is none of them): every route of a
-//! fragment is asked as each, and each is refused where its role is below
-//! the route's (`ROUTES`, the inventory's table). A refusal comes before
-//! anything is read or written, so a read refused answers 401 or 403 and
-//! never the thing, and a write refused leaves the fragment as it was.
-//! Writes are asked only of those refused, so the fragment stays the same
-//! fragment for every check. Then the routes keyed by a person rather than a
-//! fragment: another's invite, own-list view, search across, and export,
-//! each named by its id by someone it is not theirs.
+//! stranger (a signed-in person who is none of them). The owner first
+//! makes what the routes name: a file, a blob, a subscription. Every route
+//! in `routes` is then asked as each: below the route's role the answer is
+//! 403 exactly (never the thing), and at or above it a read answers what
+//! the owner's own read answers, which is a success except where the table
+//! says the fixture has none (no card, icon, run or app code: the owner's
+//! 404 too). Writes are asked only of those they refuse, so the fragment
+//! stays the same fragment, and the owner's view of it after is the view
+//! before. Then the routes keyed by a person rather than a fragment:
+//! another's invite, subscription and own-list view, and search across.
 //!
-//! `idor` runs on the local node with levers (a member is added by the
-//! test lever, as `members` adds one).
+//! What this section does not ask, and where it is asked: an operation's
+//! call and a channel post need app code and declared channels (the `ops`
+//! and `posts` sections); another person's export, ready, is the `export`
+//! section's; another's computer, one that exists, is the `computers`
+//! section's.
+//!
+//! `idor` runs on the local node with levers and fakes (a member is added
+//! by the test lever, as `members` adds one; a subscription's URL is the
+//! push fake's).
 
 use anyhow::Result;
 use fragment_nip98::Keys;
@@ -48,26 +56,46 @@ impl Asker {
     }
 }
 
-/// One route of a fragment: method, path below `/api/f/{name}/`, body.
+/// One route of a fragment: method, path below `/api/f/{name}/`, body
+/// (raw bytes for a blob), and whether the owner's read of it, on this
+/// fixture, finds nothing (`absent`: their 404 too).
 struct Route {
     method: &'static str,
     path: String,
     body: Option<Value>,
+    raw: Option<Vec<u8>>,
     needs: Needs,
+    absent: bool,
 }
 
-/// A 64-hex hash no blob of the fragment's has.
-const NO_BLOB: &str = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
-
 fn r(method: &'static str, path: impl Into<String>, body: Option<Value>, needs: Needs) -> Route {
-    Route { method, path: path.into(), body, needs }
+    Route { method, path: path.into(), body, raw: None, needs, absent: false }
+}
+
+/// A read the owner's fixture has nothing for: the owner's answer is 404.
+fn none_yet(path: &str, needs: Needs) -> Route {
+    Route { absent: true, ..r("GET", path, None, needs) }
+}
+
+/// What the owner made before anyone else asks.
+struct Made {
+    file: String,
+    blob: String,
+    /// Bytes another blob upload sends, and their hash.
+    other: (Vec<u8>, String),
+    victim: String,
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// The fragment routes a member's role gates (cell/src/fragment.rs `route`),
-/// each with a body that reads, so a refusal is the role's and not the
-/// body's. `/api/f/{name}/subscriptions` lists the caller's own (none for a
-/// stranger) and is checked apart; the inbox takes its token, not a role.
-fn routes() -> Vec<Route> {
+/// each with a body that parses, so a refusal is the role's and not the
+/// body's. Subscriptions list and remove the caller's own, and are asked
+/// apart (`by_person`); the inbox takes its token, not a role.
+fn routes(m: &Made) -> Vec<Route> {
     use Needs::*;
     vec![
         r("GET", "status", None, Viewer),
@@ -76,25 +104,27 @@ fn routes() -> Vec<Route> {
         r("GET", "members", None, Viewer),
         r("GET", "storage-token?access=read", None, Viewer),
         r("GET", "files", None, Viewer),
-        r("GET", "file?path=site/index.html", None, Viewer),
-        r("GET", "card", None, Viewer),
-        r("GET", "icon", None, Viewer),
+        r("GET", format!("file?path={}", m.file), None, Viewer),
+        none_yet("card", Viewer),
+        none_yet("icon", Viewer),
         r("GET", "events", None, Viewer),
         r("GET", "channels", None, Viewer),
         r("GET", "channels/events", None, Viewer),
         r("GET", "channels/events/newest", None, Viewer),
         r("GET", "runs", None, Viewer),
-        r("GET", "runs/1", None, Viewer),
+        none_yet("runs/1", Viewer),
         r("GET", "triggers", None, Viewer),
         r("GET", "schedules", None, Viewer),
         r("GET", "search/status", None, Viewer),
-        r("GET", format!("blobs/{NO_BLOB}"), None, Viewer),
+        r("GET", format!("blobs/{}", m.blob), None, Viewer),
         r("GET", "secrets", None, Editor),
         r("GET", "search/sources", None, Editor),
-        r("GET", "storage-token?access=write", None, Editor),
+        // no `access` is a token that writes too (`StorageAccess::parse`)
+        r("GET", "storage-token", None, Editor),
         r("PUT", "secrets/IDOR_KEY", Some(json!("not yours")), Editor),
         r("DELETE", "secrets/IDOR_KEY", None, Editor),
-        r("POST", "files", Some(json!({ "files": [{ "path": "site/idor.txt", "content": "not yours" }] })), Editor),
+        r("POST", "files", Some(json!({ "files": [{ "path": "site/idor.txt", "text": "not yours\n" }] })), Editor),
+        Route { raw: Some(m.other.0.clone()), ..r("PUT", format!("blobs/{}", m.other.1), None, Editor) },
         r("POST", "deploy", Some(json!({})), Editor),
         r("POST", "refresh", Some(json!({})), Editor),
         r("POST", "card", None, Editor),
@@ -106,10 +136,13 @@ fn routes() -> Vec<Route> {
         r("DELETE", "schedules/1", None, Editor),
         r("GET", "invites", None, Owner),
         r("GET", "door", None, Owner),
-        r("GET", "database", None, Owner),
+        none_yet("database", Owner),
         r("PUT", "visibility", Some(json!({ "visibility": "public" })), Owner),
         r("POST", "invites", Some(json!({ "email": "idor@e2e.test", "role": "editor" })), Owner),
         r("POST", "rotate", Some(json!({})), Owner),
+        // membership changes: someone added, a role raised, a member removed
+        r("PUT", format!("members/{}", m.victim), Some(json!({ "role": "editor" })), Owner),
+        r("DELETE", format!("members/{}", m.victim), None, Owner),
         r("DELETE", "", None, Owner),
     ]
 }
@@ -122,7 +155,8 @@ fn path(name: &str, route: &str) -> String {
 }
 
 /// What the owner sees of the fragment that a refused write would change:
-/// its members, invites, visibility, files, secrets, schedules and pins.
+/// its members, invites, visibility, files, secrets, schedules,
+/// subscriptions and pins.
 fn state(api: &Api, owner: &Keys, name: &str) -> Result<Value> {
     let read = |route: &str| api.signed(owner, "GET", &path(name, route), None).map(|r| r.body);
     let status = read("status")?;
@@ -135,22 +169,39 @@ fn state(api: &Api, owner: &Keys, name: &str) -> Result<Value> {
         "files": read("files")?,
         "secrets": read("secrets")?,
         "schedules": read("schedules")?,
+        "subscriptions": read("subscriptions")?,
     }))
 }
 
 pub fn idor(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("idor", &[crate::Need::Levers]) {
+    if !s.section("idor", &[crate::Need::Levers, crate::Need::Fakes]) {
         return Ok(());
     }
     let (owner, viewer, editor, stranger) = (api.person()?, api.person()?, api.person()?, api.person()?);
+    // a member whom the membership routes name: no asker is them, so no
+    // asker's request is their own leaving
+    let victim = api.person()?;
     let name = s.named(api, &owner, "idor")?;
     s.create(api, &owner, &name)?;
     let r = api.signed(&owner, "PUT", &path(&name, "visibility"), Some(&json!({ "visibility": "members" })))?;
     anyhow::ensure!(r.status == 200, "members only: {r}");
-    for (who, role) in [(&viewer, "viewer"), (&editor, "editor")] {
+    for (who, role) in [(&viewer, "viewer"), (&editor, "editor"), (&victim, "viewer")] {
         let r = api.share(&name, who.pubkey_hex(), role)?;
         anyhow::ensure!(r.status == 200, "a {role} added: {r}");
     }
+    let made = victims(api, &owner, &name, &victim, &format!("{}/notify", s.push.url))?;
+    let routes = routes(&made);
+    // the owner reads each read first: what an allowed asker must get too
+    let mut owners = std::collections::BTreeMap::new();
+    let mut unread = vec![];
+    for route in routes.iter().filter(|r| r.method == "GET") {
+        let reply = api.signed(&owner, "GET", &path(&name, &route.path), None)?;
+        if reply.status != if route.absent { 404 } else { 200 } {
+            unread.push(format!("GET {} → {reply}", route.path));
+        }
+        owners.insert(route.path.clone(), reply.status);
+    }
+    s.ok("the owner reads every route the table asks (200), and finds nothing where the fixture has none (404)", unread.is_empty(), unread.join("\n"));
     let before = state(api, &owner, &name)?;
     for asker in [Asker::Stranger, Asker::Viewer, Asker::Editor] {
         let keys = match asker {
@@ -158,38 +209,69 @@ pub fn idor(s: &mut Suite, api: &Api) -> Result<()> {
             Asker::Viewer => &viewer,
             Asker::Editor => &editor,
         };
-        fragment_routes(s, api, keys, asker, &name)?;
+        fragment_routes(s, api, keys, asker, &name, &routes, &owners)?;
     }
     let after = state(api, &owner, &name)?;
-    s.ok("every write refused left the fragment as it was: its members, invites, visibility, share link, files, secrets, schedules and pins", before == after, json!({ "before": before, "after": after }));
-    let r = api.signed(&stranger, "GET", &path(&name, "subscriptions"), None)?;
-    s.ok("a stranger's subscriptions list is their own: none here", r.status == 200 && r.body["subscriptions"].as_array().is_some_and(Vec::is_empty), &r);
+    s.ok("every write refused left the fragment as it was: its members, invites, visibility, share link, files, secrets, schedules, subscriptions and pins", before == after, json!({ "before": before, "after": after }));
     let r = api.signed(&stranger, "GET", &path(&name, "status?view=x"), None)?;
     s.ok("a `view` on an API route lends nothing: the share link counts on the fragment's own site alone", r.status == 403, &r);
     let r = api.unsigned("GET", &path(&name, "status"), None)?;
     s.ok("unsigned, a members-only fragment's status is 401", r.status == 401, &r);
-    by_person(s, api, &owner, &stranger, &name)
+    by_person(s, api, &owner, &viewer, &stranger, &name)
 }
 
-/// Each route as `keys` (`asker`): refused (403) below the route's role,
-/// answered (not 401 or 403) at or above it, where reads alone are asked:
-/// a read allowed may still find nothing (no card yet: 404), which says
-/// nothing of who may ask.
-fn fragment_routes(s: &mut Suite, api: &Api, keys: &Keys, asker: Asker, name: &str) -> Result<()> {
+/// What the owner makes for the routes to name: a file on main, a blob,
+/// a subscription of theirs (to `hook`, the push fake), and the member a
+/// membership change names (`victim`).
+fn victims(api: &Api, owner: &Keys, name: &str, victim: &Keys, hook: &str) -> Result<Made> {
+    let file = "site/owners.txt".to_string();
+    let r = api.signed(owner, "POST", &path(name, "files"), Some(&json!({ "files": [{ "path": file, "text": "the owner's\n" }] })))?;
+    anyhow::ensure!(r.status == 200, "the owner's file: {r}");
+    let bytes = b"the owner's blob".to_vec();
+    let blob = sha256(&bytes);
+    let r = api.call(crate::api::Call {
+        method: "PUT",
+        url: format!("{}{}", api.base, path(name, &format!("blobs/{blob}"))),
+        body: Some(bytes),
+        content_type: Some("application/octet-stream"),
+        keys: Some(owner),
+        ..crate::api::Call::default()
+    })?;
+    anyhow::ensure!(r.status == 200, "the owner's blob: {r}");
+    let r = api.signed(owner, "POST", &path(name, "subscriptions"), Some(&json!({ "channel": "events", "url": hook })))?;
+    anyhow::ensure!(r.status == 200, "the owner's subscription: {r}");
+    let other = b"someone else's blob".to_vec();
+    let other_sha = sha256(&other);
+    Ok(Made { file, blob, other: (other, other_sha), victim: victim.pubkey_hex().to_string() })
+}
+
+/// Each route as `keys` (`asker`): refused (403, exactly) below the
+/// route's role; at or above it, a read answers what the owner's answered
+/// (`owners`). Writes are asked only of those they refuse.
+fn fragment_routes(s: &mut Suite, api: &Api, keys: &Keys, asker: Asker, name: &str, routes: &[Route], owners: &std::collections::BTreeMap<String, u16>) -> Result<()> {
     let mut wrong: Vec<String> = vec![];
     let mut asked = 0;
-    for route in routes() {
+    for route in routes {
         let allowed = asker.may(route.needs);
         // a write is asked only of those it refuses: it would change the fragment
         if allowed && route.method != "GET" {
             continue;
         }
         asked += 1;
-        let reply: Reply = api.signed(keys, route.method, &path(name, &route.path), route.body.as_ref())?;
-        let refused = matches!(reply.status, 401 | 403);
+        let reply: Reply = match &route.raw {
+            Some(bytes) => api.call(crate::api::Call {
+                method: route.method,
+                url: format!("{}{}", api.base, path(name, &route.path)),
+                body: Some(bytes.clone()),
+                content_type: Some("application/octet-stream"),
+                keys: Some(keys),
+                ..crate::api::Call::default()
+            })?,
+            None => api.signed(keys, route.method, &path(name, &route.path), route.body.as_ref())?,
+        };
         let fine = match allowed {
             false => reply.status == 403,
-            true => !refused,
+            true => owners.get(&route.path) == Some(&reply.status),
         };
         if !fine {
             wrong.push(format!("{} {} → {}", route.method, route.path, reply));
@@ -197,49 +279,52 @@ fn fragment_routes(s: &mut Suite, api: &Api, keys: &Keys, asker: Asker, name: &s
     }
     let who = match asker {
         Asker::Stranger => "a stranger (signed in, no member) is refused every route of a members-only fragment (403), reads and writes",
-        Asker::Viewer => "a viewer reads what a viewer may and is refused (403) every editor's and owner's route",
-        Asker::Editor => "an editor reads what it may and is refused (403) every owner's route",
+        Asker::Viewer => "a viewer reads what a viewer may, as the owner does, and is refused (403) every editor's and owner's route",
+        Asker::Editor => "an editor reads what it may, as the owner does, and is refused (403) every owner's route",
     };
     s.ok(&format!("{who} ({asked} routes)"), wrong.is_empty(), wrong.join("\n"));
     Ok(())
 }
 
 /// Routes keyed by a person or by an id that is someone else's.
-fn by_person(s: &mut Suite, api: &Api, owner: &Keys, stranger: &Keys, name: &str) -> Result<()> {
+fn by_person(s: &mut Suite, api: &Api, owner: &Keys, viewer: &Keys, stranger: &Keys, name: &str) -> Result<()> {
     // an invite to someone else's email: not the stranger's to answer
     let r = api.signed(owner, "POST", &path(name, "invites"), Some(&json!({ "email": "invited-idor@e2e.test", "role": "viewer" })))?;
     anyhow::ensure!(r.status == 200, "an invite: {r}");
     let yes = api.signed(stranger, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
     let role = api.signed(stranger, "GET", &path(name, "status"), None)?;
     s.ok("an invite to another's email is no one else's to accept (404), and makes them nothing", yes.status == 404 && role.status == 403, format!("{yes} {role}"));
-    // an own-list view names the asker's list alone
-    let archived = api.signed(stranger, "PUT", &format!("/api/fragments/{name}/archived"), Some(&json!({ "archived": true })))?;
-    let theirs = api.signed(owner, "GET", "/api/fragments", None)?;
-    let still = theirs.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).map(|f| f["archived"].clone());
+    // the owner's subscription: no one else lists or removes it. The list
+    // and removal are scoped by the signer (theirs, or every one for the
+    // owner: subscriptions.rs), so anyone signed is answered, with none
+    // of the owner's
+    let theirs = api.signed(owner, "GET", &path(name, "subscriptions"), None)?;
+    let id = theirs.body["subscriptions"].as_array().and_then(|a| a.first()).and_then(|s| s["id"].as_i64());
+    anyhow::ensure!(theirs.status == 200 && id.is_some(), "the owner lists their subscription: {theirs}");
+    let id = id.unwrap_or_default();
+    let listed = |keys: &Keys| api.signed(keys, "GET", &path(name, "subscriptions"), None);
+    let (stranger_list, viewer_list) = (listed(stranger)?, listed(viewer)?);
+    let none = |r: &Reply| r.status == 200 && r.body["subscriptions"].as_array().is_some_and(Vec::is_empty);
+    s.ok("the owner's subscription is in no one else's list: a stranger's and a viewer's hold none", none(&stranger_list) && none(&viewer_list), format!("{stranger_list} {viewer_list}"));
+    let gone_stranger = api.signed(stranger, "DELETE", &path(name, &format!("subscriptions/{id}")), None)?;
+    let gone_viewer = api.signed(viewer, "DELETE", &path(name, &format!("subscriptions/{id}")), None)?;
+    let still = api.signed(owner, "GET", &path(name, "subscriptions"), None)?;
+    let kept = still.body["subscriptions"].as_array().is_some_and(|a| a.iter().any(|s| s["id"].as_i64() == Some(id)));
     s.ok(
-        "archiving someone else's fragment changes nothing of theirs: their list is as it was",
-        archived.status != 200 || still.as_ref().is_some_and(|a| a.is_null() || *a == json!(false)),
-        format!("{archived} {still:?}"),
+        "the owner's subscription, named by its id, is no one else's to remove: a stranger and a viewer remove nothing, and it is still the owner's",
+        [&gone_stranger, &gone_viewer].iter().all(|r| r.status == 200 && r.body["removed"] == 0) && kept,
+        format!("{gone_stranger} {gone_viewer} {still}"),
     );
+    // an own-list view names the asker's list alone
+    let before = api.signed(owner, "GET", "/api/fragments", None)?;
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).map(|f| f["archived"].as_bool().unwrap_or(false));
+    anyhow::ensure!(row(&before) == Some(false), "the owner's list holds the fragment, not archived: {before}");
+    let archived = api.signed(stranger, "PUT", &format!("/api/fragments/{name}/archived"), Some(&json!({ "archived": true })))?;
+    let after = api.signed(owner, "GET", "/api/fragments", None)?;
+    s.ok("archiving someone else's fragment changes nothing of theirs: the owner's row is still there, not archived", row(&after) == Some(false), format!("{archived} {after}"));
     // a search across names fragments: one not theirs is denied, its words never answered
-    let r = api.signed(stranger, "POST", "/api/search", Some(&json!({ "q": "anything", "in": [name], "mode": "lexical" })))?;
+    let r = api.signed(stranger, "POST", "/api/search", Some(&json!({ "q": "owner", "in": [name], "mode": "lexical" })))?;
     let denied = r.body["fragments"].as_array().and_then(|a| a.first()).is_some_and(|f| f["state"] == "denied");
     s.ok("a search across someone else's fragment is denied for it, with no results", r.status == 200 && denied && r.body["results"].as_array().is_some_and(Vec::is_empty), &r);
-    // an export is its person's: another's id is none of theirs
-    let pressed = api.signed(owner, "POST", "/api/export", None)?;
-    match pressed.body["id"].as_str().filter(|id| fragment_proto::export::valid_export_id(id)) {
-        Some(id) => {
-            let r = api.signed(stranger, "GET", &format!("/api/export/{id}/download"), None)?;
-            s.ok("another person's export, named by its id, is not found (404)", r.status == 404, &r);
-        }
-        None => s.skip("another person's export, named by its id, is not found (404)", &format!("no export was started here: {pressed}")),
-    }
-    // a computer is found by its owner's identity; another's id is no one's
-    let theirs = fragment_core::computer::default_computer_of(&api.identity(owner)?);
-    for (method, route) in [("GET", ""), ("POST", "/wake"), ("POST", "/sleep"), ("PUT", "/image")] {
-        let body = (method != "GET").then(|| json!({ "image": "stub" }));
-        let r = api.signed(stranger, method, &format!("/api/computers/{theirs}{route}"), body.as_ref())?;
-        s.ok(&format!("{method} someone else's computer{route} is not found (404), as one never made"), r.status == 404, &r);
-    }
     Ok(())
 }

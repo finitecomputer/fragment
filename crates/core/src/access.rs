@@ -680,24 +680,30 @@ mod tests {
         assert_eq!((first, again), (None, None));
     }
 
-    /// Goal: nobody reaches a fragment by naming it (FIN-584, the CASA
-    /// lab's IDOR check; docs/security/access-control.md). Method: every
-    /// standing a request can bring (member or not at each role, the share
-    /// link or not, signed or not, an agent of theirs in it or not, an
-    /// agent acting for them with each cap and hold), on every visibility,
-    /// for reading and acting, against every role a route may need. Who is
-    /// no member is never given more than the visibility's floor (nothing
-    /// on `members`; a viewer's reading with the link on `link`; `public`,
-    /// or viewer with the link, on `public`), and never acts through an
-    /// agent's membership; nobody is given more than their own role, nor an
-    /// agent more than editor or its hold; and a refusal is 401 only to
-    /// someone unsigned.
+    /// Goal: nobody reaches a fragment by naming it, and everyone reaches
+    /// what their standing gives (FIN-584, the CASA lab's IDOR check;
+    /// docs/security/access-control.md). Method: every standing a request
+    /// can bring (member or not at each role, the share link or not,
+    /// signed or not, an agent of theirs in it or not, an agent acting for
+    /// them with each cap and hold), on every visibility, for reading and
+    /// acting, against every role a route may need, compared with a model
+    /// of the rule written from its prose: who is no member has the
+    /// visibility's floor (nothing on `members`; a viewer with the link on
+    /// `link`; `public`, or viewer with the link, on `public`), and a
+    /// person whose agent is in reads, never acts, as a viewer; an agent
+    /// acting for someone holds the lower of their role and its cap (its
+    /// own membership or the floor, or its owner's membership, the higher,
+    /// never above editor), and at most its hold. Each request is allowed
+    /// exactly when the model's role reaches its need, at that role; a
+    /// refusal is 401 only to someone unsigned. So a rule that grants more
+    /// (an agent its owner's editor role past an empty or viewer cap) and
+    /// one that grants less (refusing everyone) both fail here.
     #[test]
     fn no_one_reaches_more_than_their_own_standing_gives() {
         let roles = [None, Some(Public), Some(Viewer), Some(Editor), Some(Owner)];
         let members = [None, Some(Viewer), Some(Editor), Some(Owner)];
         let caps = std::iter::once(None).chain(members.iter().flat_map(|a| members.iter().map(move |o| Some(Cap { agent: *a, owner: *o }))));
-        let mut asked = 0;
+        let (mut asked, mut allowed) = (0, 0);
         for cap in caps.collect::<Vec<_>>() {
             for member in members {
                 for held in [None, Some(Viewer), Some(Editor)] {
@@ -711,22 +717,26 @@ mod tests {
                                     (V::Public, false) => Some(Public),
                                 };
                                 let through_agent = (owns_member_agent && purpose == Purpose::Read).then_some(Viewer);
-                                let most = member.or(floor.max(through_agent)).max(floor);
-                                let most = match cap {
-                                    // an agent acting: at most editor, and its hold
-                                    Some(_) => most.map(|r| r.min(AGENT_ROLE_MAX)).map(|r| held.map_or(r, |h| r.min(h))),
-                                    None => most,
+                                let own = member.or(floor.max(through_agent));
+                                let expected = match cap {
+                                    None => own,
+                                    Some(cap) => {
+                                        let lent = cap.agent.or(floor).max(cap.owner).map(|r| r.min(AGENT_ROLE_MAX));
+                                        own.min(lent).map(|r| held.map_or(r, |h| r.min(h)))
+                                    }
                                 };
                                 for needs in roles.into_iter().flatten() {
                                     asked += 1;
                                     let at = format!("{standing:?} {visibility:?} {purpose:?} needs {needs:?}");
-                                    match decide(visibility, standing, purpose, needs) {
-                                        Decision::Allow(role) => {
-                                            assert!(role >= needs, "allowed below its need: {at}");
-                                            assert!(Some(role) <= most, "allowed {role:?}, more than {most:?}: {at}");
+                                    match (decide(visibility, standing, purpose, needs), expected) {
+                                        (Decision::Allow(role), Some(e)) if e >= needs => {
+                                            assert_eq!(role, e, "allowed at another role than its standing gives: {at}");
+                                            allowed += 1;
                                         }
-                                        Decision::Unauthenticated => assert!(!signed, "401 to a signer: {at}"),
-                                        Decision::Forbidden => assert!(signed, "403 to the unsigned: {at}"),
+                                        (Decision::Allow(role), _) => panic!("allowed {role:?}, more than {expected:?}: {at}"),
+                                        (refused, Some(e)) if e >= needs => panic!("{refused:?}, though its standing gives {e:?}: {at}"),
+                                        (Decision::Unauthenticated, _) => assert!(!signed, "401 to a signer: {at}"),
+                                        (Decision::Forbidden, _) => assert!(signed, "403 to the unsigned: {at}"),
                                     }
                                 }
                             }
@@ -736,6 +746,23 @@ mod tests {
             }
         }
         assert_eq!(asked, 17 * 4 * 3 * 8 * 3 * 2 * 4, "every standing, visibility, purpose and need was asked");
+        assert!(allowed > 0 && allowed < asked, "some allowed and some refused: {allowed} of {asked}");
+        // the cases the model is for, by name
+        let as_agent = |member, cap| Standing { member, owns_member_agent: false, link: false, signed: true, cap: Some(cap), held: None };
+        let empty = Cap { agent: None, owner: None };
+        let viewer_cap = Cap { agent: None, owner: Some(Viewer) };
+        let editor_cap = Cap { agent: None, owner: Some(Editor) };
+        assert_eq!(decide(V::Members, as_agent(Some(Editor), empty), Purpose::Act, Viewer), Decision::Forbidden, "an empty cap lends an editor's agent nothing");
+        assert_eq!(decide(V::Members, as_agent(Some(Editor), viewer_cap), Purpose::Act, Editor), Decision::Forbidden, "a viewer's cap is no editor's");
+        assert_eq!(decide(V::Members, as_agent(Some(Editor), viewer_cap), Purpose::Read, Viewer), Decision::Allow(Viewer));
+        assert_eq!(decide(V::Members, as_agent(Some(Editor), editor_cap), Purpose::Act, Editor), Decision::Allow(Editor));
+        assert_eq!(decide(V::Members, as_agent(Some(Owner), Cap { agent: None, owner: Some(Owner) }), Purpose::Act, Editor), Decision::Allow(Editor), "an agent's role stops at editor");
+        let person = |member| Standing { member, owns_member_agent: false, link: false, signed: true, cap: None, held: None };
+        assert_eq!(decide(V::Members, person(Some(Viewer)), Purpose::Read, Viewer), Decision::Allow(Viewer));
+        assert_eq!(decide(V::Members, person(Some(Editor)), Purpose::Act, Editor), Decision::Allow(Editor));
+        assert_eq!(decide(V::Members, person(Some(Owner)), Purpose::Act, Owner), Decision::Allow(Owner));
+        assert_eq!(decide(V::Public, person(None), Purpose::Read, Public), Decision::Allow(Public));
+        assert_eq!(decide(V::Members, person(None), Purpose::Read, Public), Decision::Forbidden, "a stranger reaches no members-only fragment");
     }
 
     #[test]
