@@ -658,15 +658,18 @@ fn e2e(args: &[String]) -> Result<()> {
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
     // CI's split: `--build-only` builds (and the cache is saved after it,
-    // so a red run still saves), then `--no-build` runs what it left
+    // so a red run still saves), then `--no-build` runs what it left. Given
+    // the run's selection (`selection_only`), it builds the images that
+    // run's node builds (the door's for `--only simplex-door`); given none,
+    // a whole run's
     let build_only = args.iter().any(|a| a == "--build-only");
     let no_build = args.iter().any(|a| a == "--no-build");
     if build_only && no_build {
         bail!("--build-only and --no-build are two steps of one run, not one");
     }
     let suite_args: Vec<&String> = args.iter().filter(|a| *a != "--build-only" && *a != "--no-build").collect();
-    if build_only && !suite_args.is_empty() {
-        bail!("--build-only builds what every run needs, and takes no suite arguments");
+    if build_only && !selection_only(&suite_args) {
+        bail!("--build-only takes a run's selection alone (--only, --except, --shard and their values), the images its node builds");
     }
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
@@ -688,6 +691,12 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
+/// Whether `args` are a run's selection alone: `--only`, `--except` or
+/// `--shard`, each with its value (the suite refuses any two of them).
+fn selection_only(args: &[&String]) -> bool {
+    args.chunks(2).all(|pair| matches!(pair, [flag, _] if ["--only", "--except", "--shard"].contains(&flag.as_str())))
+}
+
 /// Whether a run's arguments name the SimpleX door's lane (`--only
 /// …,simplex-door,…`), which runs by name alone: only that run's node runs
 /// doors and builds their image (the suite's `builds_doors`), so only it
@@ -966,6 +975,25 @@ mod tests {
         assert!(names(&["--only", "computers,simplex-door"]));
         for not in [&["--except", "simplex-door"][..], &["--only", "simplex-doors,computers"], &["--shard", "3/5"], &[], &["simplex-door"]] {
             assert!(!names(not), "{not:?}");
+        }
+    }
+
+    /// Goal: `--build-only` takes a run's selection, which picks the
+    /// images it builds ahead (so a build for `--no-build --only
+    /// simplex-door` builds the door's too), and nothing else it would
+    /// ignore. Valid: none (CI's), `--only`, `--except`, `--shard` with
+    /// values. Invalid: a flag with no value, any other argument.
+    #[test]
+    fn a_build_alone_takes_a_runs_selection_alone() {
+        let selection = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            super::selection_only(&args.iter().collect::<Vec<_>>())
+        };
+        for valid in [&[][..], &["--only", "simplex-door"], &["--except", "computers"], &["--shard", "1/5"]] {
+            assert!(selection(valid), "{valid:?}");
+        }
+        for invalid in [&["--only"][..], &["--rehearse"], &["--only", "auth", "--rehearse"], &["simplex-door"], &["--hosted", "x"]] {
+            assert!(!selection(invalid), "{invalid:?}");
         }
     }
 
