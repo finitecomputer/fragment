@@ -1,0 +1,18 @@
+# cargo-deny's policy for bench/search's Cargo.lock: the search index's
+# benchmark, run by hand, never shipped. As the root's deny.toml, which says
+# how this list is kept; docs/security/dependency-scanning.md.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+unmaintained = "workspace"
+yanked = "warn"
+unused-ignored-advisory = "deny"
+ignore = [
+    # both also in the shipped workspaces, tracked there: here only in the
+    # benchmark, which runs on a developer's machine on its own data
+    { id = "RUSTSEC-2026-0387", reason = "benchmark only; FIN-636" },
+    { id = "RUSTSEC-2026-0459", reason = "benchmark only; FIN-637" },
+]
