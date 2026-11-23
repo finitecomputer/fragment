@@ -473,7 +473,7 @@ pub fn restarted(chat: &[Record], work: &[Record], me: &str, owner: &str, fragme
 /// Whether `c` breaks a line where it is shown (beside `\n`): a carriage
 /// return, a vertical tab, a form feed, a next line, or Unicode's line and
 /// paragraph separators.
-fn breaks_line(c: char) -> bool {
+pub(crate) fn breaks_line(c: char) -> bool {
     matches!(c, '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
