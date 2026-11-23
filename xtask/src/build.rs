@@ -339,7 +339,7 @@ pub fn images(doors: bool) -> Result<()> {
     let env = |k: &str| std::env::var(k).ok();
     for (name, image, cache) in ahead(devstack::read_config(&cell)?, &cell, doors, env)? {
         let t0 = Instant::now();
-        let built = docker_build(&image, None, &["--load".as_ref()], &cache).with_context(|| format!("building the {name} image ahead of the node"))?;
+        let built = docker_build(&image, None, &[ahead_output(&cache).as_ref()], &cache).with_context(|| format!("building the {name} image ahead of the node"))?;
         let (cached, steps) = cached_steps(&built);
         println!("image {name} built ahead of the node in {:.1?} ({cached} of {steps} steps cached)", t0.elapsed());
     }
@@ -370,6 +370,23 @@ fn ahead(mut config: serde_json::Value, cell: &Path, doors: bool, env: impl Fn(&
         false => Vec::new(),
     };
     Ok(images.iter().enumerate().map(|(n, (name, image))| (name.to_string(), (*image).clone(), cache(n, image))).collect())
+}
+
+/// Where a build ahead of the node puts its result, given its cache flags
+/// (`ahead`). Its layers, in the builder's cache, are all the node's build
+/// needs; an image loaded into Docker's store is one no one tags (each
+/// node builds its own, labeled for its project: devstack's
+/// `scope_images`), and a box kept every one (1,087 untagged stubs, 11.5 GB
+/// on 2026-11-23). So nothing (`type=cacheonly`), but for a build that
+/// reads a remote cache (CI's): BuildKit takes a remote cache's hits
+/// without fetching them, and only an exported result fetches them into
+/// the builder for the node's build to find (`--load`; a runner's store
+/// goes with it).
+fn ahead_output(cache: &[String]) -> &'static str {
+    match cache.iter().any(|flag| flag == "--cache-from") {
+        true => "--load",
+        false => "--output=type=cacheonly",
+    }
 }
 
 /// The Actions cache an image built ahead of the node reads, and writes
@@ -420,7 +437,7 @@ pub fn image_push(image: &serde_json::Value, tag: &str, metadata: &Path) -> Resu
 }
 
 /// `docker build` of `image` as wrangler builds it, `how` its output
-/// (`--load`, or `--push`), `cache` its cache flags. Untagged (ahead of the
+/// (`--load`, none: `ahead_output`; or `--push`), `cache` its cache flags. Untagged (ahead of the
 /// node), its output is kept, shown only when it fails, and answered (its
 /// progress); a push's (`tag`: image.rs) is shown as it runs.
 fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::OsStr], cache: &[String]) -> Result<String> {
@@ -505,6 +522,20 @@ mod tests {
         for (_, image, _) in super::ahead(config.clone(), &cell, true, saving).unwrap() {
             assert!(std::path::Path::new(image["dockerfile"].as_str().unwrap()).is_absolute(), "its Dockerfile's path works from anywhere");
         }
+    }
+
+    /// Goal: a build ahead of the node leaves no image in Docker's store,
+    /// unless it reads a remote cache, whose hits only an exported result
+    /// fetches into the builder. Valid: a local build (no cache flags)
+    /// exports nothing; CI's (`--cache-from`, and `--cache-to` when it
+    /// saves) loads its image. Invalid: a local build that loads an
+    /// untagged image no one removes.
+    #[test]
+    fn a_build_ahead_loads_an_image_only_to_fetch_a_remote_cache() {
+        assert_eq!(super::ahead_output(&[]), "--output=type=cacheonly");
+        let gha = "type=gha,scope=e2e-stub".to_string();
+        assert_eq!(super::ahead_output(&["--cache-from".into(), gha.clone()]), "--load");
+        assert_eq!(super::ahead_output(&["--cache-from".into(), gha.clone(), "--cache-to".into(), format!("{gha},mode=max")]), "--load");
     }
 
     /// Goal: a build's cached steps are counted from BuildKit's plain

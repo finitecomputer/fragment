@@ -503,7 +503,7 @@ impl Drop for Suite {
     fn drop(&mut self) {
         drop(self.node.take());
         if let Err(e) = self.remove_containers() {
-            println!("      could not remove this run's containers: {e:#}");
+            println!("      could not remove this run's containers or images: {e:#}");
         }
     }
 }
@@ -1063,23 +1063,16 @@ impl Suite {
         Ok(())
     }
 
-    /// Removes the containers the run's nodes left (devstack::containers),
-    /// once, its node stopped: none on a hosted run, which starts no node.
-    fn remove_containers(&mut self) -> Result<Option<devstack::containers::Removed>> {
+    /// Removes the containers the run's nodes left, then the images they
+    /// built (devstack::containers), once, its node stopped: none on a
+    /// hosted run, which starts no node. Answers how many of each went.
+    fn remove_containers(&mut self) -> Result<Option<(u32, u32)>> {
         if self.tools.is_none() || self.containers_removed {
             return Ok(None);
         }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
         self.containers_removed = true;
-        // on celld's krun engine, the VMs a node killed outright left (a
-        // node's own stop reaps them)
-        let krun = match &self.celld {
-            Some(c) => c.engine.remove(&self.project)?,
-            None => 0,
-        };
-        let mut removed = devstack::containers::remove(&self.project)?;
-        removed.containers += krun;
-        Ok(Some(removed))
+        Ok(Some(remove_leftovers(&self.project, self.celld.as_ref().map(|c| &c.engine))?))
     }
 
     /// Records who owns a fragment made some other way than `create` (the
@@ -1462,11 +1455,10 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let leftovers = project.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
     devstack::signals::on_termination(move |signal| {
-        println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
-        let krun = engine.as_ref().map_or(Ok(0), |e| e.remove(&leftovers));
-        match devstack::containers::remove(&leftovers).and_then(|r| Ok(r.containers + krun?)) {
-            Ok(n) => println!("      (removed {n} containers of this run)"),
-            Err(e) => println!("      could not remove this run's containers: {e:#}"),
+        println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers and images");
+        match remove_leftovers(&leftovers, engine.as_ref()) {
+            Ok((containers, images)) => println!("      (removed {containers} containers and {images} images of this run)"),
+            Err(e) => println!("      could not remove this run's containers or images: {e:#}"),
         }
     })?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
@@ -1564,6 +1556,19 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     finish(&mut s)
 }
 
+/// Removes what a run's nodes left on `project`: their containers and
+/// sidecars (on celld's krun `engine`, its VMs too), then the images they
+/// built, labeled for it (devstack::containers `remove_images`), so a
+/// run's images go with it: each run is a project of its own, whose
+/// images no later run uses. Answers how many containers and images.
+fn remove_leftovers(project: &Path, engine: Option<&devstack::celld::Engine>) -> Result<(u32, u32)> {
+    // on celld's krun engine, the VMs a node killed outright left (a
+    // node's own stop reaps them)
+    let krun = engine.map_or(Ok(0), |e| e.remove(project))?;
+    let containers = devstack::containers::remove(project)?.containers + krun;
+    Ok((containers, devstack::containers::remove_images(project)?))
+}
+
 /// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
 /// state in the run's scratch, on a free loopback port, every request in
 /// its audit log (read at the run's end: `openbao_reads`).
@@ -1609,9 +1614,9 @@ fn finish(s: &mut Suite) -> Result<()> {
     // (wrangler's teardown removes the containers alone; a crash, neither)
     let t0 = Instant::now();
     match s.remove_containers() {
-        Ok(Some(r)) => println!("      (removed {} containers of this run in {:.1?})", r.containers, t0.elapsed()),
+        Ok(Some((containers, images))) => println!("      (removed {containers} containers and {images} images of this run in {:.1?})", t0.elapsed()),
         Ok(None) => {}
-        Err(e) => s.fail("the run removes the containers its nodes left", format!("{e:#}")),
+        Err(e) => s.fail("the run removes the containers its nodes left and the images they built", format!("{e:#}")),
     }
     let t0 = Instant::now();
     s.chrome.close();
