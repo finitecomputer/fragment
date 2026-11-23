@@ -132,6 +132,13 @@ it, the offer's cover stands aside: it is answered there.
   that starts while the page shows takes the person to its agent's chat
   (the first, if several start between two reads); one already importing
   when the page opens leaves the page as it is.
+- Its new agent is empty until the import's routine runs, minutes after
+  its Yes, so its first message (its hello) says its upgrade is under
+  way, and that it will write again once everything is here. Until then
+  it answers nothing as if it knew its person: it says it is still
+  bringing itself over (`onboarding.js` `helloText`; FIN-492, 11-22: one
+  greeted its person as a stranger, in a language not theirs). Every
+  agent's hello names the language their browser is set to.
 
 ## The comp (F5)
 
