@@ -46,5 +46,8 @@ rm -rf "$KEEP/worker-build" && cp -a ~/.cache/worker-build "$KEEP/worker-build"
 if grep -q /var/lib/ascii-lazy ~/golden.log; then echo "a build ran in Boat's lazy view: not saving"; exit 1; fi
 # last, right before the snapshot: the times every copy puts back
 python3 "$KEEP/times.py" save
+# the commit this snapshot holds, which tools/boat/golden reads from the
+# snapshot's file list to skip a refresh when master has not moved
+rm -rf "$KEEP/warm-at" && mkdir -p "$KEEP/warm-at" && touch "$KEEP/warm-at/$(git rev-parse HEAD)"
 du -sh target cell/target ~/.cargo ~/.buildcache
 git log -1 --format="== warm at %h %s"

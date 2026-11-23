@@ -3,7 +3,8 @@
 # Boat account needed. The fake builder's home keeps the last refresh's
 # successful ~/golden.status (as a snapshot does) and starts the detached
 # build late, after golden's first poll. Golden must save the snapshot only
-# once the new build has succeeded, and never when it fails.
+# once the new build has succeeded, and never when it fails. When the
+# snapshot already holds master's commit, golden must start nothing.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
@@ -28,7 +29,7 @@ print(json.dumps({"type": "exit", "exitCode": rc}))
 }
 cmd=$1; shift
 case $cmd in
-  snapshots) echo '{"named":[{"name":"fragment-warm","status":"ready"}]}' ;;
+  snapshots) echo '{"named":[{"name":"fragment-warm","snapshotId":"snap1","status":"ready"}]}' ;;
   new) echo "new" >> "$FAKE/calls"; echo '{"id":"bx_fake"}' ;;
   scp)
     dest=$home/${2#bx_fake:/home/user/}
@@ -54,7 +55,13 @@ case $cmd in
       printf '%s' "$out" | frames "$rc"
       exit "$rc"
     fi ;;
-  snapshot) [ -e "$FAKE/built" ] && echo "snapshot after the new build" >> "$FAKE/calls" || echo "snapshot BEFORE the new build" >> "$FAKE/calls" ;;
+  snapshot)
+    if [ "$1" = tree ]; then
+      echo "tree" >> "$FAKE/calls"
+      printf '{"entries":[{"kind":"file","path":".profile"},{"kind":"file","path":".boat-keep/warm-at/%s"}]}\n' "$FAKE_WARM_AT"
+      exit 0
+    fi
+    [ -e "$FAKE/built" ] && echo "snapshot after the new build" >> "$FAKE/calls" || echo "snapshot BEFORE the new build" >> "$FAKE/calls" ;;
   delete) echo "delete" >> "$FAKE/calls" ;;
   *) echo "fake boat: no $cmd" >&2; exit 1 ;;
 esac
@@ -62,11 +69,16 @@ FAKE
 chmod +x "$work/boat"
 
 failed=0
-# case NAME BUILD_RC WANT_EXIT WANT_CALLS
+# master: a local repository standing in for GitHub's
+git init -q "$work/remote" && git -C "$work/remote" -c user.name=t -c user.email=t@t commit -q --allow-empty -m m
+git -C "$work/remote" branch -q -M master
+master=$(git -C "$work/remote" rev-parse HEAD)
+# case NAME BUILD_RC WANT_EXIT WANT_CALLS [WARM_AT]
 case_() {
   local name=$1 want_exit=$3 want_calls=$4 rc=0
   cases=$(( ${cases:-0} + 1 ))
-  export FAKE="$work/case$cases" FAKE_BUILD_RC=$2 FAKE_BUILD_SECONDS=2 FAKE_START_DELAY=3
+  export FAKE="$work/case$cases" FAKE_BUILD_RC=$2 FAKE_BUILD_SECONDS=2 FAKE_START_DELAY=3 FAKE_WARM_AT=${5:-0000000}
+  export FRAGMENT_BOAT_REMOTE="$work/remote"
   mkdir -p "$FAKE/home"
   echo 0 > "$FAKE/home/golden.status"  # the last refresh's success, as snapshots hold it today
   BOAT_BIN="$work/boat" FRAGMENT_BOAT_POLL=1 "$HERE/golden" > "$FAKE/out" 2>&1 || rc=$?
@@ -80,6 +92,7 @@ case_() {
     failed=1
   fi
 }
-case_ "an old success and a late start: saved after the new build" 0 0 "new,snapshot after the new build,delete"
-case_ "an old success and a late start, the new build failing: nothing saved" 1 1 "new,delete"
+case_ "an old success and a late start: saved after the new build" 0 0 "tree,new,snapshot after the new build,delete"
+case_ "an old success and a late start, the new build failing: nothing saved" 1 1 "tree,new,delete"
+case_ "the snapshot already at master: nothing started" 0 0 "tree" "$master"
 exit $failed
