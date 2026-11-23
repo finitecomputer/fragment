@@ -18,7 +18,7 @@ The cell answers three kinds of host:
 
 | Header | Value | Why |
 |---|---|---|
-| `Strict-Transport-Security` | `max-age=31536000` | After one visit, the browser uses only HTTPS for that host for a year. It is sent on every answer that arrived over HTTPS, errors and redirects included. It is not sent over plain HTTP: browsers ignore it there, and the local dev stack (`http://127.0.0.1:8790`) must keep working. |
+| `Strict-Transport-Security` | `max-age=31536000` | After one visit, the browser uses only HTTPS for that host for a year. It is set on every answer that arrived over HTTPS, errors and redirects included, replacing any value an app or a computer's image sent. Over plain HTTP the cell adds none and leaves the answer as it came, so an app's own header passes through; browsers ignore HSTS there, and the local dev stack (`http://127.0.0.1:8790`) must keep working. |
 
 We leave out **`includeSubDomains`** on purpose. `finite.chat` has
 subdomains that this Worker does not answer: `preview.finite.chat`,
@@ -56,15 +56,16 @@ platform's headers are merged with it, so the app can't weaken them.
 |---|---|---|
 | `X-Content-Type-Options` | `nosniff` | Set over anything the app sends. |
 | `Referrer-Policy` | `same-origin` | Set over anything the app sends. A page's URL may hold its share link (`?view=`). |
-| `frame-ancestors` (CSP) | `'self' https://finite.chat` (the platform's origin) on every answer | Only the fragment's own pages and the shell may frame it, which the shell needs to show apps. A frame's navigation can get a narrower policy (`'self'` alone, for a page framing itself: `frames::ancestors`). An app can narrow this further with its own `frame-ancestors`, but can't widen it: a browser enforces both policies. |
+| `frame-ancestors` (CSP) | `'self' https://finite.chat` (the platform's origin) on every answer, an unclaimed address's or a failed registry lookup's included | Only the fragment's own pages and the shell may frame it, which the shell needs to show apps. A frame's navigation can get a narrower policy (`'self'` alone, for a page framing itself: `frames::ancestors`). The cell sends this as a policy of its own unless one of the answer's policies already enforces exactly it, judged by each policy's first `frame-ancestors`, the one a browser enforces (`answer_headers::has_directive`). So an app can narrow it with its own `frame-ancestors`, but can't widen it: a browser enforces every policy, and a duplicate later in a policy doesn't count. |
 | `Content-Security-Policy: sandbox` | On scriptable media (SVG, XML) and on HTML content files (`__file`) | Opened directly, user-uploaded content runs no script and gets an opaque origin. |
-| `X-Frame-Options` | not sent | It can't name a second origin (`ALLOW-FROM` is obsolete), and `SAMEORIGIN` would stop the shell from showing the app. CSP `frame-ancestors` takes precedence over it in every current browser. |
+| `X-Frame-Options` | not sent by the platform | It can't name a second origin (`ALLOW-FROM` is obsolete), and `SAMEORIGIN` would stop the shell from showing the app. An app's own `X-Frame-Options` passes through: it can only narrow, and CSP `frame-ancestors` takes precedence over it in every current browser. |
 
 ## A computer's host
 
 A computer's pages come from its own image. The cell adds HSTS and
-`frame-ancestors <platform>` (`cell/src/computer.rs`, `framed_by`)
-and leaves the rest as the image answers.
+`frame-ancestors <platform>` (`cell/src/computer.rs`, `framed_by`), to
+a refused signature's answer too, and leaves the rest as the image
+answers.
 
 ## Not sent, and why
 

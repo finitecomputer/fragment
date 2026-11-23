@@ -43,12 +43,33 @@ pub fn fragment_frame_ancestors(platform: &str) -> String {
 }
 
 /// Whether a `Content-Security-Policy` header value (its policies joined
-/// by commas, as a browser and `Headers` join them) holds `directive`
-/// exactly, as one of its directives: so a policy already there is not
-/// sent twice, and a wider one that merely starts the same is not taken
-/// for it (`frame-ancestors 'self' A B` is not `frame-ancestors 'self' A`).
-pub fn has_directive(policy: &str, directive: &str) -> bool {
-    policy.split([',', ';']).any(|d| d.split_ascii_whitespace().eq(directive.split_ascii_whitespace()))
+/// by commas, as a browser and `Headers` join them) enforces `directive`
+/// exactly in one of its policies: so a policy already there is not sent
+/// twice, and a wider one is not taken for it. Only a directive's first
+/// occurrence in a policy counts, as a browser enforces only that one
+/// (CSP3 §2.2, a duplicate is ignored): `frame-ancestors *;
+/// frame-ancestors 'self' A` enforces `*`. And only exactly:
+/// `frame-ancestors 'self' A B` is not `frame-ancestors 'self' A`. A miss
+/// costs only a second policy, which can only narrow.
+pub fn has_directive(header: &str, directive: &str) -> bool {
+    let Some(name) = directive.split_ascii_whitespace().next() else { return false };
+    header
+        .split(',')
+        .filter_map(|policy| first_directive(policy, name))
+        .any(|d| d.split_ascii_whitespace().eq(directive.split_ascii_whitespace()))
+}
+
+/// Whether some policy in a `Content-Security-Policy` header value names
+/// the directive `name` at all (for the platform's own answers, whose
+/// every policy is the platform's).
+pub fn names_directive(header: &str, name: &str) -> bool {
+    header.split(',').any(|policy| first_directive(policy, name).is_some())
+}
+
+/// A policy's first directive called `name` (directive names are ASCII
+/// case-insensitive), the one a browser enforces.
+fn first_directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
+    policy.split(';').find(|d| d.split_ascii_whitespace().next().is_some_and(|n| n.eq_ignore_ascii_case(name)))
 }
 
 #[cfg(test)]
@@ -67,6 +88,37 @@ mod tests {
         }
         for absent in ["", "sandbox", "frame-ancestors 'self' https://finite.chat https://evil.example", "frame-ancestors *", "frame-ancestors 'self'", "default-src 'self' frame-ancestors 'self' https://finite.chat"] {
             assert!(!has_directive(absent, floor), "{absent:?}");
+        }
+    }
+
+    /// Goal: an app cannot make the floor be skipped by naming it after
+    /// a wider `frame-ancestors` in the same policy: a browser enforces
+    /// only a directive's first occurrence in each policy (CSP3 §2.2).
+    /// Method: the floor behind a wider one, in either case, in one
+    /// policy; the floor in a policy of its own still counts.
+    #[test]
+    fn only_a_policys_first_directive_counts() {
+        let floor = "frame-ancestors 'self' https://finite.chat";
+        for widened in [
+            "frame-ancestors *; frame-ancestors 'self' https://finite.chat",
+            "FRAME-ANCESTORS https://evil.example; frame-ancestors 'self' https://finite.chat",
+            "default-src 'self'; frame-ancestors *;frame-ancestors 'self' https://finite.chat",
+        ] {
+            assert!(!has_directive(widened, floor), "{widened:?}");
+        }
+        assert!(has_directive("frame-ancestors *, frame-ancestors 'self' https://finite.chat", floor));
+    }
+
+    /// Goal: the platform keeps an answer's own `frame-ancestors`, and
+    /// adds its floor to any answer that names none, a mention elsewhere
+    /// in a policy included. Method: present, absent and near misses.
+    #[test]
+    fn a_policy_names_a_directive_only_as_one() {
+        for named in ["frame-ancestors 'none'", "default-src 'self'; FRAME-ANCESTORS 'self'", "sandbox, frame-ancestors 'self'"] {
+            assert!(names_directive(named, "frame-ancestors"), "{named:?}");
+        }
+        for unnamed in ["", "default-src 'self'", "report-uri https://x.example/frame-ancestors", "default-src 'self' frame-ancestors"] {
+            assert!(!names_directive(unnamed, "frame-ancestors"), "{unnamed:?}");
         }
     }
 

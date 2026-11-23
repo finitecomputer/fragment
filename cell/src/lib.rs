@@ -185,7 +185,10 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
 
 /// Every answer reached over HTTPS, on every host the cell answers (the
 /// platform's, each fragment's, each computer's, an error's), tells the
-/// browser to come back only over HTTPS (`answer_headers::hsts`). Cloned,
+/// browser to come back only over HTTPS (`answer_headers::hsts`), set
+/// over any value an app or image sent. Over plain HTTP the answer is
+/// left as it came, an app's own header included: a browser ignores HSTS
+/// there. Cloned,
 /// as `platform_origin` does, which keeps a socket's 101 and its WebSocket.
 fn strict_transport(resp: Response, scheme: &str) -> Result<Response> {
     let Some(hsts) = fragment_core::answer_headers::hsts(scheme) else { return Ok(resp) };
@@ -1062,10 +1065,13 @@ async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, res
 /// hold its share link, `?view=`, and every fragment is another origin;
 /// a page's own `<meta name="referrer">` still governs its own links),
 /// and framing by its own pages and the platform's alone
-/// (`answer_headers::fragment_frame_ancestors`; appended unless the
-/// answer has that very directive already, a frame's `bound` among them,
-/// so an app's own `frame-ancestors` can narrow it and never widen it). No other policy:
-/// a fragment's scripts and styles are its app's to decide.
+/// (`answer_headers::fragment_frame_ancestors`; appended unless one of
+/// the answer's policies already enforces that very directive, a frame's
+/// `bound` among them: `has_directive` reads only a directive's first
+/// occurrence in a policy, as a browser does, so an app's own
+/// `frame-ancestors` can narrow it and never widen it). No other policy:
+/// a fragment's scripts and styles are its app's to decide, and an app's
+/// own `X-Frame-Options` passes through (it can only narrow).
 /// Scriptable media (an SVG, the XML types: `site::opened_as`) is sandboxed
 /// besides, so opened directly it runs no script and has an opaque origin,
 /// while a page's `<img>` of it is unaffected (a subresource's policy is
@@ -1232,14 +1238,25 @@ async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Respo
     // a computer's own origin: its ports, for its owner (computer.rs)
     if let Some(id) = host.and_then(|h| cfg.computer_of_host(h)) {
         let signer = match req.headers().get("authorization")? {
-            Some(_) => Some(signer(env, &req, &url, &[]).await?.identity.id),
+            // a refused signature is still this origin's answer, framed as its others are
+            Some(_) => match signer(env, &req, &url, &[]).await {
+                Ok(signed) => Some(signed.identity.id),
+                Err(e) => return computer::framed_by(e.response()?, &cfg.platform()),
+            },
             None => None,
         };
         return computer::serve_host(req, env, &url, &id, signer).await;
     }
     if let Some(label) = host.and_then(|h| cfg.address_of_host(h)) {
-        let address = ask_registry(env, &crate::registry::calls::AddressOf::Label { label }).await?
-            .ok_or_else(|| CellError::new(ErrorCode::NotFound, "no fragment here: no app has claimed this address"))?;
+        let looked_up = ask_registry(env, &crate::registry::calls::AddressOf::Label { label }).await
+            .and_then(|a| a.ok_or_else(|| CellError::new(ErrorCode::NotFound, "no fragment here: no app has claimed this address")));
+        let address = match looked_up {
+            Ok(address) => address,
+            // an unclaimed address, or a registry that did not answer, is
+            // still a fragment's host: its answer gets the headers `serve`
+            // gives every other one there
+            Err(e) => return fragment_origin(e.response()?, &cfg.platform()),
+        };
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &address.fragment, &rest, Some(&address.npub)).await;
     }
@@ -1276,7 +1293,7 @@ fn platform_origin(resp: Response, release: &str, cli_version: Option<&str>) -> 
     // framed only by the platform's own pages, unless the answer said who
     // may frame it (the shell's pages say no one): every policy here is
     // the platform's own, and appended it could only narrow
-    if !h.get("content-security-policy")?.is_some_and(|p| p.contains("frame-ancestors")) {
+    if !h.get("content-security-policy")?.is_some_and(|p| fragment_core::answer_headers::names_directive(&p, "frame-ancestors")) {
         h.append("content-security-policy", fragment_core::answer_headers::PLATFORM_FRAME_ANCESTORS)?;
     }
     if !h.has("x-frame-options")? {
