@@ -90,6 +90,9 @@ pub struct Config {
     /// `BRIDGE_KEEPALIVE_PING_MS`: how often the keepalive pings; silent
     /// twice that, it is opened again (`limits::KEEPALIVE_PING_MS`).
     pub keepalive_ping: Duration,
+    /// `BRIDGE_COMPUTER_EVERY_MS`: how often the computer's view is read
+    /// again while awake (`limits::COMPUTER_EVERY_MS`).
+    pub computer_every: Duration,
     /// `BRIDGE_SIMPLEX_BIN` and the rest: each linked agent's SimpleX core
     /// (simplex/run.rs); none, no SimpleX, and nothing of it runs.
     pub simplex: Option<crate::simplex::run::Config>,
@@ -566,7 +569,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                 // that changed is read at once: an agent the image just made
                 // ready is followed within a tick.
                 let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
-                if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
+                if ready_changed || computer_read.elapsed() >= cfg.computer_every {
                     computer_read = Instant::now();
                     reread(&api, cfg.simplex.is_some(), &runtime_names, &inbox_tx);
                 }

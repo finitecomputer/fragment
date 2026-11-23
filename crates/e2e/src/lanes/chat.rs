@@ -1477,7 +1477,8 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     chrome.press(&page, "Enter", false)?;
     let install = ".prompt:not(.closed) button[data-option=\"install\"]";
     // its first turn waits for the bridge to see a new agent's runtime (its
-    // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
+    // read of the computer: every few seconds in the stub, images/stub
+    // BRIDGE_COMPUTER_EVERY_MS)
     let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
     // its chat's row in the shell's list, as its listed records say (each
     // after the list's gap, `LISTED_MIN_GAP_MS`)
