@@ -125,8 +125,7 @@ Every change is checked against this table.
 | The model route's models, its routes (name, label, default) and each route's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
 | A computer's agents | the Computer DO's `agents` | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it (cell/src/ended.rs) |
 | What a person's agents used of each provider, by month | their ledger's `uses` (`fragment_core::ledger::uses`), counted after each swap's answer, best effort | none; a computer's months from before the move (Computer step 7) are owed, taken once by id, then forgotten |
-| A shared key's charges this last hour, per person | their computer's `key_hour` (`fragment_core::key_hour`), counted by `computer/used` after a swap a shared key charged | none |
-| A person's hourly cap on a shared key | their computer's `key_caps` (no row: `key_hour::KEY_HOUR_CAP`) | none: its pause notice is worked out on read |
+| What a person's agents' calls on shared keys cost this last hour | their ledger's `spend_slots` (`fragment_core::ledger::uses::spend`), counted with each swap's uses | its `spending` notice, worked out on read, told at each step |
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |
 | A fragment's scheduled records | its supervisor's `record_schedules` (docs/api.md, "Scheduled records") | each fire appended once, keyed by schedule and minute; a computer keeps none |
 | Money | each payer's ledger (docs/ledger.md) | meters batch rows to it, idempotently; each isolate's gate keeps an answer a minute at most |
@@ -177,7 +176,9 @@ release was deployed (`release::DEPLOYED`), which no release reads now
 
 - **The caller** calls an object only through `routed::send` and
   `send_again`, the JavaScript through `InternalRoute.request` (xtask's
-  guard holds both).
+  guard holds both). The operators' admin calls from a Worker of its
+  own (cell/src/admin.rs), through bindings to the cell's classes, a
+  caller of the cell's release once a deploy finishes.
 - **The object** checks the release before it reads the call: another
   release's, or none, is 503 `deploying`, marked
   `x-fragment-release-refused`, and nothing was done.
@@ -215,7 +216,10 @@ refusing calls that long. One it cannot finish or verify goes back to
 the version before (`wrangler rollback`, verified the same way), unless
 that release's schema (its steps, and its last Durable Object migration)
 is not its own; the job fails either way, never
-green over a mix. A platform page outlives a
+green over a mix. The admin Worker deploys after, from the same release,
+until it answers that release at every class (`/healthz/admin`); until
+then its calls are refused as another release's, and its failure fails
+the job and leaves only the operators' routes down (the debt ledger). A platform page outlives a
 deploy too, and reloads once the platform's release differs from its own
 (docs/api.md, The shell, "A new release").
 

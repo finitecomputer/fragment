@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { troubleWhat } from "../shell/admin-glance.js";
+import { ago, troubleWhat } from "../shell/admin-glance.js";
 
 const AT = Date.UTC(2026, 10, 18, 14, 2);
 const when = (ms) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
@@ -40,4 +40,19 @@ test("no reason read, or another kind: its kind alone", () => {
   assert.deepEqual(troubleWhat({ ...unread, kind: "disk_filling" }, when), { what: "disk nearly full", why: null });
   // a kind a newer cell names, as it is
   assert.deepEqual(troubleWhat({ ...unread, kind: "something_new" }, when), { what: "something_new", why: null });
+});
+
+test("how old the logs' numbers are: just now under a minute, then minutes, then hours; a clock behind is just now", () => {
+  const now = AT;
+  const cases = [
+    [now, "just now"],
+    [now - 59_999, "just now"],
+    [now - 60_000, "a minute ago"],
+    [now - 2 * 60_000, "2 minutes ago"],
+    [now - 59 * 60_000 - 59_999, "59 minutes ago"],
+    [now - 3_600_000, "an hour ago"],
+    [now - 3 * 3_600_000, "3 hours ago"],
+    [now + 5_000, "just now"],
+  ];
+  for (const [at, said] of cases) assert.equal(ago(at, now), said, `${now - at} ms`);
 });

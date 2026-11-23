@@ -132,6 +132,13 @@ it, the offer's cover stands aside: it is answered there.
   that starts while the page shows takes the person to its agent's chat
   (the first, if several start between two reads); one already importing
   when the page opens leaves the page as it is.
+- Its new agent is empty until the import's routine runs, minutes after
+  its Yes, so its first message (its hello) says its upgrade is under
+  way, and that it will write again once everything is here. Until then
+  it answers nothing as if it knew its person: it says it is still
+  bringing itself over (`onboarding.js` `helloText`; FIN-492, 11-22: one
+  greeted its person as a stranger, in a language not theirs). Every
+  agent's hello names the language their browser is set to.
 
 ## The comp (F5)
 
@@ -149,6 +156,16 @@ Then Migrations marks them (`people.comped_ms`) and no visit gives it
 again. A visit cut off before the mark gives it again, the registry
 answering the same comp. A guest makes no agent (decision 25), so the comp
 comes before `/move` makes the new ones.
+
+**SimpleX needs always-on.** A `seat`'s computer sleeps, and SimpleX runs
+only on one that stays on, so a mover whose stage carries their SimpleX
+chat would lose it (a mover's, 2026-11-20). The mover says so in the
+manifest (`simplex: true`, "SimpleX in a stage"), and the stage's
+`complete` makes that person's comped `seat` a `seat_always_on` before its
+zip is made: a failure is the mover's complete tried again. A paid seat,
+one always-on already, or none is left as it is, and so is a person
+wiped since the move bound them: their stage lands as any other.
+Everyone else keeps a `seat` that sleeps.
 
 Comps the move gave before with a 30-day end lost it at the registry's
 step 12 (`0012_move_comps_open.sql`): each row whose last comp in the
@@ -333,6 +350,9 @@ the files open as they are.
   read by ranges as the agent, or given up (then Link SimpleX, as before),
   so the import, and its `done`, come after by construction. It runs
   nothing then.
+- **The manifest says it carries one** (`simplex: true`), so its
+  person's comped seat is made always-on as it completes (The comp, "SimpleX
+  needs always-on").
 - **Only the owner adopts it**, from their Settings ("Keep my SimpleX
   chat"), by a door ticket the platform signs (`adopt`, docs/api.md, "An
   agent's doors"). The bridge binds its link to that contact and lets the

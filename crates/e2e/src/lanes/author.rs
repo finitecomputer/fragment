@@ -1040,32 +1040,34 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
         json!({ "mcp": wrote, "room": said.body }),
     );
-    // a quote of the book's parts (FIN-443 and FIN-445), through the CLI:
-    // each priced as the ledger charges its row, a part counted by its
-    // units, none said, said so; the lines a person reads printed here
-    let asked = ["fal:image", "1x", "1048576px", "xai", "1", "xai:image", "2x", "google-places:photo", "firecrawl:credit", "5credits", "elevenlabs:speech", "200chars", "fal:image"];
+    // a quote of the vendors' units (FIN-616), through the CLI: each priced
+    // as the ledger charges its row, a unit its vendor counts, none said,
+    // said so; the lines a person reads printed here
+    let asked = ["fal:flux-2-klein-9b", "1x", "2units", "xai:tick", "1234500ticks", "perplexity:call", "2x", "firecrawl:credit", "5credits", "elevenlabs:character", "200chars", "fal:flux-2-klein-9b"];
     let said = s.cli(api, &home, &[&["quote"][..], &asked].concat());
     let lines = String::from_utf8_lossy(&said.stdout).into_owned();
     println!("      (fragment quote {}:\n{})", asked.join(" "), lines.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
     let quoted = s.cli_json(api, &home, &[&["quote"][..], &asked, &["--json"]].concat())?;
     let charge = |key: &str, units: u64| {
-        let (micros, per) = fragment_core::price::default_key_price(key).expect("the book prices each part");
+        let (vendor, unit) = key.split_once(':').expect("a vendor's unit");
+        let c = fragment_core::catalog::default_charges(vendor).into_iter().find(|c| c.unit == unit).expect("the book prices each unit");
+        let (micros, per) = (c.price.micros, c.price.per);
         let book = fragment_core::price::PriceBook { keys: vec![fragment_core::price::KeyPrice { key: key.into(), micros, per }], ..fragment_core::price::PriceBook::defaults() };
-        book.price(&fragment_core::price::Usage::Key { key: key.into(), units }).expect("a part's row is priced").charge
+        book.price(&fragment_core::price::Usage::Key { key: key.into(), units }).expect("a unit's row is priced").charge
     };
-    let expect = [("fal:image", 1_048_576, 1), ("xai", 1, 1), ("xai:image", 1, 2), ("google-places:photo", 1, 1), ("firecrawl:credit", 5, 1), ("elevenlabs:speech", 200, 1)];
+    let expect = [("fal:flux-2-klein-9b", 2, 1), ("xai:tick", 1_234_500, 1), ("perplexity:call", 1, 2), ("firecrawl:credit", 5, 1), ("elevenlabs:character", 200, 1)];
     let items = quoted["items"].as_array().cloned().unwrap_or_default();
     let priced = expect.iter().zip(&items).all(|((key, units, calls), q)| q["pricedAs"] == *key && q["calls"] == *calls && q["eachMicros"].as_i64() == Some(charge(key, *units)) && q["chargeMicros"].as_i64() == Some(charge(key, *units) * *calls));
     let total: i64 = expect.iter().map(|(key, units, calls)| charge(key, *units) * calls).sum();
     s.ok(
-        "fragment quote prices each of the book's parts as the ledger charges its row: fal's image by its pixels, xAI's X search and its image a call, a Places photo, Firecrawl's credits, speech by its characters; a part counted by its units, none said, is said so",
+        "fragment quote prices each vendor's unit as the ledger charges its row: Klein's units, xAI's ticks, Perplexity's searches a call, Firecrawl's credits, speech by its characters; a unit its vendor counts, none said, is said so",
         said.status.success()
-            && items.len() == 7
+            && items.len() == 6
             && priced
-            && items[6] == json!({ "pricedAs": "fal:image", "calls": 1, "unknown": "no_units" })
+            && items[5] == json!({ "pricedAs": "fal:flux-2-klein-9b", "calls": 1, "unknown": "no_units" })
             && quoted["totalMicros"].as_i64() == Some(total)
             && lines.starts_with(&format!("about {} for what is priced; you ", fragment_core::price::dollars(total)))
-            && lines.contains("  fal:image: say each call's units")
+            && lines.contains("  fal:flux-2-klein-9b: say each call's units")
             && lines.lines().next().is_some_and(|l| l.ends_with(" left this month") && l.rsplit_once('.').is_some_and(|(_, cents)| cents.len() == 2 + " left this month".len())),
         json!({ "said": lines, "quoted": quoted }),
     );
@@ -1239,7 +1241,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli_json(api, &home, &["members", "add", &app, &agent, "--role", "editor", "--json"])?;
     let after = invite(&chat);
     let in_app = invite(&app);
-    let warning = fragment_core::access::TRUST_WARNING;
+    let warning = fragment_core::permit::TRUST_WARNING;
     s.ok(
         "fragment members add <email> on a chat its owner's agent is in says people in it can talk to their agent; on that chat before the agent is in, and on an app it is in, it does not",
         before.starts_with("invited ")

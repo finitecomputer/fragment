@@ -426,17 +426,34 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
             wait,
         );
         s.ok("its trouble says why a save failed: the kind's short label, when, and the reason its newest line gave", said, b.eval(&page, "document.getElementById('trouble-rows').innerText")?);
-        // the trouble rows as an operator sees them, wide and narrow, for review
-        for (width, height, mobile, name) in [(1280, 900, false, "glance-trouble-1280.png"), (390, 844, true, "glance-trouble-390.png")] {
-            b.viewport(&page, width, height, mobile)?;
-            let _ = b.screenshot(&page, &shots.join(name));
+        // the glance says how old the logs' numbers are (a read is kept
+        // two minutes: `fragment_core::glance::LOGS_FRESH_MS`)
+        let aged = b.until(&page, "/^Updated .* · logs read just now; again each minute\\.$/.test(document.getElementById('glance-at').textContent)", wait);
+        s.ok("it says when the logs' numbers were read", aged, b.eval(&page, "document.getElementById('glance-at').textContent")?);
+        // the trouble rows as an operator sees them, wide and narrow, light
+        // and dark, for review
+        for scheme in ["light", "dark"] {
+            b.color_scheme(&page, scheme)?;
+            for (width, height, mobile) in [(1280, 900, false), (390, 844, true)] {
+                b.viewport(&page, width, height, mobile)?;
+                let _ = b.screenshot(&page, &shots.join(format!("glance-trouble-{width}-{scheme}.png")));
+            }
         }
+        b.color_scheme(&page, "light")?;
         b.viewport(&page, 1280, 900, false)?;
-        // no cache: a computer awake since, and the glance read again
+        // a computer awake since, and the glance read again within the two
+        // minutes: the read kept, its numbers as they were, saying when
         s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
+        let asked = s.observability.asked().len();
+        // cleared, so its line said again is this read's
+        b.eval(&page, "document.getElementById('glance-at').textContent = ''")?;
         b.click(&page, "#tabs button[data-tab=glance]")?;
-        let again = b.until(&page, &format!("[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now')?.querySelector('.big').textContent === '{}'", awake + 1), wait);
-        s.ok("read again, the glance asks afresh: a computer awake since counts", again, tile(&mut b)?);
+        let again = b.until(&page, "/^Updated .* · logs read (just now|a minute ago); again each minute\\.$/.test(document.getElementById('glance-at').textContent)", wait);
+        s.ok(
+            "read again within two minutes, the glance asks the logs nothing and shows the read it kept, saying when it was read: a computer awake since counts at the next read",
+            again && tile(&mut b)? == before && s.observability.asked().len() == asked,
+            json!({ "tile": tile(&mut b)?, "asked": s.observability.asked().len() - asked, "at": b.eval(&page, "document.getElementById('glance-at').textContent")? }),
+        );
         b.eval(&page, &format!("[...document.querySelectorAll('#trouble-rows tr')].find(r => r.textContent.includes({glancer_email:?})).click()"))?;
         let opened = b.until(&page, &format!("!document.getElementById('people').hidden && !document.getElementById('person').hidden && document.getElementById('person').textContent.includes({glancer_email:?})"), wait);
         s.ok("a person in trouble opens their page", opened, b.eval(&page, "document.getElementById('person').textContent")?);
@@ -491,11 +508,15 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// The operators' glance (`GET /api/admin/glance`): the registry's people
-/// and the logs' numbers, read afresh each time, from lines planted in the
-/// Workers Observability fake (a local run's); an operator's alone. Valid,
-/// invalid (another caller, a day that is not today), and the logs' read
-/// failing (the registry's numbers stay). Hosted, it answers its shape.
+/// The operators' glance (`GET /api/admin/glance`), the admin Worker's:
+/// the registry's people, and the logs' numbers from lines planted in the
+/// Workers Observability fake (a local run's), kept a short while and
+/// answered with when they were read; an operator's alone. Valid, replay
+/// (read again within the while: nothing asked, the same read and its
+/// time), invalid (another caller, a day that is not today), and the
+/// logs' read failing (the registry's numbers stay). Each case after the
+/// first names a day of its own (a millisecond apart), which no kept read
+/// answers. Hosted, it answers its shape.
 fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, ivy_email: &str) -> Result<()> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
     let day = now - 3_600_000;
@@ -524,7 +545,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     for ago in [10_000, 20_000] {
         s.observability.log(now - ago, of(ours, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } })));
     }
-    s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
+    s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64, "room": 731_564_544_u64 }, "generation": 3 })));
     // its saves failed twice: the newest says why, naming a person's file
     // (its phase left out of the lines, so it counts as awake nowhere)
     let failed = |seq: u64, why: &str| json!({ "computer": saver, "event": { "event": "save_failed", "generation": 2, "seq": seq, "why": why } });
@@ -535,6 +556,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed", "why": "another deployment's" } })));
     s.observability.log(now - 1_000, of(foreign, json!({ "computer": saver, "event": { "event": "save_failed", "why": "another deployment's" } })));
     s.observability.log(now - 5_000, of(foreign, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "frag-elsewhere" })));
+    let asked_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
     let r = ask(operator, day)?;
     let b = &r.body;
     let listed = b["newPeople"].as_array().into_iter().flatten().find(|p| p["npub"] == ivy_id).cloned().unwrap_or(Value::Null);
@@ -567,10 +589,25 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
         read,
     );
     let asked = s.observability.asked();
+    let questions = fragment_core::glance::Question::ALL.len();
     s.ok(
-        "each read asks afresh: one query a question, with the account's read-only key, each of this deployment's Worker",
-        asked.len() == fragment_core::glance::Question::ALL.len() && asked.iter().all(|q| q["queryId"] == fragment_core::glance::QUERY_ID && q["parameters"]["filters"][0]["value"] == crate::OBSERVABILITY_SCRIPT),
-        json!(asked.len()),
+        "its read asks one query a question, with the account's read-only key, each of this deployment's Worker, and says when it read them",
+        asked.len() == questions
+            && asked.iter().all(|q| q["queryId"] == fragment_core::glance::QUERY_ID && q["parameters"]["filters"][0]["value"] == crate::OBSERVABILITY_SCRIPT)
+            && read["at"].as_i64().is_some_and(|at| (asked_at..=b["at"].as_i64().unwrap_or(0)).contains(&at))
+            && read.get("whyKept").is_none(),
+        json!({ "asked": asked.len(), "at": read["at"], "asked at": asked_at }),
+    );
+    // replay: within the while the read is kept, a load asks nothing and
+    // answers the same read, with when it was read; the registry's numbers,
+    // read every load, count a person who joined since
+    api.person()?;
+    let again = ask(operator, day)?;
+    let total = |r: &Value| r["signups"]["total"].as_u64().unwrap_or(0);
+    s.ok(
+        "read again at once, the glance asks the logs nothing: the same numbers and trouble, read when they were, and the registry's read anew (a person who joined since counted)",
+        again.status == 200 && s.observability.asked().len() == questions && again.body["logs"] == *read && again.body["at"].as_i64() >= b["at"].as_i64() && total(&again.body) == total(b) + 1,
+        json!({ "asked": s.observability.asked().len(), "logs": again.body["logs"], "signups": [&b["signups"], &again.body["signups"]] }),
     );
     let person = ask(ivy, day)?;
     let tomorrow = ask(operator, now + 3_600_000)?;
@@ -586,7 +623,7 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     // why saves failed is the lines themselves, which may run past the
     // cell's bound on an answer: its read failing alone takes nothing else
     s.observability.fail_next_events(400, "too many events to answer");
-    let partial = ask(operator, day)?;
+    let partial = ask(operator, day - 1)?;
     let logs = &partial.body["logs"];
     let rows = logs["trouble"].as_array().cloned().unwrap_or_default();
     s.ok(
@@ -596,19 +633,26 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
             && logs["computersAwakeWeek"] == read["computersAwakeWeek"]
             && rows.iter().map(|t| (&t["computer"], &t["kind"])).eq(trouble.iter().map(|t| (&t["computer"], &t["kind"])))
             && rows.iter().all(|t| t.get("why").is_none())
-            && logs["whyUnread"].as_str().is_some_and(|w| w.contains("SaveWhys") && w.contains("too many events to answer")),
+            && logs["whyUnread"].as_str().is_some_and(|w| w.contains("SaveWhys") && w.contains("too many events to answer"))
+            && s.observability.asked().len() == 2 * questions,
         logs,
     );
     s.observability.fail_next(403, "Authentication error");
-    let failed = ask(operator, day)?;
+    let before = s.observability.asked().len();
+    let failed = ask(operator, day - 2)?;
+    // the read stops at the refusal: the questions in flight then, and
+    // no more (the fake records the refused one in none of them, so a read
+    // that went on records the other eight)
+    let asked = s.observability.asked().len() - before;
     s.ok(
-        "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown",
+        "when the logs refuse their key, the glance says why and keeps the registry's numbers; whether a computer came up is unknown; and the read stops at the refusal, never asking every question",
         failed.status == 200
             && failed.body["logs"]["state"] == "failed"
             && failed.body["logs"]["why"].as_str().is_some_and(|w| w.contains("Authentication error"))
-            && failed.body["signups"] == b["signups"]
-            && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null()),
-        &failed,
+            && failed.body["signups"] == again.body["signups"]
+            && failed.body["newPeople"].as_array().into_iter().flatten().all(|p| p["computerUp"].is_null())
+            && asked + 1 < questions,
+        json!({ "asked": asked, "glance": failed.body }),
     );
     Ok(())
 }

@@ -48,8 +48,12 @@ computers) returns once this product works.
    Cloudflare Artifacts has a commit API), Stripe (51), and the model
    APIs a deployment names (61).
 2. **The Rust cell, ported to Workers (workers-rs), not rewritten**, with
-   thin JS shims where workers-rs lacks an API. The cell is the one
-   Worker; the CLI is Rust.
+   thin JS shims where workers-rs lacks an API. The cell is the
+   platform's Worker, and the CLI is Rust. The platform splits into
+   Workers by who uses them, so a fragment's isolate carries only what
+   fragments use (FIN-475, 2026-11-20): the operators' admin first, a
+   second Worker of the same crate (cell/src/admin.rs), since nothing
+   in the system reads from it.
 3. **Accounts.** Dev and previews run in a dev account on WorkOS's
    staging environment; production in Finite's production account on
    WorkOS's production one. CI deploys from a clean config, as a
@@ -208,10 +212,11 @@ computers) returns once this product works.
     added on its own; it comes in with its person (64). Only an owner
     holds an agent below themselves. What an agent makes is its person's.
     An agent shares what its owner owns as its owner would, but never
-    deletes or sets a cap (`access::agent_shares`).
+    deletes or sets a cap (`permit::agent_shares`).
 37. **Agents can do anything they could do in Finite.** Services that act
     as you are connections (22); paid APIs that need only a key use the
-    operator's keys, priced per call (`price::DEFAULT_KEYS`); a person's
+    operator's keys, each call charged what its vendor said it cost
+    (`price::DEFAULT_CHARGES`, FIN-616); a person's
     own keys are sealed in their Vault and never metered.
 38. **Routines are fragment cron:** scheduled records on any fragment, an
     agent's on its own `tasks` (`fragment schedule add --routine`).
@@ -399,8 +404,10 @@ appoints control who may use them.
   Sessions are `__Host-` cookies.
 - **R17. An agent acts for its owner, capped:** with the lower of the
   owner's role and its cap (its own role, or its owner's on a fragment
-  the owner belongs to), never above `editor`. `for` names only the
-  agent's own owner (2026-11-19, `access::may_act_for`): an app is told
+  the owner belongs to), never above `editor`. Where its owner is not in
+  and it is, its request is its own, as itself (2026-11-21, FIN-615: what
+  should obviously work works). `for` names only the
+  agent's own owner (2026-11-19, `permit::may_act_for`): an app is told
   the named identity as `call.principal`, and nothing proved anyone else
   asked.
 - **R18. Postable channels.** A declared channel may name a `post` role,

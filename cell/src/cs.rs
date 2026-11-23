@@ -159,6 +159,24 @@ pub async fn fetch_all(req: Request, deadline: Duration, max: usize) -> CellResu
     answer
 }
 
+/// `fetch_all` for a platform object's answer (`send`, a `routed::send`:
+/// a SimpleX connector's call to its door): read whole within one
+/// deadline, its body up to `max` bytes. A call into an object takes no
+/// abort, so one past its deadline is only left unread.
+pub async fn answer_all(send: impl std::future::Future<Output = CellResult<Response>>, deadline: Duration, max: usize) -> CellResult<Answer> {
+    let read = async {
+        let mut resp = send.await?;
+        let (body, cut) = read_answer(&mut resp, max).await?;
+        Ok(Answer { status: resp.status_code(), headers: resp.headers().clone(), body, cut })
+    };
+    let timer = Delay::from(deadline);
+    futures_util::pin_mut!(read, timer);
+    match select(read, timer).await {
+        Either::Left((answer, _)) => answer,
+        Either::Right(_) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("no whole answer within {deadline:?}"))),
+    }
+}
+
 /// An answer's body as it streams, measured as a request's is
 /// (`LimitedBody`): all of it, or what came before the chunk that crossed
 /// `max` (none, when its declared length is over), and whether it was cut

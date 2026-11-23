@@ -1710,6 +1710,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     disk_ui(s, api, &mut b, &page, &session, &shots)?;
+    storage_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
@@ -3646,20 +3647,26 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
 }
 
 /// Its disk filling, as its owner sees it (docs/computers.md,
-/// `disk_filling`; Paul, 2026-11-18: "ask your agent to move big files to
-/// storage"): a read of 3.2 GB left of 20 GB, kept as a start's read is (the
-/// `disk` lever: a test fleet's computers share their host's disk, which
-/// never fills), is told over settings in those words, at 1280 and 390 px;
-/// a read with room again tells it no more. Starts and ends with nothing
-/// told.
+/// `disk_filling` and "Room to restore"; Paul, 2026-11-18: "ask your agent
+/// to move big files to storage"): a read of 20 GB with 9 GB free (its
+/// files stored compressed) whose /data restores to 14.2 GB, which leaves
+/// 2.4 GB of room beside the image and a restore's floor, kept as a read
+/// after a save is (the `disk` lever: a test fleet's computers share their
+/// host's disk, which never fills), is told over settings in those words,
+/// the room and never what is free, at 1280 and 390 px; a read with room
+/// again tells it no more. Starts and ends with nothing told.
 fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=disk_filling]')";
     // its words, over settings once they have loaded (what the shots show)
-    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (3.2 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
-    let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 3_240_662_016u64 }))?;
+    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
+    let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 9_000_000_000u64, "data": 14_200_000_000u64 }))?;
+    // its update waits for room while it is told filling (docs/computers.md,
+    // "An image's share of the disk"; Codex on #1422)
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let waits = view()["roomFirst"] == true;
     b.viewport(page, 1280, 800, false)?;
     b.reload(page)?;
     let told = b.until(page, &words, wait);
@@ -3680,15 +3687,134 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     b.color_scheme(page, "dark")?;
     b.viewport(page, 1280, 900, false)?;
     s.ok(
-        "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen",
-        filling.status == 200 && filling.body["kept"] == true && told && phone && fits == true,
-        json!({ "said": said, "lever": filling.body }),
+        "a disk filling is told over settings, in Paul's words: the room left, and to ask its agent to move big files to storage; on a desktop and on a phone (390 px), on screen; its update waits for room",
+        filling.status == 200 && filling.body["kept"] == true && told && phone && fits == true && waits,
+        json!({ "said": said, "lever": filling.body, "roomFirst": waits }),
     );
-    let room = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    let room = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64, "data": 3_000_000_000u64 }))?;
     b.reload(page)?;
     let gone = b.until(page, "!document.querySelector('#computer-notices .computer-notice[data-kind=disk_filling]')", wait);
-    s.ok("a read with room again tells it no more", room.status == 200 && gone, &room.body);
+    let free = view().get("roomFirst").is_none();
+    s.ok("a read with room again tells it no more, and its update waits no more", room.status == 200 && gone && free, json!({ "lever": room.body, "roomFirst": !free }));
     Ok(())
+}
+
+/// Settings → Computer → Storage, as its owner sees it (docs/computers.md,
+/// "Room to restore"; Paul, 2026-11-20: an iPhone-style view in plain
+/// categories): its agent leaves three real files on its computer (the
+/// stub's `fill-data`: a 48 MiB download, 16 MiB of browser data, a 12 MiB
+/// cache), its awake save after that work reads what takes its disk, and
+/// Storage shows them by kind, the biggest files by name, and the room
+/// left; its disk's size a computer's (the `disk` lever, its /data as that
+/// read found it: a test fleet's computers share their host's disk), at
+/// 1280 and 390 px, light and dark, within the phone's width. Starts and
+/// ends on settings.
+fn storage_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let files = [("work/e2e/downloads/talk.mp4", 48), ("work/e2e/browser-profile/cache.bin", 16), ("work/e2e/home/.cache/pip/wheel.whl", 12)];
+    let mut posted = Vec::new();
+    for (n, (path, mib)) in files.iter().enumerate() {
+        posted.push(shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("storage-fill-{n}"), "body": { "text": format!("fill-data {path} {mib}") } })), &[])?.status);
+    }
+    let filled = || {
+        shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?limit=1000"), None, &[])
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("filled work/e2e/")))
+            .count()
+            == files.len()
+    };
+    let made = s.eventually(std::time::Duration::from_secs(60), filled);
+    // its work over, it saves awake, and reads what takes its disk
+    let listed = |v: &Value| files.iter().all(|(path, mib)| v["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == *path && f["bytes"].as_u64() == Some(mib * 1024 * 1024))));
+    let read = made && s.eventually(std::time::Duration::from_secs(180), || listed(&view()));
+    let sizes = view()["sizes"].clone();
+    // its disk a computer's: 20 GB with 15 GB free, its /data as read
+    let sized = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    let block = "document.querySelector('#settings-page [data-storage]')";
+    let drawn = format!(
+        "!!{block}?.checkVisibility() && ['downloads', 'browser', 'caches'].every((k) => {block}.querySelector(`[data-kind=${{k}}]`)) && ['talk.mp4', 'cache.bin', 'wheel.whl'].every((n) => [...{block}.querySelectorAll('.storage-file-name')].some((e) => e.textContent === n)) && /left$/.test({block}.querySelector('.storage-left').textContent)"
+    );
+    let at = |w: u32, h: u32, mobile: bool, b: &mut Browser| -> Result<(bool, Value)> {
+        b.viewport(page, w, h, mobile)?;
+        b.reload(page)?;
+        let ok = b.until(page, &drawn, wait);
+        b.eval(page, &format!("({block}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        let fits = b.eval(page, &format!("({{ right: {block}?.getBoundingClientRect().right <= innerWidth + 1, wide: document.scrollingElement.scrollWidth <= innerWidth + 1 }})"))?;
+        for scheme in ["dark", "light"] {
+            b.color_scheme(page, scheme)?;
+            let _ = b.screenshot(page, &shots.join(format!("computer-storage-{w}-{scheme}.png")));
+        }
+        Ok((ok, fits))
+    };
+    let (desk, _) = at(1280, 900, false, b)?;
+    let (phone, fits) = at(390, 844, true, b)?;
+    let said = b.eval(page, &format!("{block}?.innerText"))?;
+    // the room it shows is its view's, as its notices say a size (Codex on #1428)
+    let room = view()["disk"]["room"].as_u64();
+    let left = b.eval(page, &format!("{block}?.querySelector('.storage-left')?.textContent"))?;
+    let room_said = room.is_some_and(|r| r >= 1_000_000_000 && left.as_str() == Some(&format!("{} left", storage_size(r))));
+    s.ok(
+        "Storage shows what takes its disk by kind (downloads, browser data, caches), its biggest files by name, and the room left, from its awake save's read; on a desktop and on a phone (390 px), within its width",
+        made && posted.iter().all(|st| *st == 200) && read && sized.status == 200 && desk && phone && fits["right"] == true && fits["wide"] == true && room_said,
+        json!({ "said": said, "posted": posted, "sizes": sizes, "fits": fits, "room": room, "left": left }),
+    );
+    // no room left (free below a restore's floor): Full, in red; room again after
+    let full = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 200_000_000u64 }))?;
+    b.reload(page)?;
+    let shows_full = b.until(page, &format!("{block}?.querySelector('.storage-left.storage-low')?.textContent === 'Full'"), wait);
+    // its view says none while it shows Full (Codex on #1428)
+    let none = view()["disk"]["room"].clone();
+    let again = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 15_000_000_000u64 }))?;
+    b.reload(page)?;
+    let roomy = b.until(page, &format!("/ left$/.test({block}?.querySelector('.storage-left:not(.storage-low)')?.textContent)"), wait);
+    s.ok(
+        "Storage with no room left says Full, in red, and the room again once a read finds it",
+        full.status == 200 && none == 0 && shows_full && again.status == 200 && roomy,
+        json!({ "full": full.body, "room": none, "again": again.body }),
+    );
+    // Delete, on the phone: asked once, then the platform removes the file
+    // in its container, and Storage reads it again without it
+    let wheel = "work/e2e/home/.cache/pip/wheel.whl";
+    let row = format!("{block}?.querySelector('.storage-file[data-path=\"{wheel}\"]')");
+    // on screen for its shots (the Full step's reloads left the page at its top)
+    b.until(page, &format!("!!{row}"), wait);
+    b.eval(page, &format!("({row}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete]')?.click(), true)"))?;
+    let asked = b.until(page, &format!("!!{row}?.querySelector('[data-action=storage-delete-sure]')?.checkVisibility() && !{row}.querySelector('[data-action=storage-delete]')"), wait);
+    for scheme in ["dark", "light"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("computer-storage-delete-390-{scheme}.png")));
+    }
+    b.eval(page, &format!("({row}?.querySelector('[data-action=storage-delete-sure]')?.click(), true)"))?;
+    let gone_drawn = b.until(page, &format!("!!{block} && !{row}"), std::time::Duration::from_secs(60));
+    let after = view();
+    let gone = !after["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == wheel));
+    let kept = ["work/e2e/downloads/talk.mp4", "work/e2e/browser-profile/cache.bin"].iter().all(|p| after["sizes"]["files"].as_array().is_some_and(|l| l.iter().any(|f| f["path"] == *p)));
+    // a folder, and a path outside its work, are refused, touching nothing
+    let folder = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "work/e2e/downloads" })), &[])?;
+    let outside = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "../etc/passwd" })), &[])?;
+    let climbed = shell(api, session, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": "work/../bridge/state.json" })), &[])?;
+    b.color_scheme(page, "dark")?;
+    b.viewport(page, 1280, 900, false)?;
+    s.ok(
+        "Delete asks once, then the platform removes that file in its container (no agent asked), and Storage reads its disk again without it; a folder, and a path outside its work, are refused",
+        asked && gone_drawn && gone && kept && folder.status == 404 && outside.status == 400 && climbed.status == 400,
+        json!({ "files": after["sizes"]["files"], "folder": [folder.status, &folder.body], "outside": [outside.status, &outside.body], "climbed": climbed.status }),
+    );
+    Ok(())
+}
+
+/// A size as Storage and its notices say it (cell/shell/computer.js
+/// `storageSize`, fragment_core's notice size): GB to a tenth, rounded.
+fn storage_size(n: u64) -> String {
+    let tenths = (n + 50_000_000) / 100_000_000;
+    format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
 /// An update, as the person sees it (docs/computers.md, "What its owner is
@@ -4490,7 +4616,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     };
     let id = computer["computer"].as_str().unwrap_or("").to_string();
     // the uses below, and the page's month of them, in one month
-    super::computers::pin_month(api, &id, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
+    super::computers::pin_month(api, computer["agents"][0]["owner"].as_str().unwrap_or_default())?;
     // the person connects Google (as another account than their sign-in here),
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
@@ -6099,7 +6225,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
 }
 
 /// The Skills page's library: the pinned Hermes image's optional skills
-/// (the release's catalog in the skills fragment), each a switch. Valid:
+/// (the release's catalog the shell publishes), each a switch. Valid:
 /// switched on, the fragment holds its `optional/hermes/<id>.on`, which
 /// is what the image's boot installs; switched off, it is gone. A labelled
 /// skill asks first. Replay: loaded again, the switch is as it was left.
@@ -7221,11 +7347,13 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
 /// still asked the status for that origin navigated under the bare
 /// policy, which names only the mint's origin, and the page stayed
 /// refused the microphone. The shell knows each fragment's origin from
-/// its own page now (its `fragment-origin` meta), with no request. Valid:
-/// in a shell of its own, the app's status held, never answered, its
-/// window opened and its Reload pressed, the frame is sent at once, under
-/// the policy that names the app's own origin, and its page may use the
-/// microphone (Chrome's fake, allowed).
+/// its own page now (its `fragment-origin` meta), with no request. Only a
+/// chat's frame is lent the microphone since (the frames section,
+/// `app_microphone`), so an app's window is sent under a policy that names
+/// none. Valid: in a shell of its own, the app's status held, never
+/// answered, its window opened and its Reload pressed, the frame is sent
+/// at once, under a policy that lends no microphone, and its page is told
+/// the microphone is denied (in this Chrome, whose fake would allow it).
 fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"]")));
@@ -7245,15 +7373,15 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
     // in the same task as the press: nothing it could have waited for came
     let sent = b.eval(&shell, &format!("(() => {{ {pane}.querySelector('button[aria-label=Reload]').click(); const f = {pane}.querySelector('iframe'); return {{ src: f.hasAttribute('src'), allow: f.allow }}; }})()"))?;
-    let named = sent["src"] == true && sent["allow"] == format!("clipboard-write; microphone {}", api.site_origin(app));
+    let named = sent["src"] == true && sent["allow"] == "clipboard-write";
     let told = s.eventually(wait, || {
         let Ok(frame) = b.frame(app) else { return false };
         let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");
         let _ = b.detach(frame);
-        state.ok() == Some(json!("granted"))
+        state.ok() == Some(json!("denied"))
     });
     s.ok(
-        "an app's window opened and reloaded before its status answers loads at once, under the policy that names its own origin: its page may use the microphone",
+        "an app's window opened and reloaded before its status answers loads at once, under a policy that lends it no microphone: its page is told the microphone is denied",
         up && opened && named && told,
         json!({ "up": up, "opened": opened, "sent": sent, "told": told }),
     );
@@ -9152,6 +9280,9 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
 /// whatever their role, and folds it into Archived; Delete is on their own
 /// alone, asks again under its row with its name typed back and what goes,
 /// then deletes it for good; each row moves only once the list says so.
+/// Its tabs too: their own on Made by me, the lent one on Shared with me,
+/// whose filters by access each keep only what they name, each tab with its
+/// own Archived; with nothing shared with them, no tabs.
 /// Invalid: a brain shared with them (an editor) offers no Delete, and the
 /// platform refuses them its delete.
 fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
@@ -9176,45 +9307,84 @@ fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page
     let control = |name: &str, action: &str| format!("{}?.querySelector('[data-action={action}]')", row(name));
     // the row's actions a person sees, by name
     let actions = |name: &str| format!("[...({}?.querySelectorAll('button[data-action]') ?? [])].filter((b) => b.checkVisibility()).map((b) => b.dataset.action)", row(name));
+    // a tab (apps-page.js `accessView`: Made by me, Shared with me) chosen,
+    // and a filter on Shared with me; `on(key)` whether that tab is chosen
+    let pick = |b: &mut Browser, what: &str, key: &str| b.eval(page, &format!("(document.querySelector('#brains-page .{what}[data-key={key}]')?.click(), true)"));
+    let on = |key: &str| format!("document.querySelector('#brains-page .apps-tab[data-key={key}]')?.getAttribute('aria-selected') === 'true'");
+    let summary = "document.querySelector('#brains-page .apps-archived summary')?.textContent";
     b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
-    let shown = b.until(page, &format!("location.pathname === '/brains' && {} && {}", live(&mine), live(&theirs)), wait);
-    let (own, lent) = (b.eval(page, &actions(&mine))?, b.eval(page, &actions(&theirs))?);
+    let shown = b.until(page, &format!("location.pathname === '/brains' && {} && !{} && {}", live(&mine), live(&theirs), on("mine")), wait);
+    let own = b.eval(page, &actions(&mine))?;
+    pick(b, "apps-tab", "shared")?;
+    let lent_shown = b.until(page, &format!("{} && !{}", live(&theirs), live(&mine)), wait);
+    let lent = b.eval(page, &actions(&theirs))?;
     let has = |v: &Value, a: &str| v.as_array().is_some_and(|l| l.iter().any(|x| x == a));
     s.ok(
         "on Brains, their own brain has Archive and Delete; one shared with them as an editor has Archive and no Delete",
-        shown && has(&own, "archive") && has(&own, "delete") && has(&lent, "archive") && !has(&lent, "delete"),
+        shown && lent_shown && has(&own, "archive") && has(&own, "delete") && has(&lent, "archive") && !has(&lent, "delete"),
         json!({ "own": own, "lent": lent }),
+    );
+    // Shared with me: the lent one saying Can edit, and its filters; each
+    // keeps only what it names, Any access both; Made by me has none
+    let filters = "document.querySelector('#brains-page .apps-filters')?.checkVisibility()";
+    let lent_says = b.until(page, &format!("{filters} && {}?.querySelector('.app-row-meta')?.textContent === 'Can edit'", row(&theirs)), wait);
+    pick(b, "apps-filter", "view")?;
+    let view = b.until(page, &format!("!{} && document.querySelector('#brains-page .apps-empty')?.textContent === 'None you can only view.'", live(&theirs)), wait);
+    pick(b, "apps-filter", "edit")?;
+    let edit = b.until(page, &live(&theirs), wait);
+    pick(b, "apps-filter", "view")?;
+    b.until(page, &format!("!{}", live(&theirs)), wait);
+    pick(b, "apps-filter", "any")?;
+    let any = b.until(page, &live(&theirs), wait);
+    let _ = b.screenshot(page, &shots.join("brains-shared-tab.png"));
+    pick(b, "apps-tab", "mine")?;
+    let mine_tab = b.until(page, &format!("{} && {} && !{} && !{filters}", on("mine"), live(&mine), live(&theirs)), wait);
+    s.ok(
+        "Shared with me lists the lent brain (Can edit) with filters by access: Can view keeps none, Can edit and Any access keep it; Made by me lists their own, no filters",
+        lent_says && view && edit && any && mine_tab,
+        b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?,
     );
     let refused = b.eval(page, &in_page("DELETE", &format!("/api/f/{theirs}"), "undefined"))?;
     let kept = api.status(&other, &theirs)?;
     s.ok("the platform refuses an editor's delete of it (403), and it stays", refused["status"] == 403 && kept.status == 200, json!({ "refused": refused, "status": kept.status }));
 
-    // Archive: their own and the lent one, each folded once the list says so
+    // Archive: their own and the lent one, each folded into its tab's
+    // Archived once the list says so
     b.eval(page, &format!("({}?.click(), true)", control(&mine, "archive")))?;
-    let one = b.until(page, &format!("{} && !{}", folded(&mine), live(&mine)), wait);
+    let one = b.until(page, &format!("{} && !{} && {summary} === 'Archived (1)'", folded(&mine), live(&mine)), wait);
+    pick(b, "apps-tab", "shared")?;
+    b.until(page, &live(&theirs), wait);
     b.eval(page, &format!("({}?.click(), true)", control(&theirs, "archive")))?;
-    let both = b.until(page, &format!("{} && !{} && document.querySelector('#brains-page .apps-archived summary')?.textContent === 'Archived (2)'", folded(&theirs), live(&theirs)), wait);
+    let both = b.until(page, &format!("{} && !{} && !{} && {summary} === 'Archived (1)'", folded(&theirs), live(&theirs), folded(&mine)), wait);
     b.eval(page, "(document.querySelector('#brains-page .apps-archived').open = true, true)")?;
-    let (own_folded, lent_folded) = (b.eval(page, &actions(&mine))?, b.eval(page, &actions(&theirs))?);
+    let lent_folded = b.eval(page, &actions(&theirs))?;
+    let _ = b.screenshot(page, &shots.join("brains-archived.png"));
+    pick(b, "apps-tab", "mine")?;
+    b.until(page, &folded(&mine), wait);
+    b.eval(page, "(document.querySelector('#brains-page .apps-archived').open = true, true)")?;
+    let own_folded = b.eval(page, &actions(&mine))?;
     let owners = api.signed(&other, "GET", "/api/fragments", None)?;
     let owners_row = owners.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == theirs.as_str()).cloned()).unwrap_or_default();
-    let _ = b.screenshot(page, &shots.join("brains-archived.png"));
     s.ok(
-        "Archive folds each into Archived for them alone: Unarchive there (and Delete on their own), no Archive, and its owner's list unchanged",
+        "Archive folds each into its own tab's Archived for them alone: Unarchive there (and Delete on their own), no Archive, and its owner's list unchanged",
         one && both
             && has(&own_folded, "unarchive") && has(&own_folded, "delete") && !has(&own_folded, "archive")
             && has(&lent_folded, "unarchive") && !has(&lent_folded, "delete") && !has(&lent_folded, "archive")
             && owners_row["name"] == theirs.as_str() && owners_row["archived"] != true,
         json!({ "own": own_folded, "lent": lent_folded, "owners": owners_row }),
     );
-    for name in [&mine, &theirs] {
-        b.eval(page, &format!("({}?.click(), true)", control(name, "unarchive")))?;
-        b.until(page, &live(name), wait);
-    }
     // settled: each its Archive again, pressable, never left saying Archiving…
     let settled = |name: &str| format!("{} && {}?.textContent === 'Archive' && !{}.disabled", live(name), control(name, "archive"), control(name, "archive"));
-    let back = b.until(page, &format!("{} && {} && document.querySelector('#brains-page .apps-archived')?.hidden", settled(&mine), settled(&theirs)), wait);
-    s.ok("Unarchive brings each back to the list, its Archive pressable again", back, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
+    let empty_fold = "document.querySelector('#brains-page .apps-archived')?.hidden";
+    b.eval(page, &format!("({}?.click(), true)", control(&mine, "unarchive")))?;
+    let mine_back = b.until(page, &format!("{} && {empty_fold}", settled(&mine)), wait);
+    pick(b, "apps-tab", "shared")?;
+    b.until(page, &folded(&theirs), wait);
+    b.eval(page, &format!("({}?.click(), true)", control(&theirs, "unarchive")))?;
+    let theirs_back = b.until(page, &format!("{} && {empty_fold}", settled(&theirs)), wait);
+    s.ok("Unarchive brings each back to its tab's list, its Archive pressable again", mine_back && theirs_back, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
+    pick(b, "apps-tab", "mine")?;
+    b.until(page, &live(&mine), wait);
 
     // Delete: asked again under the row, its name typed back
     let form = format!("document.querySelector({})", js(&format!("#brains-page [data-delete-confirm=\"{mine}\"]")));
@@ -9247,7 +9417,7 @@ fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page
     let ready = typed(b, &mine)? == false;
     let _ = b.screenshot(page, &shots.join("brains-delete-ready.png"));
     b.eval(page, &format!("({sure}?.click(), true)"))?;
-    let gone = b.until(page, &format!("!{} && {}", row(&mine), live(&theirs)), wait);
+    let gone = b.until(page, &format!("!{}", row(&mine)), wait);
     let after = b.eval(page, &in_page("GET", &format!("/api/f/{mine}/status"), "undefined"))?;
     s.ok(
         "its name typed, Delete deletes it: its row leaves with the list, and it is gone (404)",
@@ -9256,9 +9426,15 @@ fn apps_archive_delete_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page
     );
 
     // its owner deletes theirs: it leaves their page too, as their list is told
+    // on Shared with me as it goes; with nothing else shared with them, the
+    // tabs go with it
+    pick(b, "apps-tab", "shared")?;
+    anyhow::ensure!(b.until(page, &live(&theirs), wait), "{theirs} was not on Shared with me");
     let r = api.signed(&other, "DELETE", &format!("/api/f/{theirs}"), None)?;
     anyhow::ensure!(r.status == 200, "{theirs} was not deleted: {r}");
-    anyhow::ensure!(b.until(page, &format!("!{}", row(&theirs)), wait), "{theirs}, deleted by its owner, stayed on their Brains page");
+    let left = b.until(page, &format!("!{}", row(&theirs)), wait);
+    let untabbed = b.until(page, "!document.querySelector('#brains-page .apps-tabs')?.checkVisibility() && !document.querySelector('#brains-page .apps-filters')?.checkVisibility()", wait);
+    s.ok("deleted by its owner, the lent brain leaves their page, and with nothing shared with them the tabs go too", left && untabbed, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
     // back to settings, where the checks after these are
     b.eval(page, "(document.getElementById('settings').click(), true)")?;
     b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);

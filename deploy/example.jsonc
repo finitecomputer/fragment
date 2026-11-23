@@ -86,7 +86,8 @@
   // The operators' glance (`/admin`, `GET /api/admin/glance`): a key to
   // this account's Workers Logs, read only (an account API token with
   // Workers Observability Read and nothing else), by its name in the
-  // store. Leave it out and the glance shows the registry's numbers and
+  // store, bound to the admin Worker alone (no fragment's isolate holds
+  // it). Leave it out and the glance shows the registry's numbers and
   // says the logs' are not configured.
   // "observability_read": "fragment-observability-read",
   // The AI Gateway the model route and image steps call through: one of
@@ -280,10 +281,10 @@
   // environment variables a guest finds its placeholder in, the names the
   // vendor's own SDK reads. A connection is a WorkOS Pipes provider,
   // enabled in the WorkOS environment above. An operator key's value is a
-  // store secret, named as its `key`, as every secret; its price is the
-  // price book's list price for its name (fragment_core::price
-  // DEFAULT_KEYS) unless it names `"price": {"micros", "per"}`
-  // (micro-dollars per calls, at list; the margin is added). An `own` row
+  // store secret, named as its `key`, as every secret; its calls are
+  // charged as its `charges` say (below), and a row may name
+  // `"price": {"micros", "per"}` (micro-dollars per calls, at list; the
+  // margin is added) for every call they don't price. An `own` row
   // takes the person's own key instead: pasted in settings, or, with an
   // `oauth` sign-in, made by the provider when the person connects it there
   // (`fragment_core::own_signin`); its `models` are what their agents may
@@ -307,7 +308,16 @@
   // live browsers), a key minted from it, or its own disable. The swap
   // refuses such a call (403) before any provider, and sends every other
   // as before (docs/computers.md, "Connections and operator keys"). The
-  // same goes for it: only once a release that knows it is deployed.
+  // same goes for it: only once a release that knows it is deployed. An
+  // operator row's `charges` say how its calls are charged, the price
+  // book's for its name unless it names its own (fragment_core::price
+  // DEFAULT_CHARGES, docs/ledger.md, "The price book"): each `{"calls":
+  // ["METHOD /path", …], "header"?|"json"?, "unit", "price": {"micros",
+  // "per"}}`, the whole number of units its answer names in that header or
+  // JSON pointer, or one, the first that is for the call and says it.
+  // Name them only once a release that knows the field is deployed. An
+  // operator row's `calls_an_hour` holds each computer to that many calls
+  // on its key an hour (Google Places: 120 unless it names its own).
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],

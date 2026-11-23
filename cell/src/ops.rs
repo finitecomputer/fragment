@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::access::Purpose;
+use fragment_core::permit::Action;
 use fragment_core::facet::{self, Answer, Answered, Refusal};
 use fragment_core::npub;
 use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, Role, Via};
@@ -246,12 +246,12 @@ impl FragmentCell {
         let standing = self.standing(caller, link)?;
         // Whether the caller can see the fragment at all comes before
         // anything about its operations.
-        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        decide(facts.visibility, standing, Action::Read(Role::Public))?;
         let decl = self.declared(op)?;
         // a query reads (docs/MODEL.md), so an agent's owner may ask it; a
         // mutation or a job acts, which takes a membership of one's own
-        let purpose = if decl.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
-        let role = decide(facts.visibility, standing, purpose, decl.role)?;
+        let action = if decl.kind == OpKind::Query { Action::Read(decl.role) } else { Action::Act(decl.role) };
+        let role = decide(facts.visibility, standing, action)?;
         // a mutation or a job writes: past its owner's overdraft the fragment
         // takes none, and its queries still answer
         let writes = decl.kind != OpKind::Query;
@@ -341,7 +341,23 @@ impl FragmentCell {
         // One call settles an id at a time: a retry that arrives while the
         // first is still running waits for it, then replays.
         let _held = self.hold(&ledger_id).await;
-        let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth)?;
+        // the code this call runs, read before it runs: what its effects are
+        // stamped by (`code_author`), whatever an install lands meanwhile
+        let code = self.installed_code()?;
+        let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth, code.as_deref())?;
+        // A row an earlier attempt left: until this call's answer says whose
+        // run the facet holds (that attempt's, replayed, or this one's), the
+        // code that wrote it is not known, so the row names none meanwhile.
+        // A reply lost now stamps its effects app code's (`code_author`),
+        // never a release's word; the answer puts back the code it names.
+        let earlier = match fresh {
+            true => None,
+            false => {
+                let earlier = pending.code.clone();
+                self.pending_code(&mut pending, None)?;
+                earlier
+            }
+        };
         meta["run"] = pending.seq.into();
         meta["ledgerMs"] = self.ledger_kept_ms()?.into();
         let call = js::Mutation { ledger_id: &ledger_id, op: inv.op, input_sha, input: input_text, meta: &meta };
@@ -366,8 +382,10 @@ impl FragmentCell {
         let ran = match answer {
             Answer::Ran(ran) => ran,
             Answer::Refused(why) => {
-                if fresh {
-                    self.forget(&pending)?;
+                // nothing ran: a run the facet holds is the earlier attempt's
+                match fresh {
+                    true => self.forget(&pending)?,
+                    false => self.pending_code(&mut pending, earlier)?,
                 }
                 return Err(refused(why, inv.op));
             }
@@ -379,8 +397,11 @@ impl FragmentCell {
                 return Err(CellError::host(format!("the facet committed run {run:?}, not run {}", pending.seq)));
             }
             if !fresh {
-                self.restate(&mut pending, inv.op, inv.depth)?;
+                self.restate(&mut pending, inv.op, inv.depth, code)?;
             }
+        } else if !fresh {
+            // the earlier attempt's run, replayed: its code wrote it
+            self.pending_code(&mut pending, earlier)?;
         }
         // The facet answers the run it holds for this id. That run is this
         // row's when it just committed, or when an earlier try of it has not
@@ -457,6 +478,25 @@ impl FragmentCell {
         if body["op"] == "search-index" {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;
+        }
+        if body["op"] == "hold-card" {
+            // the alarm's pass waits while on where it chooses its card's
+            // shot (fragment.rs `on_alarm`); `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_card.set((on, self.test_hold_card.get().1));
+            }
+            let (on, waiting) = self.test_hold_card.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
+        }
+        if body["op"] == "hold-launch" {
+            // a launch's batch, made, waits while on before it is written
+            // (jobs.rs `launch_queued`), across a delete and the name made
+            // again; `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_launch.set((on, self.test_hold_launch.get().1));
+            }
+            let (on, waiting) = self.test_hold_launch.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
         }
         if body["op"] == "hold-install" {
             // a pending install (plane.rs `install_pending`) waits while on,
@@ -751,7 +791,14 @@ impl FragmentCell {
                 self.flush_meters(true).await?;
                 self.meter_state()?
             }
-            Some("meter") => self.meter_state()?,
+            Some("meter") => {
+                // this life's open count read in, so a first ask after a
+                // reactivation shows it too
+                if let Some(life) = self.meta(MetaKey::CreatedAt)? {
+                    self.open_count(&life).await?;
+                }
+                self.meter_state()?
+            }
             Some("forget-standing") => {
                 // the isolate's whole gate: every person's answers, not only this owner's
                 crate::ledger::forget_gate();
@@ -765,13 +812,16 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "due": due, "records": records })
             }
-            Some("poll-now") => {
+            Some(op @ ("poll-now" | "age-blobs")) => {
                 // the next alarm is a poll pass (the blob collection's), so a
-                // test need not wait a quiet fragment's day for one
+                // test need not wait a quiet fragment's day for one; `age-blobs`
+                // makes every blob a grace period older first, so it need not
+                // wait a blob's week either
+                let aged = if op == "age-blobs" { self.age_blobs()? } else { 0 };
                 let now = js::now_ms();
                 self.set_meta(MetaKey::PollAt, &now.to_string())?;
                 self.schedule().await?;
-                json!({ "pollAt": now })
+                json!({ "pollAt": now, "aged": aged })
             }
             Some("hold-rows") => {
                 // while on, the alarm sends no list row (`on_alarm`): a row
@@ -787,7 +837,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
+ hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, age-blobs, hold-rows, or ended")),
         })
     }
 }

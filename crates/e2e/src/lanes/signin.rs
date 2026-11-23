@@ -233,17 +233,26 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// A deploy's probe, `GET /healthz/objects` (docs/api.md, Health), which
-/// `cargo xtask deploy` asks until every object class answers its release:
-/// the Registry's skew hook stands in for an object of another release.
+/// `cargo xtask deploy` asks until every object class answers its release,
+/// and the admin Worker's, `GET /healthz/admin`, asked after it: the same,
+/// from the admin's own Worker through its bindings to the cell's classes.
+/// The Registry's skew hook stands in for an object of another release.
 fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex", "Vault"];
-    let probe = || api.unsigned("GET", "/healthz/objects", None);
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex", "Vault", "Migrations", "SimplexDoor"];
+    for (probed, worker) in [("/healthz/objects", "the Worker"), ("/healthz/admin", "the admin Worker")] {
+        probe_cases_of(s, api, &classes, probed, worker)?;
+    }
+    Ok(())
+}
+
+fn probe_cases_of(s: &mut Suite, api: &Api, classes: &[&str], probed: &str, worker: &str) -> Result<()> {
+    let probe = || api.unsigned("GET", probed, None);
     // valid: every class's probe object admits the Worker's release, its schema ready
     let r = probe()?;
     let answered = |r: &Reply, of: &[&str]| of.iter().all(|c| r.body["objects"][c]["release"] == r.body["release"]);
     s.ok(
-        "a deploy's probe is answered to anyone: every object class admits the Worker's release (200), the release every answer names",
-        r.status == 200 && answered(&r, &classes) && r.body["release"] == r.header("x-fragment-deploy"),
+        &format!("{probed}: a deploy's probe is answered to anyone: every object class admits {worker}'s release (200), the release every answer names"),
+        r.status == 200 && answered(&r, classes) && r.body["release"] == r.header("x-fragment-deploy"),
         &r,
     );
     // invalid: an object of another release refuses it, and the probe names
@@ -252,13 +261,13 @@ fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(skew.status == 200, "the skewFor test hook: {skew}");
     let r = probe()?;
     s.ok(
-        "an object of another release fails the probe (503), named with the release it runs: the deploy is not done",
+        &format!("{probed}: an object of another release fails the probe (503), named with the release it runs: the deploy is not done"),
         r.status == 503 && r.body["objects"]["Registry"]["refusedBy"] == "another-release-a-test-hook" && answered(&r, &classes[1..]),
         &r,
     );
     // replay: once that object runs the Worker's release, the probe is 200 again
     let r = probe()?;
-    s.ok("and asked again, that object now of the Worker's release, it is 200", r.status == 200 && answered(&r, &classes), &r);
+    s.ok(&format!("{probed}: and asked again, that object now of {worker}'s release, it is 200"), r.status == 200 && answered(&r, classes), &r);
     Ok(())
 }
 

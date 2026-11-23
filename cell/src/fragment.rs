@@ -51,7 +51,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use fragment_core::access::{self, Decision, Purpose, Standing};
+use fragment_core::permit::{self, Action, Standing, Verdict};
 use fragment_core::npub;
 use fragment_core::seed;
 use fragment_proto::{
@@ -82,8 +82,12 @@ use calls::{
 pub(crate) const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
+/// The longest a due card's shot waits for queued runs to start first
+/// (`fragment_core::alarm::card_waits`).
+const CARD_WAIT_MAX_MS: i64 = 10_000;
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct FragmentCell {
     pub(crate) state: State,
     pub(crate) raw: JsValue,
@@ -120,6 +124,10 @@ pub struct FragmentCell {
     pub(crate) live: RefCell<crate::live::LiveMemory>,
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
+    /// The open minute's request count (meter.rs `count_request`), as the
+    /// storage's key-value API holds it: not read yet (`None`), none, or
+    /// one.
+    pub(crate) meter_open: RefCell<Option<Option<crate::meter::OpenCount>>>,
     /// A record woke an idle search cursor, and the alarm is not armed for
     /// it yet (search.rs `log_search`; `after_answer` arms it).
     pub(crate) search_woke: Cell<bool>,
@@ -136,15 +144,25 @@ pub struct FragmentCell {
     /// waiting now. In memory: a life's end, which remakes its storage,
     /// leaves it as the test set it.
     pub(crate) test_hold_install: Cell<(bool, bool)>,
-    /// Serializes `launch_queued`: two at once would each start a queued
-    /// run's Workflow and say so.
-    pub(crate) launching: futures_util::lock::Mutex<()>,
+    /// A test fleet's `hold-launch` lever (ops.rs): whether a launch's
+    /// batch, made, waits before it is written (jobs.rs `launch_queued`),
+    /// and whether one is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_launch: Cell<(bool, bool)>,
+    /// A test fleet's `hold-card` lever (ops.rs): whether the alarm's pass
+    /// waits where it chooses its card's shot (`on_alarm`), and whether one
+    /// is waiting now. In memory, as `test_hold_install`.
+    pub(crate) test_hold_card: Cell<(bool, bool)>,
+    /// A launch is under way (`launch_queued`): one at a time, without an
+    /// await before its `createBatch`; another finding one leaves its runs
+    /// queued for the alarm's next pass.
+    pub(crate) launching: Cell<bool>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     pub(crate) schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for FragmentCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -171,11 +189,14 @@ impl DurableObject for FragmentCell {
             app,
             live: RefCell::default(),
             meter_armed: Cell::new(-1),
+            meter_open: RefCell::new(None),
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
-            launching: futures_util::lock::Mutex::new(()),
+            test_hold_launch: Cell::new((false, false)),
+            test_hold_card: Cell::new((false, false)),
+            launching: Cell::new(false),
             dw_noted: RefCell::new(None),
             schema,
         }
@@ -195,6 +216,11 @@ impl DurableObject for FragmentCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // Queued runs' Workflows start first, before anything here calls out
+        // (`launch_queued`; xtask/src/guards.rs holds this order). The alarm
+        // begins with a fresh subrequest budget, and a Workflow keeps the
+        // budget of the call that made it.
+        self.launch_queued().await;
         if self.schema.refused() {
             // a delete's cleanup goes on, refused or not: it ends in its
             // storage's release, which makes the fragment current (ended.rs)
@@ -334,6 +360,9 @@ pub(crate) enum MetaKey {
     /// When the next pass runs (a day after the last, or within the poll
     /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
+    /// A queued run's Workflow could not be started: queued runs wait
+    /// until then to be tried again (`runs_due_at`).
+    LaunchRetryAt,
     /// When the pins last may have fallen behind the repo: a storage token
     /// was minted for it, or a move failed to follow (plane.rs `may_lag`).
     OutsideAt,
@@ -486,6 +515,9 @@ pub(crate) enum MetaKey {
     TestFailMeterAcks,
     /// The last minute whose request count was closed into a row (meter.rs).
     MeterClosed,
+    /// The last minute whose open request count was folded into its row
+    /// (meter.rs `fold_open`): a count at or below it is never folded again.
+    MeterFolded,
     /// When storage was last sampled (meter.rs).
     StorageSampledAt,
     /// The preview card and its schedule (card.rs: `fragment_core::card::Cards`, as JSON).
@@ -530,6 +562,7 @@ impl MetaKey {
             MetaKey::RepoOfLife => "repo_of_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
+            MetaKey::LaunchRetryAt => "launch_retry_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::TemplateTitle => "template_title",
@@ -584,6 +617,7 @@ impl MetaKey {
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
 
             MetaKey::MeterClosed => "meter_closed",
+            MetaKey::MeterFolded => "meter_folded",
             MetaKey::StorageSampledAt => "storage_sampled_at",
             MetaKey::Cards => "cards",
             MetaKey::TestFailCards => "test_fail_cards",
@@ -667,21 +701,13 @@ pub(crate) fn as_themselves(standing: Standing) -> bool {
     standing.member.is_some() || standing.owns_member_agent
 }
 
-/// The caller's role for `purpose`, or the refusal and why: pure, over the
-/// visibility and standing a request read once. `needs` is the weakest
-/// role that may do it.
-pub(crate) fn decide(visibility: Visibility, standing: Standing, purpose: Purpose, needs: Role) -> CellResult<Role> {
-    let why = || match (needs, visibility) {
-        _ if standing.cap.is_some() => format!("this needs the {} role: an agent acts with the lower of its asker's role and its own (or its owner's), at most editor", needs.as_str()),
-        _ if standing.owns_member_agent && purpose == Purpose::Act => "you read this fragment through your agent's membership; acting here needs your own".to_string(),
-        (Role::Public, Visibility::Link) => "this fragment is shared by link: open it with its share link (?view=)".to_string(),
-        (Role::Public, Visibility::Members) => "this fragment is for its members only".to_string(),
-        _ => format!("this needs the {} role", needs.as_str()),
-    };
-    match access::decide(visibility, standing, purpose, needs) {
-        Decision::Allow(role) => Ok(role),
-        Decision::Unauthenticated => Err(CellError::new(ErrorCode::Unauthenticated, format!("{}; sign in or sign the request", why()))),
-        Decision::Forbidden => Err(CellError::new(ErrorCode::Forbidden, why())),
+/// The caller's role for `action`, or the refusal and why
+/// (`permit::decide`), over the visibility and standing a request read once.
+pub(crate) fn decide(visibility: Visibility, standing: Standing, action: Action) -> CellResult<Role> {
+    match permit::decide(&permit::Facts { visibility, standing, action }) {
+        Verdict::Allow(role) => Ok(role),
+        Verdict::Ask(ask) => match ask {},
+        Verdict::Refuse(refusal) => Err(CellError::new(if refusal.sign_in { ErrorCode::Unauthenticated } else { ErrorCode::Forbidden }, refusal.message())),
     }
 }
 
@@ -821,7 +847,7 @@ impl FragmentCell {
     /// Appends to the audit trail: the `events` channel, written by the platform.
     pub(crate) fn event(&self, kind: &str, summary: &str, data: Value) {
         let summary: String = summary.chars().take(500).collect();
-        let _ = self.append("events", "platform", kind, &json!({ "summary": summary, "data": data }), None);
+        let _ = self.append("events", "platform", fragment_proto::Author::Platform, kind, &json!({ "summary": summary, "data": data }), None);
     }
 
     /// The fragment's name, or 404 when it was never created (or was deleted).
@@ -871,70 +897,90 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["role"].as_str()).and_then(Role::parse))
     }
 
-    /// What the caller brings, in one statement: their membership, or an
-    /// agent of theirs that is a member (they read what it reads). A
-    /// request reads it once and decides with it (`decide`) as often as
-    /// it asks.
+    /// What the caller brings, in one statement (`permit::Standing`): the
+    /// membership of whom it asks for (an agent's owner, named in `for`;
+    /// else the signer), or an agent of theirs that is a member (they read
+    /// what it reads); an agent's own membership and its person's; and
+    /// whether this is a connector, and the caller its owner in person. The
+    /// rules over them are `permit::decide`'s alone. A request reads it
+    /// once and decides with it as often as it asks.
     pub(crate) fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
-        let Some(principal) = caller.principal() else {
-            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None, held: None });
+        let Some(signed) = caller.signed.as_ref() else {
+            return Ok(Standing { link, ..Standing::default() });
         };
-        if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
-            let standing = self.standing_for(signed, link)?;
-            return self.only_owner_edits(caller, standing);
+        let asker = signed.acting_for.as_deref().unwrap_or(&signed.id);
+        let person = signed.owner.as_deref();
+        if signed.acting_for.is_some() && person.is_none() {
+            return Err(CellError::host("an agent acting for someone has no owner"));
         }
         #[derive(serde::Deserialize)]
         struct Row {
             role: Option<String>,
             agent: i64,
-        }
-        let rows: Vec<Row> = self.typed(
-            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent",
-            vec![principal.into(), principal.into()],
-        )?;
-        let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        let mut member = row.role.as_deref().and_then(Role::parse);
-        // as itself, a hold caps an agent in with its person here, a
-        // member who is not the owner (decision 64: the whole entity is
-        // secured; members.rs `entity_of`); never its own memberships, its
-        // owner's chats, its agent fragment, one it holds on its own
-        // (decision 36), where it answers and records its turns
-        if let Some((held, signed)) = caller.signed.as_ref().and_then(|s| Some((s.held?, s))) {
-            let in_with_person = match signed.owner.as_deref() {
-                Some(person) => self.member_role(person)?.is_some_and(|r| r != Role::Owner),
-                None => false,
-            };
-            if in_with_person {
-                member = member.map(|m| m.min(held));
-            }
-        }
-        self.only_owner_edits(caller, Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
-    }
-
-    /// An agent acting for someone (decision R17), in one statement:
-    /// the asker's standing (their membership, or an agent of theirs that is
-    /// a member), capped by the agent's own membership and its owner's
-    /// (`access::effective_role`).
-    fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
-        let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
-        let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
-        #[derive(serde::Deserialize)]
-        struct Row {
-            role: Option<String>,
-            agent: i64,
-            agent_role: Option<String>,
-            owner_role: Option<String>,
+            own_role: Option<String>,
+            person_role: Option<String>,
+            door: Option<String>,
+            owner: Option<String>,
         }
         let rows: Vec<Row> = self.typed(
             "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent, \
-             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role",
-            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
+             (SELECT role FROM members WHERE principal = ?) AS own_role, (SELECT role FROM members WHERE principal = ?) AS person_role, \
+             (SELECT value FROM meta WHERE key = ?) AS door, (SELECT value FROM meta WHERE key = ?) AS owner",
+            vec![
+                asker.into(),
+                asker.into(),
+                signed.id.as_str().into(),
+                person.unwrap_or_default().into(),
+                MetaKey::DoorTemplate.key().into(),
+                MetaKey::Owner.key().into(),
+            ],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
-        let member = role(row.role);
-        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap), held: agent.held })
+        let (member, person_role) = (role(row.role), role(row.person_role));
+        // read only on a connector, where it lifts the viewer ceiling
+        let owner_in_person = match (&row.door, row.owner) {
+            (None, _) => false,
+            (Some(_), Some(owner)) => crate::doors::owner_in_person(signed, &owner),
+            (Some(_), None) => return Err(missing(MetaKey::Owner)),
+        };
+        Ok(Standing {
+            member,
+            owns_member_agent: member.is_none() && row.agent != 0,
+            link,
+            signed: true,
+            cap: signed.acting_for.as_ref().map(|_| permit::Cap { agent: role(row.own_role), owner: person_role }),
+            held: signed.held,
+            // its person is a member here, not its owner (members.rs `entity_of`)
+            beside_person: person_role.is_some_and(|r| r != Role::Owner),
+            connector: row.door.is_some(),
+            owner_in_person,
+        })
+    }
+
+    /// Whom a request acts as here: as the router named it, but an
+    /// agent's for its owner where its owner holds no membership and it
+    /// holds one is its own (`permit::acts_as_itself`): from here it reads,
+    /// acts and is named as the agent alone, as if it had signed without
+    /// `for`, so an app is never told its owner with the agent's role.
+    fn as_whom(&self, signed: Option<Signed>) -> CellResult<Option<Signed>> {
+        let Some(mut signed) = signed else { return Ok(None) };
+        let Some(owner) = signed.acting_for.as_deref() else { return Ok(Some(signed)) };
+        #[derive(serde::Deserialize)]
+        struct Row {
+            owner: Option<String>,
+            agent: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT (SELECT role FROM members WHERE principal = ?) AS owner, (SELECT role FROM members WHERE principal = ?) AS agent",
+            vec![owner.into(), signed.id.as_str().into()],
+        )?;
+        let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
+        let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
+        if permit::acts_as_itself(role(row.owner), role(row.agent)) {
+            signed.acting_for = None;
+        }
+        Ok(Some(signed))
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an
@@ -953,7 +999,7 @@ impl FragmentCell {
     /// `require` over facts the request already read. A route that decides
     /// more than once reads its standing itself and calls `decide`.
     pub(crate) fn admit(&self, facts: &Facts, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
-        decide(facts.visibility, self.standing(caller, link)?, Purpose::Read, needs)
+        decide(facts.visibility, self.standing(caller, link)?, Action::Read(needs))
     }
 
     /// The caller with who they are resolved: a site request's credential,
@@ -970,7 +1016,7 @@ impl FragmentCell {
     /// the fragment with `needs` (a page, a file: `public`; a blob:
     /// `viewer`): who they are is resolved only when the anonymous standing
     /// may not read, since no one sees less than that
-    /// (`access::effective_role` only adds to it). A refusal is the
+    /// (`permit::decide` only adds to it). A refusal is the
     /// resolved caller's (401 or 403).
     ///
     /// Asking the registry lets other requests run meanwhile (a deploy's
@@ -1117,9 +1163,9 @@ impl FragmentCell {
                 return Err(CellError::new(ErrorCode::NotFound, "the app at this address has ended"));
             }
         }
-        let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
+        let caller = Caller { signed: self.as_whom(signed)?, unresolved: credential, url, site: path.starts_with("/serve/") };
         // every request the router hands a fragment is its owner's to pay for
-        self.count_request();
+        self.count_request().await;
         self.meter_soon().await;
         // a fragment on a blessed template runs the release this build
         // serves (decision 40): one installed from an older release (the
@@ -1602,7 +1648,7 @@ impl FragmentCell {
 
     fn status(&self, caller: &Caller) -> CellResult<Response> {
         let facts = self.facts()?;
-        let role = decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Viewer)?;
+        let role = decide(facts.visibility, self.standing(caller, false)?, Action::Read(Role::Viewer))?;
         let [npub, owner, inbox_token] = self.metas([MetaKey::Npub, MetaKey::Owner, MetaKey::InboxToken])?;
         json_response(&FragmentStatus {
             kind: self.kind()?,
@@ -1664,15 +1710,17 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
-    /// life was made since; then the life's index, search, joined and
-    /// delivery outboxes, due schedules (the code's and its records'), queued runs, and the pass: the
-    /// trims, the poll backstop (while the pins may lag), the blob
-    /// collection, running runs checked, and the storage sample. The next
-    /// pass is a day away, or within the poll interval while the fragment
-    /// is busy (`arm`). Last, a preview card due is shot (card.rs): the
-    /// seconds a browser takes hold up only the work that comes due
-    /// meanwhile. Then it re-arms.
+    /// After queued runs' starts (`alarm`), the alarm runs an ended life's
+    /// cleanup (ended.rs) whether or not a life was made since; then the
+    /// life's index, search, joined and delivery outboxes, due schedules
+    /// (the code's and its records'), and the pass: the trims, the poll
+    /// backstop (while the pins may lag), the blob collection, running runs
+    /// checked, and the storage sample. The next pass is a day away, or
+    /// within the poll interval while the fragment is busy (`arm`), and
+    /// soon when runs were queued meanwhile (`launch_due_at`): a run queued
+    /// while this pass works waits for its end. Last, a preview card due is
+    /// shot (card.rs), unless runs were queued meanwhile: they start first,
+    /// in the next pass. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1711,7 +1759,6 @@ impl FragmentCell {
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
         self.fire_cron().await?;
-        self.launch_queued().await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
@@ -1727,12 +1774,20 @@ impl FragmentCell {
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
-            self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
-        if let Err(e) = self.drain_card().await {
-            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+        if self.cfg.test_hooks {
+            self.held_card().await;
+        }
+        // A run queued while this pass worked starts before a card's shot
+        // (a browser's seconds, which an object's next alarm waits for): the
+        // shot waits for the next pass, armed at once, which starts the run
+        // first (`launch_queued`), for at most CARD_WAIT_MAX_MS of its due.
+        if !fragment_core::alarm::card_waits(self.launch_waiting()?, self.card_due_at()?, js::now_ms(), CARD_WAIT_MAX_MS) {
+            if let Err(e) = self.drain_card().await {
+                self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+            }
         }
         self.schedule().await
     }
@@ -1763,7 +1818,7 @@ impl FragmentCell {
     }
 
     /// After the answer: the delivery outbox drained (a computer's wakes
-    /// among it), queued runs' Workflows started, and the alarm armed for a
+    /// among it), the alarm armed for queued runs (`arm_launch`) and for a
     /// search cursor a record woke, none of which the answer waits on. Each
     /// is the alarm's too (the outbox's rows and a woken cursor stay due,
     /// queued runs stay queued), so whatever this cuts short or fails is
@@ -1797,12 +1852,12 @@ impl FragmentCell {
         // waits on no wake
         let t0 = js::now_ms();
         let drain = async { (self.drain_deliveries().await, js::now_ms() - t0) };
-        let launch = async { (self.launch_queued().await, js::now_ms() - t0) };
+        let launch = async { (self.arm_launch().await, js::now_ms() - t0) };
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || listed || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || launched || drained.queued + drained.woken > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "armed": launched }));
         }
     }
 
@@ -1829,7 +1884,10 @@ impl FragmentCell {
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
         let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.search_forget_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
-        let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
+        let now = js::now_ms();
+        let at = due.into_iter().flatten().fold(poll_at, i64::min).max(now + min_ms);
+        // an alarm still to come that is sooner stays (`alarm::to_set`)
+        let Some(at) = fragment_core::alarm::to_set(self.state.storage().get_alarm().await?, at, now, min_ms) else { return Ok(()) };
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())
     }

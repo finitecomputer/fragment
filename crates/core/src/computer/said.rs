@@ -4,11 +4,11 @@
 //! is literally true.
 
 use fragment_proto::computer::ComputerNotice;
-use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel, Until};
+use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::{Map, Value};
 
 use crate::computer::limits::SET_ASIDE_KEPT_MS;
-use crate::notice::{provider_name, size, span, usd};
+use crate::notice::{size, span};
 
 /// What the words need of the computer beyond its notices.
 pub struct Facts<'a> {
@@ -116,25 +116,29 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
                 ..notice(format!("went_back:{life}"), "went_back", NoticeLevel::Info, title.into())
             }
         }
-        ComputerNotice::Update { version } => Notice {
+        // its save may not restore beside the new image: it stays on the
+        // one it has, and a restart (which would take the new one) is not
+        // offered until there is room (docs/computers.md, "An image's share
+        // of the disk")
+        ComputerNotice::Update { version, room_first: true } => Notice {
+            text: Some("Make room first: ask your agent to move big files to storage. Until then your computer stays as it is.".into()),
+            actions: vec![NoticeAction::post("Later", at("notices/later"), body("version", version.as_str()))],
+            ..notice(format!("update:{version}:room"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
+        },
+        ComputerNotice::Update { version, room_first: false } => Notice {
             // never restarted behind their agents' backs; an always-on
             // computer never sleeps, so never updates by itself
             text: Some(format!("Restart to get it; your chats and work are kept.{}", if f.always_on { "" } else { " It also updates by itself the next time your computer sleeps." })),
             actions: vec![restart("Restart"), NoticeAction::post("Later", at("notices/later"), body("version", version.as_str()))],
             ..notice(format!("update:{version}"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
         },
-        ComputerNotice::DiskFilling { free, .. } => Notice {
+        ComputerNotice::DiskFilling { room, .. } => Notice {
             // Paul, 2026-11-18: its agent makes room (`fragment offload`, the
-            // `disk-space-finite` skill)
-            text: Some("Ask your agent to move big files to storage.".into()),
-            ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, format!("Your computer is almost full ({} left)", size(*free)))
-        },
-        ComputerNotice::KeyPaused { provider, spent_micros, cap_micros, allow_micros, resumes_at } => Notice {
-            text: allow_micros.is_none().then(|| format!("{} an hour is the most allowed.", usd(*cap_micros))),
-            until: Some(Until { at: *resumes_at, said: "Calls resume".into() }),
-            // one tap lifts its cap a step from the one shown (a stale page changes nothing)
-            actions: allow_micros.map(|allow| NoticeAction::post(format!("Allow up to {} an hour", usd(allow)), at(&format!("key-caps/{provider}")), body("from", *cap_micros))).into_iter().collect(),
-            ..notice(format!("key_paused:{provider}"), "key_paused", NoticeLevel::Warn, format!("{} calls paused: {} this hour", provider_name(provider), usd(*spent_micros)))
+            // `disk-space-finite` skill). The room is what a restore of its
+            // save leaves (docs/computers.md, "Room to restore"), never what
+            // `df` says: at none, its next start may not restore it.
+            text: Some(if *room == 0 { "It may not start again until there is room. Ask your agent to move big files to storage." } else { "Ask your agent to move big files to storage." }.into()),
+            ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, if *room == 0 { "Your computer is full".into() } else { format!("Your computer is almost full ({} left)", size(*room)) })
         },
     }
 }
@@ -236,24 +240,25 @@ mod tests {
         assert_eq!(post(&told), vec![("OK".into(), format!("{at}/notices/seen"), json!({ "life": 6, "tooBig": true }))]);
         assert_eq!(too_big(None).text.as_deref(), Some("It went back to an older save. The newer files are kept for 30 days: you can still export them in Settings."));
 
-        let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &f)[0];
+        let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: false }], &f)[0];
         assert_eq!(update.text.as_deref(), Some("Restart to get it; your chats and work are kept. It also updates by itself the next time your computer sleeps."));
         assert_eq!(post(update)[1], ("Later".into(), format!("{at}/notices/later"), json!({ "version": "0123456789ab" })));
-        let always = said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &Facts { always_on: true, ..facts() });
+        let always = said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: false }], &Facts { always_on: true, ..facts() });
         assert_eq!(always[0].text.as_deref(), Some("Restart to get it; your chats and work are kept."), "an always-on computer never sleeps");
+        // its save may not restore beside the new image: room first, no restart
+        let waits = &said(&[ComputerNotice::Update { version: "0123456789ab".into(), room_first: true }], &f)[0];
+        assert_eq!(waits.text.as_deref(), Some("Make room first: ask your agent to move big files to storage. Until then your computer stays as it is."));
+        assert_eq!(post(waits), vec![("Later".into(), format!("{at}/notices/later"), json!({ "version": "0123456789ab" }))], "Later alone: no Restart");
+        assert_ne!(waits.id, update.id, "another thing told: another id");
 
-        let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 3_240_662_016 }], &f)[0];
-        assert_eq!(disk.title, "Your computer is almost full (3.2 GB left)");
+        // its room, never df's free (2026-11-20: 2.1 GB free, and no room to restore)
+        let disk = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 9_000_000_000, room: 2_972_226_560 }], &f)[0];
+        assert_eq!(disk.title, "Your computer is almost full (3.0 GB left)");
         assert_eq!(disk.text.as_deref(), Some("Ask your agent to move big files to storage."));
         assert!(disk.actions.is_empty());
-
-        let paused = |allow_micros| said(&[ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 5_030_000, cap_micros: 5_000_000, allow_micros, resumes_at: 123 * MIN }], &f).remove(0);
-        let one = paused(Some(20_000_000));
-        assert_eq!((one.title.as_str(), one.text.as_deref()), ("ElevenLabs calls paused: $5.03 this hour", None));
-        assert_eq!(one.until, Some(Until { at: 123 * MIN, said: "Calls resume".into() }));
-        assert_eq!(post(&one), vec![("Allow up to $20 an hour".into(), format!("{at}/key-caps/elevenlabs"), json!({ "from": 5_000_000 }))]);
-        let most = paused(None);
-        assert_eq!((most.text.as_deref(), most.actions.len()), (Some("$5 an hour is the most allowed."), 0));
+        let full = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 2_100_000_000, room: 0 }], &f)[0];
+        assert_eq!(full.title, "Your computer is full");
+        assert_eq!(full.text.as_deref(), Some("It may not start again until there is room. Ask your agent to move big files to storage."));
     }
 
     /// Goal: a client keys its rows by id: unique among one computer's
@@ -262,10 +267,9 @@ mod tests {
     fn ids_are_unique_and_stable() {
         let told = vec![
             ComputerNotice::WontWake { why: "x".into() },
-            ComputerNotice::Update { version: "0123456789ab".into() },
-            ComputerNotice::DiskFilling { total: 2, free: 1 },
-            ComputerNotice::KeyPaused { provider: "xai".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
-            ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
+            ComputerNotice::Update { version: "0123456789ab".into(), room_first: false },
+            ComputerNotice::Update { version: "0123456789ab".into(), room_first: true },
+            ComputerNotice::DiskFilling { total: 2, free: 1, room: 0 },
         ];
         let ids: Vec<String> = said(&told, &facts()).into_iter().map(|n| n.id).collect();
         let unique: std::collections::BTreeSet<&String> = ids.iter().collect();

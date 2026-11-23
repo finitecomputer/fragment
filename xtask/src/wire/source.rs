@@ -112,7 +112,8 @@ pub const HAND_WRITTEN: [(&str, &str); 11] = [
 /// values the lock lets pass for their readers read past one they do not
 /// know, and where each reader does: a claim of the clients, not of serde,
 /// so each is listed. A new one fails generation until it is.
-pub const OPEN: [(&str, &str); 7] = [
+pub const OPEN: [(&str, &str); 8] = [
+    ("Author", "read as `Other` (`#[serde(other)]`, a lock fact); the bridge reads it as text, and only `code` takes a word away"),
     ("CommandKind", "left in the mailbox by the mover, done by no one, until the move's deadline holds it (docs/migrations.md)"),
     ("ErrorCode", "read by its HTTP status (the CLI's `Resp::refusal`)"),
     ("FragmentKind", "read as `Other` (`#[serde(other)]`, a lock fact)"),

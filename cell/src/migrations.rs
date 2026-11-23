@@ -553,10 +553,15 @@ fn complete<'a>(env: &'a Env, stage: &'a str, body: String) -> Waits<'a, Respons
         let at = text(ask(env, format!("complete/{stage}"), manifest.to_string()).await?)?;
         let mut lines = at.lines();
         let mut line = || lines.next().unwrap_or_default();
-        let (prefix, upload, zip_bytes, done) = (line(), line(), line(), line());
+        let (prefix, upload, zip_bytes, done, simplex) = (line(), line(), line(), line(), line());
         let zip_bytes = zip_bytes.parse::<u64>().map_err(|_| CellError::host("a complete's size"))?;
         if !done.is_empty() {
             return crate::json_answer(&StageCompleted { manifest_sha256: done.into(), zip_bytes });
+        }
+        // before the zip is made: a failure here is the mover's complete,
+        // tried again
+        if !simplex.is_empty() {
+            simplex_on(env, simplex).await?;
         }
         let parts = lines.map(|l| l.split_once(' ').and_then(|(n, etag)| Some((n.parse::<u16>().ok()?, etag.to_string())))).collect::<Option<Vec<_>>>().ok_or_else(|| CellError::host("a complete's parts"))?;
         // a complete cut off between the zip and its manifest is not done
@@ -569,6 +574,35 @@ fn complete<'a>(env: &'a Env, stage: &'a str, body: String) -> Waits<'a, Respons
         js::blob_put_bytes(env, STAGE, &format!("{prefix}{STAGE_MANIFEST}"), manifest.as_bytes()).await?;
         let sha = fragment_core::blob::sha256_hex(manifest.as_bytes());
         pass(env, format!("completed/{stage}/{sha}/{size}"), manifest.to_string()).await
+    })
+}
+
+/// A stage that carries its owner's SimpleX chat (its manifest's
+/// `simplex`): their comped `seat` made always-on, as SimpleX runs only on
+/// a computer that stays on (FIN-492; a mover's, 2026-11-20). A seat that is
+/// paid, always-on already, or none is left as it is; so is a person wiped
+/// since the move bound them, whose stage lands as any other.
+#[inline(never)]
+fn simplex_on<'a>(env: &'a Env, person: &'a str) -> Waits<'a, ()> {
+    Box::pin(async move {
+        use crate::registry::calls::By;
+        use crate::registry::orgs::{CompKind, Mine};
+        use fragment_proto::org::SeatKind;
+        let mine = match crate::ask_registry(env, &Mine { by: By::Identity(person.to_string()) }).await {
+            Ok(m) => m.mine,
+            // wiped (404) or being wiped (403, registry.rs `by`): no seat to
+            // keep on, and failing would fail every complete of the stage
+            Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::Forbidden) => {
+                console_log!("migrations.simplex: {person} holds no seat to keep on: {}", e.message);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        if let Some(seat) = mine.seat.filter(|s| s.comped && s.kind == SeatKind::Seat) {
+            crate::ask_registry(env, &CompKind { by: NAME.into(), seat: seat.id, kind: SeatKind::SeatAlwaysOn }).await?;
+            console_log!("migrations.simplex: {person}'s comped seat made always-on");
+        }
+        Ok(())
     })
 }
 
@@ -659,6 +693,8 @@ struct ManifestIn {
     phase: String,
     attempt: u32,
     zip_bytes: u64,
+    #[serde(default)]
+    simplex: bool,
 }
 
 /// A roster within its bounds, each WorkOS id and old id once: its people,
@@ -702,7 +738,8 @@ fn read_roster(text: &str) -> CellResult<(RosterIn, Agents)> {
     Ok((r, agents))
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct MigrationsCell {
     state: State,
     env: Env,
@@ -714,6 +751,7 @@ pub struct MigrationsCell {
     changed: Rc<RefCell<Vec<String>>>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for MigrationsCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -1222,7 +1260,7 @@ impl MigrationsCell {
         let upload = parts.rows("SELECT upload_id, manifest_sha256, zip_bytes FROM uploads WHERE stage = ?", vec![text_value(stage)])?.pop().ok_or_else(|| CellError::invalid("no part of this stage was taken"))?;
         let (prefix, upload_id) = (stage_prefix(m.phase, &m.old, m.attempt), upload["upload_id"].as_str().unwrap_or_default());
         if let Some(done) = upload["manifest_sha256"].as_str() {
-            return Ok(format!("{prefix}\n{upload_id}\n{}\n{done}\n", upload["zip_bytes"].as_u64().unwrap_or(0)));
+            return Ok(format!("{prefix}\n{upload_id}\n{}\n{done}\n\n", upload["zip_bytes"].as_u64().unwrap_or(0)));
         }
         let taken = parts.stage_parts(stage)?;
         let zip_bytes: u64 = taken.iter().map(|p| p.bytes).sum();
@@ -1232,7 +1270,9 @@ impl MigrationsCell {
         if f.format != STAGE_FORMAT || f.old != m.old || f.phase != m.phase.as_str() || f.attempt != m.attempt || taken.is_empty() || zip_bytes != f.zip_bytes {
             return Err(CellError::invalid(format!("the stage is not complete: its manifest is not this attempt's in {STAGE_FORMAT}, or its parts, {zip_bytes} bytes, are not its zip")));
         }
-        let mut lines = format!("{prefix}\n{upload_id}\n{zip_bytes}\n\n");
+        // whose comped seat its SimpleX chat makes always-on (`simplex_on`)
+        let simplex = if f.simplex { parts.person_of(&m.workos_id)?.unwrap_or_default() } else { String::new() };
+        let mut lines = format!("{prefix}\n{upload_id}\n{zip_bytes}\n\n{simplex}\n");
         for p in &taken {
             lines += &format!("{} {}\n", p.n, p.etag);
         }

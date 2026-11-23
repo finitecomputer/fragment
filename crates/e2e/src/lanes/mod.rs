@@ -50,6 +50,7 @@ mod migrations;
 mod moves;
 mod native;
 mod notes;
+mod pipe_live;
 mod offload;
 mod orgs;
 mod plane;
@@ -58,6 +59,7 @@ mod schedules;
 mod restart;
 mod sessions;
 mod share;
+pub(crate) mod simplex_door;
 mod shell;
 mod signin;
 mod simplex_settings;
@@ -120,6 +122,8 @@ const LANES: &[Lane] = &[
     },
     limits::facet_cap,
     limits::capability_cost,
+    // by name: its stack builds the door's image
+    simplex_door::door,
     limits::facet_restart,
     limits::lockdown,
     site::site,
@@ -180,6 +184,7 @@ const LANES: &[Lane] = &[
     agent_ask::agent_ask,
     agent_app::agent_app,
     agent_restart::agent_restart,
+    pipe_live::pipe_live,
     checkout::checkout,
     sync::folder_sync,
     migrations::migrations,
@@ -213,13 +218,13 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 5] = [
     &[
         "keys", "levers", "delegation", "orgs", "admin-page", "computers", "computer-room", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
-        "agent-app", "agent-restart", "checkout",
+        "agent-app", "agent-restart", "pipe-live", "checkout",
     ],
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "agent-sharing", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "doc-for", "slides", "board", "export", "search", "search-across",
-        "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "trial-seats", "transcribe",
+        "sync", "migrations", "capability-cost", "simplex-door", "share", "isolation", "push", "blobs", "trials", "trial-seats", "transcribe",
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
