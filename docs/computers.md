@@ -1054,6 +1054,11 @@ provider's own hosts.
   connection's are never denied, and an empty list denies nothing. It
   can't catch an account-wide call a vendor adds later; the vendor's own
   scoping is the main lock.
+- **An operator key never comes back.** It is the platform's own at its
+  vendor, so an answer to a request that carried one names each echo of
+  it `{{provider}}`, in its headers and its body, as a Vault's fills are
+  named (`Plan::operator_keys`, `pipe::answer`; docs/secrets.md, "Echoes
+  are hidden"): nothing the pipe puts on a request comes back in its answer.
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's

@@ -89,6 +89,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "an operator key on a call its row denies (each vendor's: an account-wide read, a key minted or disabled) is refused 403, naming the call, and reaches no provider",
     "spelled otherwise (upper case, a doubled and a trailing /, a format suffix, an encoded letter) it is refused the same, and a path the row can't read plainly (a ;) is refused too, reaching no provider",
     "on the same keys, the calls their rows do not deny go on: Browser Use's start on the very path whose list is denied, ElevenLabs' speech, Firecrawl's scrape",
+    "an operator key its provider echoes back reaches the guest named as its provider ({{name}}), never as the key",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -356,6 +357,9 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 
     // Hermes' tool vendors share the existing upstream fake: each real
     // host and SDK header, with no vendor-specific response simulation.
+    // The fake answers with what arrived, its auth headers too, as a
+    // provider that echoes its key would.
+    let mut echoes = vec![];
     for (i, (n, name, host, env, header, scheme)) in [
         (130, "firecrawl", "api.firecrawl.dev", "FIRECRAWL_API_KEY", "authorization", "Bearer "),
         (131, "fal", "queue.fal.run", "FAL_KEY", "authorization", "Key "),
@@ -368,7 +372,10 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         s.ok(SWAP_CHECKS[22 + i],
             said.starts_with("fetched 200") && seen["host"] == host && seen["auth"][header] == format!("{scheme}{}", key_value(name)),
             json!({ "said": said, "seen": seen }));
+        echoes.push((name, said));
     }
+    let hidden = echoes.iter().all(|(name, said)| said.contains(&format!("{{{{{name}}}}}")) && !SWAP_KEYS.iter().any(|(_, value, _)| said.contains(value)));
+    s.ok(SWAP_CHECKS[SWAP_CHECKS.len() - 1], hidden, json!({ "echoes": echoes }));
     // fal's image (FIN-445): queued as Hermes does, charged nothing (made
     // later, or not); run synchronously, charged below by its pixels; and
     // the call above (a poll's) nothing

@@ -432,6 +432,33 @@ impl Plan {
         self.wanted.is_empty()
     }
 
+    /// What an answer to this request must never show its guest: each
+    /// operator key it carried, by its provider's name, as a Vault's fills
+    /// are named (a vendor may echo what it was sent). Where one went as a
+    /// half of basic auth, the header's base64 is named too, which a short
+    /// key's own spellings would not name. A connection's token and an own
+    /// key are its agent's owner's, not the operator's; a Vault's fills are
+    /// named apart, as the Vault answers them. `out` is `apply`'s, with
+    /// `secrets`.
+    pub fn operator_keys(&self, catalog: &Catalog, secrets: &BTreeMap<Placeholder, String>, out: &Outgoing) -> Vec<(String, String)> {
+        let mut hidden: Vec<(String, String)> = vec![];
+        let mut add = |name: &str, value: String| {
+            if !value.is_empty() && !hidden.iter().any(|(n, v)| n == name && *v == value) {
+                hidden.push((name.to_string(), value));
+            }
+        };
+        for f in &self.found {
+            let operator = catalog.named(&f.placeholder.provider, f.placeholder.connection).is_some_and(|row| row.kind == Kind::Operator);
+            let Some(secret) = secrets.get(&f.placeholder).filter(|_| operator) else { continue };
+            add(&f.placeholder.provider, secret.clone());
+            if matches!(f.at, Location::Basic(_)) {
+                let sent = out.headers.iter().find(|(name, _)| name == "authorization").and_then(|(_, v)| v.strip_prefix("Basic "));
+                add(&f.placeholder.provider, sent.unwrap_or_default().to_string());
+            }
+        }
+        hidden
+    }
+
     /// The request with each placeholder's credential in its place: a
     /// header is its placement's format around the secret, a query
     /// parameter the secret (percent-encoded), a half of basic auth the
@@ -946,5 +973,53 @@ mod tests {
         let headers: Vec<(String, String)> = many.iter().enumerate().map(|(i, p)| (format!("x-k{i}"), p.clone())).collect();
         assert_eq!(found(&headers, None, "/"), Err(SwapError::TooMany(5)));
         assert_eq!(found(&h(&[("accept", "*/*")]), None, "/"), Ok(vec![]));
+    }
+
+    /// Valid and invalid: an answer hides each operator key the swap put on
+    /// its request, by its provider's name, a basic auth half's header
+    /// whole too; a connection's token and an own key, the agent's owner's,
+    /// are not the operator's to hide, and a request with no placeholder
+    /// hides nothing.
+    #[test]
+    fn an_answer_hides_the_operator_keys_its_request_carried() {
+        let c = Catalog::parse(
+            &json!([
+                { "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
+                { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["PERPLEXITY_API_KEY"] },
+                { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] },
+                { "name": "twilio", "kind": "operator", "hosts": ["api.twilio.test"], "placements": [{ "basic": "password" }], "env": ["TWILIO_KEY"], "price": { "micros": 1, "per": 1 } },
+                { "name": "mail", "kind": "own", "hosts": ["api.mail.test"], "placements": [{ "basic": "password" }], "env": ["MAIL_API_KEY"] },
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let hides = |headers: &[(String, String)], query: Option<&str>, host: &str, pairs: &[(&Placeholder, &str)]| {
+            let plan = Plan::of("GET", headers, query, "/", &c, host).unwrap();
+            let secrets = secrets(pairs);
+            plan.operator_keys(&c, &secrets, &plan.apply(headers, query, &c, &secrets))
+        };
+        let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
+        let headers = h(&[("authorization", &format!("Bearer {}", p.text()))]);
+        assert_eq!(hides(&headers, None, "api.perplexity.ai", &[(&p, "pplx-real")]), vec![("perplexity".to_string(), "pplx-real".to_string())]);
+        // a query parameter's key, and the same key twice named once
+        let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
+        let headers = h(&[("x-goog-api-key", &gp.text())]);
+        let q = format!("key={}", gp.text());
+        assert_eq!(hides(&headers, Some(&q), "places.googleapis.com", &[(&gp, "AIzaReal")]), vec![("google-places".to_string(), "AIzaReal".to_string())]);
+        // a half of basic auth: the key, and the header's base64 it went in
+        let t = ph(Kind::Operator, "twilio", "juniper--k3x9");
+        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("AC1:{}", t.text())));
+        let headers = h(&[("authorization", &auth)]);
+        let sent = base64::engine::general_purpose::STANDARD.encode("AC1:tw-real");
+        assert_eq!(hides(&headers, None, "api.twilio.test", &[(&t, "tw-real")]), vec![("twilio".to_string(), "tw-real".to_string()), ("twilio".to_string(), sent)]);
+        // the owner's own: not the operator's
+        let g = ph(Kind::Connection, "google", "juniper--k3x9");
+        let headers = h(&[("authorization", &format!("Bearer {}", g.text()))]);
+        assert_eq!(hides(&headers, None, "www.googleapis.com", &[(&g, "ya29.token")]), vec![]);
+        let m = ph(Kind::Own, "mail", "juniper--k3x9");
+        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("api:{}", m.text())));
+        assert_eq!(hides(&h(&[("authorization", &auth)]), None, "api.mail.test", &[(&m, "mail-real")]), vec![]);
+        // nothing swapped, nothing hidden
+        assert_eq!(hides(&h(&[("authorization", "Bearer sk-own")]), None, "api.perplexity.ai", &[]), vec![]);
     }
 }
