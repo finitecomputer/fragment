@@ -127,22 +127,41 @@ local.
 ## Proving your work
 
 You prove your own work before anyone merges it. CI on a pull request is
-not the safety net, and nobody waits on bot reviews. This machine runs the
-tests faster than CI does, so run them here. Work is ready only when you
-can show evidence that it does what it claims and breaks nothing else.
-"It compiles" and "the tests I wrote pass" are not evidence.
+not the safety net, and nobody waits on bot reviews. Work is ready only
+when you can show evidence that it does what it claims and breaks nothing
+else. "It compiles" and "the tests I wrote pass" are not evidence.
+
+Evidence is a finished run on the final head, merged with current
+`master`. Where it ran is yours to choose, and each of these counts:
+
+- **This machine,** for what is quick here.
+- **A Boat sandbox** (Building on Boat).
+- **CI, run by hand on your branch.** `gh workflow run ci.yml --ref
+  <branch>` runs `check` and all five e2e shards on the branch's head;
+  `gh workflow run images.yml --ref <branch>` runs the Docker and
+  real-Hermes lanes. They are the jobs of master's gate, on its runners,
+  and they deploy nothing. Merge `master` and push first, then link the
+  run: its `check` holds your schema lock to master's newest. A run takes
+  six of the runners master's gate waits for, so start one for a suite,
+  not for what this machine proves in minutes.
+
+A computer short of memory, disk or Docker is a reason to run elsewhere,
+never to prove less. A run still going is not evidence yet.
 
 Put an evidence pack in the PR body and in your report:
 
 - **What and why:** what changed and why, in plain words. Say whether it
   touches the wire, stored rows or money.
 - **What ran:** each command with its result and counts, on the final head
-  merged with current `master`:
-  - `cargo xtask check`.
+  merged with current `master`, and where it ran (a CI run by its link):
+  - `cargo xtask check`, or the pull request's own `check` run on that
+    head, once it is green.
   - `cargo xtask e2e --only …` for every section that covers a changed file.
-    Grep `crates/e2e` for each file and run every lane that uses it.
+    Grep `crates/e2e` for each file and run every lane that uses it. A CI
+    run by hand runs every section, so it covers them all.
   - For `images/` or the bridge: `cargo test --workspace` and the Docker
-    tests (`cargo test -p fragment-bridge --test docker -- --ignored`).
+    tests (`cargo test -p fragment-bridge --test docker -- --ignored`),
+    or `images.yml` run by hand.
   - For iOS: `xcodebuild` tests on the Mac, in a build folder of your own,
     on a simulator chosen by id.
   - For the cell: the Wasm delta against the exact `master` you merged,
