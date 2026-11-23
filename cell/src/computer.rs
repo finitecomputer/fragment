@@ -54,22 +54,20 @@ use std::rc::Rc;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
-use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
 use fragment_core::ledger::uses::{self, Used};
-use fragment_core::ledger::{MeterRow, Month, Spend};
+use fragment_core::ledger::{Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind, Reason};
-use futures_util::StreamExt;
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -177,9 +175,6 @@ const CHECK_UNUSABLE: i64 = 3;
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
-/// How far the `clock` lever moves a computer's key hours, either way:
-/// a month's worth.
-const CLOCK_OFFSET_MAX_MS: u64 = 31 * 24 * 3600 * 1000;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
 /// backups run, swapped for one that never answers, as a sick container's
 /// (r4, r6), the real one kept beside it; and put back.
@@ -322,10 +317,6 @@ const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm 
 /// streams through (`egress_api`), at most the router's
 /// `limits::BLOB_MAX_BYTES`.
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
-/// An answer to a request a Vault filled is read whole, every spelling of
-/// each value it echoes named, up to this long; past it (or an event
-/// stream) each value's own bytes are named as it streams.
-const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
 /// A port's request to a computer still starting is asked again after
@@ -375,10 +366,6 @@ enum MetaKey {
     /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
     /// `<day> <bytes>`.
     RelayDay,
-    /// The clock a test fleet moved (the `clock` lever): the milliseconds its
-    /// uses' months and its keys' hours are counted and read ahead by. None
-    /// elsewhere.
-    ClockOffset,
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
@@ -438,7 +425,6 @@ impl MetaKey {
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
             MetaKey::RelayDay => "relay_day",
-            MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
             MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::SlowSnapshot => "slow_snapshot",
@@ -830,9 +816,6 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
-    /// `clock`'s: how far its key hours are moved.
-    #[serde(default, rename = "offsetMs")]
-    offset_ms: Option<i64>,
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
@@ -1084,80 +1067,14 @@ impl ComputerCell {
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
     }
 
     /// What its owner is told now, in words (FIN-458, `GET /api/notices`).
     fn said(&self) -> CellResult<Vec<fragment_proto::notice::Notice>> {
         let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
         let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
-        Ok(said::said(&self.with_keys(notices(&life, &self.saves()?, &self.images()?, &self.rules()))?, &facts))
-    }
-
-    /// `told`, and a notice of each shared key its owner's cap pauses now,
-    /// worked out from its hour (`fragment_core::key_hour`).
-    fn with_keys(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
-        let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
-        for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
-            let provider = row["provider"].as_str().unwrap_or_default();
-            let cap = self.key_cap(provider)?;
-            if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
-                let allow_micros = key_hour::next_lift(cap);
-                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, allow_micros, resumes_at: real + resumes_in });
-            }
-        }
-        Ok(told)
-    }
-
-    /// A shared key's hourly cap: its owner's, else the default.
-    fn key_cap(&self, provider: &str) -> CellResult<i64> {
-        let rows = self.rows("SELECT micros FROM key_caps WHERE provider = ?", vec![provider.into()])?;
-        Ok(rows.first().and_then(|r| r["micros"].as_i64()).unwrap_or(key_hour::KEY_HOUR_CAP))
-    }
-
-    /// `computer/key-cap`: its owner's cap on a shared key (`KeyCapAsk`),
-    /// `from` lifting it one step from the cap it holds, so a stale page
-    /// changes nothing; its pages told.
-    async fn set_key_cap(&self, provider: &str, ask: KeyCapAsk) -> CellResult<()> {
-        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no shared key {provider:?} here")));
-        }
-        let cap = self.key_cap(provider)?;
-        let to = match (ask.from, ask.micros) {
-            (Some(from), None) => (from == cap).then(|| key_hour::next_lift(cap)).flatten().unwrap_or(cap),
-            (None, Some(m)) if (1..=key_hour::KEY_CAP_MAX).contains(&m) => m,
-            (None, None) => key_hour::KEY_HOUR_CAP,
-            _ => return Err(CellError::invalid(format!("a key's cap is `from` (the cap a notice showed), or `micros` from 1 to {}, or neither (the default)", key_hour::KEY_CAP_MAX))),
-        };
-        match to == key_hour::KEY_HOUR_CAP {
-            true => self.exec("DELETE FROM key_caps WHERE provider = ?", vec![provider.into()])?,
-            false => self.exec("INSERT INTO key_caps (provider, micros) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET micros = excluded.micros", vec![provider.into(), to.into()])?,
-        }
-        self.tell_owner().await;
-        Ok(())
-    }
-
-    /// A shared key's slots this last hour, oldest first.
-    fn key_slots(&self, provider: &str) -> CellResult<Vec<(i64, i64)>> {
-        let rows = self.rows("SELECT slot, micros FROM key_hour WHERE provider = ? ORDER BY slot", vec![provider.into()])?;
-        Ok(rows.iter().map(|r| (r["slot"].as_i64().unwrap_or(0), r["micros"].as_i64().unwrap_or(0))).collect())
-    }
-
-    /// Refuses a shared key its owner's cap pauses (FIN-448): 429, with when
-    /// it resumes. A read that fails lets the call go (a preference never
-    /// breaks an agent).
-    fn key_open(&self, provider: &str) -> CellResult<()> {
-        let now = js::now_ms() + self.offset_ms().unwrap_or(0);
-        let slots = self.key_slots(provider).unwrap_or_else(|e| {
-            console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
-            vec![]
-        });
-        let cap = self.key_cap(provider).unwrap_or(key_hour::KEY_HOUR_CAP);
-        let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
-        let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
-        let (spent, cap) = (fragment_core::price::dollars(spent), fragment_core::price::dollars(cap));
-        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes, or ask your person to allow more (they'll see a button in this chat)");
-        Err(CellError::new(ErrorCode::RateLimited, said).because(Reason::KeyPaused).retry_after(resumes_in.unsigned_abs()))
+        Ok(said::said(&notices(&life, &self.saves()?, &self.images()?, &self.rules()), &facts))
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -2918,42 +2835,6 @@ impl ComputerCell {
         String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))
     }
 
-    /// The clock's offset a test fleet set (the `clock` lever); none elsewhere.
-    fn offset_ms(&self) -> CellResult<i64> {
-        if !self.cfg.test_hooks {
-            return Ok(0);
-        }
-        Ok(self.meta(MetaKey::ClockOffset)?.and_then(|v| v.parse().ok()).unwrap_or(0))
-    }
-
-    /// Counts a shared key's charge in its hour (`fragment_core::key_hour`):
-    /// whether one reached its cap. What its agents used is their owner's
-    /// ledger's (`uses::count`), not counted here.
-    fn count_key_hour(&self, b: &Used) -> CellResult<bool> {
-        if b.at_ms <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
-            return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
-        }
-        let offset = self.offset_ms()?;
-        let (at, now) = (b.at_ms.saturating_add(offset), js::now_ms() + offset);
-        let mut capped = false;
-        for u in &b.uses {
-            let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
-                return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
-            };
-            // a shared key's charge counts in its hour (fragment_core::key_hour)
-            if provider.kind == Kind::Operator && u.micros > 0 {
-                let (before, cap) = (key_hour::spent(&self.key_slots(&u.provider)?, now), self.key_cap(&u.provider)?);
-                capped |= before < cap && before + u.micros >= cap;
-                self.exec(
-                    "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
-                    vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
-                )?;
-            }
-        }
-        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
-        Ok(capped)
-    }
-
     /// Its view: what its owner is told of it, and its agents, each with
     /// what it may use, asked of its fragment.
     /// Boxed: its callers (about twenty routes) each hold a pointer to it,
@@ -2991,7 +2872,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: self.with_keys(notices(&life, &saves, &images, &self.rules()))?,
+            notices: notices(&life, &saves, &images, &self.rules()),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -3313,13 +3194,6 @@ impl ComputerCell {
                 let view = self.view().await?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
             }
-            "clock" => {
-                // a lane's uses and its reads of them in one month, however
-                // late in a month it runs
-                let offset = b.offset_ms.filter(|o| o.unsigned_abs() <= CLOCK_OFFSET_MAX_MS).ok_or_else(|| CellError::invalid(format!("clock names its offsetMs, at most {CLOCK_OFFSET_MAX_MS} either way")))?;
-                self.set_meta(MetaKey::ClockOffset, &offset.to_string())?;
-                Ok(json!({ "computer": id, "offsetMs": offset, "month": Month::of(js::now_ms() + offset).label() }))
-            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -3527,15 +3401,6 @@ impl ComputerCell {
             "computer/credentials" => {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
-            }
-            "computer/used" => {
-                let b: Used = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                // a key's charge that reaches its cap: its owner's pages read again
-                if self.count_key_hour(&b)? {
-                    self.tell_owner().await;
-                }
-                json_response(&json!({ "ok": true }))
             }
             "computer/signed-in" => {
                 let b: SignedInAsk = body_json(&mut req).await?;
@@ -3771,10 +3636,6 @@ impl ComputerCell {
                 }
                 // its owner's other pages read it again, and tell it no more
                 self.tell_owner().await;
-                json_response(&self.view().await?)
-            }
-            (Method::Post, ["key-caps", provider]) => {
-                self.set_key_cap(provider, body_json(&mut req).await?).await?;
                 json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
@@ -4091,12 +3952,8 @@ impl ComputerCell {
                     };
                     self.connection_token(&owner, &provider.name, agent, grants.account(&provider.name), at).await?
                 }
-                // its call is held to its owner's cap on the key here, gated on
-                // their standing and charged after (`egress_swap`)
-                Kind::Operator => {
-                    self.key_open(&provider.name)?;
-                    crate::keys::operator_key(&self.env, &provider.name).await?
-                }
+                // its call gated on its owner's standing and charged after (`egress_swap`)
+                Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
                 Kind::Own => {
                     let key = own.iter().position(|o| *o == provider.name).and_then(|i| keys[i].clone());
                     key.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?
@@ -4795,12 +4652,13 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// call its row denies (`catalog::Deny`), and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
-/// go to no provider. An operator key's call asks the gate first
-/// (ledger.rs `may`: the agent's owner's standing as this isolate heard
-/// it within the minute; a person out of credit is refused, and a ledger
-/// that does not answer refuses nothing: decision 62). After the answer is
-/// handed back, each operator key's call the provider answered (under
-/// 500) is charged to the owner (`charge_keys`), and every call the
+/// go to no provider. An operator key's call goes through the pipe
+/// (crate::pipe): gated beside it, as the agent's model calls are (a
+/// person out of credit is refused, once this isolate has heard so), its
+/// answer passed through the pipe's one pass (nothing it put on the
+/// request comes back), and each operator key's call charged to the owner
+/// what its vendor's answer said it used (`Provider::charged`), once the
+/// answer is read. Every call the
 /// provider answered is counted as the agent's in its owner's ledger
 /// (`uses::Used`; a shared key's charge in its hour here too,
 /// `computer/used`), in `wait_until`, never in the answer's way: a count
@@ -4827,7 +4685,8 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // each placeholder's secret, by its provider and tag
     let mut answered: Vec<(Placeholder, String)> = vec![];
     let mut vault_rows = vec![];
-    // what a Vault filled (never a signature), by name: named so in the answer
+    // what a Vault filled (never a signature), by name: named so in the
+    // answer, after the operator's keys (`pipe::answer`)
     let mut filled: Vec<(String, String)> = vec![];
     // a Vault's secret that goes as a half of basic auth, if one does
     let mut basic: Option<String> = None;
@@ -4896,6 +4755,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let header = out_parts.headers.iter().find(|(h, _)| h == "authorization").and_then(|(_, v)| v.strip_prefix("Basic "));
         filled.extend(header.map(|b| (name.clone(), b.to_string())));
     }
+    // each operator key, the platform's own at its vendor, named so too:
+    // a vendor that echoes what it was sent never shows the guest the key
+    let operator = plan.operator_keys(&cfg.providers, &secrets, &out_parts);
     let headers = Headers::new();
     for (name, value) in &out_parts.headers {
         headers.set(name, value)?;
@@ -4927,128 +4789,94 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // the operator's keys among them, and the gate asked for them last
     let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some_and(|row| row.kind == Kind::Operator)).collect();
     if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
-        let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
-        crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
+        crate::pipe::gate(env, owner, None, ctx).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
-    // after the answer, never in its way
-    if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
-        let book = &cfg.book;
-        // what each key's call used: a call, the units of a part the book
-        // prices apart (ElevenLabs' speech by its characters, fal's images
-        // by their pixels, when its answer is a 2xx), or none (fal's
-        // polls), the row and the agent's count alike
-        let call = fragment_core::price::KeyCall { method: method.as_ref(), host: &host, path: url.path(), body: &body, status: answered };
-        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
-        // each call the provider answered is the agent's (decision 37), a key's at its price
-        // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
-        let uses: Vec<uses::Use> = plan
-            .wanted
-            .iter()
-            .filter(|p| cfg.providers.named(&p.provider, p.connection).is_some())
-            .map(|p| {
-                let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
-                let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
-                uses::Use { provider: p.provider.clone(), micros }
-            })
-            .collect();
-        let at = js::now_ms();
-        // counted in its owner's ledger; a shared key's charge in its hour
-        // too, which its computer keeps
-        let charged = uses.iter().any(|u| u.micros > 0);
-        let counted = Used { agent, at_ms: at, uses };
-        let rows: Vec<MeterRow> = used
-            .into_iter()
-            .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
-            .collect();
-        let (env, computer) = (env.clone(), computer.to_string());
-        ctx.wait_until(async move {
-            if !rows.is_empty() {
-                crate::meter::charge(&env, &owner, rows).await;
-            }
-            if counted.uses.is_empty() {
-                return;
-            }
-            // side by side: a ledger slow to count never holds back the
-            // hour a shared key's cap is checked against
-            let hour = async {
-                if charged {
-                    if let Err(e) = crate::routed::ask_bytes(&env, "COMPUTER", &computer, "computer/used", &counted).await {
-                        console_error!("{}", json!({ "egress": "swap", "key_hour": e.message }));
-                    }
-                }
-            };
-            let count = async {
-                if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
-                    console_error!("{}", json!({ "egress": "swap", "used": e.message }));
-                }
-            };
-            futures_util::future::join(hour, count).await;
-        });
-    }
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms, "ownMs": own_ms }));
     }
-    match sent {
-        Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,
-        sent => sent,
+    // what each key's charges read (FIN-616): a header as its vendor sent
+    // it, and a JSON pointer in the answer's one pass (`pipe::answer`)
+    let rows: Vec<&'static catalog::Provider> = keys.iter().filter_map(|p| cfg.providers.named(&p.provider, p.connection)).collect();
+    // a path no charge can read plainly (a row with no charges or deny
+    // takes one) is for no charge, and its row's own price a call
+    let (methods, segments) = swap::call_of(method.as_ref(), &headers_in, url.path()).unwrap_or_else(|| (vec![method.as_ref()], vec![]));
+    let for_call = |c: &&catalog::Charge| c.calls.iter().any(|d| methods.iter().any(|m| d.matches(m, &segments)));
+    let mut pointers: Vec<String> = vec![];
+    // only the charges for this call: a header's charge waits on no body
+    for json in rows.iter().flat_map(|row| &row.charges).filter(for_call).filter_map(|c| c.json.clone()) {
+        if !pointers.contains(&json) {
+            pointers.push(json);
+        }
     }
-}
-
-/// An answer that may echo a Vault's value, with each value named as its
-/// secret (`{{name}}`), as a job's fetch names its own (Paul, 2026-11-09:
-/// echoed values hidden): in its headers, and in its body. A body read
-/// whole (up to `ANSWER_HIDDEN_MAX_BYTES`, not an event stream) has every
-/// spelling of a value named (`secrets::redact`), or its bytes, not text;
-/// past that, or an event stream, each value's own bytes are named as it
-/// streams (`secrets::Streamed`), a value split across pieces too.
-async fn hidden(mut resp: Response, filled: &[(String, String)]) -> CellResult<Response> {
-    let redact = |text: String| filled.iter().fold(text, |t, (name, value)| fragment_core::secrets::redact(t, &BTreeMap::from([(name.clone(), value.clone())])));
-    let headers = Headers::new();
-    for (name, value) in resp.headers().entries() {
-        headers.set(&name, &redact(value))?;
-    }
-    let status = resp.status_code();
-    // no body (a HEAD's, a 204's): its headers were all it could echo
-    if !matches!(resp.body(), ResponseBody::Stream(_)) || matches!(status, 101 | 204 | 304) {
-        return Ok(resp.with_headers(headers));
-    }
-    let kind = resp.headers().get("content-type")?.unwrap_or_default();
-    let mut stream = resp.stream()?;
-    let mut streamed = fragment_core::secrets::Streamed::new(filled);
-    let mut read = vec![];
-    if !kind.starts_with("text/event-stream") {
-        // bounded: each piece read adds to `read`, which stops at its cap
-        while read.len() <= ANSWER_HIDDEN_MAX_BYTES {
-            match stream.next().await {
-                Some(piece) => read.extend(piece?),
-                None => {
-                    let body = match String::from_utf8(read) {
-                        Ok(text) => redact(text).into_bytes(),
-                        Err(e) => [streamed.push(&e.into_bytes()), streamed.finish()].concat(),
-                    };
-                    headers.set("content-length", &body.len().to_string())?;
-                    return Ok(Response::from_bytes(body)?.with_status(status).with_headers(headers));
-                }
+    // the answer's header names, never their values: an uncharged call's
+    // line says where its vendor may name a number no charge reads
+    let answer_headers: Vec<String> = sent.as_ref().map(|r| r.headers().keys().collect()).unwrap_or_default();
+    let headers_said: Vec<(String, Option<u64>)> = match &sent {
+        Ok(resp) => rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.header.clone()).map(|h| (h.clone(), resp.headers().get(&h).ok().flatten().and_then(|v| fragment_core::price::number(&v)))).collect(),
+        Err(_) => vec![],
+    };
+    // an answer the pass could not read is still charged what its headers
+    // or a row's price say
+    let unread = || -> crate::pipe::Said { Box::pin(futures_util::future::ready(vec![None; pointers.len()])) };
+    let (answer, said): (CellResult<Response>, crate::pipe::Said) = match sent {
+        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => match crate::pipe::answer(resp, &[operator, filled], &pointers).await {
+            Ok((resp, said)) => (Ok(resp), said),
+            Err(e) => (Err(e), unread()),
+        },
+        sent => (sent, unread()),
+    };
+    // after the answer, never in its way: each key's call charged what its
+    // vendor said it used (`Provider::charged`), once the answer is read
+    if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
+        let call: (Vec<String>, Vec<Vec<u8>>) = (methods.into_iter().map(str::to_string).collect(), segments);
+        // each call the provider answered is the agent's (decision 37), a key's at its charge
+        // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
+        let named: Vec<Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some()).cloned().collect();
+        let keys: Vec<Placeholder> = keys.into_iter().cloned().collect();
+        let (env, computer, method) = (env.clone(), computer.to_string(), method.as_ref().to_string());
+        ctx.wait_until(async move {
+            let numbers = said.await;
+            let said = |c: &catalog::Charge| match (&c.header, &c.json) {
+                (Some(h), _) => headers_said.iter().find(|(n, _)| n == h).and_then(|(_, v)| *v),
+                (_, Some(p)) => pointers.iter().position(|q| q == p).and_then(|i| numbers[i]),
+                (None, None) => None,
+            };
+            let charged = |p: &Placeholder| {
+                let (row, (methods, segments)) = (cfg.providers.named(&p.provider, p.connection)?, &call);
+                row.charged(&methods.iter().map(String::as_str).collect::<Vec<_>>(), segments, answered, said)
+            };
+            let used: Vec<(Placeholder, Option<Usage>)> = keys.into_iter().map(|p| (p.clone(), charged(&p))).collect();
+            for (p, _) in used.iter().filter(|(_, usage)| usage.is_none()) {
+                // none of its charges priced it: charged nothing, said so
+                console_log!("{}", json!({ "event": "pipe.uncharged", "provider": p.provider, "host": host, "method": method, "status": answered, "headers": answer_headers }));
             }
-        }
+            let at = js::now_ms();
+            let uses: Vec<uses::Use> = named
+                .iter()
+                .map(|p| {
+                    let usage = used.iter().find(|(k, _)| k == p).and_then(|(_, u)| u.as_ref());
+                    let micros = usage.map_or(0, |u| cfg.book.price(u).map_or(0, |priced| priced.charge));
+                    uses::Use { provider: p.provider.clone(), micros }
+                })
+                .collect();
+            let bill = |usage| (crate::pipe::Bill { payer: owner.clone(), reference: format!("key:{computer}:{}", js::random_hex::<12>()), agent: Some(identity.clone()), fragment: None, computer: Some(computer.clone()) }, Some(usage));
+            crate::pipe::settle(&env, used.into_iter().filter_map(|(_, usage)| usage.map(bill)).collect()).await;
+            if uses.is_empty() {
+                return;
+            }
+            // counted in its owner's ledger, where a spend past a rate is
+            // told as a notice (`uses::count`)
+            let counted = Used { agent, at_ms: at, uses };
+            if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
+                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+            }
+        });
     }
-    // a stream: what was read so far, then the rest as it comes, each named
-    let _ = headers.delete("content-length");
-    let first = streamed.push(&read);
-    let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
-        let (mut stream, mut streamed) = state?;
-        match stream.next().await {
-            Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
-            Some(Err(e)) => Some((Err(e), None)),
-            None => Some((Ok(streamed.finish()), None)),
-        }
-    });
-    let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
-    Ok(Response::from_stream(body)?.with_status(status).with_headers(headers))
+    answer
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

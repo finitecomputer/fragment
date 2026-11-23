@@ -243,8 +243,15 @@ Not built either:
   not restore is never given again, and a door with saves never starts as
   a new one over them). A deployment runs doors only when its config names
   their image (`doors`), and a local stack only for the e2e's
-  `simplex-door` lane. Until a connector runs one (the next step), SimpleX
-  runs on an always-on computer (decision 32).
+  `simplex-door` lane. Its connector (templates/simplex, a hosted door as
+  Telegram's is) starts it and is its only caller of the two: its jobs
+  reach the door of the connector's life (`door_id`: a name made again
+  reaches another), and the door posts its
+  owner's messages to the connector's inbox as a webhook does, which
+  publishes each to the bound agent; the agent's computer wakes for it as
+  for any message, so it may sleep. Until Settings makes one (the next
+  step) and existing links move to doors, SimpleX runs on an always-on
+  computer (decision 32).
 
 ## What its owner is told
 
@@ -291,21 +298,13 @@ steps; its "no reply yet" waits until it is up):
   its next start runs, until its owner puts that version off. While its
   save may not restore beside the new image, it says to make room first,
   with no Restart (`roomFirst`; below, "An image's share of the disk").
-- `key_paused`: a shared key's charges this last hour reached its owner's
-  cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
-  calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
-  until `resumesAt`, which the notice counts down to. Worked out on read from
-  the computer's `key_hour`, and told as a charge reaches the cap. Its
-  button lifts the cap a step (`allowMicros`, `key_hour::next_lift`),
-  worked out by the computer from the cap it holds, so a stale page
-  changes nothing; at the most it says so.
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). Its owner reads them in words
 with the rest of what they are told (`GET /api/notices`, docs/api.md,
 Notices): the computer says each one itself (`fragment_core::computer::said`),
 with its actions' routes (Restart, OK `…/notices/seen`, Later
-`…/notices/later`, Allow `…/key-caps/{provider}`, Get help), and the shell
+`…/notices/later`, Get help), and the shell
 draws them over every chat and Settings with no code of its own for any.
 
 - **One way back: Restart** (`POST /api/computers/{id}/restart`): the
@@ -1026,7 +1025,9 @@ provider's own hosts.
   not name, forged or naming an agent not on this computer now, of a
   provider its agent was narrowed from, or of a connection not connected
   or an own key not given (403 `not_connected`); and an operator key's
-  when its owner's gate refuses (402, 403). A body goes as it came, and a
+  when its owner's gate, asked beside the call as for a model call, has
+  heard them refused (402, 403; docs/ledger.md, "The gate"). A body goes
+  as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
 - **Calls an operator key never goes on.** Every agent shares an operator
@@ -1045,6 +1046,11 @@ provider's own hosts.
   connection's are never denied, and an empty list denies nothing. It
   can't catch an account-wide call a vendor adds later; the vendor's own
   scoping is the main lock.
+- **An operator key never comes back.** It is the platform's own at its
+  vendor, so an answer to a request that carried one names each echo of
+  it `{{provider}}`, in its headers and its body, as a Vault's fills are
+  named (`Plan::operator_keys`, `pipe::answer`; docs/secrets.md, "Echoes
+  are hidden"): nothing the pipe puts on a request comes back in its answer.
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's

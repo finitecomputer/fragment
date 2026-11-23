@@ -4,11 +4,11 @@
 //! is literally true.
 
 use fragment_proto::computer::ComputerNotice;
-use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel, Until};
+use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::{Map, Value};
 
 use crate::computer::limits::SET_ASIDE_KEPT_MS;
-use crate::notice::{provider_name, size, span, usd};
+use crate::notice::{size, span};
 
 /// What the words need of the computer beyond its notices.
 pub struct Facts<'a> {
@@ -140,13 +140,6 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             text: Some(if *room == 0 { "It may not start again until there is room. Ask your agent to move big files to storage." } else { "Ask your agent to move big files to storage." }.into()),
             ..notice("disk_filling".into(), "disk_filling", NoticeLevel::Warn, if *room == 0 { "Your computer is full".into() } else { format!("Your computer is almost full ({} left)", size(*room)) })
         },
-        ComputerNotice::KeyPaused { provider, spent_micros, cap_micros, allow_micros, resumes_at } => Notice {
-            text: allow_micros.is_none().then(|| format!("{} an hour is the most allowed.", usd(*cap_micros))),
-            until: Some(Until { at: *resumes_at, said: "Calls resume".into() }),
-            // one tap lifts its cap a step from the one shown (a stale page changes nothing)
-            actions: allow_micros.map(|allow| NoticeAction::post(format!("Allow up to {} an hour", usd(allow)), at(&format!("key-caps/{provider}")), body("from", *cap_micros))).into_iter().collect(),
-            ..notice(format!("key_paused:{provider}"), "key_paused", NoticeLevel::Warn, format!("{} calls paused: {} this hour", provider_name(provider), usd(*spent_micros)))
-        },
     }
 }
 
@@ -266,14 +259,6 @@ mod tests {
         let full = &said(&[ComputerNotice::DiskFilling { total: 20_000_002_048, free: 2_100_000_000, room: 0 }], &f)[0];
         assert_eq!(full.title, "Your computer is full");
         assert_eq!(full.text.as_deref(), Some("It may not start again until there is room. Ask your agent to move big files to storage."));
-
-        let paused = |allow_micros| said(&[ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 5_030_000, cap_micros: 5_000_000, allow_micros, resumes_at: 123 * MIN }], &f).remove(0);
-        let one = paused(Some(20_000_000));
-        assert_eq!((one.title.as_str(), one.text.as_deref()), ("ElevenLabs calls paused: $5.03 this hour", None));
-        assert_eq!(one.until, Some(Until { at: 123 * MIN, said: "Calls resume".into() }));
-        assert_eq!(post(&one), vec![("Allow up to $20 an hour".into(), format!("{at}/key-caps/elevenlabs"), json!({ "from": 5_000_000 }))]);
-        let most = paused(None);
-        assert_eq!((most.text.as_deref(), most.actions.len()), (Some("$5 an hour is the most allowed."), 0));
     }
 
     /// Goal: a client keys its rows by id: unique among one computer's
@@ -285,8 +270,6 @@ mod tests {
             ComputerNotice::Update { version: "0123456789ab".into(), room_first: false },
             ComputerNotice::Update { version: "0123456789ab".into(), room_first: true },
             ComputerNotice::DiskFilling { total: 2, free: 1, room: 0 },
-            ComputerNotice::KeyPaused { provider: "xai".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
-            ComputerNotice::KeyPaused { provider: "elevenlabs".into(), spent_micros: 1, cap_micros: 1, allow_micros: None, resumes_at: 1 },
         ];
         let ids: Vec<String> = said(&told, &facts()).into_iter().map(|n| n.id).collect();
         let unique: std::collections::BTreeSet<&String> = ids.iter().collect();

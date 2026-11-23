@@ -806,7 +806,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 | `detail` | `string` or `null` | optional | The platform's own words, small, for whoever helps (why a start failed, as it said it). |
 | `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
 | `image` | `string` or `null` | optional | A picture beside its words (an agent's): a platform path, read with the person's own credential. A client from before it shows none. |
-| `kind` | `string` | required | What it is about (`key_paused`), for tests and logs. No client reads it to decide what to draw. |
+| `kind` | `string` | required | What it is about (`spending`), for tests and logs. No client reads it to decide what to draw. |
 | `level` | [`NoticeLevel`](#noticelevel) | required |  |
 | `mustAnswer` | `boolean` | optional | It must be answered (FIN-458): a client shows it alone, over everything, until one of its actions goes through, and the read after no longer has it. The first such in the list first: its owner lists its own oldest first. A client from before it shows it as any other. |
 | `text` | `string` or `null` | optional | A sentence or two under it. |
@@ -1019,7 +1019,7 @@ in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only 
 
 out, open. A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.
 
-Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `key_paused`, `trial_seat_of_one`.
+Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `trial_seat_of_one`.
 
 ### `Report`
 

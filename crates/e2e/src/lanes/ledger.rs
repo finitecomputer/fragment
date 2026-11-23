@@ -1708,6 +1708,26 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         acked && new.len() == 1 && new[0]["entry"]["row"]["usage"]["count"].as_i64() >= Some(3) && m(&after, "charged") - m(&before, "charged") == charged,
         json!({ "before": before, "after": after, "new": new }),
     );
+    // a life's end takes its open minute's count with it: the name made
+    // again counts only its own requests, never the deleted life's
+    let held = 10;
+    for _ in 0..held {
+        api.op(&owner, &name, "notes", "q", json!({}))?;
+    }
+    let open = lever(api, &name, "meter", json!({}))?.body;
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    s.create(api, &owner, &name)?;
+    let again = lever(api, &name, "meter", json!({}))?.body;
+    let counted = |state: &Value| -> i64 {
+        let open: i64 = state["counted"].as_array().into_iter().flatten().filter_map(|m| m["count"].as_i64()).sum();
+        let closed: i64 = state["rows"].as_array().into_iter().flatten().filter(|r| r["ref"].as_str().is_some_and(|r| r.starts_with("req:"))).filter_map(|r| r["usage"]["count"].as_i64()).sum();
+        open + closed
+    };
+    s.ok(
+        "a fragment deleted with its minute's requests still counting: the name made again counts none of them",
+        counted(&open) >= held && deleted.status == 200 && counted(&again) < held,
+        json!({ "before the delete": open, "deleted": deleted.status, "made again": again }),
+    );
     let _ = c;
     Ok(())
 }

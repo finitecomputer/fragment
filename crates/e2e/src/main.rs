@@ -676,6 +676,18 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether a local stack builds the door's image: for a run that names
+    /// the door's lane alone (`Fleet::doors`, `local_containers`).
+    fn builds_doors(&self) -> bool {
+        self.containers.doors
+    }
+
+    /// Whether the stack runs SimpleX doors: a deployment whose config names
+    /// them; a local one that builds their image (`builds_doors`).
+    pub fn runs_doors(&self) -> bool {
+        needs::missing(Need::Doors, self.rung).is_none() && (self.preview.is_some() || self.builds_doors())
+    }
+
     /// Whether the local node runs computers: wrangler's when a section the
     /// run runs uses one (`local_containers`), celld's on the krun engine
     /// alone (docs/self-host.md, seam 2). The section asking has said it
@@ -1087,7 +1099,7 @@ impl Suite {
             computer_containers: self.containers.computers || self.on_celld(),
             computer_snapshots: false,
             // the door's image built only for a run that names its lane
-            doors: self.containers.doors,
+            doors: self.builds_doors(),
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
