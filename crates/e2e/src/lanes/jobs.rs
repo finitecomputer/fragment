@@ -845,6 +845,11 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
             && as_editor.body.get("withheld").is_none(),
         &as_editor,
     );
+    s.ok(
+        "the record a run is handed is as it was before records said who wrote them: no `author` (FIN-615), so an app's input schema reads it as ever",
+        as_editor.body["input"]["record"].is_object() && as_editor.body["input"]["record"].get("author").is_none(),
+        &as_editor,
+    );
     let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
     if let Some(channels) = without["channels"].as_object_mut() {
         channels.remove("alarms");

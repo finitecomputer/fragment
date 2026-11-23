@@ -847,7 +847,7 @@ impl FragmentCell {
     /// Appends to the audit trail: the `events` channel, written by the platform.
     pub(crate) fn event(&self, kind: &str, summary: &str, data: Value) {
         let summary: String = summary.chars().take(500).collect();
-        let _ = self.append("events", "platform", kind, &json!({ "summary": summary, "data": data }), None);
+        let _ = self.append("events", "platform", fragment_proto::Author::Platform, kind, &json!({ "summary": summary, "data": data }), None);
     }
 
     /// The fragment's name, or 404 when it was never created (or was deleted).

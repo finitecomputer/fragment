@@ -247,6 +247,14 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
 
     let r = call("note", "n1", json!({ "slug": "one", "text": "one" }))?;
     s.ok("a note lands", r.status == 200 && note(s, "one").as_deref() == Some(&b"one"[..]) && slugs("one") == 1, &r);
+    // who wrote each record, as the platform stamps it (FIN-615): an
+    // effect of its author's own code is code's, though its caller is named
+    let owner_id = api.identity(&owner)?;
+    let (feed, ops) = (channel("feed"), channel("ops"));
+    let one = feed.iter().find(|r| r["body"]["slug"] == "one");
+    s.ok("its record says app code wrote it, under its caller's name", one.is_some_and(|r| r["author"] == "code" && r["principal"] == owner_id.as_str()), json!(feed));
+    let applied_n1 = ops.iter().find(|r| r["body"]["id"] == "n1");
+    s.ok("and its `ops` record says the platform did", applied_n1.is_some_and(|r| r["author"] == "platform"), json!(ops));
 
     // a query's result is bounded like a mutation's: a string of n
     // characters is n + 2 bytes of JSON
