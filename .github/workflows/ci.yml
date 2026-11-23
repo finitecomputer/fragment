@@ -177,12 +177,15 @@ jobs:
   # 7 to 10 minutes apiece. It saves this commit's builds, the stub's layers
   # and the tools on master's pushes, a proven one's too (its shards skip):
   # later runs (master's next push, production's, a run by hand) and
-  # `deploy` restore master's newest. Never after `proven` fails.
+  # `deploy` restore master's newest. A proven push elsewhere (production's
+  # promotion) builds nothing: no shard runs, and it saves nothing. Never
+  # after `proven` fails.
   e2e-build:
     needs: proven
     if: >-
       ${{ !cancelled() && github.event_name != 'pull_request'
-      && (needs.proven.result == 'skipped' || needs.proven.result == 'success') }}
+      && (needs.proven.result == 'skipped' || needs.proven.result == 'success')
+      && (needs.proven.outputs.proven != 'true' || github.ref == 'refs/heads/master') }}
     runs-on: ubuntu-latest
     # a hang's guard, not a pace: about 4 minutes from the last master's
     # cache, more when a push rebuilds more, and a new Rust release builds
