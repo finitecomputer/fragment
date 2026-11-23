@@ -681,7 +681,7 @@ fn e2e(args: &[String]) -> Result<()> {
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
-    if step.is_none() {
+    if step != Some("--no-build") {
         build_e2e(&suite_args)?;
     }
     if step == Some("--build-only") {
