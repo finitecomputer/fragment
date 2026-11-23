@@ -22,6 +22,20 @@ pub struct Connector {
     pub relay_targets: Vec<RelayTarget>,
 }
 
+/// Whether a triggered run trips its operation's hourly breaker
+/// (`TRIGGERED_RUNS_PER_HOUR`): `this_hour` of its triggered runs started
+/// within the hour, on its author's code. A connector's own code (a
+/// blessed connector template, never other code since) never trips it: its
+/// triggers relay a conversation (its inbox's deliveries, its agent's
+/// replies), fire on nothing they publish themselves, so loop on nothing,
+/// and its owner's chat is the one place a pause would say nothing (a
+/// paused connector relays nothing until its owner unpauses it, unasked).
+/// Its runs still meet the hop depth, the held-runs breaker and its
+/// inbox's pending bound.
+pub fn trips_hourly_breaker(this_hour: u64, connector: bool) -> bool {
+    !connector && this_hour >= fragment_proto::limits::TRIGGERED_RUNS_PER_HOUR
+}
+
 /// The deployment's connectors, checked (`new`). Absent from a config, it
 /// is `default()`: SimpleX, with `relay::HOSTS` on 443, and Telegram (a
 /// hosted connector: templates/telegram, no relay). `[]` allows none.
@@ -120,6 +134,22 @@ pub fn id_ok(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a connector's conversation is never paused by its pace (the
+    /// SimpleX door spike: 100 messages each way tripped the breaker on
+    /// `intake`, then `mirror`, and the connector said nothing until its
+    /// owner unpaused it; Telegram's the same past 120 messages an hour).
+    /// Valid: an app's operation trips at its hourly count, not before.
+    /// Invalid: a connector's, however many.
+    #[test]
+    fn a_connectors_triggers_never_trip_the_hourly_breaker() {
+        let cap = fragment_proto::limits::TRIGGERED_RUNS_PER_HOUR;
+        assert!(!trips_hourly_breaker(cap - 1, false), "within its count");
+        assert!(trips_hourly_breaker(cap, false), "an app's, at its count");
+        for n in [cap, cap * 10, u64::MAX] {
+            assert!(!trips_hourly_breaker(n, true), "a connector's, at {n}");
+        }
+    }
+
     use super::*;
 
     /// Goal: the default is today's SimpleX relay and Telegram; `[]` allows

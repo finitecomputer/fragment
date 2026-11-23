@@ -119,6 +119,8 @@ pub const FRAGMENT: Class = Class {
         step!("newest", "fragment/0008_newest.sql"),
         step!("inbox_forward_only", "fragment/0009_inbox_forward_only.sql"),
         step!("face_forward_only", "fragment/0010_face_forward_only.sql"),
+        step!("record_author", "fragment/0011_record_author.sql"),
+        step!("pending_code", "fragment/0012_pending_code.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -158,9 +160,9 @@ pub const PRINCIPAL: Class = Class {
     kept: &["wiped"],
 };
 
-pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql"), step!("uses", "ledger/0002_uses.sql")], variants: &[], kept: &["wiped"] };
+pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql"), step!("uses", "ledger/0002_uses.sql"), step!("spend_slots", "ledger/0003_spend_slots.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql"), step!("uses_owed", "computer/0007_uses_owed.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql"), step!("uses_owed", "computer/0007_uses_owed.sql"), step!("key_hour_gone", "computer/0008_key_hour_gone.sql"), step!("key_calls", "computer/0009_key_calls.sql")], variants: &[], kept: &["wiped"] };
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.
