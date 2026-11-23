@@ -457,13 +457,16 @@ pub(crate) struct WipeConnectionsFenced {
     pub failures: Vec<WipeRevokeFailures>,
 }
 
-/// An account whose revoke failed in a wipe's earlier calls.
+/// What a wipe's earlier calls kept of an account (`wipe_revokes`): its
+/// failed revokes, and how its revoke ended (`wipe_connections::Ended::code`).
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct WipeRevokeFailures {
     pub provider: String,
     pub account: String,
     pub tries: u32,
     pub first_ms: i64,
+    #[serde(default)]
+    pub ended: i64,
 }
 
 impl Call for WipeConnections {
@@ -471,18 +474,22 @@ impl Call for WipeConnections {
     type Answer = WipeConnectionsFenced;
 }
 
-/// `POST /wipe/revoke-failed`: an account's revoke failed in this call of
-/// a wipe's `connections` step: counted (the first's time kept), while
-/// the wipe stands before that step. Answers its count.
+/// `POST /wipe/revoke-noted`: in this call of a wipe's `connections`
+/// step, an account's revoke failed (`ended` none: counted, the first's
+/// time kept), or ended so (`wipe_connections::Ended::code`, 1 or 2: kept
+/// until its delete), while the wipe stands at that step. Answers what is
+/// kept of it.
 #[derive(Serialize, Deserialize)]
-pub(crate) struct WipeRevokeFailed {
+pub(crate) struct WipeRevokeNoted {
     pub identity: String,
     pub provider: String,
     pub account: String,
+    #[serde(default)]
+    pub ended: Option<i64>,
 }
 
-impl Call for WipeRevokeFailed {
-    const PATH: &'static str = "/wipe/revoke-failed";
+impl Call for WipeRevokeNoted {
+    const PATH: &'static str = "/wipe/revoke-noted";
     type Answer = WipeRevokeFailures;
 }
 

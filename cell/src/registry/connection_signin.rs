@@ -96,7 +96,8 @@ impl RegistryCell {
         let account = Account { issuer: pending.issuer.clone(), subject: pending.subject.clone(), provider: b.provider.clone() };
         let id = self.finishing.borrow_mut().begin(account);
         let finished = self.finish_taken(b, o, pending, id).await;
-        self.finishing.borrow_mut().end(id);
+        // an import with no known outcome is held a while (`Finishing::end`)
+        self.finishing.borrow_mut().end(id, js::now_ms());
         finished
     }
 
@@ -182,15 +183,20 @@ impl RegistryCell {
         if !self.finishing.borrow_mut().may_import(id) { return Ok(NotUnderWay); }
         // An import that fails, or whose outcome is unknown (a timeout, a
         // 5xx), leaves a disconnect's lasting fence standing: it may yet
-        // land at Pipes, and is never taken for a connection. Of several,
+        // land at Pipes, and is never taken for a connection. A wipe waits
+        // it out (`Finishing::end`, `imported` said only at a known answer).
+        // Of several,
         // one whose outcome is unknown keeps its turn a while (no answer, or
         // an error, keeps it too), so no other decides on a list that lacks it.
         if let Some(t) = &turn {
             t.uncertain.set(Some(js::now_ms() + accounts::UNCERTAIN_HOLD_MS));
         }
         let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens.keeping(metadata), label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
-        if let Some(t) = turn.as_ref().filter(|_| imported != Imported::Failed) {
-            t.uncertain.set(None);
+        if imported != Imported::Failed {
+            self.finishing.borrow_mut().imported(id);
+            if let Some(t) = &turn {
+                t.uncertain.set(None);
+            }
         }
         match imported {
             Imported::Done => {}

@@ -884,7 +884,7 @@ impl RegistryCell {
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),
             WipeBilling::PATH => reply::<WipeBilling>(self.wipe_billing(body(&bytes)?).await),
             calls::WipeConnections::PATH => reply::<calls::WipeConnections>(self.wipe_connections(body(&bytes)?)),
-            calls::WipeRevokeFailed::PATH => reply::<calls::WipeRevokeFailed>(self.wipe_revoke_failed(body(&bytes)?)),
+            calls::WipeRevokeNoted::PATH => reply::<calls::WipeRevokeNoted>(self.wipe_revoke_noted(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

@@ -28,7 +28,8 @@
 //!   (`wipe_connections`): in one turn, that the wipe stands at the step,
 //!   every connection fenced for them (none imports after: 429 while one
 //!   is), their WorkOS user, and what each account's revokes failed so far
-//!   (`wipe_revokes`, counted by `wipe_revoke_failed`).
+//!   and how its revoke ended, kept until its delete (`wipe_revokes`,
+//!   kept by `wipe_revoke_noted`).
 //! - **The end** (`Step::Registry`, the last): every row naming them or
 //!   their agents goes in one turn: identities, keys (their own sealed
 //!   key with the rest), sign-in subjects and emails, picture, agent
@@ -40,7 +41,7 @@ use fragment_core::wipe::{self, Completed, Named, Progress, Refusal, Step};
 use fragment_proto::wipe::OrgFound;
 
 use super::calls::{
-    WipeBegin, WipeBilled, WipeBilling, WipeConnections, WipeConnectionsFenced, WipeDone, WipeFacts, WipeLook, WipePicture, WipeRevokeFailed, WipeRevokeFailures, WipeStep,
+    WipeBegin, WipeBilled, WipeBilling, WipeConnections, WipeConnectionsFenced, WipeDone, WipeFacts, WipeLook, WipePicture, WipeRevokeFailures, WipeRevokeNoted, WipeStep,
 };
 use super::*;
 
@@ -279,6 +280,7 @@ impl RegistryCell {
             }
         }
         if b.step == Step::Registry {
+            self.wipe_settled(id)?;
             self.wipe_rows(id)?;
         }
         let finished = match progress.finished() {
@@ -317,38 +319,77 @@ impl RegistryCell {
             .filter(|p| p.kind == fragment_core::catalog::Kind::Connection)
             .map(|p| fragment_core::connection_signin::Account { issuer: b.issuer.clone(), subject: subject.clone(), provider: p.name.clone() })
             .collect();
-        self.finishing.borrow_mut().fence_all(&theirs).map_err(|fragment_core::connection_signin::Importing| {
-            CellError::new(ErrorCode::RateLimited, "a connect of theirs is finishing now: the next call ends their connections")
+        self.finishing.borrow_mut().fence_all(&theirs, js::now_ms()).map_err(|fragment_core::connection_signin::Importing| {
+            CellError::new(ErrorCode::RateLimited, "a connect of theirs is finishing now, or its import's outcome is not known yet: a later call ends their connections")
         })?;
         // bounded: at most `catalog::PROVIDERS_MAX` connections
         for a in &theirs {
             self.exec(fragment_core::connection_signin::FENCE_PENDING, vec![a.issuer.as_str().into(), a.subject.as_str().into(), a.provider.as_str().into()])?;
         }
         let failures = self.rows::<WipeRevokeFailures>(
-            "SELECT provider, account, tries, first_ms FROM wipe_revokes WHERE identity = ? ORDER BY provider, account LIMIT ?",
+            "SELECT provider, account, tries, first_ms, ended FROM wipe_revokes WHERE identity = ? ORDER BY provider, account LIMIT ?",
             vec![id.into(), SqlStorageValue::Integer((fragment_core::catalog::PROVIDERS_MAX * usize::from(fragment_core::catalog::ACCOUNTS_MAX)) as i64)],
         )?;
         Ok(WipeConnectionsFenced { subject: Some(subject), failures })
     }
 
-    /// `POST /wipe/revoke-failed` (`calls::WipeRevokeFailed`): an account's
-    /// revoke failed in a call of the `connections` step, counted while the
-    /// wipe stands at that step (a stale call's is refused).
-    pub(super) fn wipe_revoke_failed(&self, b: WipeRevokeFailed) -> CellResult<WipeRevokeFailures> {
+    /// `POST /wipe/revoke-noted` (`calls::WipeRevokeNoted`): an account's
+    /// revoke failed in a call of the `connections` step (counted), or
+    /// ended (kept until its delete), while the wipe stands at that step (a
+    /// stale call's is refused). A failure noted of an account whose
+    /// revoke ended already is a fault: that one is only deleted.
+    pub(super) fn wipe_revoke_noted(&self, b: WipeRevokeNoted) -> CellResult<WipeRevokeFailures> {
+        use fragment_core::wipe_connections::Ended;
         let id = b.identity.as_str();
         fragment_core::wipe_connections::may_end(self.wipe_progress(id)?).map_err(|e| CellError::new(ErrorCode::AlreadyExists, format!("the connections of {id}: {e}")))?;
         if !fragment_core::catalog::valid_name(&b.provider) || !fragment_core::connection_accounts::valid_account_id(&b.account) {
-            return Err(CellError::invalid("a revoke failed at a provider, of an account Pipes listed"));
+            return Err(CellError::invalid("a revoke at a provider, of an account Pipes listed"));
         }
-        self.exec(
-            "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms) VALUES (?, ?, ?, 1, ?) ON CONFLICT (identity, provider, account) DO UPDATE SET tries = tries + 1",
-            vec![id.into(), b.provider.as_str().into(), b.account.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        self.row::<WipeRevokeFailures>(
-            "SELECT provider, account, tries, first_ms FROM wipe_revokes WHERE identity = ? AND provider = ? AND account = ?",
-            vec![id.into(), b.provider.as_str().into(), b.account.as_str().into()],
-        )?
-        .ok_or_else(|| CellError::host("a failed revoke's count went missing"))
+        let key = || -> Vec<SqlStorageValue> { vec![id.into(), b.provider.as_str().into(), b.account.as_str().into()] };
+        let now = SqlStorageValue::Integer(js::now_ms());
+        match b.ended.map(Ended::of_code) {
+            None => self.exec(
+                "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms, ended) VALUES (?, ?, ?, 1, ?, 0) ON CONFLICT (identity, provider, account) DO UPDATE SET tries = tries + 1 WHERE ended = 0",
+                [key(), vec![now]].concat(),
+            )?,
+            Some(Ok(Some(ended))) => self.exec(
+                "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms, ended) VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT (identity, provider, account) DO UPDATE SET ended = excluded.ended",
+                [key(), vec![now, SqlStorageValue::Integer(Ended::code(Some(ended)))]].concat(),
+            )?,
+            Some(_) => return Err(CellError::invalid("a revoke ends revoked or given up")),
+        }
+        let kept = self
+            .row::<WipeRevokeFailures>("SELECT provider, account, tries, first_ms, ended FROM wipe_revokes WHERE identity = ? AND provider = ? AND account = ?", key())?
+            .ok_or_else(|| CellError::host("a revoke's record went missing"))?;
+        if b.ended.is_none() && kept.ended != 0 {
+            return Err(CellError::host(format!("{} {}: its revoke ended already, and is not tried again", b.provider, b.account)));
+        }
+        Ok(kept)
+    }
+
+    /// No import of `identity`'s WorkOS user is under way or held with its
+    /// outcome unknown (`Finishing::settled`; FIN-588): one may still land
+    /// at Pipes, and the end, forgetting their WorkOS user and its fences,
+    /// would leave it to the next person it signs in as. Their
+    /// `connections` step waits the same (`wipe_connections`); this holds
+    /// should one come between that step and this.
+    fn wipe_settled(&self, identity: &str) -> CellResult<()> {
+        #[derive(serde::Deserialize)]
+        struct Subject {
+            issuer: String,
+            subject: String,
+        }
+        // bounded: an identity's sign-in subjects, one an issuer; more is a fault, never a skipped check
+        const SUBJECTS_MAX: i64 = 64;
+        let subjects = self.rows::<Subject>("SELECT issuer, subject FROM subjects WHERE identity = ? LIMIT ?", vec![identity.into(), SqlStorageValue::Integer(SUBJECTS_MAX + 1)])?;
+        if subjects.len() as i64 > SUBJECTS_MAX {
+            return Err(CellError::host(format!("{identity} has more than {SUBJECTS_MAX} sign-in subjects")));
+        }
+        let now = js::now_ms();
+        match subjects.iter().all(|s| self.finishing.borrow().settled(&s.issuer, &s.subject, now)) {
+            true => Ok(()),
+            false => Err(CellError::new(ErrorCode::RateLimited, format!("a connect of {identity}'s may still land at Pipes: a later call ends their wipe"))),
+        }
     }
 
     /// Every row that names the person `identity` or an agent of theirs, in

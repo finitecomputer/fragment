@@ -499,8 +499,7 @@ pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &s
 }
 
 /// `connection_revoke`'s request, answered whole: (status, the provider's
-/// answer as JSON, none when it is not), for a wipe, which reads a token
-/// revoked already (Google's 400 `invalid_token`) apart from a failure
+/// answer as JSON, none when it is not), for a wipe, which reads it
 /// (`fragment_core::wipe_connections::revoked`). Nothing of it is logged.
 pub async fn connection_revoke_answer(env: &Env, provider: &str, revoke: &str, form: &str) -> CellResult<(u16, Value)> {
     use fragment_core::catalog::ClientAuth;

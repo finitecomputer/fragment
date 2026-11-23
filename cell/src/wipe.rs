@@ -301,22 +301,7 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         // registry still names that user: done once none is left
         Step::Connections => {
             let w = crate::connections::wipe(env, Config::from_env(env), person, deadline).await?;
-            let mut said = vec![];
-            if !w.given_up.is_empty() {
-                said.push(format!(
-                    "given up after {} failed revokes over a day, deleted at Pipes, their grant perhaps left at the provider: {}",
-                    fragment_core::wipe_connections::REVOKE_TRIES_MAX,
-                    w.given_up.join("; ")
-                ));
-            }
-            if !w.kept.is_empty() {
-                said.push(format!("not revoked, kept for the next call: {}", w.kept.join("; ")));
-            }
-            if w.cut {
-                said.push("the call's time ran out: the next call ends the rest".into());
-            }
-            let note = (!said.is_empty()).then(|| said.join(". "));
-            Ok(Did { done: w.kept.is_empty() && !w.cut, deleted: w.deleted, note, ..Did::default() })
+            Ok(Did { done: w.done(), deleted: w.deleted, note: w.note(), ..Did::default() })
         }
         // its rows go as the registry records it done (`WipeStep`)
         Step::Registry => Ok(Did::finished(0)),

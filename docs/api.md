@@ -420,19 +420,31 @@ idempotent and recorded done only once whole:
   catalog, by its Pipes id (never an account-less call, which could reach
   the next person's account under the same WorkOS user). First every
   connection is fenced for them (429 while an import of theirs is under
-  way: the call fails the step and the next tries again), then Pipes
-  lists their accounts, and the registry confirms the wipe still stands at
-  this step before anything is acted on. Each grant is revoked at its
-  provider where its row names `revoke` (a token Pipes vends for that
-  account; Google's 400 `invalid_token`, or a token Pipes cannot vend
-  since its provider refused its refresh, is a grant gone already), and
-  only then its account deleted at Pipes. A revoke that fails keeps its
-  account (its token is what the next call revokes with), says so in the
-  step's `note`, and leaves the step not done; once it has failed in 5
-  calls over at least a day, the account is given up: deleted at Pipes,
-  the `note` and the log saying its grant may be left at the provider.
-  Each vendor call starts within the call's time; a wipe the release
-  before left unfinished (any step before `registry`) runs this step too.
+  way, or one whose outcome was unknown, a timeout or a fault, is held a
+  minute in case it lands: the call fails the step and a later one tries
+  again and lists afresh), then Pipes lists their accounts, and the
+  registry confirms the wipe still stands at this step before anything is
+  acted on (`registry` waits the same). Each grant is revoked at its
+  provider where its row names `revoke`, with an access token Pipes
+  vends for that account (Pipes vends no refresh token; Google revoking an
+  access token ends the refresh token with it). Only a 200 from the
+  provider, Pipes' 404, or a well-formed Pipes answer that it holds no
+  active token (`{active: false}`, `needs_reauthorization` or
+  `not_installed`) counts as the grant gone; an unreadable vend, or
+  Google's 400 `invalid_token` (the access token may have expired while
+  its refresh token lives), is a failure. Then how it ended is recorded,
+  and only then its account deleted at Pipes, so a call that runs out of
+  time after the revoke, or a delete that fails, resumes at the delete. A
+  revoke that fails keeps its account (its token is what the next call
+  revokes with), says so in the step's `note`, and leaves the step not
+  done; once it has failed in 5 calls over at least a day, the account is
+  given up: deleted at Pipes, the `note` (of the call whose delete
+  answered) and the log saying its grant may be left at the provider. A
+  call out of time before an account's vend counts no failure. Each
+  account starts within the call's time, its vend and revoke then run on
+  (each within its vendor timeout), and its delete starts within the
+  call's time too; a wipe the release before left unfinished (any step
+  before `registry`) runs this step too.
 - `registry`: every row naming them or their agents. The wipe's own row
   stays, and so do orgs' governance logs naming them by npub (never by
   email): each org they were in the content of (Org content) records them
