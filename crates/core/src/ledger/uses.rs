@@ -88,6 +88,74 @@ pub trait Tally {
     fn put_taken(&mut self, id: &str, digest: &str);
     /// `month`'s rows, by provider then agent.
     fn month(&self, month: Month) -> Vec<ProviderUse>;
+    /// The last hour's spend, slot by slot (`spend`).
+    fn add_spend(&mut self, slot: i64, micros: i64);
+    fn spent_since(&self, slot: i64) -> i64;
+    /// The slots from `slot` on with spend in them, oldest first: at most
+    /// an hour's (`SPEND_SLOTS` and now's).
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)>;
+    fn forget_spend_before(&mut self, slot: i64);
+}
+
+/// The last hour's spend on shared keys, in slots this long (FIN-616): the
+/// hourly key pause's window, kept for the notice that replaced it
+/// (`said::spending`), never to stop a call.
+pub const SPEND_SLOT_MS: i64 = 300_000;
+/// Slots an hour holds.
+pub const SPEND_SLOTS: i64 = 12;
+const _: () = assert!(SPEND_SLOT_MS * SPEND_SLOTS == 3_600_000, "an hour of slots");
+
+fn spend_slot(ms: i64) -> i64 {
+    ms.div_euclid(SPEND_SLOT_MS)
+}
+
+/// What a swap's calls cost (`u`, as `count` took it), counted in its slot
+/// of the hour, the slots past the hour forgotten: whether the hour's spend
+/// passed a step of its notice (`said::spending_step`), so its person's
+/// pages are told.
+pub fn spend(t: &mut impl Tally, u: &Used, now_ms: i64) -> bool {
+    let before = super::said::spending_step(spent_hour(t, now_ms));
+    // at most USES_MAX charges, each within CHARGE_MAX (`count`'s check)
+    let micros: i64 = u.uses.iter().map(|x| x.micros).sum();
+    if micros > 0 {
+        t.add_spend(spend_slot(u.at_ms.min(now_ms)), micros);
+    }
+    t.forget_spend_before(hour_from(now_ms));
+    super::said::spending_step(spent_hour(t, now_ms)) > before
+}
+
+/// The oldest slot the hour ending at `now_ms` holds: a whole hour of
+/// them before now's, so a call an hour old or less always counts (the
+/// window is an hour to an hour and five minutes).
+fn hour_from(now_ms: i64) -> i64 {
+    spend_slot(now_ms) - SPEND_SLOTS
+}
+
+/// What the last hour's slots hold, the hour ending at `now_ms`.
+pub fn spent_hour(t: &impl Tally, now_ms: i64) -> i64 {
+    t.spent_since(hour_from(now_ms))
+}
+
+/// When the last hour's spend falls below the notice's first step
+/// (`said::SPENDING_MICROS`), as its oldest slots age out and with no more
+/// spent: its notice is told until then, and never gone while a read would
+/// still tell one (a step down is told by the next count). None below it.
+pub fn spent_until(t: &impl Tally, now_ms: i64) -> Option<i64> {
+    let step = super::said::SPENDING_MICROS;
+    if spent_hour(t, now_ms) < step {
+        return None;
+    }
+    let slots = t.spent_slots(hour_from(now_ms));
+    let mut left: i64 = slots.iter().map(|(_, m)| m).sum();
+    // bounded: at most an hour's slots
+    for (slot, micros) in slots {
+        left -= micros;
+        if left < step {
+            return Some((slot + SPEND_SLOTS + 1) * SPEND_SLOT_MS);
+        }
+    }
+    // the slots are the hour's spend: all gone, none is left
+    None
 }
 
 /// The oldest month kept at `now_ms`.
@@ -182,6 +250,7 @@ pub fn read(t: &impl Tally, month: Month, now_ms: i64) -> LedgerUses {
 pub struct Memory {
     pub rows: BTreeMap<(Month, String, String), (u64, i64)>,
     pub taken: BTreeMap<String, String>,
+    pub spend: BTreeMap<i64, i64>,
 }
 
 impl Tally for Memory {
@@ -214,6 +283,22 @@ impl Tally for Memory {
         let mut uses: Vec<ProviderUse> = self.rows.iter().filter(|((m, _, _), _)| *m == month).map(|((_, agent, provider), (calls, micros))| ProviderUse { provider: provider.clone(), agent: agent.clone(), calls: *calls, micros: *micros }).collect();
         uses.sort_by(|a, b| (&a.provider, &a.agent).cmp(&(&b.provider, &b.agent)));
         uses
+    }
+
+    fn add_spend(&mut self, slot: i64, micros: i64) {
+        *self.spend.entry(slot).or_insert(0) += micros;
+    }
+
+    fn spent_since(&self, slot: i64) -> i64 {
+        self.spend.range(slot..).map(|(_, m)| m).sum()
+    }
+
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)> {
+        self.spend.range(slot..).map(|(s, m)| (*s, *m)).collect()
+    }
+
+    fn forget_spend_before(&mut self, slot: i64) {
+        self.spend.retain(|s, _| *s >= slot);
     }
 }
 
@@ -262,6 +347,55 @@ mod tests {
             assert_eq!(count(&mut t, &u, NOW), Err(why), "{u:?}");
         }
         assert_eq!(t, before, "a refusal counts nothing");
+    }
+
+    /// FIN-616: the hour's spend on shared keys, which replaced the hourly
+    /// key pause with a notice. Goal: a swap's charges count in their
+    /// five-minute slot, an hour's slots are summed and older ones
+    /// forgotten, a call's time past now counts now, and a count says
+    /// whether the hour passed a step of its notice ($5, then each
+    /// doubling), once a step. Method: swaps across an hour and past it.
+    #[test]
+    fn an_hours_spend_is_counted_and_its_steps_said_once() {
+        let mut t = Memory::default();
+        let step = 5_000_000;
+        assert!(!spend(&mut t, &used("lead--a1", NOW, &[("elevenlabs", step - 1), ("github", 0)]), NOW), "under $5: nothing to tell");
+        assert_eq!(spent_hour(&t, NOW), step - 1);
+        assert!(spend(&mut t, &used("lead--a1", NOW, &[("xai", 1)]), NOW), "at $5: told");
+        assert!(!spend(&mut t, &used("lead--b2", NOW, &[("xai", 4_000_000)]), NOW), "$9: the same step, told no more");
+        assert!(spend(&mut t, &used("lead--b2", NOW, &[("xai", 1_000_000)]), NOW), "$10: the next step, told");
+        assert!(!spend(&mut t, &used("lead--b2", NOW, &[("github", 0)]), NOW), "nothing spent, nothing told");
+        // a call an hour old still counts: the window is a whole hour of slots before now's
+        assert_eq!(spent_hour(&t, NOW + 3_600_000), 10_000_000, "an hour on, the hour's charges still in it");
+        assert_eq!(spent_until(&t, NOW), Some((NOW.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS), "told until the hour's spend falls below its step");
+        // the hour passes: its slots go, and the hour starts again
+        let later = NOW + SPEND_SLOT_MS * (SPEND_SLOTS + 1);
+        assert!(!spend(&mut t, &used("lead--a1", later, &[("xai", 1)]), later));
+        assert_eq!(spent_hour(&t, later), 1, "an hour on, only its own");
+        assert_eq!(t.spend.len(), 1, "the older slots forgotten");
+        // a call stamped past now counts in now's slot
+        spend(&mut t, &used("lead--a1", later + CLOCK_SKEW_MS, &[("xai", 2)]), later);
+        assert_eq!(spent_hour(&t, later), 3);
+    }
+
+    /// FIN-616, the review's: a spending notice ends when the hour's spend
+    /// falls below its step, not when its newest charge ages out: $6 an
+    /// hour ago and a cent since end the $5 notice as the $6 ages out.
+    /// Method: two slots, the older past the step alone.
+    #[test]
+    fn a_spending_notice_ends_as_the_spend_falls_below_its_step() {
+        let mut t = Memory::default();
+        let (early, late) = (NOW, NOW + 59 * 60_000);
+        spend(&mut t, &used("lead--a1", early, &[("xai", 6_000_000)]), early);
+        spend(&mut t, &used("lead--a1", late, &[("xai", 10_000)]), late);
+        let ends = (early.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS;
+        assert_eq!(spent_until(&t, late), Some(ends), "as the $6 ages out, not the cent");
+        assert_eq!(spent_hour(&t, ends), 10_000, "and then the cent alone is left");
+        assert_eq!(spent_until(&t, ends), None, "below the step: no notice");
+        // $12, past the $10 step: told until under $5, not under $10
+        spend(&mut t, &used("lead--a1", late, &[("xai", 5_990_000)]), late);
+        let late_ends = (late.div_euclid(SPEND_SLOT_MS) + SPEND_SLOTS + 1) * SPEND_SLOT_MS;
+        assert_eq!(spent_until(&t, late), Some(late_ends), "a step down keeps the notice");
     }
 
     /// Goal: thirteen months are kept, and a month full of pairs takes no
@@ -420,7 +554,7 @@ mod tests {
     fn step_7_owes_every_row_and_the_ledger_takes_each_once() {
         use crate::migrate::{self, Ran, SchemaError, COMPUTER};
         let newest = COMPUTER.steps.len() as u32;
-        assert_eq!((newest, COMPUTER.steps.last().map(|s| s.name)), (7, Some("uses_owed")), "the drop's step is the newest");
+        assert_eq!(COMPUTER.steps[6].name, "uses_owed", "the drop's step is step 7");
         let (this, last, before) = (Month::of(NOW).0, Month::of(NOW).0 - 1, Month::of(NOW).0 - 12);
         let held = [
             (this, "github", "lead--a1", 3, 0),
@@ -471,7 +605,7 @@ mod tests {
     fn nothing_held_owes_nothing() {
         use crate::migrate::{self, Ran, COMPUTER};
         let db = at_step_6(&[]);
-        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 6, version: 7 }));
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 6, version: COMPUTER.steps.len() as u32 }));
         assert_eq!(db.count("SELECT COUNT(*) FROM meta"), 0);
     }
 
@@ -483,8 +617,34 @@ mod tests {
         let db = Lite::new();
         let one = migrate::Class { steps: &LEDGER.steps[..1], ..LEDGER };
         assert_eq!(db.transaction(|db| migrate::migrate(db, &one, 0)), Ok(Ran::Made { version: 1 }));
-        assert_eq!(db.transaction(|db| migrate::migrate(db, &LEDGER, 100)), Ok(Ran::Migrated { from: 1, version: 2 }));
+        let newest = LEDGER.steps.len() as u32;
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &LEDGER, 100)), Ok(Ran::Migrated { from: 1, version: newest }));
         assert_eq!(db.columns("uses"), ["month", "agent", "provider", "calls", "micros"]);
-        assert_eq!(db.transaction(|db| migrate::migrate(db, &one, 200)), Err(SchemaError::Newer { class: "Ledger", held: 2, known: 1 }));
+        assert_eq!(db.transaction(|db| migrate::migrate(db, &one, 200)), Err(SchemaError::Newer { class: "Ledger", held: newest, known: 1 }));
+    }
+
+    /// FIN-616: a ledger gains the hour's spend (step 3), empty; a computer
+    /// drops its key hour and its caps (step 8), the rows in them gone;
+    /// each step again changes nothing, and the release before refuses it.
+    /// Method: a step-2 ledger and a step-7 computer holding a key hour.
+    #[test]
+    fn the_hour_moves_from_the_computer_to_the_ledger() {
+        use crate::migrate::{self, host::Lite, Ran, SchemaError, COMPUTER, LEDGER};
+        let ledger = Lite::new();
+        let two = migrate::Class { steps: &LEDGER.steps[..2], ..LEDGER };
+        assert_eq!(ledger.transaction(|db| migrate::migrate(db, &two, 0)), Ok(Ran::Made { version: 2 }));
+        assert_eq!(ledger.transaction(|db| migrate::migrate(db, &LEDGER, 100)), Ok(Ran::Migrated { from: 2, version: 3 }));
+        assert_eq!(ledger.columns("spend_slots"), ["slot", "micros"]);
+        assert_eq!(ledger.transaction(|db| migrate::migrate(db, &LEDGER, 200)), Ok(Ran::Current { version: 3 }));
+        assert_eq!(ledger.transaction(|db| migrate::migrate(db, &two, 300)), Err(SchemaError::Newer { class: "Ledger", held: 3, known: 2 }));
+        let computer = Lite::new();
+        let seven = migrate::Class { steps: &COMPUTER.steps[..7], ..COMPUTER };
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &seven, 0)), Ok(Ran::Made { version: 7 }));
+        computer.harness("INSERT INTO key_hour (provider, slot, micros) VALUES ('elevenlabs', 1, 5000000)");
+        computer.harness("INSERT INTO key_caps (provider, micros) VALUES ('elevenlabs', 20000000)");
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &COMPUTER, 100)), Ok(Ran::Migrated { from: 7, version: 8 }));
+        assert_eq!(computer.count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('key_hour', 'key_caps')"), 0, "both gone");
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &COMPUTER, 200)), Ok(Ran::Current { version: 8 }));
+        assert_eq!(computer.transaction(|db| migrate::migrate(db, &seven, 300)), Err(SchemaError::Newer { class: "Computer", held: 8, known: 7 }));
     }
 }

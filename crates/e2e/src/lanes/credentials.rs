@@ -75,13 +75,8 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "firecrawl: a scrape is charged the credits its answer says (data.metadata.creditsUsed), and a call around it nothing",
     "browser-use: a session's start and a task's are each charged five minutes, and a call around them (a status read) nothing",
     "x: a search is charged the posts its answer counts (meta.result_count), and a lookup whose answer counts none nothing",
-    "a shared key charged its owner's hourly cap pauses: its next call is refused 429 rate_limited (reason key_paused), saying what it spent and when it resumes, reaching no provider and charged nothing",
-    "while it is paused, another key's call goes on: the key pauses, not the account",
-    "its owner sees it over the agent's chat: the key, and what it spent this hour",
-    "as the hour passes, its oldest charges go: the key's calls go again, and its notice with them",
-    "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
-    "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
-    "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
+    "past $5 of its agents' calls on shared keys in an hour, its owner is told so (a spending notice, the same until the next step, counting down to an end ahead on the real clock), and nothing pauses: the key's next call goes through and is charged",
+    "its owner sees it over the agent's chat, in the server's words, with no button",
     "a connection whose accounts live at hosts of their own (Salesforce's orgs): a call to its account's own host, as Pipes' metadata names it, is swapped the account's credential, and one to its named host Pipes' token",
     "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
     "an account whose Pipes metadata names no host under the suffix, or another host, has its calls there refused, reaching no one",
@@ -284,16 +279,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let at_own = say(s, 164, &fetch(s, &own))?;
     let own_swapped = swapped_at(s, &own);
     let at_login = say(s, 165, &fetch(s, ORG_CONNECTION_HOST))?;
-    s.ok(SWAP_CHECKS[46], at_own.starts_with("fetched 200") && own_swapped && at_login.starts_with("fetched 200") && swapped_at(s, ORG_CONNECTION_HOST), json!({ "own": at_own, "login": at_login }));
+    s.ok(SWAP_CHECKS[41], at_own.starts_with("fetched 200") && own_swapped && at_login.starts_with("fetched 200") && swapped_at(s, ORG_CONNECTION_HOST), json!({ "own": at_own, "login": at_login }));
     let seen_before = s.upstream.seen().len();
     let another = say(s, 166, &fetch(s, &format!("rival.{under}")))?;
-    s.ok(SWAP_CHECKS[47], another.starts_with("fetched 403") && another.contains(&format!("is at {own}")) && s.upstream.seen().len() == seen_before, &another);
+    s.ok(SWAP_CHECKS[42], another.starts_with("fetched 403") && another.contains(&format!("is at {own}")) && s.upstream.seen().len() == seen_before, &another);
     s.workos.keep_metadata(&email, ORG_CONNECTION, json!({}));
     let unnamed = say(s, 167, &fetch(s, &own))?;
     s.workos.keep_metadata(&email, ORG_CONNECTION, json!({ "instance_url": "https://acme.org.test" }));
     let elsewhere = say(s, 168, &fetch(s, &own))?;
     s.ok(
-        SWAP_CHECKS[48],
+        SWAP_CHECKS[43],
         [&unnamed, &elsewhere].iter().all(|said| said.starts_with("fetched 5") && said.contains(&format!("names no host under {under}"))) && s.upstream.seen().len() == seen_before,
         json!({ "unnamed": unnamed, "elsewhere": elsewhere }),
     );
@@ -310,7 +305,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let seen_before = s.upstream.seen().len();
     let at_old = say(s, 178, &fetch(s, &own))?;
     s.ok(
-        SWAP_CHECKS[49],
+        SWAP_CHECKS[44],
         first.status == 200 && at_first.starts_with("fetched 200") && first_swapped && second.status == 200 && at_second.starts_with("fetched 200") && second_swapped
             && at_old.starts_with("fetched 403") && at_old.contains(&format!("is at {rival}")) && s.upstream.seen().len() == seen_before
             && s.workos.metadata(&email, ORG_CONNECTION) == Some(json!({ "instance_url": format!("https://{rival}") })),
@@ -446,7 +441,7 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         let said = say(s, n, &format!("fetch {url} with ${env} in {header}{}", if posting { " posting {}" } else { "" }))?;
         denied.push((said.starts_with("fetched 403") && said.contains(&format!("never sent on {call}")), said));
     }
-    s.ok(SWAP_CHECKS[50], denied.iter().all(|(ok, _)| *ok) && s.upstream.seen().len() == seen_before, json!(denied));
+    s.ok(SWAP_CHECKS[45], denied.iter().all(|(ok, _)| *ok) && s.upstream.seen().len() == seen_before, json!(denied));
     let mut spelled = vec![];
     for (n, path) in [(196, "/API/V3//Browsers/"), (197, "/api/v3/browsers.json"), (198, "/api/v3/%62rowsers")] {
         let said = say(s, n, &format!("fetch http://api.browser-use.com{path} with $BROWSER_USE_API_KEY in x-browser-use-api-key"))?;
@@ -454,8 +449,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     }
     let unplain = say(s, 199, "fetch http://api.browser-use.com/api/v3/browsers;x with $BROWSER_USE_API_KEY in x-browser-use-api-key")?;
     spelled.push((unplain.starts_with("fetched 403") && unplain.contains("goes only on a path read plainly"), unplain));
-    s.ok(SWAP_CHECKS[51], spelled.iter().all(|(ok, _)| *ok) && s.upstream.seen().len() == seen_before, json!(spelled));
-    s.ok(SWAP_CHECKS[52], session_sent && spoken_sent && scrape_sent, json!({ "session": session_sent, "spoken": spoken_sent, "scrape": scrape_sent }));
+    s.ok(SWAP_CHECKS[46], spelled.iter().all(|(ok, _)| *ok) && s.upstream.seen().len() == seen_before, json!(spelled));
+    s.ok(SWAP_CHECKS[47], session_sent && spoken_sent && scrape_sent, json!({ "session": session_sent, "spoken": spoken_sent, "scrape": scrape_sent }));
 
     // an own key, behind basic auth
     let own = SWAP_OWN_KEY;
@@ -571,174 +566,72 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "went": went, "refused": refused, "capped": capped.body }),
     );
 
-    // its owner's hourly cap on a shared key (FIN-448), held where the
-    // computer hands the key out: long speech calls reach it
-    let cap = fragment_core::key_hour::KEY_HOUR_CAP;
-    let of_elevenlabs = |r: &Value| usage(r)["key"].as_str().is_some_and(|k| k == "elevenlabs" || k.starts_with("elevenlabs:"));
-    let spent: i64 = rows.iter().filter(|r| of_elevenlabs(r)).filter_map(charged).sum();
+    // the hour's spend on shared keys (FIN-616: a notice, where FIN-448's
+    // hourly pause was): long speech calls take this hour's charges past $5
+    let step = fragment_core::ledger::said::SPENDING_MICROS;
+    let spent: i64 = held().iter().filter_map(charged).sum();
     let each = charge_for("elevenlabs:character", LONG_CHARS);
-    let calls = (cap - spent + each - 1) / each;
-    anyhow::ensure!((1..=6).contains(&calls), "a few long calls reach the cap: {calls}");
-    // what the hour holds once they are charged: the words name it exactly
-    let total = spent + calls * each;
-    let eleven_calls = || {
-        let u = api.signed(w.owner, "GET", "/api/ledger/uses", None).map(|r| r.body).unwrap_or(Value::Null);
-        u["uses"].as_array().map_or(0, |l| l.iter().filter(|x| x["provider"] == "elevenlabs").map(|x| x["calls"].as_u64().unwrap_or(0)).sum::<u64>())
-    };
-    let counted_before = eleven_calls();
+    let calls = (step - spent + each - 1) / each;
+    anyhow::ensure!((1..=6).contains(&calls), "a few long calls pass the step: {calls}");
     let long = format!(r#"{{"text":"{}","model_id":"eleven_multilingual_v2"}}"#, "a".repeat(LONG_CHARS as usize));
     let speak = |text: &str| format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {text}");
     let mut spoke = vec![];
     for n in 0..calls as u32 {
         spoke.push(say(s, 150 + n, &speak(&long))?);
     }
-    let counted = s.eventually(Duration::from_secs(20), || eleven_calls() == counted_before + calls as u64);
+    let notices = || api.signed(w.owner, "GET", "/api/notices", None).map(|r| r.body["notices"].clone()).unwrap_or(Value::Null);
+    let spending = || notices().as_array().and_then(|l| l.iter().find(|n| n["kind"] == "spending").cloned());
+    let told = s.eventually(Duration::from_secs(20), || spending().is_some());
     let seen_before = s.upstream.seen().len();
-    let paused = say(s, 157, &speak(SPOKEN))?;
-    let unreached = s.upstream.seen().len() == seen_before;
-    let other = say(s, 158, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
-    let went = other.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|l| l["host"] == "api.perplexity.ai");
-    let uncharged = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows + 1 + calls as usize + 1) && eleven_calls() == counted_before + calls as u64;
+    let after = say(s, 157, &speak(SPOKEN))?;
+    let reached = s.upstream.seen().len() == seen_before + 1;
+    let charged_after = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows + 1 + calls as usize + 1);
+    let notice = spending().unwrap_or(Value::Null);
     s.ok(
         SWAP_CHECKS[39],
         spoke.iter().all(|said| said.starts_with("fetched 200"))
-            && counted
-            && paused.starts_with("fetched 429")
-            && paused.contains(r#""error":"rate_limited""#)
-            && paused.contains(&format!("elevenlabs's calls are paused: {} spent", fragment_core::price::dollars(total)))
-            && paused.contains("they resume in about")
-            && paused.contains(r#""reason":"key_paused""#)
-            && paused.contains("retry_after_ms")
-            && unreached
-            && uncharged,
-        json!({ "spent": spent, "calls": calls, "total": total, "paused": paused, "counted": counted, "uncharged": uncharged }),
+            && told
+            && notice["title"] == "Your agents spent over $5 on tools in the last hour"
+            && notice["level"] == "info"
+            // its end is on the epoch's clock, whatever the ledger's says
+            // (this lane moves the ledger's to mid-month: `pin_month`)
+            && notice["until"]["at"].as_i64().is_some_and(|at| at > crate::api::now_ms())
+            && after.starts_with("fetched 200")
+            && reached
+            && charged_after,
+        json!({ "spent": spent, "calls": calls, "notice": notice, "after": after }),
     );
-    s.ok(SWAP_CHECKS[40], went, &other);
-    let notices = || api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None).map(|r| r.body["notices"].clone()).unwrap_or(Value::Null);
-    let paused_now = || notices().as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused"));
-    // its cap is its person's (FIN-448): set on their computer, never by an agent
-    let key_cap = |who: &crate::Keys, provider: &str, body: Value| api.signed(who, "POST", &format!("/api/computers/{}/key-caps/{provider}", w.id), Some(&body));
-    let (agent_keys, _) = api.own_agent(w.stranger)?;
-    let by_agent = key_cap(&agent_keys, "elevenlabs", json!({}))?;
-    let unsigned = api.unsigned("POST", &format!("/api/computers/{}/key-caps/elevenlabs", w.id), Some(&json!({})))?;
-    let no_key = key_cap(w.owner, SWAP_CONNECTION, json!({}))?;
-    let out = key_cap(w.owner, "elevenlabs", json!({ "micros": 0 }))?;
-    let both = key_cap(w.owner, "elevenlabs", json!({ "from": cap, "micros": cap }))?;
+    let in_chat = spend_notice_in_chat(s, api, w.owner)?;
     s.ok(
-        SWAP_CHECKS[43],
-        by_agent.status == 403 && unsigned.status == 401 && no_key.status == 404 && out.status == 400 && both.status == 400 && paused_now(),
-        json!({ "agent": by_agent.status, "unsigned": unsigned.status, "noKey": no_key.status, "out": out.body, "both": both.body }),
+        SWAP_CHECKS[40],
+        in_chat.as_ref().is_some_and(|shown| *shown == json!({ "said": "Your agents spent over $5 on tools in the last hour", "buttons": [] })),
+        json!({ "inChat": in_chat }),
     );
-    let told = notices();
-    let in_chat = key_notice_in_chat(s, api, w.owner)?;
-    s.ok(
-        SWAP_CHECKS[41],
-        told.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused" && n["provider"] == "elevenlabs" && n["capMicros"] == cap && n["allowMicros"] == 4 * cap))
-            && in_chat.as_ref().is_some_and(|(shown, _, _)| *shown == json!({ "said": format!("ElevenLabs calls paused: {} this hour", fragment_core::notice::usd(total)), "buttons": ["Allow up to $20 an hour"] })),
-        json!({ "told": told, "inChat": in_chat }),
-    );
-    let lifted = say(s, 160, &speak(SPOKEN))?;
-    // its countdown first, then why, in the server's own words for its
-    // refusal (FIN-458's band: every notice's; `KEY_ASKS_FAIL`'s 503)
-    let unconfirmed = |f: &Value| {
-        let lines: Vec<&str> = f["lines"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        matches!(lines.as_slice(), [until, "refused (a test)"] if until.starts_with("Calls resume in ")) && f["button"] == "Allow up to $20 an hour"
-    };
-    s.ok(
-        SWAP_CHECKS[44],
-        in_chat.as_ref().is_some_and(|(_, failed, gone)| unconfirmed(failed) && *gone) && !paused_now() && lifted.starts_with("fetched 200"),
-        json!({ "lifted": lifted, "inChat": in_chat, "notices": notices() }),
-    );
-    // a page still showing the $5 notice taps again: nothing changes, so
-    // $20 holds and the next call goes through
-    let stale = key_cap(w.owner, "elevenlabs", json!({ "from": cap }))?;
-    let kept = say(s, 161, &speak(SPOKEN))?;
-    // its person's CLI, as its own: $1, so the key pauses at it; then the default
-    let home = s.dir("key-cap-cli");
-    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
-    std::fs::create_dir_all(&config)?;
-    std::fs::write(config.join("config.json"), json!({ "secret_key": w.owner.secret_hex() }).to_string())?;
-    let cli = |s: &Suite, usd: &str| {
-        let out = s.cli(api, &home, &["ledger", "key-cap", "elevenlabs", usd]);
-        (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).trim().to_string())
-    };
-    let low = cli(s, "1");
-    let held_low = say(s, 162, &speak(SPOKEN))?;
-    let back = cli(s, "default");
-    // a page still showing a $20 notice taps: the $5 the computer holds stays
-    let late = key_cap(w.owner, "elevenlabs", json!({ "from": 4 * cap }))?;
-    let repaused = say(s, 163, &speak(SPOKEN))?;
-    s.ok(
-        SWAP_CHECKS[45],
-        stale.status == 200
-            && kept.starts_with("fetched 200")
-            && low.0
-            && low.1 == "elevenlabs: $1.00 an hour"
-            && held_low.starts_with("fetched 429")
-            && held_low.contains("its limit $1.00 an hour")
-            && back.0
-            && back.1 == "elevenlabs: back to the default"
-            && late.status == 200
-            && repaused.starts_with("fetched 429")
-            && repaused.contains("its limit $5.00 an hour")
-            && paused_now(),
-        json!({ "stale": stale.status, "kept": kept, "low": low, "heldLow": held_low, "back": back, "late": late.status, "repaused": repaused }),
-    );
-    // two hours on, by the computer's clock, which its key hours are on
-    let moved = super::computers::lever_with(api, w.id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() + 2 * fragment_core::key_hour::HOUR_MS }))?;
-    let again = say(s, 159, &speak(SPOKEN))?;
-    // a view with no notices leaves them out
-    let gone = notices().as_array().is_none_or(|l| l.iter().all(|n| n["kind"] != "key_paused"));
-    s.ok(SWAP_CHECKS[42], moved.status == 200 && again.starts_with("fetched 200") && gone, json!({ "again": again, "notices": notices() }));
     Ok(turns)
 }
 
-/// A paused key's notice over the agent's chat, as the shell shows it: its
-/// words and its buttons; null while it is not shown.
-const KEY_NOTICE: &str = "(() => { const box = document.getElementById('computer-notices'); const r = box?.querySelector('.computer-notice[data-kind=\"key_paused\"]'); if (!r || box.hidden) return null; return { said: r.querySelector('strong')?.textContent ?? null, buttons: [...r.querySelectorAll('button')].map((x) => x.textContent) }; })()";
+/// The hour's spending notice over the agent's chat, as the shell shows
+/// it: its words and its buttons; null while it is not shown.
+const SPEND_NOTICE: &str = "(() => { const box = document.getElementById('computer-notices'); const r = box?.querySelector('.computer-notice[data-kind=\"spending\"]'); if (!r || box.hidden) return null; return { said: r.querySelector('strong')?.textContent ?? null, buttons: [...r.querySelectorAll('button')].map((x) => x.textContent) }; })()";
 
-/// Taps a paused key's Allow (its notice's one action), enabled: whether it was.
-const ALLOW: &str = "(() => { const x = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"] .notice-actions button'); if (!x || x.disabled) return false; x.click(); return true; })()";
-/// The page's asks of Allow refused (503) and its reads of the computer and
-/// of its notices failing as a network fails, until `__restoreFetch()`.
-const KEY_ASKS_FAIL: &str = "(() => { const f = window.fetch; window.__restoreFetch = () => { window.fetch = f; }; window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const method = o?.method ?? 'GET'; if (method === 'POST' && path.includes('/key-caps/')) return new Response(JSON.stringify({ error: 'unavailable', message: 'refused (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); if (method === 'GET' && (/^\\/api\\/computers\\/[^/]+$/.test(path) || path === '/api/notices')) throw new TypeError('Failed to fetch'); return f(url, o); }; return true; })()";
-/// A paused key's notice whose tap went unconfirmed: its lines, and its
-/// button, enabled; null while that button is not.
-const KEY_UNCONFIRMED: &str = "(() => { const r = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"]'); const b = r?.querySelector('.notice-actions button'); return r && b && !b.disabled ? { lines: [...r.querySelectorAll('.notice-copy p')].map((p) => p.textContent), button: b.textContent } : null; })()";
 /// The person's chat page in Chrome (the shell, signed in as `owner`): the
-/// paused key's notice as it shows, shot at 1280 and 390 wide, light, in
-/// the run's `key-guard/`; its Allow tapped while its ask and the
-/// computer's read fail, and the notice then (shot); tapped again, whether
-/// the notice went (shot again). None without Chrome.
-fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<(Value, Value, bool)>> {
+/// spending notice as it shows, shot at 1280 and 390 wide, light, in the
+/// run's `spend-notice/`. None without Chrome.
+fn spend_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<Value>> {
     let Some(mut b) = s.browser()? else { return Ok(None) };
-    let shots = s.dir("key-guard");
+    let shots = s.dir("spend-notice");
     let session = api.sign_in(&Api::email_of(owner))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 900, false)?;
     let mut shown = Value::Null;
     s.eventually(Duration::from_secs(30), || {
-        shown = b.eval(&page, KEY_NOTICE).unwrap_or(Value::Null);
+        shown = b.eval(&page, SPEND_NOTICE).unwrap_or(Value::Null);
         !shown.is_null()
     });
-    super::telegram_settings::shoot(&mut b, &page, &shots, "k1-paused", Some("#computer-notices"))?;
-    // tapped while its ask is refused and the computer's read fails: the
-    // pause stays as last read, its button back with a short line
-    b.eval(&page, KEY_ASKS_FAIL)?;
-    b.eval(&page, ALLOW)?;
-    let mut failed = Value::Null;
-    s.eventually(Duration::from_secs(30), || {
-        failed = b.eval(&page, KEY_UNCONFIRMED).unwrap_or(Value::Null);
-        failed["lines"].as_array().is_some_and(|l| !l.is_empty())
-    });
-    super::telegram_settings::shoot(&mut b, &page, &shots, "k1b-unconfirmed", Some("#computer-notices"))?;
-    b.eval(&page, "(window.__restoreFetch(), true)")?;
-    let tapped = b.eval(&page, ALLOW)? == true;
-    let gone = tapped && b.until(&page, &format!("{KEY_NOTICE} === null"), Duration::from_secs(30));
-    super::telegram_settings::shoot(&mut b, &page, &shots, "k2-allowed", None)?;
+    super::telegram_settings::shoot(&mut b, &page, &shots, "s1-spending", Some("#computer-notices"))?;
     b.close(page)?;
-    Ok(Some((shown, failed, gone)))
+    Ok(Some(shown))
 }
 
 /// The checks `model_checks` makes, as a run without the stub or the fakes

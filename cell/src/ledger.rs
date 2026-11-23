@@ -537,8 +537,9 @@ impl SqlStore {
     }
 }
 
-/// A change to the uses (`LedgerCell::tally`): what it could not keep.
-type TallyOp = Box<dyn FnOnce(&mut SqlStore, i64) -> Result<u32, Refused>>;
+/// A change to the uses (`LedgerCell::tally`): what it could not keep, and
+/// whether the hour's spend passed a step of its notice.
+type TallyOp = Box<dyn FnOnce(&mut SqlStore, i64) -> Result<(u32, bool), Refused>>;
 
 #[derive(Deserialize)]
 struct UseLine {
@@ -580,6 +581,26 @@ impl Tally for SqlStore {
         self.exec("INSERT INTO meta (key, value) VALUES (?, ?)", vec![format!("uses_taken:{id}").into(), digest.into()]);
     }
 
+    fn add_spend(&mut self, slot: i64, micros: i64) {
+        self.exec("INSERT INTO spend_slots (slot, micros) VALUES (?, ?) ON CONFLICT (slot) DO UPDATE SET micros = micros + excluded.micros", vec![SqlStorageValue::Integer(slot), SqlStorageValue::Integer(micros)]);
+    }
+
+    fn spent_since(&self, slot: i64) -> i64 {
+        // at most `uses::SPEND_SLOTS` rows: older ones are forgotten as each is counted
+        let rows: Vec<Spent> = self.rows("SELECT COALESCE(SUM(micros), 0) AS micros FROM spend_slots WHERE slot >= ?", vec![SqlStorageValue::Integer(slot)]);
+        rows.first().map_or(0, |r| r.micros)
+    }
+
+    fn spent_slots(&self, slot: i64) -> Vec<(i64, i64)> {
+        // at most an hour's rows: older ones are forgotten as each is counted
+        let rows: Vec<Slot> = self.rows("SELECT slot, micros FROM spend_slots WHERE slot >= ? ORDER BY slot", vec![SqlStorageValue::Integer(slot)]);
+        rows.into_iter().map(|r| (r.slot, r.micros)).collect()
+    }
+
+    fn forget_spend_before(&mut self, slot: i64) {
+        self.exec("DELETE FROM spend_slots WHERE slot < ?", vec![SqlStorageValue::Integer(slot)]);
+    }
+
     fn month(&self, month: Month) -> Vec<ProviderUse> {
         // bounded by `uses::ROWS_MAX` and its computers' hand-overs
         let rows: Vec<UseLine> = self.rows("SELECT provider, agent, calls, micros FROM uses WHERE month = ? ORDER BY provider, agent", vec![SqlStorageValue::Integer(month.0.into())]);
@@ -590,6 +611,17 @@ impl Tally for SqlStore {
 #[derive(Deserialize)]
 struct Json {
     value: String,
+}
+
+#[derive(Deserialize)]
+struct Spent {
+    micros: i64,
+}
+
+#[derive(Deserialize)]
+struct Slot {
+    slot: i64,
+    micros: i64,
 }
 
 #[derive(Deserialize)]
@@ -762,15 +794,22 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
+/// The last hour's spend at the ledger's `now`, and when its notice ends on
+/// the clock a page counts it down on: the epoch's, a test fleet's offset
+/// (`offset_ms`, moving the ledger's now) taken off.
+fn spending(store: &SqlStore, now: i64, offset: i64) -> (i64, Option<i64>) {
+    (uses::spent_hour(store, now), uses::spent_until(store, now).map(|at| at - offset))
+}
+
 /// How every transaction ends, the same for each (`transact`'s closures,
 /// one for each caller, carry none of it): the head written back, the
 /// store's fault if any, what it leaves the ledger saying kept in `left`
 /// (`told`; packs sold here or not), and when the next sweep is due.
 #[inline(never)]
-fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, offset: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
     save(store, ledger);
     store.checked()?;
-    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok())));
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok(), spending(store, now, offset))));
     Ok(ledger.next_sweep_ms(now))
 }
 
@@ -817,7 +856,7 @@ impl LedgerCell {
     /// neither reads nor writes it, nor the alarm, so it never changes what
     /// the gate answers. A store that failed rolls it back. One copy for
     /// both its routes (`op` boxed), as the cell's Wasm is held to a budget.
-    fn tally(&self, op: TallyOp) -> Result<u32, Failed> {
+    fn tally(&self, op: TallyOp) -> Result<(u32, bool), Failed> {
         let now = js::now_ms() + self.offset_ms()?;
         let sql = self.sql();
         let answer = js::transaction_sync(&self.raw, move || {
@@ -836,13 +875,14 @@ impl LedgerCell {
     /// answer and when the next sweep is due (the ledger's clock); the
     /// what it leaves the ledger saying is in `left`.
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
-        let now = js::now_ms() + self.offset_ms()?;
+        let offset = self.offset_ms()?;
+        let now = js::now_ms() + offset;
         let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            Ok((answer, settled(&store, &ledger, now, cfg, &left)?))
+            Ok((answer, settled(&store, &ledger, now, offset, cfg, &left)?))
         })
     }
 
@@ -871,14 +911,15 @@ impl LedgerCell {
     /// person's default plan is a command it keeps), so that call is a
     /// mutation, writing it.
     async fn read<T: 'static>(&self, op: impl FnOnce(&Ledger, &SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
-        let now = js::now_ms() + self.offset_ms()?;
+        let offset = self.offset_ms()?;
+        let now = js::now_ms() + offset;
         let store = SqlStore::new(self.sql());
         let Some(ledger) = stored(&store)?.1 else {
             return self.mutate(move |l, s, now| op(l, s, now)).await;
         };
         let answer = op(&ledger, &store, now);
         store.checked()?;
-        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok())));
+        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), spending(&store, now, offset))));
         if self.armed.get().is_none() {
             self.alarm_kept(ledger.next_sweep_ms(now)).await?;
         }
@@ -1042,12 +1083,13 @@ impl LedgerCell {
                 // the head as last written (its body, `{}`, says nothing). A
                 // ledger no call has written yet has none to tell (its
                 // standing ok, or a guest's), and an org's tells no one.
-                let now = js::now_ms() + self.offset_ms()?;
+                let offset = self.offset_ms()?;
+                let now = js::now_ms() + offset;
                 let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
                 let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
                     (Some(Payer::Person(_)), Some(row)) => {
                         let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
-                        ledger.said(now, self.cfg.stripe().is_ok())
+                        ledger.said(now, self.cfg.stripe().is_ok(), spending(&SqlStore::new(self.sql()), now, offset))
                     }
                     _ => vec![],
                 };
@@ -1071,15 +1113,29 @@ impl LedgerCell {
                 // a clock a test fleet moved reads the call's time on it too
                 u.at_ms = u.at_ms.saturating_add(self.offset_ms()?);
                 let agent = u.agent.clone();
-                let full = self.tally(Box::new(move |t, now| uses::count(t, &u, now)))?;
+                // counted, and its charges in the hour's spend, in one go
+                let (full, stepped) = self.tally(Box::new(move |t, now| uses::count(t, &u, now).map(|full| (full, uses::spend(t, &u, now)))))?;
                 if full > 0 {
                     console_error!("{}", json!({ "event": "ledger.uses-full", "agent": agent, "lost": full }));
+                }
+                // its spend passed a step of its notice, or is past one, whose
+                // end it may have moved: its person's pages told what changed
+                // (`told` tells nothing that did not)
+                let offset = self.offset_ms()?;
+                let now = js::now_ms() + offset;
+                let store = SqlStore::new(self.sql());
+                let spent = spending(&store, now, offset);
+                if stepped || spent.0 >= core::said::SPENDING_MICROS {
+                    if let Some(ledger) = stored(&store)?.1 {
+                        self.left.set(Some(ledger.told_key(now, self.cfg.stripe().is_ok(), spent)));
+                        self.told();
+                    }
                 }
                 reply(Done {})
             }
             <uses::TakeUses as Route>::PATH => {
                 let o: uses::TakeUses = decode(&body)?;
-                self.tally(Box::new(move |t, now| uses::take(t, &o, now).map(|()| 0)))?;
+                self.tally(Box::new(move |t, now| uses::take(t, &o, now).map(|()| (0, false))))?;
                 reply(Done {})
             }
             UsesOf::PATH => {

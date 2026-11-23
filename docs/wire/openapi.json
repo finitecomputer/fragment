@@ -1885,7 +1885,7 @@
             ]
           },
           "kind": {
-            "description": "What it is about (`key_paused`), for tests and logs. No client reads\nit to decide what to draw.",
+            "description": "What it is about (`spending`), for tests and logs. No client reads\nit to decide what to draw.",
             "type": "string"
           },
           "level": {
@@ -2486,7 +2486,6 @@
           "last_paid_seat",
           "private_while_reaching",
           "unshare_first",
-          "key_paused",
           "trial_seat_of_one"
         ],
         "type": "string",

@@ -54,7 +54,6 @@ use std::rc::Rc;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
-use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
@@ -67,8 +66,8 @@ use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind, Reason};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -176,9 +175,6 @@ const CHECK_UNUSABLE: i64 = 3;
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
-/// How far the `clock` lever moves a computer's key hours, either way:
-/// a month's worth.
-const CLOCK_OFFSET_MAX_MS: u64 = 31 * 24 * 3600 * 1000;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
 /// backups run, swapped for one that never answers, as a sick container's
 /// (r4, r6), the real one kept beside it; and put back.
@@ -370,10 +366,6 @@ enum MetaKey {
     /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
     /// `<day> <bytes>`.
     RelayDay,
-    /// The clock a test fleet moved (the `clock` lever): the milliseconds its
-    /// uses' months and its keys' hours are counted and read ahead by. None
-    /// elsewhere.
-    ClockOffset,
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
@@ -433,7 +425,6 @@ impl MetaKey {
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
             MetaKey::RelayDay => "relay_day",
-            MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
             MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::SlowSnapshot => "slow_snapshot",
@@ -825,9 +816,6 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
-    /// `clock`'s: how far its key hours are moved.
-    #[serde(default, rename = "offsetMs")]
-    offset_ms: Option<i64>,
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
@@ -1079,80 +1067,14 @@ impl ComputerCell {
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
     }
 
     /// What its owner is told now, in words (FIN-458, `GET /api/notices`).
     fn said(&self) -> CellResult<Vec<fragment_proto::notice::Notice>> {
         let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
         let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
-        Ok(said::said(&self.with_keys(notices(&life, &self.saves()?, &self.images()?, &self.rules()))?, &facts))
-    }
-
-    /// `told`, and a notice of each shared key its owner's cap pauses now,
-    /// worked out from its hour (`fragment_core::key_hour`).
-    fn with_keys(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
-        let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
-        for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
-            let provider = row["provider"].as_str().unwrap_or_default();
-            let cap = self.key_cap(provider)?;
-            if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
-                let allow_micros = key_hour::next_lift(cap);
-                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, allow_micros, resumes_at: real + resumes_in });
-            }
-        }
-        Ok(told)
-    }
-
-    /// A shared key's hourly cap: its owner's, else the default.
-    fn key_cap(&self, provider: &str) -> CellResult<i64> {
-        let rows = self.rows("SELECT micros FROM key_caps WHERE provider = ?", vec![provider.into()])?;
-        Ok(rows.first().and_then(|r| r["micros"].as_i64()).unwrap_or(key_hour::KEY_HOUR_CAP))
-    }
-
-    /// `computer/key-cap`: its owner's cap on a shared key (`KeyCapAsk`),
-    /// `from` lifting it one step from the cap it holds, so a stale page
-    /// changes nothing; its pages told.
-    async fn set_key_cap(&self, provider: &str, ask: KeyCapAsk) -> CellResult<()> {
-        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no shared key {provider:?} here")));
-        }
-        let cap = self.key_cap(provider)?;
-        let to = match (ask.from, ask.micros) {
-            (Some(from), None) => (from == cap).then(|| key_hour::next_lift(cap)).flatten().unwrap_or(cap),
-            (None, Some(m)) if (1..=key_hour::KEY_CAP_MAX).contains(&m) => m,
-            (None, None) => key_hour::KEY_HOUR_CAP,
-            _ => return Err(CellError::invalid(format!("a key's cap is `from` (the cap a notice showed), or `micros` from 1 to {}, or neither (the default)", key_hour::KEY_CAP_MAX))),
-        };
-        match to == key_hour::KEY_HOUR_CAP {
-            true => self.exec("DELETE FROM key_caps WHERE provider = ?", vec![provider.into()])?,
-            false => self.exec("INSERT INTO key_caps (provider, micros) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET micros = excluded.micros", vec![provider.into(), to.into()])?,
-        }
-        self.tell_owner().await;
-        Ok(())
-    }
-
-    /// A shared key's slots this last hour, oldest first.
-    fn key_slots(&self, provider: &str) -> CellResult<Vec<(i64, i64)>> {
-        let rows = self.rows("SELECT slot, micros FROM key_hour WHERE provider = ? ORDER BY slot", vec![provider.into()])?;
-        Ok(rows.iter().map(|r| (r["slot"].as_i64().unwrap_or(0), r["micros"].as_i64().unwrap_or(0))).collect())
-    }
-
-    /// Refuses a shared key its owner's cap pauses (FIN-448): 429, with when
-    /// it resumes. A read that fails lets the call go (a preference never
-    /// breaks an agent).
-    fn key_open(&self, provider: &str) -> CellResult<()> {
-        let now = js::now_ms() + self.offset_ms().unwrap_or(0);
-        let slots = self.key_slots(provider).unwrap_or_else(|e| {
-            console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
-            vec![]
-        });
-        let cap = self.key_cap(provider).unwrap_or(key_hour::KEY_HOUR_CAP);
-        let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
-        let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
-        let (spent, cap) = (fragment_core::price::dollars(spent), fragment_core::price::dollars(cap));
-        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes, or ask your person to allow more (they'll see a button in this chat)");
-        Err(CellError::new(ErrorCode::RateLimited, said).because(Reason::KeyPaused).retry_after(resumes_in.unsigned_abs()))
+        Ok(said::said(&notices(&life, &self.saves()?, &self.images()?, &self.rules()), &facts))
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -2913,42 +2835,6 @@ impl ComputerCell {
         String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))
     }
 
-    /// The clock's offset a test fleet set (the `clock` lever); none elsewhere.
-    fn offset_ms(&self) -> CellResult<i64> {
-        if !self.cfg.test_hooks {
-            return Ok(0);
-        }
-        Ok(self.meta(MetaKey::ClockOffset)?.and_then(|v| v.parse().ok()).unwrap_or(0))
-    }
-
-    /// Counts a shared key's charge in its hour (`fragment_core::key_hour`):
-    /// whether one reached its cap. What its agents used is their owner's
-    /// ledger's (`uses::count`), not counted here.
-    fn count_key_hour(&self, b: &Used) -> CellResult<bool> {
-        if b.at_ms <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
-            return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
-        }
-        let offset = self.offset_ms()?;
-        let (at, now) = (b.at_ms.saturating_add(offset), js::now_ms() + offset);
-        let mut capped = false;
-        for u in &b.uses {
-            let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
-                return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
-            };
-            // a shared key's charge counts in its hour (fragment_core::key_hour)
-            if provider.kind == Kind::Operator && u.micros > 0 {
-                let (before, cap) = (key_hour::spent(&self.key_slots(&u.provider)?, now), self.key_cap(&u.provider)?);
-                capped |= before < cap && before + u.micros >= cap;
-                self.exec(
-                    "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
-                    vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
-                )?;
-            }
-        }
-        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
-        Ok(capped)
-    }
-
     /// Its view: what its owner is told of it, and its agents, each with
     /// what it may use, asked of its fragment.
     /// Boxed: its callers (about twenty routes) each hold a pointer to it,
@@ -2986,7 +2872,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: self.with_keys(notices(&life, &saves, &images, &self.rules()))?,
+            notices: notices(&life, &saves, &images, &self.rules()),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -3308,13 +3194,6 @@ impl ComputerCell {
                 let view = self.view().await?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
             }
-            "clock" => {
-                // a lane's uses and its reads of them in one month, however
-                // late in a month it runs
-                let offset = b.offset_ms.filter(|o| o.unsigned_abs() <= CLOCK_OFFSET_MAX_MS).ok_or_else(|| CellError::invalid(format!("clock names its offsetMs, at most {CLOCK_OFFSET_MAX_MS} either way")))?;
-                self.set_meta(MetaKey::ClockOffset, &offset.to_string())?;
-                Ok(json!({ "computer": id, "offsetMs": offset, "month": Month::of(js::now_ms() + offset).label() }))
-            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -3522,15 +3401,6 @@ impl ComputerCell {
             "computer/credentials" => {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
-            }
-            "computer/used" => {
-                let b: Used = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                // a key's charge that reaches its cap: its owner's pages read again
-                if self.count_key_hour(&b)? {
-                    self.tell_owner().await;
-                }
-                json_response(&json!({ "ok": true }))
             }
             "computer/signed-in" => {
                 let b: SignedInAsk = body_json(&mut req).await?;
@@ -3766,10 +3636,6 @@ impl ComputerCell {
                 }
                 // its owner's other pages read it again, and tell it no more
                 self.tell_owner().await;
-                json_response(&self.view().await?)
-            }
-            (Method::Post, ["key-caps", provider]) => {
-                self.set_key_cap(provider, body_json(&mut req).await?).await?;
                 json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
@@ -4086,12 +3952,8 @@ impl ComputerCell {
                     };
                     self.connection_token(&owner, &provider.name, agent, grants.account(&provider.name), at).await?
                 }
-                // its call is held to its owner's cap on the key here, gated on
-                // their standing and charged after (`egress_swap`)
-                Kind::Operator => {
-                    self.key_open(&provider.name)?;
-                    crate::keys::operator_key(&self.env, &provider.name).await?
-                }
+                // its call gated on its owner's standing and charged after (`egress_swap`)
+                Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
                 Kind::Own => {
                     let key = own.iter().position(|o| *o == provider.name).and_then(|i| keys[i].clone());
                     key.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?
@@ -5006,24 +4868,12 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             if uses.is_empty() {
                 return;
             }
-            // counted in its owner's ledger; a shared key's charge in its hour
-            // too, which its computer keeps, side by side: a ledger slow to
-            // count never holds back the hour a shared key's cap is checked against
-            let charged = uses.iter().any(|u| u.micros > 0);
+            // counted in its owner's ledger, where a spend past a rate is
+            // told as a notice (`uses::count`)
             let counted = Used { agent, at_ms: at, uses };
-            let hour = async {
-                if charged {
-                    if let Err(e) = crate::routed::ask_bytes(&env, "COMPUTER", &computer, "computer/used", &counted).await {
-                        console_error!("{}", json!({ "egress": "swap", "key_hour": e.message }));
-                    }
-                }
-            };
-            let count = async {
-                if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
-                    console_error!("{}", json!({ "egress": "swap", "used": e.message }));
-                }
-            };
-            futures_util::future::join(hour, count).await;
+            if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
+                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+            }
         });
     }
     answer

@@ -1212,13 +1212,13 @@ fn a_seat_that_ends_or_comes_back_is_news_though_its_standing_holds() {
     w.spend("b1", 52 * USD);
     let overdrawn = Standing::ReadOnly { why: Why::Overdrawn };
     assert_eq!(w.ledger.standing(T0), overdrawn);
-    let with_buy = w.ledger.told_key(T0, true);
+    let with_buy = w.ledger.told_key(T0, true, (0, None));
     w.ok(seat("seat:2", SeatState::Canceled, 2));
     assert_eq!(w.ledger.standing(T0), overdrawn, "its standing holds");
-    let without = w.ledger.told_key(T0, true);
+    let without = w.ledger.told_key(T0, true, (0, None));
     assert!(said::news(Some(&with_buy), &without), "the seat gone: Buy credit goes, and that is news");
     w.ok(seat("seat:3", SeatState::Active, 3));
-    let back = w.ledger.told_key(T0, true);
+    let back = w.ledger.told_key(T0, true, (0, None));
     assert!(said::news(Some(&without), &back), "the seat back: Buy credit is back, news too");
     assert!(!said::news(Some(&with_buy), &back), "the same notices as before: nothing new");
 }
