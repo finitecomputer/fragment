@@ -23,8 +23,38 @@ use fragment_proto::ErrorCode;
 pub fn redacted(code: ErrorCode) -> Option<&'static str> {
     match code {
         ErrorCode::HostFailed => Some("something went wrong on our side; try again, and if it keeps happening, tell us this reference"),
+        // its message wraps the registry's own refusal, a storage error's
+        // words among them (cell/src/lib.rs `registry_round_trip`)
+        ErrorCode::RegistryUnavailable => Some("the identity registry did not answer; try again shortly, and if it keeps happening, tell us this reference"),
         _ => None,
     }
+}
+
+/// Whether an answer leaving the cell is read as one of the platform's
+/// refusals, to say it as `public_message` would.
+/// Only one the platform marked as its own (`marked`: the cell's
+/// `error::PLATFORM_REFUSAL`, set on every refusal an object of the
+/// platform answers): an app's or a computer image's answer is theirs,
+/// and passes unread, whatever it holds. And only a JSON one at a
+/// redacted code's status.
+pub fn rereads(marked: bool, status: u16, content_type: &str) -> bool {
+    marked && content_type.starts_with("application/json") && REDACTED.iter().any(|c| c.status() == status)
+}
+
+/// The codes `redacted` says words for.
+pub const REDACTED: [ErrorCode; 2] = [ErrorCode::HostFailed, ErrorCode::RegistryUnavailable];
+
+/// The most bytes of an OAuth error code a sign-in's page names.
+pub const OAUTH_ERROR_MAX_BYTES: usize = 64;
+
+/// The OAuth error code (RFC 6749 §4.1.2.1, `access_denied`) a sign-in's
+/// callback names on its page, when its redirect's `error` is shaped like
+/// one. Never its `error_description`: whoever made the link wrote it, so
+/// a page of the platform's would say an attacker's words (it goes to the
+/// logs).
+pub fn oauth_error(error: &str) -> Option<&str> {
+    let shaped = !error.is_empty() && error.len() <= OAUTH_ERROR_MAX_BYTES && error.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+    shaped.then_some(error)
 }
 
 /// The most bytes of a reference a request may bring (`Cf-Ray` is 16 hex
@@ -94,7 +124,6 @@ mod tests {
             ErrorCode::AppFailed,
             ErrorCode::UpstreamFailed,
             ErrorCode::RateLimited,
-            ErrorCode::RegistryUnavailable,
             ErrorCode::BudgetUsedUp,
             ErrorCode::StorageFull,
             ErrorCode::NodeFull,
@@ -105,6 +134,52 @@ mod tests {
         ];
         for code in theirs {
             assert_eq!(public_message(code, "name it in lower case", "r"), "name it in lower case", "{code:?}");
+        }
+    }
+
+    /// Goal: a registry outage names none of the registry's internals
+    /// past the edge: its own refusal (a storage error) is wrapped in
+    /// `registry_unavailable`. Method: the message the cell makes of one.
+    #[test]
+    fn a_registry_outage_says_only_a_sentence_and_a_reference() {
+        let message = "the identity registry did not answer (D1_ERROR: database is locked: SQLITE_BUSY); try again shortly";
+        let said = public_message(ErrorCode::RegistryUnavailable, message, "8c1e2f3a4b5c6d7e-SJC");
+        assert!(said.ends_with("(reference 8c1e2f3a4b5c6d7e-SJC)"), "{said}");
+        assert!(said.contains("try again"), "{said}");
+        for leak in ["D1_ERROR", "SQLITE", "locked"] {
+            assert!(!said.contains(leak), "{said}");
+        }
+    }
+
+    /// Goal: only the platform's own refusal is reread on its way out; an
+    /// app's or a computer image's answer passes unread, whatever it
+    /// holds. Method: the platform's mark, or not, on each redacted
+    /// code's status, and the answers that are never refusals.
+    #[test]
+    fn only_the_platforms_marked_refusals_are_reread() {
+        for code in [ErrorCode::HostFailed, ErrorCode::RegistryUnavailable] {
+            assert!(rereads(true, code.status(), "application/json"), "{code:?}");
+            assert!(!rereads(false, code.status(), "application/json"), "an app's own {code:?}");
+        }
+        assert!(!rereads(true, 500, "text/html"));
+        assert!(!rereads(true, 404, "application/json"));
+        assert!(!rereads(true, 200, "application/json"));
+        for code in REDACTED {
+            assert!(redacted(code).is_some(), "{code:?}");
+        }
+    }
+
+    /// Goal: a sign-in's page names only an OAuth error code, never words
+    /// a link brought. Method: the registered codes, then text, markup and
+    /// an over-long one.
+    #[test]
+    fn a_sign_in_page_names_only_an_oauth_code() {
+        for code in ["access_denied", "invalid_request", "server_error", "temporarily_unavailable"] {
+            assert_eq!(oauth_error(code), Some(code));
+        }
+        let long = "a".repeat(OAUTH_ERROR_MAX_BYTES + 1);
+        for words in ["", "your account is locked: call +1 555 0100", "<b>x</b>", "Access_Denied", long.as_str()] {
+            assert_eq!(oauth_error(words), None, "{words:?}");
         }
     }
 

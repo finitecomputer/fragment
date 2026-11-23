@@ -1152,11 +1152,13 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
                 let e: ErrorBody = resp.read_json().await?;
                 auth::refused(cfg, url, name, rest, fetched.framed, &CellError::new(e.error, e.message))?
             }
-            // the fragment's refusal, said as the edge says one (never
-            // its app's answer, which is unmarked and passes as it is)
-            false => error::public_answer(unmarked(resp)?, &error::reference_of(&req)?).await?,
+            false => unmarked(resp)?,
         };
     }
+    // any other failure of the fragment's own (its facts' storage, say),
+    // said as the edge says one; its app's answer carries no mark and
+    // passes as it is (`error::PLATFORM_REFUSAL`)
+    let resp = error::public_answer(resp, &error::reference_of(&req)?).await?;
     match fetched.navigation {
         true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref()),
         false => Ok(resp),

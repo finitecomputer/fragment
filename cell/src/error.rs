@@ -51,9 +51,13 @@ impl CellError {
     }
 
     /// The refusal as one of the platform's objects answers the router,
-    /// its whole message kept. Past the cell's edge, `public_response`.
+    /// its whole message kept, and marked as the platform's own
+    /// (`PLATFORM_REFUSAL`), so the edge tells it from an app's answer
+    /// (`public_answer`). Past the cell's edge, `public_response`.
     pub fn response(&self) -> worker::Result<Response> {
-        self.answered(self.message.clone())
+        let mut resp = self.answered(self.message.clone())?;
+        resp.headers_mut().set(PLATFORM_REFUSAL, "1")?;
+        Ok(resp)
     }
 
     /// The refusal as whoever asked from outside reads it: the platform's
@@ -127,6 +131,13 @@ fn logged(code: ErrorCode, message: &str, reference: &str) {
     console_error!("{}", serde_json::json!({ "refused": code, "reference": reference, "message": message }));
 }
 
+/// Marks a refusal one of the platform's objects answered (`response`):
+/// the edge rereads only an answer with it (`public_answer`), never an
+/// app's or a computer image's, and drops it from every answer it passes.
+/// An app or image that sent it would only have its own JSON refusal of a
+/// redacted code said as a fixed sentence.
+pub const PLATFORM_REFUSAL: &str = "x-fragment-platform-refusal";
+
 /// The bytes an answer's refusal may hold for `public_answer` to read it
 /// (an `ErrorBody` is a code and a sentence); a longer body is no refusal
 /// of the platform's and passes as it is.
@@ -134,34 +145,47 @@ const REFUSAL_READ_MAX_BYTES: usize = 64 * 1024;
 
 /// An answer on its way out of the cell, with a refusal some object of the
 /// platform's answered (and the router passed on as it was) said as
-/// `public_response` says one: only a JSON `ErrorBody` of a redacted code,
-/// at its status; every other answer is untouched, its body unread.
+/// `public_response` says one: only an answer the platform marked as its
+/// own (`PLATFORM_REFUSAL`), a JSON `ErrorBody` of a redacted code at its
+/// status (`public_error::rereads`); every other answer, an app's or a
+/// computer image's, keeps its body, unread, and loses only the mark.
 pub async fn public_answer(mut resp: Response, reference: &str) -> worker::Result<Response> {
-    let status = resp.status_code();
-    let json = resp.headers().get("content-type")?.is_some_and(|t| t.starts_with("application/json"));
-    let redacted_status = [ErrorCode::HostFailed].iter().any(|c| c.status() == status);
-    if !(json && redacted_status) {
+    if !resp.headers().has(PLATFORM_REFUSAL)? {
         return Ok(resp);
     }
+    let status = resp.status_code();
+    let content_type = resp.headers().get("content-type")?.unwrap_or_default();
+    if !public_error::rereads(true, status, &content_type) {
+        return unmarked(resp);
+    }
     let bytes = match resp.body() {
-        ResponseBody::Empty => return Ok(resp),
+        ResponseBody::Empty => return unmarked(resp),
         ResponseBody::Body(b) if b.len() <= REFUSAL_READ_MAX_BYTES => b.clone(),
-        ResponseBody::Body(_) => return Ok(resp),
+        ResponseBody::Body(_) => return unmarked(resp),
         // an object's answer: a copy read, bounded, and the answer kept whole
         ResponseBody::Stream(_) => match crate::cs::read_answer(&mut resp.cloned()?, REFUSAL_READ_MAX_BYTES).await {
             Ok((bytes, false)) => bytes,
-            _ => return Ok(resp),
+            _ => return unmarked(resp),
         },
     };
-    let Ok(body) = serde_json::from_slice::<ErrorBody>(&bytes) else { return Ok(resp) };
+    let Ok(body) = serde_json::from_slice::<ErrorBody>(&bytes) else { return unmarked(resp) };
     if body.error.status() != status || public_error::redacted(body.error).is_none() {
-        return Ok(resp);
+        return unmarked(resp);
     }
     logged(body.error, &body.message, reference);
     let said = ErrorBody { message: public_error::public_message(body.error, &body.message, reference), ..body };
     let h = resp.headers().clone();
+    h.delete(PLATFORM_REFUSAL)?;
     h.delete("content-length")?;
     h.delete("content-encoding")?;
     h.delete("etag")?;
     Ok(Response::from_json(&said)?.with_status(status).with_headers(h))
+}
+
+/// `resp` without `PLATFORM_REFUSAL`: an object's answer has immutable
+/// headers, so cloned, which keeps a socket's 101 and its WebSocket.
+fn unmarked(resp: Response) -> worker::Result<Response> {
+    let h = resp.headers().clone();
+    h.delete(PLATFORM_REFUSAL)?;
+    Ok(resp.with_headers(h))
 }

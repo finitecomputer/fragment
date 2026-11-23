@@ -64,7 +64,11 @@ impl Stripe {
     /// An answer's body, read as `T`: the one generic step, so each type
     /// read costs the cell's Wasm a parse, not a copy of `send`.
     fn parse<T: DeserializeOwned>(path: &str, body: Vec<u8>) -> CellResult<T> {
-        serde_json::from_slice(&body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path}: {e}")).because(Reason::StripeRefused))
+        serde_json::from_slice(&body).map_err(|e| {
+            // our path names Stripe's ids: the logs' alone
+            crate::error::vendor_said("Stripe", path, 200, &format!("its answer did not decode: {e}"));
+            CellError::new(ErrorCode::UpstreamFailed, "Stripe's answer did not decode").because(Reason::StripeRefused)
+        })
     }
 
     /// One call to Stripe: its 200's body, or why not.
@@ -85,9 +89,14 @@ impl Stripe {
             init.with_body(Some(b.into()));
         }
         let req = Request::new_with_init(&format!("{}{path}", self.api), &init)?;
-        let a = crate::cs::fetch_all(req, TIMEOUT, ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe did not answer {path}: {}", e.message)).because(Reason::StripeRefused))?;
+        // our path names Stripe's ids: in the logs alone, as its words are
+        let a = crate::cs::fetch_all(req, TIMEOUT, ANSWER_MAX_BYTES).await.map_err(|e| {
+            crate::error::vendor_said("Stripe", path, 0, &format!("no answer: {}", e.message));
+            CellError::new(ErrorCode::UpstreamFailed, "Stripe did not answer").because(Reason::StripeRefused)
+        })?;
         if a.cut {
-            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path} is over {ANSWER_MAX_BYTES} bytes")).because(Reason::StripeRefused));
+            crate::error::vendor_said("Stripe", path, a.status, "its answer was cut");
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer is over {ANSWER_MAX_BYTES} bytes")).because(Reason::StripeRefused));
         }
         if a.status == 200 {
             return Ok(a.body);

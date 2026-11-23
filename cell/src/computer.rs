@@ -4355,7 +4355,10 @@ pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, sig
     let platform = Config::from_env(env).platform();
     let reference = crate::error::reference_of(&req)?;
     let answered = match host_answer(req, env, url, id, signer).await {
-        Ok(resp) => resp,
+        // the computer object's own refusal (its sessions' storage, its
+        // port's runtime), said as the edge says one; the image's answer
+        // carries no mark and passes as it is (`error::PLATFORM_REFUSAL`)
+        Ok(resp) => crate::error::public_answer(resp, &reference).await?,
         Err(e) => e.public_response(&reference)?,
     };
     framed_by(answered, &platform)

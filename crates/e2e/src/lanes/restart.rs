@@ -701,7 +701,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
 /// The checks of OpenBao behind the cell's secrets, across its stop and
 /// start (docs/self-host.md, seam 12).
 const OPENBAO: [&str; 2] = [
-    "with OpenBao down, a sign-in fails at once, naming OpenBao: the cell's read of its sign-in's secrets is an error, never a hang",
+    "with OpenBao down, a sign-in fails at once as the platform's own failure, with a reference and no word of OpenBao (fragment_core::public_error): the cell's read of its sign-in's secrets is an error, never a hang",
     "OpenBao started again unseals itself from its key file, initialised once, and the next sign-in reads its secrets: the cell not restarted",
 ];
 
@@ -720,7 +720,7 @@ fn openbao_restart(s: &mut Suite) -> Result<()> {
     let t0 = std::time::Instant::now();
     let r = api.unsigned("GET", "/auth/login?return=/&login_hint=openbao-down%40e2e.test", None)?;
     let took = t0.elapsed();
-    s.ok(OPENBAO[0], r.status >= 500 && r.text.contains("OpenBao") && r.text.contains("is not answering") && took < Duration::from_secs(10), format!("{r} in {took:?}"));
+    s.ok(OPENBAO[0], r.status == 500 && r.error() == "host_failed" && r.message().contains("(reference ") && !r.text.contains("OpenBao") && took < Duration::from_secs(10), format!("{r} in {took:?}"));
     let up = s.openbao_up()?;
     let r = api.workos_callback("openbao-up@e2e.test")?;
     let signed = r.cookies().into_iter().any(|c| c.starts_with("fragment_session=") && c.len() > "fragment_session=".len() + 1);
