@@ -662,7 +662,9 @@ fn e2e(args: &[String]) -> Result<()> {
     // (and the cache is saved after it, so a red run still saves); each
     // shard's runner, given what it built, builds the images its node runs
     // ahead (`--images-only`, from the Actions cache), then `--no-build`
-    // runs the shard
+    // runs the shard. Given the run's selection (`selection_only`), the
+    // first two build the images that run's node builds; given none, a
+    // whole run's
     const STEPS: [&str; 3] = ["--build-only", "--images-only", "--no-build"];
     let steps: Vec<&String> = args.iter().filter(|a| STEPS.contains(&a.as_str())).collect();
     if steps.len() > 1 {
@@ -670,8 +672,8 @@ fn e2e(args: &[String]) -> Result<()> {
     }
     let step = steps.first().map(|s| s.as_str());
     let suite_args: Vec<&String> = args.iter().filter(|a| !STEPS.contains(&a.as_str())).collect();
-    if step == Some("--build-only") && !suite_args.is_empty() {
-        bail!("--build-only builds what every run needs, and takes no suite arguments");
+    if matches!(step, Some("--build-only" | "--images-only")) && !selection_only(&suite_args) {
+        bail!("{} takes a run's selection alone (--only, --except, --shard and their values), the images its node builds", step.unwrap_or_default());
     }
     if step == Some("--images-only") {
         return build_images(&suite_args);
@@ -696,6 +698,17 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
+/// Whether `args` are a run's selection alone: nothing, or one of `--only`,
+/// `--except` or `--shard` with its value (the suite refuses two; its
+/// values are the suite's to check, as the run starts).
+fn selection_only(args: &[&String]) -> bool {
+    match args {
+        [] => true,
+        [flag, _] => ["--only", "--except", "--shard"].contains(&flag.as_str()),
+        _ => false,
+    }
+}
+
 /// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
 /// suite beside it, and the images the node's boot builds, built ahead
 /// beside the cell so its build finds every layer cached: those of the
@@ -968,6 +981,26 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
+    }
+
+    /// Goal: `--build-only` takes a run's selection, which picks the
+    /// images it builds ahead (so a build for `--no-build --only
+    /// simplex-door` builds the door's too), and nothing else it would
+    /// ignore. Valid: none (CI's), `--only`, `--except` or `--shard` with
+    /// its value. Invalid: a flag with no value, two of them (the suite
+    /// refuses that run), any other argument.
+    #[test]
+    fn a_build_alone_takes_a_runs_selection_alone() {
+        let selection = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            super::selection_only(&args.iter().collect::<Vec<_>>())
+        };
+        for valid in [&[][..], &["--only", "simplex-door"], &["--except", "computers"], &["--shard", "1/5"]] {
+            assert!(selection(valid), "{valid:?}");
+        }
+        for invalid in [&["--only"][..], &["--rehearse"], &["--only", "auth", "--rehearse"], &["--only", "simplex-door", "--except", "computers"], &["simplex-door"], &["--hosted", "x"]] {
+            assert!(!selection(invalid), "{invalid:?}");
+        }
     }
 
     #[test]
