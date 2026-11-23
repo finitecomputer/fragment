@@ -378,6 +378,15 @@ fn plain_segments(path: &str) -> Option<Vec<Vec<u8>>> {
     Some(out)
 }
 
+/// A request as a row's `deny` and `charges` read it (`Deny::matches`):
+/// its method and any a header overrides it with, and its path's plain
+/// segments; none when the path can't be read plainly.
+pub fn call_of<'a>(method: &'a str, headers: &'a [(String, String)], path: &str) -> Option<(Vec<&'a str>, Vec<Vec<u8>>)> {
+    let segments = plain_segments(path)?;
+    let overrides = headers.iter().filter(|(n, _)| METHOD_OVERRIDES.contains(&n.as_str())).map(|(_, v)| v.trim());
+    Some((std::iter::once(method).chain(overrides).collect(), segments))
+}
+
 impl Plan {
     /// Reads `headers`, `query` and `path` of a `method` request to
     /// `host`. A request with no placeholder plans nothing, and goes on as
@@ -408,11 +417,11 @@ impl Plan {
                 return Err(SwapError::NotAlone { at: f.at.describe() });
             }
             // a key every agent shares never goes on a call its row denies,
-            // by its method or one a header overrides it with
-            if p.kind == Kind::Operator && !p.deny.is_empty() {
-                let segments = plain_segments(path).ok_or_else(|| SwapError::Unplain { placeholder: text.clone() })?;
-                let overrides = headers.iter().filter(|(n, _)| METHOD_OVERRIDES.contains(&n.as_str())).map(|(_, v)| v.trim());
-                let methods: Vec<&str> = std::iter::once(method).chain(overrides).collect();
+            // by its method or one a header overrides it with; and a call
+            // its charges price is one they read plainly, so no spelling
+            // of a path goes uncharged (FIN-616)
+            if p.kind == Kind::Operator && !(p.deny.is_empty() && p.charges.is_empty()) {
+                let (methods, segments) = call_of(method, headers, path).ok_or_else(|| SwapError::Unplain { placeholder: text.clone() })?;
                 if let Some(d) = p.deny.iter().find(|d| methods.iter().any(|m| d.matches(m, &segments))) {
                     return Err(SwapError::Denied { placeholder: text, call: d.to_string() });
                 }
@@ -902,6 +911,7 @@ mod tests {
                 { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"],
                   "deny": ["GET /v1/history", "POST /v1/workspaces/api-keys/disable", "* /*/team/**", "GET /api/*/browsers", "GET /v2/agent"] },
                 { "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] },
+                { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }], "env": ["GOOGLE_PLACES_API_KEY"] },
             ])
             .to_string(),
         )
@@ -957,11 +967,19 @@ mod tests {
         let with = c.with(vec![crate::vault::row("mine", vec!["api.elevenlabs.io".into()], Placement::Header { name: "xi-api-key".into(), format: "{}".into() })]);
         let own = h(&[("xi-api-key", &mine.text())]);
         assert_eq!(Plan::of("GET", &own, None, "/v1/history", &with, "api.elevenlabs.io").unwrap().wanted, vec![mine]);
-        // a row that denies nothing refuses neither
+        // a row that denies nothing but charges (FIN-616) reads its path
+        // plainly too, so no spelling of a call goes uncharged; one that
+        // does neither refuses neither
         let x = ph(Kind::Operator, "xai", "juniper--k3x9");
         let bearer = h(&[("authorization", &format!("Bearer {}", x.text()))]);
+        assert_eq!(Plan::of("GET", &bearer, None, "/v1/history", &c, "api.x.ai").unwrap().wanted, vec![x.clone()]);
+        for path in ["/v1/%2e%2e/files", "/v1/a;b", "/v1/responses%2F"] {
+            assert_eq!(Plan::of("POST", &bearer, None, path, &c, "api.x.ai").unwrap_err(), SwapError::Unplain { placeholder: x.named() }, "{path}");
+        }
+        let gp = ph(Kind::Operator, "google-places", "juniper--k3x9");
+        let key = h(&[("x-goog-api-key", &gp.text())]);
         for path in ["/v1/history", "/v1/%2e%2e/files", "/v1/a;b"] {
-            assert_eq!(Plan::of("GET", &bearer, None, path, &c, "api.x.ai").unwrap().wanted, vec![x.clone()], "{path}");
+            assert_eq!(Plan::of("GET", &key, None, path, &c, "places.googleapis.com").unwrap().wanted, vec![gp.clone()], "{path}");
         }
     }
 

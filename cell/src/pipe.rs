@@ -97,8 +97,13 @@ pub async fn settle(env: &Env, bills: Vec<(Bill, Option<Usage>)>) {
 /// it streams.
 const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// The pipe's one rule for an answer (FIN-616): nothing it put on the
-/// request comes back. Each credential the swap placed (`passes`: the
+/// What an answer said at each of a call's JSON pointers (`answer`), in
+/// their order: known once it has been read, a body read whole at once,
+/// a stream at its end. A stream its guest left unread says none.
+pub type Said = futures_util::future::LocalBoxFuture<'static, Vec<Option<u64>>>;
+
+/// The pipe's one pass over an answer (FIN-616). Nothing it put on the
+/// request comes back: each credential the swap placed (`passes`: the
 /// operator's keys first, then a Vault's fills) is named as its secret
 /// (`{{name}}`), as a job's fetch names its own (2026-11-09: echoed values
 /// hidden), in the answer's headers and its body. The operator's keys go
@@ -108,8 +113,14 @@ const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// (`secrets::redact`), or its bytes, not text; past that, or one that
 /// streams as it is made (an event stream, a streamed speech's audio),
 /// each value's own bytes are named as it streams
-/// (`secrets::StreamedPasses`), a value split across pieces too.
-pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>]) -> CellResult<Response> {
+/// (`secrets::StreamedPasses`), a value split across pieces too. And what
+/// its vendor said the call used is read in the same pass, never holding
+/// the answer back: the whole number at each of `pointers` (a charge's,
+/// `catalog::Charge`), in a body read whole or an event stream's last event
+/// naming it (`price::Events`), as its vendor sent it.
+pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>], pointers: &[String]) -> CellResult<(Response, Said)> {
+    let paths: Vec<Vec<String>> = pointers.iter().map(|p| fragment_core::price::pointer_segments(p).expect("a charge's pointer is checked with its row")).collect();
+    let none = vec![None; paths.len()];
     let redact = |text: String| fragment_core::secrets::redact_passes(text, passes);
     // appended, not set: each of several fields of one name (`set-cookie`)
     // stays its own
@@ -120,7 +131,7 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>]) -> Cel
     let status = resp.status_code();
     // no body (a HEAD's, a 204's): its headers were all it could echo
     if !matches!(resp.body(), ResponseBody::Stream(_)) || matches!(status, 101 | 204 | 304) {
-        return Ok(resp.with_headers(headers));
+        return Ok((resp.with_headers(headers), Box::pin(futures_util::future::ready(none))));
     }
     let kind = resp.headers().get("content-type")?.unwrap_or_default();
     let mut stream = resp.stream()?;
@@ -132,27 +143,86 @@ pub async fn answer(mut resp: Response, passes: &[Vec<(String, String)>]) -> Cel
             match stream.next().await {
                 Some(piece) => read.extend(piece?),
                 None => {
+                    let said: Vec<Option<u64>> = paths.iter().map(|p| fragment_core::price::number_at(&read, p)).collect();
                     let body = match String::from_utf8(read) {
                         Ok(text) => redact(text).into_bytes(),
                         Err(e) => [streamed.push(&e.into_bytes()), streamed.finish()].concat(),
                     };
                     headers.set("content-length", &body.len().to_string())?;
-                    return Ok(Response::from_bytes(body)?.with_status(status).with_headers(headers));
+                    let resp = Response::from_bytes(body)?.with_status(status).with_headers(headers);
+                    return Ok((resp, Box::pin(futures_util::future::ready(said))));
                 }
             }
         }
     }
-    // a stream: what was read so far, then the rest as it comes, each named
+    // a stream: what was read so far, then the rest as it comes, each named;
+    // with nothing to read, said at once (a header's charge waits on no body)
     let _ = headers.delete("content-length");
+    if paths.is_empty() {
+        let first = streamed.push(&read);
+        let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
+            let (mut stream, mut streamed) = state?;
+            match stream.next().await {
+                Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
+                Some(Err(e)) => Some((Err(e), None)),
+                None => Some((Ok(streamed.finish()), None)),
+            }
+        });
+        let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
+        return Ok((Response::from_stream(body)?.with_status(status).with_headers(headers), Box::pin(futures_util::future::ready(none))));
+    }
+    // its numbers read as it passes, told at its end, where it broke, or
+    // when its guest let it go (`Telling`'s drop)
+    let mut events: Vec<fragment_core::price::Events> = paths.into_iter().map(fragment_core::price::Events::new).collect();
+    events.iter_mut().for_each(|e| e.push(&read));
+    let (tell, told) = futures_channel::oneshot::channel::<Vec<Option<u64>>>();
+    let telling = Telling { events: Some(events), tell: Some(tell) };
     let first = streamed.push(&read);
-    let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
-        let (mut stream, mut streamed) = state?;
+    let rest = futures_util::stream::unfold(Some((stream, streamed, telling)), |state| async move {
+        let (mut stream, mut streamed, mut telling) = state?;
         match stream.next().await {
-            Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
-            Some(Err(e)) => Some((Err(e), None)),
-            None => Some((Ok(streamed.finish()), None)),
+            Some(Ok(piece)) => {
+                telling.push(&piece);
+                Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed, telling))))
+            }
+            Some(Err(e)) => {
+                telling.tell();
+                Some((Err(e), None))
+            }
+            None => {
+                telling.tell();
+                Some((Ok(streamed.finish()), None))
+            }
         }
     });
     let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
-    Ok(Response::from_stream(body)?.with_status(status).with_headers(headers))
+    let said: Said = Box::pin(async move { told.await.unwrap_or(none) });
+    Ok((Response::from_stream(body)?.with_status(status).with_headers(headers), said))
+}
+
+/// A streamed answer's numbers, read from its events as it passes (a
+/// document past `ANSWER_HIDDEN_MAX_BYTES` has no events: its numbers are
+/// none, the debt ledger), and told once: at its end, where it broke, or as
+/// its guest lets it go, whatever was read by then.
+struct Telling {
+    events: Option<Vec<fragment_core::price::Events>>,
+    tell: Option<futures_channel::oneshot::Sender<Vec<Option<u64>>>>,
+}
+
+impl Telling {
+    fn push(&mut self, piece: &[u8]) {
+        self.events.iter_mut().flatten().for_each(|e| e.push(piece));
+    }
+
+    fn tell(&mut self) {
+        if let (Some(events), Some(tell)) = (self.events.take(), self.tell.take()) {
+            let _ = tell.send(events.into_iter().map(fragment_core::price::Events::finish).collect());
+        }
+    }
+}
+
+impl Drop for Telling {
+    fn drop(&mut self) {
+        self.tell();
+    }
 }

@@ -281,10 +281,10 @@
   // environment variables a guest finds its placeholder in, the names the
   // vendor's own SDK reads. A connection is a WorkOS Pipes provider,
   // enabled in the WorkOS environment above. An operator key's value is a
-  // store secret, named as its `key`, as every secret; its price is the
-  // price book's list price for its name (fragment_core::price
-  // DEFAULT_KEYS) unless it names `"price": {"micros", "per"}`
-  // (micro-dollars per calls, at list; the margin is added). An `own` row
+  // store secret, named as its `key`, as every secret; its calls are
+  // charged as its `charges` say (below), and a row may name
+  // `"price": {"micros", "per"}` (micro-dollars per calls, at list; the
+  // margin is added) for every call they don't price. An `own` row
   // takes the person's own key instead: pasted in settings, or, with an
   // `oauth` sign-in, made by the provider when the person connects it there
   // (`fragment_core::own_signin`); its `models` are what their agents may

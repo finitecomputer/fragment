@@ -193,10 +193,18 @@ const NO_READ: DefaultCharge = DefaultCharge { calls: &[], header: None, json: N
 pub const DEFAULT_CHARGES: [(&str, &[DefaultCharge]); 7] = [
     // xAI: every inference answer says what it cost, its tools' calls and
     // images included, as `usage.cost_in_usd_ticks`, 10^10 ticks a dollar,
-    // a stream on its last chunk (docs.x.ai/developers/cost-tracking).
-    // Only a POST's is read: a stored response read again, a deferred
-    // image's or a video's poll says its cost again each time.
-    ("xai", &[DefaultCharge { calls: &["POST /**"], json: Some("/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ }]),
+    // a stream on its last chunk (docs.x.ai/developers/cost-tracking); a
+    // Responses stream in its last event's `response`
+    // (docs.x.ai/developers/model-capabilities/text/best-practices). Only
+    // a POST's is read: a stored response read again, a deferred image's
+    // or a video's poll says its cost again each time.
+    (
+        "xai",
+        &[
+            DefaultCharge { calls: &["POST /**"], json: Some("/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ },
+            DefaultCharge { calls: &["POST /v1/responses"], json: Some("/response/usage/cost_in_usd_ticks"), unit: "tick", micros: 1, per: 10_000, ..NO_READ },
+        ],
+    ),
     // ElevenLabs: text to speech and sound effects say the characters
     // they billed, `character-cost` (elevenlabs.io/docs/api-reference/
     // introduction; its own skills read `x-character-count`), priced at
@@ -259,116 +267,23 @@ pub const DEFAULT_CHARGES: [(&str, &[DefaultCharge]); 7] = [
     ("browser-use", &[DefaultCharge { calls: &["POST /api/*/sessions", "POST /api/*/tasks", "POST /api/*/runs", "POST /api/*/browsers"], unit: "session", micros: 20_000, per: 12, ..NO_READ }]),
 ];
 
-/// The operator keys' list prices per call (decision 37; Paul, 2026-10-04:
-/// Perplexity, Google Places, xAI, ElevenLabs), `(name, micros, per
-/// calls)`, read from each vendor's own pricing page on 2026-10-03. A
-/// catalog row of the operator kind takes its name's price here unless it
-/// names its own (`fragment_core::catalog`). The swap meters a call, not
-/// what the vendor counts (tokens, posts, minutes), so a vendor that bills
-/// by those is priced at a typical call of the managed skill that uses it,
-/// and the estimate says what it assumes. A part of a key's calls priced
-/// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
-/// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 13] = [
-    // X API application-bearer reads, separate from Grok's xai key:
-    // $0.005 per Post and $0.010 per User resource. The x-api-finite
-    // helper's default recent search fetches 10 posts: $0.05 assumed
-    // per request, excluding expanded users and vendor deduplication.
-    // https://docs.x.com/x-api/getting-started/pricing (2026-10-09).
-    // Variable resources per request are recorded in the debt ledger.
-    // Since FIN-445 only a search (`/2/tweets/search/recent` or `/all`) is
-    // priced so (`key_usage`); a lookup, billed by the resources it
-    // returns ($0.005 a Post, $0.010 a User), which the meter does not
-    // count, and every other call is free.
+/// The names an older release's queued key rows carry, priced as it
+/// priced them (its estimates a call, and the parts it read from a
+/// request), so a row it sent just before a deploy is charged as it would
+/// have been (the debt ledger, "An older release's key rows").
+pub const LEGACY_KEYS: [(&str, i64, u64); 13] = [
     ("x", 50_000, 1),
-    // Firecrawl search: 2 credits per 10 results, Hobby PAYG $5 per
-    // 1,000 credits. One search is $0.01; a basic scrape is $0.005.
-    // https://www.firecrawl.dev/pricing (2026-10-09). A row an older
-    // release queued is priced so; this release's are below.
     ("firecrawl", 10_000, 1),
-    // A Firecrawl credit (`KEY_PARTS`), Hobby's pay-as-you-go 1,000 for
-    // $5: a scrape (Hermes' `web_extract`) 1 a page, 4 more for each kind
-    // of LLM format (JSON, a question, highlights, audio, video); a map 1.
-    // A search (Hermes' `web_search`) is billed by the results it returns,
-    // which the meter does not count, and a crawl or a batch scrape as each
-    // page completes, so each is charged nothing here. Sources:
-    // docs.firecrawl.dev/billing and firecrawl.dev/pricing (read
-    // 2026-11-07).
     ("firecrawl:credit", 5_000, 1),
-    // FAL FLUX.2 Klein 9B: $0.006 per megapixel, a 1 MP image assumed.
-    // https://fal.ai/models/fal-ai/flux-2/klein/9b (2026-10-09). A row an
-    // older release queued is priced so; this release's are below.
     ("fal", 6_000, 1),
-    // FLUX.2 Klein 9B's synchronous run (`KEY_PARTS`), per pixel its
-    // request asks for: "$0.006 per megapixel", a megapixel taken as
-    // 1,048,576 pixels, the larger reading, as fal says neither. Source:
-    // fal.ai/models/fal-ai/flux-2/klein/9b (read 2026-11-07). One
-    // 1024 × 576 `landscape_16_9` image is $0.0034. Every other fal call is
-    // free here: a queued generation (Hermes' `image_generate`) until its
-    // result can be settled, another model at its own rate, and the queue's
-    // polls, results and uploads, which fal does not bill ("per output":
-    // fal.ai/pricing, read 2026-11-07).
     ("fal:image", 6_000, 1_048_576),
-    // Browser Use: $0.02 per browser-hour, $5/GB residential proxy.
-    // https://browser-use.com/pricing (2026-10-09). A control request is
-    // estimated as a 5-minute session, excluding proxy traffic, rounded
-    // up to a micro-dollar. Only a new session's or task's start is priced
-    // so (`key_usage`); a task on a session it has (its `sessionId`), its
-    // status, its stop and every other call is free.
     ("browser-use", 20_000, 12),
-    // Perplexity's Search API (`POST /search`, Hermes' own web search):
-    // $5.00 per 1,000 requests. Source:
-    // docs.perplexity.ai/getting-started/pricing. A Sonar Pro brief
-    // (`/v1/sonar`) also bills tokens ($3 in, $15 out per million) and a
-    // request fee of $6 to $14 per 1,000: it is metered at the search's
-    // price, under what it costs (docs/technical-debt-ledger.md).
     ("perplexity", 5_000_000, 1_000),
-    // Google Places API (New), Text Search Enterprise: $35.00 per 1,000
-    // calls (0 to 100,000 a month). The goplaces skill's field masks name
-    // rating, userRatingCount, websiteUri, nationalPhoneNumber, priceLevel
-    // and regularOpeningHours, Enterprise fields; Place Details Enterprise
-    // is $20.00, so a call is priced at the dearer of its two. Source:
-    // developers.google.com/maps/billing-and-pricing/pricing (last updated
-    // 2026-09-28), the free monthly caps not counted. A row an older
-    // release queued is priced so. Since FIN-445 a search or a place's
-    // details is charged nothing: its tier is its field mask's, which the
-    // meter does not read, and the lowest (IDs only) is free; so is an
-    // autocomplete, free in a session that ends in a Details call. A
-    // photo, one price, is below.
     ("google-places", 35_000_000, 1_000),
-    // Place Photos (`GET /v1/places/<id>/photos/<photo>/media`): $7.00 per
-    // 1,000. Source as above (read 2026-11-07).
     ("google-places:photo", 7_000_000, 1_000),
-    // xAI's X Search (Hermes' native `x_search`: `/v1/responses` with the
-    // `x_search` tool): $5 per 1,000 posts fetched and $10 per 1,000 user
-    // profiles, plus tokens. Source: docs.x.ai/developers/tools/x-search
-    // (prices in effect since 2026-09-21) and docs.x.ai/docs/models
-    // (grok-4.3: $1.25 in, $2.50 out per million). A call is taken as 20
-    // posts ($0.10) and 10,000 tokens in and 1,000 out ($0.015): $0.115,
-    // priced at $0.12. Only a call with the `x_search` tool is priced so
-    // (`KEY_PARTS`); its images are below, and every other call (a chat,
-    // its tokens not read) is free.
     ("xai", 120_000, 1),
-    // A Grok image made synchronously (`/v1/images/generations` naming a
-    // grok-imagine-image model, `XAI_IMAGE_MODELS`, and not `deferred`: its
-    // answer is the image), one a call whatever its `n`, which is what it
-    // asks for, not what it made; a deferred one, only its request id until
-    // it is made or fails, is free here: grok-imagine-image's $0.02
-    // ($0.04 on grok-imagine-image-2.0, charged under its list). Source:
-    // docs.x.ai/developers/pricing (read 2026-11-07).
     ("xai:image", 20_000, 1),
-    // ElevenLabs' Music API (`/v1/music`, the music-generation skill):
-    // $0.15 per minute of music generated. Source: elevenlabs.io/pricing/api
-    // (read 2026-11-07). A call is taken as a minute; the skill's jingles
-    // are 15 s, its longest compositions 5 minutes. Every call on the key
-    // but text to speech (below) is priced so.
     ("elevenlabs", 150_000, 1),
-    // ElevenLabs' Text to Speech (`/v1/text-to-speech/…`, Hermes'
-    // `text_to_speech`), per character of its request's `text`
-    // (`KEY_PARTS`): $0.08 per 1,000 characters on the multilingual
-    // models (Hermes' default, `eleven_multilingual_v2`), $0.04 on Flash
-    // and Turbo, billed per character. Source: elevenlabs.io/pricing/api
-    // (read 2026-11-07). A 200-character reply is $0.016.
     ("elevenlabs:speech", 80_000, 1_000),
 ];
 
@@ -376,7 +291,6 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 13] = [
 mod tests {
     use super::*;
     use crate::price::book::{dollars, KeyPrice, PriceBook, Priced};
-    use crate::price::keys::default_key_price;
     use crate::price::testing::{tokens, FLASH};
     use crate::price::usage::{StorageClass, Usage};
 
@@ -502,37 +416,42 @@ mod tests {
         assert_eq!(keyed.key_charge("nonesuch"), None, "a key the book prices not");
     }
 
-    /// Goal: each operator key Paul named (2026-10-04) has a list price
-    /// per call, and one call of each is charged that and the margin.
+    /// Goal: each vendor's own number is charged at its unit's list price
+    /// and the margin, rounded up once a row: xAI's ticks (10^10 a dollar),
+    /// ElevenLabs' characters, Firecrawl's credits, Klein's units, X's
+    /// posts, and the calls of the vendors whose answers say nothing.
     #[test]
-    fn the_operator_keys_list_prices() {
+    fn each_vendors_number_is_charged_at_its_units_list_price() {
         let mut book = PriceBook::defaults();
-        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        for (vendor, charges) in DEFAULT_CHARGES {
+            for c in charges {
+                let key = format!("{vendor}:{}", c.unit);
+                if !book.keys.iter().any(|k| k.key == key) {
+                    book.keys.push(KeyPrice { key, micros: c.micros, per: c.per });
+                }
+            }
+        }
         assert_eq!(book.validate(), Ok(()));
-        let call = |key: &str| book.price(&Usage::Key { key: key.into(), units: 1 }).unwrap();
-        assert_eq!(call("perplexity"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "$5 per 1,000 searches");
-        assert_eq!(call("google-places"), Priced { list: 35_000, cost: 35_000, charge: 52_500 }, "$35 per 1,000 Enterprise text searches");
-        assert_eq!(call("xai"), Priced { list: 120_000, cost: 120_000, charge: 180_000 });
-        assert_eq!(call("elevenlabs"), Priced { list: 150_000, cost: 150_000, charge: 225_000 }, "a minute of music");
-        assert_eq!(call("firecrawl"), Priced { list: 10_000, cost: 10_000, charge: 15_000 }, "two Hobby PAYG credits");
-        assert_eq!(call("x"), Priced { list: 50_000, cost: 50_000, charge: 75_000 }, "ten post resources");
-        assert_eq!(call("fal"), Priced { list: 6_000, cost: 6_000, charge: 9_000 }, "one MP Klein 9B image");
-        assert_eq!(call("browser-use"), Priced { list: 1_667, cost: 1_667, charge: 2_500 }, "five browser minutes");
-        let spoken = |units| book.price(&Usage::Key { key: "elevenlabs:speech".into(), units }).unwrap();
-        assert_eq!(spoken(200), Priced { list: 16_000, cost: 16_000, charge: 24_000 }, "a 200-character reply, $0.08 per 1,000");
-        assert_eq!(spoken(1), Priced { list: 80, cost: 80, charge: 120 });
-        assert_eq!(spoken(0), Priced { list: 0, cost: 0, charge: 0 }, "a call whose characters were not read");
-        let pixels = |units| book.price(&Usage::Key { key: "fal:image".into(), units }).unwrap();
-        assert_eq!(pixels(1_048_576), Priced { list: 6_000, cost: 6_000, charge: 9_000 }, "a megapixel, $0.006");
-        assert_eq!(pixels(1024 * 576), Priced { list: 3_375, cost: 3_375, charge: 5_063 }, "Hermes' landscape_16_9 image");
-        assert_eq!(pixels(1), Priced { list: 1, cost: 1, charge: 1 }, "rounded up once");
-        assert_eq!(call("fal").charge, pixels(1_048_576).charge, "an older release's row: one image, as before");
-        assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
-        assert_eq!(default_key_price("elevenlabs:speech"), Some((80_000, 1_000)));
-        assert_eq!(default_key_price("fal:image"), Some((6_000, 1_048_576)));
-        assert_eq!(call("xai:image"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "a grok-imagine-image");
-        assert_eq!(call("google-places:photo"), Priced { list: 7_000, cost: 7_000, charge: 10_500 }, "$7 per 1,000 photos");
-        assert_eq!(call("firecrawl:credit"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "a Hobby PAYG credit");
-        assert_eq!(default_key_price("nonesuch"), None);
+        let charged = |key: &str, units| book.price(&Usage::Key { key: key.into(), units }).unwrap();
+        // an X search through Grok that cost $0.1234567: 123,456.7 micro-dollars, rounded up once
+        assert_eq!(charged("xai:tick", 1_234_567_000), Priced { list: 123_457, cost: 123_457, charge: 185_186 });
+        assert_eq!(charged("xai:tick", 1), Priced { list: 1, cost: 1, charge: 1 }, "a tick is charged a micro-dollar at least");
+        assert_eq!(charged("elevenlabs:character", 200), Priced { list: 16_000, cost: 16_000, charge: 24_000 }, "a 200-character reply, $0.08 per 1,000");
+        assert_eq!(charged("elevenlabs:music", 1), Priced { list: 150_000, cost: 150_000, charge: 225_000 }, "a minute of music");
+        assert_eq!(charged("firecrawl:credit", 5), Priced { list: 25_000, cost: 25_000, charge: 37_500 }, "a scrape of 5 credits");
+        assert_eq!(charged("fal:flux-2-klein-9b", 1), Priced { list: 6_000, cost: 6_000, charge: 9_000 }, "a megapixel of Klein");
+        assert_eq!(charged("x:post", 7), Priced { list: 35_000, cost: 35_000, charge: 52_500 }, "a search that returned 7 posts");
+        assert_eq!(charged("perplexity:call", 1), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "$5 per 1,000 searches");
+        assert_eq!(charged("browser-use:session", 1), Priced { list: 1_667, cost: 1_667, charge: 2_500 }, "five browser minutes");
+        // an older release's rows, priced as it priced them
+        let mut older = book.clone();
+        // Firecrawl's credit is both an older release's name and a charge's, at one price
+        let new_names: Vec<String> = book.keys.iter().map(|k| k.key.clone()).collect();
+        older.keys.extend(LEGACY_KEYS.iter().filter(|(name, ..)| !new_names.iter().any(|n| n == name)).map(|(name, micros, per)| KeyPrice { key: name.to_string(), micros: *micros, per: *per }));
+        assert_eq!(LEGACY_KEYS.iter().find(|(n, ..)| *n == "firecrawl:credit").map(|(_, m, p)| (*m, *p)), Some((5_000, 1)));
+        assert_eq!(older.validate(), Ok(()));
+        let legacy = |key: &str, units| older.price(&Usage::Key { key: key.into(), units }).unwrap().charge;
+        assert_eq!(legacy("elevenlabs:speech", 200), charged("elevenlabs:character", 200).charge, "speech's characters as before");
+        assert_eq!(legacy("perplexity", 1), charged("perplexity:call", 1).charge);
     }
 }

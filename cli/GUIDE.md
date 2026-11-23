@@ -929,18 +929,18 @@ Before a job that spends (speech, images, searches, many model calls),
 quote it: `fragment quote` prices a plan with the same book your ledger
 charges with, and says what you have left this month (an agent's quote
 is its owner's). It spends nothing. Its items follow one another, each a
-name and its amounts: an operator key (`perplexity`, `xai`), a part of
-a key's calls priced apart (`elevenlabs:speech` by its text's
-characters, `fal:image` by its pixels, `xai:image` one a call) or a
+name and its amounts: a vendor's unit, as each call's answer is charged
+(`elevenlabs:character` by its text's characters, `xai:tick` by what
+Grok said it cost, 10^10 ticks a dollar, `perplexity:call` a call) or a
 model (`cheap`, `medium`, an id); `<n>` or `<n>x` its calls, `<n>in`,
 `<n>cached`, `<n>write` and `<n>out` a model's tokens a call, `<n>` with
-a unit (`60000chars`, `1048576px`) a key's units a call. A name the
+a unit (`60000chars`, `5credits`) a key's units a call. A name the
 book does not price here is said so, never guessed. Refused for credit
 or a budget? `fragment quote` alone reads what is left.
 
 ```
-fragment quote elevenlabs:speech 60000chars   # "about $7.20; you have $95.40 left this month"
-fragment quote fal:image 40x 1048576px xai 10x   # several items, each one's price too
+fragment quote elevenlabs:character 60000chars   # "about $7.20; you have $95.40 left this month"
+fragment quote perplexity:call 40x firecrawl:credit 10x 5credits   # several items, each one's price too
 fragment quote cheap 2000in 500out 40x        # 40 turns on the cheap tier
 fragment quote                                # what you have left, alone
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment

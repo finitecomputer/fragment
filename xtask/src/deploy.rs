@@ -2315,10 +2315,8 @@ mod tests {
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
-            // each key's estimates at list, and its charges the book's for its name
-            assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key).is_none_or(|list| list == (k.micros, k.per))), "{file}: at list");
             let operator = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator);
-            assert!(operator.into_iter().all(|p| p.charges == fragment_core::catalog::default_charges(&p.name)), "{file}: each key charged as the book says");
+            assert!(operator.into_iter().all(|p| p.price.is_none() && p.charges == fragment_core::catalog::default_charges(&p.name)), "{file}: each key charged as the book says");
             let mut book = fragment_core::price::PriceBook::defaults();
             book.keys = catalog.key_prices();
             assert_eq!(book.validate(), Ok(()), "{file}: a book the ledger takes");
@@ -2555,7 +2553,8 @@ mod tests {
         };
         let d = with(vec![row(json!({ "key": "fragment-perplexity-api-key" }))]);
         let (catalog, keys) = catalog_of(&d).unwrap();
-        assert_eq!(catalog.get("perplexity").unwrap().price.map(|p| (p.micros, p.per)), Some((5_000_000, 1_000)), "the price book's list price");
+        let perplexity = catalog.get("perplexity").unwrap();
+        assert_eq!((perplexity.price, &perplexity.charges), (None, &fragment_core::catalog::default_charges("perplexity")), "the price book's charges, at list");
         assert_eq!(keys, vec![("perplexity".to_string(), "fragment-perplexity-api-key".to_string())]);
         assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("fragment-perplexity-api-key"), "the key's store name is the deploy's, never the cell's");
         assert!(checked(d).is_ok());
