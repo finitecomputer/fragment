@@ -402,6 +402,7 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        computers: true,
         // a door's image is built only for a stack that runs them (the e2e's door lane)
         doors: false,
         computer_internet: true,
@@ -658,21 +659,24 @@ fn e2e(args: &[String]) -> Result<()> {
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
     // CI's split: `--build-only` builds (and the cache is saved after it,
-    // so a red run still saves), then `--no-build` runs what it left
+    // so a red run still saves), then `--no-build` runs what it left. Given
+    // the run's selection (`selection_only`), it builds the images that
+    // run's node builds (the door's for `--only simplex-door`); given none,
+    // a whole run's
     let build_only = args.iter().any(|a| a == "--build-only");
     let no_build = args.iter().any(|a| a == "--no-build");
     if build_only && no_build {
         bail!("--build-only and --no-build are two steps of one run, not one");
     }
     let suite_args: Vec<&String> = args.iter().filter(|a| *a != "--build-only" && *a != "--no-build").collect();
-    if build_only && !suite_args.is_empty() {
-        bail!("--build-only builds what every run needs, and takes no suite arguments");
+    if build_only && !selection_only(&suite_args) {
+        bail!("--build-only takes a run's selection alone (--only, --except, --shard and their values), the images its node builds");
     }
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
     if !no_build {
-        build_e2e()?;
+        build_e2e(&suite_args)?;
     }
     if build_only {
         return Ok(());
@@ -688,23 +692,54 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
+/// Whether `args` are a run's selection alone: nothing, or one of `--only`,
+/// `--except` or `--shard` with its value (the suite refuses two; its
+/// values are the suite's to check, as the run starts).
+fn selection_only(args: &[&String]) -> bool {
+    match args {
+        [] => true,
+        [flag, _] => ["--only", "--except", "--shard"].contains(&flag.as_str()),
+        _ => false,
+    }
+}
+
 /// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
-/// suite beside it, and the computer images the node's boot builds, built
-/// ahead beside them all so its build finds every layer cached.
-fn build_e2e() -> Result<()> {
+/// suite beside it, and the images the node's boot builds, built ahead
+/// beside the cell so its build finds every layer cached: those of the
+/// container classes the run's node runs, as the suite plans them for the
+/// run's `selection` (`--containers`: a run whose sections use no computer
+/// builds none).
+fn build_e2e(selection: &[&String]) -> Result<()> {
     let t0 = std::time::Instant::now();
-    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
-    // no images (docs/self-host.md, seam 2)
-    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let built_images = images.then(|| s.spawn(build::images));
-        let native = s.spawn(build_native);
-        let cell = build::cell();
-        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
-        cell.and(native.join().expect("the native build does not panic")).and(built_images)
+        let cell = s.spawn(build::cell);
+        let rest = build_native().and_then(|()| build_images(selection));
+        cell.join().expect("the cell's build does not panic").and(rest)
     });
-    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
+    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
     built
+}
+
+/// The images the run's node builds as it boots, built ahead: those of the
+/// container classes it runs, as the suite (built) plans them for the
+/// run's `selection`. None for a run on celld (FRAGMENT_E2E_RUNTIME=celld),
+/// which makes no computers here (docs/self-host.md, seam 2).
+fn build_images(selection: &[&String]) -> Result<()> {
+    if std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() == Ok("celld") {
+        return Ok(());
+    }
+    build::images(&node_classes(selection)?)
+}
+
+/// The container classes the run's node runs (`selection`: its `--only`,
+/// `--except` or `--shard`), as the suite plans them (`--containers`).
+fn node_classes(selection: &[&String]) -> Result<Vec<String>> {
+    let suite = devstack::repo_root().join(E2E_BIN);
+    let out = Command::new(&suite).args(selection).arg("--containers").output().with_context(|| format!("run {}", suite.display()))?;
+    anyhow::ensure!(out.status.success(), "{} --containers: {}{}", suite.display(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let classes: Vec<String> = String::from_utf8(out.stdout)?.lines().map(str::to_string).collect();
+    println!("the run's node runs {}", if classes.is_empty() { "no container".to_string() } else { classes.join(" and ") });
+    Ok(classes)
 }
 
 /// The CLI and the suite, for this machine.
@@ -940,6 +975,26 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
+    }
+
+    /// Goal: `--build-only` takes a run's selection, which picks the
+    /// images it builds ahead (so a build for `--no-build --only
+    /// simplex-door` builds the door's too), and nothing else it would
+    /// ignore. Valid: none (CI's), `--only`, `--except` or `--shard` with
+    /// its value. Invalid: a flag with no value, two of them (the suite
+    /// refuses that run), any other argument.
+    #[test]
+    fn a_build_alone_takes_a_runs_selection_alone() {
+        let selection = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            super::selection_only(&args.iter().collect::<Vec<_>>())
+        };
+        for valid in [&[][..], &["--only", "simplex-door"], &["--except", "computers"], &["--shard", "1/5"]] {
+            assert!(selection(valid), "{valid:?}");
+        }
+        for invalid in [&["--only"][..], &["--rehearse"], &["--only", "auth", "--rehearse"], &["--only", "simplex-door", "--except", "computers"], &["simplex-door"], &["--hosted", "x"]] {
+            assert!(!selection(invalid), "{invalid:?}");
+        }
     }
 
     #[test]
