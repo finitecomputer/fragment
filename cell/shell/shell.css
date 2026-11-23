@@ -875,9 +875,6 @@ label.settings-line { cursor: pointer; }
 .provider-body { min-width: 0; }
 .provider-name { display: block; font: var(--type-body-strong); }
 .provider-sub { display: block; margin-top: 2px; font: var(--type-body-sm); color: var(--text-secondary); }
-/* its note whole, wrapped (one line of the deployment's, at most 280
-   characters: a clamp cut its words in half); a key's price its own line */
-.provider-price { display: block; }
 .provider-foot { grid-column: 2 / 4; margin-top: 6px; font: var(--type-caption); color: var(--text-tertiary); }
 /* its light: on, green; waiting on the person, amber; off, an empty ring */
 .provider-state { display: grid; place-items: center; width: 22px; height: 22px; }
@@ -895,12 +892,18 @@ label.settings-line { cursor: pointer; }
 .provider-about { margin: 0 0 14px; color: var(--text-secondary); }
 .provider-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 14px; }
 .provider-chips span { display: inline-flex; align-items: center; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px; font: var(--type-body-sm); }
-.provider-status { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 8px 8px 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--surface-muted); font: var(--type-body); }
+.provider-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 48px; padding: 8px 8px 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--surface-muted); font: var(--type-body); }
 .provider-status .provider-state { width: 12px; height: 12px; flex: none; }
 .provider-status-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .provider-account { font: var(--type-body-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-access { font: var(--type-body-sm); color: var(--text-secondary); }
-.provider-status .settings-actions { flex: none; margin: 0; }
+.provider-status .settings-actions { flex: none; margin: 0 0 0 auto; }
+/* on a phone, its buttons go under what it says, side by side and the row's
+   width, never past the sheet's edge */
+@media (max-width: 520px) {
+  .provider-status .settings-actions { flex: 1 0 100%; margin: 2px 0 0; }
+  .provider-status .settings-actions > button { flex: 1 1 auto; justify-content: center; }
+}
 .provider-status .quiet { font: var(--type-control); min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; background: var(--bg-active); color: var(--text-primary); }
 .provider-status [data-action=disconnect], .provider-status [data-action=remove-key] { color: var(--danger-text); }
 .provider-details { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0 2px; }

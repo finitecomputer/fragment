@@ -22,9 +22,9 @@
 //! - an own key's models (`models`): the chat-completions base URL a guest
 //!   sends its model calls to, and the few models a person is offered for
 //!   an agent (its `agent.json`'s `model`);
-//! - a note (`note`): a line settings' Connections shows people under the
-//!   provider's name (a provider still reviewing the platform's sign-in,
-//!   say);
+//! - a note (`note`): a line settings' Connections shows people in the
+//!   provider's sheet, never on its card (a provider still reviewing the
+//!   platform's sign-in, say);
 //! - a connection's account host (`account_host`): where each account
 //!   lives at a host of its own under the provider's (a Salesforce org at
 //!   its My Domain), the suffix those hosts are under and the Pipes
@@ -564,7 +564,7 @@ pub struct Provider {
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
-    /// What settings' Connections tells people under its name, whatever
+    /// What settings' Connections tells people in its sheet, whatever
     /// their state: plain text, one line (`check_note`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,

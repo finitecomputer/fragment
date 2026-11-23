@@ -297,13 +297,12 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       st.append(el("span", `provider-light ${lightOf(p)}`));
       return st;
     };
-    // the card: its name, the deployment's note on it and a key's price, its
-    // light, and this month's calls; the whole card opens its sheet
+    // the card: its name, a key's price, its light, and this month's calls;
+    // the whole card opens its sheet, which alone says the row's note (Paul,
+    // 2026-11-20: no explaining on the list)
     const body = el("span", "provider-body");
-    const sub = el("span", "provider-sub");
-    if (p.note) sub.append(el("span", "provider-note", p.note));
-    if (price) sub.append(el("span", "provider-price", `${price} a call`));
-    body.append(el("span", "provider-name", name), sub);
+    body.append(el("span", "provider-name", name));
+    if (price) body.append(el("span", "provider-sub provider-price", `${price} a call`));
     const foot = el("span", "provider-foot", calls ? `${callsSaid(calls)} in ${month}${charge}` : `No calls in ${month}`);
     const open = el("button", "provider-open");
     open.type = "button";
@@ -330,7 +329,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     close.onclick = () => sheet.close();
     top.append(tile(true), titled, close);
     const inner = el("div", "provider-sheet-body");
-    if (p.note) inner.append(el("p", "provider-about", p.note));
+    if (p.note) inner.append(el("p", "provider-about provider-note", p.note));
     // what a connection's account allows, in words: each granted scope its
     // row names for people
     const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
