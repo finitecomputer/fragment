@@ -334,6 +334,12 @@ pub async fn pipes_accounts(env: &Env, api: &str, user: &str) -> CellResult<Valu
     }
     let key = required(env, store::WORKOS_KEY).await?;
     let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/data_providers?supports_multiple_connections=true"), Method::Get, Some(&key), None, "WorkOS").await?;
+    // a user WorkOS no longer knows (deleted there) holds no account: so a
+    // wipe of their person finishes (`connections::wipe`), and their
+    // connections read as none
+    if status == 404 {
+        return Ok(json!({ "object": "list", "data": [] }));
+    }
     if status != 200 {
         return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not list the connected accounts ({status}): {}", answer["message"].as_str().unwrap_or("no reason given"))));
     }
