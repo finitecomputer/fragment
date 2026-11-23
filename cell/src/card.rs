@@ -42,7 +42,7 @@
 use std::time::Duration;
 
 use fragment_core::card::{self, Cards, Fault, Heard, Next, Outcome, Pace, Skip, Verdict};
-use fragment_core::site::VIEW_COOKIE;
+use fragment_core::site::{self, VIEW_COOKIE};
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
 use fragment_proto::{ErrorCode, PageErrorKind, Role, Visibility};
@@ -446,13 +446,15 @@ async fn shoot(cdp: &mut Cdp<'_>, page: &card::Visit, deadline: i64) -> Result<V
         cdp.call(&format!("{domain}.enable"), json!({}), deadline).await?;
     }
     // a link holder's share link, as its `?view=` would have left it: the
-    // origin's HttpOnly cookie, so the page opens at a URL with no token.
+    // origin's HttpOnly cookie (`__Host-` over https, at the origin's
+    // root, as serve.rs sets it), so the page opens at a URL with no token.
     // Setting a cookie needs no `Network.enable`, whose events would count
     // toward the shot's messages (`CDP_MESSAGES_MAX`).
     if let Some(token) = &page.view_token {
+        let https = page.url.starts_with("https://");
         let cookie = json!({
-            "name": VIEW_COOKIE, "value": token, "url": page.url,
-            "httpOnly": true, "secure": page.url.starts_with("https://"), "sameSite": "Lax",
+            "name": site::cookie_name(VIEW_COOKIE, https, "/"), "value": token, "url": page.url, "path": "/",
+            "httpOnly": true, "secure": https, "sameSite": "Lax",
         });
         let set = cdp.call("Network.setCookie", cookie, deadline).await?;
         if set["success"] == false {

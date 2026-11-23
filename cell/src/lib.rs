@@ -424,7 +424,7 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 ///
 /// - the fragment's own page (`same-origin`): all of them;
 /// - a top-level navigation (GET or HEAD, from anywhere): the origin's own
-///   (`fragment_site`, `fragview`, `fragment_anon`), as Lax means them;
+///   (`fragment_site`, `fragview`, `fragment_anon`, each `__Host-` over https), as Lax means them;
 /// - a frame's navigation (an `iframe`, or an `object` or `embed`, which
 ///   show a page too): the frame cookie (`/auth/frame`'s), and the answer
 ///   shows only in the page that framed it (`bound`);

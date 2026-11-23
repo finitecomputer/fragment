@@ -264,7 +264,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.page(&name, "", None)?;
     s.ok("a link fragment refuses a visitor without the link", r.status == 401 && r.message().contains("share link"), &r);
     let r = api.page(&name, &format!("?view={view}"), None)?;
-    let set = r.header("set-cookie");
+    let set = api::plain_set_cookie(&r.header("set-cookie")).to_string();
     s.ok("the share link opens it", r.status == 200 && r.text.contains("front"), &r);
     s.ok("and sets a cookie for the fragment's origin", set.starts_with(&format!("fragview={view}; Path=/;")) && set.contains("HttpOnly"), &set);
     let cookie = format!("fragview={view}");
@@ -280,7 +280,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
         api.call(Call { method: "GET", url: api.site_url(&name, path), cookie: cookie.map(str::to_string), extra, ..Call::default() })
     };
     let r = navigate(&format!("docs/?q=1&view={view}&b=x%20y"), None)?;
-    let set = r.header("set-cookie");
+    let set = api::plain_set_cookie(&r.header("set-cookie")).to_string();
     s.ok(
         "a navigation with the share link sets its cookie and goes on to its URL without it, uncached",
         r.status == 302 && r.header("location") == "/docs/?q=1&b=x%20y" && set.starts_with(&format!("fragview={view}; Path=/;")) && set.contains("HttpOnly") && r.header("cache-control") == "no-store",

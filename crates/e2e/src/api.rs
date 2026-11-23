@@ -163,7 +163,13 @@ pub const CLI_AGENT: &str = "fragment-e2e/1";
 /// The prefix browsers hold an https host's own cookies under (auth.rs `cookie_name`).
 pub(crate) const HOST_PREFIX: &str = "__Host-";
 /// The cookies the cell names `__Host-` over https, at a host's root.
-pub(crate) const HOST_COOKIES: [&str; 7] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_switch", "fragment_own_key", "fragment_computer"];
+pub(crate) const HOST_COOKIES: [&str; 9] =
+    ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_switch", "fragment_own_key", "fragment_computer", "fragview", "fragment_anon"];
+
+/// A `Set-Cookie` as a local run reads it: a `__Host-` name as its plain one.
+pub fn plain_set_cookie(set: &str) -> &str {
+    set.strip_prefix(HOST_PREFIX).unwrap_or(set)
+}
 
 /// A `Cookie` header as a browser on https sends it: each of the cell's
 /// host cookies under its `__Host-` name, the rest as they are.

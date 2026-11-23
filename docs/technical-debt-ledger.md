@@ -1240,8 +1240,11 @@ unfinished design, not debt.
 ## An app's own answers may set cookies named as the platform's
 
 - **Shortcut:** an app's `Set-Cookie`s pass through (cell/src/js.rs
-  `Facet::fetch`), `fragment_site`, `fragment_anon` and `fragview` too.
-- **Risk:** only to its own fragment's visitors' sessions.
+  `Facet::fetch`), `fragment_site`, `fragment_anon` and `fragview` (their
+  `__Host-` names over https) too.
+- **Risk:** only to its own fragment's visitors' sessions: over https each
+  is a `__Host-` cookie, which no other fragment's page or answer can set
+  (docs/api.md).
 - **Delete when:** the router strips the platform's cookie names from an
   app's answer, with an e2e app that tries.
 
