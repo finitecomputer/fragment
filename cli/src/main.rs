@@ -256,7 +256,7 @@ enum Cmd {
     /// charges with, and what you have left this month (an agent: its
     /// owner's). Items one after another, each a name (an operator key, a
     /// part of one, or a model) and its amounts: `fragment quote
-    /// elevenlabs:speech 60000chars`, `fragment quote fal:image 40x
+    /// elevenlabs:character 60000chars`, `fragment quote perplexity:call 40x
     /// 1048576px`, `fragment quote cheap 2000in 500out 40x`. Spends
     /// nothing; with no items, what is left
     Quote {
@@ -838,14 +838,6 @@ enum LedgerCmd {
         /// The grant's id (again: the same grant, made once)
         #[arg(long)]
         id: Option<String>,
-    },
-    /// The most your agents' calls on one of the platform's shared keys
-    /// (by its provider's name: `elevenlabs`) may spend an hour before that
-    /// key pauses, held by your computer (default $5)
-    KeyCap {
-        key: String,
-        /// Dollars an hour, or `default`
-        usd: String,
     },
 }
 
@@ -2559,20 +2551,6 @@ fn run(cli: Cli) -> Result<()> {
                 json_exit(j, &json!({ "granted": body }));
                 println!("granted {who} {} ({id})", dollars(micros_of(usd)?));
             }
-            Some(LedgerCmd::KeyCap { key, usd }) => {
-                let micros = match usd.as_str() {
-                    "default" => None,
-                    n => Some(micros_of(n.parse::<f64>().map_err(|_| usage("a key's cap is dollars an hour, or `default`"))?)?),
-                };
-                let mine = c.call(c.get("/api/computers")?)?;
-                let id = mine["computers"][0]["computer"].as_str().ok_or_else(|| usage("you have no computer yet"))?.to_string();
-                let v = c.call(c.post_json(&format!("/api/computers/{id}/key-caps/{key}"), &json!({ "micros": micros }))?)?;
-                json_exit(j, &v);
-                match micros {
-                    Some(m) => println!("{key}: {} an hour", dollars(m)),
-                    None => println!("{key}: back to the default"),
-                }
-            }
         },
         Cmd::Cap { name, usd } => {
             let micros = match usd.as_str() {
@@ -2778,7 +2756,7 @@ fn run(cli: Cli) -> Result<()> {
                         let warns = match st.kind {
                             fragment_proto::FragmentKind::Chat => {
                                 let members: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
-                                fragment_core::access::talks_to_owners_agent(st.kind, &members.members)
+                                fragment_core::permit::talks_to_owners_agent(st.kind, &members.members)
                             }
                             _ => false,
                         };
@@ -2791,7 +2769,7 @@ fn run(cli: Cli) -> Result<()> {
                                 println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
                                 if warns {
-                                    println!("  {}", fragment_core::access::TRUST_WARNING);
+                                    println!("  {}", fragment_core::permit::TRUST_WARNING);
                                 }
                                 return Ok(());
                             }
