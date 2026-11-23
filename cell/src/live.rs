@@ -13,7 +13,12 @@
 //! client pages comes in a later page, never live ahead of the records
 //! before it, so a client's cursor never jumps a gap.
 //!
-//! A socket's role is fixed when it connects; removing a member closes
+//! A socket's role is fixed when it connects, and it is sent a channel's
+//! records and drafts only while that role may read the channel as it is
+//! declared now (`fragment_core::live::reads`): asked at its subscribe,
+//! and again at each record and draft, so a deploy that raises a
+//! channel's read role stops what goes to the sockets below it at once.
+//! Removing a member closes
 //! theirs, and rotating the share link closes link holders' (4003);
 //! deleting the fragment closes every socket (4004). Both codes are
 //! final: the browser library does not reconnect after them. A member
@@ -47,7 +52,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fragment_core::live::{presence_admit, QueryBudget, QueryRefused};
+use fragment_core::live::{presence_admit, reads, QueryBudget, QueryRefused};
 use fragment_core::facet::Answered;
 use fragment_core::npub;
 use fragment_core::permit::{Action, Standing};
@@ -166,11 +171,14 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-/// What a broadcast reads of a socket's attachment: its id and the
-/// channels it follows, and no more (its presence is any JSON a page set).
+/// What a broadcast reads of a socket's attachment: its id, its role and
+/// the channels it follows, and no more (its presence is any JSON a page
+/// set). Every release's attachment has carried its role (`LiveState`);
+/// one that does not read as this is sent nothing.
 #[derive(Deserialize)]
 struct Follows {
     id: String,
+    role: Role,
     subs: Vec<String>,
 }
 
@@ -279,18 +287,29 @@ impl FragmentCell {
         }
     }
 
-    /// A record to the sockets following its channel: none are looked at
-    /// when no socket may follow it (`LiveMemory::followers`).
+    /// The channel's read role as declared now, for a broadcast: `None`
+    /// when it is not declared, or cannot be read, so no socket is sent it.
+    fn read_role_now(&self, channel: &str) -> Option<Role> {
+        self.channel_read_role(channel).ok()
+    }
+
+    /// A record to the sockets following its channel whose role may read
+    /// it now (`reads`): none are looked at when no socket may follow it
+    /// (`LiveMemory::followers`). A follower below the read role is still
+    /// one, and is sent it again should the role come back down.
     pub(crate) fn broadcast_record(&self, r: &ChannelRecord) {
         if !self.followed(&r.channel) {
             return;
         }
+        let read = self.read_role_now(&r.channel);
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = follows_of(&ws) else { continue };
             if st.subs.contains(&r.channel) {
-                let _ = ws.send_with_str(&frame);
+                if reads(st.role, read) {
+                    let _ = ws.send_with_str(&frame);
+                }
                 found.insert(st.id);
             }
         }
@@ -299,7 +318,8 @@ impl FragmentCell {
         }
     }
 
-    /// A draft to the sockets following its channel, at most
+    /// A draft to the sockets following its channel whose role may read it
+    /// now (`reads`), at most
     /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
     /// sends only its latest): `false` when past that pace, and dropped.
     /// `thinking`: ms a text step's model has reasoned with no words yet.
@@ -311,9 +331,10 @@ impl FragmentCell {
         if !self.followed(channel) {
             return true;
         }
+        let read = self.read_role_now(channel);
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel) && reads(st.role, read)) {
                 send(&ws, &frame);
             }
         }
@@ -411,7 +432,7 @@ impl FragmentCell {
             LiveIn::Ping => send(ws, &LiveOut::Pong),
             LiveIn::Subscribe(Subscribe { channel, from }) => {
                 let read = self.channel_read_role(&channel)?;
-                if st.role < read {
+                if !reads(st.role, Some(read)) {
                     return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} needs the {} role", read.as_str())));
                 }
                 let live = st.subs.contains(&channel);
