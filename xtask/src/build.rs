@@ -322,9 +322,9 @@ fn worker_build_installed() -> Result<()> {
     Ok(())
 }
 
-/// The computer images the cell's config names (`containers[].images`)
-/// that the run's node builds (`ahead`: the door's for its lane's run
-/// alone), each built as `wrangler dev` builds it at boot (wrangler's
+/// The images the cell's config names (`containers[].images`) that the
+/// run's node builds (`ahead`: those of the container classes it runs,
+/// `classes`), each built as `wrangler dev` builds it at boot (wrangler's
 /// `constructBuildCommand`: `docker build --load --platform linux/amd64
 /// --provenance=false [--build-arg …] -f - <context>`, the Dockerfile on
 /// stdin), so the boot's build finds every layer cached. A cold build of
@@ -334,10 +334,10 @@ fn worker_build_installed() -> Result<()> {
 /// that read them for itself warmed nothing here (BuildKit takes a remote
 /// cache's hits without fetching them, and a build that exports nothing
 /// keeps nothing), so the stub compiled its bridge on every shard.
-pub fn images(doors: bool) -> Result<()> {
+pub fn images(classes: &[String]) -> Result<()> {
     let cell = devstack::cell_dir();
     let env = |k: &str| std::env::var(k).ok();
-    for (name, image, cache) in ahead(devstack::read_config(&cell)?, &cell, doors, env)? {
+    for (name, image, cache) in ahead(devstack::read_config(&cell)?, &cell, classes, env)? {
         let t0 = Instant::now();
         let built = docker_build(&image, None, &[ahead_output(&cache).as_ref()], &cache).with_context(|| format!("building the {name} image ahead of the node"))?;
         let (cached, steps) = cached_steps(&built);
@@ -348,22 +348,20 @@ pub fn images(doors: bool) -> Result<()> {
 
 /// The images `images` builds ahead of the node, by name, each with its
 /// cache flags: those of `config` (the cell's, from `cell`) that the run's
-/// node builds as it boots, the door's only for a run of its lane
-/// (`doors`), as only that run's node runs doors (`devstack::Fleet::doors`).
+/// node builds as it boots, its container classes' (`classes`: the stub's
+/// for a run that makes computers, the door's for a run of its lane).
 /// The Actions cache (`image_cache_args`) is one scope, the first image's
 /// (the stub's): the first writes it, and an image from the same
 /// Dockerfile (the stub's next build) reads it. An image from another
 /// Dockerfile (the door's) builds with no cache flags: none of its layers
 /// are there, and its write would replace the stub's (a scope holds one
 /// build's). No CI run names the door's lane, so CI never builds it.
-fn ahead(mut config: serde_json::Value, cell: &Path, doors: bool, env: impl Fn(&str) -> Option<String>) -> Result<Vec<(String, serde_json::Value, Vec<String>)>> {
-    if !doors {
-        devstack::without_doors(&mut config)?;
-    }
+fn ahead(mut config: serde_json::Value, cell: &Path, classes: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Vec<(String, serde_json::Value, Vec<String>)>> {
     devstack::absolute_images(&mut config, cell)?;
     let containers = config["containers"].as_array().cloned().unwrap_or_default();
+    let runs = |c: &&serde_json::Value| classes.iter().any(|class| c["class_name"] == class.as_str());
     // bounded: the images one config names
-    let images: Vec<_> = containers.iter().flat_map(|c| c["images"].as_object().into_iter().flatten()).collect();
+    let images: Vec<_> = containers.iter().filter(runs).flat_map(|c| c["images"].as_object().into_iter().flatten()).collect();
     let cached = images.first().map(|(_, image)| image["dockerfile"].clone());
     let cache = |n: usize, image: &serde_json::Value| match Some(&image["dockerfile"]) == cached.as_ref() {
         true => image_cache_args(&env, n == 0),
@@ -497,12 +495,12 @@ mod tests {
 
     /// Goal: a run builds ahead of the node the images its node builds,
     /// and reads and writes the Actions cache for the stub's alone. Valid:
-    /// a run of the door's lane (`doors`) builds the stub, its next build
-    /// and the door's; any other run, the stub's two alone (its node runs
-    /// no door: devstack's `Fleet::doors`). In CI the stub writes the
-    /// cache and its next build reads it. Invalid: the door's image reads
-    /// the stub's cache, where none of its layers are, or writes it, which
-    /// would replace the stub's there.
+    /// a run of the door's lane builds the door's image too; a run that
+    /// makes computers, the stub's two alone; a run that makes none (its
+    /// node runs no container: the suite's `node_classes`), none. In CI the
+    /// stub writes the cache and its next build reads it. Invalid: the
+    /// door's image reads the stub's cache, where none of its layers are,
+    /// or writes it, which would replace the stub's there.
     #[test]
     fn a_run_builds_ahead_only_the_images_its_node_builds() {
         let cell = fragment_devstack::cell_dir();
@@ -513,13 +511,15 @@ mod tests {
             "FRAGMENT_IMAGE_CACHE_SAVE" => Some("true".to_string()),
             _ => None,
         };
-        let shown = |doors| super::ahead(config.clone(), &cell, doors, saving).unwrap().into_iter().map(|(name, _, cache)| (name, cache.join(" "))).collect::<Vec<_>>();
+        let (computers, doors) = (fragment_devstack::COMPUTER_CLASS.to_string(), fragment_devstack::DOOR_CLASS.to_string());
+        let shown = |classes: &[String]| super::ahead(config.clone(), &cell, classes, saving).unwrap().into_iter().map(|(name, _, cache)| (name, cache.join(" "))).collect::<Vec<_>>();
         let (reads, writes) = (format!("--cache-from {gha}"), format!("--cache-from {gha} --cache-to {gha},mode=max,ignore-error=true"));
         let stubs = [("stub".to_string(), writes), ("stub-next".to_string(), reads)];
-        assert_eq!(shown(false), stubs, "no door's image for a run without its lane");
+        assert_eq!(shown(&[computers.clone()]), stubs, "no door's image for a run without its lane");
         let with_door: Vec<_> = stubs.iter().cloned().chain([("door".to_string(), String::new())]).collect();
-        assert_eq!(shown(true), with_door, "the door's image for its lane's run, with no cache flags");
-        for (_, image, _) in super::ahead(config.clone(), &cell, true, saving).unwrap() {
+        assert_eq!(shown(&[computers.clone(), doors.clone()]), with_door, "the door's image for its lane's run, with no cache flags");
+        assert!(shown(&[]).is_empty(), "no image for a run that makes no computer");
+        for (_, image, _) in super::ahead(config.clone(), &cell, &[computers, doors], saving).unwrap() {
             assert!(std::path::Path::new(image["dockerfile"].as_str().unwrap()).is_absolute(), "its Dockerfile's path works from anywhere");
         }
     }

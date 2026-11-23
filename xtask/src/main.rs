@@ -402,6 +402,7 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        computers: true,
         // a door's image is built only for a stack that runs them (the e2e's door lane)
         doors: false,
         computer_internet: true,
@@ -672,7 +673,7 @@ fn e2e(args: &[String]) -> Result<()> {
     // them in place
     devstack::Tools::locate()?;
     if !no_build {
-        build_e2e(names_door_lane(&suite_args))?;
+        build_e2e(&suite_args)?;
     }
     if build_only {
         return Ok(());
@@ -688,32 +689,43 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
-/// Whether a run's arguments name the SimpleX door's lane (`--only
-/// …,simplex-door,…`), which runs by name alone: only that run's node runs
-/// doors and builds their image (the suite's `builds_doors`), so only it
-/// builds the door's image ahead.
-fn names_door_lane(args: &[&String]) -> bool {
-    args.windows(2).any(|w| w[0] == "--only" && w[1].split(',').any(|name| name == devstack::DOOR_LANE))
+/// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
+/// suite beside it, and the images the node's boot builds, built ahead
+/// beside the cell so its build finds every layer cached: those of the
+/// container classes the run's node runs, as the suite plans them for the
+/// run's `selection` (`--containers`: a run whose sections use no computer
+/// builds none).
+fn build_e2e(selection: &[&String]) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let built = std::thread::scope(|s| {
+        let cell = s.spawn(build::cell);
+        let rest = build_native().and_then(|()| build_images(selection));
+        cell.join().expect("the cell's build does not panic").and(rest)
+    });
+    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    built
 }
 
-/// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
-/// suite beside it, and the computer images the node's boot builds, built
-/// ahead beside them all so its build finds every layer cached: the door's
-/// for a run of its lane alone (`doors`).
-fn build_e2e(doors: bool) -> Result<()> {
-    let t0 = std::time::Instant::now();
-    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
-    // no images (docs/self-host.md, seam 2)
-    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
-    let built = std::thread::scope(|s| {
-        let built_images = images.then(|| s.spawn(move || build::images(doors)));
-        let native = s.spawn(build_native);
-        let cell = build::cell();
-        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
-        cell.and(native.join().expect("the native build does not panic")).and(built_images)
-    });
-    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
-    built
+/// The images the run's node builds as it boots, built ahead: those of the
+/// container classes it runs, as the suite (built) plans them for the
+/// run's `selection`. None for a run on celld (FRAGMENT_E2E_RUNTIME=celld),
+/// which makes no computers here (docs/self-host.md, seam 2).
+fn build_images(selection: &[&String]) -> Result<()> {
+    if std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() == Ok("celld") {
+        return Ok(());
+    }
+    build::images(&node_classes(selection)?)
+}
+
+/// The container classes the run's node runs (`selection`: its `--only`,
+/// `--except` or `--shard`), as the suite plans them (`--containers`).
+fn node_classes(selection: &[&String]) -> Result<Vec<String>> {
+    let suite = devstack::repo_root().join(E2E_BIN);
+    let out = Command::new(&suite).args(selection).arg("--containers").output().with_context(|| format!("run {}", suite.display()))?;
+    anyhow::ensure!(out.status.success(), "{} --containers: {}{}", suite.display(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let classes: Vec<String> = String::from_utf8(out.stdout)?.lines().map(str::to_string).collect();
+    println!("the run's node runs {}", if classes.is_empty() { "no container".to_string() } else { classes.join(" and ") });
+    Ok(classes)
 }
 
 /// The CLI and the suite, for this machine.
@@ -949,24 +961,6 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
-    }
-
-    /// Goal: the door's image is built ahead for a run whose `--only`
-    /// names its lane, as the suite's node then runs doors (its
-    /// `builds_doors`). Valid: named alone or among others. Invalid: named
-    /// by `--except`, a name it is only part of, a shard (CI's runs), no
-    /// selection at all.
-    #[test]
-    fn only_a_run_naming_the_door_lane_builds_its_image() {
-        let names = |args: &[&str]| {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            super::names_door_lane(&args.iter().collect::<Vec<_>>())
-        };
-        assert!(names(&["--only", "simplex-door"]));
-        assert!(names(&["--only", "computers,simplex-door"]));
-        for not in [&["--except", "simplex-door"][..], &["--only", "simplex-doors,computers"], &["--shard", "3/5"], &[], &["simplex-door"]] {
-            assert!(!names(not), "{not:?}");
-        }
     }
 
     #[test]
