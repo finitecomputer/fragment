@@ -4,6 +4,33 @@
 
 use std::collections::HashMap;
 
+const HOUR_MS: i64 = 3_600_000;
+
+/// One provider's calls an hour from one computer (FIN-616; 2026-11-20:
+/// Google Places kept free, never at any volume): the hour it counts, and
+/// its calls in it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Hourly {
+    pub hour: i64,
+    pub used: u32,
+}
+
+impl Hourly {
+    /// Counts a call at `now_ms` against `max` an hour: refused, with the
+    /// ms until the next hour, once the hour has had `max`.
+    pub fn take(&mut self, max: u32, now_ms: i64) -> Result<(), i64> {
+        let hour = now_ms.div_euclid(HOUR_MS);
+        if hour != self.hour {
+            (self.hour, self.used) = (hour, 0);
+        }
+        if self.used >= max {
+            return Err((hour + 1) * HOUR_MS - now_ms);
+        }
+        self.used += 1;
+        Ok(())
+    }
+}
+
 pub struct Rate {
     per_caller: u32,
     per_fragment: u32,
@@ -38,6 +65,17 @@ impl Rate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Valid and invalid: `max` calls an hour go, the next is refused with
+    /// the wait to the hour's end, and the next hour starts again.
+    #[test]
+    fn an_hour_takes_its_calls_and_no_more() {
+        let mut h = Hourly::default();
+        let t = 7 * HOUR_MS + 1_000;
+        assert_eq!((0..3).map(|_| h.take(3, t)).collect::<Vec<_>>(), [Ok(()), Ok(()), Ok(())]);
+        assert_eq!(h.take(3, t + 5_000), Err(HOUR_MS - 6_000), "the fourth waits for the hour's end");
+        assert_eq!(h.take(3, 8 * HOUR_MS), Ok(()), "a new hour, a new count");
+    }
 
     #[test]
     fn budgets() {

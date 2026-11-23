@@ -16,15 +16,15 @@
 mod book;
 mod defaults;
 mod instance;
-mod keys;
 mod limits;
+mod reported;
 #[cfg(test)]
 mod testing;
 mod usage;
 
 pub use book::{dollars, BookFault, InstancePrice, KeyPrice, ModelPrice, PriceBook, PriceError, Priced, StoragePrices, TokenPrices};
-pub use defaults::{openrouter, DEFAULT_BOOK_VERSION, DEFAULT_BROWSER, DEFAULT_DYNAMIC_WORKERS, DEFAULT_IMAGES, DEFAULT_INSTANCES, DEFAULT_KEYS, DEFAULT_MODELS, DEFAULT_NEURONS, DEFAULT_REQUESTS, DEFAULT_STORAGE, INSTANCE, OPENROUTER_FEE_BP};
+pub use defaults::{openrouter, DefaultCharge, DEFAULT_BOOK_VERSION, DEFAULT_CHARGES, DEFAULT_BROWSER, DEFAULT_DYNAMIC_WORKERS, DEFAULT_IMAGES, DEFAULT_INSTANCES, DEFAULT_MODELS, DEFAULT_NEURONS, DEFAULT_REQUESTS, DEFAULT_STORAGE, INSTANCE, LEGACY_KEYS, OPENROUTER_FEE_BP};
 pub use instance::{instance_size, InstanceSize, DISK_MB};
-pub use keys::{default_key_price, key_usage, KeyCall, KeyPart, KEY_PARTS, KEY_PART_BODY_MAX_BYTES};
 pub use limits::{AWAKE_MS_PER, BP, BROWSER_MS_PER, CHARGE_MAX, CREDITS_FEE_BP_DEFAULT, FEE_BP_MAX, IMAGES_PER, MARGIN_BP_DEFAULT, MARGIN_BP_MAX, MILLI_NEURONS_PER, NAME_MAX_BYTES, PRICES_MAX, PRICE_MAX, QUANTITY_MAX, REQUESTS_PER, STORAGE_BYTE_HOURS_PER, TOKENS_PER, USD};
+pub use reported::{number, number_at, pointer_segments, Events, EVENT_LINE_MAX_BYTES, POINTER_SEGMENTS_MAX};
 pub use usage::{printable, StorageClass, Usage, UsageFault};
