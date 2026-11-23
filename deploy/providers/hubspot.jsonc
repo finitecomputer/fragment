@@ -16,7 +16,7 @@
 { "name": "hubspot", "kind": "connection", "title": "HubSpot",
   "hosts": ["api.hubapi.com"],
   "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-  "note": "Only a HubSpot super admin, or a user with Marketplace Access, can connect HubSpot. Your agents then reach the whole account's records, not only those your HubSpot user can see.",
+  "note": "Needs a HubSpot super admin or Marketplace Access. Your agents reach every record in the account, not only yours.",
   "connection_oauth": { "authorize": "https://app.hubspot.com/oauth/authorize",
     "exchange": "https://api.hubapi.com/oauth/2026-09/token",
     "access": {

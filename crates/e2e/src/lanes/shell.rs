@@ -4687,13 +4687,13 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     );
     let accounts = b.eval(page, "[...document.querySelectorAll('#settings-connections [data-account]')].map((a) => [a.closest('[data-provider]').dataset.provider, a.textContent])")?;
     s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
-    // each note: its row, its text, and whether it is the line under the
-    // row's name (right after its head)
-    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, n.closest('.provider-body')?.firstElementChild?.classList.contains('provider-name') ?? false, !n.closest('dialog')])";
+    // each note: its row, its text, and whether it is in the row's sheet
+    // (never on its card: Paul, 2026-11-20)
+    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, !!n.closest('dialog.provider-sheet')])";
     let notes = b.eval(page, NOTES)?;
     s.ok(
-        "a row whose catalog row has a note shows it on its card, under the provider's name (Google's, connected); a row without one shows none",
-        notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]),
+        "a row whose catalog row has a note says it in its sheet and not on its card (Google's, connected); a row without one says none",
+        notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true]]),
         &notes,
     );
     s.ok(
@@ -4747,7 +4747,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let said = b.eval(page, "document.getElementById('notice').innerText")?;
     s.ok("Disconnect takes a connection away at Pipes; settings shows it not connected, and, unrevoked, says where its access is removed at the provider", off && !s.workos.holds(email, crate::SWAP_CONNECTION), &said);
     let notes = b.eval(page, NOTES)?;
-    s.ok("not connected, Google's card still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
+    s.ok("not connected, Google's sheet still says its note, and still no other row says one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true]]), &notes);
     // connected again for the checks after, the computer told by a read: its
     // disconnect's fence lifted as a connect known to import lifts it (the
     // row has no `connection_oauth` here: the registry's lever)
