@@ -1434,6 +1434,33 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
     s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
 
+    // a connector's own code is no loop: its inbox's deliveries past the
+    // hourly count each start a run, and its relay is never paused (the
+    // SimpleX door spike: a busy hour paused `intake`, and the connector
+    // said nothing until its owner unpaused it). Telegram's, its updates
+    // none of a paired account's, so each run only looks and ends.
+    let telegram = s.named(api, &owner, "tgpace")?;
+    let made = api.create_with(&owner, json!({ "name": telegram, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "making a Telegram connector: {made}");
+    s.owned(&made.body, &owner);
+    const HOOK: &str = "e2e0c0ffee5ec4e7a9f0b1c2d3e4f5061728394a5b6c7d8e9f001122334455";
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{telegram}/secrets/TELEGRAM_WEBHOOK_SECRET"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
+    anyhow::ensure!(r.status == 200, "its webhook's secret: {r}");
+    let mut taken = 0;
+    for update in 0..=limits::TRIGGERED_RUNS_PER_HOUR {
+        let body = json!({ "update_id": update }).to_string().into_bytes();
+        let extra = vec![("x-telegram-bot-api-secret-token", HOOK.to_string())];
+        let r = api.call(Call { method: "POST", url: format!("{}/api/f/{telegram}/inbox", api.base), body: Some(body), content_type: Some("application/json"), extra, ..Call::default() })?;
+        taken += usize::from(r.status == 200);
+    }
+    let intakes = runs(api, &owner, &telegram, "&op=intake");
+    let r = api.signed(&owner, "GET", &format!("/api/f/{telegram}/runs?limit=1"), None)?;
+    s.ok(
+        "a connector's triggers past the hourly count each start a run, and its relay is never paused",
+        taken as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && intakes.len() as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && intakes.iter().all(|r| r["status"] != "blocked") && r.body["paused"] == json!([]),
+        json!({ "taken": taken, "runs": intakes.len(), "blocked": intakes.iter().filter(|r| r["status"] == "blocked").count(), "paused": r.body["paused"] }),
+    );
+
     // a live commit with no app says nothing about the next code: the
     // pause outlasts it, and the next good deploy comes back paused
     s.commit(&busy_c, &[("app.mjs", None)]);
