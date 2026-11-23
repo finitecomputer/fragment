@@ -1226,4 +1226,111 @@ mod tests {
         assert!(refuse_remove(Some(Owner), true, Some(Owner)).is_some());
         assert!(refuse_remove(Some(Owner), false, None).is_some());
     }
+
+    /// Goal: nobody reaches a fragment by naming it, and everyone reaches
+    /// what their standing gives (FIN-584, the CASA lab's IDOR check;
+    /// docs/security/access-control.md). Method: every standing a request
+    /// can bring (member or not at each role, the share link or not,
+    /// signed or not, an agent of theirs in it or not, an agent acting for
+    /// them with each cap and hold, an agent beside its person, a
+    /// connector, its owner in person), on every visibility, reading and
+    /// acting, against every role a route may need, compared with a model
+    /// of the rules written from their prose: who is no member has the
+    /// visibility's floor (nothing on `members`; a viewer with the link on
+    /// `link`; `public`, or viewer with the link, on `public`), and a
+    /// person whose agent is in reads, never acts, as a viewer; an agent
+    /// acting for someone holds the lower of their role and its cap (its
+    /// own membership or the floor, or its owner's membership, the higher,
+    /// never above editor); a hold caps an agent acting for someone, or
+    /// one beside its person; on a connector everyone but its owner in
+    /// person is at most a viewer. Each request is allowed exactly when
+    /// the model's role reaches its need, at that role; a refusal asks to
+    /// sign in only someone unsigned. So a rule that grants more (an agent
+    /// its owner's editor role past an empty or viewer cap) and one that
+    /// grants less (refusing everyone) both fail here.
+    #[test]
+    fn no_one_reaches_more_than_their_own_standing_gives() {
+        let roles = [Public, Viewer, Editor, Owner];
+        let members = [None, Some(Viewer), Some(Editor), Some(Owner)];
+        let caps: Vec<Option<Cap>> = std::iter::once(None).chain(members.iter().flat_map(|a| members.iter().map(move |o| Some(Cap { agent: *a, owner: *o })))).collect();
+        let (mut asked, mut allowed) = (0, 0);
+        for cap in caps {
+            for member in members {
+                for held in [None, Some(Viewer), Some(Editor)] {
+                    for bits in 0..64u8 {
+                        let bit = |n: u8| bits & (1 << n) != 0;
+                        let standing = Standing {
+                            member,
+                            owns_member_agent: bit(0),
+                            link: bit(1),
+                            signed: bit(2),
+                            cap,
+                            held,
+                            beside_person: bit(3),
+                            connector: bit(4),
+                            owner_in_person: bit(5),
+                        };
+                        for visibility in [V::Members, V::Link, V::Public] {
+                            for read in [true, false] {
+                                let floor = match (visibility, standing.link) {
+                                    (V::Members, _) | (V::Link, false) => None,
+                                    (V::Link, true) | (V::Public, true) => Some(Viewer),
+                                    (V::Public, false) => Some(Public),
+                                };
+                                let through_agent = (standing.owns_member_agent && read).then_some(Viewer);
+                                let own = member.or(floor.max(through_agent));
+                                let lent = cap.map(|c| c.agent.or(floor).max(c.owner).map(|r| r.min(AGENT_ROLE_MAX)));
+                                let role = match lent {
+                                    None => own,
+                                    Some(lent) => own.min(lent),
+                                };
+                                let role = match (cap.is_some() || standing.beside_person, held) {
+                                    (true, Some(h)) => role.map(|r| r.min(h)),
+                                    _ => role,
+                                };
+                                let expected = match standing.connector && !standing.owner_in_person {
+                                    true => role.map(|r| r.min(Viewer)),
+                                    false => role,
+                                };
+                                for needs in roles {
+                                    asked += 1;
+                                    let action = if read { Action::Read(needs) } else { Action::Act(needs) };
+                                    let at = format!("{standing:?} {visibility:?} {action:?}");
+                                    match (decide(&Facts { visibility, standing, action }), expected) {
+                                        (Verdict::Allow(role), Some(e)) if e >= needs => {
+                                            assert_eq!(role, e, "allowed at another role than its standing gives: {at}");
+                                            allowed += 1;
+                                        }
+                                        (Verdict::Allow(role), _) => panic!("allowed {role:?}, more than {expected:?}: {at}"),
+                                        (Verdict::Refuse(r), Some(e)) if e >= needs => panic!("{r:?}, though its standing gives {e:?}: {at}"),
+                                        (Verdict::Refuse(r), _) => assert_eq!(r.sign_in, !standing.signed, "a refusal asks to sign in exactly the unsigned: {at}"),
+                                        (Verdict::Ask(never), _) => match never {},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(asked, 17 * 4 * 3 * 64 * 3 * 2 * 4, "every standing, visibility, purpose and need was asked");
+        assert!(allowed > 0 && allowed < asked, "some allowed and some refused: {allowed} of {asked}");
+        // the cases the model is for, by name
+        let decided = |visibility, standing, action| decide(&Facts { visibility, standing, action });
+        let as_agent = |member, cap| Standing { member, signed: true, cap: Some(cap), ..Standing::default() };
+        let empty = Cap { agent: None, owner: None };
+        let viewer_cap = Cap { agent: None, owner: Some(Viewer) };
+        let editor_cap = Cap { agent: None, owner: Some(Editor) };
+        assert!(matches!(decided(V::Members, as_agent(Some(Editor), empty), Action::Act(Viewer)), Verdict::Refuse(_)), "an empty cap lends an editor's agent nothing");
+        assert!(matches!(decided(V::Members, as_agent(Some(Editor), viewer_cap), Action::Act(Editor)), Verdict::Refuse(_)), "a viewer's cap is no editor's");
+        assert_eq!(decided(V::Members, as_agent(Some(Editor), viewer_cap), Action::Read(Viewer)), Verdict::Allow(Viewer));
+        assert_eq!(decided(V::Members, as_agent(Some(Editor), editor_cap), Action::Act(Editor)), Verdict::Allow(Editor));
+        assert_eq!(decided(V::Members, as_agent(Some(Owner), Cap { agent: None, owner: Some(Owner) }), Action::Act(Editor)), Verdict::Allow(Editor), "an agent's role stops at editor");
+        let person = |member| Standing { member, signed: true, ..Standing::default() };
+        assert_eq!(decided(V::Members, person(Some(Viewer)), Action::Read(Viewer)), Verdict::Allow(Viewer));
+        assert_eq!(decided(V::Members, person(Some(Editor)), Action::Act(Editor)), Verdict::Allow(Editor));
+        assert_eq!(decided(V::Members, person(Some(Owner)), Action::Act(Owner)), Verdict::Allow(Owner));
+        assert_eq!(decided(V::Public, person(None), Action::Read(Public)), Verdict::Allow(Public));
+        assert!(matches!(decided(V::Members, person(None), Action::Read(Public)), Verdict::Refuse(_)), "a stranger reaches no members-only fragment");
+    }
 }

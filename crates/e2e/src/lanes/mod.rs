@@ -39,6 +39,7 @@ mod icons;
 pub mod hermes;
 mod home;
 mod identities;
+mod idor;
 mod isolation;
 pub(crate) mod jobs;
 mod keys;
@@ -91,6 +92,7 @@ const LANES: &[Lane] = &[
     control::lockdown,
     keys::keys,
     members::members,
+    idor::idor,
     identities::identities,
     signin::signin,
     door::door,
@@ -229,7 +231,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "door", "native", "connections", "vault", "secrets", "secrets-page", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page", "move", "move-import", "move-big", "move-ui", "move-comp",
+        "members", "idor", "billing", "governance", "billing-page", "move", "move-import", "move-big", "move-ui", "move-comp",
     ],
 ];
 
