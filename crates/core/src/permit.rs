@@ -64,6 +64,15 @@
 //! agent shares is recorded as the agent's, for its owner, so its owner
 //! sees it did.
 //!
+//! **A question is answered only by whom it asks** (`may_answer`). A
+//! record whose body names whom it `asks` is a question (a card: an agent
+//! asking its owner to confirm), and a record whose `answers` names it is
+//! its answer, taken only as that identity's own post: never an agent's
+//! for its owner, so an agent never answers its own card. The cell checks
+//! it as it appends any record (docs/api.md, "Questions and answers"), so
+//! no template's page or agent checks it again. Invites and offers are
+//! asked on the person's own routes (registry/invites.rs, offers.rs).
+//!
 //! Deleting a fragment and setting its money cap are dangerous
 //! (`Reserved::Dangerous`): today an agent is refused them, whomever it
 //! acts for, and its owner does them. That is not the design. Paul,
@@ -72,7 +81,8 @@
 //! when I do it myself in the UI." The target is in `the_rule_table`'s
 //! comment.
 
-use fragment_proto::{FragmentKind, IdentityKind, Member, Role, Visibility};
+use fragment_proto::{valid_channel_name, Author, FragmentKind, IdentityKind, Member, Role, Visibility};
+use serde_json::Value;
 
 /// What `decide` decides over: the fragment's visibility, what the caller
 /// brings to it, and what they would do. Read once per request, by the
@@ -531,6 +541,41 @@ pub fn may_act_for(kind: IdentityKind, owner: Option<&str>, named: &str) -> Resu
 /// (`AGENT_ROLE_MAX`), so that stays its owner's request.
 pub fn acts_as_itself(owner: Option<Role>, agent: Option<Role>) -> bool {
     owner.is_none() && agent.is_some_and(|role| role <= AGENT_ROLE_MAX)
+}
+
+/// The question a record answers, as its body names it (docs/api.md,
+/// "Questions and answers"): `answers`, the question's own record in the
+/// same fragment. A question is a record whose body names whom it `asks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    pub channel: String,
+    pub seq: i64,
+}
+
+/// `body`'s question, if it answers one: its `answers` names a `seq`. An
+/// `answers` naming none (a quiz's own answers) is its app's own field.
+/// What is wrong with one that names a `seq` but is not `{channel, seq}`.
+pub fn answers(body: &Value) -> Option<Result<Answers, &'static str>> {
+    let named = body.get("answers")?.as_object().filter(|o| o.contains_key("seq"))?;
+    let read = || -> Result<Answers, &'static str> {
+        let channel = named.get("channel").and_then(Value::as_str).filter(|c| valid_channel_name(c)).ok_or("names the question's channel")?;
+        let seq = named.get("seq").and_then(Value::as_i64).filter(|s| *s >= 1).ok_or("names the question's seq, an integer from 1")?;
+        if named.len() != 2 {
+            return Err("is {channel, seq} alone");
+        }
+        Ok(Answers { channel: channel.into(), seq })
+    };
+    Some(read())
+}
+
+/// A question is answered only by whom it asks (FIN-615): `asks` is whom
+/// the record an answer names asks (`None`: no such record, or it asks no
+/// one). Only that identity's own post answers it, written as itself
+/// (`Author::Person` or `Author::Agent`): never anyone else, an agent for
+/// its owner (an agent never answers its own card), app code, the platform
+/// or a door.
+pub fn may_answer(asks: Option<&str>, poster: &str, author: Author) -> bool {
+    matches!(author, Author::Person | Author::Agent) && asks.is_some_and(|asks| crate::npub::display(asks) == crate::npub::display(poster))
 }
 
 /// Why a membership change is refused, or `None` when it is allowed. Only
@@ -1225,5 +1270,57 @@ mod tests {
         assert!(refuse_remove(Some(Editor), false, Some(Viewer)).is_some());
         assert!(refuse_remove(Some(Owner), true, Some(Owner)).is_some());
         assert!(refuse_remove(Some(Owner), false, None).is_some());
+    }
+
+    /// Goal: a question is answered only by whom it asks, in their own
+    /// post. Method: Ana's agent Juniper asks her on a card, and each
+    /// writer answers it; an answer to a record that asks no one, or is
+    /// not there, is no one's; `asks` and the poster in either form (an
+    /// npub, 64 hex) are one identity; a retried post decides the same.
+    #[test]
+    fn a_question_is_answered_by_whom_it_asks() {
+        let hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let ana = crate::npub::encode(hex);
+        let juniper = crate::npub::encode(&"1".repeat(64));
+        let ben = crate::npub::encode(&"2".repeat(64));
+        let rows: &[(&str, Option<&str>, &str, Author, bool)] = &[
+            ("Ana answers her card", Some(&ana), &ana, Author::Person, true),
+            ("Ana's signed key, as 64 hex", Some(&ana), hex, Author::Person, true),
+            ("a card naming Ana as 64 hex", Some(hex), &ana, Author::Person, true),
+            ("Ben answers Ana's card", Some(&ana), &ben, Author::Person, false),
+            ("Juniper answers its own card, for Ana or as itself", Some(&ana), &juniper, Author::Agent, false),
+            ("a question asking Juniper, answered by Juniper", Some(&juniper), &juniper, Author::Agent, true),
+            ("app code Ana called writes the answer", Some(&ana), &ana, Author::Code, false),
+            ("the platform writes it as Ana", Some(&ana), &ana, Author::Platform, false),
+            ("a door relays Ana's answer", Some(&ana), &ana, Author::Door, false),
+            ("an answer to what asks no one, or is not there", None, &ana, Author::Person, false),
+        ];
+        for (case, asks, poster, author, ok) in rows {
+            assert_eq!(may_answer(*asks, poster, *author), *ok, "{case}");
+            // replay: the same post again decides the same
+            assert_eq!(may_answer(*asks, poster, *author), *ok, "{case}, again");
+        }
+
+        let named = |answers: Value| super::answers(&serde_json::json!({ "kind": "prompt_response", "option": "yes", "answers": answers }));
+        assert_eq!(named(serde_json::json!({ "channel": "work", "seq": 12 })), Some(Ok(Answers { channel: "work".into(), seq: 12 })));
+        // an `answers` naming no seq is its app's own: no question
+        for own in [serde_json::json!(["a", "b"]), serde_json::json!({ "q1": "a" }), serde_json::json!("work/12"), serde_json::json!(12)] {
+            assert_eq!(named(own.clone()), None, "{own}");
+        }
+        assert_eq!(super::answers(&serde_json::json!("a bare string body")), None);
+        // one that names a seq is checked whole: a reader of either kind (a
+        // JSON number read in JavaScript) finds the record the platform did
+        for bad in [
+            serde_json::json!({ "channel": "work", "seq": "12" }),
+            serde_json::json!({ "channel": "work", "seq": 12.0 }),
+            serde_json::json!({ "channel": "work", "seq": 0 }),
+            serde_json::json!({ "channel": "work", "seq": -3 }),
+            serde_json::json!({ "channel": "work", "seq": u64::MAX }),
+            serde_json::json!({ "seq": 12 }),
+            serde_json::json!({ "channel": "Work!", "seq": 12 }),
+            serde_json::json!({ "channel": "work", "seq": 12, "by": "npub1ana" }),
+        ] {
+            assert!(named(bad.clone()).is_some_and(|r| r.is_err()), "{bad}");
+        }
     }
 }

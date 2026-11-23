@@ -859,6 +859,27 @@ chose its words:
 A record stored before the stamp has no `author`, and reads as it did. A
 reader meets an author it does not know as `other`.
 
+### Questions and answers
+
+A question is answered only by whom it asks (FIN-615,
+`fragment_core::permit::may_answer`), in any fragment:
+
+- **A question** is a record whose body names whom it asks: `asks`, an
+  identity (a chat's card asks its agent's owner).
+- **An answer** is a record whose body names the question's record in the
+  same fragment: `"answers": {"channel": "work", "seq": 12}`, exactly
+  those two fields. An `answers` naming no `seq` is the app's own field.
+- **Who answers.** The platform appends an answer only as the asked
+  identity's own post, written as itself (`author` `person` or `agent`).
+  Anyone else's is 403 and appends nothing: another person, an agent
+  acting for whom it asks (an agent never answers its own card), app code
+  (a mutation's effect or a job step that answers is refused), the
+  platform's own records and a door's. So is an answer to a record that
+  asks no one, or is not kept. A malformed `answers` is 400.
+
+A reader takes any record naming its question as the asked identity's
+answer, and checks no poster itself.
+
 ### Listed records
 
 A channel that declares `listed` (Apps) puts what each member is doing on

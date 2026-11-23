@@ -215,9 +215,66 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
 
     heard(s, api, &owner, &stranger)?;
     posters_kind(s, api, &owner)?;
+    questions(s, api, &owner)?;
     listed(s, api, &owner)?;
     newest(s, api, &owner)?;
     retention(s, api, &owner)
+}
+
+/// Goal: a question is answered only by whom it asks, in any app
+/// (docs/api.md, "Questions and answers"): a record naming whom it `asks`
+/// is a question, and a post whose `answers` names it is taken only as
+/// that identity's own post. Method: in an app of no code, the owner's
+/// agent asks its owner on its channel; then an editor person, the agent
+/// as itself and acting for its owner each answer it, the owner answers
+/// it, again under the same id, and answers what asks no one, what is not
+/// there, and with an `answers` of the wrong shape or of none.
+fn questions(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "questions")?;
+    let c = s.create(api, owner, &name)?;
+    let editor = api.person()?;
+    let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
+    let owner_id = api.identity(owner)?;
+    for who in [api.identity(&editor)?, agent_id.clone()] {
+        let r = api.share(&name, &who, "editor")?;
+        anyhow::ensure!(r.status == 200, "adding {who} as an editor: {r}");
+    }
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"chat":{"read":"viewer","post":"viewer"}}}"#))]);
+    s.deploy(&c);
+    let asked = post(api, &agent, &name, "work", "card", json!({ "kind": "turn.prompt", "prompt": "p1", "text": "Delete it?", "asks": owner_id }))?;
+    let plain = post(api, &agent, &name, "work", "step", json!({ "kind": "turn.step", "text": "a step asks no one" }))?;
+    anyhow::ensure!(asked.status == 200 && plain.status == 200, "the agent's records: {asked} {plain}");
+    let (card, step) = (asked.body["record"]["seq"].as_i64().unwrap_or(0), plain.body["record"]["seq"].as_i64().unwrap_or(0));
+    let answer = |seq: i64| json!({ "kind": "prompt_response", "option": "yes", "answers": { "channel": "work", "seq": seq } });
+    let chat = || records(api, owner, &name, "chat").len();
+
+    let before = chat();
+    let editors = post(api, &editor, &name, "chat", "a1", answer(card))?;
+    let agents = post(api, &agent, &name, "chat", "a2", answer(card))?;
+    let for_owner = api.signed(&agent, "POST", &format!("/api/f/{name}/channels/chat?for={owner_id}"), Some(&json!({ "id": "a3", "body": answer(card) })))?;
+    s.ok(
+        "an answer from anyone the question does not ask is refused (403) and appends nothing: an editor, the asking agent as itself, and the agent acting for whom it asks",
+        [&editors, &agents, &for_owner].iter().all(|r| r.status == 403 && r.code() == Some(ErrorCode::Forbidden) && r.message().contains("answered only by whom it asks")) && chat() == before,
+        format!("{editors} {agents} {for_owner}"),
+    );
+    let mine = post(api, owner, &name, "chat", "a4", answer(card))?;
+    let again = post(api, owner, &name, "chat", "a4", answer(card))?;
+    s.ok(
+        "whom it asks answers it in their own post, and the same post again is that record, appended once",
+        mine.status == 200 && mine.body["record"]["principal"] == owner_id.as_str() && again.status == 200 && again.body["replayed"] == true && again.body["record"]["seq"] == mine.body["record"]["seq"] && chat() == before + 1,
+        format!("{mine} {again}"),
+    );
+    let no_one = post(api, owner, &name, "chat", "a5", answer(step))?;
+    let nothing = post(api, owner, &name, "chat", "a6", answer(card + 100))?;
+    let shape = post(api, owner, &name, "chat", "a7", json!({ "answers": { "channel": "work", "seq": card.to_string() } }))?;
+    s.ok(
+        "an answer to a record that asks no one, or to one not there, is refused (403); one naming a seq in another shape is 400; none appends",
+        no_one.status == 403 && nothing.status == 403 && shape.status == 400 && chat() == before + 1,
+        format!("{no_one} {nothing} {shape}"),
+    );
+    let quiz = post(api, owner, &name, "chat", "a8", json!({ "answers": { "q1": "b", "q2": "c" } }))?;
+    s.ok("an `answers` naming no seq is the app's own field, and appends as any post", quiz.status == 200 && chat() == before + 2, &quiz);
+    Ok(())
 }
 
 /// A fragment with a channel its agents post to that any member reads, and

@@ -7,9 +7,11 @@
 //   - `chat`: what is said. People's messages (`{text, to?, attachments?}`,
 //     posted here with an id of their own), agents' replies (`{text, turn,
 //     attachments?}`), Stop (`{kind: "stop", turn}`), and prompt answers
-//     (`{kind: "prompt_response", prompt, option, agent, turn}`: the card's
-//     own agent and turn, so an answer to one agent's card is never another
-//     agent's that reused its prompt id; id `pr:<a hash of the three>`).
+//     (`{kind: "prompt_response", prompt, option, agent, turn, answers}`:
+//     the card's own agent and turn, so an answer to one agent's card is
+//     never another agent's that reused its prompt id, and its record on
+//     `work`, `answers: {channel, seq}`, which the platform takes only from
+//     whom the card asks; id `pr:<a hash of the three>`).
 //   - `work`: an agent's progress, which only the chat's agents post
 //     (`"from": "agent"`): `turn.start`, `turn.call` (a tool call asked
 //     for, before it runs), `turn.step` (one ended), `turn.prompt`,
@@ -414,7 +416,7 @@ export function mount(root) {
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
     drafts: new Map(), // `turnKey(poster, turn)` -> { principal, turn, text, at }: a reply as it streams
-    answers: new Map(), // `cardKey` (or a bare prompt id) -> Map(poster -> option): each poster's first prompt_response on `chat`
+    answers: new Map(), // a card's seq on `work` -> the option of the first prompt_response naming it (`answers`)
     answering: new Map(), // `cardKey` -> the option this page posted, until its card closes
     typed: new Map(), // `cardKey` -> what is typed in its card's field (an option answered in words)
     handed: new Map(), // `cardKey` -> what came of an answer this page handed its agent's computer, in words
@@ -978,17 +980,11 @@ export function mount(root) {
     // it answers no card and no question here either
     const code = record.author === "code";
     if (body.kind === "prompt_response") {
-      // each poster's first answer, for the card it names (its agent's turn
-      // and prompt; an answer naming none, the API's, is the prompt's); a
-      // card counts only its asker's, so no one else's answer can disable
-      // or answer it here
-      if (!code && typeof body.prompt === "string") {
-        const named = typeof body.agent === "string" && typeof body.turn === "string";
-        const key = named ? cardKey(turnKey(body.agent, body.turn), body.prompt) : body.prompt;
-        if (!state.answers.has(key)) state.answers.set(key, new Map());
-        const by = state.answers.get(key);
-        if (!by.has(record.principal)) by.set(record.principal, body.option);
-      }
+      // the first answer naming its card's record: the platform appends
+      // one only from whom that card asks, in their own post (docs/api.md,
+      // "Questions and answers"), so no one else's can disable or answer it
+      const card = body.answers;
+      if (card?.channel === "work" && Number.isInteger(card.seq) && !state.answers.has(card.seq)) state.answers.set(card.seq, body.option);
       return schedule();
     }
     const to = Array.isArray(body.to) ? body.to.filter((x) => typeof x === "string") : [];
@@ -1951,9 +1947,9 @@ export function mount(root) {
   function promptNode(t, p) {
     const key = `p:${t.key}:${p.prompt}`;
     const closed = t.closed.get(p.prompt) ?? null;
-    // only the card's asker's answer counts here, as only theirs counts to the agent
+    // only an answer naming this card's record (`p.n`), which only its asker posts
     const card = cardKey(t.key, p.prompt);
-    const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
+    const sent = state.answering.get(card) ?? state.answers.get(p.n) ?? null;
     const handed = state.handed.get(card) ?? null;
     const gone = !closed && (expired(p) || t.end?.outcome === "stopped");
     const theirs = mayAnswer(t, p);
@@ -3244,7 +3240,8 @@ export function mount(root) {
     try {
       const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(card)));
       const id = `pr:${[...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-      await fragment.post("chat", { kind: "prompt_response", prompt, option, agent: t.agent, turn: t.id, ...(text ? { text } : {}) }, { id });
+      const answers = { channel: "work", seq: t.prompts.get(prompt).n };
+      await fragment.post("chat", { kind: "prompt_response", prompt, option, agent: t.agent, turn: t.id, answers, ...(text ? { text } : {}) }, { id });
     } catch (err) {
       // 409: another option was sent first, from another page: the card says which once closed
       if (err.status !== 409) {

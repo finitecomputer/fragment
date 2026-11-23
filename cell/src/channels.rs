@@ -56,7 +56,7 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
     Ok((after, before, limit))
 }
 
-use fragment_core::permit::{Action, Standing};
+use fragment_core::permit::{self, Action, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::{door, npub};
 use fragment_proto::{
@@ -253,6 +253,15 @@ impl FragmentCell {
     /// place.
     pub(crate) fn append(&self, channel: &str, principal: &str, author: Author, kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
         assert!(author != Author::Other, "the platform stamps an author it knows");
+        // an answer is taken only from whom its question asks, as its own
+        // post: the floor beneath every writer (posts, the platform's own,
+        // a fill), so no reader checks it again
+        if let Some(question) = permit::answers(body) {
+            let question = question.map_err(|why| CellError::invalid(format!("an answer's `answers` {why}")))?;
+            if !permit::may_answer(self.asks(&question)?.as_deref(), principal, author) {
+                return Err(CellError::new(ErrorCode::Forbidden, "a question is answered only by whom it asks, in their own post"));
+            }
+        }
         let now = js::now_ms();
         let (op_id, idx) = match op {
             Some((id, i)) => (SqlStorageValue::from(id), SqlStorageValue::Integer(i)),
@@ -319,6 +328,21 @@ impl FragmentCell {
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// Whom the record `question` names asks (its body's `asks`, when a
+    /// string): `None` when it asks no one, or is not here (never written,
+    /// or no longer kept).
+    fn asks(&self, question: &permit::Answers) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            asks: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT CASE WHEN json_type(body, '$.asks') = 'text' THEN json_extract(body, '$.asks') END AS asks FROM records WHERE channel = ? AND seq = ?",
+            vec![question.channel.as_str().into(), SqlStorageValue::Integer(question.seq)],
+        )?;
+        Ok(rows.into_iter().next().and_then(|r| r.asks))
     }
 
     /// A record just appended to `channel`, which keeps each poster's newest
