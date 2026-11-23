@@ -93,7 +93,8 @@ thread_local! {
     static GATE: RefCell<Gate> = const { RefCell::new(Gate::new()) };
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct LedgerCell {
     state: State,
     raw: JsValue,
@@ -121,6 +122,7 @@ pub struct LedgerCell {
     schema: crate::schema::Schema,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for LedgerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();

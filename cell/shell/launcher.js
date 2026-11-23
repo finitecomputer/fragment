@@ -168,7 +168,8 @@ export function createLauncher(shell) {
   function openFound(name) {
     const to = opensTo(name);
     closeSearch();
-    if (to?.chat) openChat(to.chat);
+    // a chat picked, as from the sidebar: their computer's start is raced
+    if (to?.chat) { openChat(to.chat); prewake(); }
     else if (to) openApp(to.app);
     leaveSidebar();
   }
@@ -178,7 +179,7 @@ export function createLauncher(shell) {
   function openKnown(hit) {
     closeSearch();
     const at = knownAt(hit, byName(hit.fragment)?.kind);
-    if (at.chat) openChat(hit.fragment, true, at.chat);
+    if (at.chat) { openChat(hit.fragment, true, at.chat); prewake(); }
     else openApp(hit.fragment, at.app);
     leaveSidebar();
   }
@@ -470,8 +471,6 @@ export function createLauncher(shell) {
     fitSearch();
     trigger?.setAttribute("aria-expanded", "true");
     input.focus();
-    // the computer starts waking as the person types, not when they send
-    prewake();
   }
   // `launched`: the panel lifts away as the chat it started shows beneath.
   async function closeSearch(force = false, launched = false) {
@@ -624,14 +623,22 @@ export function createLauncher(shell) {
     $(id).setAttribute("aria-haspopup", "dialog");
     $(id).setAttribute("aria-controls", "search-dialog");
     $(id).setAttribute("aria-expanded", "false");
-    $(id).onclick = () => openSearch($(id));
+    $(id).onclick = () => openedByPerson($(id));
   }
   addEventListener("keydown", (e) => {
     if (e.isComposing || e.repeat || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.code !== "KeyK" || $("layout").hidden) return;
     e.preventDefault();
     if (dialog.open) { input.focus(); return; }
-    openSearch($("sidebar-new-chat"));
+    openedByPerson($("sidebar-new-chat"));
   });
+  // The person's own opening, in the shell (its button, ⌘K): the
+  // computer starts waking as they type, not when they send. A framed
+  // page's ask (below) opens it and wakes nothing: a page may send it on
+  // its own, late, with no key pressed.
+  function openedByPerson(trigger) {
+    openSearch(trigger);
+    prewake();
+  }
   // Keyboard events inside the chat iframe cannot bubble to the desktop.
   addEventListener("message", async event => {
     if (event.data?.fragment !== KIND.openLauncher || $("layout").hidden) return;

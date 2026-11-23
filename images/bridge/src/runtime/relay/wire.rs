@@ -256,6 +256,12 @@ pub fn going_idle_ack() -> String {
     line(json!({ "type": "going_idle_ack" }))
 }
 
+/// An agent's profile's directory, under Hermes' home: its sessions
+/// (`state.db`) and the rest of its memory.
+pub fn profile_dir(home: &std::path::Path, agent_fragment: &str) -> std::path::PathBuf {
+    home.join("profiles").join(profile(agent_fragment))
+}
+
 /// A Hermes profile id for an agent fragment (`^[a-z0-9][a-z0-9_-]{0,63}$`,
 /// Hermes' `PROFILE_ID_RE`): its name, which is one already (`juniper--k3x9`),
 /// any other character as `-`. A name that does not fit is cut and keeps a

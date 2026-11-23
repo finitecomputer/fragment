@@ -122,9 +122,6 @@ pub struct Config {
     /// loopback, link-local, localhost or the platform's own
     /// (`fragment_core::egress::Allow`). Unset: none, public only.
     pub egress_allow: fragment_core::egress::Allow,
-    /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
-    /// (default 7 days: a rollback within it still has its bytes).
-    pub blob_grace_ms: i64,
     /// The shortest wait before a delivery, or a card's shot, is tried
     /// again (10 s; the wait grows with the delivery's age, and a shot's
     /// doubles), and the longest (an hour). `FRAGMENT_DELIVERY_RETRY_S`
@@ -403,7 +400,6 @@ impl Config {
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             egress_allow,
-            blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
             delivery_retry_s: pinned_retry_s.unwrap_or(10),
             delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {

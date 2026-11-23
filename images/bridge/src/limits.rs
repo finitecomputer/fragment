@@ -189,6 +189,9 @@ pub const NOTE_MAX_BYTES: usize = 4096;
 pub const MESSAGE_AGE_TOLD_MS: u64 = 5 * 60_000;
 /// That line, at most (its longest, a continuation's in days, is under 150).
 pub const AGE_NOTE_MAX_BYTES: usize = 256;
+/// The line telling an agent its computer's disk is filling (note.rs,
+/// `disk`), at most.
+pub const DISK_NOTE_MAX_BYTES: usize = 400;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;
@@ -423,7 +426,7 @@ const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(CARD_READ_MS_MAX > HTTP_TIMEOUT_MS, "one hung call fits a card's read");
 const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
-const _: () = assert!(AGE_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + 4 <= MESSAGE_TEXT_MAX_BYTES, "a turn's notes together (its age, a cut turn's or a card's, a chat's history or a recap) are told in no more than a message holds");
+const _: () = assert!(DISK_NOTE_MAX_BYTES + AGE_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + 6 <= MESSAGE_TEXT_MAX_BYTES, "a turn's notes together (its disk, its age, a cut turn's or a card's, a chat's history or a recap) are told in no more than a message holds");
 const _: () = assert!(RECAP_MESSAGE_MAX_BYTES + 1024 < HISTORY_NOTE_MAX_BYTES, "a recap's newest line fits beside its head and where the rest is (under 1 KiB: note.rs, `recap`)");
 const _: () = assert!(RECAP_PAGE_RECORDS as usize * (2 * REPLY_TEXT_MAX_BYTES + 1024) < ANSWER_MAX_BYTES, "a page of the longest replies is one answer");
 const _: () = assert!(RECAP_PAGE_RECORDS <= NOTE_PAGE_RECORDS && RECAP_PAGE_RECORDS as usize <= RECAP_SCAN_RECORDS && RECAP_SCAN_RECORDS + NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX);

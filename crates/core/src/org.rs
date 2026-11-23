@@ -203,6 +203,50 @@ pub fn wiped(p: Place) -> Wiped {
     w
 }
 
+/// How a paid seat would come to someone in an org (`seating`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seating {
+    /// An admin asks for a seat that is already as asked (held, or offered
+    /// the same): answered as it is, nothing written or billed.
+    Again,
+    /// An admin offers a new paid seat, or gives one to a member who holds
+    /// none: one more seat on the subscription.
+    Add,
+    /// Someone accepts a paid seat offered to them: from then they hold it,
+    /// and their ledger is granted its included credit.
+    Accept,
+}
+
+/// Why an org takes no further paid seat now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unseated {
+    /// Its subscription is not in good standing, or it has none: it buys
+    /// again first.
+    NotPaying,
+    /// Its subscription is a trial, which is for a seat of one.
+    TrialSeatOfOne,
+}
+
+/// Whether an org whose subscription is `status` (`None`: it has none)
+/// takes a paid seat `how`. A trial is for a seat of one (docs/billing.md,
+/// "Trials": "One trial per person ever, for a seat of one"; team trials
+/// are not in v1), so while it runs no seat is added and no offer is
+/// accepted, an offer made before it (or before this rule) included: an
+/// accept is when a ledger is granted a seat's included credit, so it waits
+/// until the org pays, and the offer stays to be accepted then (its admin
+/// may withdraw it). What exists is answered as it is. `past_due` is good
+/// here as everywhere (decision 53).
+pub fn seating(status: Option<Status>, how: Seating) -> Result<(), Unseated> {
+    match status {
+        Some(s) if s.is_good() => {}
+        _ => return Err(Unseated::NotPaying),
+    }
+    match (status, how) {
+        (Some(Status::Trialing), Seating::Add | Seating::Accept) => Err(Unseated::TrialSeatOfOne),
+        _ => Ok(()),
+    }
+}
+
 /// A seat its holder holds, as the registry reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Held {
@@ -460,6 +504,48 @@ mod tests {
         let ended: Vec<_> = ALL.iter().filter(|s| s.is_ended()).collect();
         assert_eq!(ended, [&Status::Canceled, &Status::IncompleteExpired]);
         assert!(ALL.iter().all(|s| !(s.is_good() && s.is_ended())), "nothing good is ended");
+    }
+
+    /// Goal: a trial is for a seat of one (docs/billing.md, "Trials"):
+    /// while its org trials, no paid seat is added or accepted, and once it
+    /// pays (or is past due, its retries' grace) seats come as ever.
+    #[test]
+    fn a_trial_takes_no_further_paid_seat() {
+        for how in [Seating::Add, Seating::Accept, Seating::Again] {
+            assert_eq!(seating(Some(Status::Active), how), Ok(()), "{how:?} once it pays");
+            assert_eq!(seating(Some(Status::PastDue), how), Ok(()), "{how:?} past due, unchanged");
+        }
+        assert_eq!(seating(Some(Status::Trialing), Seating::Add), Err(Unseated::TrialSeatOfOne));
+        assert_eq!(seating(Some(Status::Trialing), Seating::Accept), Err(Unseated::TrialSeatOfOne));
+    }
+
+    /// Goal: an org that does not pay takes no paid seat at all, however
+    /// asked; that is the older refusal, not the trial's.
+    #[test]
+    fn an_org_that_does_not_pay_takes_none() {
+        for how in [Seating::Add, Seating::Accept, Seating::Again] {
+            assert_eq!(seating(None, how), Err(Unseated::NotPaying), "{how:?}, no subscription");
+            for s in ALL.into_iter().filter(|s| !s.is_good()) {
+                assert_eq!(seating(Some(s), how), Err(Unseated::NotPaying), "{how:?}, {s:?}");
+            }
+        }
+    }
+
+    /// Goal: the same request again during a trial answers what exists (a
+    /// seat held or offered already), adding nothing; it is not refused.
+    #[test]
+    fn a_trial_answers_the_same_seat_again() {
+        assert_eq!(seating(Some(Status::Trialing), Seating::Again), Ok(()));
+    }
+
+    /// Goal: an offer made before the org trialed, or before this rule, is
+    /// not accepted while it trials (an accept grants a seat's included
+    /// credit); once the org pays, the same offer is accepted.
+    #[test]
+    fn an_offer_outstanding_waits_for_the_trial_to_be_paid() {
+        assert_eq!(seating(Some(Status::Trialing), Seating::Accept), Err(Unseated::TrialSeatOfOne));
+        assert_eq!(seating(Some(Status::Active), Seating::Accept), Ok(()));
+        assert_eq!(seating(Some(Status::Canceled), Seating::Accept), Err(Unseated::NotPaying), "a trial ended unpaid takes it no more");
     }
 
     fn place(admin: bool, admins: u64, others: u64, pays: bool) -> Place {

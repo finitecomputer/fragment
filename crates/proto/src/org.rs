@@ -443,6 +443,14 @@ pub enum GlanceLogs {
     Failed { why: String },
     #[serde(rename_all = "camelCase")]
     Read {
+        /// When these numbers were read (ms): a read is kept a short while
+        /// (`fragment_core::glance::LOGS_FRESH_MS`), so this is how old they
+        /// are, which the page shows.
+        at: i64,
+        /// Why a newer read failed, when these are a kept one standing in
+        /// for it (a 429 under the account's query limit).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why_kept: Option<String>,
         /// Distinct computers whose lines say they are awake: in the last
         /// ten minutes (an awake one logs at least every five), since
         /// `dayStart`, in the last seven days.
@@ -498,8 +506,8 @@ pub enum TroubleKind {
     WontWake,
     /// A save of it failed.
     SavesFailing,
-    /// Its disk had less than `fragment_core::computer::DISK_TOLD_FREE_MAX`
-    /// free.
+    /// Its disk had less than `fragment_core::computer::ROOM_TOLD_MAX` of
+    /// room (docs/computers.md, "Room to restore").
     DiskFilling,
 }
 

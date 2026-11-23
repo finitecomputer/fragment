@@ -31,12 +31,10 @@
 //!   next turn in that chat is told what was cut (P5): its note is built
 //!   from the chat's journal alone, before its claim (note.rs), so it is
 //!   said once, and the same in any life.
-//! - A turn another life ran after this life's `/data` was saved (its
-//!   claim answered 409, and its lost end too: that life ended it) is in
-//!   no memory of its runtime's: the agent's next turn in that chat is told
-//!   the chat (`TurnStart::forgotten`, note.rs `recap`), once in this life.
-//!   One whose lost end lands as this life's was cut in that life: the cut
-//!   note tells it.
+//! - Whether a runtime remembers a chat is its memory's to say, not this
+//!   state's: the driver compares the marker beside it with the journal's
+//!   newest turn of the agent's there (crate::seen), and a turn whose
+//!   runtime is behind is told the chat (note.rs `recap`).
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -172,10 +170,17 @@ pub const CONTINUE_NOTICE: &str = "Picking up where it left off after a restart"
 /// computer's bridge does not run (its image carries none by that name).
 pub fn refused_runtime(runtime: &str) -> String {
     if crate::runtime::valid_name(runtime) {
-        format!("this computer doesn't run {runtime} agents")
+        format!("{REFUSED_RUNTIME}{runtime} agents")
     } else {
-        "this computer doesn't run this agent's runtime".to_string()
+        format!("{REFUSED_RUNTIME}this agent's runtime")
     }
+}
+const REFUSED_RUNTIME: &str = "this computer doesn't run ";
+
+/// Whether a turn's end's error is a refusal: the turn never reached a
+/// runtime (note.rs passes over it).
+pub fn refusal(error: &str) -> bool {
+    matches!(error, REFUSED_QUEUED | REFUSED_BUSY) || error.starts_with(REFUSED_RUNTIME) || error == refused_deep() || error == refused_budget()
 }
 
 /// Why an agent's hand-off is refused a turn: the chat's agents started as
@@ -534,6 +539,11 @@ impl ChatView {
 pub enum Input {
     /// The computer's agents, as `GET /api/computer` lists them now.
     Agents(Vec<Agent>),
+    /// Its disk, as a view of `GET /api/computer` says it (none: not read
+    /// yet): the read's time, its room, and whether it is told filling. A
+    /// read older than the newest it was told changes nothing: a view read
+    /// before another may answer after it (Codex on #1425).
+    Disk(Option<crate::api::Disk>),
     /// A record of a followed channel, read as `agent`, with the chat's view
     /// (a `chat` record's admission needs it; a `tasks` record's does not).
     /// A record from before `since` (ms; when the agent joined the chat) is
@@ -571,6 +581,10 @@ pub enum Input {
     /// its owner's phone (`mirror`). Their relayed records are honored with
     /// or without it.
     Relaying(BTreeMap<String, Option<String>>),
+    /// The computer's agents not ready yet for the runtime their
+    /// `agent.json` names now (ready.rs, `unready`): theirs, their turns
+    /// wait, none claimed, until they are ready.
+    Unready(BTreeSet<String>),
     /// An open card's option answered on the agent's computer (its `/answer`
     /// page: screen.rs), never in a record: `reply` names the request the
     /// answer goes back to (`Effect::ComputerAnswered`).
@@ -665,6 +679,13 @@ pub struct Engine {
     /// prompt (`Effect::Fence`): one not answered is posted again at a tick.
     fencing: BTreeSet<(String, String)>,
     agents: Vec<Agent>,
+    /// Its disk as the newest read it was told says it (`Input::Disk`),
+    /// and the read each agent was last told of: an agent is told at its
+    /// next turn after each read that finds it filling, once (docs/bridge.md,
+    /// "An agent is told to make room"). Never saved: a new life tells each
+    /// again.
+    disk: Option<crate::api::Disk>,
+    disk_told: BTreeMap<String, i64>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
     /// Its agents' work held the computer at the last step: a turn queued
@@ -681,13 +702,6 @@ pub struct Engine {
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
     ended: VecDeque<EndedTurn>,
-    /// The agents and chats where another life ran a turn of the agent's
-    /// since this life's `/data` was saved (its lost end answered 409, or
-    /// refused: `posted`): its runtime remembers none of it, so its next
-    /// turn there is told the chat (`TurnStart::forgotten`) and the entry
-    /// goes. Never written to `/data`: a life that restores the same old
-    /// `/data` reads them again, and is told again.
-    forgotten: BTreeSet<(String, String)>,
     /// Cut turns another life ran (claims answered 409) that may be
     /// continued once their lost end is this life's, which the journal
     /// decides then (`Effect::ReadCut`). Never written to `/data`: a life
@@ -712,6 +726,15 @@ pub struct Engine {
     /// Never written to `/data`: the bridge reads it from each link's file
     /// as it starts.
     relaying: BTreeMap<String, Option<String>>,
+    /// The agents not ready for their runtime yet (`Input::Unready`): no turn
+    /// of theirs is claimed. Never written to `/data`: the driver says it
+    /// with each read of the computer.
+    unready: BTreeSet<String>,
+    /// Turns claimed as this life's while their agent was not ready (its
+    /// claim was in flight as it became so), each with its claim's seq:
+    /// handed once it is (`Input::Unready`). Never written to `/data`: a
+    /// life that ends meanwhile leaves them cut, as any claimed turn.
+    parked: BTreeMap<String, Option<u64>>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -801,6 +824,8 @@ impl Engine {
             claiming: BTreeSet::new(),
             fencing: BTreeSet::new(),
             agents: Vec::new(),
+            disk: None,
+            disk_told: BTreeMap::new(),
             views: HashMap::new(),
             keepalive: false,
             busy: false,
@@ -808,12 +833,13 @@ impl Engine {
             left_from: None,
             left: false,
             ended: VecDeque::new(),
-            forgotten: BTreeSet::new(),
             unread_cuts: BTreeSet::new(),
             reading_cuts: BTreeMap::new(),
             closed_late: BTreeSet::new(),
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
+            unready: BTreeSet::new(),
+            parked: BTreeMap::new(),
             noticed: VecDeque::new(),
             helpers_said: BTreeMap::new(),
             helpers_n: 0,
@@ -923,7 +949,13 @@ impl Engine {
     pub fn step(&mut self, input: Input, now: u64) -> Step {
         self.begin(now);
         match input {
-            Input::Agents(agents) => self.set_agents(agents),
+            Input::Agents(agents) => {
+                // what each agent was told of its disk, for agents still here
+                self.disk_told.retain(|told, _| agents.iter().any(|a| a.fragment == *told));
+                self.set_agents(agents)
+            }
+            Input::Disk(Some(read)) if self.disk.is_none_or(|newest| read.at >= newest.at) => self.disk = Some(read),
+            Input::Disk(_) => {}
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
             Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
             Input::Runtime { runtime, event } => self.runtime(&runtime, event),
@@ -944,6 +976,7 @@ impl Engine {
                 assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
                 self.relaying = agents;
             }
+            Input::Unready(agents) => self.set_unready(agents),
         }
         self.finish()
     }
@@ -1680,21 +1713,11 @@ impl Engine {
         }
         let chat = (t.agent.clone(), t.fragment.clone());
         let cut = (kept && settled).then(|| t.clone());
-        // a lost end refused as another life's (409: that life ran the
-        // turn, or ended it, after this /data was saved): the runtime does
-        // not remember it, and the agent's next turn here is told the chat.
-        // One that lands as this life's was cut in that life: the cut note
-        // tells it.
-        let forgot = !kept && post == records::work_id(id, "end") && t.owed.iter().any(|o| o.id == post && o.body["error"] == LOST);
         t.owed.retain(|o| o.id != post);
         self.dirty = true;
         if t.owed.is_empty() {
             self.state.turns.remove(id);
             crate::ev!("turn.closed", { "turn": id });
-        }
-        if forgot {
-            crate::ev!("turn.forgotten", { "turn": id, "agent": chat.0, "fragment": chat.1 });
-            self.forgotten.insert(chat.clone());
         }
         // another life's cut turn: its read is due now, or never (that life
         // ended it, or its asker stopped it first)
@@ -1818,13 +1841,16 @@ impl Engine {
     /// answered, so a life that ends meanwhile leaves it for the next to
     /// claim (a 409 then, if this claim had landed).
     fn pump(&mut self, agent: &str, fragment: &str) {
+        if self.unready.contains(agent) {
+            return;
+        }
         let runtime = self.runtime_of(agent);
         match self.runtimes.get(&runtime) {
             Some(r) if r.connected => {}
             Some(_) => return,
             None => return self.refuse_queued(agent, fragment, &runtime),
         }
-        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id)));
+        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id) || self.parked.contains_key(&t.id)));
         if busy || self.settling(agent, fragment) {
             return;
         }
@@ -1867,6 +1893,28 @@ impl Engine {
         }
     }
 
+    /// The agents not ready for their runtime now (`Input::Unready`): those
+    /// ready again hand their parked turns, and their queues move. Said
+    /// after the roster (`Input::Agents`), so a turn starts on the runtime
+    /// its agent names now.
+    fn set_unready(&mut self, agents: BTreeSet<String>) {
+        assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
+        let ready: Vec<String> = self.unready.difference(&agents).cloned().collect();
+        self.unready = agents;
+        let parked: Vec<(String, Option<u64>)> = self.parked.iter().filter(|(id, _)| self.state.turns.get(*id).is_none_or(|t| !self.unready.contains(&t.agent))).map(|(id, seq)| (id.clone(), *seq)).collect();
+        for (id, seq) in parked {
+            self.parked.remove(&id);
+            // stopped, or its agent gone, while parked: nothing to hand
+            if self.state.turns.get(&id).is_some_and(|t| t.phase == Phase::Queued && self.agent(&t.agent).is_some()) {
+                self.hand(&id, seq);
+            }
+        }
+        let chats: BTreeSet<(String, String)> = self.state.turns.values().filter(|t| ready.contains(&t.agent)).map(|t| (t.agent.clone(), t.fragment.clone())).collect();
+        for (agent, fragment) in chats {
+            self.pump(&agent, &fragment);
+        }
+    }
+
     /// Every chat's queue moves (a claim may be due in any).
     fn pump_all(&mut self) {
         let chats: BTreeSet<(String, String)> = self.state.turns.values().map(|t| (t.agent.clone(), t.fragment.clone())).collect();
@@ -1886,6 +1934,12 @@ impl Engine {
         }
         assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         match answer {
+            // its agent stopped being ready while its claim was in flight:
+            // claimed, it waits until its agent is ready again
+            ClaimAnswer::Ours { seq } if self.state.turns.get(id).is_some_and(|t| self.unready.contains(&t.agent)) => {
+                crate::ev!("turn.parked", { "turn": id, "why": "its agent is not ready for its runtime yet" });
+                self.parked.insert(id.to_string(), seq);
+            }
             ClaimAnswer::Ours { seq } => self.hand(id, seq),
             ClaimAnswer::Theirs => {
                 // It owes its end as lost (a 409 itself when that life ended
@@ -1906,9 +1960,6 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
-                // whether that life ran it, which the runtime does not
-                // remember, its end's answer says (`posted`), before the
-                // chat's next claim: it is first in the chat's lane
                 self.owe(&agent, &fragment, id, end);
                 self.owe_answer(id, &Outcome::Error(LOST.into()), false);
                 self.pump(&agent, &fragment);
@@ -1943,9 +1994,6 @@ impl Engine {
             crate::ev!("turn.refused", { "turn": id, "agent": agent, "fragment": fragment, "why": "its runtime is none this bridge runs", "runtime": runtime });
             return self.end(id, Outcome::Error(refused_runtime(&runtime)), Closed::Expired);
         };
-        // the runtime does not remember what another life ran here: this
-        // turn is told the chat, once
-        let forgotten = self.forgotten.remove(&(agent.clone(), fragment.clone()));
         // the menu, once a life in each chat, as the agent first runs there
         if !menu.is_empty() && self.published.insert((agent.clone(), fragment.clone())) {
             self.post(&agent, &fragment, records::WORK, records::menu_id(&self.life), records::commands(&a.identity, menu), Vec::new());
@@ -1971,6 +2019,17 @@ impl Engine {
         // driver puts it first in the note); its own note stays a card's,
         // which takes the cut note's place (driver.rs, `note_for`)
         let age = crate::note::age(t.said_at, now, t.routine || t.command, t.continues.is_some());
+        // a disk filling is told to each agent at its next turn after each
+        // read that finds it so, first in the note; never to a command
+        let command = t.command;
+        let disk = match self.disk {
+            Some(crate::api::Disk { at, room, filling: true }) if !command && self.disk_told.get(&agent) != Some(&at) => {
+                self.disk_told.insert(agent.clone(), at);
+                Some(crate::note::disk(room))
+            }
+            _ => None,
+        };
+        let t = self.state.turns.get_mut(id).expect("checked");
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
@@ -1988,7 +2047,7 @@ impl Engine {
             claim_seq,
             note: t.note.clone(),
             age,
-            forgotten,
+            disk,
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
@@ -2309,7 +2368,7 @@ impl Engine {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Called { turn, .. } | Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Child { change: ChildChange::Started { turn, .. }, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } => None,
+                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } | Event::Taken { .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -2336,6 +2395,8 @@ impl Engine {
             }
         }
         match event {
+            // the driver's (crate::seen), which keeps it from here
+            Event::Taken { .. } => {}
             Event::Working(working) => self.runtimes.get_mut(from).expect("checked").working = working,
             Event::Connected(connected) => {
                 let r = self.runtimes.get_mut(from).expect("checked");

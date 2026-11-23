@@ -22,7 +22,7 @@ mod refuse;
 mod report;
 mod scan;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod verify;
 
 pub use pass::{pass_over, refresh_pins, sync_once};

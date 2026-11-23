@@ -27,7 +27,9 @@ platform concept.
 
 ## Where things live
 
-- `cell/`: Rust Worker and JS shims; `cell/shell/`: platform pages.
+- `cell/`: Rust Worker and JS shims; `cell/shell/`: platform pages. The
+  same crate built with `--features admin` is the operators' admin
+  Worker (`cell/src/admin.rs`, `cell/wrangler.admin.jsonc`).
 - `cli/`: CLI; `xtask/`: build, check, dev, e2e, deployment tooling.
 - `crates/proto`: wire types; `crates/core`: pure logic and state machines;
   `crates/nip98`: authentication; `crates/templates`: release assets;
@@ -63,6 +65,10 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   (`crates/proto/wire.lock`) from `crates/proto`'s routes and types.
   Check fails on a change an older client would feel; retire a fact in
   `crates/proto/wire.retired` only once its clients are gone.
+- `cargo xtask skills-catalog`: write the index of Hermes'
+  optional skills (`templates/skills/catalog/hermes.json`) from the pinned
+  Hermes image, through Docker. Run it when the pin moves; a host test
+  fails while the catalog names another version.
 - `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: dev stack
   at :8790, fragments at `http://<name>.fragment.localhost:8790/`.
   Default vendors are fakes. `--real-agent` calls real text models using
@@ -158,6 +164,10 @@ one large one.
   library when it simplifies the stack. Bespoke code needs its reason
   beside it (comment, decision or debt entry). A build step is welcome
   when it buys significant simplification or safety.
+- Shell, templates and platform pages load no script, stylesheet or font
+  from another domain (a security hole and a privacy leak): serve it
+  ourselves in the release's files, async if it helps. `cargo xtask
+  check` enforces it (`xtask/src/remote_loads.rs`).
 - Each runtime offers what it supports: the UI shows only what an agent's
   runtime can do (`cell/shell/agent-runtimes.js`), and we don't build
   parity across runtimes.

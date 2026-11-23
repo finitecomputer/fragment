@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 
 use crate::deploy::{pinned_ok, repository_ok, REGISTRY};
 
+pub(crate) mod disk;
 pub(crate) mod preview;
 
 const USAGE: &str = "usage: cargo xtask image push <image> --repository <name> --tag <tag> [--summary <file>]\n       cargo xtask image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]\nthe registry's account in CLOUDFLARE_ACCOUNT_ID (wrangler's token in CLOUDFLARE_API_TOKEN); a copy's source's in FROM_CLOUDFLARE_ACCOUNT_ID and FROM_CLOUDFLARE_API_TOKEN; images: hermes";
@@ -168,6 +169,9 @@ pub fn image(rest: &[String]) -> Result<()> {
     if rest.first().is_some_and(|s| s == "preview") {
         return preview::run(&rest[1..]);
     }
+    if rest.first().is_some_and(|s| s == "disk") {
+        return disk::run(&rest[1..]);
+    }
     let req = parse(rest, |name| std::env::var(name).ok())?;
     // the pinned Node and wrangler first, and the API the image is prepared
     // through: one that cannot be had stops the run before a build or a
@@ -175,7 +179,9 @@ pub fn image(rest: &[String]) -> Result<()> {
     let tools = devstack::Tools::locate()?;
     let mut api = crate::cloudflare::Api::from_env(&req.account)?;
     let reference = match &req.from {
-        None => push(&req, &tools)?,
+        // a build is held to the disk budget before anything pins it (a
+        // copy's source was, when it was built)
+        None => push(&req, &tools).and_then(|r| disk::check(&r).map(|_| r))?,
         Some(source) => copy(&req, source, &tools)?,
     };
     // ready on the account's network before the summary names it, so the

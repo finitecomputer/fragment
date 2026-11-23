@@ -60,6 +60,10 @@
 //!                    (docs/wire) and its lock (crates/proto/wire.lock) from
 //!                    crates/proto, then says what it breaks of master's
 //!                    (xtask/src/wire/)
+//!   skills-catalog
+//!                    writes templates/skills/catalog/hermes.json, the Hermes
+//!                    optional skills a person can switch on, read from the
+//!                    pinned Hermes image (xtask/src/skills_catalog.rs)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -79,16 +83,22 @@
 //!                    --pinned-only, and changes only its in-memory pins
 //!   image preview --output <file> [--build | --dry-run] [--summary <file>]
 //!                    resolve master's input-keyed Hermes image, or build it,
-//!                    and prepare it (--build); write its input key and digest
+//!                    and prepare it (--build; one it builds held to the disk
+//!                    budget first); write its input key and digest
 //!                    for CI's preview deploy. --dry-run prints its plan
 //!                    without credentials or calls
+//!   image disk <reference>
+//!                    an image's share of a fresh computer's disk, refused past
+//!                    IMAGE_DISK_MAX (xtask/src/image/disk.rs; images/'s
+//!                    Docker lane runs it on the Hermes image)
 //!   cli-release plan | record <tag>
 //!                    CI's CLI input lookup/version plan, or record and
 //!                    verify inputs after publishing all four tarballs
 //!   image push <image> --repository <name> --tag <tag> [--summary <file>]
 //!                    build a computer image (hermes) as a deploy builds it and
 //!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
-//!                    names, then print the digest a config pins it at
+//!                    names, held to the disk budget (image disk), then print
+//!                    the digest a config pins it at
 //!                    (xtask/src/image.rs; the Image workflow runs it)
 //!   image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]
 //!                    copy an image another account's registry holds
@@ -133,12 +143,14 @@ mod image;
 mod inputs;
 mod js_syntax;
 mod prepare;
+mod remote_loads;
 #[cfg(test)]
 mod markdown_dom;
 #[cfg(test)]
 mod continue_js;
 mod rollout;
 mod schema_lock;
+mod skills_catalog;
 mod wire;
 // CI's freshness of its cached builds, compiled by itself with rustc
 // (ci.yml); here for its tests alone
@@ -347,7 +359,6 @@ fn dev(args: &[String]) -> Result<()> {
         poll_interval_s: 10,
         egress_local: true,
         job_retry_delay_s: 2,
-        blob_grace_s: None,
         upload_max_bytes: None,
         // text and images: the Workers AI fake, every tier on it, unless
         // --real-agent puts the text tiers on real models
@@ -391,6 +402,8 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        // a door's image is built only for a stack that runs them (the e2e's door lane)
+        doors: false,
         computer_internet: true,
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
@@ -773,11 +786,22 @@ fn no_eval_sinks(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No page of this repo loads a script, stylesheet or font from another
+/// domain (xtask/src/remote_loads.rs): a security hole and a privacy leak.
+/// We serve our own, from the release, on the page's own origin.
+fn no_remote_loads(root: &Path) -> Result<()> {
+    let files = remote_loads::sources(root)?;
+    remote_loads::check(&files, &remote_loads::ALLOWED)?;
+    println!("remote loads: none in {} pages, stylesheets and scripts ({} allowed, each with why)", files.len(), remote_loads::ALLOWED.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
+    no_remote_loads(&root)?;
     schema_lock::holds(&root)?;
     wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
@@ -790,10 +814,17 @@ fn check() -> Result<()> {
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
         .current_dir(&root))?;
-    run(Command::new("cargo")
-        .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
-        .current_dir(Path::new(&devstack::cell_dir())))
+    // the cell's build, then the admin Worker's (cell/src/lib.rs, "Two
+    // Workers, one crate"): each its own exports
+    for features in [&[][..], &["--features", "admin"]] {
+        run(Command::new("cargo")
+            .args(["clippy", "--target", "wasm32-unknown-unknown"])
+            .args(features)
+            .args(["--", "-D", "warnings"])
+            .env("CARGO_ENCODED_RUSTFLAGS", build::CELL_TARGET_FLAGS.join("\x1f"))
+            .current_dir(Path::new(&devstack::cell_dir())))?;
+    }
+    Ok(())
 }
 
 /// Where the one-line install fetches the CLI from.
@@ -842,13 +873,14 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("wire") => wire::write(&devstack::repo_root()),
+        Some("skills-catalog") => skills_catalog::run(&args[1..]),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> | disk <reference> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

@@ -458,6 +458,25 @@ impl FragmentCell {
             // a life's search index, an ended life's too (searchable.rs)
             return self.search_index_lever(body).await;
         }
+        if body["op"] == "hold-card" {
+            // the alarm's pass waits while on where it chooses its card's
+            // shot (fragment.rs `on_alarm`); `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_card.set((on, self.test_hold_card.get().1));
+            }
+            let (on, waiting) = self.test_hold_card.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
+        }
+        if body["op"] == "hold-launch" {
+            // a launch's batch, made, waits while on before it is written
+            // (jobs.rs `launch_queued`), across a delete and the name made
+            // again; `waiting`, whether one waits now
+            if let Some(on) = body["on"].as_bool() {
+                self.test_hold_launch.set((on, self.test_hold_launch.get().1));
+            }
+            let (on, waiting) = self.test_hold_launch.get();
+            return Ok(json!({ "on": on, "waiting": waiting }));
+        }
         if body["op"] == "hold-install" {
             // a pending install (plane.rs `install_pending`) waits while on,
             // its release's reads and writes to come: set before a create,
@@ -713,6 +732,14 @@ impl FragmentCell {
                 self.del_meta(MetaKey::ReachTold)?;
                 json!({ "reach": self.reaches()? })
             }
+            Some("legacy-visibility") => {
+                // an agent fragment opened by its link or public before
+                // FIN-544 (2026-11-18), as such fragments were left (alone.rs)
+                let v = body["visibility"].as_str().and_then(fragment_proto::Visibility::parse).ok_or_else(|| CellError::invalid("legacy-visibility names a visibility"))?;
+                self.set_meta(MetaKey::Visibility, v.as_str())?;
+                self.sharing_changed()?;
+                json!({ "visibility": v })
+            }
             Some("records") => {
                 // posts filled in as a member made them (channels.rs `fill_records`)
                 let channel = body["channel"].as_str().ok_or_else(|| CellError::invalid("records names a channel"))?;
@@ -757,13 +784,16 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "due": due, "records": records })
             }
-            Some("poll-now") => {
+            Some(op @ ("poll-now" | "age-blobs")) => {
                 // the next alarm is a poll pass (the blob collection's), so a
-                // test need not wait a quiet fragment's day for one
+                // test need not wait a quiet fragment's day for one; `age-blobs`
+                // makes every blob a grace period older first, so it need not
+                // wait a blob's week either
+                let aged = if op == "age-blobs" { self.age_blobs()? } else { 0 };
                 let now = js::now_ms();
                 self.set_meta(MetaKey::PollAt, &now.to_string())?;
                 self.schedule().await?;
-                json!({ "pollAt": now })
+                json!({ "pollAt": now, "aged": aged })
             }
             Some("hold-rows") => {
                 // while on, the alarm sends no list row (`on_alarm`): a row
@@ -779,7 +809,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, hold-rows, or ended")),
+ hold-advances, advance-held, hold-woke, woke-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, age-blobs, hold-rows, or ended")),
         })
     }
 }

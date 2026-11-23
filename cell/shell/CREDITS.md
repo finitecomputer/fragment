@@ -13,6 +13,11 @@
   Authors, github.com/Dicotype/Funnel), under the SIL Open Font License 1.1
   (`vendor/funnel-sans-OFL.txt`), supplied by Skyler (2026-10-22), copied
   unchanged from the fonts that design embeds.
+- `jetbrains-mono-400.woff2`, `-500` and `-600`: JetBrains Mono (The
+  JetBrains Mono Project Authors, github.com/JetBrains/JetBrainsMono), under
+  the SIL Open Font License 1.1 (`vendor/jetbrains-mono-OFL.txt`), copied
+  unchanged from its release v2.304 (`fonts/webfonts/JetBrainsMono-Regular`,
+  `-Medium` and `-SemiBold.woff2`). `fonts.css` declares both families.
 
 - `finite-logo.svg`: Finite's logo supplied by Skyler (2026-10-18),
   copied unchanged above the splash and welcome cards. Its paths are also

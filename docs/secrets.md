@@ -11,9 +11,9 @@ its home; everything that uses it reads it from there.
 |---|---|---|
 | The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, a read-only Workers Observability key (the operators' glance reads the account's Workers Logs with it: an account API token with Workers Observability Read and nothing else), each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
 | A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`), and removed when it installs other code (a fork: Paul, 2026-10-31) |
-| A person's own key for an `own` provider | their computer's Durable Object, sealed | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
+| A person's own key for an `own` provider | their Vault, sealed (below; M16: a computer from before hands its own over once) | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
 | A person's secret for their agents (a token, a bot's, a Nostr key) | their Vault, a Durable Object of theirs, sealed (below) | the person alone, never an agent: `PUT /api/vault/{secret}` (docs/api.md, "A person's Vault"); or the platform's own code for them (`vault::put`: FIN-463's hand-off) |
-| A sign-in under way (its PKCE verifier) | sealed in the computer (an own key's) or the registry (a connection's), until used or ten minutes pass | no one |
+| A sign-in under way (its PKCE verifier) | sealed in the person's Vault (an own key's; one begun before the move, in their computer) or the registry (a connection's), until used or ten minutes pass | no one |
 | A fragment's nostr key (an agent's too) and its push key | made and sealed in the fragment's Durable Object, opened only to sign | no one |
 | A person's connections (Google, …) | WorkOS Pipes, which holds and refreshes them; a computer's swap asks it for a short-lived token on each call (decision 22) | the person (docs/pipes-browser-binding.md) |
 | Browser sessions | the registry, as SHA-256 hashes; the tokens only in HttpOnly cookies | no one |
@@ -67,7 +67,11 @@ only from that computer's egress, toward that provider.
   (#814).
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
-  and connections are swapped in at the computer's egress.
+  and connections are swapped in at the computer's egress. Each operator
+  key is locked at its vendor (scopes and a spend limit where offered),
+  and its catalog row's `deny` names the account-wide calls the vendor
+  can't scope away, which the swap never sends it on (docs/computers.md,
+  "Calls an operator key never goes on").
 
 ## A person's Vault
 
@@ -105,6 +109,23 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
 - **Echoes are hidden**: an answer to a request a Vault filled is read
   whole (not an event stream, at most 8 MiB) and each value it echoes
   named `{{name}}`, as a job's fetch names its own.
+- **Their own keys are its too** (M16), each its own kind (Paul,
+  2026-11-18): one per `own` provider of the catalog, used by every agent
+  of theirs not narrowed from it, as before. Its person sets or removes
+  one (`PUT`/`DELETE /api/connections/{provider}/key`, or a sign-in's
+  finish, whose verifier the Vault keeps sealed ten minutes); a removal is
+  kept as one. Their computer's swap asks the Vault for the key as each
+  request goes, beside its ask of the agent's fragment, and the view lists
+  which they hold. Neither asks a computer.
+- **A computer from before the move hands its own keys over** once, at
+  its owner's next read of it or of their connections, or its agent's
+  next call through one (never a start, an exit, a takeover or its
+  guest's request): it opens each, sends it to their Vault in one
+  hop between the two, logs only providers and counts, and deletes it
+  whether the Vault took it or not. The Vault takes one only where its
+  person set or removed none since, so a key sent late, or again, never
+  replaces what they said. One the Vault did not answer for stays owed. A
+  sign-in begun on a computer before the move finishes from there.
 - **A wipe empties it** with their ledger, and keeps the row that says so.
 - **An old finite.computer agent's keys come in once** (FIN-463 F11;
   docs/migrations.md, "The secrets hand-off"): on its person's Yes, the
@@ -123,6 +144,17 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   short. A claim has no clock; setting the secret again with a value, or
   removing it, ends it (`fragment_core::vault::Claimed`); set again with
   no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
+- **A move is its person's word, never a page's**: from the platform's
+  own pages (the shell's session) or their own key, never from a
+  fragment's page (`__secrets`, a site or frame session: 403 for any
+  name, before the Vault is asked). A page runs its authors' code with its
+  visitor's session, and an author may be the visitor's own agent, so a
+  page's call says nothing of what they want. The Telegram connector's
+  setup page asks Settings instead (`vault-move`, frame-messages.js):
+  Settings moves only the bot it offered that frame, into that connector.
+  A move keeps the secret within the hosts its Vault names
+  (`fragment_core::vault::within`, 400 otherwise, before it is claimed);
+  a parked one's move names them.
 
 ## The Secrets Store
 
