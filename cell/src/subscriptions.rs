@@ -4,9 +4,13 @@
 //! outbox and queue (deliveries.rs) as `{type: "record", fragment,
 //! channel, record}` (`fragment_proto::Delivery`), unsigned: the URL is
 //! the subscriber's capability; a computer's wake goes from the outbox to
-//! the computer itself. A member's subscriptions end with its membership.
+//! the computer itself. A member's subscriptions end with its membership,
+//! and each delivery asks again whether its subscriber may read the
+//! channel now (`fragment_core::subscription::delivers`): one lowered
+//! since, or a channel raised or dropped by a deploy since, is sent
+//! nothing, its subscription kept for when it may read again.
 
-use fragment_core::{egress, npub};
+use fragment_core::{egress, npub, subscription};
 use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode};
 use serde_json::{json, Value};
 use worker::*;
@@ -97,6 +101,19 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "removed": gone.len() }))
     }
 
+    /// Whether `principal` may be sent a record of `channel` now: a member
+    /// whose role reads the channel as it is declared now
+    /// (`subscription::delivers`), asked as `subscriber` asked when the
+    /// subscription was made.
+    fn may_deliver(&self, principal: &str, channel: &str) -> CellResult<bool> {
+        let read = match self.channel_read_role(channel) {
+            Ok(read) => Some(read),
+            Err(gone) if gone.code == ErrorCode::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        Ok(subscription::delivers(self.member_role(principal)?, read))
+    }
+
     /// A member's subscriptions end with its membership.
     pub(crate) fn drop_subscriptions(&self, principal: &str) -> CellResult<()> {
         self.exec("DELETE FROM subs WHERE principal = ?", vec![principal.into()])
@@ -142,17 +159,23 @@ impl FragmentCell {
         Ok(row["outboxed"].as_i64().expect("records.outboxed is INTEGER NOT NULL") != 0)
     }
 
-    /// The delivery of record `seq` of `channel` to subscription `sub`, or
-    /// `None` when there is nothing to send: the subscription ended, or the
-    /// record is past its retention.
     /// When record `seq` of `channel` was posted (ms), if it is there.
     pub(crate) fn record_at(&self, channel: &str, seq: i64) -> Option<i64> {
         self.read_channel(channel, seq - 1, 1).ok()?.into_iter().find(|r| r.seq == seq).map(|r| r.at)
     }
 
+    /// The delivery of record `seq` of `channel` to subscription `sub`, or
+    /// `None` when there is nothing to send: the subscription ended, its
+    /// subscriber may not read the channel now (`may_deliver`), or the
+    /// record is past its retention.
     pub(crate) fn record_delivery(&self, sub: i64, channel: &str, seq: i64, fragment: &str, incarnation: &str) -> CellResult<Option<Delivery>> {
-        let subs = self.rows("SELECT url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
-        let Some(url) = subs.first().map(|r| r["url"].as_str().expect("subs.url is TEXT").to_string()) else { return Ok(None) };
+        let subs = self.rows("SELECT principal, url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
+        let Some(row) = subs.first() else { return Ok(None) };
+        let principal = row["principal"].as_str().expect("subs.principal is TEXT");
+        let url = row["url"].as_str().expect("subs.url is TEXT").to_string();
+        if !self.may_deliver(principal, channel)? {
+            return Ok(None);
+        }
         let Some(record) = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq) else { return Ok(None) };
         // serialized as it is: the record's body goes out as the text the cell stored
         let delivery = fragment_proto::Delivery { kind: DeliveryType::Record, fragment: fragment.to_string(), channel: channel.to_string(), record };
