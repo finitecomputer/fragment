@@ -2190,13 +2190,14 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<Option<String>> {
             api.channels(agent, chat).await.map_err(|e| unread(e.into())).ok()?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq).saturating_add(1)
         }
     };
+    let want_room = ts.room.as_ref().map(|r| r.id.as_str());
     let full = |rs: &[Record]| {
-        let (said, begins) = note::exchanges(rs, me, owner, since, until);
+        let (said, begins) = note::exchanges_in(rs, me, owner, want_room, since, until);
         begins || note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES
     };
     // small pages: a page of the chat's longest records is one answer still
     let (read, from_start) = read_pages(api, agent, chat, records::CHAT, before, (limits::RECAP_PAGE_RECORDS, limits::RECAP_SCAN_RECORDS), full, &mut budget).await.map_err(unread).ok()?;
-    let (mut said, mut begins) = note::exchanges(&read, me, owner, since, until);
+    let (mut said, mut begins) = note::exchanges_in(&read, me, owner, want_room, since, until);
     let Some(oldest) = said.first().map(|r| r.at) else {
         crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here before it to tell" });
         return Some(None);
@@ -2228,7 +2229,6 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<Option<String>> {
     // using the agent's own verified `turn.start` records on `work`, so no
     // private room's messages or tool steps ever leak into another room's
     // prompt.
-    let want_room = ts.room.as_ref().map(|r| r.id.as_str());
     let mut same_turns: BTreeSet<String> = BTreeSet::new();
     let mut same_seqs: BTreeSet<u64> = BTreeSet::new();
     let mut other_turns: BTreeSet<String> = BTreeSet::new();

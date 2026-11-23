@@ -529,15 +529,32 @@ fn message(r: &Record) -> Option<String> {
 /// time; each message was one the bridge read as the agent, which may read
 /// all of them (`fragment channel`).
 pub fn exchanges<'a>(chat: &'a [Record], me: &str, owner: &str, since: i64, until: i64) -> (Vec<&'a Record>, bool) {
+    exchanges_in(chat, me, owner, None, since, until)
+}
+
+/// Like `exchanges`, scoped to one session: when `room` is `Some(rid)`,
+/// ignores root-chat `/new` resets (which reset only the root session) and
+/// counts only records that belong to `rid` or are the agent's own replies
+/// (later verified against `work`'s `turn.start["room"]`), so neither an
+/// unrelated root `/new` nor busy sibling rooms truncate `rid`'s recovery.
+pub fn exchanges_in<'a>(chat: &'a [Record], me: &str, owner: &str, room: Option<&str>, since: i64, until: i64) -> (Vec<&'a Record>, bool) {
     let mut said = Vec::new();
     let mut begins = false;
     // newest first, back to where its runtime's conversation began
     for r in chat.iter().rev() {
-        if r.at < since || begins_again(r, me, owner) {
+        if r.at < since || (room.is_none() && begins_again(r, me, owner)) {
             begins = true;
             break;
         }
         if r.channel == records::CHAT && r.at <= until && records::is_identity(&r.principal) && message(r).is_some() {
+            if let Some(rid) = room {
+                let in_room = records::room(&r.body).as_ref().map(|rm| rm.id.as_str()) == Some(rid) || own_words(&r.principal, &r.body, me, owner);
+                if !in_room {
+                    continue;
+                }
+            } else if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) {
+                continue;
+            }
             said.push(r);
         }
     }
@@ -1547,5 +1564,22 @@ mod tests {
         let rendered = room_context(&many).unwrap();
         assert!(rendered.len() <= limits::ROOM_CONTEXT_MAX_BYTES, "{}", rendered.len());
         assert!(rendered.contains("> User20: ") && !rendered.contains("> User1: "), "newest kept, oldest dropped");
+
+        // exchanges_in ignores root /new and sibling rooms for room sessions,
+        // while root sessions still stop at root /new.
+        let chat = vec![
+            said_at(1, OWNER, json!({ "text": "root old" })),
+            said_at(2, "npub1slack", json!({ "text": "c1 old", "heard": { "via": "slack", "from": "U1", "name": "Maple" }, "room": { "id": "C1", "name": "#deploys" } })),
+            said_at(3, ME, json!({ "text": "c1 reply", "turn": "tc1" })),
+            said_at(4, "npub1slack", json!({ "text": "c2 noise", "heard": { "via": "slack", "from": "U2", "name": "Sam" }, "room": { "id": "C2", "name": "#general" } })),
+            said_at(5, OWNER, json!({ "kind": "command", "command": "new", "to": [ME] })),
+            said_at(6, OWNER, json!({ "text": "root fresh" })),
+        ];
+        let (c1_said, c1_begins) = exchanges_in(&chat, ME, OWNER, Some("C1"), 0, i64::MAX);
+        assert!(!c1_begins, "root /new must not stop room C1 pagination");
+        assert_eq!(c1_said.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![2, 3], "C1 keeps its message + own replies and skips root/C2");
+        let (root_said, root_begins) = exchanges_in(&chat, ME, OWNER, None, 0, i64::MAX);
+        assert!(root_begins, "root /new still stops root pagination");
+        assert_eq!(root_said.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![6]);
     }
 }

@@ -934,6 +934,89 @@ async fn private_room_history_never_leaks_into_another_room_after_restart_or_rol
     bridge.stop().await;
 }
 
+/// Goal (FIN-508, review of #1494): a `/new` command in the connector's root
+/// chat resets the root session alone and never truncates a room's recovery
+/// recap after runtime memory loss and restart, while root recovery still
+/// stops at the root `/new`.
+#[tokio::test]
+async fn root_new_does_not_erase_room_recap() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let door = fake.connector("slacknew", "juniper", Some("slack"));
+    let reply_for = |w: &World, said: &Value| {
+        let t = turn_of("juniper", &door, seq(said));
+        w.bodies(&door, "chat", "reply").into_iter().find(|r| r["turn"] == t).and_then(|r| r["text"].as_str().map(str::to_string))
+    };
+    let dir = support::dir("room-root-new");
+    let memory = dir.join("memory");
+    let script_with_mem = |mem: std::path::PathBuf| -> Box<dyn fragment_bridge::runtime::Runtime> {
+        Box::new(fragment_bridge::runtime::script::Script { config: fragment_bridge::runtime::script::ScriptConfig { pace: Duration::from_millis(10), data: dir.join("data"), scratch: dir.join("scratch"), memory: Some(mem) } })
+    };
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start(cfg.clone(), script_with_mem(memory.clone()));
+    following(&fake, 2).await;
+
+    // 1. Root conversation before `/new`
+    let root_before = fake.say(&door, &person("paul"), json!({ "text": "root secret before reset", "to": ["npub1juniper"] }));
+    fake.until(WAIT, "root turn before /new finished", |w| reply_for(w, &root_before).is_some()).await;
+
+    // 2. Room C1 conversation before root `/new`
+    let c1_before = fake.say(
+        &door,
+        "npub1slacknew",
+        json!({
+            "text": "deploy checklist alpha-77",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+            "room": { "id": "C1", "name": "#deploys" },
+        }),
+    );
+    fake.until(WAIT, "C1 turn before /new finished", |w| reply_for(w, &c1_before).is_some()).await;
+
+    // 3. Owner runs `/new` in the connector's root chat addressed to juniper
+    let reset = fake.say(
+        &door,
+        &person("paul"),
+        json!({ "kind": "command", "command": "new", "to": ["npub1juniper"] }),
+    );
+    let reset_turn = turn_of("juniper", &door, seq(&reset));
+    fake.until(WAIT, "root /new finished", |w| !w.bodies(&door, "work", "turn.end").into_iter().filter(|r| r["turn"] == reset_turn).collect::<Vec<_>>().is_empty()).await;
+
+    // 4. Lose runtime memory and restart
+    bridge.stop().await;
+    fake.until(WAIT, "sockets closed", |w| w.live_sockets() == 0).await;
+    let _ = std::fs::remove_dir_all(&memory);
+    let bridge = support::start(cfg, script_with_mem(memory.clone()));
+    following(&fake, 2).await;
+
+    // 5. Message room C1: its recap MUST still include "deploy checklist alpha-77"
+    let c1_after = fake.say(
+        &door,
+        "npub1slacknew",
+        json!({
+            "text": "status now?",
+            "to": ["npub1juniper"],
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
+            "room": { "id": "C1", "name": "#deploys" },
+        }),
+    );
+    fake.until(WAIT, "C1 turn after restart finished", |w| reply_for(w, &c1_after).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &c1_after).unwrap();
+        assert!(text.contains("deploy checklist alpha-77"), "root /new must not erase C1 recap: {text}");
+        assert!(!text.contains("root secret before reset"), "root conversation must not leak into C1: {text}");
+    });
+
+    // 6. Message root chat: root `/new` MUST still stop root recap from recovering pre-reset root history
+    let root_after = fake.say(&door, &person("paul"), json!({ "text": "fresh root message", "to": ["npub1juniper"] }));
+    fake.until(WAIT, "root turn after restart finished", |w| reply_for(w, &root_after).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &root_after).unwrap();
+        assert!(!text.contains("root secret before reset"), "root /new must still reset root recap: {text}");
+        assert!(!text.contains("deploy checklist alpha-77"), "C1 conversation must not leak into root: {text}");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (lesson 5): when the API drops every socket (a deploy) or goes
 /// down a while, the bridge comes back on its own and answers what was
 /// said meanwhile, once.
