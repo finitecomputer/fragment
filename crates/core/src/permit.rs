@@ -533,6 +533,20 @@ pub fn acts_as_itself(owner: Option<Role>, agent: Option<Role>) -> bool {
     owner.is_none() && agent.is_some_and(|role| role <= AGENT_ROLE_MAX)
 }
 
+/// Whether a request of `standing` may start a fragment's `woke` trigger
+/// (cell/src/jobs.rs `woke_chance`, FIN-372): it is signed, by someone the
+/// fragment would answer at its floor for reading (`public`), so a
+/// stranger to a members-only or link fragment starts no run its owner
+/// pays for (FIN-660). The share link never counts: the wake is offered
+/// before the site reads its link (cell/src/jobs.rs `woke_run` reads the
+/// standing without it). This is the fragment's floor, not each route's
+/// decision: a route that needs more (`status` needs a viewer) can still
+/// refuse a signed visitor to a public fragment whose request woke it.
+pub fn wakes(visibility: Visibility, standing: Standing) -> bool {
+    let standing = Standing { link: false, ..standing };
+    standing.signed && matches!(decide(&Facts { visibility, standing, action: Action::Read(Role::Public) }), Verdict::Allow(_))
+}
+
 /// Why a membership change is refused, or `None` when it is allowed. Only
 /// the owner manages members (their own agent sharing for them acts with
 /// their role: `agent_shares`); the owner's own row is never changed here
@@ -1225,5 +1239,38 @@ mod tests {
         assert!(refuse_remove(Some(Editor), false, Some(Viewer)).is_some());
         assert!(refuse_remove(Some(Owner), true, Some(Owner)).is_some());
         assert!(refuse_remove(Some(Owner), false, None).is_some());
+    }
+
+    /// A woke trigger starts for someone signed whom the fragment answers,
+    /// and for no one it refuses or anyone unsigned (FIN-660).
+    #[test]
+    fn a_wake_is_someone_the_fragment_answers() {
+        let signed = |member| Standing { member, signed: true, ..Standing::default() };
+        // valid: a member, on any visibility; anyone signed, on a public fragment
+        for v in [V::Members, V::Link, V::Public] {
+            for role in [Viewer, Editor, Owner] {
+                assert!(wakes(v, signed(Some(role))), "a {role:?} on {v:?}");
+            }
+        }
+        assert!(wakes(V::Public, signed(None)), "a signed visitor to a public fragment");
+        assert!(wakes(V::Members, Standing { owns_member_agent: true, ..signed(None) }), "a person whose agent is in reads");
+        // invalid: a signed stranger the route refuses, and anyone unsigned
+        assert!(!wakes(V::Members, signed(None)), "a stranger to a members-only fragment");
+        assert!(!wakes(V::Link, signed(None)), "a stranger without the link");
+        // the share link lends a wake nothing, whatever standing says of it
+        // (the Worker reads it without the link): a link holder who is no
+        // member wakes no link fragment
+        assert!(!wakes(V::Link, Standing { link: true, ..signed(None) }), "a link holder on a link fragment");
+        assert!(!wakes(V::Members, Standing { link: true, ..signed(None) }), "a link holder on a members-only fragment");
+        // a signed visitor to a public fragment wakes it, though a route
+        // that needs a viewer (`status`) refuses them after
+        assert!(wakes(V::Public, Standing { link: true, ..signed(None) }), "a public fragment's visitor, link or not");
+        for v in [V::Members, V::Link, V::Public] {
+            assert!(!wakes(v, Standing { signed: false, ..signed(None) }), "unsigned on {v:?}");
+        }
+        // an agent acting for someone wakes as it may read
+        let agent = |cap| Standing { cap: Some(cap), ..signed(Some(Editor)) };
+        assert!(!wakes(V::Members, agent(Cap { agent: None, owner: None })), "an agent whose cap lends nothing");
+        assert!(wakes(V::Members, agent(Cap { agent: Some(Viewer), owner: None })), "an agent that is itself a member");
     }
 }

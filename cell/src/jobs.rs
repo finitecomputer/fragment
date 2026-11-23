@@ -55,7 +55,7 @@ use fragment_core::inbox::Answer;
 use fragment_core::manifest::{InboxCheck, InboxDecl};
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
-use fragment_core::{cron::Cron, egress, glob, npub};
+use fragment_core::{cron::Cron, egress, glob, npub, permit};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, Author, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
@@ -1240,8 +1240,11 @@ impl FragmentCell {
 
     /// A woke trigger (`{"woke": true, "run": op}`, FIN-372) starts its run
     /// at most once per activation of this object, for the first request
-    /// of it that a person or an agent made: one the router signed for
-    /// them, or a page's whose credential resolves to one. Never for an
+    /// of it that a person or an agent made whom the fragment answers (a
+    /// member, or anyone on a public fragment: `permit::wakes`): one the
+    /// router signed for them, or a page's whose credential resolves to
+    /// one. A stranger's request to a members-only fragment, refused by
+    /// its route, starts nothing (FIN-660). Never for an
     /// alarm (it makes no request), the platform's own routes (answered
     /// before the router's), or an anonymous visitor (a share link's
     /// reader, or the card's browser, which opens the page as one), so a
@@ -1264,7 +1267,12 @@ impl FragmentCell {
     }
 
     async fn woke_run(&self, caller: &Caller, name: &str) {
-        let someone = self.identified(caller, name).await.is_ok_and(|c| c.signed.is_some());
+        // someone signed whom the fragment answers: a request its route
+        // refuses starts nothing (`permit::wakes`, FIN-660)
+        let someone = match self.identified(caller, name).await {
+            Ok(c) => c.signed.is_some() && self.facts().and_then(|f| Ok(permit::wakes(f.visibility, self.standing(&c, false)?))).unwrap_or(false),
+            Err(_) => false,
+        };
         // two first requests at once: the first to get here starts it
         if !someone || self.woke.replace(true) {
             return;
