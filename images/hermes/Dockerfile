@@ -310,6 +310,26 @@ RUN for d in /opt/hermes/tools/chromium-*; do \
 # count proves the rest compiled. Our plugin's is compiled with it, below.
 RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchecked-hash /opt/hermes > /dev/null || true; \
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
+# And read by `hermes` commands: Hermes' launcher (libexec/hermes, which
+# `hermes` and the venv's `hermes` both run) points Python's bytecode at
+# $HOME/.cache/hermes-pycache unless a prefix is set, and under a prefix
+# Python reads none of the bytecode beside a source, so each command
+# compiled its imports and PYTHONDONTWRITEBYTECODE kept none (`hermes
+# --version` 0.87 s, 0.22 s with this bytecode, on a computer of the cell's
+# size, 2026-11-22). The gateway's preload runs Python directly and reads
+# it already; its fallback start goes through the launcher. What
+# upstream's prefix protects, an install Python must not write into,
+# /opt/hermes already is here (root's, and the image writes no bytecode),
+# so the line goes, an exact match (docs/technical-debt-ledger.md, "Hermes
+# reads the image's bytecode"). The check: a launcher run with bytecode
+# writes on puts nothing in that cache.
+RUN line='export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/hermes-pycache}"' \
+ && test "$(grep -cxF "$line" /opt/hermes/libexec/hermes)" = 1 \
+ && grep -vxF "$line" /opt/hermes/libexec/hermes > /tmp/launcher \
+ && cat /tmp/launcher > /opt/hermes/libexec/hermes && rm /tmp/launcher \
+ && ! grep -q PYTHONPYCACHEPREFIX /opt/hermes/libexec/hermes \
+ && mkdir /tmp/rh && env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX -u XDG_CACHE_HOME HOME=/tmp/rh HERMES_HOME=/tmp/rh /opt/hermes/.venv/bin/hermes --version > /dev/null \
+ && test ! -e /tmp/rh/.cache/hermes-pycache && rm -rf /tmp/rh
 
 # The files the gateway loads, read ahead on the second CPU while /data is
 # restored (S3b, cut h). And the base's directories that ours (below) lands

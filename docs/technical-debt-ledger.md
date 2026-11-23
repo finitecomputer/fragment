@@ -423,6 +423,26 @@ unfinished design, not debt.
   `a_regular_browser_is_shared_by_the_desktop_and_tools` with the flag
   gone.
 
+## Hermes reads the image's bytecode
+
+- **Shortcut:** Hermes' launcher (since v0.23, `libexec/hermes`) sets
+  `PYTHONPYCACHEPREFIX` to `$HOME/.cache/hermes-pycache` unless one is set,
+  so a sealed install never sees bytecode written into it. Under a prefix
+  Python reads none of the bytecode beside a source, so each `hermes`
+  command (and the gateway's fallback start, not its preload) compiled
+  its imports again: `hermes --version` 0.87 s against 0.22 s. The image's
+  build deletes that one line of the launcher (images/hermes/Dockerfile,
+  after its compileall): the launcher sets no prefix, as before v0.23,
+  and one a caller sets still holds. An exact match: an upstream change
+  fails the build.
+- **Risk:** none known: `/opt/hermes` is root's and the image sets
+  `PYTHONDONTWRITEBYTECODE`, so nothing writes into the install. A
+  process that unsets both and runs as root could, as before v0.23.
+- **Delete when:** a pinned Hermes reads an install's own bytecode under
+  its launcher (or leaves the prefix unset), proven by the build's check
+  (a launcher run with bytecode writes on leaves no
+  `$HOME/.cache/hermes-pycache`) passing without the change.
+
 ## The image brings the agent's browser tab to the front
 
 - **Shortcut:** Hermes' browser_exec opens each page after the first in a
