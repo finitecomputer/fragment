@@ -68,7 +68,10 @@ The share link (`?view=<token>`) counts only on the fragment's own site
 (`cell/src/serve.rs` `answer`, compared in constant time with `eq_ct`). It
 lends nothing on `/api/f/…`: every API route decides with `link: false`.
 It moves into a cookie on its first navigation and off the URL, so the
-page's code never reads it. The owner's `POST rotate` replaces it.
+page's code never reads it. The owner's `POST rotate` replaces it. The
+`idor` section holds a real link on a `link` fragment to both: its site
+answers an unsigned holder, and its control API answers the same token
+403 to a signed stranger and 401 to no one signed.
 
 ## Fragment routes (`/api/f/{name}/…`)
 
@@ -125,16 +128,16 @@ e2e sections test which cookies count there.
 
 | Route | Resource named by | Checked at | Tests |
 |---|---|---|---|
-| `POST /api/fragments` (create) | the signer, who owns what they make; an agent makes one only acting for its own owner | `lib.rs` (`signer_for`, `acting_for` must be its owner), then the new fragment's `create` | `create` |
+| `POST /api/fragments` (create) | the signer, who owns what they make. An agent's signature, with or without `for`, makes one for the agent's own owner: `create_fragment` takes the owner from the agent's identity (its registered owner), never from the request, so an agent signing bare reaches it too and still makes its owner's; a `for` naming anyone but its owner is refused first (`signer_for`) | `lib.rs` `signer_for`, then `create_fragment` (the maker is the agent's `owner`), then the new fragment's `create` | `create` |
 | `GET /api/fragments/watch` (WebSocket) | the signer's own list: signed, or the platform's own page with its session (Origin checked) | `lib.rs` `watch_list` | `shell` |
 | `GET /api/fragments`, `PUT /api/fragments/{name}/archived`, `dock`, `pinned`, `seen`, `GET /api/search` | the signer's own `Principal` object; `{name}` picks a row of their list | `lib.rs` (object keyed by `who.identity.id`) | `idor` (another's archive changes nothing of theirs) |
 | `POST /api/search` (across fragments) | each named fragment, asked as the signer | `across.rs` → each fragment's `search_asked` (`admit` viewer) | `idor`, `search-across` |
-| `/api/computers`, `/api/computers/{id}/…` | the computer `{id}` | `computer.rs` `ComputerCell::api` → `owned_by` (404 unless its stored owner is the signer); people only | `idor` (another's id 404), `computers` (a stranger's restart) |
+| `/api/computers`, `/api/computers/{id}/…` | the computer `{id}` | `computer.rs` `ComputerCell::api` → `owned_by` (404 unless its stored owner is the signer); people only | `computers` (a stranger's restart of another's computer is 404, `RECOVERY_CHECKS`) |
 | `/api/connections`, `/{provider}/authorize`, `DELETE /{provider}?account=` | the signer's WorkOS user; an account id must be one of theirs | `connections.rs` `route`, `going`; registry `connection_signin.rs` `disconnected` (by the signer's subject) | `connections` |
 | `PUT`/`DELETE /api/connections/{provider}/key` | the signer's own Vault (an own key for a provider) | `connections.rs` → `vault::own_put` keyed by the signer | `connections` |
 | `GET /api/connections/{provider}/callback` | the state cookie of the browser that began it, and its session | `connections.rs` `callback`, `auth::trip_bound` | `connections` (PKCE, another attempt's code) |
 | `/api/vault`, `/api/vault/{name}` | the signer's own `Vault` object | `vault.rs` `route`; people only | `vault` (another person's list, delete by name) |
-| `/api/export`, `/api/export/{id}/download` | the signer's own `Principal`; `{id}` among their exports | `export.rs` `route`, `downloader`; people only | `idor`, `export` |
+| `/api/export`, `/api/export/{id}/download` | the signer's own `Principal`; `{id}` among their exports | `export.rs` `route`, `downloader`; people only | `export` (anyone else's session downloads nothing, 404) |
 | `/api/ledger`, `/api/ledger/uses`, `POST /api/ledger/quote` | the signer's payer (an agent's: its owner) | `lib.rs` `ledger_route`, `payer_of` | `ledger` |
 | `POST /api/ledger/{who}/{command}` | any ledger | operators only (`orgs::operator`) | `ledger`, `orgs` |
 | `POST /api/identities` (an agent's registration) | the owner's signature, and a proof signed by the agent's new key; a person is refused (people sign in) | `lib.rs` `identities` (`authenticate`, `proven_key`), registry `RegisterAgent` | `identities` |
@@ -181,10 +184,22 @@ otherwise (`lib.rs`, `levers::route`).
   not run: this pass used no Docker, workerd or e2e lanes. Run it with
   `cargo xtask e2e --only idor` before counting on it. The other sections
   named above already ran on `master`.
-- **A refused request still costs its owner a little.** It counts once
-  on the owner's request meter before the route's check (`meter.rs`
-  `count_request`). Nothing else of the fragment is read or written for
-  it, and with FIN-660 fixed it starts no job.
+- **A refused request still has effects before its check.** Every
+  request the router hands a fragment runs three steps before its route
+  decides who may ask (`fragment.rs`, before `route`):
+  - It counts once on the owner's request meter (`meter.rs`
+    `count_request`).
+  - On a fragment of a blessed template installed from an older release
+    (the platform deployed since), it installs the release's code again
+    (`plane.rs` `blessed_current`, `install_code`), and that
+    install fires the template's `installed` trigger (`jobs.rs` `fire_installed`),
+    a job of the owner's: Brain declares one (`templates/brain/fragment.json`,
+    `{"installed": true, "run": "changed"}`). So a stranger's refused
+    request, the first after a deploy, can start the owner's reinstall and
+    its job. It is the same work the owner's next request would start, once
+    per release, but a stranger can choose when. Filed as FIN-698.
+  - It may start a due `woke` job, for a signer the fragment would answer
+    (FIN-660).
 - **A fragment's existence shows.** `/api/f/{name}/…` answers 403 to a
   signer for a fragment that exists and isn't theirs, and 404 for one that
   doesn't. A search across says `denied` or `missing` the same way.

@@ -213,19 +213,57 @@ pub fn idor(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let after = state(api, &owner, &name)?;
     s.ok("every write refused left the fragment as it was: its members, invites, visibility, share link, files, secrets, schedules, subscriptions and pins", before == after, json!({ "before": before, "after": after }));
-    let r = api.signed(&stranger, "GET", &path(&name, "status?view=x"), None)?;
-    s.ok("a `view` on an API route lends nothing: the share link counts on the fragment's own site alone", r.status == 403, &r);
+    share_link(s, api, &owner, &stranger)?;
     let r = api.unsigned("GET", &path(&name, "status"), None)?;
     s.ok("unsigned, a members-only fragment's status is 401", r.status == 401, &r);
     by_person(s, api, &owner, &viewer, &stranger, &name)
 }
 
-/// What the owner makes for the routes to name: a file on main, a blob,
+/// A share link, real and valid, on a fragment it opens (visibility
+/// `link`): on the fragment's own site it lets anyone read, signed or
+/// not; on the control API it lends nothing, to a signed stranger or to
+/// no one signed, whichever route it rides on.
+fn share_link(s: &mut Suite, api: &Api, owner: &Keys, stranger: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "idor-link")?;
+    s.create(api, owner, &name)?;
+    let file = "site/linked.txt";
+    let r = api.signed(owner, "POST", &path(&name, "files"), Some(&json!({ "files": [{ "path": file, "text": "the owner's, by link\n" }] })))?;
+    anyhow::ensure!(r.status == 200, "the owner's file: {r}");
+    let status = api.signed(owner, "GET", &path(&name, "status"), None)?;
+    let view = status.body["viewToken"].as_str().unwrap_or_default().to_string();
+    anyhow::ensure!(status.status == 200 && status.body["visibility"] == "link" && !view.is_empty(), "a link fragment with its share link: {status}");
+    let site = |query: &str| api.call(crate::api::Call { method: "GET", url: api.site_url(&name, &format!("__file?path={file}{query}")), ..crate::api::Call::default() });
+    let (with, without) = (site(&format!("&view={view}"))?, site("")?);
+    s.ok(
+        "on a link fragment's own site its share link lets an unsigned visitor read its file (200), and without it they read nothing",
+        with.status == 200 && with.text.contains("the owner's, by link") && without.status != 200 && !without.text.contains("the owner's, by link"),
+        format!("{with} {without}"),
+    );
+    let mut lent = vec![];
+    for route in ["status", "members", "files", &format!("file?path={file}")] {
+        let q = if route.contains('?') { "&" } else { "?" };
+        let signed = api.signed(stranger, "GET", &path(&name, &format!("{route}{q}view={view}")), None)?;
+        let unsigned = api.unsigned("GET", &path(&name, &format!("{route}{q}view={view}")), None)?;
+        if signed.status != 403 || unsigned.status != 401 {
+            lent.push(format!("{route}: signed {signed}, unsigned {unsigned}"));
+        }
+    }
+    s.ok(
+        "the same valid share link on the control API lends nothing: a signed stranger is 403 and no one signed is 401, on its status, members, files and a file",
+        lent.is_empty(),
+        lent.join("\n"),
+    );
+    Ok(())
+}
+
+/// What the owner makes for the routes to name: a file on main and a
+/// `fragment.json` (so `manifest` has one to answer), a blob,
 /// a subscription of theirs (to `hook`, the push fake), and the member a
 /// membership change names (`victim`).
 fn victims(api: &Api, owner: &Keys, name: &str, victim: &Keys, hook: &str) -> Result<Made> {
     let file = "site/owners.txt".to_string();
-    let r = api.signed(owner, "POST", &path(name, "files"), Some(&json!({ "files": [{ "path": file, "text": "the owner's\n" }] })))?;
+    let files = json!({ "files": [{ "path": file, "text": "the owner's\n" }, { "path": "fragment.json", "text": "{}\n" }] });
+    let r = api.signed(owner, "POST", &path(name, "files"), Some(&files))?;
     anyhow::ensure!(r.status == 200, "the owner's file: {r}");
     let bytes = b"the owner's blob".to_vec();
     let blob = sha256(&bytes);
