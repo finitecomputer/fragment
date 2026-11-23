@@ -158,7 +158,9 @@ Put an evidence pack in the PR body and in your report:
     head, once it is green.
   - `cargo xtask e2e --only …` for every section that covers a changed file.
     Grep `crates/e2e` for each file and run every lane that uses it. A CI
-    run by hand runs every section, so it covers them all.
+    run by hand runs every section a whole local run does, so it covers
+    those. A section that runs only by name (`hermes`) or only on a
+    preview still needs its own run.
   - For `images/` or the bridge: `cargo test --workspace` and the Docker
     tests (`cargo test -p fragment-bridge --test docker -- --ignored`),
     or `images.yml` run by hand.
