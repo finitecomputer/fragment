@@ -28,19 +28,33 @@ boundary:
   from the live commit's code once it is installed (`plane.rs`
   `read_live_code`, at most `SOURCE_MAX_BYTES`; `ops.rs` `facet`). The
   facet has no network (`globalOutbound: null`, `js.rs` `worker_code`),
-  a CPU limit per call, its own SQLite (at most `APP_DB_MAX_BYTES`) that
-  can't see the platform's tables, and two capabilities only, `FILES`
-  and `SEARCH`, for its own fragment (`js.rs` `app_env`). It is reached
-  only through the fragment's operations and triggers, after their role
-  checks (`ops.rs` `call_op`); a job reaches out only through `job.fetch`
-  steps, which the supervisor takes and checks (`fragment_core::egress`;
-  docs/MODEL.md, "Why a facet").
+  a CPU limit per call, its own SQLite that can't see the platform's
+  tables, and two capabilities only, `FILES` and `SEARCH`, for its own
+  fragment (`js.rs` `app_env`). It is reached through the fragment's
+  operations and triggers, after their role checks (`ops.rs` `call_op`),
+  and through its optional `fetch`, which answers every path of the
+  fragment's origin that is no site file, after a read check of
+  `public` alone: anyone the fragment's visibility lets in, anonymous on
+  a public fragment (`serve.rs` `app_fetch`). A job reaches out only
+  through `job.fetch` steps, which the supervisor takes and checks
+  (`fragment_core::egress`; docs/MODEL.md, "Why a facet").
+- `APP_DB_MAX_BYTES` bounds the app's SQLite only where a mutation
+  writes: the mutation wrapper checks the database's size after the
+  author's code and rolls the mutation back past it (`platform.mjs`
+  `#mutate`). The author's `fetch`, its queries, its jobs and its
+  constructor run outside that wrapper (`platform.mjs` `fetch`,
+  `__query`, `__job`), so they can write the database past the bound,
+  and a `fetch` that writes on each request does so on its visitors'
+  requests. The check runs in the app's own realm in any case, which the
+  app can patch (debt ledger, "An app's database answers to the app's
+  own code alone"; FIN-696). The runtime's own limit on a Durable
+  Object's SQLite is the only hard one.
 
 ## What is taken
 
 | Upload | Route | Limits and checks | Where |
 |---|---|---|---|
-| A large file's bytes, and a chat's attachments | `PUT /api/f/{name}/blobs/{sha256}` on the platform's origin, and `PUT /__blob/{sha256}` on the fragment's own origin (the chat page's upload; `lib.rs` `fragment_origin`), both editor | `content-length` required, at most `UploadLimits.upload_max_bytes` (a deployment's `upload_max_bytes`, else `UPLOAD_MAX_BYTES_DEFAULT`; an agent's is `BLOB_MAX_BYTES`), checked by the router before the body is read on both paths (`lib.rs` `blob_length`) and again under `BLOB_MAX_BYTES`. Streamed, never held: `FixedLengthStream` refuses a body of another length, and the bytes' SHA-256 must be the one named, or the object is deleted (`js::blob_put`, `blobs.rs` `store_blob`). When the object is already stored under that fragment's key, neither path reads or checks the body: the upload answers `stored: false` and only records the blob (and a passive type, if declared). Files per message (`FILES_PER_MESSAGE`) is the chat page's own limit (`templates/chat/site/limits.js`); the cell doesn't count a message's attachments. | R2 `BLOBS`, keyed `<fragment npub>/<sha256>` |
+| A large file's bytes, and a chat's attachments | `PUT /api/f/{name}/blobs/{sha256}` on the platform's origin, and `PUT /__blob/{sha256}` on the fragment's own origin (the chat page's upload; `lib.rs` `fragment_origin`), both editor | `content-length` required, at most `UploadLimits.upload_max_bytes` (a deployment's `upload_max_bytes`, else `UPLOAD_MAX_BYTES_DEFAULT`; an agent's is `BLOB_MAX_BYTES`), checked by the router before the body is read on both paths (`lib.rs` `blob_length`) and again under `BLOB_MAX_BYTES`. Streamed, never held: `FixedLengthStream` refuses a body of another length, and the bytes' SHA-256 must be the one named, or the object is deleted (`js::blob_put`, `blobs.rs` `store_blob`). When the object is already stored under that fragment's key, neither path hashes or keeps the body, but both still read it to its end and discard it before they answer (`js::drain`, within the length the router checked): the upload answers `stored: false` and only records the blob (and a passive type, if declared). Files per message (`FILES_PER_MESSAGE`) is the chat page's own limit (`templates/chat/site/limits.js`); the cell doesn't count a message's attachments. | R2 `BLOBS`, keyed `<fragment npub>/<sha256>` |
 | Files into a fragment's repo | `POST /api/f/{name}/files` (editor); git push with an editor's storage token | Through the files API: every path passes `valid_repo_path` (relative, no `.` or `..` part, no empty part, no `\`, no control byte, no drive letter, at most `PATH_MAX_BYTES`), at most `FILE_WRITES_MAX` files and `API_FILES_WRITE_MAX_BYTES` of them in one write, the body at most `BODY_MAX_BYTES` (`publish.rs` `write_files_api`). A git push goes to code.storage directly, so those limits don't apply to it; the cell checks each path as it reads the tree, and one that fails is left out of everything (indexing, serving, triggers: `cs.rs` `tree`, `tree.refused`). `BLOB_MIN_BYTES` is the CLI's threshold for sending a file as a blob and committing a pointer (`cli/src/blobs.rs`); the cell tells a pointer by its content, so a file of that size that is no pointer is an ordinary git file, served as one (`plane.rs` `stream_file`). | code.storage git |
 | A preview card | `PUT /api/f/{name}/card` (editor) | A whole JPEG of the card's size, within its cap (`card::check_upload`) | a blob typed `image/jpeg` |
 | An icon | `PUT /api/f/{name}/icon` (editor) | At most `icon::UPLOAD_MAX_BYTES`, an image by its magic bytes (`face::picture_type`), then re-encoded by Cloudflare Images to a PNG, unless it is already one of the icon's size within `ICON_MAX_BYTES` | a blob typed `image/png` |
@@ -49,7 +63,7 @@ boundary:
 | Audio to transcribe | `POST /api/models/v1/audio/transcriptions` | Body at most `transcribe::BODY_MAX_BYTES`, audio at most `AUDIO_MAX_BYTES` | passed to the model, not kept |
 | A search source | `POST /api/f/{name}/search/upsert` (editor) | At most `search::UPSERT_MAX_BYTES`, checked by `search::rules::check` | the fragment's index |
 | A finite.computer move's zip | `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=` | The mover's key alone. Its signature covers a declared SHA-256 of the part, which the server doesn't recompute: it streams the body to R2 unread and keeps the declaration beside R2's ETag. A part must declare a `content-length` of 1 to `PART_MAX_BYTES`, its number 1 to `PARTS_MAX` (`migrations.rs` `part`). Completion checks the manifest is this attempt's and the parts' total is the declared zip size, and completes with the parts' ETags (`complete`); the zip's own hash (`zip_sha256`) is the importer's to verify. | R2, the stage's |
-| Any other body | every route | At most `BODY_MAX_BYTES` unless the route names another bound (chat completions take `MODEL_BODY_MAX_BYTES`, `models.rs` `route`; transcription its own, above). A declared length over the bound is refused before anything is read; a body with no declared length (chunked) is read as it arrives and refused at the chunk that crosses the bound, so at most one chunk past it is held (`lib.rs` `read_body`; the `lockdown` e2e section) | |
+| Any other body | every route | At most `BODY_MAX_BYTES` unless the route names another bound (chat completions take `MODEL_BODY_MAX_BYTES`, `models.rs` `route`; transcription its own, above). A declared length over the bound is refused before anything is read; a body with no declared length (chunked) is read as it arrives and refused at the chunk that crosses the bound, so at most one chunk past it is held (`lib.rs` `read_body`; the `lockdown` e2e section). Not bounded here: a request to a computer's port (`/p/<port>/…` on the computer's own host, behind its session: `computer.rs` `session_of`) streams its body to the guest as it comes, with no platform bound, the guest's own server being the one that limits it (`host_answer`); the blob uploads above stream within their own bound | |
 
 A blob's declared type is kept only if it is passive media:
 `blob::served_type` allows JPEG, PNG, WebP, GIF, MP4, WebM, MPEG/WAV/WebM/Ogg/MP4
