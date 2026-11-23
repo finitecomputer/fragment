@@ -183,6 +183,10 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
     match step {
         Step::Computer => {
             let computer = fragment_core::computer::default_computer_of(person);
+            // their connections first, while the registry still names their
+            // WorkOS user: each grant revoked at its provider, each account
+            // deleted at Pipes (FIN-588)
+            crate::connections::wipe(env, Config::from_env(env), person).await?;
             let mut deleted = 0u64;
             // bounded: COMPUTER_CALLS_MAX calls, each its own pages
             for _ in 0..COMPUTER_CALLS_MAX {

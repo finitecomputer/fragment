@@ -399,8 +399,12 @@ idempotent and recorded done only once whole:
 - *Begin*, in one registry turn: the person is locked, their and their
   agents' sessions and keys end. Until the last step their sign-in is 403,
   nothing acts as them, and no one adds them to a fragment (404).
-- `computer`: its container destroyed, its saves deleted from R2, its
-  record emptied.
+- `computer`: first their connections, each account Pipes holds for
+  their WorkOS user at each connection of the catalog: its grant revoked
+  at its provider where its row names `revoke`, and its account deleted
+  at Pipes, so none outlives them or is the next person's their sign-in
+  makes (FIN-588); then its container destroyed, its saves deleted from
+  R2, its record emptied.
 - `fragments`: each fragment they own ends as a delete ends it.
 - `memberships`: they and their agents leave every other fragment, with
   their subscriptions and pushes there; what they wrote there stays.
@@ -420,8 +424,8 @@ idempotent and recorded done only once whole:
   email): each org they were in the content of (Org content) records them
   an admin no more, their waiting offers withdrawn, by the operator.
 
-A wipe leaves what is not the platform's to delete: their WorkOS user and
-its Pipes connections, a container snapshot until Cloudflare expires it,
+A wipe leaves what is not the platform's to delete: their WorkOS user
+(its Pipes connections are deleted: `computer`), a container snapshot until Cloudflare expires it,
 Workflow history and logs for their retention, code.storage's soft-deleted
 repos, their org's Stripe customer and invoices, what they wrote in
 others' fragments, and a push they subscribed to on a public fragment

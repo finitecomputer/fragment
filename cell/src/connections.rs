@@ -438,6 +438,36 @@ async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&Connecti
     Ok(revoked)
 }
 
+/// Every connection of `person` taken away, as a wipe takes them (wipe.rs,
+/// its `computer` step; FIN-588): each account Pipes holds for their WorkOS
+/// user at each connection of the catalog, fenced or not
+/// (`connection_accounts::wiped`), its grant revoked at the provider and
+/// its account deleted at Pipes (`disconnect`), so neither the provider's
+/// grant nor Pipes' tokens outlive the person, and the new person their
+/// next sign-in makes holds none of them. Asked again, it finds what is
+/// left. Run before the wipe's `registry` step forgets their WorkOS user;
+/// one with none has nothing here.
+pub(crate) async fn wipe(env: &Env, cfg: &Config, person: &str) -> CellResult<()> {
+    let connections: Vec<&fragment_core::catalog::Provider> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).collect();
+    if connections.is_empty() {
+        return Ok(());
+    }
+    let Some(user) = workos_user(env, cfg, person).await? else { return Ok(()) };
+    let api = &cfg.workos()?.api;
+    let plural = match connections.iter().any(|p| p.several()) {
+        true => crate::keys::pipes_accounts(env, api, &user).await?,
+        false => Value::Null,
+    };
+    // at most `catalog::PROVIDERS_MAX` providers, `catalog::ACCOUNTS_MAX` accounts each
+    for p in connections {
+        let ids = accounts::wiped(&plural, &p.name, p.several()).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
+        for id in ids {
+            disconnect(env, cfg, &p.name, p.connection_oauth.as_ref(), &user, id.as_deref()).await?;
+        }
+    }
+    Ok(())
+}
+
 /// The grant behind `user`'s account at `provider` (of several, the one
 /// `account` names), revoked with an access token Pipes mints for it (one
 /// Pipes refuses, the account inactive or gone, has no grant left to

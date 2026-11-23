@@ -86,16 +86,7 @@ pub fn described(account: &Value) -> PipesAccount {
 /// An account with no id, or more than `catalog::ACCOUNTS_MAX`, is a
 /// fault: nothing of such an answer is used.
 pub fn listed(answer: &Value, provider: &str) -> Result<Vec<PipesAccount>, String> {
-    let entries = answer["data"].as_array().ok_or("Pipes' list of providers has no data")?;
-    let Some(entry) = entries.iter().find(|e| e["slug"] == provider) else { return Ok(vec![]) };
-    let accounts = match &entry["connected_accounts"] {
-        Value::Null => return Ok(vec![]),
-        Value::Array(a) => a,
-        _ => return Err(format!("Pipes' {provider} entry lists its accounts as no list")),
-    };
-    if accounts.len() > usize::from(crate::catalog::ACCOUNTS_MAX) {
-        return Err(format!("Pipes lists {} accounts at {provider}, more than its limit of {}", accounts.len(), crate::catalog::ACCOUNTS_MAX));
-    }
+    let accounts = entry_accounts(answer, provider)?;
     let mut out = Vec::with_capacity(accounts.len());
     for a in accounts {
         let account = described(a);
@@ -108,6 +99,37 @@ pub fn listed(answer: &Value, provider: &str) -> Result<Vec<PipesAccount>, Strin
     }
     out.sort_unstable_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
     Ok(out)
+}
+
+/// The account objects Pipes' plural list names at `provider`, read as
+/// they are: none where it has no entry, or one of no accounts; a list
+/// that is none, or longer than `catalog::ACCOUNTS_MAX`, a fault.
+fn entry_accounts<'a>(answer: &'a Value, provider: &str) -> Result<&'a [Value], String> {
+    let entries = answer["data"].as_array().ok_or("Pipes' list of providers has no data")?;
+    let Some(entry) = entries.iter().find(|e| e["slug"] == provider) else { return Ok(&[]) };
+    let accounts = match &entry["connected_accounts"] {
+        Value::Null => return Ok(&[]),
+        Value::Array(a) => a,
+        _ => return Err(format!("Pipes' {provider} entry lists its accounts as no list")),
+    };
+    if accounts.len() > usize::from(crate::catalog::ACCOUNTS_MAX) {
+        return Err(format!("Pipes lists {} accounts at {provider}, more than its limit of {}", accounts.len(), crate::catalog::ACCOUNTS_MAX));
+    }
+    Ok(accounts)
+}
+
+/// What a wipe of a person ends at a connection (FIN-588; cell/src/wipe.rs,
+/// its `computer` step): of one account a person (`several` false), the
+/// one there is, named by no id (Pipes answers 404 where there is none);
+/// of several, each account Pipes' plural list (`listed`'s `answer`) names
+/// there, by its id, in any state: one needing authorizing again, or one
+/// Pipes calls disconnected, may still hold what Pipes keeps of its grant.
+/// Faults as `listed`'s.
+pub fn wiped(answer: &Value, provider: &str, several: bool) -> Result<Vec<Option<String>>, String> {
+    if !several {
+        return Ok(vec![None]);
+    }
+    entry_accounts(answer, provider)?.iter().map(|a| described(a).id.map(Some).ok_or_else(|| format!("Pipes lists an account at {provider} with no id"))).collect()
 }
 
 /// The account a person's agents use at a provider unless one picked
@@ -495,6 +517,27 @@ mod tests {
             list("google", (0..26).map(|i| account(&format!("data_installation_{i}"), None, "connected", "2026-10-01T00:00:00.000Z")).collect()),
         ] {
             assert!(listed(&bad, "google").is_err(), "{bad}");
+        }
+    }
+
+    /// A wipe ends every account its person holds at a connection (FIN-588):
+    /// of one account a person, the one there is, asked by no id; of
+    /// several, each one Pipes lists there by its id, whatever its state
+    /// (one needing authorizing again, or one Pipes calls disconnected,
+    /// still holds what Pipes keeps of it), and no other provider's.
+    #[test]
+    fn a_wipe_ends_every_account_pipes_lists_at_a_connection() {
+        let answer = list("google", vec![
+            account("data_installation_b", Some("sub-b"), "needs_reauthorization", "2026-10-01T00:00:00.000Z"),
+            account("data_installation_a", Some("sub-a"), "connected", "2026-10-02T00:00:00.000Z"),
+            account("data_installation_gone", Some("sub-x"), "disconnected", "2026-09-01T00:00:00.000Z"),
+        ]);
+        assert_eq!(wiped(&answer, "google", false).unwrap(), [None], "one account a person: the one there is, by no id");
+        let ended = wiped(&answer, "google", true).unwrap();
+        assert_eq!(ended, ["data_installation_b", "data_installation_a", "data_installation_gone"].map(|i| Some(i.to_string())), "each, in any state, none of `other`'s");
+        assert_eq!(wiped(&json!({ "data": [] }), "google", true).unwrap(), Vec::<Option<String>>::new(), "none there: nothing to end");
+        for bad in [json!({}), list("google", vec![account("not an id", None, "connected", "1")]), list("google", (0..26).map(|i| account(&format!("data_installation_{i}"), None, "connected", "1")).collect())] {
+            assert!(wiped(&bad, "google", true).is_err(), "{bad}");
         }
     }
 
