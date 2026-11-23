@@ -359,10 +359,12 @@ pub fn images(classes: &[String]) -> Result<()> {
 fn ahead(mut config: serde_json::Value, cell: &Path, classes: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Vec<(String, serde_json::Value, Vec<String>)>> {
     devstack::absolute_images(&mut config, cell)?;
     let containers = config["containers"].as_array().cloned().unwrap_or_default();
+    let all = || containers.iter().flat_map(|c| c["images"].as_object().into_iter().flatten());
+    // the cache's Dockerfile: the config's first image's (the stub's), whichever classes run
+    let cached = all().next().map(|(_, image)| image["dockerfile"].clone());
     let runs = |c: &&serde_json::Value| classes.iter().any(|class| c["class_name"] == class.as_str());
     // bounded: the images one config names
     let images: Vec<_> = containers.iter().filter(runs).flat_map(|c| c["images"].as_object().into_iter().flatten()).collect();
-    let cached = images.first().map(|(_, image)| image["dockerfile"].clone());
     let cache = |n: usize, image: &serde_json::Value| match Some(&image["dockerfile"]) == cached.as_ref() {
         true => image_cache_args(&env, n == 0),
         false => Vec::new(),
@@ -500,7 +502,8 @@ mod tests {
     /// node runs no container: the suite's `node_classes`), none. In CI the
     /// stub writes the cache and its next build reads it. Invalid: the
     /// door's image reads the stub's cache, where none of its layers are,
-    /// or writes it, which would replace the stub's there.
+    /// or writes it, which would replace the stub's there (a run of the
+    /// door's lane alone too, its door the first image it builds).
     #[test]
     fn a_run_builds_ahead_only_the_images_its_node_builds() {
         let cell = fragment_devstack::cell_dir();
@@ -519,6 +522,7 @@ mod tests {
         let with_door: Vec<_> = stubs.iter().cloned().chain([("door".to_string(), String::new())]).collect();
         assert_eq!(shown(&[computers.clone(), doors.clone()]), with_door, "the door's image for its lane's run, with no cache flags");
         assert!(shown(&[]).is_empty(), "no image for a run that makes no computer");
+        assert_eq!(shown(std::slice::from_ref(&doors)), [("door".to_string(), String::new())], "a door's run alone writes no stub's cache");
         for (_, image, _) in super::ahead(config.clone(), &cell, &[computers, doors], saving).unwrap() {
             assert!(std::path::Path::new(image["dockerfile"].as_str().unwrap()).is_absolute(), "its Dockerfile's path works from anywhere");
         }
