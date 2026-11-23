@@ -727,15 +727,6 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
-## OpenRouter's calls are charged at their ceiling, not their cost
-
-- **Shortcut:** an OpenRouter slot is priced at its `max_price` plus fee
-  (`fragment_core::models::Upstream::ceiling`), so no call is charged
-  below what it could cost; `usage.cost` is unread.
-- **Risk:** people are overcharged, cached input most.
-- **Delete when:** a call is charged from OpenRouter's reported cost,
-  the fee and margin on it.
-
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model

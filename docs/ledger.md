@@ -190,13 +190,15 @@ informational. The fee is AI Gateway's on credits, so it applies to
   rows are priced as it priced them (`price::LEGACY_KEYS`, the debt
   ledger).
 
-- **OpenRouter's price** (decision 61; a decision for Paul): a slot on
-  OpenRouter is priced at the ceiling it routes under
-  (`body.provider.max_price`), every input token at its prompt price,
-  never less than OpenRouter could bill, grossed up to OpenRouter's fee
-  (`OPENROUTER_FEE_BP`). A slot without one is refused
-  (`Upstream::ceiling`). Settling from OpenRouter's own `usage.cost` is
-  in the debt ledger.
+- **OpenRouter's price** (decision 61; FIN-616): a call on an OpenRouter
+  slot is charged what OpenRouter's answer says it cost (`usage.cost`,
+  dollars of its credits, a stream's on its last usage chunk), as
+  `openrouter/nanousd`, grossed up to OpenRouter's fee on the credits
+  (`OPENROUTER_FEE_BP`: $1.055 a dollar), then the margin
+  (`Upstream::used`). An answer that names no cost is charged its tokens
+  at the ceiling the slot routes under (`body.provider.max_price`, every
+  input token at its prompt price, with the fee), which a quote's estimate
+  uses too; a slot without one is refused (`Upstream::ceiling`).
 - **A slot's own price**: a slot on any other OpenAI-compatible API may
   name its model's list price (`price`), which takes the fee and margin
   as every token row does (`Upstream::own_price`).

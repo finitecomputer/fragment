@@ -271,7 +271,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
                 return Err(e);
             }
         };
-        let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| bounds::usage_of(model, &v["usage"]));
+        let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| api.used(model, &v["usage"]));
         charge.later(after, usage, log_id);
         let mut resp = Response::from_bytes(bytes)?;
         resp.headers_mut().set("content-type", "application/json")?;
@@ -331,7 +331,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
             stream.finish(Some(&mut out));
             send(out);
         }
-        let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
+        let usage = if broke { None } else { stream.usage().and_then(|u| api.used(model, u)) };
         // bounded by the stream's end: nothing after `[DONE]` is the answer's
         let read_on = async {
             while stream.done() && !ended {
