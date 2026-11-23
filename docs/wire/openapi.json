@@ -18,6 +18,43 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Author": {
+        "description": "Who wrote a record, as the platform stamps it as it appends one, never\nas its caller says (FIN-615): its principal is whom it was written as,\nand this is what wrote the words. Only a person's or an agent's own post\nis its principal's own words.\n\nOpen (`x-fragment-open`, docs/wire): an author this build does not know\nreads as `Other`.",
+        "oneOf": [
+          {
+            "const": "person",
+            "description": "A person's post, signed or in their session (an anonymous visitor's\ntoo).",
+            "type": "string"
+          },
+          {
+            "const": "agent",
+            "description": "An agent's post, as itself or for its owner.",
+            "type": "string"
+          },
+          {
+            "const": "code",
+            "description": "App code: a mutation's effect or a job's step, in a fragment that\nruns its author's own code. It speaks for no one: its principal is\nwhoever called the code, not who chose the words.",
+            "type": "string"
+          },
+          {
+            "const": "platform",
+            "description": "The platform: its own records (`events`, `ops`, a schedule firing),\nand what a release's code writes (a blessed template, unforked).",
+            "type": "string"
+          },
+          {
+            "const": "door",
+            "description": "A door: a relay its owner opened (a connector's release code, a\ndoor's signed post), or a delivery to the fragment's inbox.",
+            "type": "string"
+          },
+          {
+            "const": "other",
+            "description": "An author this build does not know, which a newer platform names:\nread as this so that one new author breaks no shipped CLI or pinned\nimage. Never written. Last: serde's `other` must be.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
       "ChannelNewest": {
         "description": "`GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):\neach poster's newest record of each kind the channel keeps the newest\nof (`ChannelDecl::newest`), the newest first, at most\n`limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past\nits retention) is none; a channel that keeps no kind answers none.",
         "properties": {
@@ -76,6 +113,18 @@
           "at": {
             "format": "int64",
             "type": "integer"
+          },
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Author"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Who wrote it, as the platform stamped it as it appended it. Absent\non a record stored before the stamp, which reads as it did."
           },
           "body": {
             "description": "The JSON text the cell stored, passed through as it is: the cell\nneither parses a body it just wrote nor one it reads back."

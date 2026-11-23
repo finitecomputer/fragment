@@ -358,6 +358,12 @@ out. Its answer: the fragment, and whether it is archived now.
 | `archived` | `boolean` | required |  |
 | `name` | `string` | required |  |
 
+### `Author`
+
+out, open. Who wrote a record, as the platform stamps it as it appends one, never as its caller says (FIN-615): its principal is whom it was written as, and this is what wrote the words. Only a person's or an agent's own post is its principal's own words. Open (`x-fragment-open`, docs/wire): an author this build does not know reads as `Other`.
+
+Values: `person`, `agent`, `code`, `platform`, `door`, `other`.
+
 ### `ChannelNewest`
 
 out. `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader): each poster's newest record of each kind the channel keeps the newest of (`ChannelDecl::newest`), the newest first, at most `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past its retention) is none; a channel that keeps no kind answers none.
@@ -385,6 +391,7 @@ out. One record in a channel. Records are appended by the platform (`events`, `o
 | field | type | | |
 | --- | --- | --- | --- |
 | `at` | `integer` | required |  |
+| `author` | [`Author`](#author) or `null` | optional | Who wrote it, as the platform stamped it as it appended it. Absent on a record stored before the stamp, which reads as it did. |
 | `body` | `any` | required | The JSON text the cell stored, passed through as it is: the cell neither parses a body it just wrote nor one it reads back. |
 | `channel` | `string` | required |  |
 | `kind` | `string` | required |  |

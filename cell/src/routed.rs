@@ -50,7 +50,8 @@ pub struct Signed {
     /// signed URL named in `for`, which the router honors on an agent's
     /// request to a fragment only (`crate::acting_for`). The fragment acts
     /// with the lower of that identity's role and the agent's cap
-    /// (`fragment_core::access`).
+    /// (`fragment_core::permit`), or, where that identity is not in and the
+    /// agent is, as the agent itself (`FragmentCell::as_whom`).
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub acting_for: Option<String>,
 }
@@ -166,7 +167,7 @@ impl Routed {
                     return Err(CellError::host("the router named a malformed signer"));
                 }
                 // the router honors `for` for an agent only, naming its owner
-                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || fragment_core::access::may_act_for(signed.kind, signed.owner.as_deref(), f).is_err()) {
+                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || fragment_core::permit::may_act_for(signed.kind, signed.owner.as_deref(), f).is_err()) {
                     return Err(CellError::host("the router named a malformed `for`"));
                 }
                 Some(signed)
