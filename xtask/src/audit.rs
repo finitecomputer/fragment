@@ -154,8 +154,10 @@ fn npm(node: &fragment_devstack::node::Node, cache: &Path, root: &Path, lock: &s
     let found = advisories(&report)?;
     let verdict = judge(lock, &found, NPM_IGNORED);
     for (id, package) in &found {
-        let mark = if verdict.new.contains(&(id.clone(), package.clone())) { "FOUND  " } else { "ignored" };
-        println!("audit: {lock}/package-lock.json: {mark} {id} in {package}");
+        match NPM_IGNORED.iter().find(|i| i.lock == lock && i.id == id) {
+            Some(i) => println!("audit: {lock}/package-lock.json: ignored {id} in {package}: {}", i.reason),
+            None => println!("audit: {lock}/package-lock.json: FOUND   {id} in {package}"),
+        }
     }
     let mut problems = Vec::new();
     if !verdict.new.is_empty() {
