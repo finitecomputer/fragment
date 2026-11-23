@@ -176,6 +176,84 @@ final class FragmentUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["pairingCode"].exists)
     }
 
+    /// The sidebar, against a real platform as the notices' tests are (a dev
+    /// stack's person with an agent, signed by a key it approved ahead): an
+    /// agent's round New chat opens a chat with them at once, empty and
+    /// ready to write in, listed under them; the search at its foot opens
+    /// Home; a swipe to the left closes it, over the page it was opened on.
+    func testTheSidebarStartsAChatWithAnAgentSearchesAndClosesByASwipe() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let show = app.buttons["sidebar"]
+        XCTAssertTrue(show.waitForExistence(timeout: 30), "Home, signed in")
+        show.tap()
+        let newChat = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "agentNewChat-")).firstMatch
+        XCTAssertTrue(newChat.waitForExistence(timeout: 30), "an agent's New chat")
+        let agent = String(newChat.identifier.dropFirst("agentNewChat-".count))
+        XCTAssertTrue(app.buttons["agentMenu-\(agent)"].exists, "beside its pill")
+        XCTAssertTrue(app.buttons["sidebarSearch"].exists, "search at the foot")
+        let chats = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "sidebarChat-"))
+        let before = Set(chats.allElementsBoundByIndex.map(\.identifier))
+        screenshot(app, "Sidebar")
+
+        newChat.tap()
+        XCTAssertTrue(newChat.waitForNonExistence(timeout: 5), "the sidebar goes")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 30), "the new chat opens ready to write in")
+        XCTAssertTrue(app.textViews["composer"].exists)
+        XCTAssertFalse(app.buttons["homeSettings"].exists, "a chat, not Home")
+        screenshot(app, "A new chat, empty")
+        show.tap()
+        XCTAssertTrue(newChat.waitForExistence(timeout: 10))
+        let made = Set(chats.allElementsBoundByIndex.map(\.identifier)).subtracting(before)
+        XCTAssertEqual(made.count, 1, "one chat more, listed")
+        XCTAssertTrue(app.staticTexts["No messages yet"].exists, "listed empty")
+
+        app.buttons["sidebarSearch"].tap()
+        XCTAssertTrue(newChat.waitForNonExistence(timeout: 5), "the sidebar goes")
+        XCTAssertTrue(app.buttons["homeSettings"].waitForExistence(timeout: 10), "search opens Home")
+
+        show.tap()
+        XCTAssertTrue(newChat.waitForExistence(timeout: 10))
+        app.swipeLeft()
+        XCTAssertTrue(newChat.waitForNonExistence(timeout: 5), "a swipe to the left closes it")
+        XCTAssertTrue(app.buttons["homeSettings"].exists, "over the page it was opened on")
+    }
+
+    /// At the largest text size, as above: an agent's name wraps and its
+    /// pill grows, so two agents named alike are told apart. A pill held to
+    /// one control's height cut a name to its first word.
+    func testAtTheLargestTextSizeAnAgentsNameWrapsBesideItsNewChat() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key,
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        XCTAssertTrue(app.buttons["sidebar"].waitForExistence(timeout: 30), "Home, signed in")
+        app.buttons["sidebar"].tap()
+        let pills = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "agentMenu-"))
+        XCTAssertTrue(pills.firstMatch.waitForExistence(timeout: 30), "an agent's pill")
+        screenshot(app, "Sidebar, the largest text")
+        // the longest name: one like "Turbo Quasar 486" takes two lines or more at this size
+        guard let pill = pills.allElementsBoundByIndex.max(by: { $0.label.count < $1.label.count }), pill.label.count >= 12 else {
+            throw XCTSkip("no agent named long enough to wrap")
+        }
+        let newChat = app.buttons["agentNewChat-" + pill.identifier.dropFirst("agentMenu-".count)]
+        XCTAssertGreaterThan(pill.frame.height, newChat.frame.height * 1.5, "its name wraps, the pill grows")
+        XCTAssertTrue(newChat.isHittable, "its New chat beside it")
+    }
+
     /// What the person is told (FIN-458), against a real platform: a dev
     /// stack (`cargo xtask dev`, its port forwarded to this Mac) whose
     /// person's computer has an update ready and saves that fail, signed as
