@@ -1988,7 +1988,13 @@ async function fileText(name, path) {
   if (!r.ok) throw new ApiError(r.status, null, r.statusText);
   return r.text();
 }
-const skillsPage = createSkillsPage($("skills-page"), { api, el, seg, skillsFragment: () => skillsFragment(), text: fileText, openApp, openFiles });
+// a file of the release the shell publishes (`/__shell/<file>`), as JSON
+async function releaseJson(file) {
+  const r = await fetch(`/__shell/${file}`, { credentials: "same-origin" });
+  if (!r.ok) throw new ApiError(r.status, null, r.statusText);
+  return r.json();
+}
+const skillsPage = createSkillsPage($("skills-page"), { api, el, seg, skillsFragment: () => skillsFragment(), text: fileText, releaseJson, openApp, openFiles });
 function openSkills(push = true) {
   if (push) at(SKILLS);
   if (state.page !== "Skills") newView();
