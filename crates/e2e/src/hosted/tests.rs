@@ -28,7 +28,7 @@ fn hosted(args: &[&str]) -> Hosted {
 /// hosted lane's rules on the local node.
 #[test]
 fn a_local_run_reads_as_before() {
-    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None });
+    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, containers: false });
     let only = parse(&strings(&["--only", "ledger,ai"])).unwrap();
     assert_eq!((only.only, only.hosted), (Some(strings(&["ledger", "ai"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));
@@ -37,6 +37,10 @@ fn a_local_run_reads_as_before() {
     for bad in [&["--only", "a", "--except", "b"][..], &["--only"], &["--max-paid-calls", "3"], &["--dry-run"], &["--zone", "finite.place"], &["--nope"], &["--only", ""]] {
         assert!(parse(&strings(bad)).is_err(), "{bad:?}");
     }
+    // the containers a run's node runs, asked of a local run's selection alone
+    let asked = parse(&strings(&["--shard", "2/5", "--containers"])).unwrap();
+    assert_eq!((asked.containers, asked.shard), (true, Some(2)));
+    assert!(parse(&strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--containers"])).is_err(), "a hosted run's node is no local one");
 }
 
 /// A local run takes one shard of the table's split, as CI runs it; a
