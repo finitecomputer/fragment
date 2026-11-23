@@ -564,7 +564,9 @@ impl FragmentCell {
         assert!(due.len() as i64 <= DOORS_PER_PASS, "a pass ends a bounded batch of doors");
         for d in due {
             let inc = SqlStorageValue::Integer(d.incarnation);
-            let wrote = match crate::doors::end_door(&self.env, &d.door).await {
+            // its connector's life over (or other code installed: a door
+            // no more, for good): its last end
+            let wrote = match crate::doors::end_door(&self.env, &d.door, true).await {
                 Ok(()) => {
                     console_log!("{}", json!({ "event": "ended.door-ended", "door": d.door, "incarnation": d.incarnation }));
                     self.exec("DELETE FROM ended_doors WHERE incarnation = ?", vec![inc])

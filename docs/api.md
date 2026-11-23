@@ -2333,7 +2333,11 @@ nor speak through one (`fragment_core::door`):
   bound, while it cannot); its deletion, a wipe's end of it, or other
   code installed records it for its alarm to end, retried as a delete's
   other parts are. Bound to another of its owner's agents, it stays.
-  Ended, a connect starts a new door.
+  Unbound, its connector bound again connects a new door; deleted, wiped
+  or running other code, its door never starts again, whatever connect
+  comes late (one row of its object says so). An unlink re-reads its
+  connector after the door ends, and one deleted or made again meanwhile
+  is 409, nothing unlinked.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.

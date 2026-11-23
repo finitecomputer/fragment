@@ -86,10 +86,18 @@ export class SimplexDoor extends DurableObject {
   // its own file
   #ended = false;
   #ends = 0;
+  // its connector's life over (deleted, wiped, or other code: its end
+  // `final`): it never starts again, whatever comes late (a connect sent
+  // before that end and delivered after it). One row says so (`over`),
+  // all its storage keeps once it is released
+  #over = false;
 
   constructor(ctx, env) {
     super(ctx, env);
-    ctx.blockConcurrencyWhile(async () => this.#migrate());
+    ctx.blockConcurrencyWhile(async () => {
+      this.#over = ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'over'").toArray().length > 0;
+      if (!this.#over) this.#migrate();
+    });
   }
 
   #migrate() {
@@ -106,12 +114,12 @@ export class SimplexDoor extends DurableObject {
   }
 
   #door() {
-    if (this.#ended) return null;
+    if (this.#ended || this.#over) return null;
     return this.ctx.storage.sql.exec("SELECT door, agent, started, generation, marks, saved, stopped FROM door WHERE id = 1").toArray()[0] ?? null;
   }
 
   #saves() {
-    if (this.#ended) return [];
+    if (this.#ended || this.#over) return [];
     return this.ctx.storage.sql.exec("SELECT generation, seq, mark, bytes, at, unreadable FROM saves").toArray();
   }
 
@@ -141,6 +149,7 @@ export class SimplexDoor extends DurableObject {
       const lever = url.pathname === "/door/lever" && request.method === "POST" ? await bounded(request) : null;
       // the e2e's look at its files, whatever it is
       if (lever?.op === "files") return json(await this.#files(lever.door));
+      if (this.#over) return refusal(410, "over", "this door's connector is gone: it never starts again");
       // ended, only a start makes it again (its connector's connect, the
       // lever's start); anything else is refused, its storage left empty
       const starts = (url.pathname === "/job/connect" && request.method === "POST") || lever?.op === "start";
@@ -163,6 +172,7 @@ export class SimplexDoor extends DurableObject {
   }
 
   async alarm() {
+    if (this.#over) return;
     try {
       await this.#ensure("alarm");
     } catch (e) {
@@ -176,17 +186,24 @@ export class SimplexDoor extends DurableObject {
   // finds its row gone and starts nothing), its watch let go, its storage
   // gone whole and every file under its prefix deleted. Asked again, the
   // same, the files' rest deleted; asked of a door never started, nothing
-  // is kept.
+  // is kept. `final` (its connector's life over): it never starts again,
+  // its one row (`over`) saying so; else (its connector unbound, which may
+  // be bound again) its connector's next connect starts a new door.
   async #end(body) {
     const door = body.door;
     if (!nameOk(door)) throw Object.assign(new Error("an end names its door"), { status: 400 });
     const d = this.#door();
     if (d && d.door !== door) return refusal(409, "another_door", `this door is ${d.door}`);
     this.#ends += 1;
-    if (!this.#ended) {
+    if (!this.#ended && !this.#over) {
       this.#ended = true;
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
+    }
+    if (body.final === true && !this.#over) {
+      this.ctx.storage.sql.exec("CREATE TABLE over (at INTEGER NOT NULL)");
+      this.ctx.storage.sql.exec("INSERT INTO over (at) VALUES (?)", Date.now());
+      this.#over = true;
     }
     if (this.ctx.container?.running) await this.ctx.container.destroy();
     let files = 0;

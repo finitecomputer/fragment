@@ -147,8 +147,11 @@ function door({ noDoors = false } = {}) {
   d.restore = (started) => call("GET", "/egress/save", { "x-door-generation": String(started) });
   d.save = (life, seq, bytes = `save ${life}-${seq}`) => call("PUT", `/egress/save?seq=${seq}`, { "x-door-generation": String(life), "x-door-mark": "0", "content-length": String(bytes.length) }, bytes);
   d.unreadable = (life, save) => call("POST", "/egress/unreadable", { "x-door-generation": String(life) }, JSON.stringify({ save, why: "a test's" }));
-  // its end, as the platform asks it (its connector deleted or unbound)
-  d.end = (name = DOOR) => call("POST", "/door/end", {}, JSON.stringify({ door: name }));
+  // its end, as the platform asks it: its connector unbound, or (`last`)
+  // its connector's life over (deleted, wiped, other code)
+  d.end = (name = DOOR, last = false) => call("POST", "/door/end", {}, JSON.stringify({ door: name, final: last }));
+  // the same object started again over its storage (an eviction)
+  d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
   return d;
 }
@@ -489,6 +492,31 @@ test("ended, its connector's connect starts a new door, nothing of the old", asy
   assert.equal(d.row().stopped, null);
   assert.equal(life(await d.restore(d.row().started)), d.row().started + 1);
   assert.equal((await d.restore(d.row().started)).status, 204, "none to restore: a new door");
+});
+
+test("its last end (its connector's life over) is for good: a connect delivered late starts nothing, then or after a restart", async () => {
+  const { d } = await saved();
+  assert.equal((await d.end(DOOR, true)).status, 200);
+  assert.deepEqual(d.prefixed(), []);
+  const late = await d.connect();
+  assert.equal(late.status, 410, "a connect sent before its end, come after it");
+  assert.equal((await late.json()).error, "over");
+  assert.equal((await d.start()).status, 410, "nor the lever's start");
+  assert.equal(d.c.starts.length, 1, "no container started again");
+  assert.deepEqual(d.st.tables(), ["over"], "its one row, all it keeps");
+  // started again over its storage, as an eviction does
+  const o = d.again();
+  const call = (path, headers, body) => o.fetch(new Request(`http://door${path}`, { method: "POST", headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
+  const r = await call("/job/connect", { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "x-door-secret": "s3cret-of-the-inbox" }, JSON.stringify({ name: "Juniper" }));
+  assert.equal(r.status, 410);
+  assert.equal((await call("/door/end", {}, JSON.stringify({ door: DOOR, final: true }))).status, 200, "ended again, the same");
+  assert.deepEqual(d.st.tables(), ["over"]);
+  await o.alarm();
+  assert.equal(d.c.starts.length, 1, "its alarm starts nothing");
+  // an unbound connector's end is not its last: bound again, it connects
+  const { d: e } = await saved();
+  await e.end();
+  assert.equal((await e.connect()).status, 200);
 });
 
 test("its end names its own door alone", async () => {

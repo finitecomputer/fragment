@@ -51,11 +51,14 @@ use crate::routed::Signed;
 /// Ends a SimpleX connector's door (cell/door.mjs `/door/end`): its
 /// container with no last save, its files under its prefix and its
 /// object's storage. Ended already, it ends again: so a try is safe to
-/// repeat. Its answer told apart (`fragment_core::ended::door_ended`).
-pub(crate) async fn end_door(env: &worker::Env, door: &str) -> Result<(), Failure> {
+/// repeat. `last`: its connector's life is over (deleted, wiped, other
+/// code), and the door never starts again, whatever connect comes late;
+/// else (unbound) a connect starts a new one. Its answer told apart
+/// (`fragment_core::ended::door_ended`).
+pub(crate) async fn end_door(env: &worker::Env, door: &str, last: bool) -> Result<(), Failure> {
     // `door_id` makes it: a name and hex digits, nothing to escape
     assert!(door::door_of(door).is_some(), "a door's end names a connector's door: {door}");
-    let body = format!(r#"{{"door":"{door}"}}"#);
+    let body = format!(r#"{{"door":"{door}","final":{last}}}"#);
     let asked = crate::routed::internal_request("door/end", &body).map_err(|e| Failure::Transient(rules::kept_error(&e.message)))?;
     match crate::routed::send(env, "SIMPLEX_DOOR", door, asked).await {
         Ok(mut answer) => {
@@ -240,9 +243,15 @@ impl FragmentCell {
             "link" => {}
             "unlink" => {
                 // its door ends first: an unlink that cannot end it leaves
-                // it bound, to be asked again
+                // it bound, to be asked again. Bound again, it may connect
+                // again: not its last end. Its life is read again after:
+                // one made since under its name is another's, unbound by
+                // no one but its owner
                 if let Some(own) = self.own_door()? {
-                    end_door(&self.env, &own).await.map_err(|f| CellError::new(ErrorCode::UpstreamFailed, format!("its SimpleX door did not end, so it is still linked: {}", f.message())))?;
+                    end_door(&self.env, &own, false).await.map_err(|f| CellError::new(ErrorCode::UpstreamFailed, format!("its SimpleX door did not end, so it is still linked: {}", f.message())))?;
+                    if self.meta(MetaKey::DoorTemplate)?.as_deref() != Some(door::SIMPLEX) || self.meta(MetaKey::Npub)?.and_then(|npub| door::door_id(&self.name().ok()?, &npub)).as_deref() != Some(own.as_str()) {
+                        return Err(CellError::new(ErrorCode::Conflict, "this connector was deleted or made again while its door ended: nothing unlinked"));
+                    }
                 }
                 self.unbind_door("no longer its owner's agent's door")?;
                 return Ok(json!({ "ok": true }));
