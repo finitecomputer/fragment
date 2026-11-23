@@ -510,7 +510,7 @@ impl FragmentCell {
                 return Err(failed);
             }
         };
-        let usage = bounds::usage_of(read.model, &read.used);
+        let usage = read.upstream.used(read.model, &read.used);
         if usage.is_none() {
             self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged nothing", p.reference), json!({ "ref": p.reference, "logId": read.log_id }));
         }
@@ -598,7 +598,7 @@ impl FragmentCell {
             self.put_draft(d, Some(&answer.content), None);
         }
         let used = stream.usage().cloned().unwrap_or(Value::Null);
-        Ok(Read { answer, used, log_id, first_ms, ms, calls, model })
+        Ok(Read { answer, used, log_id, first_ms, ms, calls, model, upstream })
     }
 
     /// One draft to the channel's live readers: whether it went (none past
@@ -623,6 +623,8 @@ struct Read {
     calls: u32,
     /// The model that answered: its tier's, or the fallback.
     model: &'static str,
+    /// Where it runs: OpenRouter says what a call cost (`Upstream::used`).
+    upstream: &'static fragment_core::models::Upstream,
 }
 
 /// Where a text step's drafts go, and who drafts them.

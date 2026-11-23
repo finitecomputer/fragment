@@ -423,6 +423,26 @@ unfinished design, not debt.
   `a_regular_browser_is_shared_by_the_desktop_and_tools` with the flag
   gone.
 
+## Hermes reads the image's bytecode
+
+- **Shortcut:** Hermes' launcher (since v0.23, `libexec/hermes`) sets
+  `PYTHONPYCACHEPREFIX` to `$HOME/.cache/hermes-pycache` unless one is set,
+  so a sealed install never sees bytecode written into it. Under a prefix
+  Python reads none of the bytecode beside a source, so each `hermes`
+  command (and the gateway's fallback start, not its preload) compiled
+  its imports again: `hermes --version` 0.87 s against 0.22 s. The image's
+  build deletes that one line of the launcher (images/hermes/Dockerfile,
+  after its compileall): the launcher sets no prefix, as before v0.23,
+  and one a caller sets still holds. An exact match: an upstream change
+  fails the build.
+- **Risk:** none known: `/opt/hermes` is root's and the image sets
+  `PYTHONDONTWRITEBYTECODE`, so nothing writes into the install. A
+  process that unsets both and runs as root could, as before v0.23.
+- **Delete when:** a pinned Hermes reads an install's own bytecode under
+  its launcher (or leaves the prefix unset), proven by the build's check
+  (a launcher run with bytecode writes on leaves no
+  `$HOME/.cache/hermes-pycache`) passing without the change.
+
 ## The image brings the agent's browser tab to the front
 
 - **Shortcut:** Hermes' browser_exec opens each page after the first in a
@@ -573,41 +593,37 @@ unfinished design, not debt.
 - **Delete when:** the swap streams the body (its length passed on),
   proven by an upload larger than the cap.
 
-## An operator key is metered per call, not per what its vendor counts
+## An older release's key rows are priced as it priced them
 
-- **Shortcut:** the swap charges one `key` unit a call at an estimate
-  (`fragment_core::price::DEFAULT_KEYS`, sources beside it), except a
-  part of a key's calls priced by what its request says
-  (`price::KEY_PARTS`: ElevenLabs' speech by its text's characters, at
-  the multilingual models' $0.08 per 1,000 whatever the model, so Flash
-  and Turbo's $0.04 calls are charged twice their list; fal's
-  synchronous Klein runs by the pixels they ask for; xAI's X searches as
-  20 posts and a call's tokens, its synchronous images as one
-  grok-imagine-image ($0.02) a call; Google Places' photos at their own
-  list; Firecrawl's scrapes and maps by their credits; a Browser Use
-  session's start as five minutes; X's searches as ten posts).
-- **Risk:** calls charged above or below what they cost: every other
-  ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
-  is charged a minute of music; a queued fal generation (Hermes'
-  `image_generate`), an edit and every other fal model are charged
-  nothing until a queued job is settled from its result's answer, once
-  per request id; a Grok chat (its tokens not read), a deferred image, a
-  video and server-side tools other than X Search are charged nothing, a
-  grok-imagine-image-2.0 image or several images a call under their
-  cost, and an X search that fetches fewer than 20 posts over it; Google
-  Places' searches and details (their tier their field mask's, which the
-  meter does not read) and autocompletes (free in a session that ends in
-  a Details call) are charged nothing; a Firecrawl search (its returned
-  results not counted), crawl, batch scrape, extract, agent or browser
-  session is charged nothing, as are a scrape's PDF pages and other
-  add-ons; a Browser Use session is charged five minutes at its start,
-  whatever it ran, and a task its session alone, not its model's tokens;
-  X's lookups (their returned resources not counted) are charged
-  nothing, and a search that returns fewer than ten posts is charged
-  ten.
-- **Delete when:** the swap reads each answer's usage and settles the
-  vendor's own units against a hold of its worst case, each catalog row
-  naming how, proven by a lane whose upstream fake answers usage.
+- **Shortcut:** the book still prices the names the release before
+  FIN-616's charges wrote (`fragment_core::price::LEGACY_KEYS`: its per
+  call estimates and request-read parts, `elevenlabs:speech`,
+  `fal:image` and the rest), so a row it queued just before a deploy is
+  charged as it would have been.
+- **Risk:** none, but code: no release writes these names any more.
+- **Delete when:** the release after this one reaches production, so no
+  queued row of the old names is left (`REF_KEEP_MS` has passed since).
+
+## A vendor whose answer says no cost is charged an estimate
+
+- **Shortcut:** an operator key whose vendor's answers say nothing is
+  charged a call at an estimate (`price::DEFAULT_CHARGES`): Browser Use a
+  session's start as five minutes, a task on a session it has too;
+  ElevenLabs' music as a minute; Perplexity's Sonar at a search's price;
+  fal's models other than Klein, xAI's videos and deferred images (their
+  cost on a poll) and Firecrawl's crawls, batch scrapes and extracts (a
+  running total on each poll) nothing. ElevenLabs' characters are priced
+  at the multilingual models' rate, which its header doesn't tell from
+  Flash's half; X's posts at $0.005, though X bills a post read again
+  within 24 hours nothing and a user $0.010.
+  A Grok chat streamed without `stream_options.include_usage` names no
+  cost (the swap sends a request as it came), and an answer read whole
+  past 8 MiB (a Grok image's, its images inline) is not read for its
+  number: each is charged nothing.
+- **Risk:** those calls charged above or below what they cost.
+- **Delete when:** each is read from its vendor's own report: a poll's
+  cost settled once per job (fal's queue: FIN-616's queue PR), a model's
+  price per unit for each fal model, or a vendor's billing read back.
 
 ## An imported connection's refresh is unproven
 
@@ -660,6 +676,40 @@ unfinished design, not debt.
 - **Delete when:** the Computer DO holds a save until its export has
   copied it, with a test that saves three times mid-copy.
 
+## A SimpleX door's object is JavaScript in the cell's Worker
+
+- **Shortcut:** the door's Durable Object and its container's egress
+  (cell/door.mjs, its rules cell/door-rules.mjs) live in the cell's own
+  Worker, as JavaScript, so the Wasm every fragment loads carries none of
+  it (Paul, 2026-11-20: "pay for what you use"); the cell's Rust holds only
+  its lever and its probe. Its schema's steps are locked by its own test
+  (door-rules.test.mjs), not `schema.lock`.
+- **Risk:** every isolate of the cell still loads the module, and the
+  door deploys only with the cell.
+- **Delete when:** two Workers deploy in lockstep (M19, after its admin
+  pilot): once the admin Worker has shipped, the door's object moves to a
+  Worker of its own, bound to the cell.
+
+## Two SimpleX doors: the computer's, and the connector's
+
+- **Shortcut:** an agent's SimpleX may run two ways at once: the
+  computer's (images/bridge/src/simplex, its door key and signed records
+  posted as the agent into its `<label>-simplex` chat), and the
+  connector's (templates/simplex on the platform's door, cell/door.mjs:
+  no key, records the platform checks through `job.door`). The
+  connector is made only by a test or the e2e so far, and a connector
+  deleted or unbound leaves its door running, its saves in the bucket,
+  until it is stopped (its life's own: a name made again reaches another
+  door, never its link).
+- **Risk:** two paths to keep proven for one messenger; a door no one
+  stops costs its container (about $2 a month), and a deleted
+  connector's SimpleX state outlives it.
+- **Delete when:** Settings links through the connector (D3), existing
+  links move to doors (D4), and the bridge's SimpleX module, its door key
+  and the signed-record route are deleted (D5); the connector's deletion
+  stops its door and deletes its saves (`ended.rs`), and its unlinking
+  stops it, with tests.
+
 ## SimpleX retains the computer's root trust and rewindable state
 
 - **Shortcut:** the SimpleX door and cores (images/bridge/src/simplex)
@@ -677,19 +727,10 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
-## OpenRouter's calls are charged at their ceiling, not their cost
-
-- **Shortcut:** an OpenRouter slot is priced at its `max_price` plus fee
-  (`fragment_core::models::Upstream::ceiling`), so no call is charged
-  below what it could cost; `usage.cost` is unread.
-- **Risk:** people are overcharged, cached input most.
-- **Delete when:** a call is charged from OpenRouter's reported cost,
-  the fee and margin on it.
-
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
-  calls are charged after answering (cell/src/meter.rs `charge`): no
+  calls are charged after answering (cell/src/pipe.rs `settle`): no
   usage charges nothing (`ledger.unknown-usage`), a failed send is lost
   (`ledger.charge-lost`), the gate is a minute stale.
 - **Risk:** calls given away: cents, against an agent never stopped.
@@ -792,6 +833,40 @@ unfinished design, not debt.
   should every fragment need all this machinery"), and the move's code
   is removed (FIN-463's debt entry). First candidates: the Migrations
   object, the export's archive builder, the Computer DO's routes.
+
+## The admin Worker deploys after the cell, not with it
+
+- **Shortcut:** a deploy is atomic for the cell (docs/MODEL.md, "Calls
+  between releases"), but the operators' admin Worker (cell/src/admin.rs)
+  deploys after it, from the same build and release, and is then probed
+  (`/healthz/admin`; xtask/src/deploy.rs). Cloudflare deploys one Worker
+  at a time, and each refuses a binding to a Worker that is not there:
+  the cell's to the admin, the admin's to the cell's classes. So the
+  admin goes second, and a deployment with none yet first gets one with
+  no object binding (`admin_bare`). Nothing in the system reads from the
+  admin, so it alone is let fall behind.
+- **Risk:** in a deploy's seconds the objects refuse the old admin's
+  calls (`deploying`); an admin deploy that fails fails the job with the
+  cell live, and the operators' routes stay down until the next deploy.
+  A class the cell adds and the admin binds in the same release would
+  make the admin's deploy fail until the cell's is live: it is, by then.
+  Deleting a branch deletes the admin first (it binds the cell's
+  classes); whether Cloudflare also refuses to delete a Worker another
+  binds as a service is untested.
+- **Delete when:** Cloudflare deploys several Workers as one, or the
+  admin moves back into the cell.
+
+## celld runs no admin Worker
+
+- **Shortcut:** `celld dev` runs one Worker, so its render drops the
+  cell's binding to the admin (crates/devstack celld.rs `DROPPED`), and
+  the cell there answers the admin's routes with a host failure saying
+  so (cell/src/admin.rs `forward`).
+- **Risk:** a self-hosted node has no admin page or admin API; CI runs
+  no celld lane (tag `celld-final`), so nothing else notices.
+- **Delete when:** celld runs a deployment's Workers together, with a
+  service binding between them and object bindings across them, or the
+  celld lane is retired.
 
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 

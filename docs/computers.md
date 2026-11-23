@@ -230,8 +230,28 @@ Not built either:
 
 - **F**, messengers outside the computer: a connector Durable Object per
   linked account holds the protocol's state, so it never rewinds.
-  Deferred (Paul, 2026-10-05: "too much of a lift for now"); SimpleX runs
-  on an always-on computer meanwhile (decision 32).
+  Deferred (Paul, 2026-10-05: "too much of a lift for now"); being built
+  since 2026-11-20, so no one needs an always-on computer for SimpleX. A
+  SimpleX door: a `lite` container per linked account, SimpleX's core and
+  the door's runner (images/simplex-door) with the bridge's own link
+  rules, its databases saved after every change as one file its door
+  keeps; a save its door knows is behind (an effect it numbered is newer)
+  forces one ratchet sync before anything is sent. The runner's protocol
+  with its door is images/simplex-door/src/door.rs; its Durable Object is
+  cell/door.mjs (each save a file in the bucket under `doors/<door>/`, a
+  row naming it, the newest three readable ones kept; a save that will
+  not restore is never given again, and a door with saves never starts as
+  a new one over them). A deployment runs doors only when its config names
+  their image (`doors`), and a local stack only for the e2e's
+  `simplex-door` lane. Its connector (templates/simplex, a hosted door as
+  Telegram's is) starts it and is its only caller of the two: its jobs
+  reach the door of the connector's life (`door_id`: a name made again
+  reaches another), and the door posts its
+  owner's messages to the connector's inbox as a webhook does, which
+  publishes each to the bound agent; the agent's computer wakes for it as
+  for any message, so it may sleep. Until Settings makes one (the next
+  step) and existing links move to doors, SimpleX runs on an always-on
+  computer (decision 32).
 
 ## What its owner is told
 
@@ -248,19 +268,22 @@ agent says it is getting ready while it starts, before the start's own
 steps; its "no reply yet" waits until it is up):
 
 - `wont_wake`: its starts kept failing.
-- `disk_filling`: its disk, read (`df`) in each start that restores a
-  save or a snapshot, before its guest is let go (a step of the start,
-  within its deadline), and after each awake save, is used past
-  `DISK_TOLD_USED_PCT` (80%) with at most
-  `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
-  clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
-  `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
-  and clears it in turn. Each read logs a `disk` line of its own. It
-  tells its owner to ask their agent to move big files to storage: the
-  agent reads the same disk (`df`, the relay hint's `DISK`), and its
-  `disk-space-finite` skill makes room with `fragment offload`, which
-  removes a file only once its copy in a members-only fragment of the
-  owner's reads back as it was (cli/GUIDE.md, "Moving files off a disk").
+- `disk_filling`: its room (below, "Room to restore": what a restore of
+  its save would leave, never what `df` says), read in each start that
+  restores a save or a snapshot, before its guest is let go (`df`, a step
+  of the start, within its deadline), and after each awake save (`df` and
+  `du` of `/data`), is at most `ROOM_TOLD_MAX` (3 GB): the room left,
+  told until a read finds at least `ROOM_CLEAR_MIN` (4 GB), so a disk at
+  the edge never shows and clears it in turn. At no room it says its
+  computer may not start again until there is room. Each read logs a
+  `disk` line of its own, its room in it. It tells its owner to ask their
+  agent to move big files to storage: the agent's `disk-space-finite`
+  skill makes room with `fragment offload`, which removes a file only once
+  its copy in a members-only fragment of the owner's reads back as it was
+  (cli/GUIDE.md, "Moving files off a disk"). Both views carry the read
+  and its room (`disk`), the guest's for its agents: each agent is told
+  firmly at its next turn after each read that finds it filling
+  (docs/bridge.md, "An agent is told to make room").
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
@@ -272,22 +295,16 @@ steps; its "no reply yet" waits until it is up):
   newest save didn't fit its disk (`tooBig`), it says so, where it went
   back to, and that the newer files are kept and can still be exported.
 - `update`: it is awake, with no keepalive open, on another version than
-  its next start runs, until its owner puts that version off.
-- `key_paused`: a shared key's charges this last hour reached its owner's
-  cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
-  calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
-  until `resumesAt`, which the notice counts down to. Worked out on read from
-  the computer's `key_hour`, and told as a charge reaches the cap. Its
-  button lifts the cap a step (`allowMicros`, `key_hour::next_lift`),
-  worked out by the computer from the cap it holds, so a stale page
-  changes nothing; at the most it says so.
+  its next start runs, until its owner puts that version off. While its
+  save may not restore beside the new image, it says to make room first,
+  with no Restart (`roomFirst`; below, "An image's share of the disk").
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). Its owner reads them in words
 with the rest of what they are told (`GET /api/notices`, docs/api.md,
 Notices): the computer says each one itself (`fragment_core::computer::said`),
 with its actions' routes (Restart, OK `…/notices/seen`, Later
-`…/notices/later`, Allow `…/key-caps/{provider}`, Get help), and the shell
+`…/notices/later`, Get help), and the shell
 draws them over every chat and Settings with no code of its own for any.
 
 - **One way back: Restart** (`POST /api/computers/{id}/restart`): the
@@ -432,8 +449,10 @@ Node's, and its Chromium's policy).
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the DO's
   `DirectoryBackup` saves and restores `/data` through it.
-- `sh` (with its `test`), `true`, `mkdir`, `touch`, `rm` and `cat`, with
-  which the DO polls, marks and reads its markers.
+- `sh` (with its `test` and `printf`), `true`, `mkdir`, `touch`, `rm` and
+  `cat`, with which the DO polls, marks and reads its markers; `df`, `du`
+  and `cut`, with which it reads its disk (below, "Room to restore"). GNU's
+  and BusyBox's alike.
 
 ### The hold
 
@@ -542,14 +561,186 @@ the DO removes them from one started from a snapshot.
   told so (`went_back`, naming the save it went back to).
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
-  `image` the pinned image's reference, and one that fails or comes up
-  dead is forgotten as the same wake starts the image and the save. So a
-  snapshot makes a wake faster, never different.
+  `image` the pinned image's reference (or, while its update waits for
+  room, the image it ran: below, "An image's share of the disk"), and one
+  that fails or comes up dead is forgotten as the same wake starts the
+  image and the save. So a snapshot makes a wake faster, never different.
 - **What a wake restored.** Each start that comes up records which save
   it restored and how the life before it ended (the view's `restored`). A
   start that went back in time is a rollback, counted in `rollbacks`: the
   life before it crashed, slept unsaved, or its start fell back past its
   newest save. Nothing's correctness depends on the guest reading either.
+
+### Room to restore
+
+A save is only good while a wake can restore it, and a restore takes more
+of the disk than the running computer did (2026-11-20: a computer's 20 GB
+disk ran with 2.1 GB free and saved 9.5 GB, and every start after it
+stopped in its restore of `/data/work` with about 200 MB free).
+
+- **Why.** A computer's disk compresses what is written to it: it is
+  btrfs with zstd, by every sign (`df` reads exactly the device's
+  20,000,002,048 bytes, which ext4 and XFS never do, and an empty
+  computer's image takes about 2.6 GB of it, though its files are 4.3 GB).
+  A restore writes each file whole, uncompressed: the Sandbox SDK's
+  `sandbox-shim` 1.0.0 turns compression off for what it extracts, for
+  speed (`FS_NOCOMP_FL`, `Extractor::new`), and its files keep that flag.
+  It also writes a sparse file's holes, and a file hard-linked between
+  `/data` and `/data/work` once in each record. It stops once less than
+  its floor is free, a twentieth of the disk and at most 256 MiB
+  (`restore_floor`), checked every 8 MiB it writes. It stages nothing: it
+  streams the archive, extracts beside its directory and swaps it in, and
+  a fresh container's `/data` is empty.
+- **So a save restores** while `IMAGE_DISK_MAX` + what its records hold
+  at full size + `restore_floor(total)` fits the disk. `IMAGE_DISK_MAX`
+  (3.0 GB) is the most of a disk an image takes as a fresh computer reads
+  it: an empty 20 GB btrfs disk keeps 0.55 GB for itself, and our image
+  took 2.41 GB more (production's empty computers read about 2.6 GB used;
+  the larger is counted).
+- **What a restore writes** is read after each awake save, in the alarm
+  that saved it (`sizes_read`, within `SIZES_READ_MS`, 30 s): `du` of
+  each record as its save takes it, `/data` but its work less what its
+  held guest named, and `/data/work` less what it named under its work,
+  each the larger of its allocated and its apparent size, summed. Apart,
+  a file hard-linked between the two counts in each, as each record
+  restores its copy; GNU's `du --exclude` leaves out what the save does
+  without walking it, so a file hard-linked between a cache left out and
+  the work kept (uv's and pnpm's caches link into projects) counts where
+  it restores. The shell finds what each pattern names (a `*` never
+  crosses a `/` nor matches a leading `.`, as the save's gitignore-style
+  patterns' `*` is one name), so `du` leaves out those paths alone, and
+  where the two differ it counts more, never less; each pattern is in the
+  command once, so a guest's largest answer fits one exec's argument
+  (`EXEC_ARG_MAX_BYTES`). A `du` with no `--exclude` (BusyBox's, the stub's) counts
+  all of `/data`, once. A record not read leaves the last read's size in
+  place, and a walk that failed part-way still gives its `df`. On ext4
+  the allocated size is exactly what a restore writes; on btrfs it is a
+  little more (a small file sits in its metadata), and a big file's
+  restore writes a little more than it, so 1% more is counted
+  (`restore_writes`). A start's read is `df` alone and keeps the last
+  `du`, unless that start restores another save (one set aside as too big
+  for its disk, or an operator's choice): the size was the save's it
+  left, so it is forgotten, and the start's `df`, after its restore, says
+  the room.
+- **What takes the disk** is read with it (`sizes_of`): the folders of
+  all of `/data` (its caches too), to `SIZES_DEPTH` (4) below it, and its
+  files of at least 10 MiB anywhere, each the biggest first, at most 64
+  and 32, a path at most 400 bytes, 16 KiB of paths in all, and `/data`'s
+  own total. It comes after the records and the `df` (read first, so a
+  line it lists can never pass for theirs), its walks ending within
+  `SIZES_LISTED_BY_S` (24 s) of the read's start, so it never costs them
+  their read; each line framed by GNU's `du -0` with a newline in a name
+  read as `?` (a name can forge no line; BusyBox's, the stub's, frames
+  none, so its total is its `all` record), and the whole answer within
+  what the cell keeps of it. A read it cannot use logs its exit, its
+  length and the exec's error code alone. Kept in a row of
+  its own (`sizes`), shown on its owner's view (`sizes`) and never on its
+  guest's or an operator's, never logged: it names a person's files. Its
+  view adds its folders by kind (`kinds`, `storage_kinds`): its agents'
+  own (all of `/data` but its work), and in its work caches, browser data
+  and downloads by their folders' names, projects the rest.
+- **Settings → Computer → Storage** (cell/shell/computer.js) draws it
+  from its owner's view, so asleep, awake and not waking alike: a bar of
+  what takes its disk by kind, the room left (red while it is told
+  filling, "Full" at none), its five biggest files by name, and when it
+  was measured; before its first read, that it is measured after its next
+  save. A view that lands while Settings is open redraws it.
+- **Delete** (`POST /api/computers/{id}/files/delete`), on an awake
+  computer, asked once in Storage: the platform removes one regular file
+  of its work in its container, no agent asked (so it works when its
+  agent is stuck), then reads its disk again. Never a folder, a link, or
+  a path outside `/data/work`: the path is held to `work/…` with no `.` or
+  `..` part (`delete_read`), and the command it runs (as root) resolves it
+  and holds it to `/data/work/` again, so a link to a folder elsewhere
+  leads nowhere. A path with a `?` is refused, and Storage offers no
+  Delete for one: GNU's listing reads a newline in a name as `?`, so it
+  may name another file. Its line logs whether it deleted, never the path,
+  and a delete its computer did not finish says so, never the path
+  either; Storage says "Deleted" when its read after it did not answer in
+  time. A process of the computer's own that swaps a folder for a link
+  between the check and the `rm` could lead it out of the work: the
+  agent is root in its container already, and the check is against the
+  platform's mistakes, not its agent.
+- **Its room** (`fragment_core::computer::room`) is the least of what is
+  free now and what a restore of that `/data` leaves beside
+  `IMAGE_DISK_MAX`, each less the floor. Told at `ROOM_TOLD_MAX` (above,
+  `disk_filling`).
+
+Measured on 20 GB btrfs disks with zstd (as this box's Docker's, and by
+its `df` a computer's), each class of files written as a computer writes
+them, saved and restored with the real `sandbox-shim` 1.0.0
+(2026-11-20; the bench, its numbers and the raw results are in the PR
+that added this):
+
+| Files | Running | Restored | × |
+| --- | --- | --- | --- |
+| Our Hermes image's (4.3 GB, 121,568 files) | 2.41 GB | 4.11 GB | 1.70 |
+| A Python environment (Hermes', 90,716 files) | 1.07 GB | 2.12 GB | 1.98 |
+| Source code (12,300 files) | 113 MB | 285 MB | 2.53 |
+| `node_modules` (4,984 files) | 197 MB | 449 MB | 2.27 |
+| Git packs, video, a browser's SQLite history | 1.41 GB | 1.42 GB | 1.01 |
+| 100,000 small JSON files | none (in metadata) | 132 MB | |
+| A 1 GiB sparse file, 1 MiB written | 1 MB | 1.08 GB | |
+| 200 MB hard-linked between `/data` and its work | 210 MB | 423 MB | 2.01 |
+
+The same files on btrfs without compression, and on ext4, restored to
+what they used running (1.00), but for the sparse file and the hard link.
+
+The incident, made again on such a disk (our image, two Python
+environments and 13 GB of video, until `df` read 2.1 GB free): it saved
+13.9 GB, and its restore onto a fresh disk with the image stopped as
+production's did, "restore stopped with 261689344 bytes free, below the
+268435456 byte floor". With the image's own share measured, `du` (16.8
+GB) predicted 36 MB of room: 43 MB, 0.26%, short. Counted as
+`room` counts it, it had none; it is told at 3 GB of room, which that
+disk reached with 3.2 GB less video, `df` reading about 5.3 GB free.
+
+### An image's share of the disk
+
+Paul, 2026-11-20: "our image update either never goes up in size, or
+that it's safe for all existing users somehow". An image sits on the same
+disk as `/data`, so an image that grew would leave every computer less
+room to restore, and a save that fit beside the old image might not fit
+beside the new one.
+
+- **A budget.** Every image is held to `IMAGE_DISK_MAX` (3.0 GB), the
+  share of a computer's disk it may take as a fresh computer reads it: its
+  files written to a fresh btrfs disk of a computer's size (`DISK_MB`)
+  with zstd, less what that disk has available. One measure does it
+  (`cargo xtask image disk <reference>`, xtask/src/image/disk.rs, reading
+  both numbers from their one definition in core), wherever an image is
+  held to it: a push (`cargo xtask image push`, the Image workflow) and
+  preview's build (`image preview --build`, CI's preview image) are
+  refused past it before anything pins them, and the Docker lane measures
+  the Hermes image on every change to it
+  (`the_hermes_image_fits_its_disk_budget`). Preview's build is pushed as
+  `unchecked-<key>` and named by its inputs (`inputs-<key>`, the tag a
+  later run reuses) only once it fits, so a retry after a refusal builds
+  and measures again. Today's
+  image measured 2.53 to 2.67 GB in five runs on a quiet box (2026-11-20;
+  production's empty computers read about 2.6 GB used), and 2.99 GB once
+  under heavy disk load, when btrfs compresses less as it writes back in a
+  hurry: the budget is that plus a little. Raising it is Paul's word alone, recorded
+  beside the constant: each GB raised is a GB less of every person's files
+  that restore.
+- **Room counts the largest image.** A computer's room (above, "Room to
+  restore") counts `IMAGE_DISK_MAX`, never the image it runs, so it is
+  told to make room while its save still restores beside any image the
+  deployment may move it to.
+- **An update waits for room.** A computer whose save may not restore
+  beside the largest image (`fits_any_image`, its disk as last read), or
+  whose disk is told filling (at the edge, a save a little bigger no
+  longer fits), stays on the image it has: a wake starts its snapshot of
+  that save on the image it was taken of, though another is pinned
+  (`Saves::update_waits`). Its `update` notice, told as ever, says to make
+  room first and offers no Restart, which would take the new image, and
+  so does Settings (its view's `roomFirst`). Its owner's restart stays on
+  its image too: it keeps the snapshot, so the restart's sleep takes one
+  and its start comes up from it, not fresh from the pinned image. Once a
+  read after a save finds room (and it is told filling no more), its next
+  wake takes the new image, and a restart is fresh again. A start with no
+  such snapshot (after a crash, or snapshots off) has no older image to
+  stay on; there the budget is what keeps it restorable.
 
 ### The start line
 
@@ -834,7 +1025,12 @@ provider's own hosts.
   not name, forged or naming an agent not on this computer now, of a
   provider its agent was narrowed from, or of a connection not connected
   or an own key not given (403 `not_connected`); and an operator key's
-  when its owner's gate refuses (402, 403). A body goes as it came, and a
+  when its owner's gate, asked beside the call as for a model call, has
+  heard them refused (402, 403; docs/ledger.md, "The gate"); and one
+  past its row's `calls_an_hour` from this computer (429 `rate_limited`,
+  with `retry_after_ms`: Google Places, 120 by default, uncharged; a call
+  is counted as it is sent, beside it, so one refused first costs none). A body goes
+  as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
 - **Calls an operator key never goes on.** Every agent shares an operator
@@ -853,6 +1049,11 @@ provider's own hosts.
   connection's are never denied, and an empty list denies nothing. It
   can't catch an account-wide call a vendor adds later; the vendor's own
   scoping is the main lock.
+- **An operator key never comes back.** It is the platform's own at its
+  vendor, so an answer to a request that carried one names each echo of
+  it `{{provider}}`, in its headers and its body, as a Vault's fills are
+  named (`Plan::operator_keys`, `pipe::answer`; docs/secrets.md, "Echoes
+  are hidden"): nothing the pipe puts on a request comes back in its answer.
 - **An account's own host.** A connection whose accounts each live at a
   host of their own (a Salesforce org at its My Domain) names the suffix
   they are under and the Pipes metadata field naming each account's

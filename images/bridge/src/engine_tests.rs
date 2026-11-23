@@ -408,7 +408,7 @@ fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
 }
 
 fn rec(seq: u64, principal: &str, body: Value) -> Record {
-    Record { channel: "chat".into(), seq, at: 0, principal: principal.into(), kind: "message".into(), body }
+    Record { channel: "chat".into(), seq, at: 0, principal: principal.into(), author: None, kind: "message".into(), body }
 }
 
 fn view(agents: &[&Agent]) -> ChatView {
@@ -499,7 +499,7 @@ fn a_late_message_is_told_its_age() {
     let v = view(&[&a]);
     let (minute, hour) = (60_000_u64, 3_600_000_u64);
     let now = T0 + 10 * hour;
-    let record = |seq: u64, at: u64| Record { channel: "chat".into(), seq, at: i64::try_from(at).expect("a time"), principal: "npub1paul".into(), kind: "message".into(), body: json!({ "text": "ship it" }) };
+    let record = |seq: u64, at: u64| Record { channel: "chat".into(), seq, at: i64::try_from(at).expect("a time"), principal: "npub1paul".into(), author: None, kind: "message".into(), body: json!({ "text": "ship it" }) };
     let say = |e: &mut Engine, seq: u64, at: u64, now: u64| {
         let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: record(seq, at), view: Some(v.clone()), since: 0 }, now);
         answered(e, s, now)
@@ -547,6 +547,64 @@ fn a_late_message_is_told_its_age() {
     assert_eq!(continued.continues.as_deref(), Some(cut.as_str()));
     assert_eq!(continued.age.as_deref(), Some("What that turn was answering was sent about 2 hours ago. If it may no longer be wanted, check before acting on it."));
     assert_eq!(continued.note, None, "the cut note is the driver's to read");
+}
+
+/// Goal (2026-11-20: a computer whose disk filled could not restore its
+/// save): an agent is told its computer's disk is filling, firmly, at its
+/// next turn after each read that finds it so (`Input::Disk`), first in
+/// its note (`TurnStart::disk`): once per read, so it is not told stale
+/// room again while it makes room; again at a newer read still filling.
+/// Each agent of the computer is told at its own next turn. Valid: not
+/// filling, nothing. Replay: the same read again tells no more. Order: a
+/// read older than the newest changes nothing, filling or not (Codex on
+/// #1425). Restart: a new life tells again (never saved).
+#[test]
+fn an_agent_is_told_its_disk_is_filling_once_per_read() {
+    let (a, b) = (agent("juniper"), agent("rowan"));
+    let record = |seq: u64| Record { channel: "chat".into(), seq, at: i64::try_from(T0).expect("a time"), principal: "npub1paul".into(), author: None, kind: "message".into(), body: json!({ "text": "hi" }) };
+    // a message to `who` in a chat of its own, handed at once: its disk line
+    let turn = |e: &mut Engine, who: &Agent, chat: &str, at: u64| {
+        let s = e.step(Input::Record { agent: who.fragment.clone(), fragment: format!("{chat}--k3x9"), record: record(1), view: Some(view(&[who])), since: 0 }, at);
+        started(&answered(e, s, at)).expect("handed").disk
+    };
+    let told = |room: &str| Some(format!("Your computer is almost full: only {room} of room is left before it can no longer start again from its save. Before anything else, load the disk-space-finite skill and make room: move big files you are not using to storage, then tell your owner what you moved."));
+    let read = |at: i64, room: u64, filling: bool| Input::Disk(Some(crate::api::Disk { room, filling, at }));
+    let mut e = engine(&[a.clone(), b.clone()]);
+    assert_eq!(turn(&mut e, &a, "one", T0 + 1), None, "never read: nothing");
+    e.step(Input::Disk(None), T0 + 2);
+    e.step(read(50, 9_000_000_000, false), T0 + 2);
+    assert_eq!(turn(&mut e, &a, "two", T0 + 3), None, "not filling: nothing");
+    // a read finds it filling: each agent told at its next turn, once
+    e.step(read(100, 2_400_000_000, true), T0 + 4);
+    assert_eq!(turn(&mut e, &a, "three", T0 + 5), told("2.4 GB"));
+    assert_eq!(turn(&mut e, &a, "four", T0 + 6), None, "told once for that read");
+    e.step(read(100, 2_400_000_000, true), T0 + 7);
+    assert_eq!(turn(&mut e, &a, "five", T0 + 8), None, "replay: the same read again");
+    assert_eq!(turn(&mut e, &b, "six", T0 + 9), told("2.4 GB"), "the other agent, at its own next turn");
+    // a newer read, still filling, less room: told again
+    e.step(read(200, 900_000_000, true), T0 + 10);
+    assert_eq!(turn(&mut e, &a, "seven", T0 + 11), told("900 MB"));
+    // a view read before it, answered after: nothing changes, nor does a view with no disk
+    e.step(read(150, 9_000_000_000, false), T0 + 10);
+    e.step(Input::Disk(None), T0 + 10);
+    assert_eq!(turn(&mut e, &b, "seven-b", T0 + 11), told("900 MB"), "an older read clears nothing");
+    // none left
+    e.step(read(300, 0, true), T0 + 12);
+    assert_eq!(turn(&mut e, &a, "eight", T0 + 13), Some("Your computer is full: it may not start again from its save after it sleeps. Before anything else, load the disk-space-finite skill and make room: move big files you are not using to storage, then tell your owner what you moved.".into()));
+    // room made: nothing more, and an older filling read tells nothing again
+    e.step(read(400, 6_000_000_000, false), T0 + 14);
+    e.step(read(350, 100, true), T0 + 14);
+    assert_eq!(turn(&mut e, &b, "nine", T0 + 15), None);
+    // restart: a new life is told again
+    let mut n = engine(&[a.clone(), b.clone()]);
+    n.step(read(300, 0, true), T0 + 16);
+    assert!(turn(&mut n, &a, "ten", T0 + 17).is_some(), "a new life tells again");
+    for room in [0, 1, 999_999, 1_000_000_000, 2_999_999_999, u64::MAX] {
+        assert!(crate::note::disk(room).len() <= limits::DISK_NOTE_MAX_BYTES, "{room}");
+    }
+    // the room as its owner's notice says it: rounded to a tenth of a GB (2,389,566,592 bytes: 2.4 GB), whole MB under one
+    let said = |room: u64| crate::note::disk(room).split(" of room").next().unwrap_or_default().rsplit("only ").next().unwrap_or_default().to_string();
+    assert_eq!([said(2_389_566_592), said(2_349_999_999), said(999_499_999), said(999_500_000), said(400_000)], ["2.4 GB", "2.3 GB", "999 MB", "1000 MB", "1 MB"]);
 }
 
 /// Goal: a person's message to the lead starts exactly one turn, which is
@@ -1409,7 +1467,7 @@ fn two_agents_run_at_once() {
 fn tasks_start_routines() {
     let a = agent("juniper");
     let mut e = engine(std::slice::from_ref(&a));
-    let task = |seq, body| Record { channel: "tasks".into(), seq, at: 0, principal: "npub1paul".into(), kind: "message".into(), body };
+    let task = |seq, body| Record { channel: "tasks".into(), seq, at: 0, principal: "npub1paul".into(), author: None, kind: "message".into(), body };
     let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(1, json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" })), view: None, since: 0 }, T0);
     let s = answered(&mut e, s, T0);
     let t = started(&s).expect("a routine turn");
@@ -2221,7 +2279,7 @@ fn a_corrupt_budget_is_refused() {
 fn tasks_hear_only_the_owner_and_the_fragment() {
     let a = agent("juniper");
     let mut e = engine(std::slice::from_ref(&a));
-    let task = |seq, principal: &str, body| Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), kind: "message".into(), body };
+    let task = |seq, principal: &str, body| Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), author: None, kind: "message".into(), body };
     let routine = json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" });
     let feed = |e: &mut Engine, r: Record| {
         let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: r, view: None, since: 0 }, T0);
@@ -2238,6 +2296,68 @@ fn tasks_hear_only_the_owner_and_the_fragment() {
     assert!(joined.effects.is_empty());
     let owner = feed(&mut e, task(4, "npub1paul", routine));
     assert!(started(&owner).is_some(), "its owner's runs");
+}
+
+// ---- whose words: what app code wrote (docs/chat-records.md, "Who wrote a record") ----
+
+/// `rec`, stamped as the platform stamps what app code wrote.
+fn by_code(seq: u64, principal: &str, body: Value) -> Record {
+    Record { author: Some(records::CODE.into()), ..rec(seq, principal, body) }
+}
+
+fn said_by_code(e: &mut Engine, a: &Agent, v: &ChatView, seq: u64, principal: &str, body: Value, now: u64) -> Step {
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: by_code(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
+    answered(e, s, now)
+}
+
+/// Goal (FIN-615, replacing #1397's per-record status reads): words app
+/// code wrote carry no owner's authority, under its owner's name too. They
+/// answer no card, pressed or in words, and no question; they stop no turn
+/// and run no command; on `tasks` they start no routine. They are still
+/// heard as a message, credited to no one ("app code"), so an app that
+/// writes its people's messages still gets its answer. Method: each kind of
+/// record, written by code as the owner, beside the same record without
+/// the stamp (an older platform's, or one stored before it), which keeps
+/// its owner's authority as before.
+#[test]
+fn app_codes_words_carry_no_owners_authority() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = commanded(std::slice::from_ref(&a), LIFE);
+    let command = said_by_code(&mut e, &a, &v, 1, "npub1paul", cmd("usage", ""), T0);
+    assert!(started(&command).is_none() && commands(&command).is_empty() && posts(&command).is_empty(), "app code runs no command");
+    // heard, as no one's
+    let s = said_by_code(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "plant something" }), T0);
+    let t = started(&s).expect("a message app code wrote is still heard");
+    assert_eq!((t.text.as_str(), t.asker_name.as_str()), ("plant something", "app code"), "credited to no one");
+    assert!(posts(&s).iter().any(|(_, b)| b["kind"] == "turn.start" && b["code"] == true), "and its start says so, for whoever reads it back: {:?}", posts(&s));
+    let turn = t.turn.clone();
+    // a card, pressed by code: nothing; by its owner: answered
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false, computer: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true, computer: false }];
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q.1".into(), text: "Run it?".into(), options, ttl_ms: None }, T0 + 1);
+    let open = |e: &Engine| e.state().turns[&turn].prompts.iter().any(|p| p.id == "q.1" && !p.closed);
+    let pressed = said_by_code(&mut e, &a, &v, 3, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.1", "option": "once" }), T0 + 2);
+    assert!(commands(&pressed).is_empty() && posts(&pressed).is_empty() && open(&e), "app code answers no card");
+    let typed = said_by_code(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "yes, all of it" }), T0 + 3);
+    assert!(!commands(&typed).iter().any(|c| matches!(c, Command::Answer { .. })) && open(&e), "nor in words");
+    let stop = said_by_code(&mut e, &a, &v, 5, "npub1paul", json!({ "kind": "stop", "turn": turn }), T0 + 4);
+    assert!(commands(&stop).is_empty() && e.state().turns.contains_key(&turn), "nor stops its turn");
+    assert_eq!(e.cursor(&a.fragment, "talk--k3x9", "chat"), 5, "the cursor passes them all");
+    // the same answer without the stamp is its owner's, as before
+    let yes = said(&mut e, &a, &v, 6, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.1", "option": "once" }), T0 + 6);
+    assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("once".into()), seq: 6, by: "npub1paul".into(), words: None, attached: None }]);
+    // and a routine app code wrote on its tasks starts nothing; its owner's does
+    let routine = json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" });
+    let task = |r: Record| Record { channel: "tasks".into(), ..r };
+    let feed = |e: &mut Engine, r: Record| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: r, view: None, since: 0 }, T0 + 7);
+        answered(e, s, T0 + 7)
+    };
+    for (seq, principal) in [(1, "npub1paul"), (2, a.identity.as_str())] {
+        let s = feed(&mut e, task(by_code(seq, principal, routine.clone())));
+        assert!(s.effects.is_empty(), "app code as {principal} asks nothing on tasks: {:?}", s.effects);
+    }
+    assert_eq!(e.cursor(&a.fragment, &a.fragment, "tasks"), 2);
 }
 
 // ---- asks (docs/chat-records.md, "An ask") ----
@@ -2274,7 +2394,7 @@ fn answers(s: &Step) -> Vec<(String, String, Value)> {
 
 /// An answer, as its asking agent's `tasks` holds it.
 fn answer_task(seq: u64, principal: &str, body: Value) -> Record {
-    Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), kind: "message".into(), body }
+    Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), author: None, kind: "message".into(), body }
 }
 
 /// Goal: an agent's question to another, with a chat to return to, is a
@@ -2784,7 +2904,7 @@ impl Journal {
     fn append(&mut self, fragment: &str, channel: &str, principal: &str, body: Value) -> u64 {
         let list = self.records.entry((fragment.to_string(), channel.to_string())).or_default();
         let seq = list.len() as u64 + 1;
-        list.push(Record { channel: channel.to_string(), seq, at: self.at, principal: principal.to_string(), kind: "message".into(), body });
+        list.push(Record { channel: channel.to_string(), seq, at: self.at, principal: principal.to_string(), author: None, kind: "message".into(), body });
         seq
     }
 
@@ -4267,7 +4387,7 @@ fn a_late_answer_to_a_cut_turns_card_is_its_next_turn_wherever_its_read_falls() 
         let initial = said(&mut e, &a, &v, 1, &a.owner, json!({"text":"publish after asking"}), T0);
         let old = started(&initial).unwrap().turn;
         let card = ev(&mut e, Event::Prompt { turn: old.clone(), prompt: "p".into(), text: "Publish?".into(), options: vec![PromptOption { id: "yes".into(), label: "Publish".into(), style: None, words: false, computer: false }], ttl_ms: None }, T0);
-        let work: Vec<Record> = posts(&initial).into_iter().chain(posts(&card)).enumerate().map(|(i, (_, body))| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), kind: "message".into(), body }).collect();
+        let work: Vec<Record> = posts(&initial).into_iter().chain(posts(&card)).enumerate().map(|(i, (_, body))| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), author: None, kind: "message".into(), body }).collect();
         let chat = vec![Record { at: T0 as i64, ..rec(1, &a.owner, json!({"text":"publish after asking"})) }, Record { at: T0 as i64 + 1, ..rec(2, &a.owner, json!({"kind":"prompt_response","prompt":"p","option":"yes","agent":a.identity,"turn":old})) }];
         let late = Input::CardRecord { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: chat[1].clone(), view: Some(v.clone()), since: 0, history: Ok(crate::history::Journal { work: work.clone(), chat: chat.clone(), cause: Some(chat[0].clone()) }) };
         let mut next = Engine::new(before, Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
@@ -4912,7 +5032,7 @@ fn a_late_answer_is_a_fresh_claim_even_without_the_cache() {
     let saved = e.state().clone();
     let ended = ev(&mut e, Event::End {turn:old.clone(),outcome:Outcome::Idle}, T0);
     assert!(!kinds(&ended).contains(&"turn.prompt.closed".into()), "the card survives a normal runtime end too");
-    let work: Vec<Record> = posts(&initial).into_iter().chain(posts(&card)).enumerate().map(|(i, (_, body))| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), kind:"message".into(), body }).collect();
+    let work: Vec<Record> = posts(&initial).into_iter().chain(posts(&card)).enumerate().map(|(i, (_, body))| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), author: None, kind:"message".into(), body }).collect();
     let chat = vec![Record { at:T0 as i64, ..rec(1, &a.owner, json!({"text":"publish after asking"})) }, Record { at:T0 as i64 + 1, ..rec(2, &a.owner, json!({"kind":"prompt_response","prompt":"p","option":"yes","agent":a.identity,"turn":old})) }];
     for (state, questioning) in [(saved, false), (e.state().clone(), false), (State::default(), false), (State::default(), true)] {
         let mut next = Engine::new(state, Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
@@ -4975,7 +5095,7 @@ fn a_card_answered_live_starts_nothing_after_a_rollback() {
     assert_eq!(commands(&live).len(), 1, "the running turn has its answer");
     let journal: Vec<Value> = posts(&initial).into_iter().chain(posts(&card)).chain(posts(&live)).map(|(_, b)| b).collect();
     assert!(journal.iter().any(|b| b["kind"] == "turn.prompt.closed" && b.get("answerSeq").is_none()), "a live closure names no answer");
-    let work: Vec<Record> = journal.into_iter().enumerate().map(|(i, body)| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), kind:"message".into(), body }).collect();
+    let work: Vec<Record> = journal.into_iter().enumerate().map(|(i, body)| Record { channel: records::WORK.into(), seq: i as u64 + 1, at: T0 as i64, principal: a.identity.clone(), author: None, kind:"message".into(), body }).collect();
     let chat = vec![Record { at:T0 as i64, ..rec(1, &a.owner, json!({"text":"publish after asking"})) }, Record { at:T0 as i64 + 1, ..rec(2, &a.owner, response) }];
     let mut back = Engine::new(saved, Settings::default(), "11111111111111111111111111111111").unwrap().with_runtime(crate::runtime::DEFAULT, &[]);
     back.step(Input::Agents(vec![a.clone()]), T0 + 2);

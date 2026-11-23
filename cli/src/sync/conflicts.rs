@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::codestorage::Wants;
     use crate::sync::listing::list_main;
-    use crate::sync::scan::scan_local;
+    use crate::sync::scan::{scan_local, Reader};
     use crate::sync::tests::{client_for, opts, rp, tmpdir};
     use crate::sync::{sync_once, Mode};
 
@@ -184,7 +184,7 @@ mod tests {
         let storage = CodeStorage::connect(&c, "t--k3x9", Wants::Write).unwrap();
         let blobs = crate::blobs::Blobs::new(&c, "t--k3x9");
         let listing = list_main(&storage).unwrap();
-        let local = scan_local(&dir, None, true).unwrap().files;
+        let local = scan_local(&dir, None, Reader::Audit).unwrap().files;
         let mut state = SyncState { schema_version: 3, name: "t--k3x9".into(), host: None, repo: None, files: BTreeMap::new() };
         let mut report = Report::default();
         let mut recorded = HashSet::new();

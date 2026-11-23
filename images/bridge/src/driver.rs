@@ -448,6 +448,10 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
+    // its disk as its first view says it: filling, its agents are told at
+    // their first turns (Codex on #1425)
+    let s = engine.step(Input::Disk(computer.disk), crate::log::now_ms());
+    act(&engine, s)?;
     let s = engine.step(Input::Unready(unready(&computer.agents, &ready)), crate::log::now_ms());
     act(&engine, s)?;
     // the agents whose SimpleX link is bound, and their chats, as their files
@@ -502,6 +506,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c) => {
                         let agents = gated(c.agents.clone(), &ready);
+                        // its disk, filling or not (read before the view goes to SimpleX)
+                        let disk = c.disk;
                         if let Some(h) = &simplex {
                             h.computer(c, agents.clone());
                         }
@@ -510,6 +516,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                         // the roster first, then who of it is not ready: a turn
                         // starts on the runtime its agent names now
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
+                        if let Err(e) = act(&engine, s) {
+                            break Err(e);
+                        }
+                        // its agents are told of a disk filling at their next turns
+                        let s = engine.step(Input::Disk(disk), crate::log::now_ms());
                         if let Err(e) = act(&engine, s) {
                             break Err(e);
                         }
@@ -1065,8 +1076,11 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     // given up on) before the routine reaches the engine, so the import it
     // starts, and the `done` that ends the stage, come after by
     // construction (docs/migrations.md, "SimpleX in a stage"). Bounded
-    // (`SET_ASIDE_WAIT_MS`); a replay of it waits for nothing.
-    if let (true, Some(h)) = (tasks && fragment == agent.fragment && record.principal == agent.identity, &shared.simplex) {
+    // (`SET_ASIDE_WAIT_MS`); a replay of it waits for nothing. App code asks
+    // nothing on `tasks` (the engine passes it by): nothing is set aside,
+    // and no home is read, for one it wrote.
+    let code_task = tasks && record.by_code();
+    if let (true, Some(h)) = (tasks && !code_task && fragment == agent.fragment && record.principal == agent.identity, &shared.simplex) {
         let routine = record.body.get("kind").and_then(Value::as_str) == Some("routine");
         if let Some(stage) = record.body.get("text").and_then(Value::as_str).filter(|_| routine).and_then(crate::simplex::stage::of_routine) {
             h.set_aside_first(&agent.fragment, &stage).await;
@@ -1104,7 +1118,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         }
         (Some(view.view.clone()), view.since)
     };
-    let record = if tasks && record.at >= since && records::homeless(&record.body) {
+    let record = if tasks && !code_task && record.at >= since && records::homeless(&record.body) {
         let simplex = shared.mirrors.lock().expect("mirrors").get(&agent.fragment).cloned().flatten();
         let now = i64::try_from(crate::log::now_ms()).expect("ms fit");
         let waited = now.saturating_sub(record.at) >= i64::try_from(limits::HOME_CHAT_WAIT_MS).expect("ms fit");
@@ -1131,7 +1145,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     // follow, which reads it again from the cursor after a wait, so a card
     // is never closed for a blip. (A turn that ends between this look and
     // the engine's is a race of a few ms; its answer is passed over.)
-    let late = !tasks && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.principal == agent.owner && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
+    let late = !tasks && record.at >= since && record.seq > shared.cursor(&agent.fragment, fragment, &record.channel) && record.by(&agent.owner) && matches!(records::said(&record.body), records::Said::PromptResponse { prompt, card, .. } if card.as_ref().is_none_or(|c| c.agent == agent.identity) && !shared.holds(&agent.fragment, fragment, &prompt));
     let input = if late {
         let read = tokio::time::timeout(Duration::from_millis(limits::CARD_READ_MS_MAX), card_history(api, agent, fragment, &record)).await;
         let history = read.unwrap_or(Err(Unavailable::Read));
@@ -1738,12 +1752,13 @@ impl RuntimeLane {
                     }
                     keep(&ts.turn, &files);
                     ts.files = files;
-                    // its age first (a late message's), then a late card
-                    // answer's turn's own note (engine.rs `hand`)
-                    let notes: Vec<String> = [ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
+                    // its disk first (filling: make room), its age (a late
+                    // message's), then a late card answer's turn's own note
+                    // (engine.rs `hand`)
+                    let notes: Vec<String> = [ts.disk.take(), ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
                     // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 4), "a turn's notes are bounded");
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
