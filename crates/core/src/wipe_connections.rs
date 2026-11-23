@@ -213,6 +213,15 @@ impl Ended {
     }
 }
 
+/// A failed revoke counted (binds: identity, provider, account, now): the
+/// first's time kept; an account whose revoke ended already counts none.
+pub const NOTE_FAILED: &str = "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms, ended) VALUES (?1, ?2, ?3, 1, ?4, 0) ON CONFLICT (identity, provider, account) DO UPDATE SET tries = tries + 1 WHERE ended = 0";
+/// How a revoke ended, kept until its delete (binds: identity, provider,
+/// account, now, `Ended::code`).
+pub const NOTE_ENDED: &str = "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms, ended) VALUES (?1, ?2, ?3, 0, ?4, ?5) ON CONFLICT (identity, provider, account) DO UPDATE SET ended = excluded.ended";
+/// What is kept of one account (binds: identity, provider, account).
+pub const KEPT: &str = "SELECT provider, account, tries, first_ms, ended FROM wipe_revokes WHERE identity = ?1 AND provider = ?2 AND account = ?3";
+
 /// What earlier calls kept of an account (`wipe_revokes`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Kept {
@@ -582,6 +591,30 @@ mod tests {
         assert_eq!(Ended::of_code(Ended::code(Some(Ended::GivenUp))), Ok(Some(Ended::GivenUp)));
         assert_eq!(Ended::of_code(Ended::code(None)), Ok(None));
         assert!(Ended::of_code(3).is_err());
+    }
+
+    /// Goal: the registry's record of a wipe's revokes counts each failure
+    /// once, keeps the first's time, keeps how a revoke ended, and counts
+    /// no failure of one ended already (a stale call's). Method: the
+    /// statements on the migrated registry.
+    #[test]
+    fn the_registry_keeps_each_accounts_revoke() {
+        use rusqlite::{Connection, params};
+        let db = Connection::open_in_memory().unwrap();
+        for step in crate::migrate::REGISTRY.steps {
+            db.execute_batch(step.sql).unwrap();
+        }
+        let kept = |account: &str| db.query_row(KEPT, params!["p", "google", account], |r| Ok((r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))).unwrap();
+        db.execute(NOTE_FAILED, params!["p", "google", "data_installation_a", 10]).unwrap();
+        db.execute(NOTE_FAILED, params!["p", "google", "data_installation_a", 20]).unwrap();
+        assert_eq!(kept("data_installation_a"), (2, 10, 0), "counted twice, the first's time kept");
+        db.execute(NOTE_ENDED, params!["p", "google", "data_installation_a", 30, Ended::code(Some(Ended::GivenUp))]).unwrap();
+        db.execute(NOTE_FAILED, params!["p", "google", "data_installation_a", 40]).unwrap();
+        assert_eq!(kept("data_installation_a"), (2, 10, 2), "given up, and no failure counted after");
+        db.execute(NOTE_ENDED, params!["p", "google", "data_installation_b", 50, Ended::code(Some(Ended::Revoked))]).unwrap();
+        assert_eq!(kept("data_installation_b"), (0, 50, 1), "revoked at its first try");
+        let others: i64 = db.query_row("SELECT COUNT(*) FROM wipe_revokes WHERE identity <> 'p'", [], |r| r.get(0)).unwrap();
+        assert_eq!(others, 0);
     }
 
     /// Goal: an account is deleted only once its grant is revoked or gone;

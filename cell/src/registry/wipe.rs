@@ -348,19 +348,11 @@ impl RegistryCell {
         let key = || -> Vec<SqlStorageValue> { vec![id.into(), b.provider.as_str().into(), b.account.as_str().into()] };
         let now = SqlStorageValue::Integer(js::now_ms());
         match b.ended.map(Ended::of_code) {
-            None => self.exec(
-                "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms, ended) VALUES (?, ?, ?, 1, ?, 0) ON CONFLICT (identity, provider, account) DO UPDATE SET tries = tries + 1 WHERE ended = 0",
-                [key(), vec![now]].concat(),
-            )?,
-            Some(Ok(Some(ended))) => self.exec(
-                "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms, ended) VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT (identity, provider, account) DO UPDATE SET ended = excluded.ended",
-                [key(), vec![now, SqlStorageValue::Integer(Ended::code(Some(ended)))]].concat(),
-            )?,
+            None => self.exec(fragment_core::wipe_connections::NOTE_FAILED, [key(), vec![now]].concat())?,
+            Some(Ok(Some(ended))) => self.exec(fragment_core::wipe_connections::NOTE_ENDED, [key(), vec![now, SqlStorageValue::Integer(Ended::code(Some(ended)))]].concat())?,
             Some(_) => return Err(CellError::invalid("a revoke ends revoked or given up")),
         }
-        let kept = self
-            .row::<WipeRevokeFailures>("SELECT provider, account, tries, first_ms, ended FROM wipe_revokes WHERE identity = ? AND provider = ? AND account = ?", key())?
-            .ok_or_else(|| CellError::host("a revoke's record went missing"))?;
+        let kept = self.row::<WipeRevokeFailures>(fragment_core::wipe_connections::KEPT, key())?.ok_or_else(|| CellError::host("a revoke's record went missing"))?;
         if b.ended.is_none() && kept.ended != 0 {
             return Err(CellError::host(format!("{} {}: its revoke ended already, and is not tried again", b.provider, b.account)));
         }
