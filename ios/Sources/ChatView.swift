@@ -225,14 +225,16 @@ struct ChatRows: View {
     let open: (FragmentSummary) -> Void
 
     /// A finished turn's summary ("XP brewed · 22s") and the reply right
-    /// after it, its agent's, are one: the summary heads the reply in place
-    /// of its name, and has no row of its own. `folded`: the summaries'
-    /// records; `by`: each reply's summary, by its record's id.
+    /// after it, that turn's own, are one: the summary heads the reply in
+    /// place of its name, and has no row of its own. A reply of another turn
+    /// (the same agent's next, after one with no reply) keeps its own name.
+    /// `folded`: the summaries' records; `by`: each reply's summary, by its
+    /// record's id.
     static func leads(_ rows: [ChatItem], cards: [String: ToolCard]) -> (folded: Set<String>, by: [String: ToolCard]) {
         var folded = Set<String>(), by: [String: ToolCard] = [:]
         for (index, item) in rows.enumerated().dropLast() {
             guard case .record(let record) = item, let card = cards[record.id], !card.running, card.words == nil,
-                  case .record(let next) = rows[index + 1], next.isMessage, next.principal == card.turn.agent, cards[next.id] == nil
+                  case .record(let next) = rows[index + 1], next.isMessage, next.principal == card.turn.agent, next.turn == card.turn.id, cards[next.id] == nil
             else { continue }
             folded.insert(record.id); by[next.id] = card
         }
