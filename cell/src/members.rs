@@ -2,7 +2,7 @@
 //! visibility, and the share link's token live in the supervisor, change in
 //! one transaction, and take effect on the next request. Only the owner
 //! changes them, or their own agent sharing for them (Paul, 2026-10-04:
-//! `access::agent_shares`, decided here from the owner's share whatever
+//! `permit::agent_shares`, decided here from the owner's share whatever
 //! the router let through); a member may leave. Every change names who
 //! made it (`Actor`): an agent's names the agent and the owner it acted
 //! for, in the events, and the agent in members' `added_by` and invites'
@@ -40,7 +40,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::access;
+use fragment_core::permit;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
@@ -135,7 +135,7 @@ fn opt(v: Option<&str>) -> SqlStorageValue {
 /// Who changes a fragment's sharing in one request, and with what role.
 struct Actor {
     /// A person's own membership (anyone's own, leaving); an agent sharing
-    /// for its owner, its owner's role, lent (`access::agent_shares`).
+    /// for its owner, its owner's role, lent (`permit::agent_shares`).
     role: Option<Role>,
     /// Who made the change: members' `added_by`, invites' `created_by`,
     /// the events' `by`.
@@ -525,7 +525,7 @@ impl FragmentCell {
 
     /// Who shares in this request (Paul, 2026-10-04): a person, with their
     /// own membership; an agent, with its owner's role when
-    /// `access::agent_shares` lends it, and refused with why (403) when it
+    /// `permit::agent_shares` lends it, and refused with why (403) when it
     /// does not, and on a connector always (`agents_share`). An agent's own
     /// membership never shares (it is at most `AGENT_ROLE_MAX`). The router refused what it could tell from who
     /// the agent is; this decides again, so a path it read otherwise
@@ -543,13 +543,12 @@ impl FragmentCell {
             IdentityKind::Agent => {
                 self.agents_share()?;
                 let owner = signed.owner.as_deref();
-                let for_owner = owner.is_some() && signed.acting_for.as_deref() == owner;
-                let sharer = access::Sharer { for_owner, held: signed.held };
+                let sharer = permit::Sharer::of(owner, signed.acting_for.as_deref(), signed.held);
                 let share = match owner {
                     Some(owner) => self.member_role(owner)?,
                     None => None,
                 };
-                match access::agent_shares(sharer, share) {
+                match permit::agent_shares(sharer, share) {
                     Ok(role) => {
                         assert_eq!(role, Role::Owner, "an agent shares with its owner's ownership");
                         let owner = owner.expect("an agent that shares acts for its owner").to_string();
@@ -709,7 +708,7 @@ impl FragmentCell {
         let actor = self.sharer(caller)?;
         // only the owner (or their agent sharing for them) learns whom a key names
         if actor.role != Some(Role::Owner) {
-            let why = access::refuse_set_role(actor.role, None, body.role).expect("only the owner manages members");
+            let why = permit::refuse_set_role(actor.role, None, body.role).expect("only the owner manages members");
             return Err(refusal(false, why));
         }
         // what it waited on, for its client (`Server-Timing`)
@@ -775,7 +774,7 @@ impl FragmentCell {
     /// sends are the caller's (`put_member`, or a create's own).
     fn write_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
-        if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
+        if let Some(why) = permit::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
         }
         let theirs = target.owner.as_deref() == Some(self.must(MetaKey::Owner)?.as_str());
@@ -866,7 +865,7 @@ impl FragmentCell {
             false => self.sharer(caller)?,
         };
         let current = self.member_role(&target)?;
-        if let Some(why) = access::refuse_remove(actor.role, is_self, current) {
+        if let Some(why) = permit::refuse_remove(actor.role, is_self, current) {
             return Err(match current {
                 None => CellError::new(ErrorCode::NotFound, why),
                 Some(_) => refusal(actor.role == Some(Role::Owner), why),
@@ -1359,13 +1358,24 @@ impl FragmentCell {
         // refuse it here refuses it first
         let moved = match put.from_vault.take() {
             Some(_) if !put.value.is_empty() => return Err(CellError::invalid("a secret is its value or fromVault, not both")),
+            // Never from a page (`__secrets/KEY`, a site or frame session):
+            // a page runs its authors' code with its visitor's session, an
+            // agent of the visitor's own among them, so its call is no word
+            // of theirs. A move is asked from the platform's own pages (the
+            // shell's session: Settings moves the bot it offered a Telegram
+            // connector, connections.js) or their own key (the CLI's
+            // `--from-vault`). Refused before the Vault is asked, the same
+            // for every name, so a page learns nothing of what it holds.
+            Some(_) if caller.site => {
+                return Err(CellError::new(ErrorCode::Forbidden, "a secret of a vault moves only from Settings or its person's own key, never from a page"));
+            }
             Some(name) => {
                 let person = caller.signed.as_ref().filter(|s| s.identity.kind == fragment_proto::IdentityKind::Person).map(|s| s.identity.id.clone());
                 let person = person.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only a person moves a secret of their vault, from their own session or key"))?;
                 self.reach_while_private()?;
                 self.secret_room(key)?;
                 let to = format!("{}/{key}", self.name()?);
-                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to).await?;
+                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to, &hosts).await?;
                 put.value = value;
                 Some((person, name, to, revision))
             }

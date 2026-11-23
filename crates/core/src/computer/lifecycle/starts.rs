@@ -1074,7 +1074,7 @@ mod tests {
         let s = c.apply(Event::Wake { why: Wake::Record });
         let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
         let plan = c.saves.plan(Some(IMAGE));
-        assert_eq!(plan, Plan::Snapshot { id: "s1".into() });
+        assert_eq!(plan, Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
         c.saves.starting(generation, plan.source());
         assert_eq!(c.saves.start_from(generation), Some(RestoreSource::Snapshot), "its exit now is the start's own failure");
         assert_eq!(c.saves.snapshot_failed().map(|s| s.id), Some("s1".into()));
@@ -1178,6 +1178,26 @@ mod tests {
         }
         let s = l.apply(Event::RestoreFailed { generation: SAVES_KEPT as u64 + 1, why: "x".into(), older: true }, T + 10);
         assert!(s.actions.is_empty() && l.failures == 1, "a fallback past the saves kept is a strike: {s:?}");
+    }
+
+    /// Goal (Codex on the no-room PR): a start that falls back past a save
+    /// that would not restore, or did not fit its disk, is owed at once
+    /// however long its restores ran. Three big ones can outlast the wake's
+    /// hold, and then the save before them was left asleep, the message
+    /// that woke it unanswered. Invalid: with no older save, a strike as
+    /// before, owed nothing.
+    #[test]
+    fn a_fallback_start_is_owed_past_the_wakes_hold() {
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Record }, T);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let late = T + IDLE_MS + 8 * 60_000;
+        let s = l.apply(Event::RestoreFailed { generation, why: "restore stopped with ~203 MB free, below the 268435456 byte floor".into(), older: true }, late);
+        assert!(matches!(l.phase, Phase::Asleep { retry: Some(Retry { owed: true, at_ms }) } if at_ms == late), "{:?}", l.phase);
+        let s = owed(&mut l, &s, late);
+        assert_eq!((s.actions, l.failures), (vec![Action::Start { generation: generation + 1 }], 0));
+        let s = l.apply(Event::RestoreFailed { generation: generation + 1, why: "no room".into(), older: false }, late + 1_000);
+        assert!(l.failures == 1 && matches!(l.phase, Phase::Asleep { retry: Some(Retry { owed: false, .. }) }), "{s:?} {:?}", l.phase);
     }
 
     /// Goal: its owner's restart of a running computer is a sleep that

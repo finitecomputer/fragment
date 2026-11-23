@@ -163,7 +163,7 @@ model should use. A reader has one tool more, `fragment-search`.
 
 Before a job likely to cost more than about $1 (speech, images, many
 searches or model calls), or anything repeated or looping, quote it
-(`fragment quote elevenlabs:speech 40000chars`) and ask once, in one
+(`fragment quote elevenlabs:character 40000chars`) and ask once, in one
 sentence: "That's about $4.80; you have $95 left this month. Go ahead?"
 Not for small one-off calls. Refused for credit or budget? `fragment
 quote` reads what is left: don't assume.

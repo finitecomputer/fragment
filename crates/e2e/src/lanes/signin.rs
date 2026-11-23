@@ -233,17 +233,26 @@ fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// A deploy's probe, `GET /healthz/objects` (docs/api.md, Health), which
-/// `cargo xtask deploy` asks until every object class answers its release:
-/// the Registry's skew hook stands in for an object of another release.
+/// `cargo xtask deploy` asks until every object class answers its release,
+/// and the admin Worker's, `GET /healthz/admin`, asked after it: the same,
+/// from the admin's own Worker through its bindings to the cell's classes.
+/// The Registry's skew hook stands in for an object of another release.
 fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex", "Vault"];
-    let probe = || api.unsigned("GET", "/healthz/objects", None);
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer", "SearchIndex", "Vault", "Migrations", "SimplexDoor"];
+    for (probed, worker) in [("/healthz/objects", "the Worker"), ("/healthz/admin", "the admin Worker")] {
+        probe_cases_of(s, api, &classes, probed, worker)?;
+    }
+    Ok(())
+}
+
+fn probe_cases_of(s: &mut Suite, api: &Api, classes: &[&str], probed: &str, worker: &str) -> Result<()> {
+    let probe = || api.unsigned("GET", probed, None);
     // valid: every class's probe object admits the Worker's release, its schema ready
     let r = probe()?;
     let answered = |r: &Reply, of: &[&str]| of.iter().all(|c| r.body["objects"][c]["release"] == r.body["release"]);
     s.ok(
-        "a deploy's probe is answered to anyone: every object class admits the Worker's release (200), the release every answer names",
-        r.status == 200 && answered(&r, &classes) && r.body["release"] == r.header("x-fragment-deploy"),
+        &format!("{probed}: a deploy's probe is answered to anyone: every object class admits {worker}'s release (200), the release every answer names"),
+        r.status == 200 && answered(&r, classes) && r.body["release"] == r.header("x-fragment-deploy"),
         &r,
     );
     // invalid: an object of another release refuses it, and the probe names
@@ -252,13 +261,13 @@ fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(skew.status == 200, "the skewFor test hook: {skew}");
     let r = probe()?;
     s.ok(
-        "an object of another release fails the probe (503), named with the release it runs: the deploy is not done",
+        &format!("{probed}: an object of another release fails the probe (503), named with the release it runs: the deploy is not done"),
         r.status == 503 && r.body["objects"]["Registry"]["refusedBy"] == "another-release-a-test-hook" && answered(&r, &classes[1..]),
         &r,
     );
     // replay: once that object runs the Worker's release, the probe is 200 again
     let r = probe()?;
-    s.ok("and asked again, that object now of the Worker's release, it is 200", r.status == 200 && answered(&r, &classes), &r);
+    s.ok(&format!("{probed}: and asked again, that object now of {worker}'s release, it is 200"), r.status == 200 && answered(&r, classes), &r);
     Ok(())
 }
 
@@ -383,15 +392,41 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let back = api.external(&to)?;
-    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound.clone(), ..Call::default() })?;
     let ends = done.header("location");
     s.ok(
-        "WorkOS answering it from the session it holds, it signs no one in, and sends the browser to end that session at WorkOS",
-        done.status == 302 && ends == to_logout(&held) && session_set(&done).is_none() && cookie_line(&done, "fragment_switch").contains("Max-Age=0"),
+        "WorkOS answering it from the session it holds, it signs no one in, and sends the browser to end that session at WorkOS, the switch still bound to the browser",
+        done.status == 302 && ends == to_logout(&held) && session_set(&done).is_none() && cookie_line(&done, "fragment_switch").is_empty(),
         &done,
+    );
+    // The page's Continue, pressed while its Refresh had the browser on
+    // its way already: the same authorize again, after that first callback
+    // was answered (its answer lost to the second navigation, or followed)
+    let continues = r.text.contains(&format!("<a href=\"{}\">Continue</a>", to.replace('&', "&amp;")));
+    let again = api.external(&to)?;
+    let twice = api.call(Call { method: "GET", url: again.header("location"), cookie: bound.clone(), ..Call::default() })?;
+    s.ok(
+        "its page's Continue (a link to its Refresh's address), pressed while the browser was already on its way, is the same switch again: answered from the same session, it ends that one too, signing no one in",
+        continues && twice.status == 302 && twice.header("location") == to_logout(&held) && session_set(&twice).is_none(),
+        &twice,
     );
     let out = api.external(&ends)?;
     s.ok("which ends it, and comes back to the platform", out.status == 302 && out.header("location") == home && s.workos.held().is_none(), &out);
+    // pressed once WorkOS ended that session: it asks who is signing in,
+    // and that sign-in spends the switch
+    let asks = api.external(&to)?;
+    let back = api.external(&format!("{to}&login_hint=switch-c@e2e.test"))?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: bound.clone(), ..Call::default() })?;
+    let c = session_set(&done).context("a switch's Continue someone signed in to sets a session")?;
+    let r = who(api, &c)?;
+    s.ok(
+        "pressed after WorkOS ended that session, WorkOS asks who is signing in, and whoever signs in is signed in, back where the switch began, its binding spent",
+        asks.status == 200 && asks.text.contains("sign in as") && done.status == 302 && done.header("location").ends_with("/settings") && r["email"] == "switch-c@e2e.test" && cookie_line(&done, "fragment_switch").contains("Max-Age=0"),
+        &r,
+    );
+    let back = api.external(&format!("{to}&login_hint=switch-c@e2e.test"))?;
+    let late = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    s.ok("and once someone signed in to it, the same switch is spent: refused (400), signing no one in", late.status == 400 && session_set(&late).is_none(), &late);
 
     // with none held, WorkOS asks, and whoever signs in is signed in
     let r = switch(api, "/settings", None)?;

@@ -240,7 +240,7 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`board`,
 `notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
+`skills`, `sessions`, `telegram`, `simplex`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, over the
 template's: its name, set by `fragment rename` after. Any other is
 refused, naming them.
@@ -919,33 +919,30 @@ why: replay it after a top-up or next month.
   edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
-- Each of the platform's shared keys (ElevenLabs, xAI, …) pauses once your
-  agents' calls on it spend $5 in an hour (429 `rate_limited`, reason
-  `key_paused`); nothing else does. Its calls resume as the hour passes,
-  or at once when you allow more: the notice in your agent's chat has a
-  button, or `fragment ledger key-cap`. Only you can, never your agents.
+- Your agents' calls on the platform's shared keys (ElevenLabs, xAI, …)
+  are each charged what the vendor billed. Past $5 of them in an hour,
+  then each doubling, you get a notice; nothing pauses.
 
 Before a job that spends (speech, images, searches, many model calls),
 quote it: `fragment quote` prices a plan with the same book your ledger
 charges with, and says what you have left this month (an agent's quote
 is its owner's). It spends nothing. Its items follow one another, each a
-name and its amounts: an operator key (`perplexity`, `xai`), a part of
-a key's calls priced apart (`elevenlabs:speech` by its text's
-characters, `fal:image` by its pixels, `xai:image` one a call) or a
+name and its amounts: a vendor's unit, as each call's answer is charged
+(`elevenlabs:character` by its text's characters, `xai:tick` by what
+Grok said it cost, 10^10 ticks a dollar, `perplexity:call` a call) or a
 model (`cheap`, `medium`, an id); `<n>` or `<n>x` its calls, `<n>in`,
 `<n>cached`, `<n>write` and `<n>out` a model's tokens a call, `<n>` with
-a unit (`60000chars`, `1048576px`) a key's units a call. A name the
+a unit (`60000chars`, `5credits`) a key's units a call. A name the
 book does not price here is said so, never guessed. Refused for credit
 or a budget? `fragment quote` alone reads what is left.
 
 ```
-fragment quote elevenlabs:speech 60000chars   # "about $7.20; you have $95.40 left this month"
-fragment quote fal:image 40x 1048576px xai 10x   # several items, each one's price too
+fragment quote elevenlabs:character 60000chars   # "about $7.20; you have $95.40 left this month"
+fragment quote perplexity:call 40x firecrawl:credit 10x 5credits   # several items, each one's price too
 fragment quote cheap 2000in 500out 40x        # 40 turns on the cheap tier
 fragment quote                                # what you have left, alone
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
-fragment ledger key-cap elevenlabs 20   # a shared key's cap on your computer: $20 an hour (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
@@ -1252,7 +1249,7 @@ Name a secret in `a-z0-9-`, and name every host it must reach.
 fragment login [--force] [--no-wait] [--no-browser]
 fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
+fragment ledger [grant <who> <usd> --why W [--id ID]]
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive

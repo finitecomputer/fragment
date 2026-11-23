@@ -54,22 +54,20 @@ use std::rc::Rc;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
-use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, unplanned_start, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
 use fragment_core::ledger::uses::{self, Used};
-use fragment_core::ledger::{MeterRow, Month, Spend};
+use fragment_core::ledger::{Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind, Reason};
-use futures_util::StreamExt;
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -159,6 +157,12 @@ const UNHELD_EXEC_MS: i64 = 5_000;
 /// A read of its disk (`DISK_READ`) answers within this, or it is not read:
 /// a start's, made before its guest is let go, is in the start's deadline.
 const DISK_READ_MS: i64 = 5_000;
+/// A read of its disk and of what its `/data` restores to (`sizes_read`:
+/// `du` walks it, after an awake save whose backups just read it all)
+/// answers within this, or it is not read. A walk of a 4 GB tree of 121,000
+/// files took about a second; this is what an awake save's alarm leaves.
+const SIZES_READ_MS: i64 = 30_000;
+const _: () = assert!(fragment_core::computer::SIZES_LISTED_BY_S as i64 * 1000 + 5_000 <= SIZES_READ_MS, "a size summary's listing ends with time to spare in its read, its records read before it");
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -171,9 +175,6 @@ const CHECK_UNUSABLE: i64 = 3;
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
-/// How far the `clock` lever moves a computer's key hours, either way:
-/// a month's worth.
-const CLOCK_OFFSET_MAX_MS: u64 = 31 * 24 * 3600 * 1000;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
 /// backups run, swapped for one that never answers, as a sick container's
 /// (r4, r6), the real one kept beside it; and put back.
@@ -306,7 +307,7 @@ const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS 
 const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
 const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + DISK_READ_MS + MARK_EXEC_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, its disk's read among its steps, and an alarm's other events fit an alarm of its own");
 const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
-const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + 2 * UNMARK_EXEC_MS + SIZES_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold past its home and at its end, and the read of its disk and /data after it fit the one alarm they run in");
 const _: () = assert!(SAVE_STEPS_MS + UNMARK_EXEC_MS < SAVE_DEADLINE_MS, "an awake save, its unhold past its home among its steps, reports before its deadline");
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
@@ -316,10 +317,6 @@ const _: () = assert!(ALARM_WALL_MS + ALARM_OTHER_MS < ALARM_LATE_MS, "an alarm 
 /// streams through (`egress_api`), at most the router's
 /// `limits::BLOB_MAX_BYTES`.
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
-/// An answer to a request a Vault filled is read whole, every spelling of
-/// each value it echoes named, up to this long; past it (or an event
-/// stream) each value's own bytes are named as it streams.
-const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
 /// A port's request to a computer still starting is asked again after
@@ -369,10 +366,6 @@ enum MetaKey {
     /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
     /// `<day> <bytes>`.
     RelayDay,
-    /// The clock a test fleet moved (the `clock` lever): the milliseconds its
-    /// uses' months and its keys' hours are counted and read ahead by. None
-    /// elsewhere.
-    ClockOffset,
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
@@ -408,6 +401,10 @@ enum MetaKey {
     /// The test lever's save whose restore stops for want of room
     /// (`fail-restore`): its number.
     FailRestore,
+    /// What takes its disk, as the read after its newest awake save found
+    /// it (`fragment_core::computer::sizes_of`, `ComputerSizes`): a cache
+    /// its owner's view shows, its own row so its saves' stay small.
+    Sizes,
 }
 
 impl MetaKey {
@@ -428,7 +425,6 @@ impl MetaKey {
             MetaKey::Images => "images",
             MetaKey::Simplex => "simplex",
             MetaKey::RelayDay => "relay_day",
-            MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
             MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::SlowSnapshot => "slow_snapshot",
@@ -441,6 +437,7 @@ impl MetaKey {
             MetaKey::HoldSaves => "hold_saves",
             MetaKey::StallUnhold => "stall_unhold",
             MetaKey::FailRestore => "fail_restore",
+            MetaKey::Sizes => "sizes",
         }
     }
 }
@@ -468,10 +465,20 @@ enum Unstarted {
     Failed(CellError),
     /// The save it restored never will (its archive is gone or altered).
     Unusable(String),
+    /// The save's restore found no room on its disk
+    /// (`fragment_core::computer::restore_found_no_room`).
+    NoRoom(String),
     /// It came up, and its guest never read its view within its wait: a
     /// container Cloudflare restored from a snapshot dead (#362), answered
     /// as a snapshot that would not start.
     Dead(String),
+    /// Overtaken as it started (entry.mjs `start`: a start after it, or a
+    /// destroy begun meanwhile, a sleep's or a wipe's): nothing of it ran
+    /// but what that destroy ends, and nothing it would restore is at
+    /// fault. Answered as a start held up (`StartBlocked`: made again, no
+    /// strike, when its lifecycle still wants it; nothing once it moved on),
+    /// its snapshot kept.
+    Overtaken,
 }
 
 impl From<CellError> for Unstarted {
@@ -480,7 +487,8 @@ impl From<CellError> for Unstarted {
     }
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct ComputerCell {
     state: State,
     raw: JsValue,
@@ -503,6 +511,10 @@ pub struct ComputerCell {
     /// The same turn orders a start's let-go of its snapshot's hold and
     /// an awake save's let-go past its home (#1378).
     marking: futures_util::lock::Mutex<()>,
+    /// What the newest save left out (its held guest's patterns): the read
+    /// of `/data` after an awake save (`read_disk`) leaves the same out of
+    /// what a restore writes. In memory only: a read with none counts all.
+    left_out: RefCell<Vec<String>>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -544,6 +556,7 @@ pub struct ComputerCell {
     uses_due_ms: Rc<std::cell::Cell<i64>>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for ComputerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -560,6 +573,7 @@ impl DurableObject for ComputerCell {
             adopted: std::cell::Cell::new(false),
             taking_over: futures_util::lock::Mutex::new(()),
             marking: futures_util::lock::Mutex::new(()),
+            left_out: RefCell::default(),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -802,9 +816,6 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
-    /// `clock`'s: how far its key hours are moved.
-    #[serde(default, rename = "offsetMs")]
-    offset_ms: Option<i64>,
     /// `legacy-grants`': the agent fragment whose row it reads or writes.
     #[serde(default)]
     agent: Option<String>,
@@ -823,11 +834,14 @@ struct TestLever {
     /// `legacy-uses`': the month (`YYYY-MM`) it makes owed.
     #[serde(default)]
     month: Option<String>,
-    /// `disk`'s read: its size and what is free, in bytes.
+    /// `disk`'s read: its size and what is free, in bytes, and what its
+    /// `/data` restores to (none: a start's read, which keeps the last).
     #[serde(default)]
     total: Option<u64>,
     #[serde(default)]
     free: Option<u64>,
+    #[serde(default)]
+    data: Option<u64>,
     /// `fail-restore`'s: the number of the save whose restores fail.
     #[serde(default)]
     save: Option<u64>,
@@ -1053,80 +1067,56 @@ impl ComputerCell {
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
     }
 
     /// What its owner is told now, in words (FIN-458, `GET /api/notices`).
     fn said(&self) -> CellResult<Vec<fragment_proto::notice::Notice>> {
         let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
         let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
-        Ok(said::said(&self.with_keys(notices(&life, &self.saves()?, &self.images()?, &self.rules()))?, &facts))
+        Ok(said::said(&notices(&life, &self.saves()?, &self.images()?, &self.rules()), &facts))
     }
 
-    /// `told`, and a notice of each shared key its owner's cap pauses now,
-    /// worked out from its hour (`fragment_core::key_hour`).
-    fn with_keys(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
-        let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
-        for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
-            let provider = row["provider"].as_str().unwrap_or_default();
-            let cap = self.key_cap(provider)?;
-            if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
-                let allow_micros = key_hour::next_lift(cap);
-                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, allow_micros, resumes_at: real + resumes_in });
-            }
-        }
-        Ok(told)
+    /// Operator key `provider`'s calls this hour from this computer: its
+    /// SQLite's (`key_calls`), so an eviction or a restart counts on.
+    fn key_hour(&self, provider: &str) -> CellResult<fragment_core::ratelimit::Hourly> {
+        let rows = self.rows("SELECT hour, used FROM key_calls WHERE provider = ?", vec![provider.into()])?;
+        Ok(rows.first().map_or(fragment_core::ratelimit::Hourly::default(), |r| fragment_core::ratelimit::Hourly { hour: r["hour"].as_i64().unwrap_or(0), used: r["used"].as_u64().and_then(|u| u32::try_from(u).ok()).unwrap_or(u32::MAX) }))
     }
 
-    /// A shared key's hourly cap: its owner's, else the default.
-    fn key_cap(&self, provider: &str) -> CellResult<i64> {
-        let rows = self.rows("SELECT micros FROM key_caps WHERE provider = ?", vec![provider.into()])?;
-        Ok(rows.first().and_then(|r| r["micros"].as_i64()).unwrap_or(key_hour::KEY_HOUR_CAP))
+    /// Refused, 429, with the wait to the hour's end, once this hour has had
+    /// operator key `provider`'s row's calls an hour (`calls_an_hour`) from
+    /// this computer. Nothing is counted here: a call is counted as it goes
+    /// (`called`), past its Vault, its plan and its owner's standing, so a
+    /// request refused before it is sent costs none. Calls asked side by
+    /// side pass it together: past it by those in flight at most. No row's
+    /// limit, no check.
+    fn within_hour(&self, provider: &catalog::Provider) -> CellResult<()> {
+        let Some(max) = provider.calls_an_hour else { return Ok(()) };
+        self.key_hour(&provider.name)?.take(max, js::now_ms()).map_err(|wait| {
+            let minutes = wait.div_euclid(60_000) + 1;
+            CellError::new(ErrorCode::RateLimited, format!("{} takes at most {max} calls an hour from this computer: try again in about {minutes} minutes", provider.name)).retry_after(wait.unsigned_abs())
+        })
     }
 
-    /// `computer/key-cap`: its owner's cap on a shared key (`KeyCapAsk`),
-    /// `from` lifting it one step from the cap it holds, so a stale page
-    /// changes nothing; its pages told.
-    async fn set_key_cap(&self, provider: &str, ask: KeyCapAsk) -> CellResult<()> {
-        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no shared key {provider:?} here")));
+    /// A call sent now on each of `providers`' keys (`egress_swap`), counted
+    /// once in the hour of each whose row has calls an hour (`within_hour`).
+    fn called(&self, mut providers: Vec<String>) -> CellResult<()> {
+        if providers.len() > swap::PLACEHOLDERS_MAX {
+            return Err(CellError::invalid(format!("a call names at most {} keys", swap::PLACEHOLDERS_MAX)));
         }
-        let cap = self.key_cap(provider)?;
-        let to = match (ask.from, ask.micros) {
-            (Some(from), None) => (from == cap).then(|| key_hour::next_lift(cap)).flatten().unwrap_or(cap),
-            (None, Some(m)) if (1..=key_hour::KEY_CAP_MAX).contains(&m) => m,
-            (None, None) => key_hour::KEY_HOUR_CAP,
-            _ => return Err(CellError::invalid(format!("a key's cap is `from` (the cap a notice showed), or `micros` from 1 to {}, or neither (the default)", key_hour::KEY_CAP_MAX))),
-        };
-        match to == key_hour::KEY_HOUR_CAP {
-            true => self.exec("DELETE FROM key_caps WHERE provider = ?", vec![provider.into()])?,
-            false => self.exec("INSERT INTO key_caps (provider, micros) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET micros = excluded.micros", vec![provider.into(), to.into()])?,
+        providers.sort_unstable();
+        providers.dedup();
+        for row in providers.iter().filter_map(|p| self.cfg.providers.get(p)).filter(|row| row.calls_an_hour.is_some()) {
+            let mut hourly = self.key_hour(&row.name)?;
+            // sent already: counted whatever the hour has had
+            let _ = hourly.take(u32::MAX, js::now_ms());
+            self.exec(
+                "INSERT INTO key_calls (provider, hour, used) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET hour = excluded.hour, used = excluded.used",
+                vec![row.name.as_str().into(), hourly.hour.into(), i64::from(hourly.used).into()],
+            )?;
         }
-        self.tell_owner().await;
         Ok(())
-    }
-
-    /// A shared key's slots this last hour, oldest first.
-    fn key_slots(&self, provider: &str) -> CellResult<Vec<(i64, i64)>> {
-        let rows = self.rows("SELECT slot, micros FROM key_hour WHERE provider = ? ORDER BY slot", vec![provider.into()])?;
-        Ok(rows.iter().map(|r| (r["slot"].as_i64().unwrap_or(0), r["micros"].as_i64().unwrap_or(0))).collect())
-    }
-
-    /// Refuses a shared key its owner's cap pauses (FIN-448): 429, with when
-    /// it resumes. A read that fails lets the call go (a preference never
-    /// breaks an agent).
-    fn key_open(&self, provider: &str) -> CellResult<()> {
-        let now = js::now_ms() + self.offset_ms().unwrap_or(0);
-        let slots = self.key_slots(provider).unwrap_or_else(|e| {
-            console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
-            vec![]
-        });
-        let cap = self.key_cap(provider).unwrap_or(key_hour::KEY_HOUR_CAP);
-        let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
-        let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
-        let (spent, cap) = (fragment_core::price::dollars(spent), fragment_core::price::dollars(cap));
-        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes, or ask your person to allow more (they'll see a button in this chat)");
-        Err(CellError::new(ErrorCode::RateLimited, said).because(Reason::KeyPaused).retry_after(resumes_in.unsigned_abs()))
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -1270,10 +1260,11 @@ impl ComputerCell {
             for next in self.perform(step, until_ms, matches!(applied, Event::Held { .. })).await? {
                 queue.push(next);
             }
-            // its disk, once an awake save worked (a start reads its own
-            // before its guest runs: `try_start`)
+            // its disk and what its /data restores to, once an awake save
+            // worked (a start reads its disk alone, before its guest runs:
+            // `try_start`)
             if let Some(generation) = reads_disk_after(&applied, &life) {
-                self.read_disk(generation).await;
+                self.read_disk(generation, true).await;
             }
         }
         Ok(refused)
@@ -1324,7 +1315,7 @@ impl ComputerCell {
     /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
         let life = self.lifecycle()?;
-        if let Phase::Starting { generation, destroying: true, .. } = life.phase {
+        if let Phase::Starting { generation, since_ms, destroying: true } = life.phase {
             // a start that failed was destroying what it started when its
             // isolate went, and its own report (why, and whether it is a
             // strike) went with it: its container destroyed, one failure.
@@ -1339,6 +1330,13 @@ impl ComputerCell {
             self.lever_wait(MetaKey::StallTakeOver, STALL_FAILING_START_MAX_MS).await;
             if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
                 return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
+            }
+            // one that set its save aside as too big for its disk (stored
+            // before its destroy) fell back: the save before it is next, no
+            // strike, as its own report would have said (Codex on the
+            // no-room PR)
+            if self.saves()?.set_aside_too_big_since(since_ms) {
+                return Ok(Some(Event::RestoreFailed { generation, why: "its save did not fit its disk, and the isolate that saw it went before it said so".into(), older: true }));
             }
             return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
         }
@@ -1538,22 +1536,43 @@ impl ComputerCell {
         Ok(())
     }
 
-    /// The hosts the swap intercepts: every provider's in the catalog (an
-    /// account host's as its glob, `*.under`), and each its agents' Vault
-    /// secrets go to (`vault_usable`).
-    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
-        let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
-        let usable = self.vault_usable(&fragments).await.0;
+    /// The hosts the swap intercepts that need no round trip: every
+    /// provider's in the catalog (an account host's as its glob, `*.under`).
+    fn catalog_hosts(&self) -> Vec<String> {
         let mut hosts = self.cfg.providers.intercepts();
-        hosts.extend(usable.into_iter().flat_map(|u| u.2));
+        hosts.sort_unstable();
+        hosts.dedup();
+        hosts
+    }
+
+    /// The hosts the swap intercepts: the catalog's, and each its agents'
+    /// Vault secrets go to (`vault_hosts`).
+    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
+        let mut hosts = self.catalog_hosts();
+        hosts.extend(self.vault_hosts().await);
         hosts.sort_unstable();
         hosts.dedup();
         Ok(hosts)
     }
 
-    /// Sets its running start `generation`'s egress intercepts (entry.mjs
-    /// `arm`): the platform's own hosts and `hosts`, kept as armed. False:
-    /// that start was superseded.
+    /// The hosts its agents' Vault secrets go to, as its owner's Vault
+    /// answers (`vault_usable`): none, logged, when its agents or its Vault
+    /// cannot be read, so a start never fails for them.
+    async fn vault_hosts(&self) -> Vec<String> {
+        let fragments: Vec<String> = match self.agents() {
+            Ok(agents) => agents.into_iter().map(|a| a.fragment).collect(),
+            Err(e) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "agents", "error": e.message }));
+                return vec![];
+            }
+        };
+        self.vault_usable(&fragments).await.0.into_iter().flat_map(|u| u.2).collect()
+    }
+
+    /// Sets its running start `generation`'s egress intercepts again
+    /// (entry.mjs `arm`: a takeover's; its start registered them before it
+    /// began, `try_start`): the platform's own hosts and `hosts`, kept as
+    /// armed. False: that start was superseded.
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
         let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
@@ -1564,30 +1583,44 @@ impl ComputerCell {
         Ok(done)
     }
 
-    /// Arms its running start again when `vault_hosts` names a host its
-    /// egress does not catch yet (an agent's Vault secret set since it
-    /// started), so a guest that reads a placeholder reaches the swap with
-    /// it. Asleep, its next start arms them all. A failure is logged: the
+    /// `arm_vault` for its guest's read of its view (a Vault secret set
+    /// since its start), its failure logged: the read goes on, and the
     /// placeholder then goes out uncaught, and fills nothing.
     async fn arm_more(&self, vault_hosts: Vec<String>) {
-        let Ok(life) = self.lifecycle() else { return };
-        let Some(generation) = life.running() else { return };
-        let armed = self.armed.borrow().clone();
-        let mut hosts = armed.filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-        if vault_hosts.iter().all(|h| hosts.contains(h)) {
-            return;
-        }
-        hosts.extend(self.cfg.providers.intercepts());
-        hosts.extend(vault_hosts);
-        hosts.sort_unstable();
-        hosts.dedup();
-        let armed = match self.meta(MetaKey::Id) {
-            Ok(Some(id)) => self.arm(generation, &id, hosts).await,
-            _ => return,
-        };
-        if let Err(e) = armed {
+        if let Err(e) = self.arm_vault(vault_hosts).await {
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "error": e.message }));
         }
+    }
+
+    /// Has its running start's swap catch each of `vault_hosts` it does
+    /// not catch yet (entry.mjs `armSwap`: those alone), so a guest that
+    /// reads a placeholder reaches the swap with it: those its start asked
+    /// for beside the container's start (`try_start`, whose failure this
+    /// is), and any set since (its guest's view answers only after,
+    /// `guest_view`). False: its start was superseded meanwhile.
+    async fn arm_vault(&self, vault_hosts: Vec<String>) -> CellResult<bool> {
+        let Some(generation) = self.lifecycle()?.running() else { return Ok(true) };
+        // the start's own or a takeover's, as armed: the catalog's at least
+        let armed = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        let mut more: Vec<String> = vault_hosts.into_iter().filter(|h| !armed.contains(h)).collect();
+        more.sort_unstable();
+        more.dedup();
+        if more.is_empty() {
+            return Ok(true);
+        }
+        let id = self.must(MetaKey::Id)?;
+        let g = JsValue::from_f64(generation as f64);
+        if self.call("armSwap", &[g, id.as_str().into(), js::to_js(&more)]).await?.as_bool() != Some(true) {
+            return Ok(false);
+        }
+        // added to what is armed now, which another read's or its start's
+        // may have changed meanwhile
+        let mut hosts = self.armed.borrow().clone().filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        hosts.extend(more);
+        hosts.sort_unstable();
+        hosts.dedup();
+        *self.armed.borrow_mut() = Some((generation, hosts));
+        Ok(true)
     }
 
     /// The Vault secrets each of its agents (`fragments`) may use, and its
@@ -1741,7 +1774,8 @@ impl ComputerCell {
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
         let started = self.try_start(generation, &planned).await;
-        if started.is_err() {
+        // overtaken, nothing of it is this start's to destroy or report failed
+        if started.as_ref().is_err_and(|e| !matches!(e, Unstarted::Overtaken)) {
             // what it destroys below ends as this start's failure, reported
             // by the event this answers, so the end is not a crash too: it
             // would count a second strike, and start again with no pause
@@ -1768,12 +1802,33 @@ impl ComputerCell {
                 }
                 Event::Ready { generation }
             }
+            Err(Unstarted::Overtaken) => {
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Blocked);
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "overtaken": "as it started" }));
+                Event::StartBlocked { generation }
+            }
             Err(Unstarted::Unusable(why)) => {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Unusable);
                 let id = save_id.expect("only a start from a save finds it unusable");
                 let older = self.update_saves(|s| s.unusable(&id)).unwrap_or(false);
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "unusable", "id": id, "generation": generation, "why": why, "older": older }));
                 let _ = self.destroy(generation, "its save would not restore").await;
+                Event::RestoreFailed { generation, why, older }
+            }
+            Err(Unstarted::NoRoom(why)) => {
+                // Paul, 2026-11-20: "rollback is preferred to being stuck".
+                // It is set aside, kept and exportable, and the save before
+                // it is next, at once and no strike; with none older, a
+                // strike as any failed start, its save kept current
+                self.starts.borrow_mut().failing(generation, start_line::Failed::NoRoom);
+                let id = save_id.expect("only a start from a save restores one");
+                let set = self.update_saves(|s| s.too_big(&id, js::now_ms()));
+                let older = matches!(set, Ok(Some(_)));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "no_room", "id": id, "generation": generation, "why": why, "setAside": older }));
+                for record in set.ok().flatten().unwrap_or_default() {
+                    console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unforgotten": record["id"] }));
+                }
+                let _ = self.destroy(generation, "its save did not fit its disk").await;
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
@@ -1816,7 +1871,12 @@ impl ComputerCell {
         let (plan, save, facts) = self.update_saves(|s| {
             let plan = s.plan(snapshots);
             // its line's: why a whole restore, and whether it runs another image
-            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != reference.as_deref()));
+            // (what it runs: a snapshot's own image, `Saves::plan`)
+            let runs = match &plan {
+                Restore::Snapshot { image, .. } => Some(image.as_str()),
+                Restore::Backup | Restore::Nothing => reference.as_deref(),
+            };
+            let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != runs));
             s.starting(generation, plan.source());
             let save = s.current().cloned().filter(|_| plan != Restore::Nothing);
             let bytes = save.as_ref().map(|s| s.records.iter().filter_map(|r| r["size"].as_u64()).sum());
@@ -1824,6 +1884,12 @@ impl ComputerCell {
             (plan, save, facts)
         })?;
         assert_eq!(plan == Restore::Nothing, save.is_none(), "a start restores the save there is");
+        // a snapshot runs the image it was taken of: the pinned one, or the
+        // one it ran while its update waits for room (`Saves::plan`)
+        let reference = match &plan {
+            Restore::Snapshot { image, .. } => Some(image.clone()),
+            Restore::Backup | Restore::Nothing => reference,
+        };
         // a start from a snapshot waits for its guest (#362); the lever's
         // `alive-check` makes its next start wait so, whatever it restores
         let lever = self.take_alive_check()?;
@@ -1857,22 +1923,54 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
         let snapshot_js = match &planned.plan {
-            Restore::Snapshot { id } => JsValue::from_str(id),
+            Restore::Snapshot { id, .. } => JsValue::from_str(id),
             Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
-        // what its egress catches, asked before it starts (its agents' Vault's)
-        let hosts = self.swap_hosts().await?;
-        // a wipe that began while this start awaited starts nothing: the
-        // check and the start are one turn (the host's start is synchronous)
+        // what its egress catches before it starts: the platform's hosts and
+        // the catalog's, asking nothing; its agents' Vault secrets' hosts
+        // too when its guest runs at once (nothing restored), asked first
+        // as before, so no guest ever runs with one uncaught
+        // (`Plan::vault_asked`)
+        let asked = planned.plan.vault_asked();
+        let mut hosts = self.catalog_hosts();
+        if asked == VaultAsked::Before {
+            hosts.extend(self.vault_hosts().await);
+            hosts.sort_unstable();
+            hosts.dedup();
+        }
+        // a wipe that began while this start awaited starts nothing: one
+        // begun before the host's start is seen here, and one begun while
+        // the host registers the intercepts is the host's to see (its
+        // destroy overtakes the start, which answers false)
         if self.wiped.get() {
             return Err(wiped_computer().into());
         }
         let started_ms = js::now_ms();
-        self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        if !self.arm(generation, &id, hosts).await? {
-            return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
+        // every intercept registered before the container starts, all at
+        // once: its guest's first call never races them (entry.mjs `start`)
+        let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
+        // as armed from its start, for a read of its view during it to add to
+        *self.armed.borrow_mut() = Some((generation, hosts));
+        // a guest held until the start lets it go (a restore's gate, a
+        // snapshot's hold): its Vault hosts asked beside the start, never
+        // before it, and caught before the start lets it go (any set since,
+        // its view's read catches before it answers; `arm_more`)
+        let beside = async {
+            match asked {
+                VaultAsked::Beside => self.vault_hosts().await,
+                VaultAsked::Before => vec![],
+            }
+        };
+        let (started, vault) = futures_util::future::join(self.call("start", &args), beside).await;
+        if started?.as_bool() != Some(true) {
+            return Err(Unstarted::Overtaken);
+        }
+        // before its guest is let go (a restore's gate, a snapshot's hold): a
+        // host that will not register fails the start, as any intercept does
+        if !self.arm_vault(vault).await? {
+            return Err(Unstarted::Overtaken);
         }
         if self.lever_take(MetaKey::FailStarts) {
             // the lever's `fail-starts`: a start that fails with its container up
@@ -1893,18 +1991,30 @@ impl ComputerCell {
                 let save = planned.save.as_ref().expect("a start from the save has its records");
                 // the lever's `fail-restore`: a restore of this save stops for
                 // want of room, as the sandbox runtime's guard stops one on a
-                // disk it no longer fits (2026-11-20), a failure that may pass
-                if self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string()) {
-                    return Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number)).into());
-                }
+                // disk it no longer fits (2026-11-20), heard as that is
+                let lever = self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string());
                 // a directory's record before any inside it, as it was taken;
                 // together within `RESTORE_MS`, each given what is left
                 let until = js::now_ms() + RESTORE_MS;
                 for record in &save.records {
                     let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
-                    let answer = js::from_js(&self.call("restore", &[g.clone(), js::to_js(record), left]).await?).map_err(CellError::host)?;
+                    let restored = match lever {
+                        true => Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number))),
+                        false => self.call("restore", &[g.clone(), js::to_js(record), left]).await,
+                    };
+                    let of = |why: &str| format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"));
+                    // a save that no longer fits its disk (the host's typed
+                    // `ENOSPC`, or the runtime's guard in its words), told
+                    // from every other failure, which may pass
+                    let answer = match restored {
+                        Err(e) if restore_found_no_room(&e.message) => return Err(Unstarted::NoRoom(of(&e.message))),
+                        r => js::from_js(&r?).map_err(CellError::host)?,
+                    };
+                    if let Some(why) = answer["noRoom"].as_str() {
+                        return Err(Unstarted::NoRoom(of(why)));
+                    }
                     if let Some(why) = answer["unusable"].as_str() {
-                        return Err(Unstarted::Unusable(format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"))));
+                        return Err(Unstarted::Unusable(of(why)));
                     }
                 }
                 // the image's check, behind the gate: nothing reads /data yet
@@ -1919,7 +2029,7 @@ impl ComputerCell {
                 // its disk as restored, before the gate lets its guest go:
                 // read after, the read raced the guest's first seconds, the
                 // start's slowest moment (FIN-462)
-                self.read_disk(generation).await;
+                self.read_disk(generation, false).await;
                 self.mark(&g, RESTORED_MARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
                 self.starts.borrow_mut().data(generation, js::now_ms());
             }
@@ -1929,7 +2039,7 @@ impl ComputerCell {
                 self.exec_ready(&g).await?;
                 self.starts.borrow_mut().up(generation, js::now_ms());
                 // its disk, before its guest is let go (as a restore's)
-                self.read_disk(generation).await;
+                self.read_disk(generation, false).await;
                 // unless its owner's sleep held it meanwhile (`lets_go`), as
                 // any unhold (Codex on #1378)
                 let _marking = self.marking.lock().await;
@@ -1946,27 +2056,48 @@ impl ComputerCell {
         Ok(())
     }
 
-    /// Reads the disk of start `generation`'s container (`DISK_READ`) and
-    /// keeps it (`Saves::measured`), which its owner's notices tell: in its
-    /// start, its restore in place and its guest not yet let go
-    /// (`try_start`), and after each awake save (`reads_disk_after`), a
-    /// line of its own. Best effort: a read that fails is logged and
-    /// changes nothing.
-    async fn read_disk(&self, generation: u64) -> Option<fragment_core::computer::ComputerDisk> {
+    /// Reads the disk of start `generation`'s container and keeps it
+    /// (`Saves::measured`), which its owner's notices tell: in its start
+    /// (`DISK_READ`), its restore in place and its guest not yet let go
+    /// (`try_start`), and after each awake save (`reads_disk_after`), with
+    /// what its `/data` restores to (`sizes`: `sizes_read`, leaving out what
+    /// that save did), a line of its own. Best effort: a read that fails is
+    /// logged and changes nothing.
+    async fn read_disk(&self, generation: u64, sizes: bool) -> Option<fragment_core::computer::ComputerDisk> {
         let at = js::now_ms();
-        let argv = js::to_js(&json!(["sh", "-c", DISK_READ]));
-        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
-        let out = match read {
-            Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
-            Ok(o) => format!("exit {}", o["exitCode"]),
-            Err(e) => e.message,
+        let (read, bound, keep) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS, fragment_core::computer::SIZES_READ_MAX_BYTES) } else { (DISK_READ.to_string(), DISK_READ_MS, 4096) };
+        let argv = js::to_js(&json!(["sh", "-c", read]));
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64), JsValue::from_f64(keep as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        // a sizes read's answer is read whatever its exit (a walk that a
+        // file vanished from still printed its df: Codex on #1421)
+        let (out, exit, failed) = match read {
+            Ok(o) if sizes || o["exitCode"] == 0 => (o["output"].as_str().unwrap_or_default().to_string(), o["exitCode"].clone(), None),
+            Ok(o) => (String::new(), o["exitCode"].clone(), None),
+            // its code alone: a timeout's message holds the command, and its
+            // patterns name a person's files (Codex on #1426)
+            Err(e) => (String::new(), Value::Null, Some(format!("{:?}", e.code))),
         };
-        let disk = disk_of_df(&out, at, generation);
+        let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
+        // what takes its disk, its owner's Storage: a cache of its own (paths
+        // of a person's files: kept, never logged)
+        if let Some(found) = sizes.then(|| fragment_core::computer::sizes_of(&out, at)).flatten() {
+            let stored = serde_json::to_string(&found).map_err(|e| CellError::host(e.to_string())).and_then(|j| self.set_meta(MetaKey::Sizes, &j));
+            match stored {
+                Ok(()) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "sizes": { "folders": found.folders.len(), "files": found.files.len() }, "generation": generation })),
+                Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "sizes": "unkept", "error": e.message })),
+            }
+        }
         match (disk, kept) {
-            // one line per read (lesson 14): its size and what is free
-            (Some(d), Some(Ok(_))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free }, "generation": generation })),
-            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() })),
+            // one line per read (lesson 14): its size, what is free, what its
+            // /data restores to, and the room that leaves (as kept)
+            (Some(d), Some(Ok(_))) => {
+                let room = self.saves().ok().and_then(|s| s.disk()).map(|k| fragment_core::computer::room(&k));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
+            }
+            // its exit and its answer's length alone: its answer names a
+            // person's files (Codex on #1426); the exec's error's code, if any
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "exit": exit, "answerBytes": out.len(), "error": failed })),
         }
         disk
     }
@@ -2164,6 +2295,8 @@ impl ComputerCell {
         }
         // what a held guest copied to names the save keeps, it leaves out
         let left_out = if held { self.left_out(&g).await } else { vec![] };
+        // the read of /data after it leaves the same out
+        self.left_out.replace(left_out.clone());
         let mut records: Vec<Value> = Vec::with_capacity(SAVED_DIRS.len());
         // its backups together within `BACKUPS_MS` (the lever's
         // `hang-backups`: its own), each given what is left
@@ -2597,6 +2730,8 @@ impl ComputerCell {
         let mut view = self.view().await?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
+        // what takes its disk names its owner's files: theirs to see
+        view.sizes = None;
         // what its XFTP relay carries: its bridge sends its core's files through it
         let targets = self.relay_targets()?;
         view.relay = Some(fragment_proto::computer::RelayOffer { hosts: targets.iter().filter(|t| t.port == fragment_core::relay::PORT).map(|t| t.host.clone()).collect(), port: fragment_core::relay::PORT });
@@ -2742,42 +2877,6 @@ impl ComputerCell {
         String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a sign-in's verifier that is not text"))
     }
 
-    /// The clock's offset a test fleet set (the `clock` lever); none elsewhere.
-    fn offset_ms(&self) -> CellResult<i64> {
-        if !self.cfg.test_hooks {
-            return Ok(0);
-        }
-        Ok(self.meta(MetaKey::ClockOffset)?.and_then(|v| v.parse().ok()).unwrap_or(0))
-    }
-
-    /// Counts a shared key's charge in its hour (`fragment_core::key_hour`):
-    /// whether one reached its cap. What its agents used is their owner's
-    /// ledger's (`uses::count`), not counted here.
-    fn count_key_hour(&self, b: &Used) -> CellResult<bool> {
-        if b.at_ms <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
-            return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
-        }
-        let offset = self.offset_ms()?;
-        let (at, now) = (b.at_ms.saturating_add(offset), js::now_ms() + offset);
-        let mut capped = false;
-        for u in &b.uses {
-            let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
-                return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
-            };
-            // a shared key's charge counts in its hour (fragment_core::key_hour)
-            if provider.kind == Kind::Operator && u.micros > 0 {
-                let (before, cap) = (key_hour::spent(&self.key_slots(&u.provider)?, now), self.key_cap(&u.provider)?);
-                capped |= before < cap && before + u.micros >= cap;
-                self.exec(
-                    "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
-                    vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
-                )?;
-            }
-        }
-        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
-        Ok(capped)
-    }
-
     /// Its view: what its owner is told of it, and its agents, each with
     /// what it may use, asked of its fragment.
     /// Boxed: its callers (about twenty routes) each hold a pointer to it,
@@ -2815,7 +2914,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: self.with_keys(notices(&life, &saves, &images, &self.rules()))?,
+            notices: notices(&life, &saves, &images, &self.rules()),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -2828,6 +2927,12 @@ impl ComputerCell {
             simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
             relay: None,
             relay_targets: None,
+            disk: saves.disk_view(),
+            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| crate::json_text::<fragment_proto::computer::ComputerSizes>(&j).ok()).map(|mut s| {
+                s.kinds = fragment_core::computer::storage_kinds(&s);
+                s
+            }),
+            room_first: saves.update_waits(),
         }))
     }
 
@@ -3131,13 +3236,6 @@ impl ComputerCell {
                 let view = self.view().await?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
             }
-            "clock" => {
-                // a lane's uses and its reads of them in one month, however
-                // late in a month it runs
-                let offset = b.offset_ms.filter(|o| o.unsigned_abs() <= CLOCK_OFFSET_MAX_MS).ok_or_else(|| CellError::invalid(format!("clock names its offsetMs, at most {CLOCK_OFFSET_MAX_MS} either way")))?;
-                self.set_meta(MetaKey::ClockOffset, &offset.to_string())?;
-                Ok(json!({ "computer": id, "offsetMs": offset, "month": Month::of(js::now_ms() + offset).label() }))
-            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -3175,9 +3273,9 @@ impl ComputerCell {
                 // kept and told as one is (`read_disk`): a test fleet's
                 // computers share their host's disk, which never fills
                 let (total, free) = b.total.zip(b.free).filter(|(t, f)| *t > 0 && f <= t).ok_or_else(|| CellError::invalid("disk names its total and free bytes, free at most total"))?;
-                let d = fragment_core::computer::ComputerDisk { total, free, at: js::now_ms(), generation: self.lifecycle()?.generation() };
+                let d = fragment_core::computer::ComputerDisk { total, free, at: js::now_ms(), generation: self.lifecycle()?.generation(), data: b.data };
                 let kept = self.update_saves(|s| s.measured(d))?;
-                console_log!("{}", json!({ "computer": id, "lever": "disk", "total": total, "free": free, "kept": kept }));
+                console_log!("{}", json!({ "computer": id, "lever": "disk", "total": total, "free": free, "data": b.data, "kept": kept }));
                 Ok(json!({ "computer": id, "disk": d, "kept": kept }))
             }
             "saves" => {
@@ -3189,6 +3287,9 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                // when this isolate last heard its guest read its view (a
+                // test waits for its bridge to take a lever's read so)
+                v["heard"] = json!(self.heard_ms.get());
                 v["heldUntil"] = json!(life.held_until_ms());
                 v["phase"] = json!(life.phase);
                 v["failures"] = json!(life.failures());
@@ -3291,9 +3392,12 @@ impl ComputerCell {
                 let b: ExportAsk = body_json(&mut req).await?;
                 self.owned_by(&b.owner)?;
                 let saves = self.saves()?;
-                // set aside or not: a save set aside holds its newest work
-                let save = saves.every_save().into_iter().find(|s| !s.unusable);
-                json_response(&json!({ "save": save.map(|s| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records })) }))
+                // and, beside it, the newest set aside: its files may be
+                // newer, and the computer never goes back to it
+                let of = |s: &Save| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records });
+                let save = saves.all().iter().find(|s| !s.unusable);
+                let set_aside = saves.aside().iter().find(|s| !s.unusable);
+                json_response(&json!({ "save": save.map(of), "setAside": set_aside.map(of) }))
             }
             "computer/export-read" => {
                 let b: ExportRead = body_json(&mut req).await?;
@@ -3340,14 +3444,12 @@ impl ComputerCell {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
             }
-            "computer/used" => {
-                let b: Used = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                // a key's charge that reaches its cap: its owner's pages read again
-                if self.count_key_hour(&b)? {
-                    self.tell_owner().await;
-                }
-                json_response(&json!({ "ok": true }))
+            // a call on operator keys going now (`egress_swap`): its calls an hour
+            "computer/called" => {
+                let b: Value = body_json(&mut req).await?;
+                let providers: Vec<String> = b["providers"].as_array().map(|l| l.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                self.called(providers)?;
+                json_response(&json!({}))
             }
             "computer/signed-in" => {
                 let b: SignedInAsk = body_json(&mut req).await?;
@@ -3524,6 +3626,33 @@ impl ComputerCell {
                 self.wake(Wake::Owner).await?;
                 json_response(&self.view().await?)
             }
+            (Method::Post, ["files", "delete"]) => {
+                // its owner's Delete in Storage (docs/computers.md, "Room to
+                // restore"): one regular file of its work, removed by the
+                // platform in its container, no agent asked; awake alone
+                let body = req.bytes().await?;
+                let asked: fragment_proto::computer::FileAsk = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let read = fragment_core::computer::delete_read(&asked.path).map_err(CellError::invalid)?;
+                let Phase::Awake { generation, .. } = self.lifecycle()?.phase else {
+                    return Err(CellError::new(ErrorCode::Conflict, "it is not awake: wake it to delete a file"));
+                };
+                let argv = js::to_js(&json!(["sh", "-c", read]));
+                // an exec that failed (a timeout's message names the command,
+                // and so the path): its outcome unknown, said without either
+                // (Codex on #1429)
+                let unknown = |code| CellError::new(code, "its computer did not finish the delete: the file may or may not be gone (Storage says after its next save)");
+                let out = js::from_js(&self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await.map_err(|e| unknown(e.code))?).map_err(|_| unknown(ErrorCode::HostFailed))?;
+                // one line (lesson 14), never the path: it names a person's file
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "deleted": out["exitCode"] == 0, "exit": out["exitCode"], "generation": generation }));
+                match out["exitCode"].as_i64() {
+                    Some(0) => {}
+                    Some(fragment_core::computer::DELETE_REFUSED) => return Err(CellError::new(ErrorCode::NotFound, "no such file in its work: none there, a folder or a link")),
+                    code => return Err(CellError::host(format!("its delete exited {code:?}"))),
+                }
+                // its room and what takes its disk, read again
+                self.read_disk(generation, true).await;
+                json_response(&self.view().await?)
+            }
             (Method::Post, ["sleep"]) => {
                 // a start a wake during its stop owes is its alarm's, as a
                 // restart's is: the sleep answers within its steps' bound
@@ -3539,7 +3668,7 @@ impl ComputerCell {
             (Method::Put, ["image"]) => json_response(&self.pin(&image_named(&req.bytes().await?)?).await?),
             (Method::Post, ["notices", "seen"]) => {
                 let b: NoticeSeen = body_json(&mut req).await?;
-                if !self.update_saves(|s| s.saw(b.life))? {
+                if !self.update_saves(|s| s.saw_notice(b.life, b.too_big))? {
                     return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
                 }
                 // its owner's other pages read it again, and tell it no more
@@ -3556,10 +3685,6 @@ impl ComputerCell {
                 }
                 // its owner's other pages read it again, and tell it no more
                 self.tell_owner().await;
-                json_response(&self.view().await?)
-            }
-            (Method::Post, ["key-caps", provider]) => {
-                self.set_key_cap(provider, body_json(&mut req).await?).await?;
                 json_response(&self.view().await?)
             }
             (Method::Put, ["agents", fragment]) => {
@@ -3852,6 +3977,8 @@ impl ComputerCell {
         };
         let ((grants, grants_ms), (keys, own_ms)) = futures_util::future::try_join(grants, keys).await?;
         let mut secrets = vec![];
+        // each operator key counted once a request, whatever tags name it
+        let mut counted: Vec<&str> = vec![];
         // a Vault's secret (a key's name no catalog key has) is its egress's to ask
         // the agent's person's Vault for, this agent's now that its tag says so
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
@@ -3876,10 +4003,14 @@ impl ComputerCell {
                     };
                     self.connection_token(&owner, &provider.name, agent, grants.account(&provider.name), at).await?
                 }
-                // its call is held to its owner's cap on the key here, gated on
-                // their standing and charged after (`egress_swap`)
+                // its call gated on its owner's standing and charged after
+                // (`egress_swap`), within its calls an hour here, and counted
+                // in them as it goes
                 Kind::Operator => {
-                    self.key_open(&provider.name)?;
+                    if !counted.contains(&provider.name.as_str()) {
+                        self.within_hour(provider)?;
+                        counted.push(&provider.name);
+                    }
                     crate::keys::operator_key(&self.env, &provider.name).await?
                 }
                 Kind::Own => {
@@ -4243,7 +4374,8 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
 /// `model.fragment.internal`, or a host the swap catches (entry.mjs's
 /// `ComputerEgress`, whose props name the computer and the route). A class with a static method, as
 /// `InternalRoute` is: worker-build exports classes by name.
-#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), wasm_bindgen(wasm_bindgen = worker::wasm_bindgen))]
 pub struct ComputerEgress;
 
 /// `resp` with no header of the relay's family (`fragment_core::relay::
@@ -4265,7 +4397,7 @@ fn unrelayed(resp: Response, computer: &str, route: &str, path: &str) -> Respons
     resp.with_headers(headers)
 }
 
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "admin"), wasm_bindgen)]
 impl ComputerEgress {
     /// An XFTP relay of `computer`'s ended, having carried `bytes`: its
     /// place freed and its bytes counted (fragment_core::relay). Logged on
@@ -4575,15 +4707,17 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// 2026-10-04): each placeholder it carries, in a header, the query or
 /// basic auth (`swap::Plan`), is swapped for its credential when the
 /// request goes to one of its provider's own hosts, in a place its catalog
-/// row names, for the agent its tag names, and the request goes on over
+/// row names, for the agent its tag names, and never an operator key on a
+/// call its row denies (`catalog::Deny`), and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
-/// go to no provider. An operator key's call asks the gate first
-/// (ledger.rs `may`: the agent's owner's standing as this isolate heard
-/// it within the minute; a person out of credit is refused, and a ledger
-/// that does not answer refuses nothing: decision 62). After the answer is
-/// handed back, each operator key's call the provider answered (under
-/// 500) is charged to the owner (`charge_keys`), and every call the
+/// go to no provider. An operator key's call goes through the pipe
+/// (crate::pipe): gated beside it, as the agent's model calls are (a
+/// person out of credit is refused, once this isolate has heard so), its
+/// answer passed through the pipe's one pass (nothing it put on the
+/// request comes back), and each operator key's call charged to the owner
+/// what its vendor's answer said it used (`Provider::charged`), once the
+/// answer is read. Every call the
 /// provider answered is counted as the agent's in its owner's ledger
 /// (`uses::Used`; a shared key's charge in its hour here too,
 /// `computer/used`), in `wait_until`, never in the answer's way: a count
@@ -4598,10 +4732,10 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // a key's name no catalog key has is its agent's person's Vault's (FIN-466):
     // its row is known once the Vault answers, and the request is planned then
     let vaulted = found.iter().any(|p| vault_s(cfg, p));
-    if !vaulted {
-        Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(refused)?;
-    }
     let method = req.method();
+    if !vaulted {
+        Plan::of(method.as_ref(), &headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(refused)?;
+    }
     let body = match method {
         Method::Get | Method::Head => vec![],
         _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
@@ -4610,7 +4744,8 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // each placeholder's secret, by its provider and tag
     let mut answered: Vec<(Placeholder, String)> = vec![];
     let mut vault_rows = vec![];
-    // what a Vault filled (never a signature), by name: named so in the answer
+    // what a Vault filled (never a signature), by name: named so in the
+    // answer, after the operator's keys (`pipe::answer`)
     let mut filled: Vec<(String, String)> = vec![];
     // a Vault's secret that goes as a half of basic auth, if one does
     let mut basic: Option<String> = None;
@@ -4664,7 +4799,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         payer = Some((agent, owner, identity));
     }
     let catalog = cfg.providers.with(vault_rows);
-    let plan = Plan::of(&headers_in, url.query(), url.path(), &catalog, &host).map_err(refused)?;
+    let plan = Plan::of(method.as_ref(), &headers_in, url.query(), url.path(), &catalog, &host).map_err(refused)?;
     if signed && plan.wanted.len() > 1 {
         return Err(CellError::invalid("a request a Vault signs carries no other placeholder: its signature covers the request as it is sent"));
     }
@@ -4679,6 +4814,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let header = out_parts.headers.iter().find(|(h, _)| h == "authorization").and_then(|(_, v)| v.strip_prefix("Basic "));
         filled.extend(header.map(|b| (name.clone(), b.to_string())));
     }
+    // each operator key, the platform's own at its vendor, named so too:
+    // a vendor that echoes what it was sent never shows the guest the key
+    let operator = plan.operator_keys(&cfg.providers, &secrets, &out_parts);
     let headers = Headers::new();
     for (name, value) in &out_parts.headers {
         headers.set(name, value)?;
@@ -4710,128 +4848,111 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // the operator's keys among them, and the gate asked for them last
     let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some_and(|row| row.kind == Kind::Operator)).collect();
     if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
-        let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
-        crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
+        crate::pipe::gate(env, owner, None, ctx).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
     }
-    let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
+    // a key whose row has calls an hour counts this call as it goes, beside
+    // it (`Computer::called`): no wait added, the vendor's being the longer
+    let mut limited: Vec<String> = keys.iter().filter_map(|p| cfg.providers.named(&p.provider, p.connection)).filter(|row| row.calls_an_hour.is_some()).map(|row| row.name.clone()).collect();
+    limited.sort_unstable();
+    limited.dedup();
+    let out = Fetch::Request(out);
+    let fetch = out.send();
+    let sent = match limited.is_empty() {
+        true => fetch.await,
+        false => {
+            let (sent, counted) = futures_util::future::join(fetch, ask(env, computer, "computer/called", &json!({ "providers": limited }))).await;
+            if let Err(e) = counted {
+                console_error!("{}", json!({ "event": "pipe.uncounted", "computer": computer, "providers": limited, "error": e.message }));
+            }
+            sent
+        }
+    };
+    let sent = sent.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
-    // after the answer, never in its way
-    if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
-        let book = &cfg.book;
-        // what each key's call used: a call, the units of a part the book
-        // prices apart (ElevenLabs' speech by its characters, fal's images
-        // by their pixels, when its answer is a 2xx), or none (fal's
-        // polls), the row and the agent's count alike
-        let call = fragment_core::price::KeyCall { method: method.as_ref(), host: &host, path: url.path(), body: &body, status: answered };
-        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
-        // each call the provider answered is the agent's (decision 37), a key's at its price
-        // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
-        let uses: Vec<uses::Use> = plan
-            .wanted
-            .iter()
-            .filter(|p| cfg.providers.named(&p.provider, p.connection).is_some())
-            .map(|p| {
-                let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
-                let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
-                uses::Use { provider: p.provider.clone(), micros }
-            })
-            .collect();
-        let at = js::now_ms();
-        // counted in its owner's ledger; a shared key's charge in its hour
-        // too, which its computer keeps
-        let charged = uses.iter().any(|u| u.micros > 0);
-        let counted = Used { agent, at_ms: at, uses };
-        let rows: Vec<MeterRow> = used
-            .into_iter()
-            .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
-            .collect();
-        let (env, computer) = (env.clone(), computer.to_string());
-        ctx.wait_until(async move {
-            if !rows.is_empty() {
-                crate::meter::charge(&env, &owner, rows).await;
-            }
-            if counted.uses.is_empty() {
-                return;
-            }
-            // side by side: a ledger slow to count never holds back the
-            // hour a shared key's cap is checked against
-            let hour = async {
-                if charged {
-                    if let Err(e) = crate::routed::ask_bytes(&env, "COMPUTER", &computer, "computer/used", &counted).await {
-                        console_error!("{}", json!({ "egress": "swap", "key_hour": e.message }));
-                    }
-                }
-            };
-            let count = async {
-                if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
-                    console_error!("{}", json!({ "egress": "swap", "used": e.message }));
-                }
-            };
-            futures_util::future::join(hour, count).await;
-        });
-    }
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status, "grantsMs": grants_ms, "ownMs": own_ms }));
     }
-    match sent {
-        Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,
-        sent => sent,
+    // what each key's charges read (FIN-616): a header as its vendor sent
+    // it, and a JSON pointer in the answer's one pass (`pipe::answer`)
+    let rows: Vec<&'static catalog::Provider> = keys.iter().filter_map(|p| cfg.providers.named(&p.provider, p.connection)).collect();
+    // a path no charge can read plainly (a row with no charges or deny
+    // takes one) is for no charge, and its row's own price a call
+    let (methods, segments) = swap::call_of(method.as_ref(), &headers_in, url.path()).unwrap_or_else(|| (vec![method.as_ref()], vec![]));
+    let for_call = |c: &&catalog::Charge| c.calls.iter().any(|d| methods.iter().any(|m| d.matches(m, &segments)));
+    let mut pointers: Vec<String> = vec![];
+    // only the charges for this call: a header's charge waits on no body
+    for json in rows.iter().flat_map(|row| &row.charges).filter(for_call).filter_map(|c| c.json.clone()) {
+        if !pointers.contains(&json) {
+            pointers.push(json);
+        }
     }
-}
-
-/// An answer that may echo a Vault's value, with each value named as its
-/// secret (`{{name}}`), as a job's fetch names its own (Paul, 2026-11-09:
-/// echoed values hidden): in its headers, and in its body. A body read
-/// whole (up to `ANSWER_HIDDEN_MAX_BYTES`, not an event stream) has every
-/// spelling of a value named (`secrets::redact`), or its bytes, not text;
-/// past that, or an event stream, each value's own bytes are named as it
-/// streams (`secrets::Streamed`), a value split across pieces too.
-async fn hidden(mut resp: Response, filled: &[(String, String)]) -> CellResult<Response> {
-    let redact = |text: String| filled.iter().fold(text, |t, (name, value)| fragment_core::secrets::redact(t, &BTreeMap::from([(name.clone(), value.clone())])));
-    let headers = Headers::new();
-    for (name, value) in resp.headers().entries() {
-        headers.set(&name, &redact(value))?;
-    }
-    let status = resp.status_code();
-    // no body (a HEAD's, a 204's): its headers were all it could echo
-    if !matches!(resp.body(), ResponseBody::Stream(_)) || matches!(status, 101 | 204 | 304) {
-        return Ok(resp.with_headers(headers));
-    }
-    let kind = resp.headers().get("content-type")?.unwrap_or_default();
-    let mut stream = resp.stream()?;
-    let mut streamed = fragment_core::secrets::Streamed::new(filled);
-    let mut read = vec![];
-    if !kind.starts_with("text/event-stream") {
-        // bounded: each piece read adds to `read`, which stops at its cap
-        while read.len() <= ANSWER_HIDDEN_MAX_BYTES {
-            match stream.next().await {
-                Some(piece) => read.extend(piece?),
-                None => {
-                    let body = match String::from_utf8(read) {
-                        Ok(text) => redact(text).into_bytes(),
-                        Err(e) => [streamed.push(&e.into_bytes()), streamed.finish()].concat(),
-                    };
-                    headers.set("content-length", &body.len().to_string())?;
-                    return Ok(Response::from_bytes(body)?.with_status(status).with_headers(headers));
-                }
+    // the answer's header names, never their values: an uncharged call's
+    // line says where its vendor may name a number no charge reads
+    let answer_headers: Vec<String> = sent.as_ref().map(|r| r.headers().keys().collect()).unwrap_or_default();
+    let headers_said: Vec<(String, Option<u64>)> = match &sent {
+        Ok(resp) => rows.iter().flat_map(|row| &row.charges).filter_map(|c| c.header.clone()).map(|h| (h.clone(), resp.headers().get(&h).ok().flatten().and_then(|v| fragment_core::price::number(&v)))).collect(),
+        Err(_) => vec![],
+    };
+    // an answer the pass could not read is still charged what its headers
+    // or a row's price say
+    let unread = || -> crate::pipe::Said { Box::pin(futures_util::future::ready(vec![None; pointers.len()])) };
+    let (answer, said): (CellResult<Response>, crate::pipe::Said) = match sent {
+        Ok(resp) if !(operator.is_empty() && filled.is_empty()) => match crate::pipe::answer(resp, &[operator, filled], &pointers).await {
+            Ok((resp, said)) => (Ok(resp), said),
+            Err(e) => (Err(e), unread()),
+        },
+        sent => (sent, unread()),
+    };
+    // after the answer, never in its way: each key's call charged what its
+    // vendor said it used (`Provider::charged`), once the answer is read
+    if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
+        let call: (Vec<String>, Vec<Vec<u8>>) = (methods.into_iter().map(str::to_string).collect(), segments);
+        // each call the provider answered is the agent's (decision 37), a key's at its charge
+        // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
+        let named: Vec<Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some()).cloned().collect();
+        let keys: Vec<Placeholder> = keys.into_iter().cloned().collect();
+        let (env, computer, method) = (env.clone(), computer.to_string(), method.as_ref().to_string());
+        ctx.wait_until(async move {
+            let numbers = said.await;
+            let said = |c: &catalog::Charge| match (&c.header, &c.json) {
+                (Some(h), _) => headers_said.iter().find(|(n, _)| n == h).and_then(|(_, v)| *v),
+                (_, Some(p)) => pointers.iter().position(|q| q == p).and_then(|i| numbers[i]),
+                (None, None) => None,
+            };
+            let charged = |p: &Placeholder| {
+                let (row, (methods, segments)) = (cfg.providers.named(&p.provider, p.connection)?, &call);
+                row.charged(&methods.iter().map(String::as_str).collect::<Vec<_>>(), segments, answered, said)
+            };
+            let used: Vec<(Placeholder, Option<Usage>)> = keys.into_iter().map(|p| (p.clone(), charged(&p))).collect();
+            for (p, _) in used.iter().filter(|(_, usage)| usage.is_none()) {
+                // none of its charges priced it: charged nothing, said so
+                console_log!("{}", json!({ "event": "pipe.uncharged", "provider": p.provider, "host": host, "method": method, "status": answered, "headers": answer_headers }));
             }
-        }
+            let at = js::now_ms();
+            let uses: Vec<uses::Use> = named
+                .iter()
+                .map(|p| {
+                    let usage = used.iter().find(|(k, _)| k == p).and_then(|(_, u)| u.as_ref());
+                    let micros = usage.map_or(0, |u| cfg.book.price(u).map_or(0, |priced| priced.charge));
+                    uses::Use { provider: p.provider.clone(), micros }
+                })
+                .collect();
+            let bill = |usage| (crate::pipe::Bill { payer: owner.clone(), reference: format!("key:{computer}:{}", js::random_hex::<12>()), agent: Some(identity.clone()), fragment: None, computer: Some(computer.clone()) }, Some(usage));
+            crate::pipe::settle(&env, used.into_iter().filter_map(|(_, usage)| usage.map(bill)).collect()).await;
+            if uses.is_empty() {
+                return;
+            }
+            // counted in its owner's ledger, where a spend past a rate is
+            // told as a notice (`uses::count`)
+            let counted = Used { agent, at_ms: at, uses };
+            if let Err(e) = crate::ledger::ask(&env, &owner, &counted).await {
+                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+            }
+        });
     }
-    // a stream: what was read so far, then the rest as it comes, each named
-    let _ = headers.delete("content-length");
-    let first = streamed.push(&read);
-    let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
-        let (mut stream, mut streamed) = state?;
-        match stream.next().await {
-            Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
-            Some(Err(e)) => Some((Err(e), None)),
-            None => Some((Ok(streamed.finish()), None)),
-        }
-    });
-    let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
-    Ok(Response::from_stream(body)?.with_status(status).with_headers(headers))
+    answer
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

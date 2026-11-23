@@ -410,19 +410,18 @@ fn simulated_interleavings_keep_the_invariants() {
                         assert_eq!(*pending, at.is_none(), "a pending loss has no start yet (seed {seed0})");
                         reached[8] += 1;
                     }
-                    ComputerNotice::Update { version } => {
+                    ComputerNotice::Update { version, .. } => {
                         assert!(matches!(l.phase, Phase::Awake { .. }) && l.keepalives == 0, "an update is told awake, between turns (seed {seed0}): {l:?}");
                         assert_eq!(Some(version), images.latest().as_ref(), "the version its next start runs (seed {seed0})");
                         assert!(version_running(&l, &saves).is_some_and(|v| v != *version), "never the version it runs (seed {seed0})");
                         assert_ne!(images.later.as_ref(), Some(version), "never one put off (seed {seed0})");
                         reached[10] += 1;
                     }
-                    ComputerNotice::DiskFilling { total, free } => assert!(!disk_clear(*total, *free), "a disk told filling has no clear room (seed {seed0}): {n:?}"),
-                    ComputerNotice::KeyPaused { .. } => panic!("a lifecycle tells no key's pause (seed {seed0})"),
+                    ComputerNotice::DiskFilling { room, .. } => assert!(*room < ROOM_CLEAR_MIN, "a disk told filling has no clear room (seed {seed0}): {n:?}"),
                 }
             }
             // its owner puts an update off, now and then
-            if let Some(ComputerNotice::Update { version }) = told.iter().find(|n| matches!(n, ComputerNotice::Update { .. })) {
+            if let Some(ComputerNotice::Update { version, .. }) = told.iter().find(|n| matches!(n, ComputerNotice::Update { .. })) {
                 if rng(&mut seed).is_multiple_of(4) {
                     assert!(images.later(version), "an update told can be put off (seed {seed0})");
                     assert!(!notices(&l, &saves, &images, &rules).iter().any(|n| matches!(n, ComputerNotice::Update { .. })), "put off, it is told no more (seed {seed0})");

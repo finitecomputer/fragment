@@ -14,6 +14,8 @@ step Fragment 7 making df7c73337a08c512
 step Fragment 8 newest b439b2eb5ec07074
 step Fragment 9 inbox_forward_only ece226038ced1436
 step Fragment 10 face_forward_only c83644ba432a03d7
+step Fragment 11 record_author 290ff9dff6040cbf
+step Fragment 12 pending_code a323b22a2f946eb7
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -32,6 +34,7 @@ step Principal 3 memberships_dock 607987fd7686be8b
 step Principal 4 memberships_pinned e55965f09c24b2e1
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Ledger 2 uses b9ed112a7c91d546
+step Ledger 3 spend_slots 50a6b5e96c1ded82
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 step Computer 3 key_hour 6c22fff2c2414701
@@ -39,6 +42,8 @@ step Computer 4 key_caps 3a6f4f9976a3efe3
 step Computer 5 grants_forward_only 88b35e74ad3f41fe
 step Computer 6 grants_owed a3e6ebc05fade9e1
 step Computer 7 uses_owed 0c7771bd82064913
+step Computer 8 key_hour_gone ef34ecfeb9814b7f
+step Computer 9 key_calls d0b9981c9fb6d1b7
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
@@ -94,13 +99,13 @@ Fragment table own_commits: CREATE TABLE own_commits (sha TEXT PRIMARY KEY, dept
 Fragment table paid: CREATE TABLE paid ( key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment index paid_run: CREATE INDEX paid_run ON paid (run)
 Fragment table paused_ops: CREATE TABLE paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL)
-Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL, depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL, depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL, code TEXT)
 Fragment index pending_due: CREATE INDEX pending_due ON pending (next_at)
 Fragment table pointers: CREATE TABLE pointers ( ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path))
 Fragment table push_subs: CREATE TABLE push_subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER)
 Fragment index record_schedules_due: CREATE INDEX record_schedules_due ON record_schedules (next_at) WHERE next_at IS NOT NULL
-Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (channel, seq))
+Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, author TEXT, PRIMARY KEY (channel, seq))
 Fragment index records_effect: CREATE UNIQUE INDEX records_effect ON records (op, idx) WHERE op IS NOT NULL
 Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT)
 Fragment index runs_call: CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL
@@ -213,13 +218,13 @@ Ledger index entries_at: CREATE INDEX entries_at ON entries (at_ms)
 Ledger table head: CREATE TABLE head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL)
 Ledger table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Ledger table spend: CREATE TABLE spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment))
+Ledger table spend_slots: CREATE TABLE spend_slots (slot INTEGER PRIMARY KEY, micros INTEGER NOT NULL)
 Ledger table uses: CREATE TABLE uses (month INTEGER NOT NULL, agent TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, agent, provider))
 Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL)
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
-Computer table key_caps: CREATE TABLE key_caps (provider TEXT PRIMARY KEY, micros INTEGER NOT NULL)
-Computer table key_hour: CREATE TABLE key_hour (provider TEXT NOT NULL, slot INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (provider, slot))
+Computer table key_calls: CREATE TABLE key_calls (provider TEXT PRIMARY KEY, hour INTEGER NOT NULL, used INTEGER NOT NULL)
 Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL)
 Computer table own_signins: CREATE TABLE own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)

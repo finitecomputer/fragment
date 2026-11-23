@@ -43,9 +43,9 @@ pub fn support_url_ok(url: &str) -> bool {
 ///   its agents' work), until its owner puts that version off
 ///   (`Images::later`). Never while it sleeps or starts: its next start
 ///   takes the new version anyway;
-/// - `disk_filling`: a read found its disk used past `DISK_TOLD_USED_PCT`
-///   with at most `DISK_TOLD_FREE_MAX` free, and none since found clearly
-///   more room (`disk_clear`).
+/// - `disk_filling`: a read found its disk with at most `ROOM_TOLD_MAX` of
+///   room (`disk::room`: what a restore of its save leaves), and none since
+///   found clearly more (`disk_clear`).
 pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
     let mut out = Vec::with_capacity(5);
     if let Phase::Failed { why, .. } = &life.phase {
@@ -81,6 +81,7 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
                 saved_at: back_to.map(|s| s.at_ms),
                 at: None,
                 unchanged: saves.unchanged(e, back_to),
+                too_big: false,
             });
         }
         (Some(_), _) => {}
@@ -93,17 +94,18 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
             saved_at: w.restored.saved_at,
             at: Some(w.restored.at),
             unchanged: w.unchanged,
+            too_big: w.too_big,
         }),
         (None, _) => {}
     }
     let awake = matches!(life.phase, Phase::Awake { .. });
     if let (true, Some(running), Some(latest)) = (awake, version_running(life, saves), images.latest()) {
         if running != latest && life.keepalives() == 0 && images.later.as_deref() != Some(latest.as_str()) {
-            out.push(ComputerNotice::Update { version: latest });
+            out.push(ComputerNotice::Update { version: latest, room_first: saves.update_waits() });
         }
     }
     if let Some(d) = saves.disk.filter(|_| saves.disk_told) {
-        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free });
+        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free, room: crate::computer::disk::room(&d) });
     }
     assert!(out.len() <= 5, "one notice of each kind at most");
     out
@@ -143,10 +145,10 @@ mod tests {
         let crashed_at = c.now;
         let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
-        let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None, unchanged: true };
+        let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None, unchanged: true, too_big: false };
         assert_eq!(went_back(&c), Some(pending), "starting again: it goes back to b1");
         let r = c.come_up(generation);
-        let told = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: false, save: Some(1), saved_at, at: Some(r.at), unchanged: true };
+        let told = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: false, save: Some(1), saved_at, at: Some(r.at), unchanged: true, too_big: false };
         assert_eq!(went_back(&c), Some(told.clone()));
         // a sleep that saves, and a wake from it: the loss is still told
         c.sleep(Some("b2"));

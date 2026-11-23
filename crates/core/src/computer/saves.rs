@@ -6,7 +6,7 @@ use fragment_proto::computer::{ComputerRestore, ComputerSave, LifeEnd, LossCause
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::computer::disk::{disk_clear, disk_filling, ComputerDisk};
+use crate::computer::disk::{disk_clear, disk_filling, fits_any_image, ComputerDisk};
 use crate::computer::lifecycle::Ended;
 use crate::computer::limits::{SAVES_KEPT, SET_ASIDE_KEPT_MS, SET_ASIDE_MAX};
 use crate::computer::start_line::Full;
@@ -51,11 +51,17 @@ pub struct Save {
     /// the image's check of what it restored did: no start uses it again.
     #[serde(default)]
     pub unusable: bool,
-    /// When it was set aside (ms; `Saves::choose`): kept, and its owner's
-    /// export reads it, but no start restores it, and it is let go of
-    /// `SET_ASIDE_KEPT_MS` after this. Set on the saves set aside alone.
+    /// When it was set aside (ms), by an operator's choice of an older save
+    /// (`Saves::choose`) or as too big for its disk (`Saves::too_big`):
+    /// kept, and its owner's export reads it, but no start restores it, and
+    /// it is let go of `SET_ASIDE_KEPT_MS` after this. Set on the saves set
+    /// aside alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_aside_ms: Option<i64>,
+    /// It was set aside because its restore found no room on its disk
+    /// (`Saves::too_big`), not by an operator: its owner is told so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub too_big: bool,
 }
 
 impl Save {
@@ -92,8 +98,12 @@ pub struct Snapshot {
 /// What a start restores, chosen as it begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
-    /// The snapshot `id`, of the current save.
-    Snapshot { id: String },
+    /// The snapshot `id`, of the current save, and the image's reference
+    /// it was taken of: what the start runs; `held`, whether that save's
+    /// guest answered its hold (so the snapshot holds its guest too: the
+    /// sleep held it before it took the snapshot), and not when the hold
+    /// failed and the sleep saved and snapshotted all the same.
+    Snapshot { id: String, image: String, held: bool },
     /// The image, then the current save.
     Backup,
     /// The image, with an empty `/data`: there is no save.
@@ -108,6 +118,29 @@ impl Plan {
             Plan::Nothing => RestoreSource::Nothing,
         }
     }
+
+    /// When its start asks its owner's Vault for the hosts its agents'
+    /// secrets go to, so its egress catches them before its guest can send
+    /// a placeholder there (FIN-466).
+    pub fn vault_asked(&self) -> VaultAsked {
+        match self {
+            Plan::Snapshot { held: true, .. } | Plan::Backup => VaultAsked::Beside,
+            Plan::Snapshot { held: false, .. } | Plan::Nothing => VaultAsked::Before,
+        }
+    }
+}
+
+/// When a start asks the Vault (`Plan::vault_asked`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultAsked {
+    /// Before the container starts: its guest runs at once, nothing holding
+    /// it, so nothing it sends may find a host uncaught (no window).
+    Before,
+    /// Beside the container's start, never in its way: the start holds its
+    /// guest until it lets it go (a restore's gate; a snapshot's hold, which
+    /// the sleep put on before the snapshot, when its save was held), and
+    /// catches the hosts first.
+    Beside,
 }
 
 /// The start under way, and what it restores.
@@ -215,6 +248,11 @@ pub struct WentBack {
     /// was kept: told as a change lost.
     #[serde(default)]
     pub unchanged: bool,
+    /// It went back because a newer save did not fit its disk, set aside
+    /// since that life ended (`Saves::too_big`): kept, and its owner may
+    /// still export it.
+    #[serde(default)]
+    pub too_big: bool,
 }
 
 /// Why a life's work since its last save is in no save, from how it ended
@@ -261,16 +299,29 @@ impl Saves {
         self.saves.iter().find(|s| !s.unusable).or(self.saves.first())
     }
 
-    /// What a start restores: the snapshot only when it caches the current
-    /// save for the pinned image (`image`, its reference: `None` with
-    /// snapshots off); otherwise the image and the current save, or
-    /// nothing when there is no save.
+    /// What a start restores: the snapshot when it caches the current save
+    /// for the pinned image (`image`, its reference: `None` with snapshots
+    /// off), or for the image it ran when that save may not restore beside
+    /// the largest image (`fits_any_image`: it stays on the image it has
+    /// until there is room; docs/computers.md, "An image's share of the
+    /// disk"); otherwise the image and the current save, or nothing when
+    /// there is no save.
     pub fn plan(&self, image: Option<&str>) -> Plan {
         let Some(save) = self.current() else { return Plan::Nothing };
         match (&self.snapshot, image) {
-            (Some(s), Some(image)) if s.save == save.id && s.image == image && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone() },
+            (Some(s), Some(image)) if s.save == save.id && (s.image == image || self.update_waits()) && !save.unusable && !self.fresh => Plan::Snapshot { id: s.id.clone(), image: s.image.clone(), held: save.held },
             _ => Plan::Backup,
         }
+    }
+
+    /// Whether its save may not restore beside the largest image the
+    /// deployment may move it to (`fits_any_image`, as its disk was last
+    /// read), or its disk is told filling (`disk_filling`: at the edge, a
+    /// save a little bigger no longer fits; Codex on #1422): its update
+    /// waits for room, a wake that can stays on the image it has, and its
+    /// owner is told to make room first.
+    pub fn update_waits(&self) -> bool {
+        self.disk_told || self.disk.is_some_and(|d| !fits_any_image(&d))
     }
 
     /// Why `plan(image)` restores the save whole, when it does (a start's
@@ -310,6 +361,12 @@ impl Saves {
     /// the image and the newest good save (or, past one that fails its
     /// check, an older one). Again, the same.
     pub fn restart_fresh(&mut self) {
+        // while its update waits for room, a restart stays on its image
+        // too, from its snapshot (the restart's sleep takes one): fresh
+        // from the pinned image, its save may not restore (Codex on #1422)
+        if self.update_waits() {
+            return;
+        }
         self.snapshot = None;
         self.fresh = true;
     }
@@ -381,10 +438,20 @@ impl Saves {
     /// the newest loss told, or 0, is no notice they could have read, and is
     /// refused (`false`). Again, the same.
     pub fn saw(&mut self, life: u64) -> bool {
+        self.saw_notice(life, false)
+    }
+
+    /// `saw`, of the notice its owner read: `too_big`, the one that says
+    /// its newest save did not fit its disk (its OK says so). Any other of
+    /// that life (the one told while it was pending, whose OK may come just
+    /// as a start goes farther for want of room) hides only itself: the
+    /// farther rollback is still told (Codex on the no-room PR).
+    pub fn saw_notice(&mut self, life: u64, too_big: bool) -> bool {
         let told = self.went_back.as_ref().map(|w| w.life).max(self.pending_loss().map(|e| e.generation));
         let read = life >= 1 && told.is_some_and(|t| life <= t);
         if read {
-            self.seen = self.seen.max(life);
+            let farther = !too_big && self.went_back.as_ref().is_some_and(|w| w.life == life && w.too_big);
+            self.seen = self.seen.max(if farther { life - 1 } else { life });
         }
         read
     }
@@ -475,11 +542,17 @@ impl Saves {
         // its owner is told of it until they say they saw it (`notices`),
         // unless it lost nothing (read before this start's `restored`
         // replaces the lost life's)
-        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save)));
+        let told = ended.filter(|e| rollback && !self.lost_nothing(e, restored_save)).map(|e| (e, self.unchanged(&e, restored_save), self.too_big_since(&e, restored_save)));
         self.rollbacks += u64::from(rollback);
         self.restored = Some(restored.clone());
-        if let Some((e, unchanged)) = told {
-            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged });
+        if let Some((e, unchanged, too_big)) = told {
+            self.went_back = Some(WentBack { life: e.generation, cause: loss_cause(&e), ended_at_ms: e.at_ms, restored: restored.clone(), save: restored_save.map(|s| s.number), unchanged, too_big });
+            // a notice of that life seen as it was pending named a newer
+            // save than the one it went back to: told again (Codex on the
+            // no-room PR)
+            if too_big {
+                self.seen = self.seen.min(e.generation - 1);
+            }
         }
         // a restart's start is fresh; the starts after it may use a snapshot again
         self.fresh = false;
@@ -506,7 +579,7 @@ impl Saves {
             self.snapshot = None;
         }
         self.numbered += 1;
-        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false, set_aside_ms: None });
+        self.saves.insert(0, Save { number: self.numbered, id, generation, at_ms, seq: Some(seq), held, records, unusable: false, set_aside_ms: None, too_big: false });
         let mut dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         // the save its running life came up from is kept past the newest: one
         // a start restored and came up from, the last to fall back to
@@ -545,7 +618,9 @@ impl Saves {
     /// It may be one set aside before, then restorable again; what an
     /// earlier choice set aside stays so for its time. One set aside is
     /// kept, and its owner's export reads it, but no start restores it,
-    /// whatever fails. The snapshot goes unless it caches the save chosen.
+    /// whatever fails. The snapshot goes unless it caches the save chosen,
+    /// and so does the size of `/data` its last read found, which was the
+    /// save's it leaves (`ComputerDisk::data`).
     /// Answers what letting go of those set aside past their time or bound
     /// (`trim_aside`) pushed out unforgotten. Again, the same. Refused, with
     /// nothing changed, when no save of that number is kept or it was found
@@ -558,6 +633,7 @@ impl Saves {
             return Err(NotChosen::Unusable);
         }
         let id = chosen.id.clone();
+        let was = self.current().map(|s| s.id.clone());
         let mut restorable: Vec<Save> = vec![];
         for mut s in std::mem::take(&mut self.saves).into_iter().chain(std::mem::take(&mut self.aside)) {
             let restored = match s.number.cmp(&number) {
@@ -567,6 +643,7 @@ impl Saves {
             };
             if restored {
                 s.set_aside_ms = None;
+                s.too_big = false;
                 restorable.push(s);
             } else {
                 s.set_aside_ms.get_or_insert(now_ms);
@@ -583,10 +660,58 @@ impl Saves {
         if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
             self.snapshot = None;
         }
+        // the size of /data a read found is the save's it left (Codex on
+        // #1425: a rollback told every agent its computer was still full);
+        // its next start's read, after its restore, says the room
+        if was.as_deref() != Some(id.as_str()) {
+            if let Some(d) = self.disk.as_mut() {
+                d.data = None;
+            }
+        }
         let dropped = self.trim_aside(now_ms);
         assert_eq!(self.current().map(|s| s.id.as_str()), Some(id.as_str()), "its next start restores the save chosen");
         assert!(self.saves.len() <= SAVES_KEPT + 1 && self.aside.len() <= SET_ASIDE_MAX, "bounded");
         Ok(self.let_go(dropped.into_iter().flat_map(|s| s.records).collect()))
+    }
+
+    /// The save `id`'s restore found no room on its disk
+    /// (`restore_found_no_room`), as one that grew past what its disk holds
+    /// once restored does (Paul, 2026-11-20: "rollback is preferred to
+    /// being stuck"). With an older save left to restore, it is set aside,
+    /// as an operator's choice of the newest such would (`choose`): kept,
+    /// exportable, never restored by a start, and its next start, owed at
+    /// once, restores that one, no strike (`Event::RestoreFailed`). Answers
+    /// what letting go of those set aside past their time or bound pushed
+    /// out unforgotten. None, nothing changed, with no older save left (or
+    /// `id` not the current save): its failure is a strike, so a computer
+    /// none of whose saves fit ends `wont_wake`, never started with nothing.
+    pub fn too_big(&mut self, id: &str, now_ms: i64) -> Option<Vec<Value>> {
+        if self.current().is_none_or(|c| c.id != id) {
+            return None;
+        }
+        let older = self.saves.iter().skip_while(|s| s.id != id).skip(1).find(|s| !s.unusable)?.number;
+        let lost = self.choose(older, now_ms).expect("an older save kept, not found unusable");
+        if let Some(s) = self.aside.iter_mut().find(|s| s.id == id) {
+            s.too_big = true;
+        }
+        assert!(self.current().is_some_and(|c| c.number == older), "its next start restores the save before it");
+        Some(lost)
+    }
+
+    /// Whether a save was set aside as too big for its disk at `since_ms`
+    /// or after: the start that began then fell back past it (`too_big` is
+    /// stored before its destroy), as an isolate that comes up after that
+    /// start's own reports reads it.
+    pub fn set_aside_too_big_since(&self, since_ms: i64) -> bool {
+        self.aside.iter().any(|s| s.too_big && s.set_aside_ms.is_some_and(|at| at >= since_ms))
+    }
+
+    /// Whether a save newer than `back_to` was set aside as too big for its
+    /// disk since the life `e` ended: the start going back to `back_to`
+    /// went back because of it.
+    fn too_big_since(&self, e: &Ended, back_to: Option<&Save>) -> bool {
+        let newer = |s: &Save| back_to.is_none_or(|b| s.number > b.number);
+        self.aside.iter().any(|s| s.too_big && newer(s) && s.set_aside_ms.is_some_and(|at| at >= e.at_ms))
     }
 
     /// Takes out the saves set aside that are let go of at `now_ms`: each
@@ -638,17 +763,25 @@ impl Saves {
         self.snapshot.is_some()
     }
 
-    /// Its disk was read (`df`, after a start came up or a save): kept
-    /// when it is newer than the one kept (a late read of an earlier
-    /// moment changes nothing). Answers whether it was kept.
+    /// Its disk was read (`df` in a start, `df` and `du` after an awake
+    /// save): kept when it is newer than the one kept (a late read of an
+    /// earlier moment changes nothing), with the newest read of what its
+    /// `/data` restores to when it has none (a start's). Answers whether it
+    /// was kept.
     pub fn measured(&mut self, disk: ComputerDisk) -> bool {
         assert!(disk.total > 0 && disk.free <= disk.total, "a disk read is its size and what fits in it: {disk:?}");
         if self.disk.is_some_and(|d| d.at > disk.at) {
             return false;
         }
-        self.disk_told = if self.disk_told { !disk_clear(disk.total, disk.free) } else { disk_filling(disk.total, disk.free) };
+        let disk = ComputerDisk { data: disk.data.or(self.disk.and_then(|d| d.data)), ..disk };
+        self.disk_told = if self.disk_told { !disk_clear(&disk) } else { disk_filling(&disk) };
         self.disk = Some(disk);
         true
+    }
+
+    /// Its disk as its view shows it: as last read, and the room it has.
+    pub fn disk_view(&self) -> Option<fragment_proto::computer::DiskRoom> {
+        self.disk.map(|d| d.view(self.disk_told))
     }
 
     /// Its disk as last read.
@@ -705,6 +838,21 @@ impl Saves {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: no wake leaves a Vault host uncaught while its guest runs.
+    /// Method: each plan's answer. A start that restores (a save behind its
+    /// gate, a snapshot behind its hold) holds its guest while it asks
+    /// beside the container's start; a fresh one (nothing restored) holds
+    /// nothing, so it asks before, as every start once did.
+    #[test]
+    fn a_start_asks_the_vault_beside_it_only_while_its_guest_is_held() {
+        assert_eq!(Plan::Nothing.vault_asked(), VaultAsked::Before, "a fresh guest runs at once: its hosts are caught before it starts");
+        assert_eq!(Plan::Backup.vault_asked(), VaultAsked::Beside, "a restore's gate holds its guest");
+        assert_eq!(Plan::Snapshot { id: "snap".into(), image: IMAGE.into(), held: true }.vault_asked(), VaultAsked::Beside, "a snapshot's hold holds its guest");
+        // a sleep whose hold failed saved and snapshotted all the same: that
+        // snapshot's guest wakes unheld, so its start asks first (Codex)
+        assert_eq!(Plan::Snapshot { id: "snap".into(), image: IMAGE.into(), held: false }.vault_asked(), VaultAsked::Before, "a snapshot whose save was not held holds nothing");
+    }
+
     use fragment_proto::computer::{ComputerNotice, ComputerSave, LifeEnd, RestoreSource};
     use serde_json::json;
 
@@ -756,7 +904,7 @@ mod tests {
         s.saved(1, rec("b0"), 0, T - 1, true);
         s.saved(1, rec("b1"), 0, T, true);
         assert!(s.snapshotted("b1", "s1", IMAGE));
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
         assert_eq!(s.plan(Some("registry/stub@sha256:2")), Plan::Backup, "another image's");
         assert_eq!(s.plan(None), Plan::Backup, "snapshots off");
         let mut other = s.clone();
@@ -860,8 +1008,78 @@ mod tests {
         assert_eq!(of, IMAGE);
         assert!(s.snapshotted("b1", "s1", &of));
         assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "the new image, and the save");
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() }, "pinned back, the snapshot serves again");
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true }, "pinned back, the snapshot serves again");
         assert_eq!(s.image_of(2), None, "a start that has not come up runs nothing yet");
+    }
+
+    /// Goal (Paul, 2026-11-20: an update must be safe for every computer):
+    /// a computer whose save may not restore beside the largest image
+    /// (`fits_any_image`, its disk as last read), or that is told filling,
+    /// stays on the image it has:
+    /// a wake starts its snapshot of that save, on the image it was taken
+    /// of, while the pinned image is another; one with room takes the new
+    /// image; one never read is as before. Never a snapshot of an older
+    /// save, a save found unusable, nor after its owner's restart: those
+    /// restore the save (no rollback). Method: a start on one image, a pin,
+    /// its sleep, a disk read, the next plan.
+    #[test]
+    fn an_update_waits_for_room_on_its_snapshot() {
+        use crate::computer::disk::{fits_any_image, restore_floor, restore_writes, ComputerDisk, IMAGE_DISK_MAX, ROOM_CLEAR_MIN};
+        const NEXT: &str = "registry/stub@sha256:2";
+        const DISK: u64 = 20_000_002_048;
+        let mut s = Saves::default();
+        s.starting(1, RestoreSource::Nothing);
+        assert!(s.came_up(1, RestoreSource::Nothing, None, Some(IMAGE), T).is_some());
+        s.saved(1, rec("b1"), 0, T + 10, true);
+        assert!(s.snapshotted("b1", "s1", IMAGE));
+        assert!(!s.update_waits(), "never read: as before");
+        assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "the new image, and the save");
+        // room to spare (not told filling): the update is taken
+        let read = |data: u64, at: i64| ComputerDisk { total: DISK, free: 12_000_000_000, at, generation: 1, data: Some(data) };
+        assert!(s.measured(read(10_000_000_000, T + 20)));
+        assert!(!s.update_waits());
+        assert_eq!(s.plan(Some(NEXT)), Plan::Backup, "it fits beside any image: the update is taken");
+        // its /data at full size fills the disk but the largest image and the floor, exactly: told filling, so it waits
+        let fits = DISK - IMAGE_DISK_MAX - restore_floor(DISK);
+        let edge = (fits * 100 / 101..fits * 100 / 101 + 200).rev().find(|d| restore_writes(*d) <= fits).expect("a size that fits exactly");
+        assert!(restore_writes(edge + 1) > fits, "the most that fits");
+        assert!(s.measured(read(edge, T + 30)));
+        assert!(fits_any_image(&read(edge, T + 30)) && s.update_waits(), "it fits, but at the edge (Codex on #1422)");
+        assert_eq!(s.plan(Some(NEXT)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
+        // a byte past it: it stays on the image it has
+        assert!(s.measured(read(edge + 1, T + 40)));
+        assert!(s.update_waits());
+        assert_eq!(s.plan(Some(NEXT)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true }, "its snapshot, on its own image");
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true }, "the pinned image's own snapshot, as ever");
+        assert_eq!(s.full_why(Some(NEXT), false), None, "no whole restore to explain");
+        // never an older save's snapshot: a newer save restores (its sleep took no snapshot)
+        let mut newer = s.clone();
+        newer.saved(1, rec("b2"), 0, T + 50, true);
+        assert_eq!(newer.plan(Some(NEXT)), Plan::Backup);
+        // never an unusable save's, nor after its owner's restart
+        let mut unusable = s.clone();
+        unusable.saves[0].unusable = true;
+        assert_eq!(unusable.plan(Some(NEXT)), Plan::Backup);
+        let mut restarted = s.clone();
+        restarted.fresh = true;
+        assert_eq!(restarted.plan(Some(NEXT)), Plan::Backup);
+        // its owner's restart while it waits: it stays on its image, from its snapshot (Codex on #1422)
+        let mut restart = s.clone();
+        restart.restart_fresh();
+        assert!(!restart.fresh() && restart.has_snapshot(), "no fresh start while its update waits");
+        assert_eq!(restart.plan(Some(NEXT)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
+        assert!(restart.snapshotted("b1", "s2", IMAGE) && restart.plan(Some(NEXT)) == Plan::Snapshot { id: "s2".into(), image: IMAGE.into(), held: true }, "the restart's sleep's snapshot, on its own image");
+        // snapshots off: the save
+        assert_eq!(s.plan(None), Plan::Backup);
+        // room made, but not yet past where it is told no more: it still waits
+        assert!(s.measured(read(fits - ROOM_CLEAR_MIN, T + 60)));
+        assert!(s.update_waits(), "told until a read finds 4 GB of room");
+        // past it: the update is taken, and a restart is fresh again
+        assert!(s.measured(read(edge - 5_000_000_000, T + 70)));
+        assert!(!s.update_waits());
+        assert_eq!(s.plan(Some(NEXT)), Plan::Backup);
+        s.restart_fresh();
+        assert!(s.fresh() && !s.has_snapshot());
     }
 
     /// Goal (docs/computers.md, Lifecycle): the second ask of a
@@ -881,7 +1099,7 @@ mod tests {
         // container, so it takes no snapshot, and that is not news
         assert!(!s.save_failed(4), "the first ask saved this start");
         assert!(s.save_failed(5), "a start whose sleep saved nothing is news");
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
         // the other order: the second's save lands while the first snapshots
         let mut s = Saves::default();
         s.saved(4, rec("b1"), 0, T, true);
@@ -889,7 +1107,7 @@ mod tests {
         assert!(!s.snapshotted("b1", "s1", IMAGE), "the first's snapshot caches a save that is no longer current");
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
         assert!(s.snapshotted("b2", "s2", IMAGE));
-        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s2".into() });
+        assert_eq!(s.plan(Some(IMAGE)), Plan::Snapshot { id: "s2".into(), image: IMAGE.into(), held: true });
     }
 
     /// Goal (P7): each start that comes up says what it restored, how old
@@ -949,7 +1167,7 @@ mod tests {
         c.wake();
         c.sleep(Some("b1"));
         assert!(c.saves.snapshotted("b1", "s1", IMAGE));
-        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(c.saves.plan(Some(IMAGE)), Plan::Snapshot { id: "s1".into(), image: IMAGE.into(), held: true });
         c.saves.restart_fresh();
         c.saves.restart_fresh();
         assert!(c.saves.fresh() && !c.saves.has_snapshot(), "forgotten; again, the same");
@@ -961,7 +1179,7 @@ mod tests {
         assert_eq!((r.from, r.save.as_deref()), (RestoreSource::Backup, Some("b2")));
         assert!(!c.saves.fresh());
         c.sleep(Some("b3"));
-        assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into() }, "snapshots again");
+        assert!(c.saves.snapshotted("b3", "s3", IMAGE) && c.saves.plan(Some(IMAGE)) == Plan::Snapshot { id: "s3".into(), image: IMAGE.into(), held: true }, "snapshots again");
     }
 
     /// Goal: three saves are kept, newest first, each numbered; a fourth
@@ -1200,6 +1418,160 @@ mod tests {
         c.saves.saved(g, rec("c6"), 0, chose_at + SET_ASIDE_KEPT_MS, true);
         assert!(c.saves.aside().is_empty(), "{:?}", numbers(&c.saves));
         assert!(["b4", "b3", "b2"].iter().all(|id| c.saves.forgetting().iter().any(|r| r["id"] == *id)), "let go of, to delete");
+    }
+
+    /// Goal (Paul, 2026-11-20: "rollback is preferred to being stuck"): a
+    /// start whose save found no room on its disk sets that save aside and
+    /// starts again at once from the save before it, no strike, past each
+    /// that does not fit either; the start that comes up is a rollback its
+    /// owner is told was for want of room, with where it went back to, the
+    /// newer kept outside the rotation. Invalid: with no older save left,
+    /// nothing is set aside: a strike, its save tried again, so it ends
+    /// `wont_wake` as before, never started with nothing; a save not the
+    /// current one changes nothing. Replay: the same too-big report again
+    /// sets nothing more aside. Restart: stored and read back; one stored
+    /// before reads as not too big. Method: the lifecycle and its saves, as
+    /// the DO drives them.
+    /// Goal (Codex on #1425: a rollback told every agent its computer was
+    /// still full): the size of `/data` a read found after a save is that
+    /// save's. Once its next start is to restore another (one set aside as
+    /// too big for its disk, or an operator's choice), it counts no more,
+    /// and the start's own read (`df`, after its restore) says the room.
+    /// Choosing the save it is on keeps it.
+    #[test]
+    fn a_rollback_forgets_the_size_of_the_save_it_left() {
+        use crate::computer::disk::{restore_floor, room, ComputerDisk};
+        const DISK: u64 = 20_000_002_048;
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        assert!(c.saves.measured(ComputerDisk { total: DISK, free: 2_000_000_000, at: c.now, generation: 2, data: Some(18_000_000_000) }));
+        assert!(c.saves.disk_view().is_some_and(|v| v.filling && v.room == 0), "told full");
+        // the save it is on, chosen: its size kept
+        let on = c.saves.current().map(|s| s.number).expect("a save");
+        assert_eq!(c.saves.choose(on, c.now), Ok(vec![]));
+        assert_eq!(c.saves.disk().and_then(|d| d.data), Some(18_000_000_000));
+        // too big for its disk: set aside, the one before next; its size forgotten
+        assert!(c.saves.too_big("b2", c.now).is_some());
+        assert_eq!(c.saves.disk().map(|d| d.data), Some(None));
+        // the start's read after its restore: what is free says the room, and it is told no more
+        assert!(c.saves.measured(ComputerDisk { total: DISK, free: 15_000_000_000, at: c.now + 1, generation: 3, data: None }));
+        assert_eq!(c.saves.disk().map(|d| room(&d)), Some(15_000_000_000 - restore_floor(DISK)));
+        assert!(c.saves.disk_view().is_some_and(|v| !v.filling));
+    }
+
+    #[test]
+    fn a_save_too_big_for_its_disk_is_set_aside_and_it_starts_from_the_one_before() {
+        let rules = Rules::default();
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        c.sleep(Some("b3"));
+        let life = c.life.generation();
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let Some(Action::Start { generation: mut g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        // b3, then b2, do not fit: each set aside, the one before at once
+        for (big, next) in [("b3", "b2"), ("b2", "b1")] {
+            assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some(big));
+            assert!(!c.saves.set_aside_too_big_since(c.now), "this start set none aside yet");
+            let lost = c.saves.too_big(big, c.now);
+            assert!(c.saves.set_aside_too_big_since(c.now) && !c.saves.set_aside_too_big_since(c.now + 1), "this start's own, read by an isolate after it");
+            assert_eq!(lost, Some(vec![]), "set aside, nothing let go of");
+            let replayed = c.saves.clone();
+            assert_eq!(c.saves.too_big(big, c.now + 1), None, "again: no longer the current save");
+            assert_eq!(c.saves, replayed);
+            let s = c.apply(Event::RestoreFailed { generation: g, why: format!("restore stopped with ~203 MB free, below the 268435456 byte floor ({big})"), older: true });
+            let s = c.owed(&s);
+            assert_eq!((s.actions, c.life.failures()), (vec![Action::Start { generation: g + 1 }], 0), "at once, no strike");
+            assert_eq!(c.saves.current().map(|s| s.id.as_str()), Some(next));
+            g += 1;
+        }
+        assert_eq!(c.saves.full_why(Some(IMAGE), false), Some(Full::Aside));
+        let r = c.come_up(g);
+        assert_eq!((r.save.as_deref(), r.rollback), (Some("b1"), true));
+        let told = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert!(matches!(told, Some(ComputerNotice::WentBack { life: l, save: Some(1), too_big: true, pending: false, .. }) if l == life), "{told:?}");
+        assert!(c.saves.aside().iter().all(|s| s.too_big && s.set_aside_ms.is_some()) && c.saves.aside().len() == 2 && !c.saves.all().iter().any(|s| s.too_big));
+        // its saves after it keep them, outside the rotation
+        for id in ["c1", "c2", "c3", "c4"] {
+            c.turn_saved(id);
+        }
+        assert!(["b3", "b2"].iter().all(|id| c.saves.aside().iter().any(|s| s.id == *id && s.too_big)), "kept for their time");
+        // restart: read back the same; one stored before reads as not too big
+        let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        assert_eq!(back, c.saves);
+        let mut stored = serde_json::to_value(&c.saves).unwrap();
+        assert!(stored["wentBack"].as_object_mut().unwrap().remove("tooBig").is_some());
+        stored["aside"].as_array_mut().unwrap().iter_mut().for_each(|s| drop(s.as_object_mut().unwrap().remove("tooBig")));
+        let older: Saves = serde_json::from_value(stored).unwrap();
+        assert!(older.aside().iter().all(|s| !s.too_big) && older.went_back().is_some_and(|w| !w.too_big));
+        // a start of an operator's choice is told as any rollback, not as
+        // one too big for its disk
+        let mut chosen = Computer::new();
+        chosen.wake();
+        chosen.sleep(Some("b1"));
+        chosen.wake();
+        chosen.sleep(Some("b2"));
+        assert_eq!(chosen.saves.choose(1, chosen.now), Ok(vec![]));
+        chosen.wake();
+        assert!(chosen.saves.went_back().is_some_and(|w| !w.too_big));
+        // invalid: no older save left: nothing set aside, a strike, the save
+        // tried again, never nothing; won't wake as before
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let mut next = s.actions.first().cloned();
+        while let Some(Action::Start { generation }) = next {
+            let unchanged = c.saves.clone();
+            assert_eq!(c.saves.too_big("b1", c.now), None);
+            assert_eq!(c.saves, unchanged, "nothing set aside");
+            assert_eq!((c.saves.current().map(|s| s.id.as_str()), c.saves.plan(Some(IMAGE))), (Some("b1"), Plan::Backup), "never started with nothing");
+            let s = c.apply(Event::RestoreFailed { generation, why: "restore stopped with ~203 MB free, below the 268435456 byte floor".into(), older: false });
+            next = s.alarm_ms.and_then(|at| {
+                c.now = at - 1_000;
+                c.apply(Event::Alarm).actions.first().cloned()
+            });
+        }
+        assert!(matches!(c.life.phase, Phase::Failed { .. }) && c.saves.aside().is_empty(), "{:?}", c.life.phase);
+    }
+
+    /// Goal (Codex on the no-room PR): a crash's notice its owner saw while
+    /// it was pending named the save it would go back to; a start that then
+    /// went farther, that save too big for its disk, is told again, saying
+    /// so. Method: the lifecycle and its saves, as the DO drives them.
+    #[test]
+    fn a_rollback_farther_for_want_of_room_is_told_though_its_notice_was_seen() {
+        let rules = Rules::default();
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        c.wake();
+        c.turn_saved("b2");
+        c.apply(Event::Opened { socket: Socket::Keepalive });
+        c.apply(Event::Closed { socket: Socket::Keepalive });
+        let life = c.life.generation();
+        let g = c.crash();
+        let pending = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert!(matches!(pending, Some(ComputerNotice::WentBack { pending: true, save: Some(2), .. })), "{pending:?}");
+        assert!(c.saves.saw(life));
+        assert_eq!(c.saves.too_big("b2", c.now), Some(vec![]));
+        let s = c.apply(Event::RestoreFailed { generation: g, why: "no room".into(), older: true });
+        let s = c.owed(&s);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        assert_eq!(c.come_up(generation).save.as_deref(), Some("b1"));
+        let told = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert!(matches!(told, Some(ComputerNotice::WentBack { life: l, pending: false, save: Some(1), too_big: true, .. }) if l == life), "{told:?}");
+        // the pending notice's OK, heard only now: the farther one stays told
+        assert!(c.saves.saw(life));
+        let still = notices(&c.life, &c.saves, &c.images, &rules).into_iter().find(|n| matches!(n, ComputerNotice::WentBack { .. }));
+        assert_eq!(still, told, "its own OK alone hides it");
+        assert!(c.saves.saw_notice(life, true));
+        assert!(notices(&c.life, &c.saves, &c.images, &rules).into_iter().all(|n| !matches!(n, ComputerNotice::WentBack { .. })));
     }
 
     /// Goal (Codex on this PR): a life's work is in the save it ended with,

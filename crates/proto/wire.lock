@@ -10,6 +10,7 @@ bound AskSecret.hosts default []
 bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.at range i64
+bound ChannelRecord.author default null
 bound ChannelRecord.seq range i64
 bound Command.as default null
 bound Command.attempt range u32
@@ -70,6 +71,7 @@ bound Manifest.files range u64
 bound Manifest.left default []
 bound Manifest.left_more default null
 bound Manifest.left_more range u64
+bound Manifest.simplex default false
 bound Manifest.zip_bytes range u64
 bound Member.addedAt range i64
 bound Member.door default null
@@ -172,6 +174,7 @@ field ChannelPage.more required boolean
 field ChannelPage.next required integer
 field ChannelPage.records required array<ChannelRecord>
 field ChannelRecord.at required integer
+field ChannelRecord.author optional Author|null
 field ChannelRecord.body required any
 field ChannelRecord.channel required string
 field ChannelRecord.kind required string
@@ -346,6 +349,7 @@ field Manifest.left optional array<LeftBehind>
 field Manifest.left_more optional integer|null
 field Manifest.old required string
 field Manifest.phase required Phase
+field Manifest.simplex optional boolean
 field Manifest.zip_bytes required integer
 field Manifest.zip_sha256 required string
 field Member.addedAt required integer
@@ -551,6 +555,7 @@ field vault.asked.path.ask required string
 field vault.decline.path.ask required string
 field vault.put.path.secret required string
 field vault.remove.path.secret required string
+other Author other
 other FragmentKind other
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft
 route channels.draft accepts nip98
@@ -798,6 +803,7 @@ type AnswerAsk in object closed
 type Archived out object
 type AskSecret in object closed
 type AskState out enum
+type Author out enum open
 type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
@@ -1015,6 +1021,12 @@ value AskState declined
 value AskState expired
 value AskState saved
 value AskState waiting
+value Author agent
+value Author code
+value Author door
+value Author other
+value Author person
+value Author platform
 value CommandKind restart
 value CommandKind retire
 value CommandKind stop_and_stage
@@ -1136,7 +1148,6 @@ value Reason admins_full
 value Reason already_offered
 value Reason gone
 value Reason holds_seat
-value Reason key_paused
 value Reason last_admin
 value Reason last_paid_seat
 value Reason no_seat
@@ -1156,6 +1167,7 @@ value Reason stripe_refused
 value Reason too_many_offers
 value Reason trial_ended
 value Reason trial_not_here
+value Reason trial_seat_of_one
 value Reason trial_taken
 value Reason trial_unknown
 value Reason trial_used

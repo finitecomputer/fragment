@@ -276,11 +276,19 @@ pub(crate) async fn hand_off(env: &Env, person: &str, name: &str, receipt: &str,
     crate::routed::ask_bytes(env, "VAULT", person, &op_path("handoff", name)?, &HandOff(receipt.to_string(), put)).await
 }
 
-/// What a move reads of a kept `Secret`: where it goes.
+/// What a move reads of a kept `Secret`: how and where it goes.
 #[derive(serde::Deserialize)]
 struct Placed {
     place: Place,
+    #[serde(default)]
+    hosts: Vec<String>,
 }
+
+/// `vault/take`'s body: the destination it claims for, and the hosts the
+/// move keeps it toward there (`fragment_core::vault::within`). A tuple on
+/// the wire.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Take(String, Vec<String>);
 
 /// `vault/take`'s answer: a secret's value, for its move, and which value
 /// it is (its revision: its sealed text's SHA-256). A tuple on the wire.
@@ -297,9 +305,10 @@ struct Moved(String, String);
 /// (`fragment_core::vault::Claimed`: another destination's take is refused,
 /// 409, while it stands). The mover keeps it, then completes (`moved`), so
 /// it has one home at the end and is never lost between. A Nostr key is
-/// refused: it never leaves.
-pub(crate) async fn take(env: &Env, person: &str, name: &str, to: &str) -> CellResult<Taken> {
-    crate::routed::ask_object(env, "VAULT", person, &op_path("take", name)?, &to).await
+/// refused: it never leaves; and so is a move toward a host its Vault does
+/// not point it at (`hosts`, 400), before anything is claimed.
+pub(crate) async fn take(env: &Env, person: &str, name: &str, to: &str, hosts: &[String]) -> CellResult<Taken> {
+    crate::routed::ask_object(env, "VAULT", person, &op_path("take", name)?, &Take(to.to_string(), hosts.to_vec())).await
 }
 
 /// `to`'s move of `name`, kept there, completed: removed from `person`'s
@@ -436,7 +445,8 @@ pub(crate) async fn notices(env: &Env, person: &str) -> CellResult<Vec<u8>> {
     ask(env, person, "vault/notices", None).await
 }
 
-#[durable_object]
+// exported by the cell's build alone (lib.rs, "Two Workers, one crate")
+#[cfg_attr(not(feature = "admin"), durable_object)]
 pub struct VaultCell {
     state: State,
     env: Env,
@@ -445,6 +455,7 @@ pub struct VaultCell {
     wiped: Cell<bool>,
 }
 
+#[cfg(not(feature = "admin"))]
 impl DurableObject for VaultCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
@@ -505,7 +516,10 @@ impl VaultCell {
             }
             ["vault", "list"] => self.list()?,
             ["vault", "delete", name] => self.delete(name)?,
-            ["vault", "take", name] => self.take(name, &crate::json_body::<String>(&req.bytes().await?)?).await?,
+            ["vault", "take", name] => {
+                let Take(to, hosts) = crate::json_body(&req.bytes().await?)?;
+                self.take(name, &to, &hosts).await?
+            }
             ["vault", "moved", name] => {
                 let Moved(to, revision) = crate::json_body(&req.bytes().await?)?;
                 self.moved(name, &to, &revision)?
@@ -857,14 +871,16 @@ impl VaultCell {
     /// `name`'s value, opened for its move into `to`, and its revision:
     /// `Taken`'s JSON. Claimed for `to` in the turn that reads it, before
     /// anything yields (`fragment_core::vault::take`). None, a Nostr key,
-    /// or one claimed for another destination, refused.
-    async fn take(&self, name: &str, to: &str) -> CellResult<String> {
+    /// one toward a host its row does not name, or one claimed for another
+    /// destination, refused.
+    async fn take(&self, name: &str, to: &str, hosts: &[String]) -> CellResult<String> {
         let rows = self.rows("SELECT sealed, secret, claim FROM secrets WHERE name = ?", vec![name.into()])?;
         let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no secret {name} in your vault (GET /api/vault lists them)")))?;
         let kept: Placed = crate::json_text(row["secret"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored secret: {e}")))?;
         if kept.place.sign.is_some() {
             return Err(CellError::invalid(format!("{name} is a key that signs: it never leaves your vault")));
         }
+        rules::within(name, &kept.hosts, hosts).map_err(|e| CellError::invalid(e.to_string()))?;
         rules::take(name, row["claim"].as_str(), to).map_err(|e| CellError::new(ErrorCode::Conflict, e.to_string()))?;
         let sealed = row["sealed"].as_str().unwrap_or_default().to_string();
         self.sql().exec("UPDATE secrets SET claim = ? WHERE name = ? AND sealed = ?", vec![to.into(), name.into(), sealed.as_str().into()])?;

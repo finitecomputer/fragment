@@ -5,10 +5,11 @@
 //! never on every call (decision 62).
 //!
 //! Off the call path (Paul, 2026-11-01: "prioritize user experience over
-//! nickel-and-diming"): a model call waits on no ledger unless this isolate
-//! last heard its question refused (`Gate::step`). Otherwise it starts at
-//! once and the ledger is asked beside it, its answer kept for the next
-//! call: a refusal stops the call after the one that taught it.
+//! nickel-and-diming"): an agent's paid call waits on no ledger unless this
+//! isolate last heard its question refused (`Gate::step`), or is asking it
+//! beside another call. Otherwise it starts at once and the ledger is asked
+//! beside it, its answer kept for the next call: a refusal stops the call
+//! after the one that taught it.
 //!
 //! A cache, so its contract. Source: the person's ledger (its
 //! `/may-spend` and `/fragment-open` routes). Invalidation: time alone, and
@@ -32,6 +33,12 @@ pub const STANDING_CACHE_MS: i64 = 60_000;
 /// within the window. Past it, the stale go first, then the oldest.
 pub const GATE_ENTRIES_MAX: usize = 1_024;
 
+/// How long a question is asked beside a call at most (cell ledger.rs
+/// `BESIDE_WAIT_MS`, this value), and so how long it is marked asked
+/// (`Gate::step`): every call on it meanwhile waits for an answer, each
+/// for at most the gate's own wait (`GATE_WAIT_MS`).
+pub const ASKING_MS: i64 = 20_000;
+
 const _: () = assert!(STANDING_CACHE_MS <= 60_000, "a spend learns its payer's standing within a minute");
 
 /// What a model call does about one gate question (`Gate::step`).
@@ -43,7 +50,9 @@ pub enum Step {
     /// the ledger is asked beside it for the next call.
     GoAndAsk,
     /// Refused, but longer ago than the window: the ledger is asked first,
-    /// as before (it may have topped up), for at most the gate's wait.
+    /// as before (it may have topped up), for at most the gate's wait. So
+    /// is a question being asked beside a call now: one call goes while it
+    /// is asked, and the rest wait for its answer.
     AskFirst,
     /// Refused within the window: it does not start.
     Refuse(Refused),
@@ -63,6 +72,9 @@ struct Seen {
 #[derive(Debug, Default)]
 pub struct Gate {
     seen: Vec<Seen>,
+    /// Questions asked beside a call (`Step::GoAndAsk`), and since when:
+    /// at most one per question, gone once it is heard (`heard`).
+    asking: Vec<(String, i64)>,
 }
 
 fn fresh_at(at_ms: i64, now_ms: i64) -> bool {
@@ -71,7 +83,7 @@ fn fresh_at(at_ms: i64, now_ms: i64) -> bool {
 
 impl Gate {
     pub const fn new() -> Gate {
-        Gate { seen: Vec::new() }
+        Gate { seen: Vec::new(), asking: Vec::new() }
     }
 
     /// The answer to `key` heard less than `STANDING_CACHE_MS` before
@@ -81,17 +93,29 @@ impl Gate {
         fresh_at(seen.at_ms, now_ms).then_some(seen.answer)
     }
 
-    /// What a model call does about `key` at `now_ms`: only a question
-    /// last heard refused waits on the ledger. A stale refusal is kept
-    /// until the bound needs its room (`heard`), so it is read here.
-    pub fn step(&self, key: &str, now_ms: i64) -> Step {
+    /// What a paid call does about `key` at `now_ms`: only a question
+    /// last heard refused, or being asked beside another call, waits on the
+    /// ledger. A stale refusal is kept until the bound needs its room
+    /// (`heard`), so it is read here. A call that goes and asks marks its
+    /// question asked, for at most `ASKING_MS`, so a burst on a cold gate
+    /// starts one call, never all of them.
+    pub fn step(&mut self, key: &str, now_ms: i64) -> Step {
         match self.seen.iter().find(|s| s.key == key) {
             Some(seen) if fresh_at(seen.at_ms, now_ms) => match seen.answer {
                 Ok(()) => Step::Go,
                 Err(why) => Step::Refuse(why),
             },
             Some(seen) if seen.answer.is_err() => Step::AskFirst,
-            _ => Step::GoAndAsk,
+            _ if self.asking.iter().any(|(k, at)| k == key && (0..ASKING_MS).contains(&(now_ms - at))) => Step::AskFirst,
+            _ => {
+                self.asking.retain(|(k, at)| k != key && (0..ASKING_MS).contains(&(now_ms - at)));
+                if self.asking.len() >= GATE_ENTRIES_MAX {
+                    self.asking.swap_remove(0);
+                }
+                self.asking.push((key.to_string(), now_ms));
+                assert!(self.asking.len() <= GATE_ENTRIES_MAX, "the gate marks at most GATE_ENTRIES_MAX questions asked");
+                Step::GoAndAsk
+            }
         }
     }
 
@@ -106,9 +130,13 @@ impl Gate {
     /// What the ledger said to `key`, asked at `now_ms` (`None`: it did not
     /// answer, or not as a ledger does), as the spend reads it: a refusal
     /// stops it, anything else lets it start. An answer is kept; no answer
-    /// is not, so the next spend asks again.
+    /// is not, so the next spend asks again, and lets the spend start
+    /// unless another ask heard a fresh answer meanwhile (an ask beside a
+    /// call, while this one waited): that answer is this spend's too.
     pub fn heard(&mut self, key: &str, answer: Option<Result<(), Refused>>, now_ms: i64) -> Result<(), Refused> {
-        let Some(answer) = answer else { return Ok(()) };
+        // asked: the calls that waited on it go as it says, or ask again
+        self.asking.retain(|(k, _)| k != key);
+        let Some(answer) = answer else { return self.fresh(key, now_ms).unwrap_or(Ok(())) };
         if let Some(seen) = self.seen.iter_mut().find(|s| s.key == key) {
             (seen.at_ms, seen.answer) = (now_ms, answer);
             return answer;
@@ -128,6 +156,7 @@ impl Gate {
     /// Forgets every answer (a test fleet's `forget-standing`).
     pub fn forget(&mut self) {
         self.seen.clear();
+        self.asking.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -199,7 +228,7 @@ mod tests {
         assert_eq!(gate.fresh("p may", 1_000), None, "no answer is no answer: asked again");
         assert!(gate.is_empty());
         assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 1_000), Err(STOPPED));
-        assert_eq!(gate.heard("p may", None, 2_000), Ok(()), "a silence lets this one start");
+        assert_eq!(gate.heard("p may", None, 1_000 + STANDING_CACHE_MS), Ok(()), "a silence lets this one start");
         assert_eq!(gate.fresh("p may", 2_000), Some(Err(STOPPED)), "and leaves the refusal heard before as it was");
     }
 
@@ -240,6 +269,52 @@ mod tests {
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS), Step::Go);
         gate.forget();
         assert_eq!(gate.step("p may", 2_000 + STANDING_CACHE_MS), Step::GoAndAsk, "forgotten (an isolate made anew): nothing heard");
+    }
+
+    /// A burst on a cold gate (Codex, #1451): while a question is asked
+    /// beside the call that found nothing heard, the next call on it waits
+    /// for an answer (asks first, for at most the gate's wait) rather than
+    /// starting too, so a person out of credit makes one call more an
+    /// isolate, never a burst. The ask's answer, or its silence, ends the
+    /// wait; so does `ASKING_MS` (an ask that never returns), and an
+    /// isolate made anew. Method: a gate driven by a clock the test holds.
+    #[test]
+    fn one_call_goes_while_its_question_is_asked() {
+        let mut gate = Gate::new();
+        assert_eq!(gate.step("p may", 1_000), Step::GoAndAsk, "the first goes, asking beside it");
+        assert_eq!(gate.step("p may", 1_001), Step::AskFirst, "the next, while that is asked, waits for an answer");
+        assert_eq!(gate.step("p may", 1_000 + ASKING_MS - 1), Step::AskFirst);
+        assert_eq!(gate.step("q may", 1_001), Step::GoAndAsk, "each question is its own");
+        assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 1_050), Err(STOPPED));
+        assert_eq!(gate.step("p may", 1_051), Step::Refuse(STOPPED), "answered: the refusal stops the rest");
+        // a silence ends the wait too: the next goes and asks again
+        assert_eq!(gate.heard("q may", None, 1_060), Ok(()));
+        assert_eq!(gate.step("q may", 1_061), Step::GoAndAsk);
+        // an ask that never returns waits on nothing past ASKING_MS
+        assert_eq!(gate.step("r may", 5_000), Step::GoAndAsk);
+        assert_eq!(gate.step("r may", 5_000 + ASKING_MS), Step::GoAndAsk, "a stale ask is asked again");
+        gate.forget();
+        assert_eq!(gate.step("r may", 5_000 + ASKING_MS), Step::GoAndAsk, "forgotten: nothing asked");
+    }
+
+    /// A slow ledger (Codex, #1451, round 2): the question asked beside a
+    /// call stays marked for as long as that ask may run (`ASKING_MS`, its
+    /// whole wait), so a call well past the gate's own wait still waits on
+    /// an answer rather than starting; and one whose own ask heard nothing
+    /// takes the refusal the ask beside heard meanwhile, never going past
+    /// it. A silence with nothing heard lets the spend start, as ever.
+    #[test]
+    fn a_slow_ledgers_answer_holds_the_calls_that_waited_on_it() {
+        let mut gate = Gate::new();
+        assert_eq!(gate.step("p may", 1_000), Step::GoAndAsk);
+        assert_eq!(gate.step("p may", 1_000 + 1_501), Step::AskFirst, "past the gate's own wait, the ask beside still runs");
+        assert_eq!(gate.step("p may", 1_000 + ASKING_MS - 1), Step::AskFirst);
+        // the ask beside hears the refusal while a follower's own ask is out
+        assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 2_800), Err(STOPPED));
+        assert_eq!(gate.heard("p may", None, 3_000), Err(STOPPED), "the follower whose ask heard nothing takes the refusal heard meanwhile");
+        // a silence with nothing fresh heard lets the spend start
+        assert_eq!(gate.heard("q may", None, 3_000), Ok(()));
+        assert_eq!(gate.heard("p may", None, 2_800 + STANDING_CACHE_MS), Ok(()), "a refusal gone stale holds nothing");
     }
 
     /// The lever's view: the fresh answers of one person's questions, and

@@ -416,6 +416,12 @@ out. Where an ask stands.
 
 Values: `waiting`, `saved`, `declined`, `expired`.
 
+### `Author`
+
+out, open. Who wrote a record, as the platform stamps it as it appends one, never as its caller says (FIN-615): its principal is whom it was written as, and this is what wrote the words. Only a person's or an agent's own post is its principal's own words. Open (`x-fragment-open`, docs/wire): an author this build does not know reads as `Other`.
+
+Values: `person`, `agent`, `code`, `platform`, `door`, `other`.
+
 ### `ChannelNewest`
 
 out. `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader): each poster's newest record of each kind the channel keeps the newest of (`ChannelDecl::newest`), the newest first, at most `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past its retention) is none; a channel that keeps no kind answers none.
@@ -443,6 +449,7 @@ out. One record in a channel. Records are appended by the platform (`events`, `o
 | field | type | | |
 | --- | --- | --- | --- |
 | `at` | `integer` | required |  |
+| `author` | [`Author`](#author) or `null` | optional | Who wrote it, as the platform stamped it as it appended it. Absent on a record stored before the stamp, which reads as it did. |
 | `body` | `any` | required | The JSON text the cell stored, passed through as it is: the cell neither parses a body it just wrote nor one it reads back. |
 | `channel` | `string` | required |  |
 | `kind` | `string` | required |  |
@@ -795,6 +802,7 @@ both. `manifest.json`, as the mover writes it beside the zip (last).
 | `left_more` | `integer` or `null` | optional | Paths left behind past the list, if any. |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) | required |  |
+| `simplex` | `boolean` | optional | It carries its owner's SimpleX chat (docs/migrations.md, "SimpleX in a stage"), which runs only on a computer that stays on: its person's comped `seat` is made always-on as it completes. |
 | `zip_bytes` | `integer` | required | The zip's size and SHA-256 (hex). |
 | `zip_sha256` | `string` | required |  |
 
@@ -864,7 +872,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 | `field` | [`NoticeField`](#noticefield) or `null` | optional | A field the person pastes a secret into (a Vault ask's, FIN-466): masked, never shown again, kept nowhere but the page's own input; an action that takes it (`NoticeAction::field`) sends what it holds. A client from before it shows none, so such an action is refused. |
 | `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
 | `image` | `string` or `null` | optional | A picture beside its words (an agent's): a platform path, read with the person's own credential. A client from before it shows none. |
-| `kind` | `string` | required | What it is about (`key_paused`), for tests and logs. No client reads it to decide what to draw. |
+| `kind` | `string` | required | What it is about (`spending`), for tests and logs. No client reads it to decide what to draw. |
 | `level` | [`NoticeLevel`](#noticelevel) | required |  |
 | `mustAnswer` | `boolean` | optional | It must be answered (FIN-458): a client shows it alone, over everything, until one of its actions goes through, and the read after no longer has it. The first such in the list first: its owner lists its own oldest first. A client from before it shows it as any other. |
 | `text` | `string` or `null` | optional | A sentence or two under it. |
@@ -1086,7 +1094,7 @@ in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only 
 
 out, open. A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.
 
-Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `key_paused`.
+Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `trial_seat_of_one`.
 
 ### `Report`
 

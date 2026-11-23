@@ -17,6 +17,7 @@ import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage, shoots } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
 import { createSchedulesPage } from "./schedules-page.js";
+import { createSkillsPage } from "./skills-page.js";
 import { createMovePage } from "./move-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
@@ -324,17 +325,22 @@ function show(spec) {
 }
 
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket).
-function frameOf(src, title, name = null) {
+// Only a chat's page is lent the microphone (`microphone`: its voice
+// memo), by the kind its row says, wherever it is framed (the middle
+// column, or Apps' window of a chat that reaches the person's accounts);
+// any other (an app's, a Session Archive's, a files view's, a setup's,
+// a port's) is lent none.
+function frameOf(src, title, name = null, { microphone = false } = {}) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.allow = "clipboard-write; microphone";
+  frame.allow = "clipboard-write";
   frame.dataset.src = src;
-  if (name) {
+  if (name) frame.dataset.fragment = name;
+  if (name && microphone) {
     // A bare `microphone` is the src's origin's, the mint's on this page's;
     // the page lands at the fragment's own, which the browser would refuse
     // without asking. So it names that origin before the frame navigates
     // (a policy is read as a navigation starts): known here, no request.
-    frame.dataset.fragment = name;
     frame.allow = `clipboard-write; microphone ${originAt(name)}`;
   }
   frame.src = src;
@@ -991,6 +997,7 @@ function openChat(name, push = true, path = null) {
   leaveApps();
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   $("frames").hidden = false;
   state.current = name;
@@ -1037,7 +1044,10 @@ function dropFrame(name) {
 // A chat's frame, made once and kept.
 function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   if (state.frames.has(name)) return;
-  const frame = frameOf(framed(name, path), titleOf(name), name);
+  // a chat the launcher just made may come before its row (`newChat`):
+  // only a row that says it is no chat (an app at `/?chat=`, a Session
+  // Archive) withholds the microphone
+  const frame = frameOf(framed(name, path), titleOf(name), name, { microphone: !byName(name) || isChat(name) });
   $("frames").append(frame);
   state.frames.set(name, frame);
   standins.add(frame);
@@ -1183,7 +1193,7 @@ function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
   if (shown && path !== "/") go(shown, framed(name, path));
-  const frame = named(frameOf(framed(name, path), titleOf(name), name), name, (t) => t, "aria-label");
+  const frame = named(frameOf(framed(name, path), titleOf(name), name, { microphone: isChat(name) }), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
   show({
@@ -1450,7 +1460,7 @@ const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
 });
 const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
-  connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load,
+  connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load,
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.
@@ -1525,6 +1535,7 @@ function showMaking(identity, name, by) {
   leaveApps();
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   $("frames").hidden = false;
   for (const frame of state.frames.values()) {
@@ -1579,13 +1590,14 @@ function stepMaking(event) {
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
 function restoreView({ page, current }) {
-  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Upgrade: MOVE }[page] ?? "/";
+  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Skills: SKILLS, Upgrade: MOVE }[page] ?? "/";
   if (location.pathname !== path) history.replaceState(null, "", path);
   if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (page === "Apps") openApps(false);
   else if (page === "Brains") openBrains(false);
   else if (page === "History") openHistory(false);
   else if (page === "Schedules") openSchedules(false);
+  else if (page === "Skills") openSkills(false);
   else if (page === "Upgrade") openMove(false);
   else if (byName(current)) openChat(current, false);
   else {
@@ -1825,6 +1837,7 @@ const APPS = "/apps";
 const BRAINS = "/brains";
 const HISTORY = "/history";
 const SCHEDULES = "/schedules";
+const SKILLS = "/skills";
 const WELCOME = "/welcome";
 const MOVE = "/move";
 function at(path) {
@@ -1837,6 +1850,7 @@ addEventListener("popstate", () => {
   else if (shown && location.pathname === BRAINS) openBrains(false);
   else if (shown && location.pathname === HISTORY) openHistory(false);
   else if (shown && location.pathname === SCHEDULES) openSchedules(false);
+  else if (shown && location.pathname === SKILLS) openSkills(false);
   else if (shown && location.pathname === MOVE) openMove(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else startOrWait();
@@ -1879,6 +1893,7 @@ function openShelf(which, push = true) {
   leaveApps(which);
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   shelf.section.hidden = false;
   renderHeading();
@@ -1919,6 +1934,7 @@ function openHistory(push = true) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   $("history-page").hidden = false;
   renderHeading();
@@ -1949,6 +1965,7 @@ function openSchedules(push = true) {
   leaveApps();
   leaveHistory();
   leaveMove();
+  leaveSkills();
   $("schedules-page").hidden = false;
   renderHeading();
   renderChats();
@@ -1961,6 +1978,46 @@ function leaveSchedules() {
   schedulesPage.close();
 }
 $("schedules-link").onclick = () => openSchedules();
+
+// ---- the Skills page (skills-page.js): what their agents know, and the
+// optional skills they switch on, in the work area as Schedules is;
+// reached from Settings' Skills ----
+// a file's text, as `api` reads JSON: a SKILL.md
+async function fileText(name, path) {
+  const r = await fetch(`/api/f/${seg(name)}/file?path=${encodeURIComponent(path)}`, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" });
+  if (!r.ok) throw new ApiError(r.status, null, r.statusText);
+  return r.text();
+}
+// a file of the release the shell publishes (`/__shell/<file>`), as JSON
+async function releaseJson(file) {
+  const r = await fetch(`/__shell/${file}`, { credentials: "same-origin" });
+  if (!r.ok) throw new ApiError(r.status, null, r.statusText);
+  return r.json();
+}
+const skillsPage = createSkillsPage($("skills-page"), { api, el, seg, skillsFragment: () => skillsFragment(), text: fileText, releaseJson, openApp, openFiles });
+function openSkills(push = true) {
+  if (push) at(SKILLS);
+  if (state.page !== "Skills") newView();
+  hideNotice();
+  state.page = "Skills";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  leaveApps();
+  leaveHistory();
+  leaveSchedules();
+  leaveMove();
+  $("skills-page").hidden = false;
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  skillsPage.open();
+}
+// a chat, settings, apps, History or Schedules in its place
+function leaveSkills() {
+  $("skills-page").hidden = true;
+  skillsPage.close();
+}
 
 // ---- the move's page (move-page.js, FIN-463): a person's old
 // finite.computer agents, which to bring over, and where each move is, in
@@ -1988,6 +2045,7 @@ function openMove(push = true) {
   leaveApps();
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   $("move-page").hidden = false;
   renderComputer();
   renderHeading();
@@ -2018,6 +2076,7 @@ const settings = createSettings({
       leaveApps();
       leaveHistory();
       leaveSchedules();
+      leaveSkills();
       leaveMove();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
@@ -2025,7 +2084,7 @@ const settings = createSettings({
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readTelegram },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
-  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, markOffer,
+  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
@@ -2260,7 +2319,7 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && [SETTINGS, APPS, BRAINS, HISTORY, SCHEDULES, MOVE].includes(location.pathname);
+  const settings = !open && [SETTINGS, APPS, BRAINS, HISTORY, SCHEDULES, SKILLS, MOVE].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
@@ -2269,6 +2328,7 @@ async function start(open) {
   else if (settings && location.pathname === BRAINS) openBrains(false);
   else if (settings && location.pathname === HISTORY) openHistory(false);
   else if (settings && location.pathname === SCHEDULES) openSchedules(false);
+  else if (settings && location.pathname === SKILLS) openSkills(false);
   else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
   // a chat an alert's click opened with no shell open (`?chat=`) too:

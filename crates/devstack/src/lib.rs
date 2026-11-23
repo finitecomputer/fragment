@@ -108,15 +108,80 @@ pub fn strip_comments(text: &str) -> String {
 
 /// A project's wrangler config, parsed.
 pub fn read_config(project: &Path) -> Result<serde_json::Value> {
-    let path = project.join("wrangler.jsonc");
-    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    read_jsonc(&project.join("wrangler.jsonc"))
+}
+
+/// A JSONC file, parsed.
+fn read_jsonc(path: &Path) -> Result<serde_json::Value> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
 }
 
+/// The admin Worker's config, beside the cell's in its project
+/// (cell/src/admin.rs).
+pub const ADMIN_CONFIG: &str = "wrangler.admin.jsonc";
+/// The cell's binding to the admin Worker (cell/wrangler.jsonc `services`).
+pub const ADMIN_BINDING: &str = "ADMIN";
+
+/// The project's admin Worker's config (`ADMIN_CONFIG`), parsed.
+pub fn read_admin_config(project: &Path) -> Result<serde_json::Value> {
+    read_jsonc(&project.join(ADMIN_CONFIG))
+}
+
+/// The cell's config and the admin Worker's, rendered for one deployment
+/// (a local node's, a deploy's) whose admin Worker is named `admin_name`:
+/// the cell's `ADMIN` binding names it; and it takes what it shares with
+/// the cell from the cell's config, so the two cannot drift: the cell's
+/// compatibility date; every one of the cell's object bindings, by its
+/// name and class, bound to the cell's script (as `cell` names it now:
+/// render the cell's name first); and the bindings its routes read as the
+/// cell's did (`ADMIN_SHARES`), the move's stage bucket among them when
+/// the cell binds it.
+pub fn pair_admin(cell: &mut serde_json::Value, admin: &mut serde_json::Value, admin_name: &str) -> Result<()> {
+    let cell_name = cell["name"].as_str().context("the cell's config names its Worker")?.to_string();
+    let services = cell["services"].as_array_mut().context("the cell's config binds its admin Worker (`services`)")?;
+    let [service] = services.as_mut_slice() else { bail!("the cell's config binds one service, its admin Worker, not {}", services.len()) };
+    anyhow::ensure!(service["binding"] == ADMIN_BINDING, "the cell's one service binding is {ADMIN_BINDING}, not {}", service["binding"]);
+    service["service"] = serde_json::json!(admin_name);
+    let date = cell["compatibility_date"].clone();
+    anyhow::ensure!(date.is_string(), "the cell's config names its compatibility date");
+    let mut bindings = cell["durable_objects"]["bindings"].as_array().context("the cell's config binds its objects")?.clone();
+    for b in &mut bindings {
+        let b = b.as_object_mut().context("an object binding is an object")?;
+        anyhow::ensure!(!b.contains_key("script_name"), "the cell binds its own classes, not another script's: {b:?}");
+        b.insert("script_name".into(), serde_json::json!(cell_name));
+    }
+    let stage: Vec<serde_json::Value> = cell["r2_buckets"].as_array().into_iter().flatten().filter(|b| b["binding"] == ADMIN_BUCKET).cloned().collect();
+    let shared: Vec<(&str, serde_json::Value)> = ADMIN_SHARES.iter().filter_map(|k| cell.get(*k).map(|v| (*k, v.clone()))).collect();
+    let a = admin.as_object_mut().context("the admin Worker's config is an object")?;
+    for key in ["compatibility_date", "durable_objects", "r2_buckets"].iter().chain(&ADMIN_SHARES) {
+        anyhow::ensure!(!a.contains_key(*key), "the admin Worker's config names no {key}: it takes the cell's");
+    }
+    a.insert("name".into(), serde_json::json!(admin_name));
+    a.insert("compatibility_date".into(), date);
+    a.insert("durable_objects".into(), serde_json::json!({ "bindings": bindings }));
+    for (key, value) in shared {
+        a.insert(key.into(), value);
+    }
+    if !stage.is_empty() {
+        a.insert("r2_buckets".into(), serde_json::json!(stage));
+    }
+    Ok(())
+}
+
+/// The cell's bindings the admin Worker's routes read as the cell's did,
+/// taken whole: the platform's mail (a trial code's, a comp's) and the
+/// release's files (its page, `admin.html`, read by the index both carry).
+const ADMIN_SHARES: [&str; 2] = ["send_email", "assets"];
+/// The cell's one bucket the admin reads: the move's stages, its staff's
+/// view of a move (cell/src/migrations.rs `admin`).
+const ADMIN_BUCKET: &str = "STAGE";
+
 /// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
-/// it imports from beside it (a deploy runs it from the source tree, so
-/// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
+/// it imports from beside it, and theirs (a deploy runs it from the source
+/// tree, so only a staged copy can miss one:
+/// `the_staged_shim_holds_what_it_imports`).
+pub const SHIM_FILES: [&str; 5] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "door.mjs", "door-rules.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -143,6 +208,7 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
+    fs::copy(from.join(ADMIN_CONFIG), dir.join(ADMIN_CONFIG)).with_context(|| format!("stage {ADMIN_CONFIG}"))?;
     for shim in SHIM_FILES {
         fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
     }
@@ -176,6 +242,21 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
     Ok(())
 }
 
+/// The SimpleX door's container class (cell/door.mjs): in a local node's
+/// config only when it runs doors (`Fleet::doors`). `wrangler dev` builds
+/// every image its config names as it starts, and the door's (SimpleX's
+/// core and its runner, built from source) would be every stack's cost; a
+/// node without it still has the door's object, which says it runs none.
+pub const DOOR_CLASS: &str = "SimplexDoor";
+
+fn without_doors(config: &mut serde_json::Value) -> Result<()> {
+    let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) else { return Ok(()) };
+    let before = containers.len();
+    containers.retain(|c| c["class_name"] != DOOR_CLASS);
+    anyhow::ensure!(containers.len() + 1 >= before, "one door container class at most");
+    Ok(())
+}
+
 /// Bindings `wrangler dev` always runs against Cloudflare itself: it starts
 /// a remote session for them as it boots, which takes a login and an
 /// account, so a local node runs without them. The model route's AI
@@ -189,6 +270,12 @@ pub fn local_config(project: &Path) -> PathBuf {
     project.join("wrangler.local.jsonc")
 }
 
+/// Where its admin Worker's is, beside it (and its `.dev.vars`, which a
+/// node reads beside each Worker's config: both Workers get the same).
+pub fn admin_local_config(project: &Path) -> PathBuf {
+    project.join("wrangler.admin.local.jsonc")
+}
+
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in the local node's store (wrangler's,
@@ -196,8 +283,11 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
 /// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], doors: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    if !doors {
+        without_doors(&mut config)?;
+    }
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
         for (name, image) in images {
@@ -212,6 +302,14 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
+    // the admin Worker, under its checked-in name, as the cell is
+    let mut admin = read_admin_config(project)?;
+    let admin_name = admin["name"].as_str().context("the admin Worker's config names it")?.to_string();
+    pair_admin(&mut config, &mut admin, &admin_name)?;
+    if !admin_secrets.is_empty() {
+        admin["secrets_store_secrets"] = store::bindings_json(store::LOCAL_STORE_ID, admin_secrets);
+    }
+    fs::write(admin_local_config(project), serde_json::to_string_pretty(&admin)?)?;
     let path = local_config(project);
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
     Ok(path)
@@ -351,8 +449,6 @@ pub struct Fleet {
     pub egress_local: bool,
     /// The first retry delay of a failed job step (it doubles each time).
     pub job_retry_delay_s: u32,
-    /// How long a blob no branch names is kept (`None`: the cell's 7 days).
-    pub blob_grace_s: Option<u32>,
     /// One file a person may send, at most (`FRAGMENT_UPLOAD_MAX_BYTES`;
     /// `None`: the cell's default, a zone's).
     pub upload_max_bytes: Option<u64>,
@@ -413,6 +509,9 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether it runs SimpleX doors (`DOOR_CLASS`'s container, and its
+    /// image built as the node starts): the e2e's door lane's alone.
+    pub doors: bool,
     /// Whether computers reach the internet (`FRAGMENT_COMPUTER_INTERNET`,
     /// `off` when not). Locally, workerd's networking sidecar answers a
     /// container's DNS: with internet on, it asks public DNS first for
@@ -548,7 +647,7 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &self.images)?;
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.doors)?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -581,10 +680,6 @@ impl Fleet {
         ];
         if self.egress_local {
             vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
-        }
-        let grace = self.blob_grace_s.map(|g| g.to_string());
-        if let Some(g) = &grace {
-            vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
         }
         let uploads = self.upload_max_bytes.map(|n| n.to_string());
         if let Some(n) = &uploads {
@@ -955,7 +1050,9 @@ impl Node {
         let heard = Arc::new(front::Heard::default());
         let front = front::Front::serve(opts.listener.try_clone()?, heard.clone(), out.clone())?;
         let mut cmd = tools.wrangler()?;
-        cmd.arg("dev").arg("-c").arg(&config);
+        // the cell first, the Worker its port serves; the admin Worker
+        // beside it, in the same runtime, reached by the cell's binding
+        cmd.arg("dev").arg("-c").arg(&config).arg("-c").arg(admin_local_config(&opts.project));
         // its own port (its proxy's, which nothing here dials: the front
         // door goes to the runtime) and its inspector's, each of its own
         // picking (`0`): one picked for it and let go before it bound could
@@ -1142,17 +1239,72 @@ mod tests {
     /// relative imports, read, against `SHIM_FILES`.
     #[test]
     fn the_staged_shim_holds_what_it_imports() {
-        let entry = std::fs::read_to_string(super::cell_dir().join("entry.mjs")).expect("entry.mjs reads");
-        let mut beside: Vec<String> = entry
-            .lines()
-            .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
-            .filter_map(|l| l.split(" from \"./").nth(1))
-            .filter_map(|rest| rest.split('"').next())
-            .filter(|path| !path.starts_with("build/"))
-            .map(str::to_string)
-            .collect();
-        beside.insert(0, "entry.mjs".into());
-        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it");
+        let imports = |file: &str| -> Vec<String> {
+            let text = std::fs::read_to_string(super::cell_dir().join(file)).unwrap_or_else(|e| panic!("{file} reads: {e}"));
+            text.lines()
+                .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
+                .filter_map(|l| l.split(" from \"./").nth(1))
+                .filter_map(|rest| rest.split('"').next())
+                .filter(|path| !path.starts_with("build/"))
+                .map(str::to_string)
+                .collect()
+        };
+        // entry.mjs, then what each staged module imports from beside it,
+        // in the order first met (a module's own imports included: door.mjs's)
+        let mut beside = vec!["entry.mjs".to_string()];
+        let mut at = 0;
+        // bounded: each file enters once, and the cell has a handful
+        while at < beside.len() {
+            for i in imports(&beside[at]) {
+                if !beside.contains(&i) {
+                    beside.push(i);
+                }
+            }
+            at += 1;
+            assert!(at < 32, "the shim's modules are few");
+        }
+        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it, and theirs");
+    }
+
+    /// Goal: the admin Worker reaches every one of the cell's objects, by
+    /// the cell's own bindings' names and classes in the cell's script,
+    /// under the cell's compatibility date, and the cell's binding names
+    /// the admin, for whatever names a deployment gives the two; a config
+    /// out of that shape is refused, never guessed at. Method: the
+    /// checked-in configs, paired under a branch's names, then broken.
+    #[test]
+    fn the_admin_takes_the_cells_objects_from_the_cells_config() {
+        let cell_dir = super::cell_dir();
+        let mut cell = super::read_config(&cell_dir).unwrap();
+        cell["name"] = serde_json::json!("fragment-b");
+        let mut admin = super::read_admin_config(&cell_dir).unwrap();
+        assert!(admin.get("durable_objects").is_none() && admin.get("compatibility_date").is_none(), "the checked-in admin config names neither: the cell's are written in");
+        super::pair_admin(&mut cell, &mut admin, "fragment-b--admin").unwrap();
+        assert_eq!(cell["services"], serde_json::json!([{ "binding": super::ADMIN_BINDING, "service": "fragment-b--admin" }]));
+        assert_eq!(admin["name"], "fragment-b--admin");
+        assert_eq!(admin["compatibility_date"], cell["compatibility_date"]);
+        let ours = cell["durable_objects"]["bindings"].as_array().unwrap();
+        let theirs = admin["durable_objects"]["bindings"].as_array().unwrap();
+        assert!(ours.len() >= 8 && ours.len() == theirs.len(), "every class");
+        for (o, t) in ours.iter().zip(theirs) {
+            assert_eq!((&t["name"], &t["class_name"], &t["script_name"]), (&o["name"], &o["class_name"], &serde_json::json!("fragment-b")), "{t}");
+        }
+        assert!(admin.get("migrations").is_none(), "the admin defines no class");
+        assert_eq!((&admin["send_email"], &admin["assets"]), (&cell["send_email"], &cell["assets"]), "the mail and the release's files, as the cell's");
+        assert_eq!(admin["r2_buckets"], serde_json::json!([{ "binding": "STAGE", "bucket_name": "fragment-migrations-stage" }]), "the move's stages alone, not the blobs");
+        // refused: paired twice (the admin's config already names the cell's),
+        // a cell with no binding to it, or one with another service too
+        let mut again = admin.clone();
+        assert!(super::pair_admin(&mut cell, &mut again, "fragment-b--admin").unwrap_err().to_string().contains("names no compatibility_date"));
+        let mut lone = cell.clone();
+        lone.as_object_mut().unwrap().remove("services");
+        assert!(super::pair_admin(&mut lone, &mut super::read_admin_config(&cell_dir).unwrap(), "a").is_err());
+        let mut two = cell.clone();
+        two["services"].as_array_mut().unwrap().push(serde_json::json!({ "binding": "OTHER", "service": "x" }));
+        assert!(super::pair_admin(&mut two, &mut super::read_admin_config(&cell_dir).unwrap(), "a").unwrap_err().to_string().contains("one service"));
+        let mut foreign = super::read_config(&cell_dir).unwrap();
+        foreign["durable_objects"]["bindings"][0]["script_name"] = serde_json::json!("elsewhere");
+        assert!(super::pair_admin(&mut foreign, &mut super::read_admin_config(&cell_dir).unwrap(), "a").unwrap_err().to_string().contains("its own classes"));
     }
 
 

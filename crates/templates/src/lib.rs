@@ -171,6 +171,10 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // `/privacy`, `/terms`): a sheet of paper, its edges bowed by paper-edge.svg
     ("legal.css", "text/css; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
+    // the Skills page's library: Hermes' optional skills, as the pinned
+    // image holds them (`cargo xtask skills-catalog`), the release's own so
+    // every skills fragment, on its template or not, has it
+    ("optional-skills-hermes.json", "application/json"),
     ("paper-edge.svg", "image/svg+xml"),
     // the platform's pages' look: their first run's card, and its
     // pointer-following rim
@@ -578,6 +582,33 @@ pub(crate) mod tests {
             }
         }
         assert!(missing.is_empty(), "{}", missing.into_iter().collect::<Vec<_>>().join("\n"));
+    }
+
+    /// The optional skills' catalog (`cargo xtask skills-catalog`) is the
+    /// pinned Hermes image's: a move of images/hermes/Dockerfile's pin
+    /// without it fails here, its digest's too (one moved under the same
+    /// tag, whose skills may differ). It is the skills template's data, each entry
+    /// an id the boot can switch on with a name and a description.
+    #[test]
+    fn the_optional_skills_catalog_is_the_pinned_hermes() {
+        let (f, content_type) = shell_published("optional-skills-hermes.json").expect("the shell publishes the catalog");
+        assert_eq!(content_type, "application/json");
+        assert!(SKILLS.file("catalog/hermes.json").is_none(), "the release's alone, no skills fragment's file");
+        let catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(repo().join("cell/shell").join(f.path)).unwrap()).unwrap();
+        let pin = std::fs::read_to_string(repo().join("images/hermes/Dockerfile")).unwrap();
+        let pin = pin.lines().find_map(|l| l.strip_prefix("ARG HERMES=")).expect("the Dockerfile pins Hermes");
+        assert_eq!(catalog["image"].as_str(), Some(pin.trim()), "the catalog was read from another image than the pin: run `cargo xtask skills-catalog`");
+        let version = catalog["hermes"].as_str().unwrap();
+        assert!(pin.contains(&format!("-{version}-")), "the catalog is Hermes {version}'s, the pin {pin}: run `cargo xtask skills-catalog`");
+        assert_eq!(catalog["runtime"], "hermes");
+        let skills = catalog["skills"].as_array().unwrap();
+        let ids: std::collections::BTreeSet<&str> = skills.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), skills.len(), "ids are unique");
+        for s in skills {
+            let id = s["id"].as_str().unwrap();
+            assert!(id.split('/').count() >= 2 && id.split('/').all(|p| !p.is_empty() && !p.starts_with('.')), "{id}");
+            assert!(s["name"].as_str().is_some_and(|n| !n.is_empty()) && s["description"].as_str().is_some_and(|d| !d.is_empty()), "{id}");
+        }
     }
 
     #[test]

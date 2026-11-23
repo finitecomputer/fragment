@@ -40,7 +40,7 @@ mod bundle;
 /// shell's (`shell`, cell/shell/), or a blessed template's site/, and how
 /// it names a file beside it.
 #[cfg(feature = "bundle")]
-const PAGES: &[(&str, &str)] = &[("chat", "./"), ("sessions", "./"), ("shell", "/__shell/"), ("telegram", "./")];
+const PAGES: &[(&str, &str)] = &[("chat", "./"), ("sessions", "./"), ("shell", "/__shell/"), ("telegram", "./"), ("simplex", "./")];
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
