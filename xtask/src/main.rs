@@ -61,7 +61,7 @@
 //!                    crates/proto, then says what it breaks of master's
 //!                    (xtask/src/wire/)
 //!   skills-catalog
-//!                    writes templates/skills/catalog/hermes.json, the Hermes
+//!                    writes cell/shell/optional-skills-hermes.json, the Hermes
 //!                    optional skills a person can switch on, read from the
 //!                    pinned Hermes image (xtask/src/skills_catalog.rs)
 //!   secret set <name> --config <file> [--from-file <path>]

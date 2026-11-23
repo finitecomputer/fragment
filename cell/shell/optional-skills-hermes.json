@@ -1,6 +1,7 @@
 {
   "runtime": "hermes",
   "hermes": "v0.23.2",
+  "image": "nousresearch/hermes-agent:rc.13-v0.23.2-desktop@sha256:87f24ae4be14980a3f2334bfe6516695253cb36dee5e9113b4348feea304c2ca",
   "source": "https://github.com/NousResearch/hermes-agent/tree/v0.23.2/optional-skills",
   "skills": [
     {"id":"autonomous-ai-agents/agent-merge-conflict-arbiter","name":"agent-merge-conflict-arbiter","description":"Neutral arbiter for merge conflicts between two agents.","license":"MIT"},
