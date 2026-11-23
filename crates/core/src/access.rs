@@ -680,6 +680,64 @@ mod tests {
         assert_eq!((first, again), (None, None));
     }
 
+    /// Goal: nobody reaches a fragment by naming it (FIN-584, the CASA
+    /// lab's IDOR check; docs/security/access-control.md). Method: every
+    /// standing a request can bring (member or not at each role, the share
+    /// link or not, signed or not, an agent of theirs in it or not, an
+    /// agent acting for them with each cap and hold), on every visibility,
+    /// for reading and acting, against every role a route may need. Who is
+    /// no member is never given more than the visibility's floor (nothing
+    /// on `members`; a viewer's reading with the link on `link`; `public`,
+    /// or viewer with the link, on `public`), and never acts through an
+    /// agent's membership; nobody is given more than their own role, nor an
+    /// agent more than editor or its hold; and a refusal is 401 only to
+    /// someone unsigned.
+    #[test]
+    fn no_one_reaches_more_than_their_own_standing_gives() {
+        let roles = [None, Some(Public), Some(Viewer), Some(Editor), Some(Owner)];
+        let members = [None, Some(Viewer), Some(Editor), Some(Owner)];
+        let caps = std::iter::once(None).chain(members.iter().flat_map(|a| members.iter().map(move |o| Some(Cap { agent: *a, owner: *o }))));
+        let mut asked = 0;
+        for cap in caps.collect::<Vec<_>>() {
+            for member in members {
+                for held in [None, Some(Viewer), Some(Editor)] {
+                    for (link, signed, owns_member_agent) in (0..8).map(|b| (b & 1 != 0, b & 2 != 0, b & 4 != 0)) {
+                        let standing = Standing { member, owns_member_agent, link, signed, cap, held };
+                        for visibility in [V::Members, V::Link, V::Public] {
+                            for purpose in [Purpose::Read, Purpose::Act] {
+                                let floor = match (visibility, link) {
+                                    (V::Members, _) | (V::Link, false) => None,
+                                    (V::Link, true) | (V::Public, true) => Some(Viewer),
+                                    (V::Public, false) => Some(Public),
+                                };
+                                let through_agent = (owns_member_agent && purpose == Purpose::Read).then_some(Viewer);
+                                let most = member.or(floor.max(through_agent)).max(floor);
+                                let most = match cap {
+                                    // an agent acting: at most editor, and its hold
+                                    Some(_) => most.map(|r| r.min(AGENT_ROLE_MAX)).map(|r| held.map_or(r, |h| r.min(h))),
+                                    None => most,
+                                };
+                                for needs in roles.into_iter().flatten() {
+                                    asked += 1;
+                                    let at = format!("{standing:?} {visibility:?} {purpose:?} needs {needs:?}");
+                                    match decide(visibility, standing, purpose, needs) {
+                                        Decision::Allow(role) => {
+                                            assert!(role >= needs, "allowed below its need: {at}");
+                                            assert!(Some(role) <= most, "allowed {role:?}, more than {most:?}: {at}");
+                                        }
+                                        Decision::Unauthenticated => assert!(!signed, "401 to a signer: {at}"),
+                                        Decision::Forbidden => assert!(signed, "403 to the unsigned: {at}"),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(asked, 17 * 4 * 3 * 8 * 3 * 2 * 4, "every standing, visibility, purpose and need was asked");
+    }
+
     #[test]
     fn membership_changes() {
         assert!(refuse_set_role(Some(Owner), None, Editor).is_none());
