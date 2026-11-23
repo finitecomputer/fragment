@@ -1241,7 +1241,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli_json(api, &home, &["members", "add", &app, &agent, "--role", "editor", "--json"])?;
     let after = invite(&chat);
     let in_app = invite(&app);
-    let warning = fragment_core::access::TRUST_WARNING;
+    let warning = fragment_core::permit::TRUST_WARNING;
     s.ok(
         "fragment members add <email> on a chat its owner's agent is in says people in it can talk to their agent; on that chat before the agent is in, and on an app it is in, it does not",
         before.starts_with("invited ")

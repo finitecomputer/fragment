@@ -58,7 +58,7 @@ use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
-    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
+    limits, valid_secret_name, Author, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -285,6 +285,15 @@ impl StepRow {
 pub(crate) enum Admits {
     Token(String),
     Code { inbox: InboxDecl, headers: Headers },
+}
+
+/// What app code is handed of a record (a trigger's run, an inbox's
+/// answer query): `{channel, record}`, the record as it was before the
+/// platform stamped who wrote it (FIN-615), so an app's own input schema
+/// reads it as it always has.
+fn app_input(record: &ChannelRecord) -> Value {
+    let unstamped = ChannelRecord { author: None, ..record.clone() };
+    json!({ "channel": record.channel, "record": unstamped })
 }
 
 impl FragmentCell {
@@ -1104,9 +1113,11 @@ impl FragmentCell {
         // the one check a mutation's records meet too, on its channel's
         // declaration alone
         let decl = self.declared_channel(channel).map_err(retry)?;
-        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
+        let hosted = self.hosted_door().map_err(retry)?;
+        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), hosted.as_ref()).map_err(permanent)?;
+        let author = self.code_author(run.code.as_deref(), hosted.is_some()).map_err(retry)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
-        let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
+        let (record, appended) = self.append_once(channel, &run.principal, author, kind, &body, (&key, i64::from(index))).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
@@ -1150,7 +1161,7 @@ impl FragmentCell {
         // read after the wait, so the runs start from the code installed now
         let ops = self.channel_triggers(record)?;
         let own = self.own_key()?;
-        let input = json!({ "channel": record.channel, "record": record });
+        let input = app_input(record);
         let mut started = vec![];
         for (i, op) in ops.iter().enumerate() {
             if i + 1 == ops.len() {
@@ -1752,7 +1763,7 @@ impl FragmentCell {
         };
         // unkeyed: a sender's retry is a new record, so a failure of its
         // triggers is the sender's error to see, never a silent 200
-        let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
+        let record = self.append("inbox", "inbox", Author::Door, "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.published(&record, true, hops, &mut js::Laps::start()).await?;
         let answered = match answer {
             Some(op) => self.inbox_answer(&op, &record, hops).await?,
@@ -1779,7 +1790,7 @@ impl FragmentCell {
         // its install checked it, and stored both in one step
         assert!(decl.kind == OpKind::Query, "an inbox's answer is a query (manifest::parse)");
         let own = self.own_key()?;
-        let input = json!({ "channel": record.channel, "record": record });
+        let input = app_input(record);
         let inv = Invocation { principal: &own, asker: None, role: Role::Editor, op, decl, id: format!("record:inbox:{}:{op}", record.seq), input, depth, via: Via::Channel, trigger: Some("inbox".into()) };
         let result: Value = crate::json_text(self.invoke(inv).await?.result.get()).map_err(|e| CellError::host(format!("{op}'s result is not JSON: {e}")))?;
         fragment_core::inbox::answer(&result).map_err(|why| CellError::new(ErrorCode::AppFailed, format!("{op}: {why}")))
