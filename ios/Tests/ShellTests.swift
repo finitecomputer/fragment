@@ -59,8 +59,6 @@ struct ShellTests {
         #expect(session.read)
     }
 
-    /// A chat readied as a memo records is the one its message takes: made
-    /// once, and kept across a failed join.
     /// The sidebar's New chat makes a chat with its agent, listed and shown
     /// at once as empty, and takes the one readied for them if there is one.
     @Test func aChatStartedFromTheSidebarIsListedAndShownEmpty() async throws {
@@ -84,6 +82,8 @@ struct ShellTests {
         #expect(stub.seen.filter { $0.route == "POST /api/fragments" }.count == 1)
     }
 
+    /// A chat readied as a memo records is the one its message takes: made
+    /// once, and kept across a failed join.
     @Test func aChatReadiedAheadIsMadeOnceAndOutlastsAFailedJoin() async throws {
         let joins = Mutex(0)
         let stub = Stub { seen, _ in
