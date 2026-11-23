@@ -136,17 +136,37 @@ pub enum Step {
     /// subscription their card pays has it canceled; any other has its
     /// seats' count pushed. Done once Stripe has what the seats say.
     Billing,
+    /// Their connections (FIN-588; `wipe_connections`): each account WorkOS
+    /// Pipes holds for their WorkOS user, its grant revoked at its provider,
+    /// then deleted at Pipes. Before `Registry`, which forgets their WorkOS
+    /// user and their connections' fences, and after `Computer`, so a
+    /// provider's fault never keeps their computer working; and where every
+    /// wipe begun before it was a step (2026-11-23) and not finished still
+    /// reaches it (`Progress::recorded`).
+    Connections,
     /// The Registry's rows: identities, keys, sign-ins, sessions.
     Registry,
 }
 
-/// Every step, in order. `Billing` is before `Registry`, so a wipe begun
-/// before it was a step (2026-10-17) runs it too; one finished then stays
-/// finished (`Progress::recorded`).
-pub const STEPS: [Step; 9] =
-    [Step::Computer, Step::Fragments, Step::Memberships, Step::Cleanup, Step::Ledger, Step::Lists, Step::Pictures, Step::Billing, Step::Registry];
+/// Every step, in order. A step added is added just before `Registry`, the
+/// last, so a wipe begun before it was a step and not finished runs it too
+/// (a stored count is of the steps before it: `Billing`, 2026-10-17;
+/// `Connections`, 2026-11-23); one finished then stays finished
+/// (`Progress::recorded`).
+pub const STEPS: [Step; 10] = [
+    Step::Computer,
+    Step::Fragments,
+    Step::Memberships,
+    Step::Cleanup,
+    Step::Ledger,
+    Step::Lists,
+    Step::Pictures,
+    Step::Billing,
+    Step::Connections,
+    Step::Registry,
+];
 
-const _: () = assert!(STEPS.len() == 9 && STEPS.len() <= u8::MAX as usize, "the steps fit a small count");
+const _: () = assert!(STEPS.len() == 10 && STEPS.len() <= u8::MAX as usize, "the steps fit a small count");
 
 impl Step {
     pub fn name(self) -> &'static str {
@@ -159,6 +179,7 @@ impl Step {
             Step::Lists => "lists",
             Step::Pictures => "pictures",
             Step::Billing => "billing",
+            Step::Connections => "connections",
             Step::Registry => "registry",
         }
     }
@@ -222,8 +243,8 @@ impl Progress {
 
     /// As the Registry's row keeps it: its count, and whether it finished
     /// (`finished_at`). A finished wipe stays finished when a step is added
-    /// after it ran (`Billing`, 2026-10-17: it ran the steps there were);
-    /// an unfinished one has a step left.
+    /// after it ran (`Billing`, 2026-10-17; `Connections`, 2026-11-23: it
+    /// ran the steps there were); an unfinished one has a step left.
     pub fn recorded(done: i64, finished: bool) -> Result<Progress, Corrupt> {
         let n = u32::try_from(done).map_err(|_| Corrupt(done))?;
         let p = match (finished, n as usize) {
@@ -428,7 +449,7 @@ mod tests {
         assert_eq!(p.done(), STEPS.len() as u32);
         assert!(STEPS.iter().all(|s| p.has_done(*s)));
         let names: Vec<&str> = STEPS.iter().map(|s| s.name()).collect();
-        assert_eq!(names, ["computer", "fragments", "memberships", "cleanup", "ledger", "lists", "pictures", "billing", "registry"]);
+        assert_eq!(names, ["computer", "fragments", "memberships", "cleanup", "ledger", "lists", "pictures", "billing", "connections", "registry"]);
         assert!(STEPS.iter().enumerate().all(|(i, s)| s.index() as usize == i));
     }
 
@@ -478,10 +499,11 @@ mod tests {
 
     /// Goal: the registry's row reads back as the wipe it records: an
     /// unfinished one at the step it stopped before, a finished one
-    /// finished, also one that finished before `billing` was a step (eight
-    /// steps done of nine now); a count no wipe makes is corrupt. A wipe
-    /// begun before then, stopped before `registry`, runs `billing` next.
-    /// Method: each count, finished and not.
+    /// finished, also one that finished before `billing` or `connections`
+    /// was a step (eight or nine steps done of ten now); a count no wipe
+    /// makes is corrupt. A wipe begun before then, stopped before
+    /// `registry`, runs the steps added first. Method: each count, finished
+    /// and not.
     #[test]
     fn a_wipe_finished_before_a_step_was_added_stays_finished() {
         for n in 0..STEPS.len() as i64 {
@@ -489,13 +511,42 @@ mod tests {
             assert_eq!(p, Progress::stored(n).unwrap(), "unfinished: as counted");
             assert!(!p.finished());
         }
-        let old = Progress::recorded(8, true).unwrap();
-        assert!(old.finished() && old.next().is_none(), "eight steps done, all there were then: finished");
+        for n in [8, 9] {
+            let old = Progress::recorded(n, true).unwrap();
+            assert!(old.finished() && old.next().is_none(), "{n} steps done, all there were then: finished");
+        }
         assert!(Progress::recorded(STEPS.len() as i64, true).unwrap().finished());
-        assert_eq!(Progress::recorded(7, false).unwrap().next(), Some(Step::Billing), "stopped before registry, billing runs first");
+        assert_eq!(Progress::recorded(7, false).unwrap().next(), Some(Step::Billing), "stopped before registry with seven steps (2026-10-17), billing runs first");
         for (bad, finished) in [(STEPS.len() as i64, false), (STEPS.len() as i64 + 1, true), (-1, true), (-1, false)] {
             assert_eq!(Progress::recorded(bad, finished), Err(Corrupt(bad)), "{bad} {finished}");
         }
+    }
+
+    /// Goal: a wipe the release before `connections` (FIN-588) left
+    /// unfinished, at any step, still ends the person's connections before
+    /// the registry forgets their WorkOS user: one past `computer`, or one
+    /// stopped just before `registry` (eight of the nine steps then done),
+    /// reaches `connections` next or later, never past it. Method: every
+    /// count that release stored, unfinished, read and run to the end.
+    #[test]
+    fn a_wipe_begun_before_connections_was_a_step_still_runs_it() {
+        // that release's steps: these, then `registry`
+        let then = [Step::Computer, Step::Fragments, Step::Memberships, Step::Cleanup, Step::Ledger, Step::Lists, Step::Pictures, Step::Billing];
+        for n in 0..=then.len() as i64 {
+            let mut p = Progress::recorded(n, false).unwrap();
+            assert!(then.iter().take(n as usize).all(|s| p.has_done(*s)), "{n}: what it did stays done");
+            assert!(!p.has_done(Step::Connections), "{n}: not done yet");
+            let mut ran = vec![];
+            // bounded: at most STEPS steps
+            while let Some(step) = p.next() {
+                p.complete(step).unwrap();
+                ran.push(step);
+                assert!(ran.len() <= STEPS.len());
+            }
+            let at = ran.iter().position(|s| *s == Step::Connections).expect("it runs connections");
+            assert_eq!(ran[at + 1..], [Step::Registry], "{n}: and then the registry's rows");
+        }
+        assert_eq!(Progress::recorded(8, false).unwrap().next(), Some(Step::Connections), "stopped before registry then: connections now");
     }
 
     /// Goal: what a fragment's ended lives have left reads as one line of a

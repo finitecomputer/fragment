@@ -437,6 +437,55 @@ impl Call for WipeBilling {
     type Answer = WipeBilled;
 }
 
+/// `POST /wipe/connections`: the `connections` step of a wipe of
+/// `identity` may act (registry/wipe.rs `wipe_connections`): in one turn,
+/// its wipe stands before that step (`wipe_connections::may_end`), every
+/// connection of the catalog fenced for their WorkOS user (refused, 429,
+/// while an import of theirs is under way), and their WorkOS user (none:
+/// they have no connection) with what each account's revokes failed so
+/// far. The step asks it before it lists their accounts at Pipes and
+/// again after, and acts only on a list made between the two.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeConnections {
+    pub identity: String,
+    pub issuer: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeConnectionsFenced {
+    pub subject: Option<String>,
+    pub failures: Vec<WipeRevokeFailures>,
+}
+
+/// An account whose revoke failed in a wipe's earlier calls.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct WipeRevokeFailures {
+    pub provider: String,
+    pub account: String,
+    pub tries: u32,
+    pub first_ms: i64,
+}
+
+impl Call for WipeConnections {
+    const PATH: &'static str = "/wipe/connections";
+    type Answer = WipeConnectionsFenced;
+}
+
+/// `POST /wipe/revoke-failed`: an account's revoke failed in this call of
+/// a wipe's `connections` step: counted (the first's time kept), while
+/// the wipe stands before that step. Answers its count.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeRevokeFailed {
+    pub identity: String,
+    pub provider: String,
+    pub account: String,
+}
+
+impl Call for WipeRevokeFailed {
+    const PATH: &'static str = "/wipe/revoke-failed";
+    type Answer = WipeRevokeFailures;
+}
+
 /// `POST /test`: the levers of a fleet with a test secret
 /// (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs).
 #[derive(Serialize, Deserialize)]

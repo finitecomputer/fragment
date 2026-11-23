@@ -438,34 +438,114 @@ async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&Connecti
     Ok(revoked)
 }
 
-/// Every connection of `person` taken away, as a wipe takes them (wipe.rs,
-/// its `computer` step; FIN-588): each account Pipes holds for their WorkOS
-/// user at each connection of the catalog, fenced or not
-/// (`connection_accounts::wiped`), its grant revoked at the provider and
-/// its account deleted at Pipes (`disconnect`), so neither the provider's
-/// grant nor Pipes' tokens outlive the person, and the new person their
-/// next sign-in makes holds none of them. Asked again, it finds what is
-/// left. Run before the wipe's `registry` step forgets their WorkOS user;
-/// one with none has nothing here.
-pub(crate) async fn wipe(env: &Env, cfg: &Config, person: &str) -> CellResult<()> {
+/// What a wipe's `connections` step did in one call (`wipe`).
+#[derive(Default)]
+pub(crate) struct WipedConnections {
+    /// Accounts deleted at Pipes.
+    pub deleted: u64,
+    /// Accounts kept, their revoke failed this call (`provider id: why`):
+    /// the step is not done, and the next call tries them again.
+    pub kept: Vec<String>,
+    /// Accounts given up (`wipe_connections::Then::GiveUp`): deleted at
+    /// Pipes though their revoke never succeeded.
+    pub given_up: Vec<String>,
+    /// The call's time ran out before every account was looked at.
+    pub cut: bool,
+}
+
+/// The wipe of `person`'s connections (wipe.rs, its `connections` step;
+/// FIN-588; `fragment_core::wipe_connections`): each account Pipes holds
+/// for their WorkOS user at each connection of the catalog, by its id, its
+/// grant revoked at its provider (where its row names `revoke`) and only
+/// then deleted at Pipes. The registry is asked first, which fences every
+/// connection of theirs (none imports after) and names their WorkOS user,
+/// and again once Pipes listed their accounts, so only a list made while
+/// the wipe stood at this step is acted on (a call that stalled past the
+/// wipe's end never reaches the next person's accounts). A revoke that
+/// failed keeps its account, counted, and the step not done; past its
+/// tries it is given up. Each vendor call starts before `deadline`.
+pub(crate) async fn wipe(env: &Env, cfg: &Config, person: &str, deadline: i64) -> CellResult<WipedConnections> {
+    use fragment_core::wipe_connections::{self as wiping, Failures, Then, Tried};
+    let mut out = WipedConnections::default();
     let connections: Vec<&fragment_core::catalog::Provider> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).collect();
     if connections.is_empty() {
-        return Ok(());
+        return Ok(out);
     }
-    let Some(user) = workos_user(env, cfg, person).await? else { return Ok(()) };
+    let issuer = crate::keys::workos(env, cfg).await?.issuer();
+    let ask = crate::registry::calls::WipeConnections { identity: person.to_string(), issuer };
+    let Some(user) = crate::ask_registry(env, &ask).await?.subject else { return Ok(out) };
     let api = &cfg.workos()?.api;
-    let plural = match connections.iter().any(|p| p.several()) {
-        true => crate::keys::pipes_accounts(env, api, &user).await?,
-        false => Value::Null,
+    let answer = crate::keys::pipes_accounts(env, api, &user).await?;
+    let again = crate::ask_registry(env, &ask).await?;
+    if again.subject.as_deref() != Some(user.as_str()) {
+        return Err(CellError::host(format!("the WorkOS user of {person} changed while their wipe listed their connections")));
+    }
+    let failures = |provider: &str, id: &str| {
+        again.failures.iter().find(|f| f.provider == provider && f.account == id).map_or(Failures::default(), |f| Failures { tries: f.tries, first_ms: Some(f.first_ms) })
     };
-    // at most `catalog::PROVIDERS_MAX` providers, `catalog::ACCOUNTS_MAX` accounts each
+    // bounded: at most `catalog::PROVIDERS_MAX` providers, `catalog::ACCOUNTS_MAX` accounts each
     for p in connections {
-        let ids = accounts::wiped(&plural, &p.name, p.several()).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
+        let ids = wiping::listed(&answer, &p.name).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
         for id in ids {
-            disconnect(env, cfg, &p.name, p.connection_oauth.as_ref(), &user, id.as_deref()).await?;
+            if crate::js::now_ms() > deadline {
+                out.cut = true;
+                return Ok(out);
+            }
+            let tried = match p.connection_oauth.as_ref().and_then(|o| o.revoke.as_deref()) {
+                Some(revoke) => wipe_revoke(env, cfg, api, &p.name, &user, &id, revoke, deadline).await,
+                None => Tried::NoGrant,
+            };
+            let then = wiping::then(&tried, failures(&p.name, &id), crate::js::now_ms());
+            match (&then, &tried) {
+                (Then::Retry, Tried::Failed(why)) => {
+                    let counted = crate::ask_registry(env, &crate::registry::calls::WipeRevokeFailed { identity: person.to_string(), provider: p.name.clone(), account: id.clone() }).await?;
+                    console_error!("{}", json!({ "wipe-connection": p.name, "account": id, "not-revoked": why, "tries": counted.tries }));
+                    out.kept.push(format!("{} {id}: {why} (failed {} of at least {} calls)", p.name, counted.tries, wiping::REVOKE_TRIES_MAX));
+                    continue;
+                }
+                (Then::GiveUp, Tried::Failed(why)) => {
+                    console_error!("{}", json!({ "wipe-connection": p.name, "account": id, "given-up": why }));
+                    out.given_up.push(format!("{} {id}: {why}", p.name));
+                }
+                _ => {}
+            }
+            if crate::js::now_ms() > deadline {
+                out.cut = true;
+                return Ok(out);
+            }
+            crate::keys::pipes_delete(env, api, &p.name, &user, Some(&id)).await?;
+            out.deleted += 1;
         }
     }
-    Ok(())
+    Ok(out)
+}
+
+/// A wipe's revoke of `user`'s account `id` at `provider`: with an access
+/// token Pipes vends for that account alone, sent to the row's `revoke`
+/// (`keys::connection_revoke_answer`), as `wipe_connections` reads each
+/// answer. A call that would start past `deadline` is not made: failed,
+/// tried again by the next call.
+#[allow(clippy::too_many_arguments)]
+async fn wipe_revoke(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, id: &str, revoke: &str, deadline: i64) -> fragment_core::wipe_connections::Tried {
+    use fragment_core::wipe_connections::{self as wiping, Tried, Vended};
+    if let Err(e) = reachable(cfg, revoke) {
+        return Tried::Failed(e.message);
+    }
+    let token = match crate::keys::pipes_token(env, api, provider, user, Some(id)).await {
+        Ok((status, answer)) => match wiping::vended(status, &answer) {
+            Vended::Token(t) => t,
+            Vended::NoGrant => return Tried::NoGrant,
+            Vended::Failed(why) => return Tried::Failed(why),
+        },
+        Err(e) => return Tried::Failed(e.message),
+    };
+    if crate::js::now_ms() > deadline {
+        return Tried::Failed("the call's time ran out before its revoke".into());
+    }
+    match crate::keys::connection_revoke_answer(env, provider, revoke, &fragment_core::connection_signin::revoke_form(&token)).await {
+        Ok((status, answer)) => wiping::revoked(status, &answer),
+        Err(e) => Tried::Failed(e.message),
+    }
 }
 
 /// The grant behind `user`'s account at `provider` (of several, the one

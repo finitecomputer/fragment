@@ -22,6 +22,13 @@
 //!   subscription's cancel, at once, when it ends or their card pays for
 //!   it; else its seats' count) and recorded (`wiped_orgs`), so a call cut
 //!   anywhere goes on with it. The step is done once Stripe has it all.
+//! - **Their connections** (`Step::Connections`, before the end; FIN-588):
+//!   the router revokes and deletes each account Pipes holds for their
+//!   WorkOS user, asking here first and after it lists them
+//!   (`wipe_connections`): in one turn, that the wipe stands at the step,
+//!   every connection fenced for them (none imports after: 429 while one
+//!   is), their WorkOS user, and what each account's revokes failed so far
+//!   (`wipe_revokes`, counted by `wipe_revoke_failed`).
 //! - **The end** (`Step::Registry`, the last): every row naming them or
 //!   their agents goes in one turn: identities, keys (their own sealed
 //!   key with the rest), sign-in subjects and emails, picture, agent
@@ -32,7 +39,9 @@ use fragment_core::org;
 use fragment_core::wipe::{self, Completed, Named, Progress, Refusal, Step};
 use fragment_proto::wipe::OrgFound;
 
-use super::calls::{WipeBegin, WipeBilled, WipeBilling, WipeDone, WipeFacts, WipeLook, WipePicture, WipeStep};
+use super::calls::{
+    WipeBegin, WipeBilled, WipeBilling, WipeConnections, WipeConnectionsFenced, WipeDone, WipeFacts, WipeLook, WipePicture, WipeRevokeFailed, WipeRevokeFailures, WipeStep,
+};
 use super::*;
 
 /// The names a `billing` step's note lists of those whose seats end.
@@ -286,6 +295,62 @@ impl RegistryCell {
         Ok(WipeDone { done: progress.done() })
     }
 
+    /// `POST /wipe/connections` (`calls::WipeConnections`): in one turn (no
+    /// await), the wipe of `identity` stands before its `connections` step,
+    /// each connection of the catalog is fenced for their WorkOS user at
+    /// once (`Finishing::fence_all`: refused, 429, while an import of
+    /// theirs is under way; each attempt still pending ended), and answers
+    /// that user with each account's failed revokes so far. A wipe begun
+    /// ended their sessions, so no connect begins after; once this answers,
+    /// none begun before lands at Pipes either.
+    pub(super) fn wipe_connections(&self, b: WipeConnections) -> CellResult<WipeConnectionsFenced> {
+        let id = b.identity.as_str();
+        fragment_core::wipe_connections::may_end(self.wipe_progress(id)?).map_err(|e| CellError::new(ErrorCode::AlreadyExists, format!("the connections of {id}: {e}")))?;
+        let Some(subject) = self.subject_of(SubjectOf { identity: id.to_string(), issuer: b.issuer.clone() })?.subject else {
+            return Ok(WipeConnectionsFenced { subject: None, failures: vec![] });
+        };
+        let theirs: Vec<fragment_core::connection_signin::Account> = self
+            .cfg
+            .providers
+            .providers()
+            .iter()
+            .filter(|p| p.kind == fragment_core::catalog::Kind::Connection)
+            .map(|p| fragment_core::connection_signin::Account { issuer: b.issuer.clone(), subject: subject.clone(), provider: p.name.clone() })
+            .collect();
+        self.finishing.borrow_mut().fence_all(&theirs).map_err(|fragment_core::connection_signin::Importing| {
+            CellError::new(ErrorCode::RateLimited, "a connect of theirs is finishing now: the next call ends their connections")
+        })?;
+        // bounded: at most `catalog::PROVIDERS_MAX` connections
+        for a in &theirs {
+            self.exec(fragment_core::connection_signin::FENCE_PENDING, vec![a.issuer.as_str().into(), a.subject.as_str().into(), a.provider.as_str().into()])?;
+        }
+        let failures = self.rows::<WipeRevokeFailures>(
+            "SELECT provider, account, tries, first_ms FROM wipe_revokes WHERE identity = ? ORDER BY provider, account LIMIT ?",
+            vec![id.into(), SqlStorageValue::Integer((fragment_core::catalog::PROVIDERS_MAX * usize::from(fragment_core::catalog::ACCOUNTS_MAX)) as i64)],
+        )?;
+        Ok(WipeConnectionsFenced { subject: Some(subject), failures })
+    }
+
+    /// `POST /wipe/revoke-failed` (`calls::WipeRevokeFailed`): an account's
+    /// revoke failed in a call of the `connections` step, counted while the
+    /// wipe stands at that step (a stale call's is refused).
+    pub(super) fn wipe_revoke_failed(&self, b: WipeRevokeFailed) -> CellResult<WipeRevokeFailures> {
+        let id = b.identity.as_str();
+        fragment_core::wipe_connections::may_end(self.wipe_progress(id)?).map_err(|e| CellError::new(ErrorCode::AlreadyExists, format!("the connections of {id}: {e}")))?;
+        if !fragment_core::catalog::valid_name(&b.provider) || !fragment_core::connection_accounts::valid_account_id(&b.account) {
+            return Err(CellError::invalid("a revoke failed at a provider, of an account Pipes listed"));
+        }
+        self.exec(
+            "INSERT INTO wipe_revokes (identity, provider, account, tries, first_ms) VALUES (?, ?, ?, 1, ?) ON CONFLICT (identity, provider, account) DO UPDATE SET tries = tries + 1",
+            vec![id.into(), b.provider.as_str().into(), b.account.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        self.row::<WipeRevokeFailures>(
+            "SELECT provider, account, tries, first_ms FROM wipe_revokes WHERE identity = ? AND provider = ? AND account = ?",
+            vec![id.into(), b.provider.as_str().into(), b.account.as_str().into()],
+        )?
+        .ok_or_else(|| CellError::host("a failed revoke's count went missing"))
+    }
+
     /// Every row that names the person `identity` or an agent of theirs, in
     /// one turn (no await): what is left of them here is their wipe's row.
     fn wipe_rows(&self, identity: &str) -> CellResult<()> {
@@ -315,6 +380,7 @@ impl RegistryCell {
         self.exec("DELETE FROM connection_fences WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
         self.exec("DELETE FROM connection_account_fences WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
         self.exec("DELETE FROM connection_disconnects WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
+        self.exec("DELETE FROM wipe_revokes WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM invite_mails WHERE sharer = ?", vec![identity.into()])?;

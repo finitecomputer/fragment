@@ -183,10 +183,6 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
     match step {
         Step::Computer => {
             let computer = fragment_core::computer::default_computer_of(person);
-            // their connections first, while the registry still names their
-            // WorkOS user: each grant revoked at its provider, each account
-            // deleted at Pipes (FIN-588)
-            crate::connections::wipe(env, Config::from_env(env), person).await?;
             let mut deleted = 0u64;
             // bounded: COMPUTER_CALLS_MAX calls, each its own pages
             for _ in 0..COMPUTER_CALLS_MAX {
@@ -299,6 +295,28 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         Step::Billing => {
             let b = ask_registry(env, &WipeBilling { identity: person.to_string() }).await?;
             Ok(Did { done: b.done, deleted: b.orgs, note: b.note, ..Did::default() })
+        }
+        // each account Pipes holds for their WorkOS user, its grant revoked
+        // and then deleted (connections.rs `wipe`; FIN-588), while the
+        // registry still names that user: done once none is left
+        Step::Connections => {
+            let w = crate::connections::wipe(env, Config::from_env(env), person, deadline).await?;
+            let mut said = vec![];
+            if !w.given_up.is_empty() {
+                said.push(format!(
+                    "given up after {} failed revokes over a day, deleted at Pipes, their grant perhaps left at the provider: {}",
+                    fragment_core::wipe_connections::REVOKE_TRIES_MAX,
+                    w.given_up.join("; ")
+                ));
+            }
+            if !w.kept.is_empty() {
+                said.push(format!("not revoked, kept for the next call: {}", w.kept.join("; ")));
+            }
+            if w.cut {
+                said.push("the call's time ran out: the next call ends the rest".into());
+            }
+            let note = (!said.is_empty()).then(|| said.join(". "));
+            Ok(Did { done: w.kept.is_empty() && !w.cut, deleted: w.deleted, note, ..Did::default() })
         }
         // its rows go as the registry records it done (`WipeStep`)
         Step::Registry => Ok(Did::finished(0)),

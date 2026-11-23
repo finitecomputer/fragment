@@ -399,12 +399,8 @@ idempotent and recorded done only once whole:
 - *Begin*, in one registry turn: the person is locked, their and their
   agents' sessions and keys end. Until the last step their sign-in is 403,
   nothing acts as them, and no one adds them to a fragment (404).
-- `computer`: first their connections, each account Pipes holds for
-  their WorkOS user at each connection of the catalog: its grant revoked
-  at its provider where its row names `revoke`, and its account deleted
-  at Pipes, so none outlives them or is the next person's their sign-in
-  makes (FIN-588); then its container destroyed, its saves deleted from
-  R2, its record emptied.
+- `computer`: its container destroyed, its saves deleted from R2, its
+  record emptied.
 - `fragments`: each fragment they own ends as a delete ends it.
 - `memberships`: they and their agents leave every other fragment, with
   their subscriptions and pushes there; what they wrote there stays.
@@ -419,13 +415,32 @@ idempotent and recorded done only once whole:
 - `pictures`: their picture, unless another identity set the same.
 - `billing`: their place in their org; an org left with no one or no admin
   ends; Stripe cancels what they pay for (docs/billing.md, "A wipe").
+- `connections` (FIN-588, `fragment_core::wipe_connections`): each
+  account Pipes holds for their WorkOS user at each connection of the
+  catalog, by its Pipes id (never an account-less call, which could reach
+  the next person's account under the same WorkOS user). First every
+  connection is fenced for them (429 while an import of theirs is under
+  way: the call fails the step and the next tries again), then Pipes
+  lists their accounts, and the registry confirms the wipe still stands at
+  this step before anything is acted on. Each grant is revoked at its
+  provider where its row names `revoke` (a token Pipes vends for that
+  account; Google's 400 `invalid_token`, or a token Pipes cannot vend
+  since its provider refused its refresh, is a grant gone already), and
+  only then its account deleted at Pipes. A revoke that fails keeps its
+  account (its token is what the next call revokes with), says so in the
+  step's `note`, and leaves the step not done; once it has failed in 5
+  calls over at least a day, the account is given up: deleted at Pipes,
+  the `note` and the log saying its grant may be left at the provider.
+  Each vendor call starts within the call's time; a wipe the release
+  before left unfinished (any step before `registry`) runs this step too.
 - `registry`: every row naming them or their agents. The wipe's own row
   stays, and so do orgs' governance logs naming them by npub (never by
   email): each org they were in the content of (Org content) records them
   an admin no more, their waiting offers withdrawn, by the operator.
 
 A wipe leaves what is not the platform's to delete: their WorkOS user
-(its Pipes connections are deleted: `computer`), a container snapshot until Cloudflare expires it,
+(its Pipes connections are deleted: `connections`), a container snapshot
+until Cloudflare expires it,
 Workflow history and logs for their retention, code.storage's soft-deleted
 repos, their org's Stripe customer and invoices, what they wrote in
 others' fragments, and a push they subscribed to on a public fragment

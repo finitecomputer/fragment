@@ -367,6 +367,23 @@ impl Finishing {
         }
         Ok(cancelled)
     }
+
+    /// A wipe's fence (FIN-588; `wipe_connections`) of each of a person's
+    /// `accounts` at once, all or none: refused, nothing cancelled, while
+    /// any of them imports; else each callback exchanging at any of them
+    /// cancelled (how many). Once it answers, no callback begun before it
+    /// lands at Pipes after the wipe lists their accounts there (a new one
+    /// needs a live session, which the wipe's begin ended).
+    pub fn fence_all(&mut self, accounts: &[Account]) -> Result<usize, Importing> {
+        if self.under_way.iter().any(|f| f.step == Step::Importing && accounts.contains(&f.account)) {
+            return Err(Importing);
+        }
+        let mut cancelled = 0;
+        for a in accounts {
+            cancelled += self.fence(a).expect("none of them imports");
+        }
+        Ok(cancelled)
+    }
 }
 
 /// An account label, at most (an email address's longest).
@@ -687,6 +704,32 @@ mod tests {
         assert_eq!(f.fence(&a), Ok(0), "once the imports answered, the disconnect goes");
         assert!(f.under_way.is_empty());
         assert_eq!(Finishing::default().fence(&a), Ok(0), "a restarted Registry has none under way");
+    }
+
+    /// Goal: a wipe never lists a person's accounts at Pipes while an
+    /// import of theirs may land after (FIN-588): its fence of every
+    /// connection of theirs is refused while one imports at any, and
+    /// changes nothing then (no callback cancelled); once none does, each
+    /// exchanging is cancelled and imports nothing, and another person's
+    /// is untouched. Method: imports and exchanges at two providers.
+    #[test]
+    fn a_wipes_fence_waits_for_every_import_and_cancels_every_exchange() {
+        let (mail, drive, other) = (account("user-a", "mail"), account("user-a", "drive"), account("user-b", "mail"));
+        let theirs = [mail.clone(), drive.clone()];
+        let mut f = Finishing::default();
+        let (importing, exchanging, others) = (f.begin(drive.clone()), f.begin(mail.clone()), f.begin(other.clone()));
+        assert!(f.may_import(importing));
+        assert_eq!(f.fence_all(&theirs), Err(Importing), "an import at drive refuses the wipe's fence");
+        assert!(f.may_import(exchanging), "a refused fence cancelled nothing: mail's exchange still imports");
+        assert_eq!(f.fence_all(&theirs), Err(Importing));
+        f.end(importing);
+        f.end(exchanging);
+        let late = f.begin(mail.clone());
+        assert_eq!(f.fence_all(&theirs), Ok(1), "no import under way: mail's exchange cancelled");
+        assert!(!f.may_import(late), "it imports nothing after the wipe's fence");
+        assert!(f.may_import(others), "another person's callback imports");
+        assert_eq!(f.fence_all(&[]), Ok(0), "no connections: nothing fenced");
+        assert_eq!(Finishing::default().fence_all(&theirs), Ok(0), "a restarted Registry has none under way");
     }
 
     #[test]
