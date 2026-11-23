@@ -804,6 +804,8 @@ label.settings-line { cursor: pointer; }
 .provider-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 48px; padding: 8px 8px 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--surface-muted); font: var(--type-body); }
 .provider-status .provider-state { width: 12px; height: 12px; flex: none; }
 .provider-status-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+/* its state on one line: the buttons wrap under it first */
+.provider-state-name { white-space: nowrap; }
 .provider-account { font: var(--type-body-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-access { font: var(--type-body-sm); color: var(--text-secondary); }
 .provider-status .settings-actions { flex: none; margin: 0 0 0 auto; }
