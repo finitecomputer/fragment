@@ -952,6 +952,16 @@ label.settings-line { cursor: pointer; }
 .apps-layout { max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
 .apps-intro h1 { margin: 0 0 18px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
 .apps-list { display: flex; flex-direction: column; }
+/* its tabs by who owns it, and Shared with me's filters by access
+   (apps-page.js `accessView`): a segmented switch, then the History
+   page's chips */
+.apps-tabs { display: inline-flex; gap: 2px; margin: 0 0 12px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; }
+.apps-tab { height: 30px; padding: 0 14px; border: 0; border-radius: 7px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
+.apps-tab:hover { color: var(--text-primary); }
+.apps-tab[aria-selected="true"] { background: var(--bg-active); color: var(--text-primary); }
+.apps-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.apps-filter-count { margin-left: 6px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.apps-tabs[hidden], .apps-filters[hidden] { display: none; }
 .apps-empty { margin: 8px 2px; font-size: 14px; }
 .app-row { display: flex; flex-direction: column; gap: 12px; padding: 24px 2px; border-bottom: 1px solid var(--border); }
 .apps-list > .app-row:last-child { border-bottom: 0; }
@@ -1080,9 +1090,9 @@ label.settings-line { cursor: pointer; }
 .history-search input:focus-visible { outline: none; }
 .history-search input::placeholder { color: var(--text-tertiary); opacity: 1; }
 .history-filters { display: flex; gap: 6px; margin: 12px 0 8px; }
-.history-filter { height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
-.history-filter:hover { background: var(--bg-hover); }
-.history-filter[aria-pressed="true"] { border-color: transparent; background: var(--bg-active); color: var(--text-primary); }
+.history-filter, .apps-filter { height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
+.history-filter:hover, .apps-filter:hover { background: var(--bg-hover); }
+.history-filter[aria-pressed="true"], .apps-filter[aria-pressed="true"] { border-color: transparent; background: var(--bg-active); color: var(--text-primary); }
 .history-status { margin: 4px 2px 8px; color: var(--text-tertiary); font-size: 13px; }
 .history-list { display: flex; flex-direction: column; }
 .history-empty { margin: 16px 2px; font-size: 14px; }
