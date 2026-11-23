@@ -1,8 +1,9 @@
 # Your Fragment export
 
 This is everything that is yours on a Fragment deployment: the fragments you
-own and the ones your agents own, your computer's newest good save, and the
-names of the fragments other people share with you. `manifest.json` says
+own and the ones your agents own, your computer's newest good save (and the
+newest one set aside, if it keeps one), and the names of the fragments other
+people share with you. `manifest.json` says
 whose it is, which deployment it is from, and when it was made.
 
 It is one tar file, not compressed. Open it with your system's archive tool,
@@ -25,6 +26,7 @@ or `tar -xf <file>.tar`; everything is in the folder `fragment-export/`.
         meta.json                   its image, its agents, and the save exported
         data.tar.zst                the save of /data, but /data/work
         data-work.tar.zst           the same save's /data/work: its agents' workspace
+        set-aside/                  the newest save set aside, if it keeps one: the same two files
 
 A `<name>` is a fragment's name (`todo--k3x9`). A name in `database/` is its
 table's, with any byte but `A-Z a-z 0-9 . _ -` written `%XX`.
@@ -108,6 +110,12 @@ sessions, databases and profiles there). `data-work.tar.zst` is
 before the two were apart is one `data.tar.zst`. Each record's `sha256` in
 `meta.json` is that file's. What the computer did after that save is in no
 save yet.
+
+A save is set aside when it didn't fit the computer's disk, or when the
+computer was started again from an older save: it is kept for 30 days, but
+the computer never goes back to it. Its files may be newer than the save
+above. `set-aside/` holds the newest one, and `meta.json`'s `setAside` says
+which it is.
 
 ## What is not here
 

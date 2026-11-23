@@ -395,13 +395,14 @@ pub const SIMPLEX: &str = "Fragment carries your owner's SimpleX for you, with a
 pub const DELEGATING: &str = "Hand big builds (a new app, a large change, or wide research) to a subagent with delegate_task. Settle questions about the outcome with the person first: subagents cannot ask them. Give the subagent the agreed goal and enough context to finish. Keep helping while it works, then inspect and test its result before telling the person it is done.";
 
 /// What every agent is told of its disk, after `DELEGATING` on every turn
-/// (Paul, 2026-11-18: a pressure release for a disk filling). It reads its
-/// own with `df`, the read the platform takes of the same disk
-/// (crates/core/src/computer/disk.rs), and the managed `disk-space-finite`
-/// skill makes room, big files moved into storage with `fragment offload`,
-/// checked before anything is removed. Its owner is told as it fills
-/// (`disk_filling`), and to ask it.
-pub const DISK: &str = "Your computer's disk holds 20 GB. Before a big download, dataset or build, check its room with df -h /. When it is nearly full, a write fails for lack of space, or your owner says their computer is almost full, load the disk-space-finite skill: it makes room by moving big files to storage, safely.";
+/// (Paul, 2026-11-18: a pressure release for a disk filling). Its files
+/// count at their full size (`du`), never as `df` reads the disk, which
+/// compresses them: a restore writes them whole (docs/computers.md, "Room
+/// to restore"). The managed `disk-space-finite` skill says how much fits
+/// and makes room, big files moved into storage with `fragment offload`,
+/// checked before anything is removed. It and its owner are told as it
+/// fills (`disk_filling`; the bridge's disk note at its next turn).
+pub const DISK: &str = "Your computer's disk holds 20 GB, and your files count at their full size there: check with du -sh /data and du -sh --apparent-size /data, the larger, as df -h / shows more room than a restart has. Check before a big download, dataset or build. When told it is almost full, a write fails for lack of space, or your owner says so, load the disk-space-finite skill: it says how much fits and moves big files to storage, safely.";
 
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
@@ -1193,10 +1194,9 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\nHERMES_GATEWAY_MAX_STARTS=0\nHERMES_STREAM_RETRIES={STREAM_RETRIES}\n")
 }
 
-/// A profile's directory, under the Hermes home.
-pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
-    home.join("profiles").join(wire::profile(agent_fragment))
-}
+/// A profile's directory, under the Hermes home: the bridge's, which
+/// keeps its marker of each chat there (its `seen.rs`).
+pub use wire::profile_dir;
 
 /// Settles each turn a restart cut, in Hermes' own sessions, before the
 /// gateway starts (docs/computers.md, Durability, P5), run by Hermes' Python as
@@ -1829,7 +1829,7 @@ mod tests {
         let m = managed_config(&[], CARD_TIMEOUT_S);
         assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{VOICE}\n\n{SENDING}\n\n{SIMPLEX}\n\n{DELEGATING}\n\n{DISK}"));
         // its disk, read by itself, and the skill that makes room on it
-        assert!(DISK.contains("df -h /") && DISK.contains("disk-space-finite") && !DISK.contains(['`', '\n', '$']) && DISK.len() < 400, "{DISK}");
+        assert!(DISK.contains("du -sh /data") && DISK.contains("du -sh --apparent-size /data") && DISK.contains("disk-space-finite") && !DISK.contains(['`', '\n', '$']) && DISK.len() < 450, "{DISK}");
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "each file, its type and its local path under /tmp/bridge-media", "tools to copy or edit the original", "copy it into your app or work", "across a sleep", "browser_exec's upload_file(selector, full path)", "check the page shows it", "With no file input", "desktop's file dialog with computer_use"] {
             assert!(FILES.contains(said), "{said}: {FILES}");

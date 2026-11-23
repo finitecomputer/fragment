@@ -99,6 +99,20 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// What its page is shot at: live's commit, or, a blessed fragment run
+    /// from the release before its first file (`Stage::runs_release`), its
+    /// template's release (`<template>@<release>`'s), which a platform
+    /// deploy moves as a deploy moves live.
+    pub(crate) fn page_version(&self) -> CellResult<Option<String>> {
+        if let Some(live) = self.meta(MetaKey::PinLive)? {
+            return Ok(Some(live));
+        }
+        if !self.stage()?.runs_release() {
+            return Ok(None);
+        }
+        Ok(self.meta(MetaKey::Blessed)?.and_then(|b| b.split_once('@').map(|(_, release)| release.to_string())))
+    }
+
     /// Main moved (plane.rs `interpret`): the card of live as it is is
     /// wanted again when this is its first change since live's shot
     /// (`card::Cards::content_moved`). The alarm takes the shot.
@@ -266,7 +280,7 @@ impl FragmentCell {
             return Err(CellError::new(code, skip.message()));
         }
         // read after the ledger's answer, as one stretch: a deploy meanwhile is the live asked of
-        let Some(live) = self.meta(MetaKey::PinLive)? else {
+        let Some(live) = self.page_version()? else {
             return Err(CellError::invalid("nothing is deployed yet: a card is a shot of the live page"));
         };
         let mut cards = self.cards()?;

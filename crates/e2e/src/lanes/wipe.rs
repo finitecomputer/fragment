@@ -104,6 +104,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = s.create(api, &paul, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"the old soul\n"))]);
     s.deploy(&agent);
+    super::computers::members_only(api, &paul, &agent_name)?;
     let r = api.signed(&paul, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let agent_id = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     let chat_name = s.named(api, &paul, "chat")?;
@@ -411,6 +412,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&made.body);
     let soul = api.signed(&fresh, "GET", &format!("/api/f/{agent_name}/file?path=SOUL.md"), None)?;
     s.ok("its files are the new person's only", soul.status == 200 && soul.text == "a new soul\n", &soul);
+    super::computers::members_only(api, &fresh, &agent_name)?;
     let r = api.signed(&fresh, "PUT", &format!("/api/computers/{fresh_computer}/agents/{agent_name}"), Some(&json!({})))?;
     let fresh_agent = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("a new agent", r.status == 200 && fragment_core::npub::is_identity(&fresh_agent) && fresh_agent != agent_id, &r);

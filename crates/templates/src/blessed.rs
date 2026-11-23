@@ -371,7 +371,7 @@ mod tests {
         // and whether it calls it with `fragment connection call`
         let mut connections: Vec<(String, String, bool)> = vec![];
         for f in files.iter().copied() {
-            assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
+            assert!(f.path.starts_with("skills/") || f.path == "catalog/hermes.json", "the managed set is under skills/, beside the optional skills' catalog: {}", f.path);
             assert!(f.size <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.size);
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
             assert_eq!(data_file("skills", f.path), Some(f));
@@ -421,6 +421,27 @@ mod tests {
             assert!(connections.iter().any(|(_, c, calls)| c == connection && *calls), "no skill of {connection} calls it with `fragment connection call {connection}`");
         }
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
+    }
+
+    /// Goal (2026-11-20, docs/computers.md "Room to restore"): the disk
+    /// skill's numbers are the platform's own, never a copy that drifts:
+    /// what a computer's files may take at their full size (`du`) for its
+    /// save to restore beside the largest image, and where it and its owner
+    /// are told (`ROOM_TOLD_MAX` of room left), each in whole GB, rounded
+    /// down. A budget or a line that moves fails here until the skill says it.
+    #[test]
+    fn the_disk_skill_says_the_platforms_room() {
+        use fragment_core::computer::{restore_floor, ROOM_TOLD_MAX, IMAGE_DISK_MAX, RESTORE_SLACK_PCT};
+        let skill = data_file("skills", "skills/productivity/disk-space-finite/SKILL.md").expect("the disk skill");
+        let text = String::from_utf8(bytes_of(template("skills").expect("skills"), skill)).expect("UTF-8");
+        // a computer's disk as its `df` reads it, and what a restore may write on it
+        let total = (u64::from(fragment_core::price::DISK_MB) * 1_000_000).div_ceil(4096) * 4096;
+        let fits = total - IMAGE_DISK_MAX - restore_floor(total);
+        let gb = |writes: u64| writes * 100 / (100 + RESTORE_SLACK_PCT) / 1_000_000_000;
+        let (most, told) = (gb(fits), gb(fits - ROOM_TOLD_MAX));
+        assert_eq!((most, told), (16, 13), "as the skill says them now");
+        assert!(text.contains(&format!("Your files may take about {most} GB in all. Past about {told} GB, make room")), "{text}");
+        assert!(text.contains("du -sxh /data") && text.contains("du -sxh --apparent-size /data") && !text.contains("Past about 80% used"), "du, allocated and apparent (the larger, as the platform's read: Codex on #1425), never df's percentage");
     }
 
     /// A command of the import skill's (FIN-401): the agent's terminal starts

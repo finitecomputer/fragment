@@ -15,7 +15,8 @@
 //! person frames signed in as them; a stranger's members-only fragment
 //! does not (the frame says a tab must ask, and the page around it hears
 //! why); a fragment's page framed there cannot mint for another; a public
-//! fragment frames for someone signed out.
+//! fragment frames for someone signed out; an app's window, the shell's
+//! own frame of it, is lent no microphone.
 //!
 //! It runs on the node as the lanes start it (the platform on 127.0.0.1,
 //! cross-site from the fragments), in a Chrome of its own that blocks
@@ -53,6 +54,18 @@ export class App extends DurableObject {
 }
 "#;
 const WHO_JSON: &str = r#"{ "operations": { "whoami": { "kind": "mutation", "role": "viewer", "input": { "type": "object", "additionalProperties": false } } } }"#;
+
+/// A page that asks for the microphone as it loads, and says what the
+/// browser answered.
+const MIC_PAGE: &str = r#"<p id="mic">mic?</p>
+<script>
+const say = (text) => { document.getElementById("mic").textContent = text; };
+if (!navigator.mediaDevices?.getUserMedia) say("mic:none");
+else navigator.mediaDevices.getUserMedia({ audio: true }).then(
+  (stream) => say("mic:live " + stream.getAudioTracks().map((t) => t.readyState).join()),
+  (e) => say("mic:refused " + e.name),
+);
+</script>"#;
 
 /// The shell at `/settings`, once it has asked who is signed in and shows
 /// them their settings (which a person with no chat yet sees too: `/`
@@ -112,7 +125,86 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(())
     };
     let (owner_email, guest_email) = (email_of(&owner), email_of(&guest));
-    in_chrome(s, api, &names, (&owner_id, &owner_session, &owner_email), (&guest_id, &guest_session, &guest_email), &flip)
+    in_chrome(s, api, &names, (&owner_id, &owner_session, &owner_email), (&guest_id, &guest_session, &guest_email), &flip)?;
+    app_microphone(s, api, (&owner, &owner_session), &guest_id, &guest_session)
+}
+
+/// The microphone in an app's window. Only the shell's frame of a chat
+/// names its origin for the microphone (`allow="… microphone <origin>"`),
+/// for the chat's voice memo (the chat section, `mic_in_frame`); an app's
+/// page is its editors' to write, so its window is lent none. Valid: an
+/// app shared with a person, its page asking for the microphone as it
+/// loads, opened from their dock: its frame's policy names no microphone,
+/// and its page is refused (in this Chrome, whose fake media UI would
+/// answer a prompt yes); the same app at a chat's address (`/?chat=`, an
+/// alert's), framed in the middle column, is lent none either; and a chat
+/// opened from Apps (one that reaches its owner's accounts: a key) keeps
+/// the microphone in its window, for its voice memo.
+fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_nip98::Keys, &str), guest_id: &str, guest_session: &str) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let app = made(api, owner, &s.name("fmic"), "blank", json!([{ "path": "site/index.html", "text": MIC_PAGE }]), "members")?;
+    let r = api.share(&app, guest_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "sharing {app}: {r}");
+    let Some(mut chrome) = safari_like(s)? else {
+        s.ok("Chrome is installed for the frames lane (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", guest_session)?;
+    let shell = chrome.open(&format!("{}/", api.base))?;
+    let icon = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{app}\"]"))?);
+    let up = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
+    chrome.eval(&shell, &format!("({icon}?.click(), true)"))?;
+    let answered = up && s.eventually(wait, || chrome.eval_in_frame(&shell, &app, "document.getElementById('mic')?.textContent.startsWith('mic:') === true").ok() == Some(json!(true)));
+    let allow = chrome.eval(&shell, &format!("document.querySelector({})?.allow ?? null", serde_json::to_string(&format!("iframe[data-fragment=\"{app}\"]"))?))?;
+    let said = chrome.eval_in_frame(&shell, &app, "document.getElementById('mic')?.textContent ?? null").unwrap_or_default();
+    s.ok(
+        "an app's window is lent no microphone: the shell's frame of it names none in its policy, and its page's request for one is refused",
+        answered && allow.as_str().is_some_and(|a| !a.contains("microphone")) && said.as_str().is_some_and(|t| t.starts_with("mic:refused")),
+        json!({ "up": up, "answered": answered, "allow": allow, "said": said }),
+    );
+    chrome.close(shell)?;
+    // the policy of `name`'s frame in `scope` (the middle column's, a window's)
+    let allow_of = |chrome: &mut Browser, page: &Page, scope: &str, name: &str| -> Result<Value> {
+        let frame = serde_json::to_string(&format!("{scope} iframe[data-fragment=\"{name}\"]"))?;
+        chrome.eval(page, &format!("document.querySelector({frame})?.allow ?? null"))
+    };
+
+    // the app at a chat's address: framed in the middle column, as a chat is
+    let shell = chrome.open(&format!("{}/?chat={app}", api.base))?;
+    let framed = chrome.until(&shell, &format!("!!document.querySelector({})", serde_json::to_string(&format!("#frames iframe[data-fragment=\"{app}\"]"))?), wait);
+    let allow = allow_of(&mut chrome, &shell, "#frames", &app)?;
+    s.ok(
+        "an app at a chat's address (`/?chat=`), framed in the middle column, is lent no microphone either",
+        framed && allow.as_str().is_some_and(|a| !a.contains("microphone")),
+        json!({ "framed": framed, "allow": allow }),
+    );
+    chrome.close(shell)?;
+
+    // a chat that reaches its owner's accounts, opened from Apps
+    let chat = api.qualified(owner, &s.name("fmicchat"))?;
+    let r = api.create_with(owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making {chat}: {r}");
+    let key = json!({ "value": "sk-e2e-frames-never-shown", "hosts": ["api.example.com"] });
+    let r = api.signed(owner, "PUT", &format!("/api/f/{chat}/secrets/API_KEY"), Some(&key))?;
+    anyhow::ensure!(r.status == 200, "a key on {chat}: {r}");
+    let reaches = s.eventually(wait, || {
+        let r = api.signed(owner, "GET", "/api/fragments", None).ok();
+        r.and_then(|r| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == chat.as_str()).map(|f| f["sharing"]["reach"] == true))) == Some(true)
+    });
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", owner_session)?;
+    let apps = chrome.open(&format!("{}/apps", api.base))?;
+    let row = format!("document.querySelector({})", serde_json::to_string(&format!("article.app-row[data-key=\"{chat}\"] .app-row-art"))?);
+    let listed = reaches && chrome.until(&apps, &format!("!!{row}"), wait);
+    chrome.eval(&apps, &format!("({row}?.click(), true)"))?;
+    let window = listed && chrome.until(&apps, &format!("!!document.querySelector({})", serde_json::to_string(&format!("#stack iframe[data-fragment=\"{chat}\"]"))?), wait);
+    let allow = allow_of(&mut chrome, &apps, "#stack", &chat)?;
+    s.ok(
+        "a chat opened from Apps (it reaches its owner's accounts) keeps the microphone in its window: its policy names the chat's own origin",
+        window && allow == json!(format!("clipboard-write; microphone {}", api.site_origin(&chat))),
+        json!({ "reaches": reaches, "listed": listed, "window": window, "allow": allow }),
+    );
+    chrome.close(apps)?;
+    Ok(())
 }
 
 struct Names<'a> {

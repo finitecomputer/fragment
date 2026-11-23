@@ -132,7 +132,7 @@ mirrors:
 - `via` is the door's id (a connector's: `simplex`, `telegram`); `for`
   is the agent's owner; `agent` is the agent fragment whose door it came
   through. The platform takes a relayed record only through a door its
-  owner opened, and no other.
+  owner opened, and no other, and only into a fragment its owner owns.
 - SimpleX's (docs/bridge.md, "SimpleX") is posted by the agent on its
   SimpleX chat. Its id is `sx:<first 32 hex digits of SHA-256 of "<agent
   fragment>|<the sender's message id>">`, so a message read again is one

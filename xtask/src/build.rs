@@ -22,6 +22,20 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// to 7.5 MB").
 pub const CELL_WASM_MAX_BYTES: u64 = 7_500_000;
 
+/// The most the operators' admin Worker's Wasm may be, raw: the same
+/// crate's other build (cell/src/lib.rs, "Two Workers, one crate"), which
+/// holds only what the admin's routes reach of it: 0.70 MB with its first
+/// route, most of it what every caller carries (the deployment's settings,
+/// NIP-98, serde), and 1.09 MB with all of the admin's (2026-11-20). Far
+/// under the cell's: a route that reaches an object's own code, not only
+/// its calls, carries that object into the admin, which this refuses.
+pub const ADMIN_WASM_MAX_BYTES: u64 = 1_200_000;
+
+/// The admin Worker's build, in the cell's `build/` (so a build's lock,
+/// mark and the e2e's staged copy hold both: devstack's built.rs), beside
+/// the cell's Static Assets in `build/assets`.
+pub const ADMIN_BUILD: &str = "build/admin";
+
 /// The cell's code generation for wasm32, beside the paths it remaps: Wasm
 /// SIMD (`simd128`, which V8 and workerd run), for the search index's int8
 /// dot product (fragment_core::search_index `dot`). It shrank the release
@@ -87,25 +101,64 @@ pub fn cell_as(profile: Profile) -> Result<()> {
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
     let ours: Vec<String> = local.remapped().into_iter().chain(CELL_TARGET_FLAGS.map(String::from)).collect();
     let flags = encoded_rustflags(given, &ours);
-    run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
-    let wasm = out.join(devstack::built::WASM);
-    let built = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;
-    let stripped = without_names(&built).with_context(|| format!("{} after worker-build", wasm.display()))?;
-    std::fs::write(&wasm, &stripped).with_context(|| format!("write {}", wasm.display()))?;
-    local.named_in(&stripped)?;
-    let size = match profile {
-        Profile::Release => within_budget(stripped.len() as u64)?,
-        Profile::Dev => format!("{} bytes of Wasm ({:.2} MB), dev's: no budget holds it (the release's is {CELL_WASM_MAX_BYTES} bytes)", stripped.len(), stripped.len() as f64 / 1e6),
-    };
+    run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir))?;
+    let size = wasm_built(&out, &local, profile, &Wasm::CELL)?;
+    // the admin Worker: the same crate and flags, its other entry, after the
+    // cell's (whose build clears `build/`)
+    let admin = Command::new("worker-build").args(profile.worker_build_args()).args(["--out-dir", ADMIN_BUILD, "--", "--features", "admin"]).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir).status();
+    anyhow::ensure!(admin.context("run worker-build for the admin Worker")?.success(), "worker-build for the admin Worker (--features admin) failed");
+    let admin_size = wasm_built(&dir.join(ADMIN_BUILD), &local, profile, &Wasm::ADMIN)?;
     let (files, bytes) = fragment_templates::write_assets(&out.join("assets")).context("writing the release's files into cell/build/assets")?;
     building.finish()?;
     println!(
-        "built the cell ({}) for wasm32 in {:.1?}: {size}, and {files} files of the release, {:.2} MB, in its Static Assets",
+        "built the cell ({}) for wasm32 in {:.1?}: {size}; the admin Worker: {admin_size}; and {files} files of the release, {:.2} MB, in its Static Assets",
         profile.name(),
         t0.elapsed(),
         bytes as f64 / 1e6
     );
     Ok(())
+}
+
+/// A Worker this crate builds (cell/src/lib.rs, "Two Workers, one crate"),
+/// and the most its Wasm may be.
+pub struct Wasm {
+    /// Its Wasm, from the repo's root.
+    file: &'static str,
+    max_bytes: u64,
+    /// That limit's name, here.
+    limit: &'static str,
+    /// Why a build over it is refused.
+    why: &'static str,
+}
+
+impl Wasm {
+    const CELL: Wasm = Wasm {
+        file: "cell/build/index_bg.wasm",
+        max_bytes: CELL_WASM_MAX_BYTES,
+        limit: "CELL_WASM_MAX_BYTES",
+        why: "every isolate copies the Wasm's data into its memory. A file the cell serves belongs in its Static Assets (crates/templates, cell/src/assets.rs), not in an include_bytes!; anything else that grows it this far is a choice to make, and this number with it",
+    };
+    const ADMIN: Wasm = Wasm {
+        file: "cell/build/admin/index_bg.wasm",
+        max_bytes: ADMIN_WASM_MAX_BYTES,
+        limit: "ADMIN_WASM_MAX_BYTES",
+        why: "the admin Worker's Wasm is what its routes reach of the crate: one that reaches an object's own code, not only its calls, carries that object into it",
+    };
+}
+
+/// The Wasm worker-build wrote into `dir`, less its names (`without_names`),
+/// written back, checked for this machine's paths, and its size within its
+/// budget (the release's alone: dev's is held to none).
+fn wasm_built(dir: &Path, local: &LocalPaths, profile: Profile, w: &Wasm) -> Result<String> {
+    let wasm = dir.join(devstack::built::WASM);
+    let built = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;
+    let stripped = without_names(&built).with_context(|| format!("{} after worker-build", wasm.display()))?;
+    std::fs::write(&wasm, &stripped).with_context(|| format!("write {}", wasm.display()))?;
+    local.named_in(&stripped, w.file)?;
+    match profile {
+        Profile::Release => within_budget(w, stripped.len() as u64),
+        Profile::Dev => Ok(format!("{} bytes of Wasm ({:.2} MB), dev's: no budget holds it (the release's is {} bytes)", stripped.len(), stripped.len() as f64 / 1e6, w.max_bytes)),
+    }
 }
 
 /// This machine's paths a build would write into the cell's Wasm (a
@@ -162,7 +215,7 @@ impl LocalPaths {
     /// directory) fails the build here, before its size moves with the
     /// checkout's. A path that already reads as its remap (a cargo home at
     /// `/cargo`, a Docker image's) is what the flags write, not a leak.
-    fn named_in(&self, wasm: &[u8]) -> Result<()> {
+    fn named_in(&self, wasm: &[u8], file: &str) -> Result<()> {
         let (repo, home, sysroot) = (&self.repo, &self.cargo_home, &self.sysroot);
         let mut paths = vec![format!("{repo}/crates/"), format!("{repo}/cell/")];
         if home != "/cargo" {
@@ -173,7 +226,7 @@ impl LocalPaths {
         }
         for path in paths {
             if wasm.windows(path.len()).any(|w| w == path.as_bytes()) {
-                bail!("cell/build/index_bg.wasm names {path}…: its build remaps that path (xtask/src/build.rs, LocalPaths::remapped), and something wrote it in unmapped");
+                bail!("{file} names {path}…: its build remaps that path (xtask/src/build.rs, LocalPaths::remapped), and something wrote it in unmapped");
             }
         }
         Ok(())
@@ -245,17 +298,16 @@ fn leb_u32(wasm: &[u8], at: &mut usize) -> Result<u32> {
     bail!("a number over five bytes")
 }
 
-/// The checked size and exact headroom within `CELL_WASM_MAX_BYTES`, or
-/// the exact overage and why the build is refused.
-fn within_budget(size: u64) -> Result<String> {
-    if size > CELL_WASM_MAX_BYTES {
-        let over = size - CELL_WASM_MAX_BYTES;
-        bail!(
-            "cell/build/index_bg.wasm is {size} bytes, over its budget of {CELL_WASM_MAX_BYTES} bytes (excess bytes: {over}; xtask/src/build.rs, CELL_WASM_MAX_BYTES): every isolate copies the Wasm's data into its memory. A file the cell serves belongs in its Static Assets (crates/templates, cell/src/assets.rs), not in an include_bytes!; anything else that grows it this far is a choice to make, and this number with it"
-        );
+/// The checked size and exact headroom within `w`'s budget, or the exact
+/// overage and why the build is refused.
+fn within_budget(w: &Wasm, size: u64) -> Result<String> {
+    let (file, max, limit, why) = (w.file, w.max_bytes, w.limit, w.why);
+    if size > max {
+        let over = size - max;
+        bail!("{file} is {size} bytes, over its budget of {max} bytes (excess bytes: {over}; xtask/src/build.rs, {limit}): {why}");
     }
-    let remaining = CELL_WASM_MAX_BYTES - size;
-    Ok(format!("{size} bytes of Wasm ({:.2} MB; budget {CELL_WASM_MAX_BYTES} bytes; remaining bytes: {remaining})", size as f64 / 1e6))
+    let remaining = max - size;
+    Ok(format!("{size} bytes of Wasm ({:.2} MB; budget {max} bytes; remaining bytes: {remaining})", size as f64 / 1e6))
 }
 
 fn worker_build_installed() -> Result<()> {
@@ -424,13 +476,25 @@ mod tests {
             (7_499_999, "7499999 bytes of Wasm (7.50 MB; budget 7500000 bytes; remaining bytes: 1)"),
             (7_500_000, "7500000 bytes of Wasm (7.50 MB; budget 7500000 bytes; remaining bytes: 0)"),
         ] {
-            assert_eq!(super::within_budget(size).unwrap(), expected);
+            assert_eq!(super::within_budget(&super::Wasm::CELL, size).unwrap(), expected);
         }
-        let refused = super::within_budget(super::CELL_WASM_MAX_BYTES + 1).unwrap_err().to_string();
+        let refused = super::within_budget(&super::Wasm::CELL, super::CELL_WASM_MAX_BYTES + 1).unwrap_err().to_string();
         assert!(refused.starts_with("cell/build/index_bg.wasm is 7500001 bytes, over its budget of 7500000 bytes (excess bytes: 1;"), "{refused}");
         assert!(refused.contains("CELL_WASM_MAX_BYTES") && refused.contains("Static Assets"), "{refused}");
-        let refused = super::within_budget(u64::MAX).unwrap_err().to_string();
+        let refused = super::within_budget(&super::Wasm::CELL, u64::MAX).unwrap_err().to_string();
         assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 7500000 bytes (excess bytes: 18446744073702051615;"), "{refused}");
+    }
+
+    /// The admin Worker is held to its own budget, far under the cell's,
+    /// and its refusal names its own file and limit.
+    #[test]
+    fn the_admin_is_held_to_its_own_budget() {
+        const _: () = assert!(super::ADMIN_WASM_MAX_BYTES * 3 < super::CELL_WASM_MAX_BYTES, "the admin is a small Worker");
+        let max = super::ADMIN_WASM_MAX_BYTES;
+        assert!(super::within_budget(&super::Wasm::ADMIN, max).unwrap().ends_with("remaining bytes: 0)"));
+        let refused = super::within_budget(&super::Wasm::ADMIN, max + 1).unwrap_err().to_string();
+        assert!(refused.starts_with(&format!("cell/build/admin/index_bg.wasm is {} bytes, over its budget of {max} bytes (excess bytes: 1; xtask/src/build.rs, ADMIN_WASM_MAX_BYTES)", max + 1)), "{refused}");
+        assert!(super::Wasm::ADMIN.file.starts_with("cell/") && super::Wasm::ADMIN.file.ends_with(&format!("{}/{}", super::ADMIN_BUILD, super::devstack::built::WASM)), "its file is the one the build writes");
     }
 
     /// Goal: the cell's Wasm holds no path of the machine that built it.
@@ -456,16 +520,16 @@ mod tests {
         assert_eq!(encoded((None, Some(" -C  target-cpu=mvp ".into()))), "-C\x1ftarget-cpu=mvp\x1f--remap-path-prefix=/w t/fragment=");
         assert_eq!(encoded((Some("-Cdebuginfo=0".into()), Some("ignored".into()))), "-Cdebuginfo=0\x1f--remap-path-prefix=/w t/fragment=", "cargo reads the encoded flags first");
         assert_eq!(encoded((Some(String::new()), None)), "--remap-path-prefix=/w t/fragment=");
-        assert!(local.named_in(b"\0asm panicked at crates/core/src/oidc.rs:7:5 /cargo/registry/src/x /w t/fragment").is_ok());
+        assert!(local.named_in(b"\0asm panicked at crates/core/src/oidc.rs:7:5 /cargo/registry/src/x /w t/fragment", "cell/build/index_bg.wasm").is_ok());
         for named in [&b"at /w t/fragment/crates/core/src/oidc.rs"[..], b"/w t/fragment/cell/src/lib.rs", b"/home/me/.cargo/registry/src/x", b"/home/me/.cargo/git/checkouts/x", b"/home/me/.rustup/toolchains/stable/lib/rustlib"] {
-            let refused = local.named_in(named).unwrap_err().to_string();
-            assert!(refused.contains("LocalPaths::remapped"), "{refused}");
+            let refused = local.named_in(named, "cell/build/admin/index_bg.wasm").unwrap_err().to_string();
+            assert!(refused.contains("LocalPaths::remapped") && refused.starts_with("cell/build/admin/index_bg.wasm names "), "{refused}");
         }
         // a cargo home at /cargo already reads as its remap: allowed, while
         // the repo's paths are still refused
         let docker = super::LocalPaths { cargo_home: "/cargo".into(), ..local };
-        assert!(docker.named_in(b"/cargo/registry/src/x /cargo/git/checkouts/x").is_ok());
-        assert!(docker.named_in(b"/w t/fragment/crates/core/src/oidc.rs").is_err());
+        assert!(docker.named_in(b"/cargo/registry/src/x /cargo/git/checkouts/x", "cell/build/index_bg.wasm").is_ok());
+        assert!(docker.named_in(b"/w t/fragment/crates/core/src/oidc.rs", "cell/build/index_bg.wasm").is_err());
     }
 
     /// Goal: the cell's Wasm drops its function names and keeps everything

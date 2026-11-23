@@ -50,24 +50,35 @@
   // Firecrawl, FAL, Browser Use, Perplexity, Google Places, xAI and ElevenLabs keys, each at the price
   // book's list price (fragment_core::price DEFAULT_KEYS); and the person's
   // own OpenRouter, signed in to (2026-10-08). A local run signs in to the
-  // OpenRouter fake instead (crates/e2e swap_providers).
+  // OpenRouter fake instead (crates/e2e swap_providers). Each key's `deny`
+  // is deploy/example.jsonc's.
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["X_API_BEARER_TOKEN"], "key": "fragment-x-api-key" },
+      "env": ["X_API_BEARER_TOKEN"], "key": "fragment-x-api-key",
+      "deny": ["* /2/usage/**", "* /2/webhooks/**", "* /2/tweets/search/stream/**",
+        "* /2/compliance/**", "* /2/account_activity/**", "* /2/activity/**"] },
     { "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["FIRECRAWL_API_KEY"], "key": "fragment-firecrawl-api-key" },
+      "env": ["FIRECRAWL_API_KEY"], "key": "fragment-firecrawl-api-key",
+      "deny": ["* /*/team/**", "GET /*/crawl/active", "GET /*/crawl/ongoing", "GET /v2/agent",
+        "GET /v2/interact", "GET /v2/browser", "GET /v2/monitor", "* /*/slack/**"] },
     { "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"],
       "placements": [{ "header": "authorization", "format": "Key {}" }],
-      "env": ["FAL_KEY"], "key": "fragment-fal-api-key" },
+      "env": ["FAL_KEY"], "key": "fragment-fal-api-key",
+      "deny": ["* /tokens/**"] },
     { "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"],
       "placements": [{ "header": "x-browser-use-api-key" }],
-      "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key" },
+      "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key",
+      "deny": ["GET /api/*/browsers", "* /api/*/profiles/**", "GET /api/*/sessions",
+        "GET /api/*/tasks", "GET /api/*/runs", "* /api/*/workspaces/**", "* /api/*/integrations/**",
+        "* /api/*/billing/**"] },
     { "row": "google" },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },
+      "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key",
+      "deny": ["* /generate_auth_token", "* /revoke_auth_token", "GET /v1/files", "GET /v1/batches",
+        "GET /v1/monitors", "GET /v1/skills"] },
     { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"],
       "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }],
       "env": ["GOOGLE_PLACES_API_KEY"], "key": "fragment-google-places-api-key" },
@@ -76,7 +87,8 @@
       "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
-      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" },
+      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key",
+      "deny": ["POST /v1/workspaces/api-keys/disable"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key
     // pasted), and paid by their OpenRouter credit, never metered here. An

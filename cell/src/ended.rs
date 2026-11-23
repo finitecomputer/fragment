@@ -37,8 +37,8 @@
 //! with the rest, retried as the rest are: the life is cleaned up only
 //! once its repo is gone too. A name made again before that delete gets a
 //! fresh repo of its own (`fragment_core::codestorage::repo_name`), so
-//! the delete never reaches it. A chat's repo is made after its create
-//! answers (publish.rs `seeds_later`): one whose life ended while
+//! the delete never reaches it. A blessed fragment's repo is made at its
+//! first file (`seed::Making::SeedsLater`): one whose life ended while
 //! code.storage made it is recorded by that seed (`end_repo_of_no_life`).
 //!
 //! A repo named by its owner (a life made before repos were named by its
@@ -237,8 +237,8 @@ impl FragmentCell {
         )?;
         // its repo, deleted by the alarm: a wipe's always, a delete's when
         // named by this life's key (an owner-named one stays: FIN-538); a
-        // life whose repo was not made yet (its template seeds after the
-        // create's answer, publish.rs `seeds_later`) records none here,
+        // life whose repo was not made (a blessed fragment's, made at its
+        // first file: `seed::Making::SeedsLater`) records none here,
         // and its seed records one it makes after (`end_repo_of_no_life`)
         let repo = repo.filter(|_| rules::repo_goes(by, of_life.is_some()));
         if let Some(repo) = &repo {

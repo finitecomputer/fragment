@@ -10,9 +10,9 @@
 //! an agent member reads the fragment as a viewer, and never acts through
 //! it (no operations, nothing a membership would let them change).
 //!
-//! An agent acts for whoever asked, capped (decision R17): a request
-//! an agent signs `for=<identity>` acts with the lower of that identity's
-//! role and a cap. The cap is the agent's own role (its membership, or the
+//! An agent acts for its owner, capped (decision R17): a request an
+//! agent signs `for=<its owner>` (no one else: `may_act_for`) acts with
+//! the lower of that identity's role and a cap. The cap is the agent's own role (its membership, or the
 //! visibility floor), or, on a fragment its owner belongs to, the owner's
 //! role; never more than `editor`. The owner's part is the owner's own role
 //! capped at `editor`, not `editor` outright: an agent never reaches further
@@ -286,6 +286,41 @@ pub enum Decision {
     Forbidden,
 }
 
+/// Why a request may not name `for` whom it names (403).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForRefusal {
+    /// A person, or an agent with no owner: it acts as itself.
+    NotAnAgent,
+    /// An agent naming someone other than its own owner.
+    NotItsOwner,
+}
+
+impl ForRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            ForRefusal::NotAnAgent => "only an agent acts for someone (`for`); a person acts as themselves",
+            ForRefusal::NotItsOwner => "an agent acts only for its own owner (`for=<its owner>`)",
+        }
+    }
+}
+
+/// Whom a request signed by an identity of `kind`, owned by `owner`, may
+/// name in `for`: an agent its own owner, and no one else. An app is told
+/// the named identity as `call.principal` and keys "who did it" on it
+/// (cli/GUIDE.md, "Who did it"), and nothing binds a request to a person
+/// who asked but its owner's computer setting `FRAGMENT_FOR` to them, so
+/// naming anyone else would let any agent's key speak as that person
+/// wherever the role floor reaches (a public doc's notes). Every caller
+/// the platform ships names the agent's owner (the bridge, Hermes, the
+/// CLI's `FRAGMENT_FOR`).
+pub fn may_act_for(kind: IdentityKind, owner: Option<&str>, named: &str) -> Result<(), ForRefusal> {
+    match (kind, owner) {
+        (IdentityKind::Agent, Some(owner)) if owner == named => Ok(()),
+        (IdentityKind::Agent, Some(_)) => Err(ForRefusal::NotItsOwner),
+        _ => Err(ForRefusal::NotAnAgent),
+    }
+}
+
 /// Whether a caller may do something that needs `needs`.
 pub fn decide(visibility: Visibility, standing: Standing, purpose: Purpose, needs: Role) -> Decision {
     match effective_role(visibility, standing, purpose) {
@@ -384,6 +419,24 @@ mod tests {
         assert!(talks_to_owners_agent(Chat, &mine), "the owner's agent is in the chat: whoever comes in can talk to it");
         assert!(!talks_to_owners_agent(App, &mine), "an app or a doc the owner's agent is in: no agent hears it, nothing to warn of");
         assert!(!talks_to_owners_agent(Chat, &[]), "no members read: no owner to warn");
+    }
+
+    /// Goal: `for` names only the agent's own owner, so no key speaks as
+    /// someone who never asked it (an app trusts `call.principal`).
+    /// Method: valid, an agent naming its owner; invalid, an agent naming
+    /// another person, another agent, or its own id; a person naming
+    /// anyone, themselves too; an agent with no owner.
+    #[test]
+    fn an_agent_names_only_its_own_owner_in_for() {
+        use IdentityKind::{Agent, Person};
+        assert_eq!(may_act_for(Agent, Some("npub1paul"), "npub1paul"), Ok(()), "its owner");
+        for named in ["npub1skyler", "npub1juniper", "npub1hand"] {
+            assert_eq!(may_act_for(Agent, Some("npub1paul"), named), Err(ForRefusal::NotItsOwner), "{named}: not its owner");
+        }
+        assert_eq!(may_act_for(Person, None, "npub1paul"), Err(ForRefusal::NotAnAgent), "a person acts as themselves");
+        assert_eq!(may_act_for(Person, Some("npub1paul"), "npub1paul"), Err(ForRefusal::NotAnAgent), "even with an owner field, a person names no one");
+        assert_eq!(may_act_for(Agent, None, "npub1paul"), Err(ForRefusal::NotAnAgent), "an agent with no owner acts as itself");
+        assert!(ForRefusal::NotItsOwner.message().contains("its own owner"), "the sharing lanes read this phrase");
     }
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {

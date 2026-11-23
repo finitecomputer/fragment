@@ -368,20 +368,20 @@ fn jobs(env: &JsValue) -> CellResult<JsValue> {
     binding(env, "JOBS", "workflows")
 }
 
-/// Starts a job's Workflow instance; an instance that already exists is
-/// left as it is, so starting twice is harmless.
-pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) -> CellResult<()> {
-    let item = Object::new();
-    set(&item, "id", id);
-    set(&item, "params", to_js(params));
-    await_js(call(&jobs(env)?, "createBatch", &[Array::of1(&item).into()]), "createBatch").await?;
+/// Starts jobs' Workflow instances, `(id, params)` each, in one
+/// `createBatch` (at most 100); an instance that already exists is left
+/// as it is, so starting twice is harmless.
+pub async fn jobs_create_batch(env: &JsValue, items: &[(&str, &serde_json::Value)]) -> CellResult<()> {
+    let batch = Array::new();
+    for (id, params) in items {
+        let item = Object::new();
+        set(&item, "id", *id);
+        set(&item, "params", to_js(params));
+        batch.push(&item);
+    }
+    await_js(call(&jobs(env)?, "createBatch", &[batch.into()]), "createBatch").await?;
     Ok(())
 }
-
-/// The Workflows binding rejects `get(id)` for an instance it has no
-/// record of with an Error whose message ends so (`WORKFLOW_ERROR:
-/// instance does not exist`).
-const NO_INSTANCE: &str = "instance does not exist";
 
 /// A Workflow instance's `status()`: `{status, error?, output?}`, or
 /// `None` when the binding has no such instance.
@@ -389,7 +389,7 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
     let binding = jobs(env).map_err(|e| e.message)?;
     let instance = match settle(call(&binding, "get", &[id.into()]).map_err(|e| js_message(&e))?).await {
         Ok(instance) => instance,
-        Err(e) if js_message(&e).ends_with(NO_INSTANCE) => return Ok(None),
+        Err(e) if fragment_core::steps::no_such_instance(&js_message(&e)) => return Ok(None),
         Err(e) => return Err(js_message(&e)),
     };
     let status = settle(call(&instance, "status", &[]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;

@@ -127,7 +127,7 @@ pub(crate) fn trip_spent(trip: Trip, url: &Url) -> String {
 
 /// A round trip coming back to the browser that began it: the only thing
 /// that finishes one. What finishes a round trip takes it by value
-/// (`calls::Exchange::of`, `computer::SignedIn::of`), never a state read
+/// (`calls::Exchange::of`, `vault::SignedIn::of`), never a state read
 /// from a URL. Its fields are private to this module, it is neither
 /// `Clone` nor `Deserialize`, and only `trip_bound` makes one, from the
 /// request's own cookie; xtask's `a_round_trip_is_bound_only_by_its_request`
@@ -398,8 +398,11 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
             &[set_cookie(SESSION_COOKIE, &token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)), spent],
         ),
         // WorkOS signed the browser in again as whoever it last was: that
-        // session ends there, and the next sign-in asks who is signing in
-        calls::Exchanged::Held { workos_sid } => redirect(&workos_logout(workos.api, &workos_sid, &cfg.platform()), &[spent]),
+        // session ends there, and the next sign-in asks who is signing in.
+        // The switch stays bound, unspent (`answered_from_held`): its page's
+        // Continue, pressed while this answer was under way, comes back with
+        // the same state.
+        calls::Exchanged::Held { workos_sid } => redirect(&workos_logout(workos.api, &workos_sid, &cfg.platform()), &[]),
     }
 }
 
