@@ -389,6 +389,24 @@ for (const how of ["on the same page", "after a reload"]) {
   });
 }
 
+// An agent.json already written is its own whatever it holds (here JSON
+// `null`, as one set up by hand may be): a making gone on with writes
+// neither it nor its job again.
+test("a making gone on with keeps an agent.json of null, and its job", async () => {
+  const world = platform();
+  const first = page(world);
+  await first.load();
+  world.cut(at(/\/agents\/wren--/, "PUT"));
+  await adding(first);
+  const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
+  world.files(wren).set("agent.json", "null");
+  world.files(wren).set("SOUL.md", "Its own job.\n");
+  await page(world).opened();
+  assert.equal(world.files(wren).get("agent.json"), "null", "its agent.json kept");
+  assert.equal(world.files(wren).get("SOUL.md"), "Its own job.\n", "its job kept");
+  assert.equal(world.tasks(wren)?.get("hello")?.chat, world.rows().find((f) => labelOf(f.name) === "wren-chat").name, "made whole: its hello in its chat");
+});
+
 // Its agent.json unread on the page opened next: no hello yet, never the
 // other one. In its chat already, its hello waits for a read that answers;
 // not yet in it, the making says what failed in its chat, and its Try again

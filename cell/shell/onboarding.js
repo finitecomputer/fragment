@@ -499,9 +499,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // making gone on with after a reload, by Add's or the first run's way
     // (a mover's first agent here), knows it only from here, and its hello
     // is still the move's.
-    const json = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).catch((e) => { if (e.status === 404) return null; throw e; });
-    if (json) {
-      if (json.from && !setup.from) setupChanged({ from: json.from });
+    // (any answer but 404 is written, whatever it holds)
+    const read = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then((json) => ({ json }), (e) => { if (e.status === 404) return null; throw e; });
+    if (read) {
+      if (read.json?.from && !setup.from) setupChanged({ from: read.json.from });
     } else {
       const owner = person().email || "your person";
       // what it runs on, as the bridge reads it (docs/bridge.md): Claude
