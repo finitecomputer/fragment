@@ -515,7 +515,7 @@ mod tests {
         let shown = |classes: &[String]| super::ahead(config.clone(), &cell, classes, saving).unwrap().into_iter().map(|(name, _, cache)| (name, cache.join(" "))).collect::<Vec<_>>();
         let (reads, writes) = (format!("--cache-from {gha}"), format!("--cache-from {gha} --cache-to {gha},mode=max,ignore-error=true"));
         let stubs = [("stub".to_string(), writes), ("stub-next".to_string(), reads)];
-        assert_eq!(shown(&[computers.clone()]), stubs, "no door's image for a run without its lane");
+        assert_eq!(shown(std::slice::from_ref(&computers)), stubs, "no door's image for a run without its lane");
         let with_door: Vec<_> = stubs.iter().cloned().chain([("door".to_string(), String::new())]).collect();
         assert_eq!(shown(&[computers.clone(), doors.clone()]), with_door, "the door's image for its lane's run, with no cache flags");
         assert!(shown(&[]).is_empty(), "no image for a run that makes no computer");
