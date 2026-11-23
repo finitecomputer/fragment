@@ -559,6 +559,18 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether a local stack builds the door's image: for a run that names
+    /// the door's lane alone (`Fleet::doors`).
+    fn builds_doors(&self) -> bool {
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME))
+    }
+
+    /// Whether the stack runs SimpleX doors: a deployment whose config names
+    /// them; a local one that builds their image (`builds_doors`).
+    pub fn runs_doors(&self) -> bool {
+        needs::missing(Need::Doors, self.rung).is_none() && (self.preview.is_some() || self.builds_doors())
+    }
+
     /// Whether the local node runs computers: wrangler's always, celld's on
     /// the krun engine alone (docs/self-host.md, seam 2).
     pub fn runs_computers(&self) -> bool {
@@ -932,7 +944,7 @@ impl Suite {
             images: vec![],
             computer_snapshots: false,
             // the door's image built only for a run that names its lane
-            doors: self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME)),
+            doors: self.builds_doors(),
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
