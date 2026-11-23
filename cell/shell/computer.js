@@ -74,7 +74,7 @@ export function platformImage(img, path) {
     .catch(() => img.remove?.());
 }
 
-export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
+export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, focusedNotice = () => null, clearFocusedNotice = () => {}, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
   // The person's computer, made once (making it again is the same one:
   // docs/api.md).
@@ -223,19 +223,24 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
   }
   // Each notice's secret field (`n.field`: a Vault ask's), by the notice's
-  // id: one input for as long as its notice shows, moved into each redraw
-  // of its row, so what the person pasted survives a redraw (a countdown's
-  // minute) and goes only with that notice's action that takes it. Masked,
-  // never read but by that action, and gone with its notice (or its field).
+  // id and what its action that takes it posts (a Vault ask's, the secret
+  // its card showed held): one input for as long as that card shows, moved
+  // into each redraw of its row, so what the person pasted survives a
+  // redraw (a countdown's minute) and goes only with that card's action.
+  // A card that says something new (a secret set meanwhile: its grant
+  // changed) is a new, empty field, never the paste meant for the last.
+  // Masked, never read but by that action, and gone with its card.
   const fields = new Map();
+  const fieldKey = (n) => `${n.id}\n${JSON.stringify((n.actions ?? []).find((x) => x.field)?.body ?? null)}`;
+  let autoFocused = null;
   function fieldOf(n) {
-    let input = fields.get(n.id);
+    let input = fields.get(fieldKey(n));
     if (!input) {
       input = el("input", "notice-field");
       Object.assign(input, { type: "password", value: "", autocomplete: "off", spellcheck: false, placeholder: n.field.placeholder ?? "" });
       input.setAttribute("aria-label", n.title);
       input.dataset.lpignore = "true";
-      fields.set(n.id, input);
+      fields.set(fieldKey(n), input);
     }
     input.disabled = pending.has(n.id);
     // Enter is the action that takes it (Save)
@@ -254,6 +259,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // the platform's own words small, and its actions, the first the main one.
   function noticeRow(n) {
     const row = el("div", n.level === "warn" ? "computer-notice warn" : "computer-notice");
+    if (focusedNotice() === n.id) row.classList.add("focused");
     row.dataset.kind = n.kind;
     row.dataset.id = n.id;
     const copy = el("div", "notice-copy");
@@ -331,7 +337,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (pending.has(n.id)) return;
     // an action that takes its notice's field sends what it holds as `value`
     // (a client of before posts none, and the server refuses the empty)
-    const input = a.field ? fields.get(n.id) : null;
+    const input = a.field ? fields.get(fieldKey(n)) : null;
     if (a.field && !input?.value.trim()) {
       failed.set(n.id, { said: "Paste it first.", refused: false, title: n.title, level: n.level });
       renderComputer();
@@ -353,6 +359,10 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // as a change told this page: only the cards whose rows it touched read again
     await load(true).catch(() => {});
     pending.delete(n.id);
+    if (focusedNotice() === n.id && !failed.has(n.id) && !(notices() ?? []).some((x) => x.id === n.id)) {
+      autoFocused = null;
+      clearFocusedNotice(true);
+    }
     // drawn again whatever the read came to (failed: as the last read said)
     renderComputer();
     if (typeof answer?.open === "string") openPage(answer.open);
@@ -441,12 +451,27 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
     const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
     // a field whose notice is not drawn goes, with whatever it held
-    for (const id of fields.keys()) if (!told.some((n) => n.id === id && n.field)) fields.delete(id);
+    for (const key of fields.keys()) if (!told.some((n) => n.field && fieldKey(n) === key)) fields.delete(key);
     // the field the person is typing in keeps their focus through the redraw
     const typing = [...fields.values()].find((i) => i === document.activeElement);
     const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
-    typing?.focus();
+    const want = focusedNotice();
+    if (typing) {
+      typing.focus();
+    } else if (want && autoFocused !== want) {
+      const target = rows.find((r) => r.dataset.id === want);
+      if (target) {
+        autoFocused = want;
+        target.scrollIntoView?.({ block: "nearest" });
+        const hit = target.querySelector("input") ?? target.querySelector("button");
+        hit?.focus?.();
+      }
+    }
+    if (want && !pending.has(want) && !told.some((n) => n.id === want)) {
+      autoFocused = null;
+      clearFocusedNotice(false);
+    }
     box.hidden = !rows.length;
     drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
     countdown();

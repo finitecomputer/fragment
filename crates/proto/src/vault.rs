@@ -90,9 +90,10 @@ pub struct SecretRemoved {
     pub removed: bool,
 }
 
-/// `POST /api/vault/asks`: an agent asks its person for a new secret. The
+/// `POST /api/vault/asks`: an agent asks its person for a secret. The
 /// person answers in a card the
-/// platform draws (a notice, `GET /api/notices`), never in a chat's
+/// platform draws (a notice, `GET /api/notices`, also reached directly at
+/// `SecretAsk.url`), never in a chat's
 /// records, so no agent, model or app ever reads what they paste.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -152,12 +153,28 @@ pub struct SecretAsk {
     pub state: AskState,
     /// When it expires unanswered, in ms since the epoch.
     pub expires_at: i64,
+    /// Platform-origin URL the person can open directly (`/vault/ask/{id}`)
+    /// to enter or approve this secret on the platform's own page.
+    pub url: String,
 }
 
-/// `POST /api/vault/asks/{id}`: the person's answer, what they pasted.
+/// `POST /api/vault/asks/{id}`: the person's answer — what they pasted for a
+/// new secret, or `allow: true` to share or widen a secret they already keep.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AnswerAsk {
-    pub value: String,
+    /// Which secret its card showed held under the ask's name (its
+    /// revision, `"none"` for none), as the card's action carries it: the
+    /// answer grants what the card said, or nothing (409).
+    pub held: String,
+    /// What the person pasted (required for a new secret; refused with `allow`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub value: Option<String>,
+    /// True on an Allow card for an existing secret: keeps its sealed value
+    /// and place, adds the asking agent, and unions any asked hosts.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub allow: bool,
 }

@@ -1702,6 +1702,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    secrets_ui(s, api, &mut b, &page, &session)?;
     settings_race_ui(s, api, &mut b, &page, &session)?;
     settings_read_again_ui(s, &mut b, &page)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
@@ -4602,6 +4603,103 @@ fn stale_read_after_a_press_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: 
 }
 
 /// The Connections page in settings (decisions 22, 37 and 44): every
+/// Settings → Secrets: add a Vault secret via masked input, edit its hosts
+/// without changing its value, replace its value, and remove it via two-step
+/// confirmation — never exposing any secret value in the page or API.
+fn secrets_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let ready = b.until(page, "!!document.querySelector('#settings-secrets [data-action=add-secret]')", wait);
+    // Add a new secret through the modal form
+    b.click(page, "#settings-secrets [data-action=add-secret]")?;
+    let opened = b.until(page, "!!document.querySelector('#settings-secrets dialog[data-add-secret][open]')", wait);
+    b.eval(
+        page,
+        r#"(() => {
+            const d = document.querySelector('#settings-secrets dialog[data-add-secret][open]');
+            d.querySelector('[data-field=name]').value = 'e2e-ui-secret';
+            d.querySelector('[data-field=value]').value = 'tok_ui_secret_111';
+            d.querySelector('[data-field=hosts]').value = 'api.ui.test';
+            d.querySelector('form').requestSubmit();
+            return true;
+        })()"#,
+    )?;
+    let card_shown = b.until(page, "!!document.querySelector('#settings-secrets [data-secret=\"e2e-ui-secret\"]')", wait);
+    let leaked_add = b.eval(page, "document.getElementById('settings-secrets').innerText.includes('tok_ui_secret_111')")?;
+    let after_add = shell(api, session, "GET", "/api/vault", None, &[])?;
+    let added = after_add.body["secrets"].as_array().and_then(|l| l.iter().find(|x| x["name"] == "e2e-ui-secret").cloned()).unwrap_or_default();
+    let set_at_1 = added["setAt"].as_i64();
+    s.ok(
+        "Settings → Secrets adds a Vault secret via masked input and shows its card without ever showing its value",
+        ready && opened && card_shown && leaked_add == false && added["hosts"] == json!(["api.ui.test"]) && !after_add.text.contains("tok_ui_secret_111"),
+        json!({ "ready": ready, "opened": opened, "card": card_shown, "leaked": leaked_add, "added": added }),
+    );
+
+    // Open its detail sheet, widen hosts (keeping sealed value), and replace its value
+    sheet_of(b, page, "#settings-secrets [data-secret=\"e2e-ui-secret\"]")?;
+    b.eval(
+        page,
+        r#"(() => {
+            const d = document.querySelector('#settings-secrets dialog[data-secret-sheet="e2e-ui-secret"][open]');
+            d.querySelector('.secret-hosts-form input').value = 'api.ui.test, uploads.ui.test';
+            d.querySelector('.secret-hosts-form').requestSubmit();
+            return true;
+        })()"#,
+    )?;
+    let hosts_updated = b.until(
+        page,
+        "document.querySelector('#settings-secrets [data-secret=\"e2e-ui-secret\"] .provider-sub')?.textContent?.includes('uploads.ui.test') ?? false",
+        wait,
+    );
+    let after_hosts = shell(api, session, "GET", "/api/vault", None, &[])?;
+    let kept = after_hosts.body["secrets"].as_array().and_then(|l| l.iter().find(|x| x["name"] == "e2e-ui-secret").cloned()).unwrap_or_default();
+
+    // Wait for detail sheet to re-open after reload, then replace value
+    let sheet_back = b.until(page, "!!document.querySelector('#settings-secrets dialog[data-secret-sheet=\"e2e-ui-secret\"][open]')", wait);
+    b.eval(
+        page,
+        r#"(() => {
+            const d = document.querySelector('#settings-secrets dialog[data-secret-sheet="e2e-ui-secret"][open]');
+            d.querySelector('.secret-replace-form input').value = 'tok_ui_secret_222';
+            d.querySelector('.secret-replace-form').requestSubmit();
+            return true;
+        })()"#,
+    )?;
+    let replaced_ok = b.until(
+        page,
+        "document.querySelector('#settings-secrets dialog[data-secret-sheet=\"e2e-ui-secret\"] .secret-replace-form input')?.value === ''",
+        wait,
+    );
+    let sheet_again = b.until(page, "!!document.querySelector('#settings-secrets dialog[data-secret-sheet=\"e2e-ui-secret\"][open]')", wait);
+    let after_replace = shell(api, session, "GET", "/api/vault", None, &[])?;
+    let rotated = after_replace.body["secrets"].as_array().and_then(|l| l.iter().find(|x| x["name"] == "e2e-ui-secret").cloned()).unwrap_or_default();
+    let leaked_rot = b.eval(page, "document.getElementById('settings-secrets').innerText.includes('tok_ui_secret_222')")?;
+    s.ok(
+        "Settings → Secrets edits allowed hosts without changing the value, and replaces a value through a masked input that clears",
+        hosts_updated
+            && kept["hosts"] == json!(["api.ui.test", "uploads.ui.test"])
+            && kept["setAt"].as_i64() == set_at_1
+            && sheet_back
+            && replaced_ok
+            && sheet_again
+            && rotated["setAt"].as_i64().zip(set_at_1).is_some_and(|(a, b)| a >= b)
+            && leaked_rot == false,
+        json!({ "hosts": hosts_updated, "kept": kept, "rotated": rotated, "sheetBack": sheet_back, "sheetAgain": sheet_again }),
+    );
+
+    // Two-step remove
+    b.click(page, "#settings-secrets dialog[data-secret-sheet=\"e2e-ui-secret\"][open] [data-action=remove-secret]")?;
+    let confirm_shown = b.until(page, "!!document.querySelector('#settings-secrets dialog[data-secret-sheet=\"e2e-ui-secret\"][open] [data-action=confirm-remove-secret]')", wait);
+    b.click(page, "#settings-secrets dialog[data-secret-sheet=\"e2e-ui-secret\"][open] [data-action=confirm-remove-secret]")?;
+    let removed = b.until(page, "!document.querySelector('#settings-secrets [data-secret=\"e2e-ui-secret\"]')", wait);
+    let after_rm = shell(api, session, "GET", "/api/vault", None, &[])?;
+    s.ok(
+        "Settings → Secrets removes a secret after two-step confirmation",
+        confirm_shown && removed && !after_rm.text.contains("e2e-ui-secret"),
+        json!({ "confirm": confirm_shown, "removed": removed, "vault": after_rm.body }),
+    );
+    Ok(())
+}
+
 /// provider the deployment offers, one row each, with its kind, the
 /// person's state there, which agents may use it (and a press that narrows
 /// one), and this month's calls by agent with an operator key's cost. The

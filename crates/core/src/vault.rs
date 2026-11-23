@@ -9,7 +9,7 @@
 //! keeping the one it holds where that value means the same (`kept`).
 
 use fragment_proto::notice::{Notice, NoticeAction, NoticeField, NoticeLevel, Until};
-use fragment_proto::vault::{AskSecret, Place, PutSecret};
+use fragment_proto::vault::{AnswerAsk, AskSecret, Place, PutSecret, Secret};
 
 use crate::catalog::{self, Catalog, Half, Placement};
 
@@ -336,49 +336,159 @@ pub fn ask_ok(ask: &AskSecret, catalog: &Catalog) -> Result<(), VaultError> {
     Ok(())
 }
 
-/// What `agent`'s ask puts in its person's Vault as they answer it with
-/// `value` (what they pasted, trimmed as a paste ends): a new secret,
-/// toward the hosts asked, in the default place, for `agent` alone, held to
-/// the Vault's own rules (`check`). It is only ever a new one: the Vault
-/// refuses an answer whose name its person keeps already.
-pub fn answered(ask: &AskSecret, agent: &str, value: &str) -> Result<PutSecret, VaultError> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(VaultError::Ask("paste the secret first".into()));
-    }
-    let mut hosts = ask.hosts.clone();
-    hosts.sort();
-    hosts.dedup();
-    Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()] })
+/// Whether `id` has a Vault ask id's form: 32 lower-case hex characters.
+pub fn ask_id_ok(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// An ask on its person's card (`GET /api/notices`): `agent` is what they
-/// call the agent (its title, else its label), `picture` its face. Its
-/// words say which hosts would receive the secret itself (the agent chose
-/// them: its person judges them) and that the agent never sees it,
-/// with the field and Save; or, where they keep one of its name already
-/// (`held`), that an ask never replaces it, with Decline alone.
-pub fn ask_notice(id: &str, ask: &AskSecret, agent: &str, picture: Option<String>, expires_at: i64, held: bool) -> Notice {
+/// The platform-origin URL where the person can open a Vault ask directly
+/// (`/vault/ask/{id}`), reachable from any chat bridge (Telegram, SimpleX).
+pub fn ask_url(platform: &str, id: &str) -> String {
+    format!("{}/vault/ask/{id}", platform.trim_end_matches('/'))
+}
+
+fn join_unique(base: &[String], extra: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(base.len() + extra.len());
+    out.extend(base.iter().cloned());
+    out.extend(extra.iter().cloned());
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What `agent`'s ask puts in its person's Vault as they answer it:
+/// - when `held` is `None`: a new secret with the pasted value (`!allow`),
+///   toward the hosts asked, in the default place, for `agent` alone;
+/// - when `held` is `Some(h)`: an Allow (`allow: true`, no value) keeping
+///   the existing sealed value and place, adding `agent`, and unioning any
+///   asked hosts (checked against `HOSTS_MAX` and `AGENTS_MAX`).
+///
+/// An ask never overwrites an existing secret's value.
+pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &AnswerAsk) -> Result<PutSecret, VaultError> {
+    match held {
+        None => {
+            if answer.allow {
+                return Err(VaultError::Ask(format!("{} is not in your vault yet: paste its value to save it", ask.name)));
+            }
+            let value = answer.value.as_deref().map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| VaultError::Ask("paste the secret first".into()))?;
+            let hosts = join_unique(&[], &ask.hosts);
+            Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()] })
+        }
+        Some(h) => {
+            if !answer.allow {
+                return Err(VaultError::Ask(format!("you already keep {}: allow it to keep its saved value, or replace it in Settings → Secrets", ask.name)));
+            }
+            if answer.value.is_some() {
+                return Err(VaultError::Ask("Allow keeps the saved secret: it takes no value".into()));
+            }
+            let hosts = join_unique(&h.hosts, &ask.hosts);
+            if hosts.len() > HOSTS_MAX {
+                return Err(VaultError::Hosts(format!("at most {HOSTS_MAX}, not {}", hosts.len())));
+            }
+            let agents = join_unique(&h.agents, &[agent.to_string()]);
+            if agents.len() > AGENTS_MAX {
+                return Err(VaultError::Agents(format!("at most {AGENTS_MAX}, not {}", agents.len())));
+            }
+            Ok(PutSecret { value: None, hosts, place: h.place.clone(), agents })
+        }
+    }
+}
+
+/// An ask on its person's card (`GET /api/notices`): `agent_fragment` is the
+/// asking agent's fragment name, `agent` is what its person calls it (its
+/// title, else its label), `picture` its face, and `held` is the secret
+/// currently kept under `ask.name` beside its revision (`"none"` if none).
+/// - For a new secret (`None`): shows the masked field, Save (carrying
+///   `{ held }`), and Decline.
+/// - For an existing secret (`Some`): shows no field — offers Allow
+///   (carrying `{ allow: true, held }`) and Decline, keeping the sealed
+///   value intact while clearly calling out any new hosts or shared agents
+///   (or Decline alone if the union would exceed host/agent limits).
+pub fn ask_notice(
+    id: &str,
+    ask: &AskSecret,
+    agent_fragment: &str,
+    agent: &str,
+    picture: Option<String>,
+    expires_at: i64,
+    held: (Option<&Secret>, &str),
+) -> Notice {
     let route = format!("/api/vault/asks/{id}");
     let decline = NoticeAction::post("Decline", format!("{route}/decline"), serde_json::json!({}));
-    let (detail, field, actions) = if held {
-        (format!("You keep a {} already, and an ask never replaces one: decline it, and ask {agent} to name it otherwise.", ask.name), None, vec![decline])
-    } else {
-        let goes = match ask.hosts.is_empty() {
-            true => format!("It goes nowhere until you say where, and {agent} never sees it."),
-            false => format!("Only {} would receive it. {agent} gets a stand-in to send there, never the secret itself.", ask.hosts.join(", ")),
-        };
-        (
-            goes,
-            Some(NoticeField { placeholder: "Paste it here".into() }),
-            vec![NoticeAction::post_field("Save", route, serde_json::json!({})), decline],
-        )
+    let (title, detail, field, actions) = match held {
+        (None, revision) => {
+            let goes = match ask.hosts.is_empty() {
+                true => format!("It goes nowhere until you say where, and {agent} never sees it."),
+                false => format!("Only {} would receive it. {agent} gets a stand-in to send there, never the secret itself.", ask.hosts.join(", ")),
+            };
+            (
+                format!("{agent} asks for {}", ask.name),
+                goes,
+                Some(NoticeField { placeholder: "Paste it here".into() }),
+                vec![NoticeAction::post_field("Save", route, serde_json::json!({ "held": revision })), decline],
+            )
+        }
+        (Some(secret), revision) => {
+            let already_agent = secret.agents.iter().any(|a| a == agent_fragment);
+            let other_agents = secret.agents.iter().any(|a| a != agent_fragment);
+            let all_hosts = join_unique(&secret.hosts, &ask.hosts);
+            let new_hosts: Vec<String> = all_hosts.iter().filter(|h| !secret.hosts.contains(*h)).cloned().collect();
+            let all_agents_len = secret.agents.len() + usize::from(!already_agent);
+            if all_hosts.len() > HOSTS_MAX {
+                (
+                    format!("{agent} asks to use {}", ask.name),
+                    format!("You already keep {}, and adding {} would exceed the {HOSTS_MAX}-host limit. Decline it, or edit {} in Settings → Secrets.", ask.name, new_hosts.join(", "), ask.name),
+                    None,
+                    vec![decline],
+                )
+            } else if all_agents_len > AGENTS_MAX {
+                (
+                    format!("{agent} asks to use {}", ask.name),
+                    format!("You already keep {}, and it is already shared with the maximum {AGENTS_MAX} agents. Decline it, or edit {} in Settings → Secrets.", ask.name, ask.name),
+                    None,
+                    vec![decline],
+                )
+            } else {
+                let allow = NoticeAction::post("Allow", route, serde_json::json!({ "allow": true, "held": revision }));
+                let other_note = if other_agents { " Your other agents that use it can send there too." } else { "" };
+                let (title, detail) = match (already_agent, new_hosts.is_empty()) {
+                    (false, true) => {
+                        let detail = if secret.hosts.is_empty() {
+                            format!("You already keep {} (parked — sent nowhere yet). Allowing shares it with {agent}, still sent nowhere until you add a host in Settings → Secrets.", ask.name)
+                        } else {
+                            format!("You already keep {} for {}. Allowing shares that saved secret with {agent}; it gets a stand-in, never the secret itself.", ask.name, secret.hosts.join(", "))
+                        };
+                        (format!("{agent} asks to use {}", ask.name), detail)
+                    }
+                    (false, false) => (
+                        format!("{agent} asks to use {}", ask.name),
+                        format!("You already keep {}. Allowing shares it with {agent} and also sends it to {} (all hosts: {}).{other_note} {agent} gets a stand-in, never the secret itself.", ask.name, new_hosts.join(", "), all_hosts.join(", ")),
+                    ),
+                    (true, false) => (
+                        format!("{agent} asks to use {} somewhere new", ask.name),
+                        format!("Adds {} to the {} you already keep (all hosts: {}).{other_note} {agent} still gets only a stand-in, never the secret itself.", new_hosts.join(", "), ask.name, all_hosts.join(", ")),
+                    ),
+                    (true, true) => {
+                        let where_part = if secret.hosts.is_empty() {
+                            " (parked — sent nowhere yet)".to_string()
+                        } else {
+                            format!(" for {}", secret.hosts.join(", "))
+                        };
+                        (
+                            format!("{agent} asks for {}", ask.name),
+                            format!("You already share {} with {agent}{where_part}. Allowing confirms access without changing the saved value (edit or replace it in Settings → Secrets).", ask.name),
+                        )
+                    }
+                };
+                (title, detail, None, vec![allow, decline])
+            }
+        }
     };
     Notice {
         id: format!("vault_ask:{id}"),
         kind: "vault_ask".into(),
         level: NoticeLevel::Info,
-        title: format!("{agent} asks for {}", ask.name),
+        title,
         text: Some(ask.why.trim().to_string()),
         detail: Some(detail),
         until: Some(Until { at: expires_at, said: "Expires".into() }),
@@ -676,38 +786,127 @@ mod tests {
         assert!(ask_ok(&ask("github", &"é".repeat(WHY_MAX_CHARS), &[]), &catalog()).is_ok(), "counted in characters, not bytes");
     }
 
-    /// Goal: an answer makes a new secret, for the asking agent alone,
-    /// toward the hosts asked, and passes the Vault's own rules; it needs a
-    /// paste. Method: a paste, and blank ones.
-    #[test]
-    fn an_answer_makes_a_new_secret_for_its_agent_alone() {
-        let new = answered(&ask("github", "push", &["uploads.github.com", "api.github.com"]), AGENT, " ghp_abc \n").expect("answered");
-        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into(), "uploads.github.com".into()], place: Place::default(), agents: vec![AGENT.into()] }, "trimmed as a paste ends");
-        assert!(check("github", &new, None, &catalog()).is_ok());
-        for blank in ["", "  \n"] {
-            assert!(matches!(answered(&ask("github", "push", &[]), AGENT, blank), Err(VaultError::Ask(_))), "{blank:?}");
+    fn held(hosts: &[&str], place: Place, agents: &[&str]) -> Secret {
+        Secret {
+            name: "github".into(),
+            hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            place,
+            agents: agents.iter().map(|a| a.to_string()).collect(),
+            set_at: 1,
         }
     }
 
-    /// Goal: the card says who asks, why, where it goes, and that the
-    /// agent never sees it, with the field its Save sends; for a name its
-    /// person keeps already, that an ask never replaces it, with Decline
-    /// alone. Method: both, on the wire.
     #[test]
-    fn the_card_says_who_why_where_and_carries_the_field() {
+    fn ask_id_and_url_follow_their_forms() {
         let id = "0123456789abcdef0123456789abcdef";
-        let n = ask_notice(id, &ask("github", "To push your shop's code", &["api.github.com"]), "Juniper", Some("/p".into()), 9, false);
+        assert!(ask_id_ok(id));
+        for bad in ["", "0123", &"A".repeat(32), &"g".repeat(32), "../0123456789abcdef0123456789abc"] {
+            assert!(!ask_id_ok(bad), "{bad:?}");
+        }
+        assert_eq!(ask_url("https://finite.chat/", id), format!("https://finite.chat/vault/ask/{id}"));
+        assert_eq!(ask_url("https://finite.chat", id), format!("https://finite.chat/vault/ask/{id}"));
+    }
+
+    /// Goal: an answer makes a new secret for the asking agent alone when none
+    /// is held, and an Allow for an existing secret keeps its sealed value and
+    /// place while adding the asking agent and unioning hosts. Method: new,
+    /// shared to second agent, widened with new host, and every invalid mix.
+    #[test]
+    fn an_answer_makes_a_new_secret_or_allows_an_existing_one_without_overwriting() {
+        let new_ans = AnswerAsk { held: "none".into(), value: Some(" ghp_abc \n".into()), allow: false };
+        let new = answered(&ask("github", "push", &["uploads.github.com", "api.github.com"]), AGENT, None, &new_ans).expect("answered");
+        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into(), "uploads.github.com".into()], place: Place::default(), agents: vec![AGENT.into()] }, "trimmed as a paste ends");
+        assert!(check("github", &new, None, &catalog()).is_ok());
+
+        for blank in [None, Some(String::new()), Some("  \n".into())] {
+            let bad = AnswerAsk { held: "none".into(), value: blank.clone(), allow: false };
+            assert!(matches!(answered(&ask("github", "push", &[]), AGENT, None, &bad), Err(VaultError::Ask(_))), "{blank:?}");
+        }
+        assert!(matches!(
+            answered(&ask("github", "push", &[]), AGENT, None, &AnswerAsk { held: "none".into(), value: None, allow: true }),
+            Err(VaultError::Ask(_))
+        ), "cannot Allow when no secret exists");
+
+        // existing secret: second agent allowed, keeping value & place, adding agent & unioning hosts
+        let custom_place = Place { header: Some("x-token".into()), format: Some("Token {}".into()), ..Place::default() };
+        let existing = held(&["api.github.com"], custom_place.clone(), &[AGENT]);
+        let allow_ans = AnswerAsk { held: "rev1".into(), value: None, allow: true };
+        let shared = answered(&ask("github", "upload", &["uploads.github.com"]), "bea--k3x9", Some(&existing), &allow_ans).expect("allowed");
+        assert_eq!(shared, PutSecret {
+            value: None,
+            hosts: vec!["api.github.com".into(), "uploads.github.com".into()],
+            place: custom_place.clone(),
+            agents: vec![AGENT.into(), "bea--k3x9".into()],
+        });
+        assert!(check("github", &shared, Some(&existing.place), &catalog()).is_ok());
+
+        // existing secret: refuses overwrite (allow: false) or value on Allow
+        assert!(matches!(
+            answered(&ask("github", "rotate", &[]), AGENT, Some(&existing), &AnswerAsk { held: "rev1".into(), value: Some("new_val".into()), allow: false }),
+            Err(VaultError::Ask(_))
+        ));
+        assert!(matches!(
+            answered(&ask("github", "share", &[]), "bea--k3x9", Some(&existing), &AnswerAsk { held: "rev1".into(), value: Some("new_val".into()), allow: true }),
+            Err(VaultError::Ask(_))
+        ));
+        // exceeding host cap on union is refused
+        let eight = held(&["a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com", "f.example.com", "g.example.com", "h.example.com"], Place::default(), &[AGENT]);
+        assert!(matches!(
+            answered(&ask("github", "more", &["i.example.com"]), "bea--k3x9", Some(&eight), &allow_ans),
+            Err(VaultError::Hosts(_))
+        ));
+    }
+
+    /// Goal: the card says who asks, why, where it goes, and that the
+    /// agent never sees it: Save + masked field for a new secret, and
+    /// Allow + Decline (no field, carrying held revision) when the secret
+    /// already exists (sharing to another agent, widening hosts, or
+    /// confirming existing access). Method: every card variant on the wire.
+    #[test]
+    fn the_card_says_who_why_where_and_carries_the_field_or_allow() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let n = ask_notice(id, &ask("github", "To push your shop's code", &["api.github.com"]), AGENT, "Juniper", Some("/p".into()), 9, (None, "none"));
         assert_eq!(n.title, "Juniper asks for github");
         assert_eq!(n.text.as_deref(), Some("To push your shop's code"));
         assert_eq!(n.detail.as_deref(), Some("Only api.github.com would receive it. Juniper gets a stand-in to send there, never the secret itself."));
         assert_eq!(n.until, Some(Until { at: 9, said: "Expires".into() }));
+        assert_eq!(n.actions[0].body, Some(serde_json::json!({ "held": "none" })));
         assert!(n.field.is_some() && n.actions[0].field && n.actions[0].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef"));
         assert!(!n.actions[1].field && n.actions[1].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef/decline"));
-        let parked = ask_notice(id, &ask("github", "Kept for later", &[]), "Juniper", None, 9, false);
+
+        let parked = ask_notice(id, &ask("github", "Kept for later", &[]), AGENT, "Juniper", None, 9, (None, "none"));
         assert_eq!(parked.detail.as_deref(), Some("It goes nowhere until you say where, and Juniper never sees it."));
-        let held = ask_notice(id, &ask("github", "Rotate", &[]), "Juniper", None, 9, true);
-        assert!(held.field.is_none() && held.actions.len() == 1 && held.actions[0].label == "Decline", "{held:?}");
-        assert!(held.detail.as_deref().is_some_and(|d| d.contains("never replaces")), "{:?}", held.detail);
+
+        // Another agent asking for an existing secret (same hosts): Allow + Decline, no field
+        let existing = held(&["api.github.com"], Place::default(), &[AGENT]);
+        let share = ask_notice(id, &ask("github", "Review PRs", &["api.github.com"]), "bea--k3x9", "Bea", None, 9, (Some(&existing), "rev1"));
+        assert_eq!(share.title, "Bea asks to use github");
+        assert!(share.field.is_none());
+        assert_eq!(share.actions.len(), 2);
+        assert_eq!(share.actions[0].label, "Allow");
+        assert!(!share.actions[0].field);
+        assert_eq!(share.actions[0].body, Some(serde_json::json!({ "allow": true, "held": "rev1" })));
+        assert_eq!(share.actions[1].label, "Decline");
+        assert!(share.detail.as_deref().is_some_and(|d| d.contains("shares that saved secret with Bea") && d.contains("api.github.com")), "{:?}", share.detail);
+
+        // Another agent asking for an existing secret + new host: calls out new host & other agents
+        let widen = ask_notice(id, &ask("github", "Upload release", &["uploads.github.com"]), "bea--k3x9", "Bea", None, 9, (Some(&existing), "rev1"));
+        assert!(widen.detail.as_deref().is_some_and(|d| d.contains("uploads.github.com") && d.contains("Your other agents that use it can send there too")), "{:?}", widen.detail);
+
+        // Same agent asking to widen hosts
+        let same_widen = ask_notice(id, &ask("github", "Upload release", &["uploads.github.com"]), AGENT, "Juniper", None, 9, (Some(&existing), "rev1"));
+        assert_eq!(same_widen.title, "Juniper asks to use github somewhere new");
+        assert_eq!(same_widen.actions[0].label, "Allow");
+
+        // Same agent already has secret and host: Allow confirms without replacing
+        let same_have = ask_notice(id, &ask("github", "Need token", &["api.github.com"]), AGENT, "Juniper", None, 9, (Some(&existing), "rev1"));
+        assert!(same_have.field.is_none() && same_have.actions[0].label == "Allow");
+        assert!(same_have.detail.as_deref().is_some_and(|d| d.contains("Settings → Secrets")), "{:?}", same_have.detail);
+
+        // Host cap exceeded: Decline alone
+        let eight = held(&["a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com", "f.example.com", "g.example.com", "h.example.com"], Place::default(), &[AGENT]);
+        let capped = ask_notice(id, &ask("github", "One more", &["i.example.com"]), "bea--k3x9", "Bea", None, 9, (Some(&eight), "rev8"));
+        assert!(capped.field.is_none() && capped.actions.len() == 1 && capped.actions[0].label == "Decline");
     }
 
     #[test]

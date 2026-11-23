@@ -117,7 +117,8 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
     format!("'self' {platform} {scheme}://*.{}{port}", cfg.host_suffix)
 }
 
-/// `GET /`, `GET /settings`, `GET /apps`, `GET /brains`, `GET /history`, `GET /welcome` and `GET /move`:
+/// `GET /`, `GET /settings`, `GET /apps`, `GET /brains`, `GET /history`,
+/// `GET /welcome`, `GET /move`, and `GET /vault/ask/<id>`:
 /// the shell's page, for anyone (signed out, it asks them to sign in; the
 /// shell opens the view its path names), naming the release that answers
 /// it and when it was deployed (`fragment_templates::shell_page`): its

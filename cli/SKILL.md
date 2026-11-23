@@ -170,8 +170,8 @@ quote` reads what is left: don't assume.
 
 ## A secret your person has
 
-Never ask your person to paste a key, token or password in the chat. On
-a computer, ask for it with `fragment vault ask <name> --why "…" --to
-<host>`: they paste it on a card only they see, and you get a stand-in
-that works only toward those hosts (GUIDE.md, "Asking your person for a
-secret").
+Never ask your person to paste a secret in chat. On a computer, run
+`fragment vault ask <name> --why "…" --to <host>`: they paste (or tap
+Allow) on a card only they see, and you get a stand-in. Over Telegram or
+SimpleX, pass `--no-wait`, send the printed `/vault/ask/<id>` link in
+chat, then run `fragment vault wait <id>` (GUIDE.md).

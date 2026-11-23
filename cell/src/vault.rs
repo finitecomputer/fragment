@@ -365,7 +365,7 @@ struct AskedBy(String);
 /// An ask's id: 32 lower-case hex, refused (404) before any route is
 /// built from it.
 fn ask_id(id: &str) -> CellResult<&str> {
-    match id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    match rules::ask_id_ok(id) {
         true => Ok(id),
         false => Err(CellError::new(ErrorCode::NotFound, format!("{id:?} is no ask"))),
     }
@@ -917,9 +917,14 @@ impl VaultCell {
         Ok(())
     }
 
-    /// The secret held under `name`, as its person reads it.
-    fn held(&self, name: &str) -> CellResult<Option<Secret>> {
-        self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?.first().map(stored).transpose()
+    /// The secret held under `name` and which one it is: its revision, the
+    /// SHA-256 of its seal and what it says together (a new value or a
+    /// change to its hosts, place or agents changes it), `"none"` for none.
+    fn held_at(&self, name: &str) -> CellResult<(Option<Secret>, String)> {
+        let rows = self.rows("SELECT sealed, secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        let Some(row) = rows.first() else { return Ok((None, "none".into())) };
+        let revision = revision_of(&format!("{}\n{}", row["sealed"].as_str().unwrap_or_default(), row["secret"].as_str().unwrap_or_default()));
+        Ok((Some(stored(row)?), revision))
     }
 
     /// The ask `id`, if one is kept: its agent, what it asks, its expiry
@@ -933,9 +938,10 @@ impl VaultCell {
         Ok(Some((asked, row["expires"].as_i64().unwrap_or(0), state)))
     }
 
-    /// `SecretAsk`'s JSON.
-    fn ask_text(id: &str, name: &str, state: AskState, expires_at: i64) -> CellResult<String> {
-        serde_json::to_string(&SecretAsk { id: id.to_string(), name: name.to_string(), state, expires_at }).map_err(|e| CellError::host(e.to_string()))
+    /// `SecretAsk`'s JSON, with its platform-origin deep link (`url`).
+    fn ask_text(&self, id: &str, name: &str, state: AskState, expires_at: i64) -> CellResult<String> {
+        let url = rules::ask_url(&self.cfg.platform(), id);
+        serde_json::to_string(&SecretAsk { id: id.to_string(), name: name.to_string(), state, expires_at, url }).map_err(|e| CellError::host(e.to_string()))
     }
 
     /// An agent's ask, kept to wait on its person's card: checked as its
@@ -973,49 +979,52 @@ impl VaultCell {
             "INSERT INTO asks (id, ask, at, expires, state) VALUES (?, ?, ?, ?, 'waiting')",
             vec![id.as_str().into(), text.as_str().into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(expires)],
         )?;
-        Self::ask_text(&id, &a.name, AskState::Waiting, expires)
+        self.ask_text(&id, &a.name, AskState::Waiting, expires)
     }
 
     /// The ask `id` as `agent`, who made it, reads it; anyone else's is none.
     fn asked(&self, id: &str, agent: &str) -> CellResult<String> {
         match self.ask_row(id)? {
-            Some((Asked(by, _, _, a), expires, state)) if by == agent => Self::ask_text(id, &a.name, state, expires),
+            Some((Asked(by, _, _, a), expires, state)) if by == agent => self.ask_text(id, &a.name, state, expires),
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no ask {id} of {agent}'s"))),
         }
     }
 
-    /// Its person's answer to the ask `id`: what they pasted, put as a new
-    /// secret under the Vault's own rules (`rules::answered`, then `put`),
-    /// and the ask saved. One that ended, or whose name they keep already
-    /// (an ask never replaces a secret), is refused (409), and a put refused
-    /// leaves it waiting, its card saying why. The put's seal may yield, so
-    /// both are checked again in the turn that writes (a Decline, an expiry,
-    /// an ask again, another answer or a secret set meanwhile: 409, nothing
-    /// written).
+    /// Its person's answer to the ask `id`: what they pasted (new secret)
+    /// or Allow (existing secret, keeping its sealed value), put under the
+    /// Vault's own rules (`rules::answered`, then `put`), and the ask saved.
+    /// One that ended or whose secret changed since the card showed it is
+    /// refused (409), and a put refused leaves it waiting, its card saying
+    /// why. The put's seal may yield, so both the ask still waiting and the
+    /// held revision are checked again in the turn that writes (a Decline,
+    /// an expiry, an ask again, another answer or a secret edit meanwhile:
+    /// 409, nothing written).
     async fn answer(&self, id: &str, a: AnswerAsk) -> CellResult<String> {
         let ended = |state: AskState| CellError::new(ErrorCode::Conflict, format!("this ask is {}: ask your agent to ask again", state.name()));
         let (Asked(agent, _, _, ask), expires, state) = self.ask_row(id)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no ask {id}")))?;
         if state != AskState::Waiting {
             return Err(ended(state));
         }
-        let free = || -> CellResult<()> {
-            match self.held(&ask.name)? {
-                None => Ok(()),
-                Some(_) => Err(CellError::new(ErrorCode::Conflict, format!("you keep a {} already, and an ask never replaces one: decline it", ask.name))),
-            }
-        };
-        free()?;
-        let put = rules::answered(&ask, &agent, &a.value).map_err(|e| CellError::invalid(e.to_string()))?;
+        let changed = || CellError::new(ErrorCode::Conflict, format!("{} changed since its card showed it: look at the card again", ask.name));
+        let (held, revision) = self.held_at(&ask.name)?;
+        if a.held != revision {
+            return Err(changed());
+        }
+        let put = rules::answered(&ask, &agent, held.as_ref(), &a).map_err(|e| CellError::invalid(e.to_string()))?;
         let still = || -> CellResult<()> {
             match self.ask_row(id)? {
-                Some((_, _, AskState::Waiting)) => free(),
-                Some((_, _, state)) => Err(ended(state)),
-                None => Err(CellError::new(ErrorCode::NotFound, format!("no ask {id}"))),
+                Some((_, _, AskState::Waiting)) => {}
+                Some((_, _, state)) => return Err(ended(state)),
+                None => return Err(CellError::new(ErrorCode::NotFound, format!("no ask {id}"))),
+            }
+            match self.held_at(&ask.name)?.1 == revision {
+                true => Ok(()),
+                false => Err(changed()),
             }
         };
         self.put(&ask.name, &put, None, Some(&still)).await?;
         self.sql().exec("UPDATE asks SET state = 'saved' WHERE id = ?", vec![id.into()])?;
-        Self::ask_text(id, &ask.name, AskState::Saved, expires)
+        self.ask_text(id, &ask.name, AskState::Saved, expires)
     }
 
     /// Its person's Decline of the ask `id`; again, or
@@ -1023,10 +1032,10 @@ impl VaultCell {
     fn decline(&self, id: &str) -> CellResult<String> {
         let (Asked(_, _, _, ask), expires, state) = self.ask_row(id)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no ask {id}")))?;
         if state != AskState::Waiting {
-            return Self::ask_text(id, &ask.name, state, expires);
+            return self.ask_text(id, &ask.name, state, expires);
         }
         self.sql().exec("UPDATE asks SET state = 'declined' WHERE id = ?", vec![id.into()])?;
-        Self::ask_text(id, &ask.name, AskState::Declined, expires)
+        self.ask_text(id, &ask.name, AskState::Declined, expires)
     }
 
     /// The asks still waiting, oldest first, each its card: `NoticeList`'s
@@ -1036,9 +1045,9 @@ impl VaultCell {
         let rows = self.rows("SELECT id, ask, expires FROM asks WHERE state = 'waiting' AND expires > ? ORDER BY at", vec![SqlStorageValue::Integer(now)])?;
         let mut notices = Vec::with_capacity(rows.len());
         for row in rows {
-            let Asked(_, title, picture, ask) = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
-            let held = self.held(&ask.name)?.is_some();
-            notices.push(rules::ask_notice(row["id"].as_str().unwrap_or_default(), &ask, &title, picture, row["expires"].as_i64().unwrap_or(0), held));
+            let Asked(by, title, picture, ask) = crate::json_text(row["ask"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored ask: {e}")))?;
+            let (held, revision) = self.held_at(&ask.name)?;
+            notices.push(rules::ask_notice(row["id"].as_str().unwrap_or_default(), &ask, &by, &title, picture, row["expires"].as_i64().unwrap_or(0), (held.as_ref(), &revision)));
         }
         serde_json::to_string(&fragment_proto::notice::NoticeList { notices }).map_err(|e| CellError::host(e.to_string()))
     }

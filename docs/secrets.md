@@ -169,25 +169,35 @@ way T3 Code's secret prompt does: the agent never sees what they give.
 
 - **The card is the platform's.** The ask waits in the person's Vault and
   shows as one of their notices (`vault/notices`), in the band the shell
-  draws above their chat: who asks, why, the hosts that would receive the
-  secret itself (the agent names them; the person judges them), a masked
-  field, Save and Decline. A chat, an app or a fork of either draws
-  no part of it, so no app code ever has the field.
+  draws above their chat — and is also reachable directly via the
+  platform-origin link `SecretAsk.url` (`/vault/ask/{id}`), so an agent
+  chatting through Telegram or SimpleX can pass `--no-wait`, send the link
+  in chat for the person to open on their phone, and wait with `fragment
+  vault wait <id>`. A chat, an app or a fork of either draws no part of
+  the card, so no app code ever has the field.
 - **The paste goes to the Vault alone**: from the shell's page to `POST
   /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's
   records, a log or an answer. The page keeps it in its input only while
-  the card shows, and empties it once posted.
+  the card shows (keyed to that card's grant revision so a changed grant
+  discards any stale paste), and empties it once posted.
 - **Only the person asked answers**, from their own session; an agent,
   theirs or another's, is refused, and anyone else finds no ask.
-- **An answer only makes a new secret**: a put under the Vault's own
-  rules, toward the hosts asked, in the default place, for the asking
-  agent alone. It never replaces or widens one the person keeps: asked for
-  a name they keep, the card says so and offers only Decline, and an
-  answer is refused (409), checked again after the seal's wait, as is a
-  card declined, expired or answered meanwhile. Pointing a secret at more
-  hosts, or giving it to more agents, stays the person's own
-  (`fragment vault set`). The agent learns nothing of secrets it is not
-  given: its ask is taken the same either way.
+- **New secret vs existing secret (Allow / Decline)**:
+  - When no secret of that name exists yet (`held: "none"`), the card
+    shows a masked field, Save and Decline; saving creates the secret for
+    the asking agent alone toward the asked hosts.
+  - When the person already keeps a secret of that name, the card never
+    asks for the value again and never overwrites it: it shows **Allow**
+    and **Decline** (no field), pinning the secret's current revision
+    (`held`), clearly naming any newly requested hosts and whether other
+    agents also use it. Allowing keeps the sealed value and placement
+    intact, adds the asking agent, and unions any asked hosts. If the
+    secret changes meanwhile, answering is refused (409), checked both
+    before and after any seal wait. The agent learns nothing of secrets it
+    is not given: `POST /api/vault/asks` takes the ask the same either way.
+  - Editing hosts, toggling per-agent access, rotating a value, or
+    removing a secret is also available directly in the browser under
+    **Settings → Secrets** (or via `fragment vault set|list|rm`).
 - **It ends**: saved, declined, or after ten minutes unanswered (or asked
   again by the same agent for the same name). At most 8 wait on a person,
   and their Vault keeps at most 64, ended ones an hour.

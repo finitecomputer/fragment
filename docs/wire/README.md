@@ -385,11 +385,13 @@ value they do not know; a closed object refuses a field it does not know.
 
 ### `AnswerAsk`
 
-in, closed. `POST /api/vault/asks/{id}`: the person's answer, what they pasted.
+in, closed. `POST /api/vault/asks/{id}`: the person's answer — what they pasted for a new secret, or `allow: true` to share or widen a secret they already keep.
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `value` | `string` | required |  |
+| `allow` | `boolean` | optional | True on an Allow card for an existing secret: keeps its sealed value and place, adds the asking agent, and unions any asked hosts. |
+| `held` | `string` | required | Which secret its card showed held under the ask's name (its revision, `"none"` for none), as the card's action carries it: the answer grants what the card said, or nothing (409). |
+| `value` | `string` or `null` | optional | What the person pasted (required for a new secret; refused with `allow`). |
 
 ### `Archived`
 
@@ -402,7 +404,7 @@ out. Its answer: the fragment, and whether it is archived now.
 
 ### `AskSecret`
 
-in, closed. `POST /api/vault/asks`: an agent asks its person for a new secret. The person answers in a card the platform draws (a notice, `GET /api/notices`), never in a chat's records, so no agent, model or app ever reads what they paste.
+in, closed. `POST /api/vault/asks`: an agent asks its person for a secret. The person answers in a card the platform draws (a notice, `GET /api/notices`, also reached directly at `SecretAsk.url`), never in a chat's records, so no agent, model or app ever reads what they paste.
 
 | field | type | | |
 | --- | --- | --- | --- |
@@ -1204,6 +1206,7 @@ out. An ask, as its agent and its person read it: never a value.
 | `id` | `string` | required | 32 hex. |
 | `name` | `string` | required |  |
 | `state` | [`AskState`](#askstate) | required |  |
+| `url` | `string` | required | Platform-origin URL the person can open directly (`/vault/ask/{id}`) to enter or approve this secret on the platform's own page. |
 
 ### `SecretKind`
 

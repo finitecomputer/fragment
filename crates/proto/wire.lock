@@ -6,6 +6,8 @@
 # client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
 # fact gone on purpose is retired in wire.retired.
 
+bound AnswerAsk.allow default false
+bound AnswerAsk.value default null
 bound AskSecret.hosts default []
 bound ChannelPage.more default false
 bound ChannelPage.next range i64
@@ -161,7 +163,9 @@ branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
 extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
-field AnswerAsk.value required string
+field AnswerAsk.allow optional boolean
+field AnswerAsk.held required string
+field AnswerAsk.value optional string|null
 field Archived.archived required boolean
 field Archived.name required string
 field AskSecret.hosts optional array<string>
@@ -472,6 +476,7 @@ field SecretAsk.expiresAt required integer
 field SecretAsk.id required string
 field SecretAsk.name required string
 field SecretAsk.state required AskState
+field SecretAsk.url required string
 field SecretList.secrets required array<Secret>
 field SecretRemoved.name required string
 field SecretRemoved.removed required boolean

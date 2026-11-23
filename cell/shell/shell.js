@@ -33,6 +33,7 @@ import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
 import { createConnections, createAgentHomes, createSimplex, createTelegram } from "./connections.js";
+import { createSecrets } from "./secrets.js";
 import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -91,7 +92,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
 // What a late answer may still do: one latest ask a kind (asks.js)
 const asks = createAsks();
-const state = { me: null, guest: false, fragments: [], limits: null, notices: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
+const state = { me: null, guest: false, fragments: [], limits: null, notices: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null, focusAsk: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -990,7 +991,7 @@ function newView() {
 function openChat(name, push = true, path = null) {
   if (!byName(name)) return;
   newView();
-  if (push) at("/");
+  if (push && !state.focusAsk) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
@@ -1808,12 +1809,20 @@ const launcher = createLauncher({
 // `made`) is a new ask of the computer (asks.js), so a list read (`load`)
 // asked before it never shows the computer as it was before: answered
 // after it, the read would undo it.
+const ASK_PATH = /^\/vault\/ask\/([0-9a-f]{32})$/;
 const { computerOf, prewake, renderComputer, restartComputer, computerSection } = createComputer({
   api, el, seg, named, section, line, actionLine, computer: () => state.computer,
   notices: () => state.notices, agents: () => state.agents, computerFailed: () => state.computerFailed,
   setupPending: () => onboarding.setupPending(),
   made: (c) => { asks.ask("computer"); state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
   reads: () => reads, load, openPage: (url) => openPage(url),
+  focusedNotice: () => state.focusAsk,
+  clearFocusedNotice: (answered) => {
+    if (!state.focusAsk) return;
+    state.focusAsk = null;
+    if (ASK_PATH.test(location.pathname)) history.replaceState(null, "", "/");
+    if (!answered) said("That secret request is no longer waiting", "It may have already been answered, declined, or expired.");
+  },
 });
 // The computer as the platform last answered: shown at once.
 function computerIs(v) {
@@ -2081,7 +2090,7 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readTelegram },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), secretsSection: (...args) => secretsSection(...args), simplexSection, telegramSection, readTelegram },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
@@ -2098,6 +2107,11 @@ const { connectionsSection } = createConnections({
     computerIs(v);
     state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
   },
+  asks, isOpen: () => state.page === "Settings", reopenSettings,
+});
+
+const { secretsSection } = createSecrets({
+  api, el, section, named, computer: () => state.computer,
   asks, isOpen: () => state.page === "Settings", reopenSettings,
 });
 
@@ -2323,6 +2337,8 @@ async function start(open) {
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
+  const askMatch = !open ? location.pathname.match(ASK_PATH) : null;
+  state.focusAsk = askMatch ? `vault_ask:${askMatch[1]}` : null;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
   else if (settings && location.pathname === BRAINS) openBrains(false);
@@ -2337,7 +2353,8 @@ async function start(open) {
   // awake then, and for the idle wait after (computer.js `prewake`).
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
-  else notice("No chats yet", "Make an agent to start.");
+  else if (!state.focusAsk) notice("No chats yet", "Make an agent to start.");
+  if (state.focusAsk) renderComputer();
   // an Add a reload cut short goes on from what it made (`resumeFirstRun`)
   if (!settings) resumeFirstRun().catch(() => {});
   // an invite waits, and nothing it shares is open yet: a phone's sidebar,

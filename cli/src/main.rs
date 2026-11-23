@@ -1100,10 +1100,11 @@ enum VaultCmd {
         name: String,
     },
     /// As an agent on a computer: ask your person for a secret. They get a
-    /// card on their page with a masked field and paste it there; you
-    /// never see it. Waits for their answer (at most 10 minutes), then
-    /// prints the stand-in to send in its place, toward the hosts it works
-    /// with. It only ever makes a new secret, never replaces one they keep
+    /// card on their page (and a direct link you can share in chat) with a
+    /// masked field for a new secret or Allow/Decline for one they already
+    /// keep; you never see the value. Waits for their answer (at most 10
+    /// minutes) unless `--no-wait` is given, then prints the stand-in to
+    /// send in its place, toward the hosts it works with
     Ask {
         #[arg(value_parser = vault_name)]
         name: String,
@@ -1114,26 +1115,63 @@ enum VaultCmd {
         /// scheme, port, or path. None: kept, and sent nowhere
         #[arg(long = "to", value_name = "HOST")]
         hosts: Vec<String>,
+        /// Return immediately after creating the ask, printing its id and
+        /// platform link so you can send the link in chat and wait later
+        /// with `fragment vault wait <id>`
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// As an agent on a computer: wait for a Vault ask you created with
+    /// `fragment vault ask --no-wait` until your person answers or it
+    /// expires, then print the stand-in
+    Wait {
+        #[arg(value_parser = vault_ask_id)]
+        id: String,
     },
 }
 
-/// How often `fragment vault ask` reads how its ask stands.
+/// How often `fragment vault ask` / `wait` reads how its ask stands.
 const ASK_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// `fragment vault ask`: the ask made, followed until it ends, and, saved,
-/// the stand-in this agent's computer gives it (`GET /api/computer`, which
-/// also has its egress catch the new hosts). Every ending is an answer:
-/// `--json` says which; otherwise one not saved exits 1, saying why.
-fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret) -> Result<()> {
-    use fragment_proto::vault::{AskState, SecretAsk};
+/// `fragment vault ask`: the ask made, and unless `--no-wait`, followed
+/// until it ends (`finish_vault_ask`).
+fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret, no_wait: bool) -> Result<()> {
+    use fragment_proto::vault::SecretAsk;
     let Some(me) = c.agent().map(|m| m.agent.clone()) else {
         return Err(usage("an agent on a computer asks its person for a secret: your own you set with `fragment vault set`"));
     };
-    let name = ask.name.clone();
-    let mut at: SecretAsk = c.call_as(c.post_json("/api/vault/asks", &ask)?)?;
-    if !j {
-        eprintln!("asked your person for {name}: waiting for their answer (at most 10 minutes)");
+    let at: SecretAsk = c.call_as(c.post_json("/api/vault/asks", &ask)?)?;
+    if no_wait {
+        json_exit(j, &json!({ "ask": at, "placeholder": Value::Null, "hosts": Value::Null }));
+        println!("asked your person for {} (id: {})", at.name, at.id);
+        println!("open: {}", at.url);
+        println!("wait for their answer with: fragment vault wait {}", at.id);
+        return Ok(());
     }
+    if !j {
+        eprintln!("asked your person for {}: waiting for their answer (at most 10 minutes)\nopen: {}", at.name, at.url);
+    }
+    finish_vault_ask(c, &me, j, at)
+}
+
+/// `fragment vault wait <id>`: poll an existing ask until it ends, then
+/// fetch this agent's stand-in if saved.
+fn vault_wait(c: &api::Client, j: bool, id: &str) -> Result<()> {
+    use fragment_proto::vault::SecretAsk;
+    let Some(me) = c.agent().map(|m| m.agent.clone()) else {
+        return Err(usage("an agent on a computer waits on its own Vault ask"));
+    };
+    let at: SecretAsk = c.call_as(c.get(&format!("/api/vault/asks/{id}"))?)?;
+    finish_vault_ask(c, &me, j, at)
+}
+
+/// Follows `at` until it leaves `waiting`, and, saved, reads the stand-in
+/// this agent's computer gives it (`GET /api/computer`, which also has its
+/// egress catch the new hosts). Every ending is an answer: `--json` says
+/// which; otherwise one not saved exits 1, saying why.
+fn finish_vault_ask(c: &api::Client, me: &str, j: bool, mut at: fragment_proto::vault::SecretAsk) -> Result<()> {
+    use fragment_proto::vault::AskState;
+    let name = at.name.clone();
     // the platform ends it in ten minutes; this stops reading a minute
     // after, whatever it says
     let reads = (fragment_core::vault::ASK_TTL_MS as u128 + 60_000) / ASK_POLL.as_millis();
@@ -1178,6 +1216,14 @@ fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret) ->
         _ => return Err(anyhow::Error::new(api::CodedError { code: api::Code::Conflict, msg: format!("no answer for {name}: the ask expired, or you asked again since") })),
     }
     Ok(())
+}
+
+/// A Vault ask's id: 32 lower-case hex, checked before it goes into a path.
+fn vault_ask_id(id: &str) -> Result<String, String> {
+    match fragment_core::vault::ask_id_ok(id) {
+        true => Ok(id.to_string()),
+        false => Err(format!("{id:?} is not a Vault ask id (32 lower-case hex characters)")),
+    }
 }
 
 /// A Vault secret's name, of its form (`fragment_core::vault::name_form`)
@@ -2706,7 +2752,8 @@ fn run(cli: Cli) -> Result<()> {
                 json_exit(j, &v);
                 println!("{}", if v.removed { format!("secret {name} removed") } else { format!("no secret {name}") });
             }
-            VaultCmd::Ask { name, why, hosts } => vault_ask(&c, j, fragment_proto::vault::AskSecret { name, why, hosts })?,
+            VaultCmd::Ask { name, why, hosts, no_wait } => vault_ask(&c, j, fragment_proto::vault::AskSecret { name, why, hosts }, no_wait)?,
+            VaultCmd::Wait { id } => vault_wait(&c, j, &id)?,
         },
         Cmd::Inbox { name, payload, source } => {
             let token = from_env_or_stdin(INBOX_TOKEN_ENV, "inbox token")?;
@@ -3537,6 +3584,10 @@ mod tests {
         assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--header", "x-key", "--query", "key"]), "one place");
         assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--format", "Bearer {}"]), "a format is a header's");
         assert!(parses(&["fragment", "vault", "list"]) && parses(&["fragment", "vault", "rm", "linear"]));
+        assert!(parses(&["fragment", "vault", "ask", "github", "--why", "Push code", "--to", "api.github.com"]));
+        assert!(parses(&["fragment", "vault", "ask", "github", "--why", "Push code", "--to", "api.github.com", "--no-wait"]));
+        assert!(parses(&["fragment", "vault", "wait", "0123456789abcdef0123456789abcdef"]));
+        assert!(!parses(&["fragment", "vault", "wait", "not-an-id"]), "vault wait requires 32 lower-case hex");
         assert!(parses(&["fragment", "inbox", "x--k3x9", "--payload", "{}"]));
         assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
     }

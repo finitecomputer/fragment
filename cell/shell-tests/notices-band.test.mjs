@@ -600,7 +600,7 @@ const ASK = "/api/vault/asks/0123456789abcdef0123456789abcdef";
 const asked = (o = {}) => ({
   id: "vault_ask:0123456789abcdef0123456789abcdef", kind: "vault_ask", level: "info", title: "Juniper asks for github", text: "To push your shop's code",
   field: { placeholder: "Paste it here" },
-  actions: [{ label: "Save", post: ASK, body: {}, field: true }, { label: "Decline", post: `${ASK}/decline`, body: {} }],
+  actions: [{ label: "Save", post: ASK, body: { held: "none" }, field: true }, { label: "Decline", post: `${ASK}/decline`, body: {} }],
   ...o,
 });
 const fieldIn = (p) => walk(p.box).find((n) => n.tag === "input");
@@ -615,8 +615,8 @@ test("a notice's field is masked, and Save sends what it holds as its value, onc
   input.value = "ghp_secret123";
   p.tap(asked().id, "Save");
   assert.equal(p.calls.length, 1);
-  assert.deepEqual([p.calls[0].path, p.calls[0].body], [ASK, { value: "ghp_secret123" }], "posted with the paste as value");
-  p.calls[0].ok({ id: "0123456789abcdef0123456789abcdef", name: "github", state: "saved", expiresAt: 1 });
+  assert.deepEqual([p.calls[0].path, p.calls[0].body], [ASK, { held: "none", value: "ghp_secret123" }], "posted with held and the paste as value");
+  p.calls[0].ok({ id: "0123456789abcdef0123456789abcdef", name: "github", state: "saved", expiresAt: 1, url: "https://chat.test/vault/ask/0123456789abcdef0123456789abcdef" });
   await settle();
   assert.equal(input.value, "", "taken: no copy stays in the page");
   assert.equal(p.calls[1].path, "/api/notices", "then read again");
@@ -635,17 +635,92 @@ test("an empty field posts nothing and says so; Decline sends no value", async (
   assert.deepEqual([p.calls[0].path, p.calls[0].body], [`${ASK}/decline`, {}], "Decline takes no field");
 });
 
-test("what the person pasted survives a redraw of the band, and goes with its notice", (t) => {
+test("what the person pasted survives a redraw of the band, goes with its notice, and is discarded if the held grant changes", (t) => {
   const p = page(t, [asked()]);
   const input = fieldIn(p);
   input.value = "half-pasted";
   p.ui.renderComputer();
   assert.equal(fieldIn(p), input, "the same input, moved into the new row");
   assert.equal(fieldIn(p).value, "half-pasted");
+  // if the card's held grant changes, a fresh empty field replaces it
+  p.shell.notices = [asked({ actions: [{ label: "Save", post: ASK, body: { held: "rev2" }, field: true }, { label: "Decline", post: `${ASK}/decline`, body: {} }] })];
+  p.ui.renderComputer();
+  assert.notEqual(fieldIn(p), input, "new grant: new input");
+  assert.equal(fieldIn(p).value, "", "stale paste discarded");
+  // notice gone: field gone too
   p.shell.notices = [];
   p.ui.renderComputer();
   p.shell.notices = [asked()];
   p.ui.renderComputer();
   assert.notEqual(fieldIn(p), input, "its notice gone, its field went with it");
   assert.equal(fieldIn(p).value, "");
+});
+
+test("an Allow card for an existing secret has no field and posts allow + held revision", async (t) => {
+  const allowCard = {
+    id: "vault_ask:0123456789abcdef0123456789abcdef",
+    kind: "vault_ask",
+    level: "info",
+    title: "Bea asks to use github",
+    text: "Review PRs",
+    detail: "You already keep github for api.github.com.",
+    actions: [
+      { label: "Allow", post: ASK, body: { allow: true, held: "rev1" } },
+      { label: "Decline", post: `${ASK}/decline`, body: {} },
+    ],
+  };
+  const p = page(t, [allowCard]);
+  assert.equal(fieldIn(p), undefined, "no password field on Allow card");
+  p.tap(allowCard.id, "Allow");
+  assert.equal(p.calls.length, 1);
+  assert.deepEqual([p.calls[0].path, p.calls[0].body], [ASK, { allow: true, held: "rev1" }]);
+});
+
+test("a focused Vault ask deep link highlights and auto-focuses the card, then clears when answered or missing", async (t) => {
+  const box = new Node("div", "computer-notices");
+  const layer = topLayer();
+  const cover = layer.dialog("must-answer");
+  globalThis.document = {
+    hidden: false, addEventListener() {}, removeEventListener() {},
+    getElementById: (id) => ({ "computer-notices": box, "must-answer": cover })[id] ?? null,
+    activeElement: null,
+  };
+  const calls = [];
+  const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok, fail }));
+  const reads = { asked: 0, shown: 0, updating: false, listFailed: false, noticesFailed: false };
+  const shell = { notices: [asked()], reads, computer: { computer: COMPUTER, phase: "awake", generation: 3, notices: [] } };
+  let focusId = asked().id;
+  const cleared = [];
+  let ui = null;
+  const load = async () => {
+    const answer = await api("GET", "/api/notices");
+    shell.notices = answer.notices;
+    ui.renderComputer();
+  };
+  const stub = () => new Node("div");
+  ui = createComputer({
+    api, el: (tag, cls, text) => new Node(tag, cls, text), seg: (s) => s, named: (n) => n, section: stub, line: stub, actionLine: stub,
+    computer: () => shell.computer, notices: () => shell.notices, agents: () => new Map(), computerFailed: () => false, setupPending: () => true,
+    made: () => {}, computerIs: () => {}, openScreen: () => {}, markOffer: () => {}, reads: () => reads, load, openPage: () => {},
+    focusedNotice: () => focusId,
+    clearFocusedNotice: (answered) => { cleared.push(answered); focusId = null; },
+  });
+  t.after(() => ui.dispose());
+  ui.renderComputer();
+  const row = box.children[0];
+  assert.ok(row.className.includes("focused"), "deep-linked card highlighted");
+  const input = walk(row).find((n) => n.tag === "input");
+  assert.equal(globalThis.document.activeElement, input, "masked input auto-focused");
+  input.value = "ghp_deep_link";
+  walk(row).find((n) => n.tag === "button" && n.textContent === "Save").onclick();
+  calls[0].ok({ id: "0123456789abcdef0123456789abcdef", name: "github", state: "saved", expiresAt: 1, url: "https://chat.test/vault/ask/0123456789abcdef0123456789abcdef" });
+  await settle();
+  calls[1].ok({ notices: [] });
+  await settle();
+  assert.deepEqual(cleared, [true], "cleared as answered");
+
+  // Deep link to a missing/expired ask clears with answered=false
+  focusId = "vault_ask:ffffffffffffffffffffffffffffffff";
+  ui.renderComputer();
+  assert.deepEqual(cleared, [true, false], "cleared as missing");
 });

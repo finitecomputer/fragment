@@ -3,14 +3,28 @@
     "schemas": {
       "AnswerAsk": {
         "additionalProperties": false,
-        "description": "`POST /api/vault/asks/{id}`: the person's answer, what they pasted.",
+        "description": "`POST /api/vault/asks/{id}`: the person's answer — what they pasted for a\nnew secret, or `allow: true` to share or widen a secret they already keep.",
         "properties": {
-          "value": {
+          "allow": {
+            "default": false,
+            "description": "True on an Allow card for an existing secret: keeps its sealed value\nand place, adds the asking agent, and unions any asked hosts.",
+            "type": "boolean"
+          },
+          "held": {
+            "description": "Which secret its card showed held under the ask's name (its\nrevision, `\"none\"` for none), as the card's action carries it: the\nanswer grants what the card said, or nothing (409).",
             "type": "string"
+          },
+          "value": {
+            "default": null,
+            "description": "What the person pasted (required for a new secret; refused with `allow`).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "value"
+          "held"
         ],
         "type": "object",
         "x-fragment-direction": "in"
@@ -34,7 +48,7 @@
       },
       "AskSecret": {
         "additionalProperties": false,
-        "description": "`POST /api/vault/asks`: an agent asks its person for a new secret. The\nperson answers in a card the\nplatform draws (a notice, `GET /api/notices`), never in a chat's\nrecords, so no agent, model or app ever reads what they paste.",
+        "description": "`POST /api/vault/asks`: an agent asks its person for a secret. The\nperson answers in a card the\nplatform draws (a notice, `GET /api/notices`, also reached directly at\n`SecretAsk.url`), never in a chat's\nrecords, so no agent, model or app ever reads what they paste.",
         "properties": {
           "hosts": {
             "default": [],
@@ -2960,13 +2974,18 @@
           },
           "state": {
             "$ref": "#/components/schemas/AskState"
+          },
+          "url": {
+            "description": "Platform-origin URL the person can open directly (`/vault/ask/{id}`)\nto enter or approve this secret on the platform's own page.",
+            "type": "string"
           }
         },
         "required": [
           "id",
           "name",
           "state",
-          "expiresAt"
+          "expiresAt",
+          "url"
         ],
         "type": "object",
         "x-fragment-direction": "out"
