@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# tools/boat/golden [--fresh]: make or refresh, on your own Boat account, the
+# warm snapshot that tools/boat/run starts from (FRAGMENT_BOAT_SNAPSHOT,
+# default fragment-warm): current master, cloned and built, with its caches.
+#
+# It starts a builder sandbox from the snapshot (or from nothing, the first
+# time or with --fresh), copies tools/boat/sandbox there, runs
+# build-golden.sh, saves the snapshot over the old one and deletes the
+# builder. Sandboxes already started from the old snapshot keep theirs.
+# About 15 minutes from nothing, 5 to 15 to refresh depending on how far
+# master moved; rerun it when runs start rebuilding much. Uses a large
+# sandbox (twice the default rate) and one start.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/lib.sh"
+from=(--from "$SNAPSHOT")
+case "${1:-}" in
+  --fresh) from=() ;;
+  "") "$B" snapshots --limit 1 --json | python3 -I -c '
+import json, sys
+names = [s["name"] for s in json.load(sys.stdin).get("named", []) if s.get("status") == "ready"]
+sys.exit(0 if sys.argv[1] in names else 1)
+' "$SNAPSHOT" || from=() ;;
+  *) echo "usage: tools/boat/golden [--fresh]" >&2; exit 2 ;;
+esac
+
+id=$("$B" new ${from[@]+"${from[@]}"} --type "$TYPE" --no-env --ttl 7200 --name "$SNAPSHOT-builder" --json | first_id)
+trap '"$B" delete "$id" --yes >/dev/null 2>&1 || echo "tools/boat/golden: could not delete $id; run: boat delete $id --yes" >&2' EXIT
+echo "tools/boat/golden: builder $id (${from[*]:-from nothing})" >&2
+bx "$id" 'mkdir -p ~/.boat-keep'
+for f in "$HERE"/sandbox/*; do
+  [ -f "$f" ] || continue
+  "$B" scp "$f" "$id:/home/user/.boat-keep/$(basename "$f")" >/dev/null
+done
+bx "$id" 'chmod +x ~/.boat-keep/*.sh ~/.boat-keep/*.py'
+"$B" exec "$id" --detach -- bash -lc '~/.boat-keep/build-golden.sh' >/dev/null
+started=$(date +%s)
+until status=$(bx "$id" 'cat ~/golden.status 2>/dev/null') && [ -n "$status" ]; do
+  [ $(( $(date +%s) - started )) -lt 5400 ] || { echo "tools/boat/golden: still building after 90 min; giving up" >&2; exit 1; }
+  sleep 20
+done
+bx "$id" 'grep "^== \|^fragment-times\|^times" ~/golden.log'
+if [ "$status" != 0 ]; then
+  echo "tools/boat/golden: build-golden.sh failed ($status); $SNAPSHOT unchanged. The end of its log:" >&2
+  bx "$id" 'tail -n 40 ~/golden.log' >&2
+  exit 1
+fi
+"$B" snapshot "$id" "$SNAPSHOT" >/dev/null
+echo "tools/boat/golden: $SNAPSHOT saved after $(( $(date +%s) - started ))s" >&2

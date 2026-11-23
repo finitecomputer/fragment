@@ -101,6 +101,29 @@ A file the cell serves belongs in the release assets built by
 `crates/templates` into `cell/build/assets`, not `include_bytes!`.
 Dev and e2e use separate state; failed e2e logs remain in `target/e2e/`.
 
+## Building on Boat (optional)
+
+Some of us run builds and tests on Boat (boat.dev) sandboxes instead of
+their own computer; nobody has to. When `FRAGMENT_BOAT=1` is set in your
+environment, or the person you work for says so, don't run cargo builds,
+`cargo xtask check`, `cargo xtask e2e`, `cargo test`, Docker or Chrome
+locally. Run them from the checkout with `tools/boat/run`, for example
+`tools/boat/run cargo xtask e2e --only shell`. "This machine" in Proving
+your work then means that sandbox. Reading, editing, git and `gh` stay
+local.
+
+- Each run sends the checkout as it stands (HEAD plus uncommitted and
+  untracked files) to a fresh copy of a warm snapshot, prints the output,
+  and deletes the sandbox. Expect 1 to 2 minutes before the command starts.
+- `--keep` reuses one sandbox per checkout across runs; use it when you
+  will run more than once. `--stop` ends it, and `--id` gives its id for
+  `boat scp` of logs or screenshots.
+- Setup is in the header of `tools/boat/run`. `tools/boat/golden` makes
+  the snapshot on your own account and refreshes it from master.
+- Each run counts as one sandbox start, and a large sandbox bills at twice
+  the default rate. Check the plan's limits with `boat limits --all`, not
+  from memory.
+
 ## Proving your work
 
 You prove your own work before anyone merges it. CI on a pull request is
