@@ -24,14 +24,15 @@
 .platform-page .people,.platform-page .options,.platform-page .more{text-align:left;font-size:14px}
 .platform-page code{font-size:14px}
 /* dark: the system's unless the shell's root says light, or the shell's
-   (Settings, Theme: theme.js); a page of its own has no data-theme. :where
-   keeps each rule's weight as it was. */
+   (Settings, Theme: theme.js). A page of its own (share.rs) has no
+   data-theme and puts .platform-page on its root, so its rules stay the
+   system's, unguarded. :where keeps each rule's weight as it was. */
 @media(prefers-color-scheme:dark){
  :root:where(:not([data-theme=light])){--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e}
  .platform-page{background-color:#141c1b;background-image:url("platform-landscape-dark.jpg")}
- :where(:root:not([data-theme=light])) .platform-page main,:where(:root:not([data-theme=light])) .first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
+ .platform-page main,:where(:root:not([data-theme=light])) .first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
  :where(:root:not([data-theme=light])) .platform-brand img{filter:brightness(0) invert(1)}
- :where(:root:not([data-theme=light])) .platform-page input,:where(:root:not([data-theme=light])) .platform-page textarea,:where(:root:not([data-theme=light])) .first-run-card input{background:#ffffff08}
+ .platform-page input,.platform-page textarea,:where(:root:not([data-theme=light])) .first-run-card input{background:#ffffff08}
 }
 :root:where([data-theme=dark]){--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e}
 :where([data-theme=dark]) .first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
