@@ -1163,6 +1163,18 @@ impl Browser {
         Ok(())
     }
 
+    /// A press at `from` held to `to` and let go there, as a hand selects
+    /// words past the field they are in: the click it ends with goes to
+    /// what holds both points.
+    pub fn drag(&mut self, page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
+        let mouse = |kind: &str, (x, y): (f64, f64), buttons: u8| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 });
+        self.send("Input.dispatchMouseEvent", mouse("mouseMoved", from, 0), Some(&page.session))?;
+        self.send("Input.dispatchMouseEvent", mouse("mousePressed", from, 1), Some(&page.session))?;
+        self.send("Input.dispatchMouseEvent", mouse("mouseMoved", to, 1), Some(&page.session))?;
+        self.send("Input.dispatchMouseEvent", mouse("mouseReleased", to, 0), Some(&page.session))?;
+        Ok(())
+    }
+
     /// `click_at` the middle of the first element `selector` matches, as a
     /// hand presses what it sees. Its aim and its press are separate calls,
     /// and a page draws again between them on its own (the shell's list

@@ -324,6 +324,36 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         moved["output"] == json!({ "status": 302, "location": "http://127.0.0.1:1/private" }) && upstream.hits("/moved").len() == 1,
         &moved,
     );
+    // the platform's call marker (cell fragment/calls.rs), forged by a
+    // fragment's own code: its job's fetch reaches the platform as any
+    // client's does. Its inbox, the one door that passes a client's own
+    // headers on (unsigned, by its token), passes none of the platform's:
+    // the forged delivery is a delivery (marked, the fragment would answer
+    // it `no call`). And no outside path names a call.
+    let (forger, made) = jobs_fragment(s, api, &owner, "forger", |_| {})?;
+    let forger_token = made["inboxToken"].as_str().unwrap_or("").to_string();
+    let forge = |id: &str, url: String, headers: Value, body: Value| {
+        let r = api.op(&owner, &forger, "forge", id, json!({ "url": url, "method": "POST", "headers": headers, "body": body }))?;
+        anyhow::Ok(settle(api, &owner, &forger, started(&r), &["succeeded", "held"], long))
+    };
+    let delivered = forge(
+        "forge-inbox",
+        format!("{}/api/f/{forger}/inbox", api.base),
+        json!({ "x-fragment-call": "1", "x-fragment-inbox-token": forger_token }),
+        json!({ "source": "forged", "payload": { "items": ["marked"] } }),
+    )?;
+    let finish = forge("forge-finish", format!("{}/call/job/finish", api.base), json!({ "x-fragment-call": "1" }), json!({ "run": 1, "attempt": 1, "error": "forged" }))?;
+    let said = |v: &Value| v["output"]["text"].as_str().unwrap_or("").to_string();
+    let kept = records(api, &owner, &forger, "inbox");
+    s.ok(
+        "a fragment's own job cannot forge a platform call: the call marker it sends its own inbox is dropped (the delivery is a record), and no path names a call (404)",
+        delivered["output"]["status"] == 200
+            && kept.len() == 1
+            && kept[0]["body"]["source"] == "forged"
+            && finish["output"]["status"] == 404
+            && ![&delivered, &finish].iter().any(|v| said(v).contains("no call")),
+        json!({ "delivered": delivered, "finish": finish, "inbox": kept }),
+    );
 
     // held, then replayed after the cause is fixed
     let r = api.op(&owner, &name, "fragile", "f1", json!({}))?;
@@ -503,7 +533,92 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
     secret_hosts(s, api, &owner, &upstream)?;
     inbox_secret(s, api, &owner)?;
+    inbox_hmac(s, api, &owner)?;
+    launched_across_lives(s, api, &owner)?;
+    queued_before_a_card(s, api, &owner)?;
     channel_run_inputs(s, api, &owner)
+}
+
+/// Goal: a run queued while the alarm's pass works starts before that
+/// pass's card shot (a browser's seconds), never after it (#1467's full
+/// e2e: a brain's run, queued as a pass began its shot, waited it out and
+/// started with a later run, which took its pages from it). The pass held
+/// where it chooses the shot (`hold-card`), the app deployed so its card
+/// is due, and a run queued, then let go: the run starts before the card
+/// is made. The hold goes on before the deploy wants the card, so no pass
+/// shoots it unheld, and the fragment's first card is the one the held
+/// pass chose about. Set after the deploy, the hold raced the deploy's own
+/// pass (armed 50 ms on): when that pass came first, it shot the card
+/// unheld, and the test took that card for the held pass's.
+fn queued_before_a_card(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    const LABEL: &str = "a run queued while the alarm's pass works starts before that pass's card shot, never after it";
+    if !s.shoots_cards() {
+        s.skip_card(LABEL);
+        return Ok(());
+    }
+    let wait = Duration::from_secs(30);
+    let name = s.named(api, owner, "cardwait")?;
+    let c = s.create(api, owner, &name)?;
+    let hold = |on: Option<bool>| -> Value {
+        let mut extra = json!({});
+        if let Some(on) = on {
+            extra["on"] = json!(on);
+        }
+        super::ledger::lever(api, &name, "hold-card", extra).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    let first_card = || events(api, owner, &name).iter().position(|e| e["kind"] == "card.made");
+    hold(Some(true));
+    ship(s, &c, JOBS_APP, JOBS_JSON);
+    let held = s.eventually(wait, || hold(None)["waiting"] == true);
+    let queued = api.op(owner, &name, "count_up", "card-wait", json!({ "n": 1 }))?;
+    let id = queued.body["result"]["run"].as_i64().unwrap_or(0);
+    hold(Some(false));
+    let run = settle(api, owner, &name, id, &["succeeded", "held", "failed", "blocked"], Duration::from_secs(60));
+    let shot = s.eventually(Duration::from_secs(60), || first_card().is_some());
+    let ev = events(api, owner, &name);
+    let started = ev.iter().position(|e| e["kind"] == "run.started" && e["data"]["run"] == id);
+    let card = ev.iter().position(|e| e["kind"] == "card.made");
+    s.ok(
+        LABEL,
+        held && shot && run["status"] == "succeeded" && started.is_some() && card.is_some() && started < card,
+        json!({ "held": held, "shot": shot, "run": run["status"], "startedAt": started, "cardAt": card }),
+    );
+    Ok(())
+}
+
+/// Goal: a launch answers only into the life it was asked for (the review
+/// of #1467). The alarm starts queued runs in one `createBatch`, and
+/// while it waits for the answer the fragment may be deleted and its name
+/// made again: the new life's first run has the same id and attempt as the
+/// old one's. Its batch held as it answers (`hold-launch`), the old life
+/// deleted, the name made again and a run queued there, then let go: that
+/// run starts and succeeds, never marked started by the old batch.
+fn launched_across_lives(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let (name, _) = jobs_fragment(s, api, owner, "relaunched", |_| {})?;
+    let hold = |on: Option<bool>| -> Value {
+        let mut extra = json!({});
+        if let Some(on) = on {
+            extra["on"] = json!(on);
+        }
+        super::ledger::lever(api, &name, "hold-launch", extra).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    hold(Some(true));
+    let old = api.op(owner, &name, "count_up", "relaunched-old", json!({ "n": 1 }))?;
+    let held = s.eventually(wait, || hold(None)["waiting"] == true);
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, JOBS_APP, JOBS_JSON);
+    let new = api.op(owner, &name, "count_up", "relaunched-new", json!({ "n": 1 }))?;
+    hold(Some(false));
+    let (old_id, new_id) = (old.body["result"]["run"].as_i64(), new.body["result"]["run"].as_i64());
+    let run = settle(api, owner, &name, new_id.unwrap_or(0), &["succeeded", "held", "failed", "blocked"], Duration::from_secs(90));
+    s.ok(
+        "a fragment deleted and made again while its alarm's launch waits for its batch's answer: the new life's run, its id the old one's, starts and succeeds, never marked started by the old batch",
+        held && deleted.status == 200 && old_id.is_some() && old_id == new_id && run["status"] == "succeeded",
+        json!({ "held": held, "deleted": deleted.status, "old": old.body, "new": new.body, "run": run }),
+    );
+    Ok(())
 }
 
 /// Goal: an inbox whose code names a secret header (a webhook's own, as
@@ -538,6 +653,86 @@ fn inbox_secret(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         r.status == 200 && run["status"] == "succeeded" && items.body["result"] == json!([{ "text": "hooked", "source": "hook" }]),
         json!({ "post": r.body, "run": run, "items": items.body }),
     );
+    Ok(())
+}
+
+/// Goal: an inbox whose code names an HMAC (Slack's shape: a signature
+/// over its time and body, under one of its secrets) takes a delivery
+/// only signed by that secret, now, in that header, with that prefix; and
+/// its `answer` query says back a URL check's challenge, the platform's
+/// own answer otherwise. Nothing refused is stored or runs, a captured
+/// delivery re-timed included.
+/// Method: the jobs fixture naming one; deliveries before its secret is
+/// set, with its token, and signed well and badly in each way.
+fn inbox_hmac(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    const HOOK: &str = "8f742231b10e8888abcd99e2e4b1d93c";
+    const CHALLENGE: &str = "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P";
+    let long = Duration::from_secs(40);
+    let hmac = json!({ "secret": "HOOK", "header": "x-hook-signature", "prefix": "v0=", "signed": "v0:{x-hook-time}:{body}", "fresh": "x-hook-time", "within_s": 300 });
+    let decl = fragment_core::inbox::HmacDecl::read(&hmac).map_err(anyhow::Error::msg)?;
+    let (name, c) = jobs_fragment(s, api, owner, "inbox-hmac", |m| {
+        m["operations"]["handshake"] = json!({ "kind": "query" });
+        m["inbox"] = json!({ "hmac": hmac, "answer": "handshake" });
+    })?;
+    let token = c["inboxToken"].as_str().unwrap_or("").to_string();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    // signed under `key` at `at`, with `edit` to change its headers after
+    type Sent = Vec<(&'static str, String)>;
+    let post = |body: &Value, key: &[u8], at: i64, edit: fn(&mut Sent)| {
+        let body = body.to_string().into_bytes();
+        let at = at.to_string();
+        let sig = decl.sign(key, &|h: &str| (h == "x-hook-time").then(|| at.clone()), &body).unwrap_or_default();
+        let mut extra = vec![("x-hook-time", at.clone()), ("x-hook-signature", sig)];
+        edit(&mut extra);
+        api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox", api.base), body: Some(body), content_type: Some("application/json"), extra, ..Call::default() })
+    };
+    let event = json!({ "source": "hook", "payload": { "items": ["signed"] } });
+    let check = json!({ "token": "deprecated", "challenge": CHALLENGE, "type": "url_verification" });
+    let as_is: fn(&mut Sent) = |_| {};
+
+    let r = post(&check, HOOK.as_bytes(), now(), as_is)?;
+    s.ok("an HMAC inbox whose secret is not set takes nothing, its URL check unanswered", r.status == 403 && r.text.contains("x-hook-signature") && !r.text.contains(CHALLENGE), &r);
+    anyhow::ensure!(api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?.status == 200, "made private");
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/secrets/HOOK"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
+    anyhow::ensure!(r.status == 200, "the inbox's secret: {r}");
+    let r = api.call(Call {
+        method: "POST",
+        url: format!("{}/api/f/{name}/inbox", api.base),
+        body: Some(event.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        extra: vec![("x-fragment-inbox-token", token)],
+        ..Call::default()
+    })?;
+    s.ok("its inbox token, which its editors read, admits nothing", r.status == 403, &r);
+
+    let refusals = [
+        ("signed by another secret", post(&event, b"another secret", now(), as_is)?, "does not match"),
+        ("a bad signature", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = format!("v0={}", "0".repeat(64)))?, "does not match"),
+        ("a stale time, signed well", post(&event, HOOK.as_bytes(), now() - 600, as_is)?, "too far from now"),
+        ("a captured delivery, its time moved to now", post(&event, HOOK.as_bytes(), now() - 600, |e| e[0].1 = (e[0].1.parse::<i64>().unwrap_or(0) + 600).to_string())?, "does not match"),
+        ("a time not in digits alone", post(&event, HOOK.as_bytes(), now(), |e| e[0].1 = format!("+{}", e[0].1))?, "digits alone"),
+        ("the wrong prefix", post(&event, HOOK.as_bytes(), now(), |e| e[1].1 = e[1].1.replacen("v0=", "v1=", 1))?, "prefix"),
+        ("no signature header", post(&event, HOOK.as_bytes(), now(), |e| e.truncate(1))?, "no x-hook-signature header"),
+        ("no time header", post(&event, HOOK.as_bytes(), now(), |e| drop(e.remove(0)))?, "no x-hook-time header"),
+    ];
+    for (what, r, why) in &refusals {
+        s.ok(&format!("{what} admits nothing, saying why"), r.status == 403 && r.text.contains(why), r);
+    }
+    s.ok("nothing refused is stored", records(api, owner, &name, "inbox").is_empty(), json!(records(api, owner, &name, "inbox")));
+
+    let r = post(&event, HOOK.as_bytes(), now(), as_is)?;
+    let run = settle(api, owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held"], long);
+    let items = api.op(owner, &name, "items", "q", json!({}))?;
+    s.ok(
+        "signed well, a delivery is taken, its trigger runs, and a null answer is the platform's own",
+        r.status == 200 && r.body["ok"] == true && r.body["seq"] == 1 && run["status"] == "succeeded" && items.body["result"] == json!([{ "text": "signed", "source": "hook" }]),
+        json!({ "post": r.body, "run": run, "items": items.body }),
+    );
+    let r = post(&check, HOOK.as_bytes(), now(), as_is)?;
+    let kind = r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    s.ok("its answer query says back a URL check's challenge, as text", r.status == 200 && r.text == CHALLENGE && kind.starts_with("text/plain"), format!("{r} ({kind})"));
+    let recs = records(api, owner, &name, "inbox");
+    s.ok("the URL check is stored as any delivery is", recs.len() == 2 && recs[1]["body"]["payload"]["challenge"] == CHALLENGE, json!(recs));
     Ok(())
 }
 
@@ -650,6 +845,11 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
             && as_editor.body.get("withheld").is_none(),
         &as_editor,
     );
+    s.ok(
+        "the record a run is handed is as it was before records said who wrote them: no `author` (FIN-615), so an app's input schema reads it as ever",
+        as_editor.body["input"]["record"].is_object() && as_editor.body["input"]["record"].get("author").is_none(),
+        &as_editor,
+    );
     let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
     if let Some(channels) = without["channels"].as_object_mut() {
         channels.remove("alarms");
@@ -667,9 +867,10 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// schedules its editors add at run time, each appending a record to one of
 /// its channels as the fragment itself, where its channel trigger runs a
 /// job from it. Viewers list them and add none; each bound refused with a
-/// typed error; the same one added again is that one; an install keeps
-/// them; due (the `cron-now` lever), one fires once; paused it fires
-/// nothing, resumed it fires again; removed, it fires no more; and a
+/// typed error (a record that relays someone among them); the same one
+/// added again is that one; an install keeps them; due (the `cron-now`
+/// lever), one fires once; paused it fires nothing, resumed it fires
+/// again; removed, it fires no more; and a
 /// fragment keeps at most 32.
 /// An installed trigger: each install of new code runs its operation once,
 /// as the fragment; asked again, nothing more; cut short by an outage, once
@@ -922,6 +1123,8 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         json!([seen.body, added.body, stranger_seen.body]),
     );
     let big = json!({ "t": "w".repeat(limits::RECORD_SCHEDULE_BODY_MAX_BYTES) });
+    // the fragment's own key is no member, so a computer's bridge would take it as an agent's owner's
+    let relaying = json!({ "text": "water the plants", "relayed": { "via": "simplex", "for": editor_id, "agent": name } });
     let refusals = [
         ("not five fields", "0 * * *", "pings", water.clone(), 400, "five fields"),
         ("every 5 minutes", "*/5 * * * *", "pings", water.clone(), 400, "at most every 15 minutes"),
@@ -931,6 +1134,7 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         ("a channel that takes no posts", "0 * * * *", "feed", water.clone(), 400, "takes no posts"),
         ("a channel only one kind of member posts on", "0 * * * *", "work", water.clone(), 400, "only its members of one kind"),
         ("a channel only its owner posts on", "0 * * * *", "desk", water.clone(), 403, "needs the owner role"),
+        ("a record that relays someone, as a post would be", "0 0 1 1 *", "pings", relaying, 403, "relays no one"),
     ];
     let (mut each, mut said) = (true, vec![]);
     for (why, cron, channel, record, status, says) in refusals {
@@ -1234,6 +1438,33 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     );
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
     s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
+
+    // a connector's own code is no loop: its inbox's deliveries past the
+    // hourly count each start a run, and its relay is never paused (the
+    // SimpleX door spike: a busy hour paused `intake`, and the connector
+    // said nothing until its owner unpaused it). Telegram's, its updates
+    // none of a paired account's, so each run only looks and ends.
+    let telegram = s.named(api, &owner, "tgpace")?;
+    let made = api.create_with(&owner, json!({ "name": telegram, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "making a Telegram connector: {made}");
+    s.owned(&made.body, &owner);
+    const HOOK: &str = "e2e0c0ffee5ec4e7a9f0b1c2d3e4f5061728394a5b6c7d8e9f001122334455";
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{telegram}/secrets/TELEGRAM_WEBHOOK_SECRET"), Some(&json!({ "value": HOOK, "hosts": ["api.telegram.org"] })))?;
+    anyhow::ensure!(r.status == 200, "its webhook's secret: {r}");
+    let mut taken = 0;
+    for update in 0..=limits::TRIGGERED_RUNS_PER_HOUR {
+        let body = json!({ "update_id": update }).to_string().into_bytes();
+        let extra = vec![("x-telegram-bot-api-secret-token", HOOK.to_string())];
+        let r = api.call(Call { method: "POST", url: format!("{}/api/f/{telegram}/inbox", api.base), body: Some(body), content_type: Some("application/json"), extra, ..Call::default() })?;
+        taken += usize::from(r.status == 200);
+    }
+    let intakes = runs(api, &owner, &telegram, "&op=intake");
+    let r = api.signed(&owner, "GET", &format!("/api/f/{telegram}/runs?limit=1"), None)?;
+    s.ok(
+        "a connector's triggers past the hourly count each start a run, and its relay is never paused",
+        taken as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && intakes.len() as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && intakes.iter().all(|r| r["status"] != "blocked") && r.body["paused"] == json!([]),
+        json!({ "taken": taken, "runs": intakes.len(), "blocked": intakes.iter().filter(|r| r["status"] == "blocked").count(), "paused": r.body["paused"] }),
+    );
 
     // a live commit with no app says nothing about the next code: the
     // pause outlasts it, and the next good deploy comes back paused

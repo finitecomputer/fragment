@@ -159,6 +159,24 @@ pub async fn fetch_all(req: Request, deadline: Duration, max: usize) -> CellResu
     answer
 }
 
+/// `fetch_all` for a platform object's answer (`send`, a `routed::send`:
+/// a SimpleX connector's call to its door): read whole within one
+/// deadline, its body up to `max` bytes. A call into an object takes no
+/// abort, so one past its deadline is only left unread.
+pub async fn answer_all(send: impl std::future::Future<Output = CellResult<Response>>, deadline: Duration, max: usize) -> CellResult<Answer> {
+    let read = async {
+        let mut resp = send.await?;
+        let (body, cut) = read_answer(&mut resp, max).await?;
+        Ok(Answer { status: resp.status_code(), headers: resp.headers().clone(), body, cut })
+    };
+    let timer = Delay::from(deadline);
+    futures_util::pin_mut!(read, timer);
+    match select(read, timer).await {
+        Either::Left((answer, _)) => answer,
+        Either::Right(_) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("no whole answer within {deadline:?}"))),
+    }
+}
+
 /// An answer's body as it streams, measured as a request's is
 /// (`LimitedBody`): all of it, or what came before the chunk that crossed
 /// `max` (none, when its declared length is over), and whether it was cut
@@ -227,8 +245,10 @@ impl<'a> Cs<'a> {
         Ok((status, v))
     }
 
-    /// Creates the fragment's repo, or finds it when it exists (a fragment
-    /// deleted and created again keeps its repo). Answers the url-form id.
+    /// Creates the fragment's repo, or finds it when it exists (a seed's
+    /// try again in its life, after one whose answer was lost: a repo's
+    /// name is its life's alone, `publish::repo_name`). Answers the
+    /// url-form id.
     pub async fn ensure_repo(&self, name: &str) -> CellResult<String> {
         let org = self.cfg.org.clone();
         // the service names a new repo by the token's repo claim (the body's
@@ -270,7 +290,7 @@ impl<'a> Cs<'a> {
         core_cs::repo_url(&v).ok_or_else(|| upstream("repo url", status, b"no url in the answer"))
     }
 
-    /// Deletes the repo (a wiped person's fragment's, ended: cell
+    /// Deletes the repo (an ended life's, deleted or wiped: cell
     /// ended.rs): done once code.storage says it is gone, deleted by this
     /// call or before it, never there included (`core_cs::repo_deleted`),
     /// so asking again after a lost answer is no error. Otherwise why not,

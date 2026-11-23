@@ -25,7 +25,7 @@ include!("blessed_names.rs");
 /// doors"): a fragment made from one is its owner's alone to edit, and may
 /// be bound as their agent's door of its name while it runs no other code
 /// (cell/src/doors.rs).
-pub const CONNECTORS: &[&str] = &["telegram"];
+pub const CONNECTORS: &[&str] = &["simplex", "telegram"];
 
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
@@ -38,6 +38,7 @@ pub fn template(name: &str) -> Option<&'static Template> {
         "skills" => Some(&crate::SKILLS),
         "sessions" => Some(&crate::SESSIONS),
         "telegram" => Some(&crate::TELEGRAM),
+        "simplex" => Some(&crate::SIMPLEX),
         _ => None,
     }
 }
@@ -394,8 +395,30 @@ mod tests {
         assert!(names.contains("gws-docs"), "the upstream Docs guide complements connected Google");
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
-        assert_eq!(names.len(), 18, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides, and import-agent-home");
+        assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
+        assert_eq!(names.len(), 19, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides, import-agent-home and disk-space-finite");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
+    }
+
+    /// Goal (2026-11-20, docs/computers.md "Room to restore"): the disk
+    /// skill's numbers are the platform's own, never a copy that drifts:
+    /// what a computer's files may take at their full size (`du`) for its
+    /// save to restore beside the largest image, and where it and its owner
+    /// are told (`ROOM_TOLD_MAX` of room left), each in whole GB, rounded
+    /// down. A budget or a line that moves fails here until the skill says it.
+    #[test]
+    fn the_disk_skill_says_the_platforms_room() {
+        use fragment_core::computer::{restore_floor, ROOM_TOLD_MAX, IMAGE_DISK_MAX, RESTORE_SLACK_PCT};
+        let skill = data_file("skills", "skills/productivity/disk-space-finite/SKILL.md").expect("the disk skill");
+        let text = String::from_utf8(bytes_of(template("skills").expect("skills"), skill)).expect("UTF-8");
+        // a computer's disk as its `df` reads it, and what a restore may write on it
+        let total = (u64::from(fragment_core::price::DISK_MB) * 1_000_000).div_ceil(4096) * 4096;
+        let fits = total - IMAGE_DISK_MAX - restore_floor(total);
+        let gb = |writes: u64| writes * 100 / (100 + RESTORE_SLACK_PCT) / 1_000_000_000;
+        let (most, told) = (gb(fits), gb(fits - ROOM_TOLD_MAX));
+        assert_eq!((most, told), (16, 13), "as the skill says them now");
+        assert!(text.contains(&format!("Your files may take about {most} GB in all. Past about {told} GB, make room")), "{text}");
+        assert!(text.contains("du -sxh /data") && text.contains("du -sxh --apparent-size /data") && !text.contains("Past about 80% used"), "du, allocated and apparent (the larger, as the platform's read: Codex on #1425), never df's percentage");
     }
 
     /// A command of the import skill's (FIN-401): the agent's terminal starts
@@ -457,6 +480,74 @@ mod tests {
         // what FIN-401's guide ran is refused
         let guide = "```sh\nmkdir -p ~/w && cd ~/w\nfragment sync b --dir .\ncp -R ~/x/. .\nrm -rf site && mkdir site\nfragment deploy b --dir \"$W\"\n```\n";
         assert_eq!(the_folders_it_names_are_whole("guide.md", guide).len(), 5, "{:?}", the_folders_it_names_are_whole("guide.md", guide));
+    }
+
+    /// The import skill's one `sh` block that holds `token`, as its agent
+    /// runs it.
+    fn import_block(token: &str) -> String {
+        let skills = template("skills").unwrap();
+        let f = skills.file("skills/productivity/import-agent-home/SKILL.md").unwrap();
+        let text = String::from_utf8(bytes_of(skills, f)).unwrap();
+        let blocks: Vec<String> = text.split("```sh\n").skip(1).filter_map(|b| b.split("\n```").next()).filter(|b| b.contains(token)).map(str::to_string).collect();
+        assert_eq!(blocks.len(), 1, "one block of the skill's runs {token}");
+        blocks[0].clone()
+    }
+
+    /// `script` in bash, as the agent's terminal runs it: its `$HOME` and
+    /// `$HERMES_HOME` (`.hermes`) under `home`, starting there. Whether it
+    /// succeeded.
+    fn run_in(home: &std::path::Path, script: &str) -> bool {
+        let ran = std::process::Command::new("bash").arg("-c").arg(script).env("HOME", home).env("HERMES_HOME", home.join(".hermes")).current_dir(home).output().unwrap();
+        ran.status.success()
+    }
+
+    /// Goal: an import into an agent that was someone already loses nothing
+    /// of it, nor anything an earlier import kept (Paul 11-19). Method: the
+    /// skill's own commands, each run again as a second import would: each
+    /// keeps what was there and puts its own beside it. Invalid: the skill
+    /// before, whose second import's copy of an old agent's memories went
+    /// over the first's. Replay: run again with nothing new, nothing moves.
+    #[test]
+    fn the_import_skill_keeps_what_was_there() {
+        let home = std::env::temp_dir().join(format!("import-skill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let put = |path: &str, text: &str| {
+            let p = home.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        let read = |path: &str| std::fs::read_to_string(home.join(path)).ok();
+
+        // an old agent's memories, kept whole: a second import's beside the first's
+        let memories = import_block("old-agent/memories").replace("<its path>", "agent/hermes-home/memories");
+        put("home-import/home/agent/hermes-home/memories/MEMORY.md", "the first old agent's");
+        assert!(run_in(&home, &memories));
+        put("home-import/home/agent/hermes-home/memories/MEMORY.md", "the second's");
+        assert!(run_in(&home, &memories));
+        assert_eq!(read("old-agent/memories/memories/MEMORY.md").as_deref(), Some("the first old agent's"), "the first copy is never written over");
+        assert_eq!(read("old-agent/memories-2/memories/MEMORY.md").as_deref(), Some("the second's"));
+
+        // an earlier import's folder, set aside whole, each beside the last
+        let aside = import_block("home-import-$n");
+        put("home-import/progress.md", "an earlier import");
+        assert!(run_in(&home, &aside));
+        put("home-import/progress.md", "another");
+        assert!(run_in(&home, &aside));
+        assert!(!run_in(&home, &aside), "replay: nothing to set aside, so its move fails");
+        assert_eq!((read("home-import-1/progress.md").as_deref(), read("home-import-2/progress.md").as_deref()), (Some("an earlier import"), Some("another")));
+        assert!(!home.join("home-import").exists() && !home.join("home-import-3").exists(), "replay: nothing to set aside, nothing moved");
+
+        // a copy of the agent as it was, before anything of it changes
+        put(".hermes/SOUL.md", "who I am");
+        put(".hermes/memories/MEMORY.md", "what I remember");
+        put(".hermes/skills/mine/SKILL.md", "what I made");
+        assert!(run_in(&home, &import_block("self-before-import")));
+        let copies: Vec<_> = std::fs::read_dir(home.join("self-before-import")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(copies.len(), 1);
+        let copy = |p: &str| std::fs::read_to_string(copies[0].join(p)).ok();
+        assert_eq!((copy("SOUL.md"), copy("memories/MEMORY.md"), copy("skills/mine/SKILL.md")), (Some("who I am".into()), Some("what I remember".into()), Some("what I made".into())));
+        assert_eq!(read(".hermes/SOUL.md").as_deref(), Some("who I am"), "the agent itself as it was");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

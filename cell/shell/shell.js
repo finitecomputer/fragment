@@ -14,12 +14,14 @@ import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
 import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
-import { createAppsPage } from "./apps-page.js";
+import { createAppsPage, shoots } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
 import { createSchedulesPage } from "./schedules-page.js";
+import { createSkillsPage } from "./skills-page.js";
 import { createMovePage } from "./move-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
+import { closeOnOutsidePress } from "./dialog.js";
 import { createViewer } from "./viewer.js";
 import { seatGives } from "./billing.js";
 import { createChatList, newestChat } from "./chat-list.js";
@@ -40,6 +42,7 @@ import { answerTo } from "./computer-answer.js";
 import { standIns } from "./frame-standin.js";
 import * as making from "./making.js";
 import { createAsks } from "./asks.js";
+import { screenActive } from "./screen-active.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -192,7 +195,7 @@ const originAt = (name) => ORIGIN.replace("{name}", name);
 const originOf = (name) => Promise.resolve(originAt(name));
 // An agent's face: its colour, by its identity (agent-color.js, the one
 // its own page and its chats' pages choose by), and its picture (its agent
-// fragment's avatar.png, as the person's list last said: an address on this
+// fragment's icon, as the person's list last said: an address on this
 // platform), shown instead of its tinted image when it has one.
 const agentFace = (fragment, id) => ({ color: colorOf(id), picture: byName(fragment)?.picture ?? null });
 const faceOf = (id) => agentFace(state.agents.get(id)?.fragment, id);
@@ -322,17 +325,22 @@ function show(spec) {
 }
 
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket).
-function frameOf(src, title, name = null) {
+// Only a chat's page is lent the microphone (`microphone`: its voice
+// memo), by the kind its row says, wherever it is framed (the middle
+// column, or Apps' window of a chat that reaches the person's accounts);
+// any other (an app's, a Session Archive's, a files view's, a setup's,
+// a port's) is lent none.
+function frameOf(src, title, name = null, { microphone = false } = {}) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.allow = "clipboard-write; microphone";
+  frame.allow = "clipboard-write";
   frame.dataset.src = src;
-  if (name) {
+  if (name) frame.dataset.fragment = name;
+  if (name && microphone) {
     // A bare `microphone` is the src's origin's, the mint's on this page's;
     // the page lands at the fragment's own, which the browser would refuse
     // without asking. So it names that origin before the frame navigates
     // (a policy is read as a navigation starts): known here, no request.
-    frame.dataset.fragment = name;
     frame.allow = `clipboard-write; microphone ${originAt(name)}`;
   }
   frame.src = src;
@@ -717,7 +725,7 @@ async function dropAlerts() {
 navigator.serviceWorker?.addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment === KIND.openChat && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
-    openChat(d.name);
+    pickChat(d.name);
     leaveSidebar();
   }
 });
@@ -764,7 +772,7 @@ addEventListener("message", (e) => {
   if (Number.isFinite(e.data?.height)) frame.style.height = `${e.data.height}px`;
   if (e.data?.share === "done") sheet.close();
 });
-sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
+closeOnOutsidePress(sheet);
 sheet.onclose = () => {
   sheet.replaceChildren();
   load().catch(() => {});
@@ -911,7 +919,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
     onScreen: () => making.shownChat(state.making, state.current, state.page),
     reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
-  navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
+  navigation: { newChat, rename: (name) => rename(name), openChat: pickChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load,
 });
 // Continue: a conversation (an import, an archived chat) as a new chat with
@@ -919,7 +927,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
 const continuing = createContinue({
   api, ui: { el, notice },
   data: { allFragments: () => state.fragments, agents: () => state.agents, primaryAgent: () => primaryAgent(), titleOf, seg, chatBase: (agent) => chatBase(agent) },
-  navigation: { openChat, leaveSidebar }, load: () => load(), store,
+  navigation: { openChat: pickChat, leaveSidebar }, load: () => load(), store,
 });
 const sessionArchive = createSessionArchive({
   api, ui: { renderHeading: () => renderHeading() },
@@ -933,7 +941,7 @@ const sessionArchive = createSessionArchive({
 const threads = createThreads({
   $, el, patch, api, seg, avatar,
   data: { byName, own, chats, titleOf, labelOf, agentFace, ownAgents, current: () => state.current, page: () => state.page },
-  navigation: { openChat, leaveSidebar },
+  navigation: { openChat: pickChat, leaveSidebar },
   rendered: () => renderChats(),
 });
 
@@ -954,7 +962,7 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
-  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title, "rename"), load, nameScreen, renderNames,
+  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title), load, nameScreen, renderNames,
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
   primaryAgent: () => primaryAgent(), chats, own, me: () => state.me,
 });
@@ -989,6 +997,7 @@ function openChat(name, push = true, path = null) {
   leaveApps();
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   $("frames").hidden = false;
   state.current = name;
@@ -1009,10 +1018,19 @@ function openChat(name, push = true, path = null) {
   renderDesktopEmpty();
   for (const lede of document.querySelectorAll(".app-prompts-lede")) namePromptsLede(lede);
   markSeen();
-  prewake();
   navigated();
   // home: a first run a failed read put off goes on from here too
   if (onboarding.putOff()) resumeFirstRun();
+}
+
+// A chat the person picked (its row, a thread's, History's, an alert's, a
+// notice's action): opened, and a sign they mean to use their agent, so
+// their computer's start is raced (computer.js `prewake`). A chat the page
+// opens on its own (as it loads, after an archive), or a framed page asks
+// to open, is no sign.
+function pickChat(name) {
+  openChat(name);
+  prewake();
 }
 
 // A chat's frame let go (the launcher's, to load it again), its stand-in
@@ -1026,7 +1044,10 @@ function dropFrame(name) {
 // A chat's frame, made once and kept.
 function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   if (state.frames.has(name)) return;
-  const frame = frameOf(framed(name, path), titleOf(name), name);
+  // a chat the launcher just made may come before its row (`newChat`):
+  // only a row that says it is no chat (an app at `/?chat=`, a Session
+  // Archive) withholds the microphone
+  const frame = frameOf(framed(name, path), titleOf(name), name, { microphone: !byName(name) || isChat(name) });
   $("frames").append(frame);
   state.frames.set(name, frame);
   standins.add(frame);
@@ -1062,21 +1083,32 @@ async function loadCard(name) {
 // none yet is asked again, waiting longer each time (2 s to a minute), and
 // the rest when the page comes back after a minute away. `only` (a set of
 // names, after a change to the list): those, and the apps still without one.
+// One whose card no shot makes (`shoots`: a members-only one of theirs) and
+// that has none is asked once while its row is the same (`cardless`, its row
+// as it was asked: only its 404 keeps it there), and again with the rest when
+// the page comes back (an upload shows then).
 const cardsLoad = { wait: 0, timer: null, at: 0 };
+const cardless = new Map();
 async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
-  const listed = docked().map((f) => f.name);
-  for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
-  const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
-  const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));
-  if (got.includes("new")) renderApps();
-  if (got.includes("none") && cardsLoad.wait < 60_000) {
+  const listed = docked();
+  for (const [name, card] of cards) if (!listed.some((f) => f.name === name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
+  const asked = listed.filter((f) => (!only || only.has(f.name) || !cards.has(f.name)) && cardless.get(f.name) !== JSON.stringify(f));
+  for (const f of asked) if (!shoots(f) && !cards.has(f.name)) cardless.set(f.name, JSON.stringify(f));
+  const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name).catch(() => "same")]));
+  for (const [f, result] of got) if (result !== "none" && cardless.get(f.name) === JSON.stringify(f)) cardless.delete(f.name);
+  if (got.some(([, result]) => result === "new")) renderApps();
+  if (got.some(([f, result]) => result === "none" && shoots(f)) && cardsLoad.wait < 60_000) {
     cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
     cardsLoad.timer = setTimeout(() => loadCards().catch(() => {}), cardsLoad.wait);
   }
 }
-addEventListener("focus", () => { if (Date.now() - cardsLoad.at > 60_000) loadCards().catch(() => {}); });
+addEventListener("focus", () => {
+  if (Date.now() - cardsLoad.at <= 60_000) return;
+  cardless.clear();
+  loadCards().catch(() => {});
+});
 // a pointer over an app's icon in the dock shows its card larger, above it
 const peek = el("div", "card-peek");
 peek.hidden = true;
@@ -1161,7 +1193,7 @@ function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
   if (shown && path !== "/") go(shown, framed(name, path));
-  const frame = named(frameOf(framed(name, path), titleOf(name), name), name, (t) => t, "aria-label");
+  const frame = named(frameOf(framed(name, path), titleOf(name), name, { microphone: isChat(name) }), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
   show({
@@ -1282,6 +1314,7 @@ addEventListener("message", async (e) => {
   if (e.origin !== origin || from.contentWindow !== e.source) return;
   const name = fragmentAt(url, sender, origin);
   if (!name) return;
+  // a page's ask, which it may send on its own: no sign of the person's
   if (isChat(name)) openChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
@@ -1303,7 +1336,7 @@ function openPage(href) {
   const name = url.origin.startsWith(before) && url.origin.endsWith(after) ? url.origin.slice(before.length, url.origin.length - after.length) : null;
   if (!name || !FRAGMENT_NAME.test(name)) return location.assign(url.href);
   if (!byName(name)) return;
-  if (isChat(name)) openChat(name);
+  if (isChat(name)) pickChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 }
 // A fragment's name, when `url` is a page of one on this deployment: its
@@ -1410,6 +1443,16 @@ function nameScreen(frame) {
   } catch {}
 }
 
+// The person at the shell, told to the agents' screens on view, so one
+// beside what they work in keeps streaming (screen-active.js): a key, a
+// press, the pointer or a touch while the page is in sight.
+const screensActive = screenActive({
+  now: () => Date.now(),
+  frames: () => [...document.querySelectorAll("iframe[data-screen]")].filter((f) => f.checkVisibility()),
+  tell: (frame) => frame.contentWindow?.postMessage({ fragment: KIND.screen, agent: frame.dataset.screen, active: true }, new URL(frame.dataset.src).origin),
+});
+for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) addEventListener(type, () => document.hidden || screensActive(), { capture: true, passive: true });
+
 const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
 const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
   api, el, section, actionLine, named, seg, computer: () => state.computer, getSeat: () => state.seat,
@@ -1417,7 +1460,7 @@ const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
 });
 const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
-  connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load,
+  connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load,
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.
@@ -1492,6 +1535,7 @@ function showMaking(identity, name, by) {
   leaveApps();
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   $("frames").hidden = false;
   for (const frame of state.frames.values()) {
@@ -1546,14 +1590,15 @@ function stepMaking(event) {
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
 function restoreView({ page, current }) {
-  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Move: MOVE }[page] ?? "/";
+  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Skills: SKILLS, Upgrade: MOVE }[page] ?? "/";
   if (location.pathname !== path) history.replaceState(null, "", path);
   if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (page === "Apps") openApps(false);
   else if (page === "Brains") openBrains(false);
   else if (page === "History") openHistory(false);
   else if (page === "Schedules") openSchedules(false);
-  else if (page === "Move") openMove(false);
+  else if (page === "Skills") openSkills(false);
+  else if (page === "Upgrade") openMove(false);
   else if (byName(current)) openChat(current, false);
   else {
     renderHeading();
@@ -1635,9 +1680,8 @@ async function titleFromFirst(name) {
     if (!said) return asks.letGo(title);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
     const titled = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
-    const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
-    if (manifest.meta?.title !== UNTITLED) return;
-    await retitle(name, titled, "its title, from its first message");
+    // only while it is still untitled: a rename meanwhile keeps its name (409)
+    await retitle(name, titled, UNTITLED);
   } catch {
     asks.letGo(title);
   }
@@ -1746,7 +1790,7 @@ function composeIn(name, text) {
 }
 
 // The same display-name editor for chats, agents and Apps.
-const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load(), heard: (r) => heard(r), ApiError });
+const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload: () => load() });
 
 // ---- the launcher (launcher.js): one input for starting a chat or finding one again ----
 const launcher = createLauncher({
@@ -1793,6 +1837,7 @@ const APPS = "/apps";
 const BRAINS = "/brains";
 const HISTORY = "/history";
 const SCHEDULES = "/schedules";
+const SKILLS = "/skills";
 const WELCOME = "/welcome";
 const MOVE = "/move";
 function at(path) {
@@ -1805,6 +1850,7 @@ addEventListener("popstate", () => {
   else if (shown && location.pathname === BRAINS) openBrains(false);
   else if (shown && location.pathname === HISTORY) openHistory(false);
   else if (shown && location.pathname === SCHEDULES) openSchedules(false);
+  else if (shown && location.pathname === SKILLS) openSkills(false);
   else if (shown && location.pathname === MOVE) openMove(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else startOrWait();
@@ -1847,6 +1893,7 @@ function openShelf(which, push = true) {
   leaveApps(which);
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   shelf.section.hidden = false;
   renderHeading();
@@ -1875,7 +1922,7 @@ const historyPage = createHistoryPage($("history-page"), {
   agentsOf, agents: () => state.agents, titleOf,
   archive: { name: () => sessionArchive.archive(), entries: () => sessionArchive.entries(), openSession: (key) => sessionArchive.openSession(key), search: (q) => sessionArchive.search(q) },
   continueControl: (source) => continuing.continueControl(source),
-  openChat, leaveSidebar,
+  openChat: pickChat, leaveSidebar,
 });
 function openHistory(push = true) {
   if (push) at(HISTORY);
@@ -1887,6 +1934,7 @@ function openHistory(push = true) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveSchedules();
+  leaveSkills();
   leaveMove();
   $("history-page").hidden = false;
   renderHeading();
@@ -1917,6 +1965,7 @@ function openSchedules(push = true) {
   leaveApps();
   leaveHistory();
   leaveMove();
+  leaveSkills();
   $("schedules-page").hidden = false;
   renderHeading();
   renderChats();
@@ -1930,11 +1979,51 @@ function leaveSchedules() {
 }
 $("schedules-link").onclick = () => openSchedules();
 
+// ---- the Skills page (skills-page.js): what their agents know, and the
+// optional skills they switch on, in the work area as Schedules is;
+// reached from Settings' Skills ----
+// a file's text, as `api` reads JSON: a SKILL.md
+async function fileText(name, path) {
+  const r = await fetch(`/api/f/${seg(name)}/file?path=${encodeURIComponent(path)}`, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" });
+  if (!r.ok) throw new ApiError(r.status, null, r.statusText);
+  return r.text();
+}
+// a file of the release the shell publishes (`/__shell/<file>`), as JSON
+async function releaseJson(file) {
+  const r = await fetch(`/__shell/${file}`, { credentials: "same-origin" });
+  if (!r.ok) throw new ApiError(r.status, null, r.statusText);
+  return r.json();
+}
+const skillsPage = createSkillsPage($("skills-page"), { api, el, seg, skillsFragment: () => skillsFragment(), text: fileText, releaseJson, openApp, openFiles });
+function openSkills(push = true) {
+  if (push) at(SKILLS);
+  if (state.page !== "Skills") newView();
+  hideNotice();
+  state.page = "Skills";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  leaveApps();
+  leaveHistory();
+  leaveSchedules();
+  leaveMove();
+  $("skills-page").hidden = false;
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  skillsPage.open();
+}
+// a chat, settings, apps, History or Schedules in its place
+function leaveSkills() {
+  $("skills-page").hidden = true;
+  skillsPage.close();
+}
+
 // ---- the move's page (move-page.js, FIN-463): a person's old
 // finite.computer agents, which to bring over, and where each move is, in
 // the work area as the Apps page is; reached from its offer's Yes ----
 const movePage = createMovePage($("move-page"), {
-  api, el, setGuest, reload: () => load(),
+  api, el, setGuest, named, reload: () => load(),
   addAgent: (spec) => onboarding.addAgent(spec),
   ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
   identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
@@ -1946,15 +2035,17 @@ const movePage = createMovePage($("move-page"), {
 });
 function openMove(push = true) {
   if (push) at(MOVE);
-  if (state.page !== "Move") newView();
+  if (state.page !== "Upgrade") newView();
   hideNotice();
-  state.page = "Move";
+  // its name, the page's title: the move is the agent's upgrade
+  state.page = "Upgrade";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   $("settings-page").hidden = true;
   leaveApps();
   leaveHistory();
   leaveSchedules();
+  leaveSkills();
   $("move-page").hidden = false;
   renderComputer();
   renderHeading();
@@ -1972,7 +2063,7 @@ function leaveMove() {
 }
 
 const settings = createSettings({
-  api, $, seg, asks,
+  api, $, asks,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
     setSeat: (seat) => { state.seat = seat; }, support: () => state.support, seatIs,
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },
@@ -1985,6 +2076,7 @@ const settings = createSettings({
       leaveApps();
       leaveHistory();
       leaveSchedules();
+      leaveSkills();
       leaveMove();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
@@ -1992,7 +2084,7 @@ const settings = createSettings({
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readTelegram },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
-  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, markOffer,
+  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
@@ -2227,7 +2319,7 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && [SETTINGS, APPS, BRAINS, HISTORY, SCHEDULES, MOVE].includes(location.pathname);
+  const settings = !open && [SETTINGS, APPS, BRAINS, HISTORY, SCHEDULES, SKILLS, MOVE].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
@@ -2236,8 +2328,13 @@ async function start(open) {
   else if (settings && location.pathname === BRAINS) openBrains(false);
   else if (settings && location.pathname === HISTORY) openHistory(false);
   else if (settings && location.pathname === SCHEDULES) openSchedules(false);
+  else if (settings && location.pathname === SKILLS) openSkills(false);
   else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
+  // a chat an alert's click opened with no shell open (`?chat=`) too:
+  // `?chat=` is an address any page may send its tab to, so its load is
+  // no sign. An alert comes as its agent replies, so its computer is
+  // awake then, and for the idle wait after (computer.js `prewake`).
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
@@ -2247,7 +2344,6 @@ async function start(open) {
   // where it is answered, shows over the page
   // after a reload for a new release, its windows where they were
   reopenWindows(settings);
-  prewake();
 }
 
 // ---- a guest (`GET /api/seat`'s `guest`: no seat, and no plan of their

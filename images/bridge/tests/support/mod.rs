@@ -64,7 +64,41 @@ pub fn script() -> Box<dyn Runtime> {
 
 /// The scripted agent with drafts `pace` apart (`slow` is twenty of them).
 pub fn script_paced(pace: Duration) -> Box<dyn Runtime> {
-    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } })
+    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data"), memory: None } })
+}
+
+/// The scripted agent (drafts `pace` apart) keeping its memory of each
+/// agent's chats under `dir` (`memory_dir`), as Hermes keeps a profile on
+/// `/data`: a rollback (`restore_state`) takes it back, and a loss
+/// (`lose_state`, `lose_memory`) takes it, and its turns are told the chat
+/// then.
+pub fn script_remembering(dir: &Path, pace: Duration) -> Box<dyn Runtime> {
+    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data"), memory: Some(memory_dir(dir)) } })
+}
+
+fn memory_dir(dir: &Path) -> PathBuf {
+    dir.join("memory")
+}
+
+/// The runtime's memory lost alone, the bridge's state kept (a profile
+/// gone: FIN-543).
+pub fn lose_memory(dir: &Path) {
+    let _ = std::fs::remove_dir_all(memory_dir(dir));
+}
+
+/// `from` copied whole into `to` (made fresh), when it is there.
+fn copy_tree(from: &Path, to: &Path) {
+    let _ = std::fs::remove_dir_all(to);
+    let Ok(entries) = std::fs::read_dir(from) else { return };
+    std::fs::create_dir_all(to).expect("a copy's directory");
+    for e in entries {
+        let e = e.expect("an entry");
+        if e.file_type().expect("its type").is_dir() {
+            copy_tree(&e.path(), &to.join(e.file_name()));
+        } else {
+            std::fs::copy(e.path(), to.join(e.file_name())).expect("a copy");
+        }
+    }
 }
 
 /// A bridge running in this process: on the test's own runtime (`start`),
@@ -163,36 +197,52 @@ fn state_dir(dir: &Path) -> PathBuf {
     dir.join("bridge")
 }
 
-/// Copies the state file of the directory `from` into `to` (made fresh),
-/// if there is one. Its temporary twin is left behind: the bridge renames
-/// it into place whole and never reads it, so a save that caught it would
-/// hold nothing a restore uses.
+/// Copies the state of the directory `from` into `to` (made fresh): its
+/// snapshot and its log (store.rs), each if there is one. Their temporary
+/// twins are left behind: the bridge renames them into place whole and
+/// never reads them, so a save that caught one would hold nothing a
+/// restore uses.
 fn copy_state(from: &Path, to: &Path) {
     let _ = std::fs::remove_dir_all(to);
     std::fs::create_dir_all(to).expect("a copy's directory");
-    match std::fs::copy(from.join("state.json"), to.join("state.json")) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => panic!("{}: {e}", from.display()),
+    for name in [fragment_bridge::store::SNAPSHOT, fragment_bridge::store::LOG] {
+        match std::fs::copy(from.join(name), to.join(name)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("{}: {e}", from.display()),
+        }
     }
 }
 
-/// The save: the state directory as it is now.
+/// The steps the state's log in `state` (`<dir>/bridge`) holds past its
+/// snapshot (its lines but the first), and its bytes.
+pub fn logged(state: &Path) -> (usize, usize) {
+    let log = std::fs::read(state.join(fragment_bridge::store::LOG)).expect("a log");
+    (log.iter().filter(|b| **b == b'\n').count().saturating_sub(1), log.len())
+}
+
+/// The save: the state directory as it is now, and the runtime's memory
+/// (`script_remembering`) beside it.
 pub fn save_state(dir: &Path) -> Saved {
     static N: AtomicU64 = AtomicU64::new(0);
     let copy = dir.join(format!("saved-{}", N.fetch_add(1, Ordering::Relaxed)));
     copy_state(&state_dir(dir), &copy);
+    copy_tree(&memory_dir(dir), &copy.join("memory"));
     Saved { copy }
 }
 
-/// The restore: the state directory goes back to the save (a rollback).
+/// The restore: the state directory, and the runtime's memory, go back to
+/// the save (a rollback).
 pub fn restore_state(dir: &Path, saved: &Saved) {
     copy_state(&saved.copy, &state_dir(dir));
+    copy_tree(&saved.copy.join("memory"), &memory_dir(dir));
 }
 
-/// The loss: no state directory at all (a `/data` gone).
+/// The loss: no state directory at all, and no memory of the runtime's (a
+/// `/data` gone).
 pub fn lose_state(dir: &Path) {
     let _ = std::fs::remove_dir_all(state_dir(dir));
+    lose_memory(dir);
 }
 
 // ---- the hold (docs/computers.md: a sleep's mark before its save) ----
@@ -269,6 +319,10 @@ impl Runtime for Counting {
         self.inner.name()
     }
 
+    fn memory(&self) -> Option<fragment_bridge::runtime::Memory> {
+        self.inner.memory()
+    }
+
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
         let RuntimeIo { mut commands, events, shutdown, held, unquiet } = io;
         let (to_inner, inner_commands) = mpsc::channel::<Command>(256);
@@ -281,6 +335,53 @@ impl Runtime for Counting {
                 while let Some(c) = commands.recv().await {
                     if let Command::Start(ts) = &c {
                         runs.0.lock().expect("runs").push(ts.turn.clone());
+                    }
+                    if to_inner.send(c).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            inner.await
+        })
+    }
+}
+
+/// `inner`, but a turn whose message says `refuse` ends at once, as a
+/// runtime that could not take it (Claude Code stopped while it signs in):
+/// an error, never `Event::Taken`.
+pub fn refusing(inner: Box<dyn Runtime>) -> Box<dyn Runtime> {
+    Box::new(Refusing { inner })
+}
+
+struct Refusing {
+    inner: Box<dyn Runtime>,
+}
+
+impl Runtime for Refusing {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn memory(&self) -> Option<fragment_bridge::runtime::Memory> {
+        self.inner.memory()
+    }
+
+    fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture {
+        let RuntimeIo { mut commands, events, shutdown, held, unquiet } = io;
+        let (to_inner, inner_commands) = mpsc::channel::<Command>(256);
+        let refused = events.clone();
+        let inner = self.inner.run(RuntimeIo { commands: inner_commands, events, shutdown, held, unquiet });
+        Box::pin(async move {
+            // On the bridge's runtime, so a kill ends it with the bridge.
+            tokio::spawn(async move {
+                // bounded by the bridge: ends when it drops its sender
+                while let Some(c) = commands.recv().await {
+                    if let Command::Start(ts) = &c {
+                        if ts.text.contains("refuse") {
+                            let outcome = fragment_bridge::records::Outcome::Error("it could not take it".into());
+                            let _ = refused.send(fragment_bridge::runtime::Event::End { turn: ts.turn.clone(), outcome }).await;
+                            continue;
+                        }
                     }
                     if to_inner.send(c).await.is_err() {
                         return;

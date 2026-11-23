@@ -187,14 +187,14 @@ impl FragmentCell {
         Ok(Response::from_json(&json!({ "subject": subject, "candidates": candidates, "flaws": flaws }))?)
     }
 
-    /// The making's subject: GLM's (the object a hint names, when one
+    /// The making's subject: its model's (the object a hint names, when one
     /// does: `icon::HINTED_SYSTEM`), or, when it named none, the hint or
     /// the title (the checks then judge what was drawn of it).
     async fn icon_subject(&self, owner: &str, key: &str, op: &str, hint: Option<&str>) -> CellResult<String> {
         let meta: Value = self.meta(MetaKey::MetaLive)?.and_then(|m| crate::json_text(&m).ok()).unwrap_or(Value::Null);
         let name = self.name()?;
         let label = fragment_proto::split_fragment_name(&name).map_or(name.as_str(), |(label, _)| label).to_string();
-        let title = meta["title"].as_str().map(str::to_string).or(self.shown_as()?.1).unwrap_or(label);
+        let title = self.shown_as()?.1.or(meta["title"].as_str().map(str::to_string)).unwrap_or(label);
         let input = icon::subject_input(&title, meta["description"].as_str(), hint);
         let named = match crate::models::run(&self.env, icon::SUBJECT_MODEL, &input, owner, None).await {
             Ok((200, bytes, _)) => {

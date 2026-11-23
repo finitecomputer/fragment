@@ -24,6 +24,13 @@ export class App extends DurableObject {
     return this.ctx.storage.sql.exec("SELECT text, source FROM items ORDER BY id").toArray();
   }
 
+  // An inbox's answer (`inbox.answer`, where a test declares it): a URL
+  // check's challenge said back, else the platform's own answer.
+  handshake({ record }) {
+    const p = record.body.payload;
+    return p?.type === "url_verification" ? { body: p.challenge } : null;
+  }
+
   // Fetches a list with the fragment's API_KEY (and any other headers
   // asked for), saves it, and says so.
   async digest({ url, headers }, job) {
@@ -96,6 +103,13 @@ export class App extends DurableObject {
   async probe({ url }, job) {
     const r = await job.fetch(url);
     return { status: r.status, location: r.headers.get("location") };
+  }
+
+  // A fetch as asked, its headers and body too, answered whole: the
+  // fragment's own code reaching the platform as any client does.
+  async forge({ url, method, headers, body }, job) {
+    const r = await job.fetch(url, { method, headers, body });
+    return { status: r.status, text: r.text() };
   }
 
   // Starts another job and answers its run.

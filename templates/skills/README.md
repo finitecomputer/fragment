@@ -26,17 +26,32 @@ default agent. A fragment on it names it and holds nothing else:
   beside it. Its frontmatter's `name` is its directory's, and says what it
   is for (`description`). Its helpers are named from `${HERMES_SKILL_DIR}`,
   which Hermes fills in with the skill's directory.
-- **Who reads it.** Its owner (the shell's Skills section in settings), and
+- **Who reads it.** Its owner (the shell's Skills page, from settings), and
   their agents' computers: our Hermes image installs `skills/` into every
   profile, as the computer's first agent acting for its owner
   (docs/computers.md, "Skills and the CLI"). The platform knows nothing of
   Hermes: this template is data, served as any fragment's files are.
 - Bounds: at most 1,000 files and 4 MiB of data, each file at most 256 KiB
   (`blessed::DATA_*`; a test holds the template to them).
+- **The optional skills' catalog** is not in this template: the shell
+  publishes it (`cell/shell/optional-skills-hermes.json`, at
+  `/__shell/optional-skills-hermes.json`), so a skills fragment that left
+  the template still has the library. It lists every optional skill of the
+  Hermes image the computers run (id, name, description, licence, and a
+  few labels chosen by hand), written by `cargo xtask skills-catalog` from
+  the image images/hermes/Dockerfile pins. A test fails when the pin moves
+  without it, its digest included. The skills themselves stay in the image
+  (about 11 MB).
+- **A switch** is a file of the fragment's own: `optional/hermes/<id>.on`
+  for each optional skill its owner switched on (the shell's Skills page
+  writes and removes it; what it holds is not read). One file a switch, so
+  two pages never undo each other. Our Hermes image shows each to every
+  profile from its own copy (docs/computers.md, "Skills and the CLI"); the
+  platform keeps only the names, and other runtimes take none.
 
 ## The managed set
 
-Eighteen skills. Eight are Fragment platform contracts:
+Nineteen skills. Nine are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -48,6 +63,7 @@ Eighteen skills. Eight are Fragment platform contracts:
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
 | slides-finite | The slides template: a deck's build, its notes and presenting live |
+| disk-space-finite | Room on a computer's 20 GB disk: caches cleared, big files moved to storage (`fragment offload`) and back |
 
 And six are integrations Paul retains:
 
@@ -118,4 +134,6 @@ the baseline again.
 The platform's files view (`fragment.json` `files.page`, as brains and
 notes have): its folders and each skill's `SKILL.md`, read from the
 fragment's own `__files` and `__file`, so it shows what its owner's agents
-have.
+have. The shell's Skills page (`/skills`, cell/shell/skills-page.js) is
+where a person browses them and switches the optional ones; its Files
+opens this.

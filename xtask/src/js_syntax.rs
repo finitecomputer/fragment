@@ -65,6 +65,7 @@ const SHELL: &str = "cell/shell/shell.js";
 const TEST_SUFFIX: &str = ".test.mjs";
 /// The shell's tests, which a walk must find (each named in its file).
 const SHELL_TESTS: &[&str] = &[
+    "cell/shell-tests/admin-glance.test.mjs",
     "cell/shell-tests/agent-claude.test.mjs",
     "cell/shell-tests/agent-home-read.test.mjs",
     "cell/shell-tests/agent-remove.test.mjs",
@@ -79,22 +80,28 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/chat-pages.test.mjs",
     "cell/shell-tests/chat-speakers.test.mjs",
     "cell/shell-tests/computer-answer.test.mjs",
+    "cell/shell-tests/computer-prewake.test.mjs",
     "cell/shell-tests/computer-state.test.mjs",
+    "cell/shell-tests/computer-storage.test.mjs",
     "cell/shell-tests/connections-names.test.mjs",
     "cell/shell-tests/frame-messages.test.mjs",
     "cell/shell-tests/frame-standin.test.mjs",
     "cell/shell-tests/history-page.test.mjs",
     "cell/shell-tests/launcher-knowledge.test.mjs",
+    "cell/shell-tests/light-dismiss.test.mjs",
     "cell/shell-tests/limits.test.mjs",
     "cell/shell-tests/making.test.mjs",
     "cell/shell-tests/move-page.test.mjs",
     "cell/shell-tests/notices-band.test.mjs",
     "cell/shell-tests/onboarding.test.mjs",
+    "cell/shell-tests/port-bridge.test.mjs",
     "cell/shell-tests/restart-follow.test.mjs",
     "cell/shell-tests/schedules-page.test.mjs",
+    "cell/shell-tests/screen-attend.test.mjs",
     "cell/shell-tests/session-archive.test.mjs",
     "cell/shell-tests/session-text.test.mjs",
     "cell/shell-tests/simplex-settings.test.mjs",
+    "cell/shell-tests/skills-page.test.mjs",
     "cell/shell-tests/telegram-settings.test.mjs",
     "cell/shell-tests/threads.test.mjs",
 ];
@@ -318,11 +325,12 @@ mod tests {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
-        // the Worker's restore reads (beside the module it tests), the shell's
-        // tests, and the board's, brain's and Telegram connector's apps' and the slides'
-        // build's and presenter's (beside the templates crate: a file under templates/
+        // the Worker's restore reads, a SimpleX door's object and its rules, and a computer's intercepts (each beside
+        // the module it tests), the shell's tests, and the board's, brain's
+        // and the SimpleX and Telegram connectors' apps' and the slides' build's and
+        // presenter's (beside the templates crate: a file under templates/
         // would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs", "cell/door-rules.test.mjs", "cell/door.test.mjs", "cell/intercepts.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/simplex_connector.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");

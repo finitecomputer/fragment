@@ -7,7 +7,7 @@
 //! list price its slot names, reading images) and its vision Finite
 //! Private. Standard, the medium tier: OpenRouter's GLM-5.3 Flash with the
 //! slot's provider routing (its `body`), its fallback and vision a slot of
-//! its own, Workers AI's GLM-5.3 Flash. The vendors are the model fake's
+//! its own, Workers AI's DeepSeek V4.1 Flash. The vendors are the model fake's
 //! two faces (a lower rung at the vendor boundary): its OpenAI-compatible
 //! one answers Finite Private's model as finite-mono's
 //! `finite-private-limiter` does, OpenRouter's as OpenRouter does (its
@@ -68,8 +68,8 @@ const ROUTE: &str = "/api/models/v1/chat/completions";
 const PRIVATE: &str = fragment_core::models::FINITE_PRIVATE_FLASH;
 /// OpenRouter's GLM-5.3 Flash, the medium tier's here.
 const ROUTED: &str = fragment_core::models::OPENROUTER_FLASH;
-/// Workers AI's GLM-5.3 Flash: the fallback and the vision model here.
-const FLASH: &str = fragment_core::models::GLM_FLASH;
+/// Workers AI's DeepSeek V4.1 Flash: the fallback and the vision model here.
+const FLASH: &str = fragment_core::models::DEEPSEEK_FLASH;
 /// Tinfoil's DeepSeek V4.1 Flash, the private tier's fallback.
 const TINFOIL: &str = fragment_fakes::workers_ai::TINFOIL_FLASH;
 /// DeepSeek V4.1 Flash as OpenRouter names it: Standard's Deep here.
@@ -210,8 +210,8 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
     s.ok(
-        "the route lists the routes' ids, each once, and nothing of their prices or where each runs (no base URL, no routing)",
-        r.status == 200 && listed == [PRIVATE, ROUTED, TINFOIL, FLASH, ROUTED_DEEP] && !r.text.contains("price") && !r.text.contains("/v1") && !r.text.contains("zdr"),
+        "the route lists its ids, each once, its routes' own models first, then each slot's by its name, and nothing of their prices or where each runs (no base URL, no routing)",
+        r.status == 200 && listed == [PRIVATE, ROUTED, FLASH, TINFOIL, ROUTED_DEEP] && !r.text.contains("price") && !r.text.contains("/v1") && !r.text.contains("zdr"),
         &r,
     );
 
@@ -232,7 +232,7 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", false)))?;
     let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 50, 20))));
     s.ok(
-        "a Standard call OpenRouter answers 429 is made once more on its route's own fallback, Workers AI's GLM-5.3 Flash, never Tinfoil, and charged at Workers AI's price",
+        "a Standard call OpenRouter answers 429 is made once more on its route's own fallback, Workers AI's DeepSeek V4.1 Flash, never Tinfoil, and charged at Workers AI's price",
         r.status == 200 && tried(s, calls) == standard_fell() && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
     );
@@ -241,7 +241,7 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(as_standard(chat("fallback", false)))?;
     let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 30, 10))));
     s.ok(
-        "a Standard agent's `fallback` (its tier said) is its route's, Workers AI's GLM-5.3 Flash",
+        "a Standard agent's `fallback` (its tier said) is its route's, Workers AI's DeepSeek V4.1 Flash",
         r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && settled,
         format!("{} {:?}", r.status, tried(s, calls)),
     );
@@ -370,7 +370,7 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let call = s.ai.calls().get(calls).cloned();
     let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 900, 40))));
     s.ok(
-        "a Standard agent's `vision` (its tier said) runs on its route's, Workers AI's GLM-5.3 Flash, the image sent as it came, never Finite Private",
+        "a Standard agent's `vision` (its tier said) runs on its route's, Workers AI's DeepSeek V4.1 Flash, the image sent as it came, never Finite Private",
         r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && call.is_some_and(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str() == Some(png)) && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
@@ -415,7 +415,7 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "tier-2", json!({ "text": "the standard notes", "tier": "medium" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok(
-        "a job's `ai.text` on Standard whose OpenRouter answers 502 is answered by its route's fallback, Workers AI's GLM-5.3 Flash, and costs that call",
+        "a job's `ai.text` on Standard whose OpenRouter answers 502 is answered by its route's fallback, Workers AI's DeepSeek V4.1 Flash, and costs that call",
         run["status"] == "succeeded" && run["output"]["model"] == FLASH && tried(s, calls) == standard_fell() && run["costMicros"] == charge(&tokens(FLASH, 800, 300)),
         json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
     );
@@ -643,7 +643,7 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[429]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat(FLASH, false)))?;
     s.ok(
-        "one naming Workers AI's GLM-5.3 Flash (Standard's fallback's and vision's) is that slot's: on Workers AI, and its 429 is the call's, no second try, nothing charged",
+        "one naming Workers AI's DeepSeek V4.1 Flash (Standard's fallback's and vision's) is that slot's: on Workers AI, and its 429 is the call's, no second try, nothing charged",
         r.status == 429 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && aig().len() == before,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );

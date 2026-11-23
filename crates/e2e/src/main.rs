@@ -105,13 +105,21 @@ pub const RECOMMENDED_LABEL: &str = "Recommended";
 pub const STANDARD_LABEL: &str = "Standard";
 
 /// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
-/// (`fragment_core::models::Models::defaults`), each tier labelled, so its
-/// Settings offers two routes (Paul, 2026-10-24).
+/// (`fragment_core::models::Models::defaults`), each route labelled, so its
+/// Settings offers two routes (Paul, 2026-10-24). Named as configs named
+/// them before routes were a list, and read as a deploy reads one
+/// (`fragment_core::models::legacy`), so the e2e runs today's configs.
 pub fn plain_models() -> Value {
-    json!({
+    listed(json!({
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
         "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
-    })
+    }))
+}
+
+/// A config's `models` of the shape before routes were a list, as the cell
+/// reads it (xtask's deploy reads it so: `fragment_core::models::legacy`).
+fn listed(old: Value) -> Value {
+    fragment_core::models::legacy(&old).expect("the e2e's models are a deployment's")
 }
 
 /// `plain_models`, its embeddings slot the default model pinned at a
@@ -144,7 +152,7 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// names, `tinfoil_price`, reading images) and vision (Finite Private),
 /// each private. Standard, the medium tier: OpenRouter's GLM-5.3 Flash
 /// with its routing, its route's fallback and vision a slot of its own,
-/// `cloudflare` (Workers AI's GLM-5.3 Flash, reading images). Each tier
+/// `cloudflare` (Workers AI's DeepSeek V4.1 Flash, reading images). Each tier
 /// its Fast at `high` and its Deep (Paul, 2026-10-27) at `max` and
 /// `DEEP_MAX_TOKENS` a call: Private's Tinfoil's DeepSeek V4.1 Flash
 /// (`private_deep`), falling back to Private's Fast; Standard's
@@ -155,12 +163,12 @@ pub fn private_tier_models(fake: &str) -> Value {
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
     let standard = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing(), "label": "Standard", "fallback": "cloudflare", "vision": "cloudflare", "reasoning": "high", "deep": "standard_deep" });
     let standard_deep = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENROUTER_DEEPSEEK, "body": openrouter_deep_routing(), "reasoning": "max", "max_tokens": DEEP_MAX_TOKENS, "fallback": "cloudflare" });
-    let cloudflare = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH, "images": true });
+    let cloudflare = json!({ "provider": "workers_ai", "model": fragment_core::models::DEEPSEEK_FLASH, "images": true });
     let vision = private.clone();
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
     private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
-    json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep })
+    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep }))
 }
 
 /// The most one call of a Deep slot writes on a node shaped as the private
@@ -187,8 +195,6 @@ pub fn openrouter_deep_routing() -> Value {
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
-/// Blobs no branch names are kept this long here (7 days in production).
-pub const BLOB_GRACE_S: u32 = 4;
 /// The fleet's bound on one file a person sends (`upload_max_bytes`):
 /// below a zone's, so a test makes a file past it cheaply, and named, so
 /// the routes and the clients' checks are seen to read the deployment's
@@ -553,6 +559,18 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether a local stack builds the door's image: for a run that names
+    /// the door's lane alone (`Fleet::doors`).
+    fn builds_doors(&self) -> bool {
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_door::NAME))
+    }
+
+    /// Whether the stack runs SimpleX doors: a deployment whose config names
+    /// them; a local one that builds their image (`builds_doors`).
+    pub fn runs_doors(&self) -> bool {
+        needs::missing(Need::Doors, self.rung).is_none() && (self.preview.is_some() || self.builds_doors())
+    }
+
     /// Whether the local node runs computers: wrangler's always, celld's on
     /// the krun engine alone (docs/self-host.md, seam 2).
     pub fn runs_computers(&self) -> bool {
@@ -853,7 +871,6 @@ impl Suite {
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
-            blob_grace_s: Some(BLOB_GRACE_S),
             upload_max_bytes: Some(UPLOAD_MAX_BYTES),
             // the lower rung: the model route's calls go to the Workers AI fake,
             // and, shaped as the private tier, its tiers to the fake's
@@ -926,6 +943,8 @@ impl Suite {
             computer_image: self.runs_computers().then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
+            // the door's image built only for a run that names its lane
+            doors: self.builds_doors(),
             // a run must not depend on public DNS (devstack::Fleet)
             computer_internet: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
@@ -1003,6 +1022,13 @@ impl Suite {
     pub fn drop_public_dns(&self) -> Result<Vec<String>> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane reaches no container: a section that does declares Need::Node");
         devstack::containers::drop_public_dns(&self.project)
+    }
+
+    /// What the guest of `computer` wrote since its container started
+    /// (devstack::containers::guest_log): None while it is asleep.
+    pub fn guest_log(&self, computer: &str) -> Result<Option<String>> {
+        anyhow::ensure!(!self.hosted_rules && !self.on_celld(), "only a local run's computers are Docker's to read: a section that does declares Need::LocalDocker");
+        devstack::containers::guest_log(&self.project, computer)
     }
 
     /// The queries to public DNS `sidecars` dropped since `drop_public_dns`.
@@ -1217,6 +1243,19 @@ impl Suite {
         c
     }
 
+    /// `cli` as an agent's computer whose disk has `room` bytes runs it:
+    /// its HOME and its temporary folder in `home`, and no file it writes
+    /// may grow past `room` (the kernel's `RLIMIT_FSIZE`, the write
+    /// refused: `with_room`).
+    pub fn cli_in_room(&self, api: &Api, home: &Path, room: u64, args: &[&str]) -> Output {
+        let mut c = self.cli_command(api, home, args);
+        let tmp = home.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("a computer's temporary folder");
+        c.env("TMPDIR", &tmp);
+        with_room(&mut c, room);
+        c.output().expect("run the fragment CLI")
+    }
+
     fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
         let mut c = self.bare_cli();
         c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
@@ -1266,14 +1305,47 @@ impl Suite {
     }
 }
 
+/// `c` runs as on a disk of `room` bytes: no file it writes grows past
+/// them (`RLIMIT_FSIZE`), a write past them refused (`EFBIG`, `SIGXFSZ`
+/// ignored), as a full disk refuses one.
+pub fn with_room(c: &mut Command, room: u64) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: between fork and exec, two async-signal-safe calls, no allocation
+    unsafe {
+        c.pre_exec(move || {
+            let limit = libc::rlimit { rlim_cur: room as libc::rlim_t, rlim_max: room as libc::rlim_t };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 || libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 /// The `data` of a `--json` CLI answer (`args`, its command, for errors).
-fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
+pub fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
     let v: Value = serde_json::from_slice(&out.stdout)
         .with_context(|| format!("fragment {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))?;
     if v["ok"] != true {
         bail!("fragment {args:?}: {v}");
     }
     Ok(v["data"].clone())
+}
+
+/// The lines a node's Workers logged as JSON, read from its log
+/// (`Suite::node_log`), each past the `[<worker>] ` a node of several
+/// Workers (the cell and the admin, in one `wrangler dev`) puts before
+/// every line of theirs; any other line passed over.
+pub fn logged_json(log: &str) -> Vec<Value> {
+    let worker = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    log.lines()
+        .map(str::trim)
+        .map(|l| match l.strip_prefix('[').and_then(|r| r.split_once("] ")) {
+            Some((name, line)) if worker(name) => line,
+            _ => l,
+        })
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
 }
 
 /// Whom `Suite::login` signs in as for a CLI key (its npub): the same
@@ -1415,7 +1487,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
+            let offers = needs::Offers { levers: true, computers: true, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
@@ -1571,4 +1643,18 @@ fn finish(s: &mut Suite) -> Result<()> {
         println!("could not remove {}: {e}", s.scratch.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Goal: a Worker's JSON line is read from a node's log whether the
+    /// node runs one Worker (the line alone) or several (`[<worker>] `
+    /// before it, as wrangler writes it), and nothing else is read as one.
+    /// Method: a log of each kind of line, as written 2026-11-20.
+    #[test]
+    fn a_workers_json_lines_are_read_past_its_name() {
+        let log = "[fragment] {\"egress\":\"swap\",\"status\":200}\n{\"egress\":\"api\"}\n[fragment--admin] {\"n\":1}\n[wrangler:info] Ready on http://127.0.0.1:1\n[1,2] not a line of ours\n[Bad Name] {\"n\":2}\n  [fragment] {\"n\":3}  \n";
+        let read = super::logged_json(log);
+        assert_eq!(read, [serde_json::json!({ "egress": "swap", "status": 200 }), serde_json::json!({ "egress": "api" }), serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 3 })]);
+    }
 }

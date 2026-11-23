@@ -28,7 +28,7 @@ fn bound_port() -> std::net::TcpListener {
 
 fn relay(port: &std::net::TcpListener, dir: &std::path::Path) -> Box<Relay> {
     let listen = port.local_addr().unwrap();
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: true }, listener: port.try_clone().unwrap() })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: true, home: None }, listener: port.try_clone().unwrap() })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -421,8 +421,61 @@ async fn a_card_answered_by_a_message_through_the_relay() {
     fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
     let told = format!("[paul sent a file: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
     hermes.with(|s| assert_eq!(s.heard.last().map(|e| e["text"].clone()), Some(json!(told)), "where the file is, in its answer's words: {:?}", s.heard));
+    hermes.with(|s| assert!(s.heard.last().is_some_and(|e| e.get("media").is_none()), "a picture is its words alone, as the clarify takes words: {:?}", s.heard.last()));
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn"));
     assert_eq!(std::fs::read(dir.join("media").join(&sha)).expect("the file"), b"a photo of basil");
+    bridge.stop().await;
+}
+
+/// Goal (Austin, 2026-11-17: a voice memo sent as the answer to a question
+/// in words reached Hermes as its file's line alone, so Hermes never
+/// transcribed it and the agent did, itself): an answer in words that is a
+/// voice memo comes to Hermes with its audio as its media, as a turn's
+/// start's does, which Hermes transcribes and answers its clarify with;
+/// its words still name where the file is. Method: the scripted gateway's
+/// card, "Other" pressed with no words, a WAV said as the answer; what
+/// Hermes heard last, and its media fetched as Hermes fetches it.
+#[tokio::test]
+async fn a_voice_memo_answer_brings_hermes_its_audio() {
+    let (fake, bridge, hermes, dir) = setup("relay-voice-answer", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"RIFF a voice memo saying blue");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("audio/wav".into(), bytes.clone())));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &chat, &turn, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &turn, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &turn, "turn.asked").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    let heard = hermes.with(|s| s.heard.last().cloned()).expect("Hermes heard the answer");
+    let told = format!("[paul sent a file: 'voice-memo.wav' (audio/wav). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    assert_eq!(heard["text"], json!(told), "its words still name the file: {heard}");
+    let media = heard["media"].as_array().cloned().unwrap_or_default();
+    assert_eq!(media.len(), 1, "its audio is its media: {heard}");
+    assert_eq!(media[0]["mime"], "audio/wav", "{heard}");
+    let url = media[0]["url"].as_str().unwrap_or("");
+    assert_eq!(heard["media_urls"], json!([url]), "{heard}");
+    let addr: std::net::SocketAddr = url.strip_prefix("http://").and_then(|r| r.split_once('/')).and_then(|(a, _)| a.parse().ok()).expect("the relay's own address");
+    assert_eq!(support::hermes::download_from(addr, "computer-test", SECRET, url).await.as_deref(), Some(&bytes[..]), "the memo itself, at {url}");
+    fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 1, "the answer started no turn"));
+
+    // words typed with a memo are a written answer: Hermes would answer a
+    // clarify heard in audio with the audio's words alone
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify again" }));
+    let again = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the second card", |w| !work_of(w, &chat, &again, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &again, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &again, "turn.asked").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "Basilio", "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
+    let heard = hermes.with(|s| s.heard.last().cloned()).expect("Hermes heard the answer");
+    assert_eq!(heard["text"], json!(format!("Basilio\n{told}")), "its words, then where the memo is: {heard}");
+    assert!(heard.get("media").is_none(), "words with it: no audio to answer with instead: {heard}");
     bridge.stop().await;
 }
 
@@ -861,7 +914,7 @@ async fn a_replys_file_is_kept_until_its_post() {
     let port = bound_port();
     let listen = port.local_addr().unwrap();
     let media = dir.join("relay-media");
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: media.clone(), media_max_bytes: 100, media_local: true };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: media.clone(), media_max_bytes: 100, media_local: true, home: None };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port.try_clone().unwrap() }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
@@ -1063,7 +1116,7 @@ async fn an_image_sent_by_url_is_fetched() {
     let dir = support::dir("relay-image-url-public");
     let port = bound_port();
     let listen = port.local_addr().unwrap();
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: false };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: false, home: None };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);
@@ -1407,4 +1460,52 @@ async fn progress_without_observations_is_no_step() {
         assert_eq!(replies(w, &chat).len(), 1);
     });
     bridge.stop().await;
+}
+
+/// A clarify answered (by a voice memo, or in words), then the model's next
+/// response a tool call alone (its intent, `Called`, on the activity
+/// socket), then a Stop while the tool runs: what Hermes heard. A voice
+/// answer's question is open until the turn goes on (`Inflight::hearing`),
+/// and a call is the turn going on, so the Stop says no `skip` to a clarify
+/// no longer waiting (Hermes would take it as a message: the council on
+/// this change, 2026-11-17).
+async fn stop_while_a_call_runs_after_an_answer(answer_by_voice: bool) -> Vec<Value> {
+    let (fake, bridge, hermes, _dir) = setup(if answer_by_voice { "relay-call-voice" } else { "relay-call-words" }, &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"RIFF a voice memo saying blue");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("audio/wav".into(), bytes.clone())));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color then call" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &chat, &turn, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &turn, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &turn, "turn.asked").is_empty()).await;
+    if answer_by_voice {
+        fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "audio/wav", "name": "voice-memo.wav" }] }));
+    } else {
+        fake.say(&chat, &person("paul"), json!({ "text": "blue" }));
+    }
+    fake.until(WAIT, "the call's intent posted", |w| !work_of(w, &chat, &turn, "turn.call").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let heard = hermes.with(|s| s.heard.clone());
+    bridge.stop().await;
+    heard
+}
+
+/// Goal: a Stop while a tool runs after a written answer says no `skip`.
+#[tokio::test]
+async fn a_stop_after_a_written_answer_and_a_call_says_no_skip() {
+    let heard = stop_while_a_call_runs_after_an_answer(false).await;
+    assert!(!heard.iter().any(|e| e["text"] == wire::STOP_WORDS), "no stray skip: {heard:?}");
+}
+
+/// Goal: as after a written answer, after a voice answer Hermes heard.
+#[tokio::test]
+async fn a_stop_after_a_voice_answer_and_a_call_says_no_skip() {
+    let heard = stop_while_a_call_runs_after_an_answer(true).await;
+    assert!(!heard.iter().any(|e| e["text"] == wire::STOP_WORDS), "a stray `skip` reached Hermes after its clarify was answered: {:?}", heard.iter().map(|e| e["text"].clone()).collect::<Vec<_>>());
 }

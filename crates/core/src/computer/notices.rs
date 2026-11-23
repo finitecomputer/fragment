@@ -43,9 +43,9 @@ pub fn support_url_ok(url: &str) -> bool {
 ///   its agents' work), until its owner puts that version off
 ///   (`Images::later`). Never while it sleeps or starts: its next start
 ///   takes the new version anyway;
-/// - `disk_filling`: a read found its disk used past `DISK_TOLD_USED_PCT`
-///   with at most `DISK_TOLD_FREE_MAX` free, and none since found clearly
-///   more room (`disk_clear`).
+/// - `disk_filling`: a read found its disk with at most `ROOM_TOLD_MAX` of
+///   room (`disk::room`: what a restore of its save leaves), and none since
+///   found clearly more (`disk_clear`).
 pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) -> Vec<ComputerNotice> {
     let mut out = Vec::with_capacity(5);
     if let Phase::Failed { why, .. } = &life.phase {
@@ -80,6 +80,8 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
                 save: back_to.map(|s| s.number),
                 saved_at: back_to.map(|s| s.at_ms),
                 at: None,
+                unchanged: saves.unchanged(e, back_to),
+                too_big: false,
             });
         }
         (Some(_), _) => {}
@@ -91,17 +93,19 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
             save: w.save,
             saved_at: w.restored.saved_at,
             at: Some(w.restored.at),
+            unchanged: w.unchanged,
+            too_big: w.too_big,
         }),
         (None, _) => {}
     }
     let awake = matches!(life.phase, Phase::Awake { .. });
     if let (true, Some(running), Some(latest)) = (awake, version_running(life, saves), images.latest()) {
         if running != latest && life.keepalives() == 0 && images.later.as_deref() != Some(latest.as_str()) {
-            out.push(ComputerNotice::Update { version: latest });
+            out.push(ComputerNotice::Update { version: latest, room_first: saves.update_waits() });
         }
     }
     if let Some(d) = saves.disk.filter(|_| saves.disk_told) {
-        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free });
+        out.push(ComputerNotice::DiskFilling { total: d.total, free: d.free, room: crate::computer::disk::room(&d) });
     }
     assert!(out.len() <= 5, "one notice of each kind at most");
     out
@@ -133,17 +137,18 @@ mod tests {
         let saved_at = c.saves.current().map(|s| s.at_ms);
         let r = c.wake();
         assert_eq!(went_back(&c), None, "a wake from its sleep's save went back nowhere");
-        // a message for its agent, then a crash: it comes back from b1
+        // a message for its agent, then a crash before any turn took it up:
+        // it comes back from b1, and nothing ran on it since (`unchanged`)
         c.apply(Event::Wake { why: Wake::Record });
         let g = r.generation;
         let s = c.apply(Event::Exited { generation: g });
         let crashed_at = c.now;
         let s = c.owed(&s);
         let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
-        let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None };
+        let pending = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: true, save: Some(1), saved_at, at: None, unchanged: true, too_big: false };
         assert_eq!(went_back(&c), Some(pending), "starting again: it goes back to b1");
         let r = c.come_up(generation);
-        let told = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: false, save: Some(1), saved_at, at: Some(r.at) };
+        let told = ComputerNotice::WentBack { life: g, cause: LossCause::Crash, ended_at: Some(crashed_at), pending: false, save: Some(1), saved_at, at: Some(r.at), unchanged: true, too_big: false };
         assert_eq!(went_back(&c), Some(told.clone()));
         // a sleep that saves, and a wake from it: the loss is still told
         c.sleep(Some("b2"));
@@ -210,15 +215,19 @@ mod tests {
         let mut c = Computer::new();
         c.wake();
         c.sleep(Some("b1"));
-        // a turn, its end saved, then only a page open: a crash loses nothing
+        // a turn, its end saved, then only a wake that brings no work (a
+        // port tab's), its owner's port tab open since before that save and
+        // unused: its exit loses nothing, and is a sleep (an open tab holds
+        // nothing: only its use)
         let g = c.wake().generation;
+        c.apply(Event::Opened { socket: Socket::Tab });
         c.turn_saved("b2");
-        c.apply(Event::Wake { why: Wake::Presence });
+        c.apply(Event::Wake { why: Wake::Tab });
         let next = c.crash();
         assert_eq!(went_back(&c), None, "it starts again from b2, which holds all it did");
         assert!(!c.saves.saw(g), "nothing told, so nothing to see");
         let r = c.come_up(next);
-        assert_eq!((r.save.as_deref(), r.after, r.rollback, c.saves.rollbacks()), (Some("b2"), Some(LifeEnd::Exit), true, 1), "its guest still reads a rollback: {r:?}");
+        assert_eq!((r.save.as_deref(), r.after, r.rollback, c.saves.rollbacks()), (Some("b2"), Some(LifeEnd::Sleep), false, 0), "a sleep, no rollback: {r:?}");
         assert_eq!((went_back(&c), c.saves.went_back()), (None, None));
         let before = (c.life.clone(), c.saves.clone());
         assert!(c.apply(Event::Exited { generation: g }).actions.is_empty() && (c.life.clone(), c.saves.clone()) == before, "the crash's report again changes nothing");
@@ -253,7 +262,8 @@ mod tests {
         c.come_up(next);
         let told = went_back(&c).expect("told once it came up");
         assert!(matches!(told, ComputerNotice::WentBack { life, pending: false, save: Some(4), .. } if life == g), "{told:?}");
-        // a quiet crash after it: the loss told before, unseen, is still told
+        // a quiet stop after it (idle and saved: a sleep): the loss told
+        // before, unseen, is still told
         c.turn_saved("b5");
         let next = c.crash();
         assert_eq!(went_back(&c), Some(told.clone()), "asleep after a stop that lost nothing");
@@ -269,23 +279,36 @@ mod tests {
         c.saved_as("b6");
         let mut next = c.crash();
         assert!(matches!(went_back(&c), Some(ComputerNotice::WentBack { life, save: Some(6), .. }) if life == g), "{:?}", went_back(&c));
-        // a tab, or a join, on a life with no save of its own: told
-        for work in [Event::Opened { socket: Socket::Tab }, Event::Wake { why: Wake::Joined }] {
-            assert!(c.saves.saw(c.life.generation() - 1));
-            c.come_up(next);
+        // a tab, or a join, on a life with no save of its own: told, as
+        // nothing changed (nothing ran on it that may change its files); a
+        // tab its person used: told as a change lost
+        let tab_used = [Event::Opened { socket: Socket::Tab }, Event::TabUsed];
+        assert!(c.saves.saw(g));
+        c.come_up(next);
+        for (work, still) in [(&tab_used[..1], true), (&[Event::Wake { why: Wake::Joined }][..], true), (&tab_used[..], false)] {
             let g = c.life.generation();
-            c.apply(work.clone());
+            for e in work {
+                c.apply(e.clone());
+            }
             next = c.crash();
-            assert!(matches!(went_back(&c), Some(ComputerNotice::WentBack { life, save: Some(6), pending: true, .. }) if life == g), "{work:?}: {:?}", went_back(&c));
+            assert!(matches!(went_back(&c), Some(ComputerNotice::WentBack { life, save: Some(6), pending: true, unchanged, .. }) if life == g && unchanged == still), "{work:?}: {:?}", went_back(&c));
+            c.come_up(next);
+            assert!(matches!(went_back(&c), Some(ComputerNotice::WentBack { life, pending: false, unchanged, .. }) if life == g && unchanged == still), "told the same once it came up, {work:?}: {:?}", went_back(&c));
+            assert!(c.saves.saw(g));
         }
-        assert!(c.saves.saw(c.life.generation() - 1));
+        let next = c.crash();
         // a sleep that slept unsaved, nothing done since its save: nothing
         c.come_up(next);
         c.sleep(None);
         assert_eq!(went_back(&c), None, "slept unsaved, back to b6, which it came up from");
         assert!(c.wake().rollback && went_back(&c).is_none());
-        // restart: an end stored before `quiet` was kept is told
-        c.turn_saved("b7");
+        // restart: an end stored before `quiet` was kept is told (a crash:
+        // a keepalive open since before its save, a busy save's)
+        let g = c.life.generation();
+        c.apply(Event::Opened { socket: Socket::Keepalive });
+        c.now += SAVE_EVERY_MS;
+        assert_eq!(c.apply(Event::Alarm).actions.last(), Some(&Action::Hold { generation: g }));
+        c.saved_as("b7");
         let next = c.crash();
         assert_eq!(went_back(&c), None);
         let mut v = serde_json::to_value(&c.saves).unwrap();

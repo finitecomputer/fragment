@@ -240,7 +240,7 @@ mod tests {
         let rules = Rules::default();
         let told = |c: &Computer| notices(&c.life, &c.saves, &c.images, &rules);
         let update = |c: &Computer| told(c).into_iter().find(|n| matches!(n, ComputerNotice::Update { .. }));
-        let ready = |reference: &str| Some(ComputerNotice::Update { version: version_of(reference) });
+        let ready = |reference: &str| Some(ComputerNotice::Update { version: version_of(reference), room_first: false });
         // deploys' references, each a digest
         let at = |n: u8| format!("registry/stub@sha256:{}", format!("{n:x}").repeat(64));
         let (next, newer, newest, fifth) = (at(2), at(3), at(4), at(5));
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(c.apply(Event::Restart { generation: g }).actions, vec![Action::Sleep { generation: g }]);
         assert_eq!(update(&c), None, "its restart's sleep is under way");
         let (_, held, seq) = save_asked(&c.apply(Event::Held { generation: g, held: true }));
-        c.saves.saved(g, rec("b2"), c.now, held);
+        c.saves.saved(g, rec("b2"), 0, c.now, held);
         c.apply(Event::Saved { generation: g, seq });
         let s = c.apply(Event::Asleep { generation: g });
         let s = c.owed(&s);

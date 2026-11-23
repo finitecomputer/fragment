@@ -252,7 +252,8 @@ pub const AGENT_HEADER: &str = "x-fragment-agent";
 /// refuses it on every other route (cell/src/lib.rs `signer`).
 pub fn honors_for(method: &str, path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search")
+    let stage_copy = method == "POST" && p.starts_with("/api/migrations/stages/") && p.ends_with("/copy");
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search") || stage_copy
 }
 
 impl From<Identity> for Signer {
@@ -414,6 +415,12 @@ impl Client {
     /// it has one.
     #[allow(clippy::too_many_arguments)]
     fn send(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
+        self.send_with(method, path, body, replay, signed, timeout, content_type, None)
+    }
+
+    /// `send`, asking for one `range` of the answer's bytes when given.
+    #[allow(clippy::too_many_arguments)]
+    fn send_with(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>, range: Option<&str>) -> Result<Resp> {
         let path = &self.resolved(path)?;
         let url = self.url(method, path);
         let verb: reqwest::Method = method.parse()?;
@@ -423,6 +430,9 @@ impl Client {
             let mut req = self.http.request(verb.clone(), &url).header(header, value).timeout(timeout);
             if let Some(t) = content_type {
                 req = req.header("content-type", t);
+            }
+            if let Some(r) = range {
+                req = req.header("range", r);
             }
             if body.is_empty() { req } else { req.body(attempt_body(&body)) }
         };
@@ -478,11 +488,37 @@ impl Client {
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
         self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
     }
+    /// A POST that does the same however often it is sent (a copy into a
+    /// content address): retried as a read is.
+    pub fn post_safe(&self, path: &str, bytes: u64) -> Result<Resp> {
+        self.send("POST", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
+    }
+    /// `len` bytes of what `path` answers, from `offset` (a `Range` the
+    /// answer must honor whole, 206), or its refusal.
+    pub fn get_range(&self, path: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        assert!(len > 0, "a range holds a byte");
+        let range = format!("bytes={offset}-{}", offset + len - 1);
+        let resp = self.send_with("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(len), None, Some(&range))?;
+        if !resp.ok() {
+            return Err(anyhow::Error::new(resp.refusal()).context(format!("{path}, {range}")));
+        }
+        if resp.status != 206 || resp.body.len() as u64 != len {
+            anyhow::bail!("{path}, {range}: answered {} with {} bytes, not that range", resp.status, resp.body.len());
+        }
+        Ok(resp.body)
+    }
     /// A signed GET whose answer goes to `to` as it arrives (an export's
     /// archive, which may be tens of gigabytes), never held whole, given
     /// the time its `bytes` take: its bytes. A refusal is read whole, as
     /// any other's is.
     pub fn download(&self, path: &str, to: &std::path::Path, bytes: u64) -> Result<u64> {
+        let mut file = None;
+        self.download_into(path, bytes, || std::fs::File::create(to).with_context(|| format!("writing {}", to.display())).map(|f| file.insert(f)))
+    }
+    /// `download`'s answer into what `open` gives once the answer is a
+    /// success (a file, or a hash of the bytes as they arrive: `fragment
+    /// offload`'s checks), never held whole: its bytes.
+    pub fn download_into<W: std::io::Write>(&self, path: &str, bytes: u64, open: impl FnOnce() -> Result<W>) -> Result<u64> {
         let url = self.url("GET", path);
         let (header, value) = self.signer.header("GET", &url, &[]);
         if self.verbose {
@@ -494,8 +530,8 @@ impl Client {
             let body = resp.bytes().map(owned).unwrap_or_default();
             return Err(anyhow::Error::new(Resp { status, body }.refusal()));
         }
-        let mut file = std::fs::File::create(to).with_context(|| format!("writing {}", to.display()))?;
-        let n = resp.copy_to(&mut file).with_context(|| format!("GET {path}: the download broke off"))?;
+        let mut into = open()?;
+        let n = resp.copy_to(&mut into).with_context(|| format!("GET {path}: the download broke off"))?;
         Ok(n)
     }
     pub fn head(&self, path: &str) -> Result<Resp> {
@@ -883,6 +919,12 @@ mod tests {
         // a search across fragments takes it; the launcher's search never
         assert!(honors_for("POST", "/api/search"));
         assert!(!honors_for("GET", "/api/search?q=a") && !honors_for("POST", "/api/searchx"));
+        // a move's copy into a fragment, often its owner's; no other stage route
+        assert!(honors_for("POST", "/api/migrations/stages/o1.p1.1/copy?into=x--k3x9&offset=0&bytes=1"));
+        for no in ["/api/migrations/stages/o1.p1.1/open", "/api/migrations/stages/o1.p1.1/done", "/api/migrations/stages/o1.p1.1/zip"] {
+            assert!(!honors_for("POST", no) && !honors_for("GET", no), "{no}");
+        }
+        assert!(!honors_for("GET", "/api/migrations/stages/o1.p1.1/copy"));
     }
 
     /// Every code has its own name, and GUIDE.md lists each one.

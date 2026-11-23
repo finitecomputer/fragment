@@ -21,7 +21,19 @@
 //   in it. Such an app has no share link and is not public for now: the
 //   cell refuses them, and its share sheet (its Sharing here) says so, and
 //   that the people added can use its keys (reach.rs, share.rs).
-// Archived ones are folded at the end, each with Unarchive.
+// - Archive (`PUT /api/fragments/{name}/archived`): their own view, any
+//   role's; archived ones are folded at the end, each with Unarchive. Either
+//   moves the row only once the list says so.
+// - Delete (`DELETE /api/f/{name}`), the owner's alone: asked once more,
+//   with its name typed back, saying what goes; the row leaves once the
+//   list says it is gone (Paul, 2026-11-17).
+//
+// Its rows are on two tabs, Made by me (they own it: they control who is
+// in it, and may delete it) and Shared with me (someone else owns it, each
+// row saying what they may do in it: Can edit, Can view), the second with
+// filters by that (`accessView`). The tabs show only when something is
+// shared with them; until then the page is theirs alone, as before
+// (Austin, 2026-11-22: the five layouts' second).
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
 // `icon`, `named`, `titleOf`, `art` (an app's icon, as the dock draws it),
@@ -30,7 +42,8 @@
 import { activity } from "./activity.js";
 import { createIconEditor } from "./app-icon.js";
 
-const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
+// what a role lets them do, said beside one shared with them
+const ROLE = { public: "Can view", viewer: "Can view", editor: "Can edit", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
@@ -54,6 +67,49 @@ export const shelfOf = (f) => (f.kind === "brain" ? "brains" : "apps");
 const kindWord = (f) => (f.kind === "app" || f.kind === "brain" ? "" : "Other");
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
+// The page's tabs, by who owns it, and the Shared with me tab's filters, by
+// what they may do in it.
+export const TABS = [
+  ["mine", "Made by me", owns],
+  ["shared", "Shared with me", (f) => !owns(f)],
+];
+export const ACCESS_FILTERS = [
+  ["any", "Any access", () => true],
+  ["edit", "Can edit", edits],
+  ["view", "Can view", (f) => !edits(f)],
+];
+// What the page shows of its rows (`live`, not archived; `archived`) on a
+// tab (`null` until one is chosen: Made by me, unless they own none of the
+// live ones) and, on Shared with me, under a filter: its rows in the list's
+// order, its Archived, and each tab's and filter's count of the live ones.
+// With nothing shared with them there is nothing to split: no tabs, every
+// row, whatever was chosen before.
+export function accessView(live, archived, { tab = null, access = "any" } = {}) {
+  if (![...live, ...archived].some((f) => !owns(f))) return { tab: null, tabs: [], access: "any", accesses: [], rows: live, archived };
+  const on = TABS.find(([k]) => k === tab) ?? TABS[live.some(owns) ? 0 : 1];
+  const inTab = on[2];
+  const tabs = TABS.map(([key, text, test]) => ({ key, text, count: live.filter(test).length }));
+  if (on[0] === "mine") return { tab: "mine", tabs, access: "any", accesses: [], rows: live.filter(inTab), archived: archived.filter(inTab) };
+  const shared = live.filter(inTab);
+  const [key, , keep] = ACCESS_FILTERS.find(([k]) => k === access) ?? ACCESS_FILTERS[0];
+  return {
+    tab: "shared",
+    tabs,
+    access: key,
+    accesses: ACCESS_FILTERS.map(([k, text, test]) => ({ key: k, text, count: shared.filter(test).length })),
+    rows: shared.filter(keep),
+    archived: archived.filter((f) => inTab(f) && keep(f)),
+  };
+}
+// what a tab, or a filter on Shared with me, with nothing in it says
+const EMPTY = { mine: "None of your own yet.", any: "Nothing shared with you outside Archived.", edit: "None you can edit.", view: "None you can only view." };
+// Whether the platform shoots its card (docs/api.md, Cards): one the dock
+// shows, unless its row says it is members only (its owner's row alone
+// says), whose page no shot opens. Such a card comes only of an upload, or
+// stays from before it was restricted: asked once, it is not asked again
+// until its row changes (Paul's preview console, 2026-11-19: a members-only
+// brain's card asked 65 times in a session, each a 404).
+export const shoots = (f) => dockable(f) && !(owns(f) && f.sharing?.visibility === "members");
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const SHELL = { "x-fragment-shell": "1" };
 // how long a preview is waited for here, asked every second
@@ -66,7 +122,10 @@ const NAMES_SHOWN = 2;
 // The Apps page's cards (`GET /api/f/<name>/card`), read with the page's
 // session as the dock's are: every one on a visit's open; afterwards a new
 // or changed row's, and one whose card is not there yet, asked again with
-// bounded backoff and retries. `visit()` is the page's visit now (a read
+// bounded backoff and retries. A row whose card no shot makes (`shoots`)
+// and that has none is asked once a visit (an upload shows on the next),
+// never again within it while the row is the same. `visit()` is the
+// page's visit now (a read
 // made in an earlier one, or one a newer read of its row superseded,
 // changes nothing), `shown()` whether the page is open, `rows()` the apps
 // it may show a card for, `draw()` draws the page again. Its own function
@@ -78,9 +137,15 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
   const reads = new Map();
   const attempts = new Map();
   const drawn = new Map();
+  // a row no shot makes a card of and with none, as it was when it was
+  // asked: no other read of the visit asks it again while its row is the
+  // same, and only its 404 keeps it here (a card, a failure or a read of a
+  // visit gone lets it go)
+  const cardless = new Map();
   const load = { wait: 0, timer: null, batch: 0 };
 
-  // its card: "new", "same", "none" or "stale" (a newer read or visit owns the row)
+  // its card: "new", "same", "none" (there is none), "failed" or "stale"
+  // (a newer read or visit owns the row)
   async function read(name, mine) {
     const request = (reads.get(name) ?? 0) + 1;
     reads.set(name, request);
@@ -90,7 +155,8 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
     const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
     if (!current()) return "stale";
     if (r.status === 304) return "same";
-    if (!r.ok) return "none";
+    if (r.status === 404) return "none";
+    if (!r.ok) return "failed";
     const body = await r.blob();
     if (!current()) return "stale";
     const url = urls.createObjectURL(body);
@@ -108,6 +174,7 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
     const asked = [];
     for (const f of rows()) {
       const fingerprint = JSON.stringify(f);
+      if (!all && cardless.get(f.name) === fingerprint) continue;
       if (!all && cards.has(f.name) && drawn.get(f.name) === fingerprint) continue;
       if (all || attempts.get(f.name)?.fingerprint !== fingerprint) {
         attempts.set(f.name, { fingerprint, count: 0 });
@@ -117,17 +184,19 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
       if (attempt.count < CARD_READS_MAX) {
         ++attempt.count;
         asked.push(f);
+        if (!shoots(f) && !cards.has(f.name)) cardless.set(f.name, fingerprint);
       }
     }
     if (fresh) load.wait = 0;
-    const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "none")]));
+    const got = await Promise.all(asked.map(async (f) => [f, await read(f.name, mine).catch(() => "failed")]));
+    for (const [f, result] of got) if (result !== "none" && cardless.get(f.name) === JSON.stringify(f)) cardless.delete(f.name);
     if (mine !== visit()) return;
     // a card its read set is drawn, though a newer batch began: that one's
     // read asks with this card's etag and, told it is the same, draws nothing
     if (got.some(([, result]) => result === "new")) draw();
     if (batch !== load.batch) return;
     for (const [f, result] of got) if (result === "new" || result === "same") drawn.set(f.name, JSON.stringify(f));
-    if (got.some(([, result]) => result === "none") && load.wait < 60_000) {
+    if (got.some(([f, result]) => (result === "none" && shoots(f)) || result === "failed") && load.wait < 60_000) {
       load.wait = Math.min(60_000, load.wait ? load.wait * 2 : 2_000);
       load.timer = timers.setTimeout(() => { if (mine === visit()) loadAll().catch(() => {}); }, load.wait);
     }
@@ -154,7 +223,7 @@ export function createAppsPage(page, h, shelf = "apps") {
   // a visit of the page (its open, its close) is an ask (asks.js `apps`,
   // `brains`): what answers for an earlier visit changes nothing
   const { asks } = h;
-  // per app: an action in flight ("dock", "card", "archive"), what the
+  // per app: an action in flight ("dock", "card", "archive", "delete"), what the
   // last one said (a refusal, or a preview still being taken), and its card
   const busy = new Map();
   const said = new Map();
@@ -174,6 +243,8 @@ export function createAppsPage(page, h, shelf = "apps") {
   // owner's), as the server says now; and a removal asked (a second press)
   const reach = new Map();
   const confirming = new Map();
+  // a delete's confirm: the name typed so far, kept across the row's redraws
+  const typed = new Map();
   const expanded = new Map();
   const editing = new Map();
   const iconEditors = new Map();
@@ -183,15 +254,25 @@ export function createAppsPage(page, h, shelf = "apps") {
   let accessRead = 0;
   let operation = 0;
   let shown = false;
+  // the tab chosen (`TABS`; none yet) and Shared with me's filter
+  // (`ACCESS_FILTERS`), kept across visits
+  let tab = null;
+  let accessFilter = "any";
 
   const say = (name, text) => {
     if (text) said.set(name, text);
     else said.delete(name);
   };
-  const beginBusy = (name, kind) => {
+  const beginBusy = (name, kind, to) => {
     const token = ++operation;
-    busy.set(name, { kind, token, started: Date.now() });
+    busy.set(name, { kind, token, started: Date.now(), to });
     return token;
+  };
+  // an archive or unarchive in flight, said by which it is: the list may
+  // move its row before the call's reload is done
+  const archiving = (name) => {
+    const b = busy.get(name);
+    return b?.kind === "archive" ? (b.to ? "Archiving…" : "Unarchiving…") : null;
   };
   const endBusy = (name, token) => {
     if (busy.get(name)?.token === token) busy.delete(name);
@@ -437,7 +518,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       say(name, "");
       render();
       try {
-        await h.retitle(name, edit.draft.trim(), "rename app");
+        await h.retitle(name, edit.draft.trim());
         editing.delete(name);
         await h.reload();
       } catch (error) { say(name, error.message); }
@@ -473,7 +554,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       url.rel = "noopener";
       text.append(url);
     }
-    const about = [kindWord(f), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
+    const about = [kindWord(f), owns(f) ? "" : ROLE[f.role] ?? f.role].filter(Boolean).join(" · ");
     if (about) text.append(h.el("span", "app-row-meta", about));
     if (owns(f)) text.append(whoLine(f));
     const reachSaid = reaches(f) && reachLine(f);
@@ -491,7 +572,7 @@ export function createAppsPage(page, h, shelf = "apps") {
       preview.append(img);
       head.append(preview);
     }
-    if (f.archived) head.append(button(doing === "archive" ? "Unarchiving…" : "Unarchive", "unarchive", () => unarchive(name), !!doing));
+    if (f.archived) head.append(button(archiving(name) ?? "Unarchive", "unarchive", () => setArchived(name, false), !!doing));
     else if (dockable(f)) {
       const dock = h.el("button", "app-dock");
       dock.type = "button";
@@ -516,14 +597,23 @@ export function createAppsPage(page, h, shelf = "apps") {
     if (edits(f) && reaches(f)) tools.append(tab("Reaches", "reach"));
     tools.append(tab(owns(f) ? "Sharing" : "People", "sharing"));
     if (owns(f) && !f.archived) tools.append(tab("Address", "address"));
+    const ends = h.el("span", "app-row-ends");
+    if (!f.archived) ends.append(button(archiving(name) ?? "Archive", "archive", () => setArchived(name, true), !!doing));
+    if (owns(f)) {
+      const ask = button("Delete", "delete", () => askDelete(name), !!doing);
+      ask.setAttribute("aria-expanded", String(confirming.get(name) === "delete"));
+      ends.append(ask);
+    }
+    if (ends.childElementCount) tools.append(ends);
     item.append(tools);
+    if (owns(f) && confirming.get(name) === "delete") item.append(deleteConfirm(f));
     if (section) {
       const panel = h.el("div", "app-row-panel");
       if (section === "appearance") {
         const editor = h.el("div");
         editor.dataset.iconEditor = name;
         panel.append(editor);
-        if (dockable(f) && !(owns(f) && f.sharing?.visibility === "members")) {
+        if (shoots(f)) {
           const preview = h.el("section", "app-preview-editor");
           preview.append(h.el("h2", null, "Preview"));
           if (card) { const img = h.el("img", "app-preview-image"); img.alt = ""; img.src = card.url; preview.append(img); }
@@ -550,9 +640,57 @@ export function createAppsPage(page, h, shelf = "apps") {
     const words = said.get(name);
     if (words) { const p = h.el("p", "app-row-said", words); p.setAttribute("role", "status"); item.append(p); }
     const edit = editing.get(name);
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
+    item.dataset.shows = JSON.stringify([f, doing ?? null, archiving(name), words ?? null, card?.url ?? null, address ?? null, shots.has(name), section ?? null, edit ? [true, edit.saving] : null, item.querySelector(".app-row-access")?.textContent ?? null, reach.get(name) ?? null, confirming.get(name) ?? null]);
     item.dataset.art = artReadiness(item);
     return item;
+  }
+
+  // Delete's confirm, under its row: what goes, and its name typed back
+  // before Delete is pressable
+  function askDelete(name) {
+    if (confirming.get(name) === "delete") {
+      confirming.delete(name);
+      typed.delete(name);
+    } else {
+      confirming.set(name, "delete");
+      expanded.delete(name);
+    }
+    render();
+    page.querySelector(`[data-delete-confirm="${CSS.escape(name)}"] input`)?.focus();
+  }
+  function deleteConfirm(f) {
+    const name = f.name;
+    const deleting = busy.get(name)?.kind === "delete";
+    const form = h.el("form", "app-delete");
+    form.dataset.deleteConfirm = name;
+    const matches = (text) => text.trim() === name;
+    const field = h.el("label", "app-delete-field");
+    const input = h.el("input");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.setAttribute("autocapitalize", "off");
+    input.value = typed.get(name) ?? "";
+    input.disabled = deleting;
+    // one line of words, read as one: its name in it
+    const words = h.el("span");
+    words.append("Type ", h.el("code", null, name), " to confirm");
+    field.append(words, input);
+    const sure = button(deleting ? "Deleting…" : "Delete", "delete-sure", null, deleting || !matches(input.value));
+    sure.type = "submit";
+    sure.classList.add("danger");
+    const cancel = button("Cancel", "delete-cancel", () => askDelete(name), deleting);
+    input.oninput = () => {
+      typed.set(name, input.value);
+      sure.disabled = !matches(input.value);
+    };
+    const actions = h.el("div", "app-delete-actions");
+    actions.append(sure, cancel);
+    form.append(h.el("p", "app-delete-title", `Delete ${h.titleOf(name)}?`), h.el("p", "muted", "Its pages, data and files go for everyone in it. This can't be undone."), field, actions);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      if (matches(input.value) && !busy.has(name)) deleteFragment(name);
+    };
+    return form;
   }
 
   function mountEditors() {
@@ -692,31 +830,71 @@ export function createAppsPage(page, h, shelf = "apps") {
     updateChildren(box, next);
   }
 
+  // a row of buttons, one pressed, drawn anew only when what it says changes
+  function choices(box, items, chosen, make) {
+    box.hidden = !items.length;
+    if (box.dataset.shows !== JSON.stringify(items)) {
+      box.dataset.shows = JSON.stringify(items);
+      box.replaceChildren(...items.map(make));
+    }
+    for (const b of box.children) b.setAttribute(b.getAttribute("role") === "tab" ? "aria-selected" : "aria-pressed", String(b.dataset.key === chosen));
+  }
+
   function render() {
     if (!shown) return;
     const all = h.state.fragments.filter(onShelf);
-    const live = all.filter((f) => !f.archived);
-    const archived = all.filter((f) => f.archived);
-    let list = page.querySelector(".apps-list");
+    const view = accessView(all.filter((f) => !f.archived), all.filter((f) => f.archived), { tab, access: accessFilter });
+    let list = page.querySelector(".apps-layout > .apps-list");
     let folded = page.querySelector(".apps-archived");
+    let tabs = page.querySelector(".apps-tabs");
+    let chips = page.querySelector(".apps-filters");
     if (!list) {
       const wrap = h.el("div", "apps-layout");
       const head = h.el("header", "apps-intro");
       head.append(h.el("h1", null, title));
+      tabs = h.el("div", "apps-tabs");
+      tabs.setAttribute("role", "tablist");
+      tabs.setAttribute("aria-label", `Whose ${noun}s`);
+      chips = h.el("div", "apps-filters");
+      chips.setAttribute("role", "group");
+      chips.setAttribute("aria-label", "Your access");
       list = h.el("div", "apps-list");
+      list.id = `${shelf}-list`;
       folded = h.el("details", "apps-archived");
       folded.append(h.el("summary"), h.el("div", "apps-list"));
-      wrap.append(head, list, folded);
+      wrap.append(head, tabs, chips, list, folded);
       page.replaceChildren(wrap);
     }
-    if (access?.error && !page.querySelector(".apps-access-failed")) list.before(h.el("p", "settings-warning apps-access-failed", `Who has access did not load: ${access.error}`));
+    // a delete's name being typed keeps its focus when its row is drawn anew
+    const typing = document.activeElement?.closest?.("[data-delete-confirm]")?.dataset.deleteConfirm;
+    if (access?.error && !page.querySelector(".apps-access-failed")) page.querySelector(".apps-intro").after(h.el("p", "settings-warning apps-access-failed", `Who has access did not load: ${access.error}`));
     if (!access?.error) page.querySelector(".apps-access-failed")?.remove();
-    place(list, live.map(row));
-    if (!live.length) list.replaceChildren(h.el("p", "muted apps-empty", empty));
-    folded.hidden = !archived.length;
-    folded.querySelector("summary").textContent = `Archived (${archived.length})`;
-    place(folded.querySelector(".apps-list"), archived.map(row));
+    choices(tabs, view.tabs, view.tab, ({ key, text, count }) => {
+      const b = h.el("button", "apps-tab", text);
+      b.type = "button";
+      b.dataset.key = key;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-controls", list.id);
+      b.append(h.el("span", "apps-filter-count", String(count)));
+      b.onclick = () => { tab = key; render(); };
+      return b;
+    });
+    choices(chips, view.accesses, view.access, ({ key, text, count }) => {
+      const b = h.el("button", "apps-filter", text);
+      b.type = "button";
+      b.dataset.key = key;
+      b.append(h.el("span", "apps-filter-count", String(count)));
+      b.onclick = () => { accessFilter = key; render(); };
+      return b;
+    });
+    place(list, view.rows.map(row));
+    if (!view.rows.length) list.replaceChildren(h.el("p", "muted apps-empty", view.tab === "mine" ? EMPTY.mine : view.tab ? EMPTY[view.access] : empty));
+    folded.hidden = !view.archived.length;
+    folded.querySelector("summary").textContent = `Archived (${view.archived.length})`;
+    place(folded.querySelector(".apps-list"), view.archived.map(row));
     mountEditors();
+    const input = typing && page.querySelector(`[data-delete-confirm="${CSS.escape(typing)}"] input`);
+    if (input && document.activeElement !== input) input.focus();
   }
 
   async function setDock(name, dock) {
@@ -734,13 +912,31 @@ export function createAppsPage(page, h, shelf = "apps") {
     }
   }
 
-  async function unarchive(name) {
-    const operation = beginBusy(name, "archive");
+  async function setArchived(name, archived) {
+    const operation = beginBusy(name, "archive", archived);
     say(name, "");
     render();
     try {
-      await h.api("PUT", `/api/fragments/${seg(name)}/archived`, { archived: false });
+      await h.api("PUT", `/api/fragments/${seg(name)}/archived`, { archived });
       await h.reload();
+    } catch (e) {
+      say(name, e.message);
+    } finally {
+      endBusy(name, operation);
+      render();
+    }
+  }
+
+  // deleted for everyone: its row leaves once the list no longer has it
+  async function deleteFragment(name) {
+    const operation = beginBusy(name, "delete");
+    say(name, "");
+    render();
+    try {
+      await h.api("DELETE", `/api/f/${seg(name)}`);
+      await h.reload();
+      confirming.delete(name);
+      typed.delete(name);
     } catch (e) {
       say(name, e.message);
     } finally {
@@ -814,6 +1010,8 @@ export function createAppsPage(page, h, shelf = "apps") {
       sharingFrames.clear();
       addressEditors.clear();
       editing.clear();
+      confirming.clear();
+      typed.clear();
     },
     // the list changed: drawn again, who has access asked again when the
     // list says that changed, and new or changed apps' cards read

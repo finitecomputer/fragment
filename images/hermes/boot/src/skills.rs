@@ -13,6 +13,12 @@
 //!   managed google-workspace-finite uses the platform's connection).
 //!   Read-only copies in PLATFORM_VIEW, withheld when a managed skill takes
 //!   the same name or alias: Hermes' external dirs share one rank.
+//! - Hermes' optional skills the owner switched on: one marker file each in
+//!   their skills fragment (`optional/hermes/<id>.on`, the shell's Skills
+//!   page writes it). Read-only copies of the image's own
+//!   (`OPTIONAL_DIR`) in PLATFORM_VIEW, beside the bundled ones; withheld
+//!   when a managed or bundled skill takes the same name or alias, and
+//!   removed once switched off (`settle_optional`).
 //! - The platform skill, `fragment`, unless a managed skill takes its name:
 //!   the `fragment` CLI's own skill (`fragment skill`) after a page of what
 //!   the computer adds (`computer.md`), written at the image's build into
@@ -63,6 +69,48 @@ const DEPTH_MAX: usize = 8;
 /// about this.
 pub const ABSENT_EVERY_MS: u64 = 60_000;
 
+/// The skill files Hermes indexes into a system prompt under `dirs` (the
+/// SKILL.md and DESCRIPTION.md files, links followed, as its skills-index
+/// snapshot watches them; it passes over some folders this walks, such as
+/// a skill's `scripts/`, which only asks a refresh it did not need), each
+/// its path and bytes, for `hermes::prompt_inputs`; and whether a bound cut
+/// it short. Each dir gives at most `FILES_MAX` files (an install's own
+/// bound, so the managed set is watched whole beside the platform's), each
+/// of at most `FILE_MAX_BYTES` (a larger one counts as its size alone),
+/// `DEPTH_MAX` deep. A directory that cannot be read counts as empty.
+pub fn indexed(dirs: &[&Path]) -> (Vec<(String, Vec<u8>)>, bool) {
+    let mut out = Vec::new();
+    let mut cut = false;
+    for root in dirs {
+        let mut found = 0;
+        let mut pending: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+        'walk: while let Some((dir, depth)) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            entries.sort();
+            for path in entries {
+                let Ok(meta) = std::fs::metadata(&path) else { continue };
+                if meta.is_dir() {
+                    if depth < DEPTH_MAX {
+                        pending.push((path, depth + 1));
+                    } else {
+                        cut = true;
+                    }
+                } else if path.file_name().is_some_and(|n| n == "SKILL.md" || n == "DESCRIPTION.md") {
+                    if found >= FILES_MAX {
+                        cut = true;
+                        break 'walk;
+                    }
+                    found += 1;
+                    let bytes = if meta.len() <= FILE_MAX_BYTES as u64 { std::fs::read(&path).unwrap_or_default() } else { meta.len().to_string().into_bytes() };
+                    out.push((path.display().to_string(), bytes));
+                }
+            }
+        }
+    }
+    (out, cut)
+}
+
 /// Where the platform skill is: in the image, read-only to the agents.
 pub const PLATFORM_DIR: &str = "/opt/fragment/skills";
 /// Hermes' skills, moved out of its sync source at the image's build.
@@ -75,6 +123,26 @@ pub const PLATFORM_VIEW: &str = "/var/lib/fragment-run/platform-skills";
 /// shadows; and its path under `PLATFORM_DIR` (`<category>/<name>/`).
 pub const PLATFORM_NAME: &str = "fragment";
 pub const PLATFORM_PATH: &str = "platform/fragment/SKILL.md";
+/// Hermes' optional skills, in the image as upstream ships them (any
+/// depth: `<category>/<name>` or `<category>/<group>/<name>`), not
+/// activated by default: the owner switches each on.
+pub const OPTIONAL_DIR: &str = "/opt/hermes/optional-skills";
+/// The owner's switches in their skills fragment: an `<id>.on` file under
+/// this prefix for each optional skill switched on, its id its path under
+/// `OPTIONAL_DIR`. One file a switch, so two pages switching two skills
+/// never undo each other. What a file holds is not read.
+pub const OPTIONAL_PREFIX: &str = "optional/hermes/";
+pub const OPTIONAL_SUFFIX: &str = ".on";
+/// At most this many are switched on (the rest are refused): each is a
+/// line of every turn's skills index.
+pub const OPTIONAL_MAX: usize = 256;
+/// The last install's switches, under `/data`: a wake shows them before
+/// its first install answers.
+pub const OPTIONAL_CHOSEN: &str = "/data/hermes-sync/optional-skills.json";
+/// Which optional skills the view holds, beside it in the boot's run
+/// directory (made at each start, as the view is): what a switch turned
+/// off removes.
+pub const OPTIONAL_SHOWN: &str = "/var/lib/fragment-run/optional-skills.json";
 /// The external dirs every profile names: the managed set, and the
 /// platform skill's view.
 pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_VIEW];
@@ -85,8 +153,9 @@ const COMPUTER_PAGE: &str = include_str!("computer.md");
 const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), to search past conversations and brains (`fragment search`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
 /// The platform skill is a page or two, not a manual. 20 KiB since
 /// 2026-10-22: the computer's page's "Files your owner sends you" took it
-/// past 16 KiB, which it had all but reached.
-pub const PLATFORM_MAX_BYTES: usize = 20 * 1024;
+/// past 16 KiB, which it had all but reached. 21 KiB since 2026-11-18:
+/// what a sleep ends took it past 20 KiB, which it had reached exactly.
+pub const PLATFORM_MAX_BYTES: usize = 21 * 1024;
 
 /// The platform skill: `cli_skill` (what `fragment skill` prints, a skill
 /// named `fragment`) with the computer's page before its body, and the
@@ -275,6 +344,25 @@ pub fn settle_platform(dir: &Path, manifest: &Path, platform: &Path, view: &Path
 /// corresponding copy; removal restores it on the next settle. Agent-owned
 /// skills win through Hermes' own higher profile tier.
 pub fn settle_bundled(dir: &Path, manifest: &Path, bundled: &Path, view: &Path) -> std::io::Result<()> {
+    let managed = managed_names(dir, manifest)?;
+    for (rel, name, alias) in bundled_skills(bundled)? {
+        let target = view.join(&rel);
+        if [name, alias, rel.to_string_lossy().into_owned()].iter().any(|n| managed.contains(n)) {
+            if target.exists() { std::fs::remove_dir_all(&target)?; }
+        } else if !target.join("SKILL.md").is_file() {
+            // The source is immutable for this image's life and the
+            // view is rebuilt at every boot, so copy once. Copies keep
+            // Hermes' resolved-path trust check inside its search root;
+            // symlinks outside it warn on every skill_view call.
+            copy_bundled_skill(&bundled.join(&rel), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The names, aliases and paths of the managed skills installed in `dir`
+/// (as `manifest` lists them): what an image's skill of the same yields to.
+fn managed_names(dir: &Path, manifest: &Path) -> std::io::Result<BTreeSet<String>> {
     let mut managed = BTreeSet::new();
     for rel in load_manifest(manifest).keys().filter(|p| *p == "SKILL.md" || p.ends_with("/SKILL.md")) {
         let parent = Path::new(rel).parent().expect("a skill has a directory");
@@ -282,31 +370,117 @@ pub fn settle_bundled(dir: &Path, manifest: &Path, bundled: &Path, view: &Path) 
         let text = std::fs::read_to_string(dir.join(rel))?;
         managed.extend([skill_name(&text, &alias), alias.into_owned(), parent.to_string_lossy().into_owned()]);
     }
-    let mut count = 0;
+    Ok(managed)
+}
+
+/// Each skill of the image's bundled tree (`<category>/<name>/SKILL.md`):
+/// its path under the tree, its name, and its alias (its directory's).
+fn bundled_skills(bundled: &Path) -> std::io::Result<Vec<(PathBuf, String, String)>> {
+    let mut out = vec![];
     for category in std::fs::read_dir(bundled)? {
         let category = category?;
         if !category.file_type()?.is_dir() { continue; }
         for skill in std::fs::read_dir(category.path())? {
             let skill = skill?;
             if !skill.file_type()?.is_dir() || !skill.path().join("SKILL.md").is_file() { continue; }
-            count += 1;
-            assert!(count <= FILES_MAX, "the pinned bundled tree is bounded");
+            assert!(out.len() < FILES_MAX, "the pinned bundled tree is bounded");
             let alias = skill.file_name().to_string_lossy().into_owned();
             let name = skill_name(&std::fs::read_to_string(skill.path().join("SKILL.md"))?, &alias);
-            let rel = PathBuf::from(category.file_name()).join(&alias);
-            let target = view.join(&rel);
-            if [name, alias, rel.to_string_lossy().into_owned()].iter().any(|n| managed.contains(n)) {
-                if target.exists() { std::fs::remove_dir_all(&target)?; }
-            } else if !target.join("SKILL.md").is_file() {
-                // The source is immutable for this image's life and the
-                // view is rebuilt at every boot, so copy once. Copies keep
-                // Hermes' resolved-path trust check inside its search root;
-                // symlinks outside it warn on every skill_view call.
-                copy_bundled_skill(&skill.path(), &target)?;
-            }
+            out.push((PathBuf::from(category.file_name()).join(&alias), name, alias));
         }
     }
-    Ok(())
+    Ok(out)
+}
+
+/// The optional skills a skills fragment's listing switches on: each
+/// `<id>.on` under `OPTIONAL_PREFIX` whose id is a safe path, at most
+/// `OPTIONAL_MAX`. The rest are refused, and why.
+pub fn switched_on(listing: &[FileEntry]) -> (BTreeSet<String>, Vec<(String, &'static str)>) {
+    let (mut on, mut refused) = (BTreeSet::new(), vec![]);
+    for f in listing {
+        let Some(id) = f.path.strip_prefix(OPTIONAL_PREFIX).and_then(|p| p.strip_suffix(OPTIONAL_SUFFIX)) else { continue };
+        if !valid_rel(id) {
+            refused.push((f.path.clone(), "not a safe path"));
+        } else if on.len() >= OPTIONAL_MAX {
+            refused.push((f.path.clone(), "past the optional skills switched on"));
+        } else {
+            on.insert(id.to_string());
+        }
+    }
+    (on, refused)
+}
+
+/// What one settle of the optional skills did, for the log.
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct OptionalShown {
+    /// in the view now
+    pub shown: Vec<String>,
+    /// switched on, but this image has no such skill (another pin's)
+    pub missing: Vec<String>,
+    /// switched on, but a managed or bundled skill takes its name
+    pub withheld: Vec<String>,
+    /// could not be copied, and why
+    pub failed: Vec<(String, String)>,
+}
+
+/// Shows the optional skills switched on (as `chosen` lists them) to the
+/// profiles: read-only copies of the image's (`optional`) in `view`, at
+/// their path under it, as bundled ones are. One the image lacks, or whose
+/// name or alias a managed skill, a bundled one or the platform skill
+/// takes, is left out: Hermes' external dirs share one rank, where two of
+/// a name are ambiguous. One switched off since goes (`shown` lists what
+/// the view holds). One that fails to copy is said and the rest show.
+pub fn settle_optional(dir: &Path, manifest: &Path, bundled: &Path, optional: &Path, chosen: &Path, shown: &Path, view: &Path) -> std::io::Result<OptionalShown> {
+    let wanted: BTreeSet<String> = load_set(chosen).into_iter().filter(|id| valid_rel(id)).collect();
+    let before: BTreeSet<String> = load_set(shown).into_iter().filter(|id| valid_rel(id)).collect();
+    // switched off goes first, whatever fails below
+    for id in before.difference(&wanted) {
+        remove_dir(view, id);
+    }
+    let mut taken = managed_names(dir, manifest)?;
+    taken.insert(PLATFORM_NAME.to_string());
+    if bundled.is_dir() {
+        for (rel, name, alias) in bundled_skills(bundled)? {
+            taken.extend([name, alias, rel.to_string_lossy().into_owned()]);
+        }
+    }
+    let mut out = OptionalShown::default();
+    let mut show = BTreeSet::new();
+    for id in wanted {
+        // bounded: the image's own file
+        let Ok(text) = std::fs::read_to_string(optional.join(&id).join("SKILL.md")) else {
+            out.missing.push(id);
+            continue;
+        };
+        let alias = id.rsplit('/').next().expect("an id has a name");
+        let name = skill_name(&text, alias);
+        if [name.as_str(), alias, id.as_str()].iter().any(|n| taken.contains(*n)) {
+            out.withheld.push(id);
+        } else {
+            show.insert(id);
+        }
+    }
+    for id in before.difference(&show) {
+        remove_dir(view, id);
+    }
+    // listed before any is copied: a copy cut short still goes once
+    // switched off
+    save_json(shown, &before.union(&show).collect::<BTreeSet<_>>())?;
+    for id in show {
+        let target = view.join(&id);
+        if !target.join("SKILL.md").is_file() {
+            if let Err(e) = copy_bundled_skill(&optional.join(&id), &target) {
+                remove_dir(view, &id);
+                out.failed.push((id, e.to_string()));
+                continue;
+            }
+        }
+        out.shown.push(id);
+    }
+    // one that would not go is tried again at the next settle
+    let stuck = before.iter().filter(|id| !out.shown.contains(*id) && view.join(id).exists());
+    save_json(shown, &out.shown.iter().chain(stuck).collect::<BTreeSet<_>>())?;
+    Ok(out)
 }
 
 /// A bounded, iterative copy of one immutable skill into the temporary
@@ -315,7 +489,16 @@ pub fn settle_bundled(dir: &Path, manifest: &Path, bundled: &Path, view: &Path) 
 fn copy_bundled_skill(source: &Path, target: &Path) -> std::io::Result<()> {
     let scratch = target.with_file_name(format!(".{}.fragment-tmp", target.file_name().expect("a skill has a name").to_string_lossy()));
     if scratch.exists() { std::fs::remove_dir_all(&scratch)?; }
-    let mut pending = vec![(source.to_path_buf(), scratch.clone(), 0)];
+    let copied = copy_tree(source, &scratch).and_then(|()| std::fs::rename(&scratch, target));
+    if copied.is_err() {
+        // no half a skill left where Hermes looks
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+    copied
+}
+
+fn copy_tree(source: &Path, scratch: &Path) -> std::io::Result<()> {
+    let mut pending = vec![(source.to_path_buf(), scratch.to_path_buf(), 0)];
     let mut count = 0;
     while let Some((from, to, depth)) = pending.pop() {
         assert!(depth <= DEPTH_MAX, "the pinned skill's tree is bounded");
@@ -331,11 +514,11 @@ fn copy_bundled_skill(source: &Path, target: &Path) -> std::io::Result<()> {
             } else if kind.is_file() {
                 std::fs::copy(entry.path(), dest)?;
             } else {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bundled skill has a non-file: {}", entry.path().display())));
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("an image's skill has a non-file: {}", entry.path().display())));
             }
         }
     }
-    std::fs::rename(scratch, target)
+    Ok(())
 }
 
 pub fn load_manifest(path: &Path) -> Installed {
@@ -343,11 +526,21 @@ pub fn load_manifest(path: &Path) -> Installed {
 }
 
 fn save_manifest(path: &Path, m: &Installed) -> std::io::Result<()> {
+    save_json(path, m)
+}
+
+/// A set of ids saved by `save_json`; none when it is missing or unread.
+fn load_set(path: &Path) -> BTreeSet<String> {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Writes `value` as JSON at `path` whole (a temporary file renamed over it).
+fn save_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(m).expect("a manifest serializes"))?;
+    std::fs::write(&tmp, serde_json::to_vec(value).expect("a set of paths serializes"))?;
     std::fs::rename(&tmp, path)
 }
 
@@ -369,6 +562,19 @@ fn write_file(dir: &Path, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
 fn remove_file(dir: &Path, rel: &str) {
     let target = dir.join(rel);
     let _ = std::fs::remove_file(&target);
+    prune(dir, &target);
+}
+
+/// Removes the directory `dir/rel` whole, then each directory it leaves
+/// empty up to `dir`.
+fn remove_dir(dir: &Path, rel: &str) {
+    let target = dir.join(rel);
+    let _ = std::fs::remove_dir_all(&target);
+    prune(dir, &target);
+}
+
+/// Removes each directory above `target` that is empty, up to `dir`.
+fn prune(dir: &Path, target: &Path) {
     let mut parent = target.parent().map(Path::to_path_buf);
     // bounded by the path's depth
     while let Some(p) = parent {
@@ -387,6 +593,8 @@ pub struct Done {
     pub removed: u32,
     pub refused: u32,
     pub skills: u32,
+    /// optional skills switched on
+    pub optional: u32,
 }
 
 /// Why an install stopped: the platform did not answer as it should, or a
@@ -413,9 +621,11 @@ impl From<ApiError> for InstallError {
 }
 
 /// One install of the owner's managed skills into `dir`, read as `reader`
-/// acting for `owner`. An answer the platform did not give (a transport
-/// error, a refusal) changes nothing installed: the last install stays.
-pub async fn install(api: &Api, reader: &Agent, owner: &str, dir: &Path, manifest: &Path) -> Result<Done, InstallError> {
+/// acting for `owner`, and of the optional skills they switched on, saved
+/// at `chosen` for `settle_optional`. An answer the platform did not give
+/// (a transport error, a refusal) changes nothing installed: the last
+/// install stays.
+pub async fn install(api: &Api, reader: &Agent, owner: &str, dir: &Path, manifest: &Path, chosen: &Path) -> Result<Done, InstallError> {
     // what the manifest says is installed and is still on disk (a file gone
     // from under it is fetched again)
     let mut installed: Installed = load_manifest(manifest).into_iter().filter(|(rel, _)| valid_rel(rel) && dir.join(rel).is_file()).collect();
@@ -426,8 +636,9 @@ pub async fn install(api: &Api, reader: &Agent, owner: &str, dir: &Path, manifes
         None => None,
     };
     let steps = plan(listing.as_deref(), &installed);
-    let mut done = Done { fragment: fragment.clone(), refused: steps.refused.len() as u32, ..Done::default() };
-    for (path, why) in &steps.refused {
+    let (on, refused_on) = listing.as_deref().map(switched_on).unwrap_or_default();
+    let mut done = Done { fragment: fragment.clone(), refused: (steps.refused.len() + refused_on.len()) as u32, optional: on.len() as u32, ..Done::default() };
+    for (path, why) in steps.refused.iter().chain(&refused_on) {
         ev!("skills.refused", { "path": path, "why": why });
     }
     std::fs::create_dir_all(dir).map_err(|e| InstallError::Disk(format!("{}: {e}", dir.display())))?;
@@ -456,6 +667,7 @@ pub async fn install(api: &Api, reader: &Agent, owner: &str, dir: &Path, manifes
     if let Err(e) = save_manifest(manifest, &installed) {
         ev!("skills.unsaved", { "error": e.to_string() });
     }
+    save_json(chosen, &on).map_err(|e| InstallError::Disk(format!("{}: {e}", chosen.display())))?;
     done.skills = skill_names(&installed).len() as u32;
     Ok(done)
 }
@@ -474,6 +686,45 @@ pub fn managed_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (the prompt refresh's inputs, hermes::prompt_inputs): what the
+    /// skills index is built from is read, and nothing else: each SKILL.md
+    /// and DESCRIPTION.md (in any order: the digest sorts), a larger one than an install takes
+    /// by its size alone, each dir's own budget, a cut said, and a dir that
+    /// is not there counting as empty.
+    #[test]
+    fn the_files_a_skills_index_is_built_from() {
+        let root = std::env::temp_dir().join(format!("hermes-boot-indexed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (managed, view) = (root.join("managed"), root.join("view"));
+        let put = |path: &Path, bytes: &[u8]| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        put(&managed.join("notes/garden-log/SKILL.md"), b"name: garden-log");
+        put(&managed.join("notes/DESCRIPTION.md"), b"notes");
+        put(&managed.join("notes/garden-log/scripts/log.py"), b"print(1)");
+        put(&managed.join("notes/garden-log/README.md"), b"not indexed");
+        put(&managed.join("big/SKILL.md"), &vec![b'x'; FILE_MAX_BYTES + 1]);
+        put(&view.join("fragment/SKILL.md"), b"name: fragment");
+        let (found, cut) = indexed(&[&managed, &view, &root.join("gone")]);
+        let mut paths: Vec<String> = found.iter().map(|(p, _)| p.strip_prefix(&root.display().to_string()).unwrap_or(p).to_string()).collect();
+        paths.sort();
+        let bytes_of = |end: &str| found.iter().find(|(p, _)| p.ends_with(end)).map(|(_, b)| b.clone()).unwrap_or_default();
+        assert_eq!(paths, ["/managed/big/SKILL.md", "/managed/notes/DESCRIPTION.md", "/managed/notes/garden-log/SKILL.md", "/view/fragment/SKILL.md"], "{paths:?}");
+        assert_eq!(bytes_of("/big/SKILL.md"), (FILE_MAX_BYTES + 1).to_string().into_bytes(), "a file past an install's bound counts as its size");
+        assert_eq!(bytes_of("/garden-log/SKILL.md"), b"name: garden-log");
+        assert!(!cut, "nothing cut");
+        // each dir its own budget: a full managed set leaves the view watched
+        for i in 0..FILES_MAX {
+            put(&managed.join(format!("many/s{i:04}/SKILL.md")), b"name: s");
+        }
+        let (found, cut) = indexed(&[&managed, &view]);
+        assert!(cut, "the managed set past its budget is cut, and said");
+        assert_eq!(found.iter().filter(|(p, _)| p.starts_with(&managed.display().to_string())).count(), FILES_MAX);
+        assert!(found.iter().any(|(p, _)| p.ends_with("/view/fragment/SKILL.md")), "the view keeps its own budget");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
         FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
@@ -561,6 +812,7 @@ mod tests {
         files.lock().unwrap().insert("skills/research/arxiv-finite/SKILL.md".into(), ("release:a".into(), b"---\nname: arxiv-finite\n---\n".to_vec()));
         files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
         files.lock().unwrap().insert("fragment.json".into(), ("c1".into(), b"{}".to_vec()));
+        files.lock().unwrap().insert("optional/hermes/creative/excalidraw.on".into(), ("c2".into(), b"on\n".to_vec()));
         let down = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), down.clone(), Arc::new(Mutex::new(true))).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
@@ -569,29 +821,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let (dir, manifest) = (root.join("managed"), root.join("sync/managed.json"));
 
-        let d = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
-        assert_eq!((d.fragment.as_deref(), d.fetched, d.skills), (Some("skills--z8w6"), 2, 2));
+        let d = install(&api, &agent, "npub1paul", &dir, &manifest, &root.join("sync/optional.json")).await.unwrap();
+        assert_eq!((d.fragment.as_deref(), d.fetched, d.skills, d.optional), (Some("skills--z8w6"), 2, 2, 1));
         assert!(dir.join("research/arxiv-finite/SKILL.md").exists() && !dir.join("fragment.json").exists());
-        let replay = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
+        let chosen = root.join("sync/optional.json");
+        assert_eq!(load_set(&chosen), BTreeSet::from(["creative/excalidraw".to_string()]), "its switches, saved");
+        assert!(!dir.join("optional").exists(), "a switch is no managed file");
+        let replay = install(&api, &agent, "npub1paul", &dir, &manifest, &root.join("sync/optional.json")).await.unwrap();
         assert_eq!((replay.fetched, replay.removed), (0, 0), "settled");
         // a file gone from under the manifest is fetched again
         std::fs::remove_file(dir.join("grill-me/SKILL.md")).unwrap();
-        let repaired = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
+        let repaired = install(&api, &agent, "npub1paul", &dir, &manifest, &root.join("sync/optional.json")).await.unwrap();
         assert_eq!(repaired.fetched, 1);
         assert!(dir.join("grill-me/SKILL.md").exists());
 
         // the release changes one skill and drops the other
         files.lock().unwrap().insert("skills/research/arxiv-finite/SKILL.md".into(), ("release:a2".into(), b"---\nname: arxiv-finite\n---\nnew\n".to_vec()));
         files.lock().unwrap().remove("skills/grill-me/SKILL.md");
-        let d = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &dir, &manifest, &root.join("sync/optional.json")).await.unwrap();
         assert_eq!((d.fetched, d.removed, d.skills), (1, 1, 1));
         assert!(std::fs::read_to_string(dir.join("research/arxiv-finite/SKILL.md")).unwrap().ends_with("new\n"));
         assert!(!dir.join("grill-me").exists(), "its directory goes with its last file");
 
-        // the platform down: nothing installed changes
+        // switched off
+        files.lock().unwrap().remove("optional/hermes/creative/excalidraw.on");
+        files.lock().unwrap().insert("optional/hermes/research/llm-wiki.on".into(), ("c3".into(), b"on\n".to_vec()));
+        install(&api, &agent, "npub1paul", &dir, &manifest, &chosen).await.unwrap();
+        assert_eq!(load_set(&chosen), BTreeSet::from(["research/llm-wiki".to_string()]));
+
+        // the platform down: nothing installed changes, the switches neither
         *down.lock().unwrap() = true;
-        assert!(install(&api, &agent, "npub1paul", &dir, &manifest).await.is_err());
+        assert!(install(&api, &agent, "npub1paul", &dir, &manifest, &root.join("sync/optional.json")).await.is_err());
         assert!(dir.join("research/arxiv-finite/SKILL.md").exists());
+        assert_eq!(load_set(&chosen), BTreeSet::from(["research/llm-wiki".to_string()]));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -691,6 +953,112 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Valid: each `<id>.on` under the prefix is a switch, nested ids too.
+    /// Invalid: an unsafe id, a file of another name, and switches past
+    /// the bound are refused or ignored; the rest stand.
+    #[test]
+    fn a_listings_switches_are_its_on_files() {
+        let listing = vec![
+            file("optional/hermes/creative/excalidraw.on", 3, "c1"),
+            file("optional/hermes/mlops/training/unsloth.on", 3, "c2"),
+            file("optional/hermes/creative/pixel-art.off", 3, "c3"),
+            file("optional/other/creative/sketch.on", 3, "c4"),
+            file("optional/hermes/../../etc/passwd.on", 3, "c5"),
+            file("skills/research/arxiv-finite/SKILL.md", 100, "release:a"),
+        ];
+        let (on, refused) = switched_on(&listing);
+        assert_eq!(on, BTreeSet::from(["creative/excalidraw".to_string(), "mlops/training/unsloth".to_string()]));
+        assert_eq!(refused, vec![("optional/hermes/../../etc/passwd.on".to_string(), "not a safe path")]);
+        let many: Vec<FileEntry> = (0..OPTIONAL_MAX + 3).map(|i| file(&format!("optional/hermes/c/s{i}.on"), 3, "v")).collect();
+        let (on, refused) = switched_on(&many);
+        assert_eq!((on.len(), refused.len()), (OPTIONAL_MAX, 3));
+    }
+
+    /// Goal: an optional skill switched on is one Hermes finds, helpers and
+    /// all, at any depth; switched off, it goes and its empty directories
+    /// with it, never a bundled skill beside it. Invalid: one the image
+    /// lacks, or whose name a managed or bundled skill takes (which would
+    /// make both ambiguous), is left out and said; one that cannot be
+    /// copied is said and the rest show. Replay changes nothing, and a
+    /// fresh view (a restart) shows the same.
+    #[test]
+    fn optional_skills_switched_on_are_shown_and_switched_off_go() {
+        let root = std::env::temp_dir().join(format!("hermes-optional-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let at = |d: &str| root.join(d);
+        let (bundled, optional, managed, manifest, chosen, shown, view, own) = (at("bundled"), at("optional"), at("managed"), at("manifest.json"), at("chosen.json"), at("shown.json"), at("view"), at("own"));
+        write_file(&bundled, "creative/ascii-art/SKILL.md", b"---\nname: ascii-art\n---\n").unwrap();
+        write_file(&optional, "creative/excalidraw/SKILL.md", b"---\nname: excalidraw\n---\n").unwrap();
+        write_file(&optional, "creative/excalidraw/references/shapes.md", b"shapes\n").unwrap();
+        write_file(&optional, "mlops/training/unsloth/SKILL.md", b"---\nname: unsloth\n---\n").unwrap();
+        write_file(&optional, "creative/ascii-art/SKILL.md", b"---\nname: ascii-art\n---\nAnother ASCII art.\n").unwrap();
+        write_file(&optional, "research/arxiv/SKILL.md", b"---\nname: arxiv-plus\n---\n").unwrap();
+        write_file(&managed, "research/arxiv/SKILL.md", b"---\nname: arxiv\n---\n").unwrap();
+        save_manifest(&manifest, &BTreeMap::from([("research/arxiv/SKILL.md".into(), "release:1".into())])).unwrap();
+        let choose = |ids: &[&str]| save_json(&chosen, &ids.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>()).unwrap();
+        let settle = || {
+            settle_bundled(&managed, &manifest, &bundled, &view).unwrap();
+            settle_optional(&managed, &manifest, &bundled, &optional, &chosen, &shown, &view).unwrap()
+        };
+        let finds = || hermes_finds(&own, &[managed.clone(), view.clone()]);
+
+        // nothing switched on: none shown
+        assert_eq!(settle(), OptionalShown::default());
+        assert!(!view.join("creative/excalidraw").exists());
+
+        choose(&["creative/excalidraw", "mlops/training/unsloth", "creative/ascii-art", "research/arxiv", "security/gone"]);
+        let o = settle();
+        assert_eq!(o.shown, ["creative/excalidraw", "mlops/training/unsloth"]);
+        assert_eq!(o.missing, ["security/gone"], "another pin's: left out");
+        assert_eq!(o.withheld, ["creative/ascii-art", "research/arxiv"], "a bundled name, a managed alias");
+        let found = finds();
+        assert_eq!(found.get("excalidraw"), Some(&view.join("creative/excalidraw/SKILL.md")));
+        assert_eq!(found.get("unsloth"), Some(&view.join("mlops/training/unsloth/SKILL.md")), "nested ids show too");
+        assert_eq!(found.get("ascii-art"), Some(&view.join("creative/ascii-art/SKILL.md")), "the bundled one, unambiguous");
+        assert!(std::fs::read_to_string(view.join("creative/ascii-art/SKILL.md")).unwrap().ends_with("---\n"), "the bundled one's text");
+        assert_eq!(found.get("arxiv"), Some(&managed.join("research/arxiv/SKILL.md")));
+        assert!(view.join("creative/excalidraw/references/shapes.md").is_file(), "helpers travel with it");
+        assert_eq!(settle(), o, "replay");
+
+        // switched off: gone, its empty parents too, the bundled skill beside it stays
+        choose(&["creative/excalidraw"]);
+        let o = settle();
+        assert_eq!(o.shown, ["creative/excalidraw"]);
+        assert!(!view.join("mlops").exists(), "its empty directories go");
+        assert!(view.join("creative/ascii-art/SKILL.md").is_file() && view.join("creative/excalidraw/SKILL.md").is_file());
+        assert!(!finds().contains_key("unsloth"));
+
+        // a restart: a fresh view shows the same
+        std::fs::remove_dir_all(&view).unwrap();
+        std::fs::remove_file(&shown).unwrap();
+        assert_eq!(settle().shown, ["creative/excalidraw"]);
+        assert!(finds().contains_key("excalidraw"));
+
+        // one that cannot be copied (a non-file in it) is said, the rest show
+        write_file(&optional, "devops/odd/SKILL.md", b"---\nname: odd\n---\n").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", optional.join("devops/odd/link")).unwrap();
+        choose(&["creative/excalidraw", "devops/odd"]);
+        let o = settle();
+        assert_eq!((o.shown.as_slice(), o.failed.len()), (&["creative/excalidraw".to_string()][..], 1));
+        assert!(!view.join("devops/odd").exists(), "never half a skill");
+
+        // switched off goes even when the settle fails after (a managed
+        // skill it cannot read)
+        std::fs::remove_file(managed.join("research/arxiv/SKILL.md")).unwrap();
+        choose(&[]);
+        assert!(settle_optional(&managed, &manifest, &bundled, &optional, &chosen, &shown, &view).is_err());
+        assert!(!view.join("creative/excalidraw").exists());
+        write_file(&managed, "research/arxiv/SKILL.md", b"---\nname: arxiv\n---\n").unwrap();
+        choose(&["creative/excalidraw"]);
+        assert_eq!(settle().shown, ["creative/excalidraw"]);
+
+        // all switched off
+        choose(&[]);
+        assert!(settle().shown.is_empty());
+        assert!(!view.join("creative/excalidraw").exists() && view.join("creative/ascii-art/SKILL.md").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Hermes' skill guard: a skill whose text holds one of these is
     /// flagged as a prompt injection (its `_INJECTION_PATTERNS`).
     const HERMES_INJECTION_PATTERNS: [&str; 9] = ["ignore previous instructions", "ignore all previous", "you are now", "disregard your", "forget your instructions", "new instructions:", "system prompt:", "<system>", "]]>"];
@@ -722,6 +1090,26 @@ mod tests {
             assert!(COMPUTER_PAGE.contains(said), "computer.md says {said}");
         }
         assert!(PLATFORM_DESCRIPTION.contains("to search past conversations and brains (`fragment search`)"));
+    }
+
+    /// Goal (P5 of the plan to sandbox per agent): an agent plans
+    /// honestly, knowing a sleep or restart ends the servers and background
+    /// commands it started and that nothing starts them again, where what
+    /// must outlive its turn lives instead, and (P6) that one still working
+    /// holds the computer only up to the bridge's bound, which both pages
+    /// name as the code keeps it.
+    #[test]
+    fn an_agent_is_told_a_sleep_ends_its_processes() {
+        let page = COMPUTER_PAGE.split_whitespace().collect::<Vec<_>>().join(" ");
+        let hours = fragment_bridge::limits::LEFT_RUNNING_HOLD_MS / 3_600_000;
+        assert_eq!(hours * 3_600_000, fragment_bridge::limits::LEFT_RUNNING_HOLD_MS, "a bound in whole hours");
+        let held = format!("keeps your computer awake up to {hours} hours after your turn; an idle server does not");
+        for said in ["A sleep or a restart ends every process you started (a server, a background command, a loop), and nothing starts it again: never rely on crontab or `hermes cron`", "a schedule on yourself, kept through every restart and sleep", "What should run without you (frequent checks, or for others) is an app", &held] {
+            assert!(page.contains(said), "computer.md says {said}");
+        }
+        let guide = include_str!("../../../../cli/GUIDE.md").split_whitespace().collect::<Vec<_>>().join(" ");
+        let held = format!("keeps the computer awake up to {hours} hours after the agent's last turn; an idle server does not");
+        assert!(guide.contains(&held), "GUIDE.md says {held}");
     }
 
     #[test]
@@ -812,7 +1200,7 @@ mod tests {
         let settle = || settle_platform(&managed, &manifest, &platform, &view).unwrap();
 
         // no skills fragment: no managed skills, the platform's `fragment`
-        let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &managed, &manifest, &root.join("sync/optional.json")).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.skills), (None, 0));
         assert!(settle(), "shown");
         let found = hermes_finds(&own, &external);
@@ -823,7 +1211,7 @@ mod tests {
         *listed.lock().unwrap() = true;
         files.lock().unwrap().insert("skills/fragment/SKILL.md".into(), ("release:f".into(), b"---\nname: fragment\ndescription: The managed one.\n---\n".to_vec()));
         files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
-        let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &managed, &manifest, &root.join("sync/optional.json")).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.skills), (Some("skills--z8w6"), 2));
         // invalid: both beside each other in one rank, Hermes finds neither
         assert_eq!(hermes_finds(&own, &external).get("fragment"), None, "ambiguous");
@@ -836,7 +1224,7 @@ mod tests {
 
         // the managed one gone: the platform's again, untouched
         files.lock().unwrap().remove("skills/fragment/SKILL.md");
-        let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
+        let d = install(&api, &agent, "npub1paul", &managed, &manifest, &root.join("sync/optional.json")).await.unwrap();
         assert_eq!((d.removed, d.skills), (1, 1));
         assert!(settle());
         assert_eq!(hermes_finds(&own, &external).get("fragment"), Some(&view.join(PLATFORM_PATH)));

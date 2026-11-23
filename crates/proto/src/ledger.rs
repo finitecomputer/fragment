@@ -256,14 +256,12 @@ impl TryFrom<PlannedFields> for Planned {
     }
 }
 
-/// Calls on an operator key, or on a part of its calls the book prices
-/// apart (`elevenlabs:speech`), by the book's name for it
-/// (`fragment_core::price::KEY_PARTS`). `units` are each call's, in the
-/// key's own unit: a part's what its vendor counts (ElevenLabs' speech, its
-/// text's characters; fal's image, its pixels), which its item must say,
-/// unless the part counts at most one a call (xAI's image, a Places
-/// photo); any other key's a call (absent, one). A part's are not cut to
-/// one call's most, so a job's whole count may be one item.
+/// Calls on a vendor's unit, by the book's name for it (`elevenlabs:character`,
+/// `perplexity:call`: `fragment_core::catalog::Charge`). `units` are each
+/// call's, in that unit: what its vendor's answer counts (speech's
+/// characters, Grok's ticks), which its item must say; a call's one
+/// (absent, one). They are not cut to one call's most, so a job's whole
+/// count may be one item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlannedKey {
@@ -368,13 +366,13 @@ mod tests {
     #[test]
     fn a_quotes_items_are_told_apart_by_what_they_name() {
         let ask: QuoteAsk = serde_json::from_value(json!({ "items": [
-            { "key": "elevenlabs:speech", "units": 60000 },
+            { "key": "elevenlabs:character", "units": 60000 },
             { "key": "fal", "calls": 40 },
             { "model": "cheap", "input": 2000, "cachedInput": 100, "output": 500, "calls": 3 },
             { "usage": { "kind": "awake", "instance": "2vcpu-6gib", "ms": 3600000 } },
         ] }))
         .unwrap();
-        assert_eq!(ask.items[0], Planned::Key(PlannedKey { key: "elevenlabs:speech".into(), units: Some(60_000), calls: None }));
+        assert_eq!(ask.items[0], Planned::Key(PlannedKey { key: "elevenlabs:character".into(), units: Some(60_000), calls: None }));
         assert_eq!(ask.items[1], Planned::Key(PlannedKey { key: "fal".into(), units: None, calls: Some(40) }));
         assert_eq!(ask.items[2], Planned::Model(PlannedModel { model: "cheap".into(), input: 2000, cached_input: 100, cache_write: 0, output: 500, calls: Some(3) }));
         assert!(matches!(&ask.items[3], Planned::Usage(u) if u.usage["kind"] == "awake" && u.calls.is_none()));
@@ -426,4 +424,28 @@ mod tests {
         let cap: SetFragmentCap = serde_json::from_value(json!({ "id": "c1", "fragment": "todo.ann", "micros": null })).unwrap();
         assert_eq!(cap.micros, None);
     }
+}
+
+/// One agent's use of one provider in a month: its calls the provider
+/// answered through a computer's swap, and what they were charged (an
+/// operator key's, as the swap priced it; zero for a connection or an own
+/// key, which are counted, never charged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUse {
+    pub provider: String,
+    /// The agent fragment.
+    pub agent: String,
+    pub calls: u64,
+    pub micros: i64,
+}
+
+/// `GET /api/ledger/uses[/{YYYY-MM}]`: a month's uses of the deployment's
+/// providers by a person's agents (docs/ledger.md, "Usage").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerUses {
+    /// `YYYY-MM`, UTC.
+    pub month: String,
+    pub uses: Vec<ProviderUse>,
 }

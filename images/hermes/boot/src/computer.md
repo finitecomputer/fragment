@@ -58,8 +58,11 @@ Archive, chats imported from elsewhere) and their brains, run
 ## Later, and again
 
 Anything later or recurring ("every hour") is a schedule on yourself,
-kept through every restart and sleep: never a loop, `sleep`, crontab or
-`hermes cron`.
+kept through every restart and sleep. A sleep or a restart ends every
+process you started (a server, a background command, a loop), and
+nothing starts it again: never rely on crontab or `hermes cron`. One
+still working (a build, a download) keeps your computer awake up to 2
+hours after your turn; an idle server does not.
 
 ```
 fragment schedule add --routine "Tell me if the shelf is in stock" --cron "0 * * * *"
@@ -156,7 +159,7 @@ uses the separate `X_API_BEARER_TOKEN` operator placeholder at `api.x.com`.
 Use native `image_generate` for an image you need now in chat; an app's
 repeatable images are a job's `job.ai.image` step (no FAL key needed).
 
-Your native browser tools drive headed Chromium on your own desktop.
+Your `browser_exec` tool drives headed Chromium on your own desktop.
 With `BROWSER_USE_API_KEY` you may also drive a cloud browser from the
 terminal, beside your desktop's:
 `BU_NAME=remote browser-harness 'start_remote_daemon("remote")'`, then
@@ -182,9 +185,11 @@ computer: the attachment note maps its original name, type and local path
 under `/tmp/bridge-media`. Use that path with your tools to copy or edit
 the original; copy it into your app or work to keep it across a sleep.
 To put it on a website,
-click the site's upload button with your browser tools, then type its
-full path into the file dialog on your desktop with `computer_use` and
-press Enter.
+set it on the page's file input with `browser_exec`'s
+`upload_file(selector, path)` (its full path), then check the page shows
+it before you send the form. Only if the page has no file input, click
+its upload button, type the full path into the file dialog on your
+desktop with `computer_use` and press Enter.
 
 ## Files you send
 
@@ -201,8 +206,8 @@ You have a desktop of your own, with a browser on it (each agent here
 has its own). Yours starts the first time you use a computer-use
 or browser tool, and stops once no one has used it for ten minutes; it
 starts again when you next need it, your browser's sign-ins kept. Your
-native browser tools and the desktop's Browser icon share one regular
-Chromium and its saved sign-ins. Use those tools for signed-in browsing;
+`browser_exec` tool and the desktop's Browser icon share one regular
+Chromium and its saved sign-ins. Use it for signed-in browsing;
 you do not need to install or launch a second browser. In your own code,
 Playwright (Python's and Node's) is installed: a plain `chromium.launch()`
 runs this computer's Chromium, without your desktop's sign-ins; no

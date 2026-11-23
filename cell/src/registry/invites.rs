@@ -8,10 +8,10 @@
 //! to their app list"), as nobody joins an org without theirs (offers.rs).
 //! Whoever signs in with the email, verified, sees it (`GET /api/invites`:
 //! the fragment's title as it was sent, its role, who shared it) and
-//! accepts it, which makes them a member there (the fragment's
-//! `invites/claim`), or declines it, which takes it from the fragment
-//! (`invites/decline`). Signing in never makes a share, nor meets one. The
-//! mails a person has sent are capped by the day.
+//! accepts it, which makes them a member there, or declines it, which
+//! takes it from the fragment (the fragment's `InviteAnswer`). Signing in
+//! never makes a share, nor meets one. The mails a person has sent are
+//! capped by the day.
 //!
 //! An invite mailed before invites waited for a yes (its row names no
 //! role) said "sign in to open it": a sign-in as its email still meets it
@@ -24,15 +24,17 @@
 //! tries in all (`fragment_core::backoff::claim_retry_ms`). Past them it
 //! waits on its person's next sign-in, which tries it afresh.
 
+use fragment_core::permit::{self, Reserved, Sharer};
 use fragment_core::{backoff, levers, mail};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, Reason, Role};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use super::calls::{By, Call, ClaimInvite, InviteEmail};
+use super::calls::{By, Call, InviteEmail};
 use super::{body, reply, RegistryCell};
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::InviteAnswer;
 use crate::js;
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
@@ -245,14 +247,14 @@ impl RegistryCell {
     /// them (Paul, 2026-10-22: "It can already publish for you and edit
     /// your own stuff! Why shouldn't it be able to handle 'skyler invited
     /// me to edit a fragment, do you see it?'"), as an agent shares for its
-    /// owner (`access::agent_shares`). Any other agent is 403; a person
+    /// owner (`permit::agent_shares`). Any other agent is 403; a person
     /// naming `for`, 400.
     fn invitee_by(&self, by: &By, acting_for: Option<&str>) -> CellResult<Identity> {
         let who = self.by(by)?;
         match (who.kind, who.owner.as_deref()) {
             (IdentityKind::Person, _) if acting_for.is_none() => Ok(who),
             (IdentityKind::Person, _) => Err(CellError::invalid("a person answers their own invites: `for` is an agent's, acting for its owner")),
-            (IdentityKind::Agent, Some(owner)) if acting_for == Some(owner) && who.held.is_none() => self.stored_identity(owner, "an agent's owner"),
+            (IdentityKind::Agent, Some(owner)) if permit::agent_may_ask(Reserved::Sharing, Sharer::of(Some(owner), acting_for, who.held)).is_ok() => self.stored_identity(owner, "an agent's owner"),
             (IdentityKind::Agent, _) => Err(CellError::new(
                 ErrorCode::Forbidden,
                 "an agent reads and answers its owner's invites only acting for them (`for` its owner), and not held below them",
@@ -351,9 +353,8 @@ impl RegistryCell {
     async fn answer_invite(&self, b: AnswerInvite) -> CellResult<Option<Role>> {
         let who = self.invitee_by(&b.by, b.acting_for.as_deref())?;
         let email = self.invite_to(&who.id, &b.fragment)?;
-        let claim = serde_json::to_value(ClaimInvite { email: email.clone(), identity: who.id.clone(), agents: self.agents_of(&who.id)? }).expect("a claim serializes");
-        let route = if b.yes { "invites/claim" } else { "invites/decline" };
-        let met = match crate::fragment::ask(&self.env, &b.fragment, route, &claim).await {
+        let answer = InviteAnswer { email: email.clone(), identity: who.id.clone(), agents: self.agents_of(&who.id)?, yes: b.yes };
+        let met = match crate::fragment::call(&self.env, &b.fragment, &answer).await {
             Ok(met) => Some(met),
             Err(e) if e.code == ErrorCode::NotFound => None,
             Err(e) => return Err(e),
@@ -365,7 +366,7 @@ impl RegistryCell {
         self.tell_person(&who.id).await;
         match (b.yes, met) {
             (false, _) => Ok(None),
-            (true, Some(met)) => met["role"].as_str().and_then(Role::parse).map(Some).ok_or_else(|| CellError::host(format!("{}'s claim named no role: {met}", b.fragment))),
+            (true, Some(met)) => met.map(Some).ok_or_else(|| CellError::host(format!("{}'s claim named no role", b.fragment))),
             (true, None) => Err(CellError::new(ErrorCode::NotFound, format!("the invite to {} is gone: it was taken back, or it was deleted", b.fragment)).because(Reason::Gone)),
         }
     }
@@ -412,9 +413,9 @@ impl RegistryCell {
             "SELECT fragment FROM invites_waiting WHERE email = ? AND role IS NULL ORDER BY expires_at LIMIT ?",
             vec![email.into(), SqlStorageValue::Integer(limits::INVITES_PER_EMAIL_MAX as i64)],
         )?;
-        let claim = serde_json::to_value(ClaimInvite { email: email.to_string(), identity: identity.to_string(), agents: self.agents_of(identity)? }).expect("a claim serializes");
+        let claim = InviteAnswer { email: email.to_string(), identity: identity.to_string(), agents: self.agents_of(identity)?, yes: true };
         for batch in waiting.chunks(CLAIMS_AT_ONCE) {
-            let answers = join_all(batch.iter().map(|w| crate::fragment::ask(&self.env, &w.fragment, "invites/claim", &claim))).await;
+            let answers = join_all(batch.iter().map(|w| crate::fragment::call(&self.env, &w.fragment, &claim))).await;
             for (w, answer) in batch.iter().zip(answers) {
                 self.claimed(email, &w.fragment, 0, answer)?;
             }
@@ -426,7 +427,7 @@ impl RegistryCell {
     /// met, or none waiting there, its invite is forgotten here, and its
     /// kept claim with it; failed, its claim is kept, due after its
     /// backoff, or, past its tries, left to its person's next sign-in.
-    fn claimed(&self, email: &str, fragment: &str, failed: i64, answer: CellResult<serde_json::Value>) -> CellResult<()> {
+    fn claimed(&self, email: &str, fragment: &str, failed: i64, answer: CellResult<Option<Role>>) -> CellResult<()> {
         let failure = match answer {
             Ok(_) => None,
             Err(e) if e.code == ErrorCode::NotFound => None,
@@ -471,8 +472,8 @@ impl RegistryCell {
         }
         // bounded: at most CLAIMS_AT_ONCE claims a run
         let answers = join_all(tried.iter().map(|(email, fragment, _, person)| {
-            let claim = serde_json::to_value(ClaimInvite { email: email.clone(), identity: person.clone(), agents: self.agents_of(person).unwrap_or_default() }).expect("a claim serializes");
-            async move { crate::fragment::ask(&self.env, fragment, "invites/claim", &claim).await }
+            let claim = InviteAnswer { email: email.clone(), identity: person.clone(), agents: self.agents_of(person).unwrap_or_default(), yes: true };
+            async move { crate::fragment::call(&self.env, fragment, &claim).await }
         }))
         .await;
         for ((email, fragment, failed, _), answer) in tried.iter().zip(answers) {

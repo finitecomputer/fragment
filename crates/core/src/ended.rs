@@ -6,8 +6,8 @@
 //! tell (one row each), its app's database and blobs (one), an agent
 //! fragment's agent (one: its computer runs it no more, and the registry
 //! names it by the fragment no more; not a wipe's, which empties both
-//! itself), and, a wipe's, its repo (one). A try of a part ends one of
-//! three ways:
+//! itself), and its repo (one, when it goes: `repo_goes`). A try of a part
+//! ends one of three ways:
 //!
 //! - **done**: the part is gone, cleaned by this try or before it (a repo
 //!   code.storage says is gone, or was never there, is gone; so is an
@@ -121,9 +121,44 @@ pub fn agent_left(code: ErrorCode, message: &str) -> Result<(), Failure> {
     }
 }
 
+/// How a life ended: its owner's delete, or an operator's wipe of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    Delete,
+    Wipe,
+}
+
+/// Whether an ended life's code.storage repo is deleted with it.
+///
+/// - **A wipe's always:** its person never comes back to make the name
+///   again (they return as a new identity).
+/// - **A delete's only when the repo is named by the life's own key**
+///   (`codestorage::repo_name`; the cell marks it at the repo's making).
+///   An older release names a repo by its owner, so after a rollback past
+///   this one, the same owner making the name again would find an
+///   owner-named repo whose delete was still to come. That delete would
+///   then take the new life's files (FIN-538). A per-life name no release
+///   ever derives again. A repo named by its owner stays until a sweep,
+///   once no rollback can reach a release that names repos so (FIN-540).
+pub fn repo_goes(end: End, named_by_life: bool) -> bool {
+    end == End::Wipe || named_by_life
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a wipe takes its repo however it is named; a delete takes
+    /// only a repo named by the life's own key, never one named by its
+    /// owner (an older release's create would find it again). Method:
+    /// each end and naming.
+    #[test]
+    fn a_delete_takes_only_a_repo_named_by_its_life() {
+        assert!(repo_goes(End::Wipe, true));
+        assert!(repo_goes(End::Wipe, false), "a wiped person never makes the name again");
+        assert!(repo_goes(End::Delete, true));
+        assert!(!repo_goes(End::Delete, false), "an owner-named repo stays: a rollback's create would find it");
+    }
 
     /// Goal: a part failing for now is tried again, waiting longer each
     /// time, and is held after `TRIES_MAX` failed tries: tried daily, never

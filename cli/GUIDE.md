@@ -145,7 +145,13 @@ weekday at 8") is a schedule on itself: a scheduled record on its own
 agent fragment's `tasks` (Scheduled records, below), which the platform
 keeps and fires through every restart and sleep of its computer. Never
 a background loop, `sleep`, crontab or `hermes cron` on the computer:
-they die with it. The agent is an editor of its own fragment, so it adds
+they die with it. The computer sleeps a while after nothing holds it
+awake (a turn, a port tab open on it), and a sleep or a restart ends
+every process an agent started: a server, a background command, a
+download. Nothing starts those again. One still working (a build, a
+download) keeps the computer awake up to 2 hours after the agent's last
+turn; an idle server does not. What must outlive that is a routine, or
+an app (its crons and triggers run on the platform). The agent is an editor of its own fragment, so it adds
 one as any editor does; on a computer `fragment schedule` acts on the
 agent's own fragment unless another is named, and `--routine` builds the
 routine record:
@@ -234,9 +240,9 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`board`,
 `notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, `sessions`, `telegram`, runs the platform's current release and is named in its
-`fragment.json`. Either way `--title` gives it its own title, its
-`fragment.json`'s `meta.title`, over the template's. Any other is
+`skills`, `sessions`, `telegram`, `simplex`, runs the platform's current release and is named in its
+`fragment.json`. Either way `--title` gives it its own title, over the
+template's: its name, set by `fragment rename` after. Any other is
 refused, naming them.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -307,7 +313,7 @@ Without `--title`, scaffolded apps and copied templates use a name derived
 from their label instead of a template placeholder such as "Blank".
 
 ```
-fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
+fragment rename meal-planner "Meals this week"     # its name, at once, deploying nothing; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
 fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
@@ -913,33 +919,30 @@ why: replay it after a top-up or next month.
   edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
-- Each of the platform's shared keys (ElevenLabs, xAI, …) pauses once your
-  agents' calls on it spend $5 in an hour (429 `rate_limited`, reason
-  `key_paused`); nothing else does. Its calls resume as the hour passes,
-  or at once when you allow more: the notice in your agent's chat has a
-  button, or `fragment ledger key-cap`. Only you can, never your agents.
+- Your agents' calls on the platform's shared keys (ElevenLabs, xAI, …)
+  are each charged what the vendor billed. Past $5 of them in an hour,
+  then each doubling, you get a notice; nothing pauses.
 
 Before a job that spends (speech, images, searches, many model calls),
 quote it: `fragment quote` prices a plan with the same book your ledger
 charges with, and says what you have left this month (an agent's quote
 is its owner's). It spends nothing. Its items follow one another, each a
-name and its amounts: an operator key (`perplexity`, `xai`), a part of
-a key's calls priced apart (`elevenlabs:speech` by its text's
-characters, `fal:image` by its pixels, `xai:image` one a call) or a
+name and its amounts: a vendor's unit, as each call's answer is charged
+(`elevenlabs:character` by its text's characters, `xai:tick` by what
+Grok said it cost, 10^10 ticks a dollar, `perplexity:call` a call) or a
 model (`cheap`, `medium`, an id); `<n>` or `<n>x` its calls, `<n>in`,
 `<n>cached`, `<n>write` and `<n>out` a model's tokens a call, `<n>` with
-a unit (`60000chars`, `1048576px`) a key's units a call. A name the
+a unit (`60000chars`, `5credits`) a key's units a call. A name the
 book does not price here is said so, never guessed. Refused for credit
 or a budget? `fragment quote` alone reads what is left.
 
 ```
-fragment quote elevenlabs:speech 60000chars   # "about $7.20; you have $95.40 left this month"
-fragment quote fal:image 40x 1048576px xai 10x   # several items, each one's price too
+fragment quote elevenlabs:character 60000chars   # "about $7.20; you have $95.40 left this month"
+fragment quote perplexity:call 40x firecrawl:credit 10x 5credits   # several items, each one's price too
 fragment quote cheap 2000in 500out 40x        # 40 turns on the cheap tier
 fragment quote                                # what you have left, alone
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
-fragment ledger key-cap elevenlabs 20   # a shared key's cap on your computer: $20 an hour (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
@@ -1021,7 +1024,9 @@ A file a message held is under `~/archive/media/`, named in its
 ## Bringing an agent's home
 
 `fragment home` reads an agent's home from wherever it ran: its folder,
-or a zip of it, read in place and never changed. A layout says where
+a zip of it, or a move's stage (`stage:<the stage>`, as its routine names
+it: read where the platform keeps it, never downloaded), each read in
+place and never changed. A layout says where
 that home keeps things: `hermes` (a bare Hermes home, the default), or a
 layout file a platform's import skill carries.
 
@@ -1031,6 +1036,7 @@ fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read thr
 fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
 fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+fragment home files stage:o1.p1.1 --layout ./layouts/x.json --into old-files--k3x9 --store juniper-storage--b2c3 --notes ~/old-agent/home   # and the rest, kept in storage
 ```
 
 The survey lists the chats' database (`fragment session import` brings
@@ -1052,6 +1058,60 @@ folder left out, its size, and why. A fragment with no `fragment.json`
 gets one whose page is the files view (`fragment deploy` shows it).
 Running it again sends only what is missing.
 
+With `--store`, nothing stays behind: every other file of the home (its
+own self, its brains' files, what the files' pick leaves) is kept whole
+in a members-only storage fragment, as it was in the home, under the
+notes folder's name (`home/` for `--notes ~/old-agent/home`), a file past
+one upload in parts, but a file whose name says it may hold a password
+or key, never read. From a move's stage each large file is
+copied there on the platform, never through your disk. Each folder or
+file kept gets a note under `--notes`, laid out as the home, as
+`fragment offload` leaves one (`<name>.offloaded.md`, a folder's at most
+10,000 files and 1 GB): `fragment offload --back <note>` brings it back,
+checked against the old file's CRC-32. A storage fragment holds at most
+19,984 files: one that fills says what is left; run it again with
+`--store` naming another, and it goes on. Cut off, run it again: it
+keeps only what no note names yet. A file its notes keep counts only as
+the same bytes; a home that differs from them (another copy of it) is
+refused before anything is written: keep it beside, with `--notes`
+naming a new folder.
+
+## Moving files off a disk
+
+A computer's disk holds 20 GB, and a full one stops it saving. When it
+fills, move big files you are not using (downloads, datasets, finished
+outputs) into a members-only fragment of your owner's, one per agent:
+
+```
+fragment create juniper-storage --visibility members              # once: what you move goes here
+fragment offload ~/Downloads/talk.mp4 --into juniper-storage--k3x9   # a note, talk.mp4.offloaded.md, in its place
+fragment offload ~/data/census --into juniper-storage--k3x9           # a folder, and all in it
+fragment deploy juniper-storage--k3x9                               # once, after the first: its page lists what is there
+fragment offload --back ~/Downloads/talk.mp4.offloaded.md           # back where it was
+```
+
+`offload` copies each file into the fragment, under a folder of its own
+named for when and where it was (`2026-11-18T103102Z-3fa9/data/work/…`):
+1 MiB and up as a blob, and a file larger than one upload in parts. It
+reads each back from the fragment and checks its sha256, and only then
+writes the note and removes the files. Anything that fails leaves every
+file where it was. The note says where they went, how to bring them
+back, and each file's size and sha256. `--back` brings each file into
+place, checked against the note, never over a file that is there, and a
+folder's folders, the empty ones too, with their permissions; the note
+goes last. The fragment keeps its copy, so a computer that goes
+back to an earlier save can still bring it back; remove it there only
+once nobody needs it. Either one cut off finishes when run again.
+Refused: a fragment that is not members-only, not an app's (a chat, a
+brain), or that you only view; a link, a folder holding one, a folder
+of more than 10,000 files, a file whose name says it may hold a
+password or key (`.env`, a private key) or a folder holding one, and
+anything in the runtime's own home (`$HERMES_HOME`: its memory, skills
+and sessions) or holding it. One move or back works in a folder at a
+time. A file that changes after its copy is made stays where it is. What
+is stored is paid from the fragment's owner's ledger, as any fragment's
+blobs are (Your ledger).
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -1064,11 +1124,11 @@ read whatever it can read (as a viewer), but you never act through it.
 fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
 
-An agent's name and picture are its agent fragment's: its title
-(`fragment.json`'s `meta.title`) and its `avatar.png` (a PNG, JPEG, WebP
-or GIF of at most 256 KiB), as live has them. Every page shows the agent
-by them (your shell, its chats, the share sheet, push notifications),
-and so does its runtime (its teammates are told it), within seconds of a change:
+An agent's name is its agent fragment's own title, and its picture that
+fragment's `avatar.png` (a PNG, JPEG, WebP or GIF of at most 256 KiB) on
+main. Every page shows the agent by them (your shell, its chats, the
+share sheet, push notifications), and so does its runtime (its teammates
+are told it), within seconds of a change:
 
 ```
 fragment agent juniper--k3x9 --name Frank          # its name
@@ -1076,13 +1136,12 @@ fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture t
 fragment agent juniper--k3x9                       # what they are now
 ```
 
-`fragment agent` checks the picture, writes both in one commit and puts
-it live; an agent on a computer leaves its own name out. A new name is
-said in its job too (`SOUL.md`), in the same commit, wherever the job
-said its old one as a word. A picture too
-large or that is no picture is refused before anything is written; one
-committed by hand is refused when it is deployed (`fragment deploy` and
-`fragment status` say why), and the last good name and picture stay.
+`fragment agent` sets them at once, deploying nothing: its name, and its
+picture as a commit to main; an agent on a computer leaves its own name
+out. A new name is said in its job too (`SOUL.md`), in a commit beside
+it, wherever the job said its old one as a word. A picture too large or
+that is no picture is refused before anything is written; one committed
+by hand is shown as none, and `fragment events` says why.
 Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
@@ -1171,13 +1230,13 @@ fine, and they can use its keys.
 fragment login [--force] [--no-wait] [--no-browser]
 fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
+fragment ledger [grant <who> <usd> --why W [--id ID]]
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
-fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
+fragment home files <source> --into <name> [--plan] [--layout L] [--store <name> --notes <dir>]   # its files, into a fragment of files (and the rest, in storage)
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
@@ -1211,8 +1270,12 @@ fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment write <name> <path>... --dir D [--message M]   # several files from D, one commit: all land or none
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
+fragment offload <path> --into <name>    # a file or folder off this disk: copied, checked, removed, a note in its place
+fragment offload --back <path>           # back from its note, checked; the fragment keeps its copy
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
-fragment rm <name>                       fragment guide|skill
+fragment rm <name> [--yes]               # for everyone in it; a terminal asks for its name typed back, unless --yes
+fragment archive|unarchive <name>        # your own lists only
+fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
@@ -1226,6 +1289,7 @@ fragment operator people [--q Q] [--after A] [--key-file F]
 fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many open by link or public (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
+fragment operator start-from <npub> <save> [--key-file F]   # asleep or won't wake: its next start restores that save; the newer are set aside
 fragment operator orgs [--after A] [--key-file F]
 fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]

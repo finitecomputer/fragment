@@ -136,6 +136,7 @@ function offers(mine, done) {
         {
           gone,
           org_not_paying: `${o.org.name} isn't paying for seats right now, so its offer can't be taken yet. Ask its admins.`,
+          trial_seat_of_one: `${o.org.name} is on a trial, which is for one seat: its offer can be accepted once it's paid. Ask its admins.`,
           holds_seat: `You already have a seat in ${o.org.name}: decline this offer.`,
           pays: PAYS(mine.org?.name ?? "your org"),
           last_admin: `You're the last admin of ${mine.org?.name ?? "your org"}: make someone else its admin first, then accept.`,
@@ -466,7 +467,9 @@ export async function billingSections(helpers, ledger, mine, back) {
     }
     billing.append(credit);
   }
-  if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
+  // a trial is for a seat of one (docs/billing.md, "Trials"): no seat is added while it runs
+  const trial = !!seat?.trialEnds;
+  if (!alone) return org ? [billing, orgSection(org, offer, mine.pays, trial)] : [billing];
   // an admin alone buys seats for others, where something is sold
   if (!offer) return [billing];
   const more = el("div", "settings-actions");
@@ -474,7 +477,7 @@ export async function billingSections(helpers, ledger, mine, back) {
   others.type = "button";
   others.onclick = () => {
     more.closest(".settings-action-line")?.remove();
-    billing.after(orgSection(org, offer, mine.pays));
+    billing.after(orgSection(org, offer, mine.pays, trial));
   };
   // only who pays opens its billing (Stripe's portal renews it, and changes its card)
   more.append(...(mine.pays ? [portal()] : []), others);
@@ -496,10 +499,11 @@ function portal() {
  * (`pays`), Stripe's portal; `offer`, what a seat added costs (null:
  * nothing is sold, the table alone). Who pays's own seat and place are
  * theirs alone to give up, and while its subscription lives they stay
- * (the platform says to cancel it first).
+ * (the platform says to cancel it first). While it is a trial (`trial`),
+ * which is for a seat of one, no seat is added: it says so instead.
  */
-function orgSection(org, offer, pays) {
-  const { el, section, actionLine } = h;
+function orgSection(org, offer, pays, trial) {
+  const { el, section, line, actionLine } = h;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
     box.append(el("p", "muted", org.error));
@@ -588,6 +592,7 @@ function orgSection(org, offer, pays) {
         admins_full: "Your org has 10 admins already, offered ones included.",
         too_many_offers: `${who} has as many offers waiting as they can: they accept or decline one first.`,
         offers_per_day: "Your org has sent as many offers as it can today. Try again tomorrow.",
+        trial_seat_of_one: "A trial is for one seat: add seats once it's paid (add a card in Payment and invoices).",
         not_admin: `Only your org's admins offer ${what}s.`,
       },
       `No ${what} was offered to ${who}. Try again in a moment.`,
@@ -618,8 +623,9 @@ function orgSection(org, offer, pays) {
       note(box, offerFailed(err, adminEmail.value.trim(), "admin's place"));
     }
   };
+  // while a trial runs, no seat is added: said instead of a form that would be refused
   box.append(
-    actionLine("Add a seat", add),
+    trial ? line("Add a seat", "A trial is for one seat. Add seats once it's paid: add a card in Payment and invoices before the trial ends.") : actionLine("Add a seat", add),
     actionLine("Add an admin", admin),
     el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}`),
   );

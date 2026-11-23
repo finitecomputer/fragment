@@ -275,6 +275,7 @@ dependencies = [
  "k256",
  "libc",
  "qrcode",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -283,6 +284,25 @@ dependencies = [
  "tokio-tungstenite",
  "unicode-properties",
  "webpki-roots",
+]
+
+[[package]]
+name = "fragment-simplex-door"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "flate2",
+ "fragment-bridge",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -400,6 +420,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{IDLE_MS, PREWAKE_MS, UNSAVED_MAX_MS_DEFAULT};
+use crate::computer::limits::{IDLE_MS, UNSAVED_MAX_MS_DEFAULT};
 
 /// The deployment's rules for its computers' lifecycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,14 +21,13 @@ impl Default for Rules {
     }
 }
 
-/// What woke it, which says how long it holds the computer.
+/// What woke it. Each holds it the idle wait (Paul, 2026-11-18: one
+/// number); only its owner's lifts "won't wake".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Wake {
     /// A record on a channel one of its agents subscribed to.
     Record,
-    /// A page opened a fragment it subscribes to, or someone is typing.
-    Presence,
     /// A port tab is opening.
     Tab,
     /// Its owner asked (the shell, the CLI): also lifts "won't wake".
@@ -41,11 +40,9 @@ pub enum Wake {
 }
 
 impl Wake {
+    /// The idle wait, whatever woke it: one number for every hold.
     pub(super) fn hold_ms(self) -> i64 {
-        match self {
-            Wake::Presence => PREWAKE_MS,
-            Wake::Record | Wake::Tab | Wake::Owner | Wake::Joined => IDLE_MS,
-        }
+        IDLE_MS
     }
 }
 
@@ -63,6 +60,12 @@ pub enum Socket {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     Wake { why: Wake },
+    /// A record its agents follow, or the notice of one's join, was posted
+    /// at `at_ms` (the poster's clock), ahead of the wake it brings: work its
+    /// guest has not taken up (`Lifecycle`'s `owed_ms`), unless a keepalive
+    /// is open (a guest at work queues what comes) or opened after it (that
+    /// work took it up), until a keepalive opens.
+    Posted { at_ms: i64 },
     /// The start `generation` finished: running, its intercepts set, its
     /// data restored.
     Ready { generation: u64 },
@@ -75,14 +78,27 @@ pub enum Event {
     SnapshotFailed { generation: u64, why: String },
     /// The start `generation` restored a save that is unusable (its archive
     /// is gone or corrupt, or the image's check of what it restored
-    /// failed): the DO marked it so. With an `older` save left to try, it
-    /// starts again at once from that one, no strike against it .
+    /// failed), or one whose restore found no room on its disk: the DO
+    /// marked it unusable, or set it aside (`Saves::too_big`). With an
+    /// `older` save left to try, it starts again at once from that one, no
+    /// strike against it; with none, a strike, as any failed start.
     RestoreFailed { generation: u64, why: String, older: bool },
     Opened { socket: Socket },
     Closed { socket: Socket },
+    /// A person used one of its port tabs: its page sent the container a
+    /// message (the DO tells it a minute apart at most: cell/entry.mjs,
+    /// `TAB_USED_EVERY_MS`). An open tab holds the computer only this way,
+    /// `IDLE_MS` after its last use: a page left open says nothing (its
+    /// screen backs off to silence when no one touches it), and a computer
+    /// under it sleeps as under no tab (Paul, 2026-11-18).
+    TabUsed,
     /// The DO touched the hold of start `generation` and waited: whether
     /// the guest answered `held` in time.
     Held { generation: u64, held: bool },
+    /// Save `seq` of start `generation` took its home's record (`/data`
+    /// without its work: the guest's own state, what the hold is for), and
+    /// takes its work's next.
+    HomeSaved { generation: u64, seq: u64 },
     /// Save `seq` of start `generation` worked: the DO keeps it.
     Saved { generation: u64, seq: u64 },
     /// Save `seq` of start `generation` failed (`seq` 0: its hold found no
@@ -99,6 +115,13 @@ pub enum Event {
     /// `destroying`), and the start's own report follows. Kept with the
     /// lifecycle, so an isolate that comes up after it knows it too.
     StartFailing { generation: u64 },
+    /// The start `generation` found the container before it still running
+    /// past its destroy (a snapshot the runtime still takes holds a sleep's
+    /// container until it ends), or its isolate went as it looked
+    /// (`unplanned_start`), and started nothing: made again at once, no
+    /// strike, until that container has had a stop's deadline
+    /// (`SLEEP_DEADLINE_MS`) since the first such try; a failure after.
+    StartBlocked { generation: u64 },
     Alarm,
     /// Its owner put it to sleep: what held it is let go (its sockets close
     /// with its container).
@@ -112,6 +135,13 @@ pub enum Event {
     Restart { generation: u64 },
     /// The owner's plan changed: an always-on computer never sleeps.
     AlwaysOn { on: bool },
+    /// An operator chose the save its next start restores, setting the
+    /// newer ones aside (`Saves::choose`), while no container ran: the
+    /// saves were at fault, not the computer, so its strikes are counted
+    /// anew, and one that won't wake is asleep, so its next wake or restart
+    /// starts it. Nothing else: no start is made, and one begun since (a
+    /// wake as it was chosen) restores the save chosen already.
+    SaveChosen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +164,11 @@ pub enum Action {
     /// End its sleep: a snapshot (when its save worked: a cache of it), the
     /// signal, the wait, the destroy; then report `Asleep`.
     Stop { generation: u64, saved: bool },
+    /// Look whether the container of the stop under way is gone, and report
+    /// `Asleep` if it is: a look (`STOP_LOOK_MS`) finds a stop whose end its
+    /// isolate took with it, which no exit report ends (its container's,
+    /// heard during a stop, is that stop's own to report).
+    Look { generation: u64 },
     /// Meter awake time from `from_ms` to `to_ms` to the owner.
     Meter { from_ms: i64, to_ms: i64 },
 }
@@ -187,4 +222,11 @@ pub struct Ended {
     /// was kept: told as any loss.
     #[serde(default)]
     pub quiet: bool,
+    /// No turn ran and no port tab was used on it since that save (a
+    /// keepalive opened or closed, a tab's page spoke: `Lifecycle`'s
+    /// `changed`): what the platform ran that may change its files is in
+    /// that save. `quiet` is this and more. False for an end recorded
+    /// before this was kept: told as a change lost.
+    #[serde(default)]
+    pub unchanged: bool,
 }

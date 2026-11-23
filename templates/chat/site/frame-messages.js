@@ -128,14 +128,20 @@ export const MESSAGES = Object.freeze({
   screen: {
     kind: "screen",
     from: "the shell → an agent's screen page",
-    fields: "{agent, name}",
-    says: "The agent's name, as the page loads and on a rename.",
+    fields: "{agent, name} | {agent, active: true}",
+    says: "The agent's name, as the page loads and on a rename; `active`: its person is at the shell (a key, a press, the pointer, a touch), told to the screens on view at most every 30 s (screen-active.js), so a screen beside what they work in keeps streaming and one no one is at pauses (images/hermes/screen/attend.js).",
   },
   simplex: {
     kind: "simplex",
     from: "the shell → a SimpleX link page, and that page (Settings framed it, for its own agent) → the shell",
     fields: "to the page: {agent, name}; asked: {agent, want: link | unlink, home?}; answered: {agent, for, ticket?, error?, home?, homeError?}",
     says: "The agent's name as the page loads and on a rename; a door ticket for a link (docs/api.md, An agent's doors), a link's `home` setting its home and an unlink's taking it back.",
+  },
+  vaultMove: {
+    kind: "vault-move",
+    from: "a Telegram connector's setup page (Settings framed it, offering a bot of its owner's Vault) → the shell, and the shell's answer",
+    fields: "asked: {nonce}; answered: {nonce, ok, status?, error?}",
+    says: "Use it: the shell moves the Vault secret it offered that frame into that connector as its `TELEGRAM_BOT_TOKEN`, toward the Vault's own hosts (`PUT /api/f/{name}/secrets/{KEY}` `{fromVault}`), the move a page may not ask itself (docs/secrets.md). The page names nothing: only the frame's own offer moves. `status` is the API's refusal's (404: moved already).",
   },
   // ---- an answer for the computer (docs/bridge.md, "An answer for the computer") ----
   cardToComputer: {

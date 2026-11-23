@@ -127,19 +127,6 @@ impl Call for InviteEmail {
     type Answer = ();
 }
 
-/// A fragment's `invites/claim` (and `invites/decline`): the person
-/// `identity`, who signs in as `email`, verified, accepts (declines) the
-/// invite waiting on it there; or, for an invite from before invites
-/// waited for a yes, signed in as it and meets it. `agents` are theirs,
-/// which come in with them (decision 64), at most `AGENTS_PER_OWNER_MAX`.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ClaimInvite {
-    pub email: String,
-    pub identity: String,
-    #[serde(default)]
-    pub agents: Vec<String>,
-}
-
 /// `POST /agents`: an agent its owner vouches for (the key's proof was
 /// checked by the router).
 #[derive(Serialize, Deserialize)]
@@ -497,6 +484,10 @@ pub(crate) enum TestHook {
     /// waited for a yes (decision 63: no role, title or sharer kept), which
     /// a sign-in as it still meets (`{before}`: how many).
     InvitesBefore(String),
+    /// When each comped seat held by, or offered to, this email ends by
+    /// itself (`{ends}`, each null when it never does), which no route
+    /// shows.
+    CompEnds(String),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the

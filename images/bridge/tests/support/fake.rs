@@ -38,6 +38,9 @@ pub struct Member {
     pub role: String,
     pub kind: String,
     pub added_at: i64,
+    /// On a connector bound as this agent's door, the door, as the
+    /// platform's list says it on the bound agent's row.
+    pub door: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +109,9 @@ pub struct World {
     pub fail_lists: u32,
     /// The next this many reads of any agent's `agent.json` answer 503.
     pub fail_agent_json: u32,
+    /// The next this many listings of a fragment's files (`GET files`),
+    /// by fragment, answer 503.
+    pub fail_files: BTreeMap<String, u32>,
     /// The next this many reads of a page of 100 records (a note's, or a
     /// late card answer's) answer 503, as a deploying platform does.
     pub fail_history_reads: u32,
@@ -118,9 +124,18 @@ pub struct World {
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
+    /// Each read of a fragment's names (`__people`) is answered this much
+    /// later: a slow platform.
+    pub people_delay_ms: u64,
+    /// Each read of a page of `RECAP_PAGE_RECORDS` records (a recap's read
+    /// of its chat) is answered this much later.
+    pub recap_page_delay_ms: u64,
     /// Each post to a `chat` channel (a reply, among others) is answered
     /// this much later: a fragment's lane of posts held.
     pub chat_post_delay_ms: u64,
+    /// Every call is answered at least this much later: the platform's
+    /// hop from a computer, which the fake on this host otherwise hides.
+    pub hop_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
     /// Each agent's door, by its fragment: the nonce of the link ticket its
@@ -253,8 +268,8 @@ fn agent_fragment(identity: &str) -> Frag {
     let label = identity.trim_start_matches("npub1");
     let title = label.get(..1).map(|c| c.to_uppercase() + &label[1..]).unwrap_or_default();
     let mut f = Frag { kind: "agent".into(), title, ..Frag::default() };
-    f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
-    f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2 });
+    f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
+    f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2, door: None });
     f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
     f
 }
@@ -345,12 +360,33 @@ impl Fake {
         let name = name.to_string();
         self.with(|w| {
             let mut f = Frag { kind: "chat".into(), ..Frag::default() };
-            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
             for (i, a) in agents.iter().enumerate() {
-                f.members.push(Member { principal: format!("npub1{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64 });
+                f.members.push(Member { principal: format!("npub1{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64, door: None });
             }
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
+            w.fragments.insert(name.clone(), f);
+        });
+        name
+    }
+
+    /// A connector `<label>--k3x9` of paul's, bound as agent `agent`'s
+    /// `door` door, as the platform binds one (docs/api.md, "An agent's
+    /// doors"): the agent a viewer of its chat, which takes its posts on
+    /// `chat` and `work`, its row of the members saying the door (`None`:
+    /// as a platform before it says nothing). Its own key, which its
+    /// records relaying paul are by, is none of its members: say,
+    /// `npub1<label>`.
+    pub fn connector(&self, label: &str, agent: &str, door: Option<&str>) -> String {
+        let name = format!("{label}--k3x9");
+        self.with(|w| {
+            let at = w.now();
+            let mut f = Frag { kind: "chat".into(), ..Frag::default() };
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
+            f.members.push(Member { principal: format!("npub1{agent}"), role: "viewer".into(), kind: "agent".into(), added_at: at, door: door.map(str::to_string) });
+            f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
+            f.channels.insert("work".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             w.fragments.insert(name.clone(), f);
         });
         name
@@ -362,7 +398,7 @@ impl Fake {
         let name = format!("{label}--k3x9");
         self.with(|w| {
             let mut f = Frag { kind: "skills".into(), ..Frag::default() };
-            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1, door: None });
             for (path, text) in files {
                 f.files.insert(path.to_string(), Bytes::from(text.to_string()));
             }
@@ -406,7 +442,7 @@ impl Fake {
     pub fn join(&self, fragment: &str, label: &str) {
         self.with(|w| {
             let at = w.now();
-            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("npub1{label}"), role: "editor".into(), kind: "agent".into(), added_at: at });
+            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("npub1{label}"), role: "editor".into(), kind: "agent".into(), added_at: at, door: None });
             w.append(&format!("{label}--k3x9"), "tasks", "npub1paul", json!({ "kind": "joined", "fragment": fragment }));
         });
     }
@@ -414,7 +450,7 @@ impl Fake {
     pub fn add_member(&self, fragment: &str, principal: &str, role: &str) {
         self.with(|w| {
             let at = w.now();
-            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: principal.into(), role: role.into(), kind: "person".into(), added_at: at });
+            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: principal.into(), role: role.into(), kind: "person".into(), added_at: at, door: None });
         });
     }
 
@@ -521,11 +557,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         if w.down {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the fake is down");
         }
-        match method {
-            Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
-            Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
-            _ => 0,
-        }
+        w.hop_ms
+            + match method {
+                Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
+                Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
+                Method::GET if path.ends_with("/__people") => w.people_delay_ms,
+                Method::GET if path.contains("/channels/") && query(&q, "limit") == [fragment_bridge::limits::RECAP_PAGE_RECORDS.to_string()] => w.recap_page_delay_ms,
+                _ => 0,
+            }
     };
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -715,8 +754,8 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         }
         let at = w.now();
         let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), ..Frag::default() };
-        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at });
-        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at });
+        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at, door: None });
+        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at, door: None });
         f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
         f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
         w.fragments.insert(name.to_string(), f);
@@ -778,7 +817,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             let at = w.now();
             let f = w.fragments.get_mut(&fragment).unwrap();
             if !f.members.iter().any(|m| m.principal == who) {
-                f.members.push(Member { principal: who.clone(), role: added.clone(), kind: if agent_fragment.is_some() { "agent" } else { "person" }.into(), added_at: at });
+                f.members.push(Member { principal: who.clone(), role: added.clone(), kind: if agent_fragment.is_some() { "agent" } else { "person" }.into(), added_at: at, door: None });
                 if let Some(a) = agent_fragment {
                     w.append(&a, "tasks", &who, json!({ "kind": "joined", "fragment": fragment }));
                 }
@@ -786,7 +825,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             answer(StatusCode::OK, json!({ "principal": who, "role": added }))
         }
         (Method::GET, ["members"]) => {
-            let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul" })).collect();
+            let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul", "door": m.door })).collect();
             answer(StatusCode::OK, json!({ "members": list }))
         }
         (Method::GET, ["subscriptions"]) => {
@@ -902,6 +941,10 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             (Some((ty, bytes)), _) => net::respond(StatusCode::OK, ty, bytes.clone()),
             (None, _) => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
+        (Method::GET, ["files"]) if w.fail_files.get(&fragment).is_some_and(|n| *n > 0) => {
+            *w.fail_files.get_mut(&fragment).expect("counted") -= 1;
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
+        }
         (Method::GET, ["files"]) => {
             // a file's version moves with its bytes, as a commit's does
             let version = |b: &Bytes| format!("c{}", &fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(b))[..12]);

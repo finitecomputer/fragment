@@ -4,7 +4,7 @@
 use fragment_proto::computer::LifeEnd;
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, WONT_WAKE_RETRY_MS};
+use crate::computer::limits::{ALARM_LATE_MS, IDLE_MS, KEEPALIVES_LOST_MAX, METER_EVERY_MS, SAVES_KEPT, SAVE_EVERY_MS, SAVE_SETTLE_MS, SLEEP_DEADLINE_MS, STARTS_FAILED_MAX, START_DEADLINE_MS, STOP_LOOK_MS, WONT_WAKE_RETRY_MS};
 
 mod event;
 mod legacy;
@@ -18,14 +18,12 @@ mod tests;
 
 pub use event::{Action, Ended, Event, Rules, SaveNote, Socket, Step, Wake};
 pub use saving::Saving;
-pub use starts::{alive, Alive};
+pub use starts::{alive, unplanned_start, Alive};
 pub use unsaved::{Failing, Unsaved};
 
-use legacy::Legacy;
-
-/// Where its lifecycle is, each phase with what is only true of it
-/// (FIN-395 C: the flags that sat beside it moved in). A phase stored by
-/// the previous release reads its fields from that release's (`Legacy`).
+/// Where its lifecycle is, each phase with what is only true of it. A
+/// phase stored before FIN-395 C is filled from the flags that release
+/// kept beside it (`Lifecycle::read`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
@@ -47,7 +45,8 @@ pub enum Phase {
     Awake { generation: u64, since_ms: i64 },
     /// `owner`: its owner's sleep (no keepalive cancels it); `restarting`:
     /// their restart (a save that fails keeps no container); `owes_start`:
-    /// a start follows its stop (a restart's, or a wake heard as it went).
+    /// a start follows its stop (a restart's, or a wake heard as it went
+    /// that did not cancel it: `Lifecycle::cancels_sleep`).
     Sleeping {
         generation: u64,
         since_ms: i64,
@@ -66,6 +65,11 @@ pub enum Phase {
         #[serde(default)]
         since_ms: i64,
     },
+}
+
+/// For `skip_serializing_if`: a field at its default is not stored.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 impl Phase {
@@ -104,8 +108,10 @@ pub struct Lifecycle {
     /// The last start's generation.
     generation: u64,
     keepalives: u32,
+    /// Port tabs open. A tab holds it only by its use (`Event::TabUsed`),
+    /// never by being open: a page left open says nothing.
     tabs: u32,
-    /// With nothing open, it is held awake until this.
+    /// With no keepalive open, it is held awake until this.
     held_until_ms: i64,
     /// Starts of this wake that failed in a row: a count across its phases
     /// (asleep for the retry, starting, gone), so beside them.
@@ -175,20 +181,43 @@ pub struct Lifecycle {
     /// was kept: none of that life's work is counted kept (`Ended::quiet`).
     #[serde(default)]
     kept_ms: i64,
-    /// The previous release's fields (`Legacy`), by its names, kept equal
-    /// to the phase (`Legacy::of`) at every step and stored with it for one
-    /// release. Plain fields, never `#[serde(flatten)]`: its buffering
-    /// costs the cell's Wasm more than its budget had left.
-    #[serde(default)]
-    wake_after_sleep: bool,
-    #[serde(default)]
-    retry_at_ms: Option<i64>,
-    #[serde(default)]
-    failed_ms: i64,
-    #[serde(default)]
-    owner_sleep: bool,
-    #[serde(default)]
-    restarting: bool,
+    /// A record or a join for its agents was posted at this time
+    /// (`Event::Posted`) after its guest last opened a keepalive, with none
+    /// open: work its guest has not taken up, which no save holds. Cleared
+    /// when a keepalive opens, or at a sleep that owes no start. None in a
+    /// lifecycle stored before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owed_ms: Option<i64>,
+    /// When its guest last opened a keepalive (began work it was given): a
+    /// record posted before it was there for that work to take up. Its
+    /// opening, never a close: a close the object only infers (a socket a
+    /// deploy cut) says nothing of when its guest's work ended. 0 when none
+    /// has, or stored before it was kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    opened_ms: i64,
+    /// Since when a person has used its port tabs with no save asked
+    /// since: their first use after the last ask (one before it is stale).
+    /// While a tab is open, an awake save is due `SAVE_EVERY_MS` after it,
+    /// as one is while a keepalive is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_since_ms: Option<i64>,
+    /// When a person's use of its port tabs was last heard (`TabUsed`): one
+    /// since may not be heard yet, up to `TAB_USED_EVERY_MS` after it,
+    /// while a tab is open (`Lifecycle::tab_unheard_ms`). 0 for none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    tab_used_ms: i64,
+    /// When this life last ran something that may change its files: a
+    /// turn (a keepalive opened or closed) or a person's use of a port tab
+    /// (`changed`). Narrower than `worked_ms`, which a tab's opening or a
+    /// record's wake moves too. 0: nothing since it came up. None in a
+    /// lifecycle stored before it was kept: its work counts as change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changed_ms: Option<i64>,
+    /// Since when the starts of this wake have found the container before
+    /// them still running (`Event::StartBlocked`): none once one comes up,
+    /// or as a wake or a restart counts its strikes anew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked_since_ms: Option<i64>,
 }
 
 impl Default for Lifecycle {
@@ -202,6 +231,12 @@ impl Lifecycle {
     /// as its owner's seat says: the registry tells it).
     pub fn always_on(&self) -> bool {
         self.always_on
+    }
+
+    /// Whether this wake fell back from a snapshot that would not start
+    /// (until a start comes up).
+    pub fn fell_back(&self) -> bool {
+        self.fell_back
     }
 
     pub fn new() -> Lifecycle {
@@ -228,12 +263,30 @@ impl Lifecycle {
             unmetered: None,
             worked_ms: 0,
             kept_ms: 0,
-            wake_after_sleep: false,
-            retry_at_ms: None,
-            failed_ms: 0,
-            owner_sleep: false,
-            restarting: false,
+            owed_ms: None,
+            opened_ms: 0,
+            used_since_ms: None,
+            tab_used_ms: 0,
+            changed_ms: None,
+            blocked_since_ms: None,
         }
+    }
+
+    /// A stored lifecycle, and whether its phase was filled from the flags
+    /// a release before FIN-395 C kept beside it (`legacy`), which the cell
+    /// logs. Decoded here, in one function the cell calls: its own decoder
+    /// (`crate::json_text`) in its place costs the cell's Wasm 7,523 bytes
+    /// more (measured 2026-11-16).
+    pub fn read(text: &str) -> serde_json::Result<(Lifecycle, bool)> {
+        // its bytes, never `from_str`: the cell decodes JSON text through
+        // one decoder per type (`crate::json_text`, cell/clippy.toml)
+        let mut life: Lifecycle = serde_json::from_slice(text.as_bytes())?;
+        let filled = legacy::filled(text, &life.phase)?;
+        let old = filled.is_some();
+        if let Some(phase) = filled {
+            life.phase = phase;
+        }
+        Ok((life, old))
     }
 
     pub fn generation(&self) -> u64 {
@@ -249,9 +302,11 @@ impl Lifecycle {
         }
     }
 
-    /// Whether something open keeps it awake.
+    /// Whether something open keeps it awake: a keepalive (a turn running).
+    /// A port tab never does by being open: its use holds it, `IDLE_MS`
+    /// after each (`Event::TabUsed`), as a record does.
     pub fn open(&self) -> bool {
-        self.keepalives > 0 || self.tabs > 0
+        self.keepalives > 0
     }
 
     /// The guest's keepalives it counts open now (its turns running).
@@ -299,11 +354,29 @@ impl Lifecycle {
         }
     }
 
-    /// When a save is due because a keepalive has stayed open: every
-    /// `SAVE_EVERY_MS` of being busy, counted from the last save asked for.
+    /// When a save is due because it is in use: every `SAVE_EVERY_MS` while
+    /// a keepalive stays open, counted from the last save asked for, or
+    /// from a port tab's first use since that ask while a tab is open.
     fn busy_save_due_ms(&self) -> Option<i64> {
-        let since = self.busy_since_ms.filter(|_| self.keepalives > 0)?;
-        Some(since.max(self.save_asked_ms) + SAVE_EVERY_MS)
+        let turn = self.busy_since_ms.filter(|_| self.keepalives > 0).map(|since| since.max(self.save_asked_ms));
+        let tab = self.used_since_ms.filter(|since| self.tabs > 0 && *since >= self.save_asked_ms);
+        Some(turn.into_iter().chain(tab).min()? + SAVE_EVERY_MS)
+    }
+
+    /// A person used one of its open port tabs (its page spoke): work, held
+    /// `IDLE_MS` as a tab's opening is, and counted for its saves; for a
+    /// start that came up only, as all work is (`worked`).
+    fn tab_used(&mut self, now_ms: i64) {
+        assert!(self.tabs > 0, "a use is of a tab it counts open");
+        if !self.ready {
+            return;
+        }
+        self.worked(now_ms);
+        self.changed(now_ms);
+        self.tab_used_ms = self.tab_used_ms.max(now_ms);
+        if self.used_since_ms.is_none_or(|since| since < self.save_asked_ms) {
+            self.used_since_ms = Some(now_ms);
+        }
     }
 
     /// Awake time up to `now`, once, but what falls in the unsaved window
@@ -311,19 +384,35 @@ impl Lifecycle {
     /// before the window and after it).
     fn meter(&mut self, now_ms: i64, step: &mut Step) {
         if now_ms > self.metered_to_ms {
-            if !self.always_on {
-                let (from, to) = (self.metered_to_ms, now_ms);
-                let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
-                assert!(free_from <= free_to, "a window runs forward");
-                if from < free_from.min(to) {
-                    step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
-                }
-                if free_to.max(from) < to && self.unmetered.is_some() {
-                    step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
-                }
-            }
+            self.meter_span(self.metered_to_ms, now_ms, step);
             self.metered_to_ms = now_ms;
         }
+    }
+
+    /// Awake time `[from, to)`, but what falls in the unsaved window, and
+    /// none while always on.
+    fn meter_span(&self, from: i64, to: i64, step: &mut Step) {
+        if from < to && !self.always_on {
+            let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
+            assert!(free_from <= free_to, "a window runs forward");
+            if from < free_from.min(to) {
+                step.actions.push(Action::Meter { from_ms: from, to_ms: free_from.min(to) });
+            }
+            if free_to.max(from) < to && self.unmetered.is_some() {
+                step.actions.push(Action::Meter { from_ms: free_to.max(from), to_ms: to });
+            }
+        }
+    }
+
+    /// The last moment its running container was shown up: its last meter,
+    /// its phase's beginning or its sleep's step's, or work done on it.
+    fn shown_up_ms(&self) -> i64 {
+        let phase = match self.phase {
+            Phase::Awake { since_ms, .. } | Phase::Sleeping { since_ms, .. } => since_ms,
+            Phase::Asleep { .. } | Phase::Starting { .. } | Phase::Failed { .. } => i64::MIN,
+        };
+        let step = self.saving.map_or(i64::MIN, Saving::since_ms);
+        self.metered_to_ms.max(phase).max(step).max(self.worked_ms)
     }
 
     fn next_alarm(&self) -> Option<i64> {
@@ -363,7 +452,31 @@ impl Lifecycle {
     pub fn apply_with(&mut self, event: Event, now_ms: i64, rules: &Rules) -> Step {
         assert!(rules.unsaved_max_ms >= 0, "a bound is a span of time");
         let mut step = Step::default();
+        // what was metered, or passed over as silence, as this event came
+        let metered_before = self.metered_to_ms;
+        // heard late (`ALARM_LATE_MS`): metered to the last moment it was
+        // shown up, and none of the time since (FIN-511); a sleep's try
+        // under way, which this event may fail (its whole time free:
+        // `begin_unsaved`), no further than its start
+        if matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }) {
+            let shown = self.shown_up_ms();
+            if now_ms > shown + ALARM_LATE_MS {
+                let tried = match (&self.phase, self.saving) {
+                    (Phase::Sleeping { .. }, Some(Saving::Hold { .. } | Saving::Save { .. })) => self.save_asked_ms,
+                    _ => i64::MAX,
+                };
+                self.meter(shown.min(tried), &mut step);
+                self.metered_to_ms = now_ms;
+            }
+        }
         match (self.phase.clone(), event) {
+            (_, Event::Posted { at_ms }) => {
+                // a guest at work queues it; one whose last work began after
+                // it was posted took it up
+                if self.keepalives == 0 && at_ms > self.opened_ms {
+                    self.owed_ms = Some(self.owed_ms.map_or(at_ms, |owed| owed.min(at_ms)));
+                }
+            }
             (phase, Event::Wake { why }) => {
                 // a message for its agents, or a fragment to follow: work
                 if matches!(why, Wake::Record | Wake::Joined) {
@@ -378,16 +491,26 @@ impl Lifecycle {
                         // its last strike (failing, it gives up again at once)
                         self.failures = STARTS_FAILED_MAX - 1;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
                     Phase::Failed { .. } | Phase::Asleep { .. } => {
                         self.failures = 0;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.hold(now_ms + why.hold_ms());
                         self.start(now_ms, &mut step);
                     }
+                    Phase::Sleeping { generation, .. } if self.cancels_sleep() => {
+                        // wanted before its idle sleep's stop began: it
+                        // stays awake on the container it has
+                        self.hold(now_ms + why.hold_ms());
+                        self.sleep_cancelled(generation, now_ms, &mut step);
+                    }
                     Phase::Sleeping { generation, since_ms, owner, restarting, .. } => {
+                        // its owner's sleep, or one whose stop began: a
+                        // start once its container is gone
                         self.hold(now_ms + why.hold_ms());
                         self.phase = Phase::Sleeping { generation, since_ms, owner, restarting, owes_start: true };
                     }
@@ -409,14 +532,16 @@ impl Lifecycle {
                         // `starting` whatever it restarted (`starting`)
                         self.failures = 0;
                         self.restore_fallbacks = 0;
+                        self.blocked_since_ms = None;
                         self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
                     }
                     // the start under way is the restart's
                     Phase::Starting { .. } => {}
                     Phase::Awake { generation, .. } => {
-                        // its sockets close with its container, as at its owner's sleep
+                        // its keepalives close with its container, as at its
+                        // owner's sleep; its tabs close as the sleep begins,
+                        // each close (and a use it carries) heard
                         self.keepalives = 0;
-                        self.tabs = 0;
                         self.sleep(generation, now_ms, (true, true, true), &mut step);
                     }
                     Phase::Sleeping { generation, since_ms, .. } => {
@@ -425,8 +550,18 @@ impl Lifecycle {
                     }
                 }
             }
+            (Phase::Asleep { .. } | Phase::Failed { .. }, Event::SaveChosen) => {
+                self.failures = 0;
+                self.restore_fallbacks = 0;
+                self.blocked_since_ms = None;
+                if matches!(self.phase, Phase::Failed { .. }) {
+                    self.phase = Phase::ASLEEP;
+                }
+            }
+            (_, Event::SaveChosen) => {}
             (Phase::Starting { generation, .. }, Event::Ready { generation: g }) if g == generation => {
                 self.failures = 0;
+                self.blocked_since_ms = None;
                 self.fell_back = false;
                 self.ready = true;
                 self.metered_to_ms = now_ms;
@@ -434,6 +569,17 @@ impl Lifecycle {
                 self.begin_life(now_ms);
             }
             (Phase::Starting { generation, .. }, Event::StartFailed { generation: g, why }) if g == generation => self.failed(why, now_ms),
+            (Phase::Starting { generation, .. }, Event::StartBlocked { generation: g }) if g == generation => {
+                // nothing of it ran: made again at once, as it was asked,
+                // no strike, while the container before it may still be its
+                // sleep's, held by a snapshot; then each try is a failure
+                let since = *self.blocked_since_ms.get_or_insert(now_ms);
+                if now_ms < since + SLEEP_DEADLINE_MS {
+                    self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
+                } else {
+                    self.failed(format!("the container before it still ran {} s after its first try", (now_ms - since) / 1000), now_ms);
+                }
+            }
             (Phase::Starting { generation, .. }, Event::SnapshotFailed { generation: g, why }) if g == generation => {
                 if std::mem::replace(&mut self.fell_back, true) {
                     // its snapshot went at the first: this one is the image's
@@ -448,10 +594,14 @@ impl Lifecycle {
             (Phase::Starting { generation, .. }, Event::RestoreFailed { generation: g, why, older }) if g == generation => {
                 if older && (self.restore_fallbacks as usize) < SAVES_KEPT {
                     // the save was at fault, not the computer: the one
-                    // before it, at once, metering nothing (it was never up)
+                    // before it, at once, metering nothing (it was never up),
+                    // owed whether or not what woke it still holds it (a big
+                    // save's restore takes minutes, and three can outlast a
+                    // wake's hold: Codex on the no-room PR)
                     self.restore_fallbacks += 1;
                     self.metered_to_ms = now_ms;
                     self.gone(now_ms, &mut step);
+                    self.phase = Phase::Asleep { retry: Some(Retry { at_ms: now_ms, owed: true }) };
                 } else {
                     self.failed(why, now_ms);
                 }
@@ -465,11 +615,13 @@ impl Lifecycle {
                 | Event::SnapshotFailed { .. }
                 | Event::RestoreFailed { .. }
                 | Event::Held { .. }
+                | Event::HomeSaved { .. }
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
                 | Event::Exited { .. }
-                | Event::StartFailing { .. },
+                | Event::StartFailing { .. }
+                | Event::StartBlocked { .. },
             ) if !matches!(&self.phase, Phase::Sleeping { .. } | Phase::Awake { .. } | Phase::Starting { .. }) => {}
             (Phase::Starting { generation, since_ms, .. }, Event::StartFailing { generation: g }) if g == generation => {
                 self.phase = Phase::Starting { generation, since_ms, destroying: true };
@@ -478,7 +630,12 @@ impl Lifecycle {
             // a restore's or a snapshot's fallback no strike (#1004: as a
             // crash, one transient error was three strikes in three seconds)
             (Phase::Starting { generation, destroying: true, .. }, Event::Exited { generation: g }) if g == generation => {}
-            (Phase::Sleeping { generation, .. }, Event::Asleep { generation: g }) if g == generation => {
+            (Phase::Sleeping { generation, owes_start, .. }, Event::Asleep { generation: g }) if g == generation => {
+                // a sleep that owes no start let go of any wake it held: its
+                // hold ran out, or its owner put it to sleep
+                if !owes_start {
+                    self.owed_ms = None;
+                }
                 self.end_life(LifeEnd::Sleep, now_ms, &mut step);
                 self.gone(now_ms, &mut step);
             }
@@ -499,6 +656,8 @@ impl Lifecycle {
                 self.tabs = 0;
                 self.failed(format!("its container kept stopping: start {generation} stopped before it was ready"), now_ms);
             }
+            // stopped unasked while idle, all it did kept: a sleep
+            (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation && self.idle_and_kept(now_ms) => self.slept_unasked(now_ms, &mut step),
             (Phase::Awake { generation, .. }, Event::Exited { generation: g }) if g == generation => {
                 // a guest that died busy had turns open: its next life ends
                 // them, so it is held as a record holds it, and starts again
@@ -537,12 +696,34 @@ impl Lifecycle {
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
+            (Phase::Awake { .. } | Phase::Sleeping { .. }, Event::HomeSaved { generation, seq }) => self.home_saved(generation, seq, &mut step),
+            (Phase::Awake { generation, .. }, Event::Held { generation: g, .. }) if g == generation && self.saving.is_none() => {
+                // a hold whose sleep was cancelled as it was made: its touch
+                // may have landed after the cancel let go of it, so it is
+                // let go again, and no guest stays held for nothing
+                step.actions.push(Action::Unhold { generation });
+            }
             (Phase::Awake { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
+                // let go again, though it let go once its home was in: that
+                // unhold's exec may have failed (Codex on #1378)
                 self.saving = None;
                 self.saved(now_ms, &mut step);
                 step.actions.push(Action::Unhold { generation });
             }
             (Phase::Sleeping { generation, .. }, Event::Saved { generation: g, seq }) if g == generation && matches!(self.saving, Some(Saving::Save { seq: s, .. }) if s == seq) => {
+                // its try heard late (its meter passed over the time since,
+                // stopping at its start) and saved: what it was shown
+                // running for up to its save's start is its owner's, from
+                // its sleep or what was metered or passed over before this
+                // event, whichever is later, so never a silence passed over
+                // before it (a hold asked again after one). One passed over
+                // by a late event before its outcome keeps what it showed
+                // before that silence unbilled: never charged falsely
+                if let Some(Saving::Save { since_ms, .. }) = self.saving {
+                    if self.metered_to_ms > since_ms {
+                        self.meter_span(self.save_asked_ms.max(metered_before), since_ms, &mut step);
+                    }
+                }
                 self.saved(now_ms, &mut step);
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
                 step.actions.push(Action::Stop { generation, saved: true });
@@ -561,15 +742,23 @@ impl Lifecycle {
                 | Event::SnapshotFailed { .. }
                 | Event::RestoreFailed { .. }
                 | Event::Held { .. }
+                | Event::HomeSaved { .. }
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
                 | Event::Exited { .. }
-                | Event::StartFailing { .. },
+                | Event::StartFailing { .. }
+                | Event::StartBlocked { .. },
             ) => {}
             (_, Event::Opened { socket }) => {
                 match socket {
-                    Socket::Keepalive => self.keepalives += 1,
+                    Socket::Keepalive => {
+                        self.keepalives += 1;
+                        // its guest took up the work it was woken for
+                        self.owed_ms = None;
+                        self.opened_ms = self.opened_ms.max(now_ms);
+                        self.changed(now_ms);
+                    }
                     Socket::Tab => self.tabs += 1,
                 }
                 self.worked(now_ms);
@@ -578,6 +767,9 @@ impl Lifecycle {
                         self.hold(now_ms + IDLE_MS);
                         self.start(now_ms, &mut step);
                     }
+                    // a tab's opening holds it as a record does, and only
+                    // its use after holds it longer
+                    Phase::Starting { .. } | Phase::Awake { .. } if socket == Socket::Tab => self.hold(now_ms + IDLE_MS),
                     Phase::Awake { .. } if socket == Socket::Keepalive => {
                         if self.keepalives == 1 {
                             self.busy_since_ms = Some(now_ms);
@@ -588,10 +780,7 @@ impl Lifecycle {
                     Phase::Sleeping { generation, owner: false, .. } if socket == Socket::Keepalive && matches!(self.saving, Some(Saving::Hold { .. })) => {
                         // the guest took work as its idle sleep held it: it
                         // stays awake, and nothing it claimed is cut (P2)
-                        self.phase = Phase::Awake { generation, since_ms: now_ms };
-                        self.saving = None;
-                        self.busy_since_ms = Some(now_ms);
-                        step.actions.push(Action::Unhold { generation });
+                        self.sleep_cancelled(generation, now_ms, &mut step);
                     }
                     _ => {}
                 }
@@ -606,22 +795,49 @@ impl Lifecycle {
                 // one it counted (none after its owner's sleep let go of them)
                 if was > 0 {
                     self.worked(now_ms);
+                    if socket == Socket::Keepalive {
+                        self.changed(now_ms);
+                    }
                 }
                 // a socket that closes as its container goes down (or after)
                 // holds nothing up
                 if matches!(self.phase, Phase::Starting { .. } | Phase::Awake { .. }) {
                     self.hold(now_ms + IDLE_MS);
                 }
-                if socket == Socket::Keepalive && was == 1 && matches!(self.phase, Phase::Awake { .. }) {
-                    // work ended: it is saved once it settles
-                    self.busy_since_ms = None;
+                // a tab used since the last save asked: its person's work
+                // through it ended, whatever other tabs it counts (one a
+                // deploy cut may be counted still)
+                let used = socket == Socket::Tab && was > 0 && self.used_since_ms.is_some_and(|since| since >= self.save_asked_ms);
+                if (was == 1 || used) && matches!(self.phase, Phase::Awake { .. }) {
+                    // work ended, its turns' or what its owner did through its
+                    // ports: it is saved once it settles (a close within it
+                    // puts that off, so a burst of them saves once)
+                    if socket == Socket::Keepalive {
+                        self.busy_since_ms = None;
+                    }
                     self.save_due_ms = Some(now_ms + SAVE_SETTLE_MS);
                 }
             }
+            // a use of no tab it counts open (heard after its close, or as
+            // its container went) is nothing
+            (_, Event::TabUsed) if self.tabs == 0 || self.running().is_none() => {}
+            (phase, Event::TabUsed) => {
+                // a sleep closes its tabs as it begins, before its hold (the
+                // cell's): a use heard during it was sent before, and is in
+                // its save; it holds nothing up, nor cancels it
+                self.tab_used(now_ms);
+                if matches!(phase, Phase::Starting { .. } | Phase::Awake { .. }) {
+                    self.hold(now_ms + IDLE_MS);
+                }
+            }
             (Phase::Starting { generation, .. } | Phase::Awake { generation, .. }, Event::Sleep) => {
+                // a start that never came up was never metered: its sleep is
+                // metered from here, as a life is from its `Ready` (FIN-511)
+                if matches!(self.phase, Phase::Starting { .. }) {
+                    self.metered_to_ms = now_ms;
+                }
                 self.held_until_ms = now_ms;
                 self.keepalives = 0;
-                self.tabs = 0;
                 self.sleep(generation, now_ms, (true, false, false), &mut step);
             }
             (Phase::Sleeping { generation, since_ms, .. }, Event::Sleep) => {
@@ -683,12 +899,18 @@ impl Lifecycle {
                 let s = self.saving.unwrap_or(Saving::Stop { since_ms, saved: false });
                 if now_ms >= s.deadline_ms() {
                     self.overdue(generation, s, now_ms, rules, &mut step);
+                } else if matches!(self.saving, Some(Saving::Stop { .. })) {
+                    step.actions.push(Action::Look { generation });
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
         }
-        self.set_legacy();
-        step.alarm_ms = self.next_alarm();
+        step.alarm_ms = self.next_alarm().map(|at| match self.saving {
+            // a stop under way is looked at every `STOP_LOOK_MS` up to its
+            // deadline: a new isolate's look finds one its isolate lost
+            Some(Saving::Stop { since_ms, .. }) => at.min(since_ms + ((now_ms - since_ms) / STOP_LOOK_MS + 1) * STOP_LOOK_MS),
+            _ => at,
+        });
         self.assert_valid();
         step
     }
@@ -713,7 +935,6 @@ impl Lifecycle {
         if let Phase::Sleeping { owner, restarting: true, owes_start, .. } = self.phase {
             assert!(owner && owes_start, "a restart is its owner's sleep, a start after it");
         }
-        assert!(self.legacy() == Legacy::of(&self.phase), "the previous release's fields say what the phase does");
         assert!(self.failures <= STARTS_FAILED_MAX, "failures stop counting at the limit");
         if self.ready {
             assert!(matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }), "only a start that came up, and is not gone, is ready");
