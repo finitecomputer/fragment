@@ -53,6 +53,12 @@
 //!                    crates/proto makes and its lock breaks nothing
 //!                    master's holds (xtask/src/wire/), then host tests and
 //!                    clippy, warnings denied
+//!   audit            every Cargo.lock and package-lock.json against the
+//!                    advisory databases: cargo-deny (RustSec) with each
+//!                    workspace's deny.toml, npm audit on the pinned Node,
+//!                    each ignore with its reason (xtask/src/audit.rs,
+//!                    docs/security/dependency-scanning.md); CI's audit.yml
+//!                    runs it, never `check`
 //!   schema-lock      appends the Durable Objects' new schema steps to
 //!                    crates/core/migrations/schema.lock, refusing to change
 //!                    or drop a locked one (crates/core/src/migrate.rs)
@@ -126,6 +132,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
+mod audit;
 mod build;
 #[cfg(test)]
 mod ci_caches;
@@ -922,6 +929,7 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
+        Some("audit") => audit::run(&args[1..]),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("wire") => wire::write(&devstack::repo_root()),
         Some("skills-catalog") => skills_catalog::run(&args[1..]),
@@ -931,7 +939,7 @@ fn main() -> Result<()> {
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> | disk <reference> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | audit | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> | disk <reference> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

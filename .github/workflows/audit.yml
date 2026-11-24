@@ -1,0 +1,69 @@
+# The dependency scan (FIN-576; docs/security/dependency-scanning.md):
+# `cargo xtask audit` (xtask/src/audit.rs), cargo-deny's advisories check
+# on each Rust workspace's lock with its deny.toml, and npm audit on each
+# package-lock.json by the pinned Node's npm, held to the ignore list in
+# xtask/src/audit.rs. A finding not on those lists fails the run.
+#
+# Its own workflow, not a step of ci.yml's `check`: an advisory published
+# upstream turns this red with no change of ours, and that must not turn a
+# pull request's `check` red, nor hold master's deploy. Nothing requires
+# it. It runs:
+#   - on each push to master, so the tree that deploys preview is scanned;
+#   - every day at 06:17 UTC, so an advisory published against a lock that
+#     has not changed is found within a day;
+#   - on a pull request that changes a lock, a manifest or this policy, so
+#     a change that adds a vulnerable version, or leaves a stale ignore,
+#     shows it before merging;
+#   - by hand (workflow_dispatch).
+# A red run is triaged as docs/security/dependency-scanning.md says: fix
+# it, or ignore it with its reason and a Linear issue.
+name: audit
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - "**/package-lock.json"
+      - "**/package.json"
+      - "**/deny.toml"
+      - "xtask/src/audit.rs"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # cargo-deny's release binary, checksum-verified by the action; the
+      # version is the one xtask/src/audit.rs requires (a test holds the two)
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2
+      # xtask's own build, and the pinned Node it runs npm audit on
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: audit
+          cache-bin: false
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      # `cargo xtask audit`, with xtask built from the committed lock
+      # (--locked); the scan itself runs cargo-deny --locked on each lock
+      - run: cargo run --locked --package xtask -- audit
