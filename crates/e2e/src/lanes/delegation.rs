@@ -170,70 +170,60 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     mandates(s, api)
 }
 
-/// Goal: proof of who asked (FIN-615 PR 6; docs/api.md, "Who asked:
+/// Goal: proof of who asked (FIN-615 PR 6a; docs/api.md, "Who asked:
 /// mandates"). A place gives its agent members, reading it as themselves,
-/// a mandate beside each record a person wrote there; with it the agent's
-/// calls act for that person, held to their own role, inside its own cap
-/// (R17). Method: Ana's room, Ben and Ana's agent Juniper in it, where Ben
-/// and Ana each say something. Valid: Juniper's read gives a mandate for
-/// each of their records and none for its own; with Ben's, Juniper acts in
-/// Ben's app for Ben (the app told Ben, at Juniper's editor cap), and in
-/// Ana's team app, where Ben is a viewer, as a viewer (an editor's note
-/// refused); the same mandate again acts the same (a replay). Invalid: Ben's
-/// word reaches nothing Ben may not open (Ana's private app, 403); Ana's
-/// word in Ben's app, where only Juniper is, does what Ana herself may
-/// there and no more: it reads through her agent's membership (FIN-11),
-/// and its note is refused; an altered mandate, another agent carrying it,
-/// one beside `for`, and one on a route that honors none are refused.
+/// a mandate beside each record their own owner wrote there; with it the
+/// agent's calls act for its owner exactly as `for` does, now proven.
+/// Method: Ana's room, where Ana's agent Juniper and Ben's agent Fred are
+/// members with Ben, and Ana and Ben each say something. Valid: Juniper's
+/// read gives a mandate beside Ana's record alone, Fred's beside Ben's
+/// alone, a person's read none; with Ana's, Juniper acts for Ana in Ana's
+/// private app (the app told Ana, at Juniper's editor cap) and in the
+/// list, as `for` would; the same mandate again acts the same (a replay).
+/// Invalid: an altered mandate, another agent carrying Juniper's, one
+/// beside `for`, and one where `for` is not honored are refused.
 fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
     let (ana, ben) = (api.person()?, api.person()?);
     let (ana_id, ben_id) = (api.identity(&ana)?, api.identity(&ben)?);
     let (juniper, juniper_id) = agent_of(api, &ana)?;
-    let (fred, _) = agent_of(api, &ben)?;
+    let (fred, fred_id) = agent_of(api, &ben)?;
     let room = s.named(api, &ana, "room")?;
     let c = s.create(api, &ana, &room)?;
     s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"chat":{"read":"viewer","post":"viewer"}}}"#))]);
     s.deploy(&c);
-    for (who, role) in [(&ben_id, "viewer"), (&juniper_id, "editor")] {
+    for (who, role) in [(&ben_id, "viewer"), (&juniper_id, "editor"), (&fred_id, "editor")] {
         let r = api.share(&room, who, role)?;
         anyhow::ensure!(r.status == 200, "{who} in the room: {r}");
     }
-    let say = |keys: &Keys, id: &str, text: &str| api.signed(keys, "POST", &format!("/api/f/{room}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })));
-    for (keys, id, text) in [(&ben, "b1", "Juniper, note this in my app"), (&ana, "a1", "and in mine"), (&juniper, "j1", "on it")] {
-        let r = say(keys, id, text)?;
+    for (keys, id, text) in [(&ben, "b1", "Fred, Juniper: hello"), (&ana, "a1", "Juniper, note this in my app"), (&juniper, "j1", "on it")] {
+        let r = api.signed(keys, "POST", &format!("/api/f/{room}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })))?;
         anyhow::ensure!(r.status == 200, "{id} in the room: {r}");
     }
-    let read = api.signed(&juniper, "GET", &format!("/api/f/{room}/channels/chat?after=0"), None)?;
-    let records = read.body["records"].as_array().cloned().unwrap_or_default();
-    let mandate_of = |principal: &str| records.iter().find(|r| r["principal"] == principal).and_then(|r| r["mandate"].as_str()).unwrap_or_default().to_string();
-    let (bens, anas) = (mandate_of(&ben_id), mandate_of(&ana_id));
-    let theirs = api.signed(&ben, "GET", &format!("/api/f/{room}/channels/chat?after=0"), None)?;
-    s.ok(
-        "an agent member reading its place as itself is given a mandate beside each person's record, none beside its own; a person's read carries none",
-        read.status == 200 && records.len() == 3 && bens.starts_with("fm1.") && anas.starts_with("fm1.") && bens != anas && mandate_of(&juniper_id).is_empty()
-            && theirs.body["records"].as_array().is_some_and(|r| r.len() == 3 && r.iter().all(|r| r.get("mandate").is_none())),
-        &read,
-    );
-
-    // Ben's app; Ana's team app, Ben a viewer there; Ana's private app
-    let app = |owner: &Keys, base: &str, members: &[(&str, &str)]| -> Result<String> {
-        let name = s.named(api, owner, base)?;
-        let c = s.create(api, owner, &name)?;
-        s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
-        ship(s, &c, CHAT_APP, CHAT_JSON);
-        api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-        for (who, role) in members {
-            let r = api.share(&name, who, role)?;
-            anyhow::ensure!(r.status == 200, "{who} in {name}: {r}");
-        }
-        Ok(name)
+    let read = |keys: &Keys| -> Result<Vec<Value>> {
+        let r = api.signed(keys, "GET", &format!("/api/f/{room}/channels/chat?after=0"), None)?;
+        anyhow::ensure!(r.status == 200, "reading the room: {r}");
+        Ok(r.body["records"].as_array().cloned().unwrap_or_default())
     };
-    let bens_app = app(&ben, "bens", &[(&juniper_id, "editor")])?;
-    let team = app(&ana, "team", &[(&ben_id, "viewer"), (&juniper_id, "editor")])?;
-    let private = app(&ana, "private", &[(&juniper_id, "editor")])?;
-    let carrying = |keys: &Keys, mandate: &str, path: &str, body: Option<Value>| {
+    // who wrote each record a reader is given a mandate beside
+    let mandated = |records: &[Value]| -> Vec<String> { records.iter().filter(|r| r["mandate"].as_str().is_some_and(|m| m.starts_with("fm1."))).map(|r| r["principal"].as_str().unwrap_or_default().to_string()).collect() };
+    let (juniper_reads, fred_reads, ben_reads) = (read(&juniper)?, read(&fred)?, read(&ben)?);
+    s.ok(
+        "an agent member reading its place as itself is given a mandate beside each record its own owner wrote and no other; a person's read carries none",
+        juniper_reads.len() == 3 && mandated(&juniper_reads) == vec![ana_id.clone()] && mandated(&fred_reads) == vec![ben_id.clone()] && mandated(&ben_reads).is_empty() && ben_reads.iter().all(|r| r.get("mandate").is_none()),
+        json!({ "juniper": mandated(&juniper_reads), "fred": mandated(&fred_reads), "ben": mandated(&ben_reads) }),
+    );
+    let anas = juniper_reads.iter().find(|r| r["principal"] == ana_id.as_str()).and_then(|r| r["mandate"].as_str()).unwrap_or_default().to_string();
+
+    let private = s.named(api, &ana, "private")?;
+    let c = s.create(api, &ana, &private)?;
+    s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+    ship(s, &c, CHAT_APP, CHAT_JSON);
+    api.signed(&ana, "PUT", &format!("/api/f/{private}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    let r = api.share(&private, &juniper_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Juniper in Ana's private app: {r}");
+    let carrying = |keys: &Keys, mandate: &str, method: &'static str, path: &str, body: Option<Value>| {
         api.call(crate::api::Call {
-            method: if body.is_some() { "POST" } else { "GET" },
+            method,
             url: format!("{}{path}", api.base),
             body: body.map(|b| b.to_string().into_bytes()),
             content_type: Some("application/json"),
@@ -242,41 +232,27 @@ fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
             ..crate::api::Call::default()
         })
     };
-    let op = |keys: &Keys, mandate: &str, name: &str, op: &str, id: &str, input: Value| carrying(keys, mandate, &format!("/api/f/{name}/ops/{op}"), Some(json!({ "id": id, "input": input })));
-
-    let who = op(&juniper, &bens, &bens_app, "whoami", "w1", json!({}))?;
-    let again = op(&juniper, &bens, &bens_app, "whoami", "w1", json!({}))?;
-    let noted = op(&juniper, &bens, &bens_app, "note", "n1", json!({ "text": "Ben asked" }))?;
+    let whoami = |keys: &Keys, mandate: &str, id: &str| carrying(keys, mandate, "POST", &format!("/api/f/{private}/ops/whoami"), Some(json!({ "id": id, "input": {} })));
+    let (who, again) = (whoami(&juniper, &anas, "w1")?, whoami(&juniper, &anas, "w1")?);
+    let listed = carrying(&juniper, &anas, "GET", "/api/fragments", None)?;
     s.ok(
-        "with Ben's mandate, Juniper acts for Ben in Ben's app: the app is told Ben, at Juniper's editor cap; the same mandate again acts the same",
-        who.status == 200 && who.body["result"] == json!({ "principal": ben_id, "role": "editor" }) && again.status == 200 && again.body["result"] == who.body["result"] && noted.status == 200,
-        format!("{who} {again} {noted}"),
-    );
-    let (as_viewer, note) = (op(&juniper, &bens, &team, "whoami", "w2", json!({}))?, op(&juniper, &bens, &team, "note", "n2", json!({ "text": "Ben asked" }))?);
-    s.ok(
-        "in Ana's team app, where Ben is a viewer, Juniper for Ben is a viewer: held to Ben's own role, an editor's note refused (403)",
-        as_viewer.status == 200 && as_viewer.body["result"] == json!({ "principal": ben_id, "role": "viewer" }) && note.status == 403,
-        format!("{as_viewer} {note}"),
-    );
-    let bens_word = op(&juniper, &bens, &private, "whoami", "w3", json!({}))?;
-    let (anas_word, anas_note) = (op(&juniper, &anas, &bens_app, "whoami", "w4", json!({}))?, op(&juniper, &anas, &bens_app, "note", "n3", json!({ "text": "Ana asked" }))?);
-    s.ok(
-        "Ben's word reaches nothing Ben may not open (Ana's private app, 403); Ana's in Ben's app, where only Juniper is, does what Ana herself may: it reads, a viewer through her agent, and its note is refused (403)",
-        bens_word.status == 403 && anas_word.status == 200 && anas_word.body["result"] == json!({ "principal": ana_id, "role": "viewer" }) && anas_note.status == 403,
-        format!("{bens_word} {anas_word} {anas_note}"),
+        "with Ana's mandate, Juniper acts for Ana as `for` would: in her private app the app is told Ana, at Juniper's editor cap, the same again the same; and it lists her fragments",
+        who.status == 200 && who.body["result"] == json!({ "principal": ana_id, "role": "editor" }) && again.body["result"] == who.body["result"]
+            && listed.status == 200 && listed.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == private.as_str())),
+        format!("{who} {again} {}", listed.status),
     );
 
-    let mut altered = bens.clone();
+    let mut altered = anas.clone();
     let last = altered.pop().unwrap_or('0');
     altered.push(if last == '0' { '1' } else { '0' });
-    let forged = op(&juniper, &altered, &bens_app, "whoami", "w5", json!({}))?;
-    let freds = op(&fred, &bens, &bens_app, "whoami", "w6", json!({}))?;
-    let both = carrying(&juniper, &bens, &format!("/api/f/{bens_app}/ops/whoami?for={ana_id}"), Some(json!({ "id": "w7", "input": {} })))?;
-    let list = carrying(&juniper, &bens, "/api/fragments", None)?;
+    let forged = whoami(&juniper, &altered, "w2")?;
+    let freds = whoami(&fred, &anas, "w3")?;
+    let both = carrying(&juniper, &anas, "POST", &format!("/api/f/{private}/ops/whoami?for={ana_id}"), Some(json!({ "id": "w4", "input": {} })))?;
+    let unhonored = carrying(&juniper, &anas, "GET", "/api/notices", None)?;
     s.ok(
-        "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400) and one where no mandate is honored (400) are refused",
-        forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && list.status == 400,
-        format!("{forged} {freds} {both} {list}"),
+        "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400) and one where `for` is not honored (400) are refused",
+        forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && unhonored.status == 400,
+        format!("{forged} {freds} {both} {unhonored}"),
     );
     Ok(())
 }

@@ -360,16 +360,12 @@ pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> 
 /// `signer`, honoring `for`: an agent's request acts for the identity it
 /// names, capped (the fragment decides: `fragment_core::permit`).
 pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
-    signer_of(env, req, url, Payload::Read(body), Mandates::Refused).await
+    signer_of(env, req, url, Payload::Read(body), Mandates::Honored).await
 }
 
-/// Where a mandate is honored (`Mandates::Honored`), as a refusal
-/// elsewhere says it.
-const MANDATES_HONORED: &str = "a mandate (x-fragment-mandate) is honored on a fragment's routes (/api/f/…) only";
-
-/// Whether a route takes a mandate in place of `for` (docs/api.md, "Who
-/// asked: mandates"): a fragment's routes, whose fragment decides what its
-/// asker may do; elsewhere, for now, `for` alone, and a mandate is 400.
+/// Whether a route takes whom an agent acts for (`for`, or a mandate: its
+/// proof, docs/api.md "Who asked: mandates"): where `for` is honored
+/// (`FOR_HONORED`), and nowhere else, where a mandate is 400 as `for` is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mandates {
     Honored,
@@ -380,15 +376,16 @@ enum Mandates {
 /// through unread (a blob, whose URL names its hash). `for` is inside the
 /// signed URL, and only an agent may name it, and only its own owner
 /// (`permit::may_act_for`): a person acts as themselves. A mandate
-/// (`fragment_core::mandate`), where a route honors one, names whom an
-/// agent acts for with the proof that they asked it: checked here, beside
-/// the signature, with no call but the signer's own lookup.
+/// (`fragment_core::mandate`) says the same with proof: that its owner's
+/// own words asked it. It is checked here, beside the signature, with no
+/// call but the signer's own lookup, and names only its agent's owner, as
+/// `for` does.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, mandates: Mandates) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
     let mandate = req.headers().get(fragment_core::mandate::HEADER)?;
     match (&mandate, mandates, &acting_for) {
         (None, ..) => {}
-        (Some(_), Mandates::Refused, _) => return Err(CellError::invalid(MANDATES_HONORED)),
+        (Some(_), Mandates::Refused, _) => return Err(CellError::invalid(FOR_HONORED)),
         (Some(_), Mandates::Honored, Some(_)) => return Err(CellError::invalid("a request names whom it acts for once: by `for`, or by a mandate")),
         (Some(_), Mandates::Honored, None) => {}
     }
@@ -397,16 +394,21 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, ma
         // the shell's: a person, signed in on the platform
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
-    if let Some(named) = &acting_for {
-        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
-    }
-    let Some(text) = mandate else { return Ok(Signed { identity, key, acting_for, mandated: false }) };
     let refused = |why: &str| CellError::new(ErrorCode::Forbidden, why.to_string());
-    let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
-    if identity.kind != IdentityKind::Agent || m.agent != identity.id {
-        return Err(refused("a mandate is carried only by the agent it names"));
+    let acting_for = match mandate {
+        None => acting_for,
+        Some(text) => {
+            let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
+            if identity.kind != IdentityKind::Agent || m.agent != identity.id {
+                return Err(refused("a mandate is carried only by the agent it names"));
+            }
+            Some(m.asker)
+        }
+    };
+    if let Some(named) = &acting_for {
+        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| refused(r.message()))?;
     }
-    Ok(Signed { identity, key, acting_for: Some(m.asker), mandated: true })
+    Ok(Signed { identity, key, acting_for })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -1541,7 +1543,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                     }
                     None
                 }
-                _ => Some(signer_of(env, &req, &url, Payload::Read(&body), Mandates::Honored).await?),
+                _ => Some(signer_for(env, &req, &url, &body).await?),
             };
             // An agent on a reserved route: deleting and the cap are never
             // its, and it shares only for its own owner, unheld (Paul,

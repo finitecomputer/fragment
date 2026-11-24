@@ -1,12 +1,14 @@
 //! Proof of who asked (FIN-615; docs/api.md, "Who asked: mandates"). A
 //! mandate is a place's word that a person's own record there asked one of
 //! its agents: its asker, the agent, the place, the record, and until when.
-//! As a place hands an agent member the records people wrote there (`GET
-//! …/channels/<c>`, read as the agent itself), each such record carries one.
-//! The agent's calls carry it beside their NIP-98 signature
-//! (`x-fragment-mandate`), and the router checks it in the signer's own
-//! lookup: the call acts for its asker, held to the asker's own role
-//! (`permit`, rule 3), with no round trip.
+//! As a place hands an agent member the records its owner wrote there
+//! (`GET …/channels/<c>`, read as the agent itself), each carries one. The
+//! agent's calls carry it beside their NIP-98 signature
+//! (`x-fragment-mandate`) in place of `for=<its owner>`, and the router
+//! checks it in the signer's own lookup, with no round trip: the call acts
+//! for its owner as `for` does (`permit`, rule 3), now proven. An asker
+//! who is not its owner is another entity, whose actions are theirs to be
+//! keyed, capped and credited by, and gets no mandate yet (FIN-615).
 //!
 //! Only the platform makes one: its mark is a keyed MAC under a key derived
 //! from the host secret (as `swap::TagKey`'s), never stored, rotating with
@@ -14,7 +16,7 @@
 //! its agent, so no other key may carry it. It holds from its record's
 //! writing for `limits::MANDATE_LIFE_MS`, so old words start nothing new.
 
-use fragment_proto::{limits, valid_channel_name, valid_fragment_name, Author};
+use fragment_proto::{limits, valid_channel_name, Author};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -63,7 +65,8 @@ pub struct Mandate {
     pub asker: String,
     /// The agent they asked (an identity): the only signer that carries it.
     pub agent: String,
-    /// The fragment they asked in.
+    /// The fragment they asked in, by its life's own key (its npub): a name
+    /// made again is another place.
     pub place: String,
     /// Their record there.
     pub channel: String,
@@ -97,8 +100,7 @@ impl Refused {
 impl Mandate {
     /// The mandate for `agent` of a record `asker` wrote in `place`, on
     /// `channel` at `seq`, at `at` (ms); none when a name is not of its
-    /// kind (a place named before names were checked), which no mandate
-    /// could carry.
+    /// kind, which no mandate could carry.
     pub fn of_record(asker: &str, agent: &str, place: &str, channel: &str, seq: i64, at: i64) -> Option<Mandate> {
         let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until: at.saturating_add(limits::MANDATE_LIFE_MS) };
         well_formed(&m).then_some(m)
@@ -118,10 +120,10 @@ impl Mandate {
     }
 }
 
-/// A mandate's fields are each of their kind: the identities, a
-/// fragment's name, a channel's, a record's place.
+/// A mandate's fields are each of their kind: the identities and the
+/// place's key (npubs), a channel's name, a record's place.
 fn well_formed(m: &Mandate) -> bool {
-    crate::npub::is_identity(&m.asker) && crate::npub::is_identity(&m.agent) && valid_fragment_name(&m.place) && valid_channel_name(&m.channel) && m.seq >= 1 && m.until > 0
+    [&m.asker, &m.agent, &m.place].iter().all(|k| crate::npub::is_identity(k)) && valid_channel_name(&m.channel) && m.seq >= 1 && m.until > 0
 }
 
 /// `text` read as a mandate, its mark checked under any of `keys` (the
@@ -155,15 +157,18 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
 /// Whose own words a record is, as a mandate names them: a person's own
 /// post (its `principal`, an identity: an anonymous visitor asks no one
 /// elsewhere), or a door's relay of its agent's owner (its `body`'s
-/// `relayed`, its `for`: checked by its door's signature as it was
-/// posted; read only then). An agent's, app code's or the platform's
-/// records, and one stored before the author stamp, are no one's.
+/// `relayed.for`, read only then). The platform stamps `door` only on what
+/// it took as a door's (a signed relay its door checked, or the one
+/// `relayed` a hosted door's code may write: `effects::check_record`), so
+/// `for` is its word in either shape; an inbox's delivery relays no one.
+/// An agent's, app code's or the platform's records, and one stored before
+/// the author stamp, are no one's.
 pub fn asker_of(principal: &str, author: Option<Author>, body: &str) -> Option<String> {
     match author? {
         Author::Person => crate::npub::is_identity(principal).then(|| principal.to_string()),
         Author::Door => {
             let body: serde_json::Value = serde_json::from_str(body).ok()?;
-            crate::door::relayed(&body)?.ok().map(|r| r.for_).filter(|f| crate::npub::is_identity(f))
+            body.get("relayed")?.get("for")?.as_str().filter(|f| crate::npub::is_identity(f)).map(str::to_string)
         }
         Author::Agent | Author::Code | Author::Platform | Author::Other => None,
     }
@@ -180,9 +185,13 @@ mod tests {
         (crate::npub::encode(&"a".repeat(64)), crate::npub::encode(&"b".repeat(64)))
     }
 
+    fn a_room() -> String {
+        crate::npub::encode(&"d".repeat(64))
+    }
+
     fn ben_asks_juniper(at: i64) -> Mandate {
         let (ben, juniper) = ids();
-        Mandate::of_record(&ben, &juniper, "chat--k3x9", "chat", 12, at).expect("well formed")
+        Mandate::of_record(&ben, &juniper, &a_room(), "chat", 12, at).expect("well formed")
     }
 
     /// Goal: a place's mandate opens as itself until its record's day is
@@ -221,26 +230,25 @@ mod tests {
     }
 
     /// Goal: a mandate names identities, a fragment and a channel, each of
-    /// its kind, or none is made: a place named before names were checked
-    /// marks nothing, and one whose fields are marked yet malformed (made
-    /// by no place) does not open.
+    /// its kind, or none is made, and one whose fields are marked yet
+    /// malformed (made by no place) does not open.
     #[test]
     fn a_mandate_is_made_only_of_names_of_their_kind() {
-        let (ben, juniper) = ids();
-        assert!(Mandate::of_record(&ben, &juniper, "chat--k3x9", "chat", 1, 1).is_some());
+        let (ben, juniper, room) = (ids().0, ids().1, a_room());
+        assert!(Mandate::of_record(&ben, &juniper, &room, "chat", 1, 1).is_some());
         for (asker, agent, place, channel, seq) in [
-            ("anon:0123456789abcdef0123456789abcdef", juniper.as_str(), "chat--k3x9", "chat", 1),
-            (ben.as_str(), "npub1short", "chat--k3x9", "chat", 1),
-            (ben.as_str(), juniper.as_str(), "Chat!", "chat", 1),
-            (ben.as_str(), juniper.as_str(), "chat--k3x9", "Chat", 1),
-            (ben.as_str(), juniper.as_str(), "chat--k3x9", "chat", 0),
+            ("anon:0123456789abcdef0123456789abcdef", juniper.as_str(), room.as_str(), "chat", 1),
+            (ben.as_str(), "npub1short", room.as_str(), "chat", 1),
+            (ben.as_str(), juniper.as_str(), "chat--k3x9", "chat", 1),
+            (ben.as_str(), juniper.as_str(), room.as_str(), "Chat", 1),
+            (ben.as_str(), juniper.as_str(), room.as_str(), "chat", 0),
         ] {
             assert_eq!(Mandate::of_record(asker, agent, place, channel, seq, 1), None, "{asker} {agent} {place} {channel} {seq}");
         }
         // marked, yet not of a mandate's form: a field more, or a seq that is no number
         let key = MandateKey::derive(HOST);
-        let (ben, juniper) = ids();
-        for fields in [format!("{PREFIX}{ben}.{juniper}.chat--k3x9.chat.1.2.3"), format!("{PREFIX}{ben}.{juniper}.chat--k3x9.chat.+1.2"), format!("{PREFIX}{ben}.{juniper}.Chat!.chat.1.2")] {
+        let (ben, juniper, room) = (ids().0, ids().1, a_room());
+        for fields in [format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2.3"), format!("{PREFIX}{ben}.{juniper}.{room}.chat.+1.2"), format!("{PREFIX}{ben}.{juniper}.chat--k3x9.chat.1.2")] {
             let mark = hex::encode(&key.mac(fields.as_bytes()).finalize().into_bytes()[..MARK_BYTES]);
             assert_eq!(open(std::slice::from_ref(&key), &format!("{fields}.{mark}"), 1), Err(Refused::Malformed), "{fields}");
         }
@@ -256,7 +264,9 @@ mod tests {
         let juniper = crate::npub::encode(&"c".repeat(64));
         let relayed = serde_json::json!({ "text": "hi", "to": [juniper], "relayed": { "via": "simplex", "for": ana, "agent": "juniper--k3x9", "at": 1, "sig": "ab".repeat(64) } }).to_string();
         assert_eq!(asker_of(&ben, Some(Author::Person), "{}"), Some(ben.clone()));
-        assert_eq!(asker_of(&juniper, Some(Author::Door), &relayed), Some(ana.clone()), "a door's relay: its owner");
+        assert_eq!(asker_of(&juniper, Some(Author::Door), &relayed), Some(ana.clone()), "a door's signed relay: its owner");
+        let hosted = serde_json::json!({ "text": "hi from telegram", "to": [juniper], "relayed": { "via": "telegram", "for": ana, "agent": "juniper--k3x9" } }).to_string();
+        assert_eq!(asker_of("npub1telegramapp", Some(Author::Door), &hosted), Some(ana.clone()), "a hosted door's relay, as its code writes it: its owner");
         assert_eq!(asker_of("inbox", Some(Author::Door), r#"{"source":"external","payload":{}}"#), None, "an inbox delivery relays no one");
         assert_eq!(asker_of("anon:0123456789abcdef0123456789abcdef", Some(Author::Person), "{}"), None);
         for author in [None, Some(Author::Agent), Some(Author::Code), Some(Author::Platform), Some(Author::Other)] {

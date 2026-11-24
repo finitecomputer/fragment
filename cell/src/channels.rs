@@ -862,20 +862,26 @@ impl FragmentCell {
     }
 
     /// A page read by an agent member as itself: each record whose words
-    /// are a person's own here (`mandate::asker_of`) carries their mandate
-    /// for this agent (docs/api.md, "Who asked: mandates"), with which its
-    /// calls act for them. Whose words each is, and the membership, are
-    /// read before the await, as the page was.
+    /// are its owner's own here (`mandate::asker_of`), written within a
+    /// mandate's life, carries their mandate for this agent (docs/api.md,
+    /// "Who asked: mandates"): the proof that its owner asked it, which its
+    /// calls carry in place of `for`. Its owner and it are one entity
+    /// (decision 64); anyone else's words give it none yet. Whose words
+    /// each is, and the membership, are read before the await, as the page
+    /// was.
     async fn mandated(&self, caller: &Caller, page: &mut ChannelPage) -> CellResult<()> {
-        let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) else { return Ok(()) };
+        let Some((agent, owner)) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()).and_then(|s| Some((s, s.owner.as_deref()?))) else { return Ok(()) };
         if self.member_role(&agent.id)?.is_none() {
             return Ok(());
         }
-        let place = self.name()?;
+        let (place, now) = (self.must(MetaKey::Npub)?, js::now_ms());
         let mandates: Vec<Option<Mandate>> = page
             .records
             .iter()
-            .map(|r| mandate::asker_of(&r.principal, r.author, r.body.get()).and_then(|asker| Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at)))
+            .map(|r| {
+                let owners = mandate::asker_of(&r.principal, r.author, r.body.get()).filter(|asker| npub::display(asker) == npub::display(owner));
+                owners.and_then(|asker| Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at)).filter(|m| m.until >= now)
+            })
             .collect();
         if mandates.iter().all(Option::is_none) {
             return Ok(());

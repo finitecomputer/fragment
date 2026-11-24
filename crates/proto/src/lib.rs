@@ -2184,10 +2184,11 @@ pub struct ChannelRecord {
     /// The JSON text the cell stored, passed through as it is: the cell
     /// neither parses a body it just wrote nor one it reads back.
     pub body: Box<RawValue>,
-    /// Proof that its asker asked the agent reading it (docs/api.md, "Who
-    /// asked: mandates"): on a channel read by an agent member as itself,
-    /// a person's own record, or a door's relay of its owner, carries one.
-    /// The agent's calls carry it to act for that asker. Absent elsewhere.
+    /// Proof that the agent reading it was asked by its owner (docs/api.md,
+    /// "Who asked: mandates"): on a channel read by an agent member as
+    /// itself, a record its owner wrote (or a door relayed for them)
+    /// carries one, which its calls carry in place of `for`. Absent
+    /// elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub mandate: Option<String>,
