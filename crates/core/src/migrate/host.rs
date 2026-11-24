@@ -336,5 +336,9 @@ mod tests {
             assert!(db.exec(&run(again)).is_err_and(|e| e.contains("UNIQUE")), "the same call again ({again}) is the one there");
         }
         assert_eq!(db.count("SELECT COUNT(*) FROM runs"), 2);
+        // a replay's lookup (cell jobs.rs `start_run`) seeks by its key, never walks a caller's ids
+        let plan = db.rows("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE principal = 'npub1juniper' AND call_id = 'sync' AND asker IS NULL").expect("a plan");
+        let plan = serde_json::Value::Array(plan).to_string();
+        assert!(plan.contains("USING INDEX runs_asked (principal=? AND call_id=?"), "{plan}");
     }
 }
