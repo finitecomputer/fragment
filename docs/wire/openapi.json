@@ -135,6 +135,14 @@
           "kind": {
             "type": "string"
           },
+          "mandate": {
+            "default": null,
+            "description": "Proof that its asker asked the agent reading it (docs/api.md, \"Who\nasked: mandates\"): on a channel read by an agent member as itself,\na person's own record, or a door's relay of its owner, carries one.\nThe agent's calls carry it to act for that asker. Absent elsewhere.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "principal": {
             "description": "npub, `anon:…`, or `platform`",
             "type": "string"

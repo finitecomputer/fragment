@@ -962,10 +962,12 @@ impl FragmentCell {
     /// agent's for its owner where its owner holds no membership and it
     /// holds one is its own (`permit::acts_as_itself`): from here it reads,
     /// acts and is named as the agent alone, as if it had signed without
-    /// `for`, so an app is never told its owner with the agent's role.
+    /// `for`, so an app is never told its owner with the agent's role. A
+    /// mandated request is its asker's, proven, and stays so: this patches
+    /// only an unproven `for` (FIN-615: it goes with `for`).
     fn as_whom(&self, signed: Option<Signed>) -> CellResult<Option<Signed>> {
         let Some(mut signed) = signed else { return Ok(None) };
-        let Some(owner) = signed.acting_for.as_deref() else { return Ok(Some(signed)) };
+        let Some(owner) = signed.acting_for.as_deref().filter(|_| !signed.mandated) else { return Ok(Some(signed)) };
         #[derive(serde::Deserialize)]
         struct Row {
             owner: Option<String>,
@@ -1293,7 +1295,7 @@ impl FragmentCell {
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
             (Method::Get, ["api", "channels", channel]) => {
                 let (after, before, limit) = crate::channels::page_query(&caller.url)?;
-                self.channel(&caller, channel, after, before, limit)
+                self.channel(&caller, channel, after, before, limit).await
             }
             (Method::Get, ["api", "channels", channel, "newest"]) => self.newest_api(&caller, channel),
             (Method::Post, ["api", "channels", channel]) => {

@@ -395,6 +395,7 @@ out. One record in a channel. Records are appended by the platform (`events`, `o
 | `body` | `any` | required | The JSON text the cell stored, passed through as it is: the cell neither parses a body it just wrote nor one it reads back. |
 | `channel` | `string` | required |  |
 | `kind` | `string` | required |  |
+| `mandate` | `string` or `null` | optional | Proof that its asker asked the agent reading it (docs/api.md, "Who asked: mandates"): on a channel read by an agent member as itself, a person's own record, or a door's relay of its owner, carries one. The agent's calls carry it to act for that asker. Absent elsewhere. |
 | `principal` | `string` | required | npub, `anon:…`, or `platform` |
 | `seq` | `integer` | required |  |
 
