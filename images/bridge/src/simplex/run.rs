@@ -233,12 +233,106 @@ pub struct View {
 pub struct Refused {
     pub status: u16,
     pub why: String,
+    /// What it is, where the platform tells refusals apart (a handover's:
+    /// `not_linked`, `busy`, `moved`, `not_moved`, `too_large`, `corrupt`).
+    pub code: Option<&'static str>,
 }
 
 impl Refused {
     fn new(status: u16, why: impl Into<String>) -> Refused {
-        Refused { status, why: why.into() }
+        Refused { status, why: why.into(), code: None }
     }
+
+    fn coded(self, code: &'static str) -> Refused {
+        Refused { code: Some(code), ..self }
+    }
+}
+
+/// A link being handed over, its core stopped: where its databases are,
+/// what its door's save holds beside them (`door.json`: its link, as the
+/// door's runner keeps it), the contact they must hold, and its SimpleX
+/// chat (archived once its door is linked).
+pub struct Handing {
+    dir: PathBuf,
+    state: Vec<u8>,
+    contact: ContactId,
+    chat: Option<String>,
+}
+
+/// A link's door's first save: its bytes, their SHA-256 (hex) and its
+/// SimpleX chat's name.
+pub struct Packed {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+    pub chat: Option<String>,
+}
+
+/// What a door's save says beside its databases that a way back takes:
+/// its link (images/simplex-door's `Kept`; the rest is the door's own).
+#[derive(Deserialize)]
+struct DoorKept {
+    link: Link,
+}
+
+/// A handover's scratch, in the agent's directory: its save made and
+/// checked there, gone after.
+const HANDOVER_DIR: &str = "handover";
+/// A way back's save, at most: a packed save is no larger than its
+/// unpacked files and gzip's framing.
+pub const BACK_MAX_BYTES: usize = super::save::UNPACKED_MAX_BYTES as usize + 1024 * 1024;
+
+/// `link`'s door's first save, from its stopped databases: each settled
+/// (a journal a stopped core left rolled back), copied and packed with its
+/// link as its door's runner keeps it, then checked as that door's restore
+/// checks it (both databases whole, the contact its link is bound to in
+/// them), before it is given.
+fn pack_handover(h: &Handing) -> Result<Vec<u8>, super::save::SaveError> {
+    use super::save;
+    let work = h.dir.join(HANDOVER_DIR);
+    let _ = std::fs::remove_dir_all(&work);
+    let packed = save::settle(&h.dir).and_then(|()| save::make(&h.dir, &work, &h.state)).and_then(|packed| {
+        save::stage(&packed, &work)?;
+        match save::staged_contact(&work, h.contact)? {
+            true => Ok(packed),
+            false => Err(save::SaveError::Corrupt(format!("its databases hold no contact {}", h.contact))),
+        }
+    });
+    let _ = std::fs::remove_dir_all(&work);
+    packed
+}
+
+/// A way back's save placed as `dir`'s databases (its door's newest: the
+/// databases its door's core went on with), each checked first, and the
+/// contact its link is bound to in them: the link it holds.
+fn place_back(dir: &Path, packed: &[u8]) -> Result<Link, super::save::SaveError> {
+    use super::save::{self, SaveError};
+    let state = save::stage(packed, dir)?;
+    let kept: DoorKept = serde_json::from_slice(&state).map_err(|e| SaveError::Corrupt(format!("its state: {e}")))?;
+    // one this bridge would set aside as it starts is never placed
+    Link::from_json(&serde_json::to_string(&kept.link).expect("a link serializes")).map_err(|e| SaveError::Corrupt(format!("its link: {e}")))?;
+    if let Phase::Linked { contact, .. } = kept.link.phase {
+        if !save::staged_contact(dir, contact)? {
+            return Err(SaveError::Corrupt(format!("its databases hold no contact {contact}")));
+        }
+    }
+    save::place(dir)?;
+    Ok(kept.link)
+}
+
+/// A save that would not be made or placed, as the platform is told it:
+/// nothing changed.
+fn save_refused(e: super::save::SaveError) -> Refused {
+    use super::save::SaveError;
+    match e {
+        SaveError::TooLarge(n) => Refused::new(413, format!("its SimpleX databases are {n} bytes, past a door's save")).coded("too_large"),
+        SaveError::Corrupt(why) => Refused::new(422, format!("its SimpleX databases are not whole: {why}")).coded("corrupt"),
+        SaveError::Io(why) => Refused::new(500, format!("its SimpleX databases could not be read or written: {why}")),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 type Answer = oneshot::Sender<Result<View, Refused>>;
@@ -296,6 +390,18 @@ pub enum Msg {
     /// Its SimpleX chat's name is someone else's (`ensure_chat`): another is
     /// chosen.
     ChatTaken { agent: String, chat: String },
+    /// The platform hands `agent`'s link over to its door (a handover's
+    /// ticket): marked moved, its core stopped, then packed off the loop.
+    Handover { agent: String, ticket: Box<Ticket>, reply: oneshot::Sender<Result<Handing, Refused>> },
+    /// A handover's pack ended: given (`failed` none), or not, and then
+    /// moved no more.
+    Packed { agent: String, failed: bool, reply: oneshot::Sender<()> },
+    /// The way back (a back's ticket): its door's newest save is placed off
+    /// the loop, into its directory.
+    Back { agent: String, ticket: Box<Ticket>, reply: oneshot::Sender<Result<(PathBuf, Key), Refused>> },
+    /// That save placed (its link), or not: the link moved no more once it
+    /// is, `behind` its door's newest effects forced to sync.
+    Placed { agent: String, link: Option<Box<Link>>, behind: bool, reply: oneshot::Sender<Result<View, Refused>> },
 }
 
 /// How the rest of the bridge reaches the manager.
@@ -411,6 +517,49 @@ impl Handle {
     /// page (the platform closed its door as it made it).
     pub async fn unlink(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
         self.answered(|reply| Msg::Unlink { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await
+    }
+
+    /// The platform hands `agent`'s link over to its door, by a handover's
+    /// ticket (D4, docs/bridge.md "SimpleX"): its core stopped for good on
+    /// this computer, its door's first save made from its stopped
+    /// databases. A pack that fails gives nothing and changes nothing: its
+    /// core starts again.
+    pub async fn handover(&self, agent: &str, ticket: Ticket) -> Result<Packed, Refused> {
+        let gone = || Refused::new(503, "this computer is stopping: try again in a moment");
+        let (reply, answer) = oneshot::channel();
+        self.tx.send(Msg::Handover { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await.map_err(|_| gone())?;
+        let h = answer.await.map_err(|_| gone())??;
+        let chat = h.chat.clone();
+        let packed = tokio::task::spawn_blocking(move || pack_handover(&h)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its pack stopped: {e}"))));
+        let (reply, told) = oneshot::channel();
+        self.tx.send(Msg::Packed { agent: agent.to_string(), failed: packed.is_err(), reply }).await.map_err(|_| gone())?;
+        told.await.map_err(|_| gone())?;
+        let bytes = packed.map_err(save_refused)?;
+        Ok(Packed { sha256: sha256_hex(&bytes), bytes, chat })
+    }
+
+    /// The way back from `agent`'s door, by a back's ticket: its door's
+    /// key taken back by the platform, then `packed` (its door's newest
+    /// save, `behind` its newest effects or not) placed as its databases
+    /// and link. Refused, nothing is placed; its key taken back and the
+    /// save not placed, the link stays moved, its core stopped, until the
+    /// way back is asked again.
+    pub async fn back(&self, agent: &str, ticket: Ticket, packed: Vec<u8>, behind: bool) -> Result<View, Refused> {
+        let gone = || Refused::new(503, "this computer is stopping: try again in a moment");
+        let (reply, answer) = oneshot::channel();
+        let nonce = ticket.nonce.clone();
+        self.tx.send(Msg::Back { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await.map_err(|_| gone())?;
+        let (dir, key) = answer.await.map_err(|_| gone())??;
+        let taken = self.api.door(agent, door::DOOR, &nonce, &key.public_hex()).await;
+        let placed = match taken {
+            Ok(_) => tokio::task::spawn_blocking(move || place_back(&dir, &packed)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its placing stopped: {e}")))).map_err(save_refused),
+            Err(e) => Err(Refused::new(502, format!("the platform did not take its door's key back: {e}"))),
+        };
+        let link = placed.as_ref().ok().cloned().map(Box::new);
+        let (reply, view) = oneshot::channel();
+        self.tx.send(Msg::Placed { agent: agent.to_string(), link, behind, reply }).await.map_err(|_| gone())?;
+        let view = view.await.map_err(|_| gone())?;
+        placed.and(view)
     }
 
     /// What `agent` works on in its SimpleX chat now (the engine's
@@ -658,6 +807,19 @@ pub struct Saved {
     /// Kept through an unlink: a link again is that chat again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<String>,
+    /// Handed over to its door (`handover`): from then on its core never
+    /// starts on this computer, until a way back (`back`) places its door's
+    /// newest save here. The ticket it went by (the same one asked again is
+    /// answered again) and when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<Moved>,
+}
+
+/// A link handed over to its door.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Moved {
+    pub nonce: String,
+    pub at: i64,
 }
 
 /// A file given up on: its cancel still to be taken by the core, or taken.
@@ -880,7 +1042,7 @@ pub fn linked_on_disk(dir: &Path, agents: &[Agent]) -> Vec<(String, Option<Strin
         .filter(|a| dir_name_ok(&a.fragment))
         .filter_map(|a| {
             let text = std::fs::read_to_string(dir.join(&a.fragment).join(LINK_FILE)).unwrap_or_default();
-            let s = serde_json::from_str::<Saved>(&text).ok().filter(|s| s.identity == a.identity && matches!(s.link.phase, Phase::Linked { .. }))?;
+            let s = serde_json::from_str::<Saved>(&text).ok().filter(|s| s.identity == a.identity && matches!(s.link.phase, Phase::Linked { .. }) && s.moved.is_none())?;
             Some((a.fragment.clone(), s.chat))
         })
         .collect()
@@ -990,6 +1152,10 @@ struct Slot {
     /// No core runs, and nothing else links, meanwhile.
     committing: Option<Adoption>,
     commit_at: Option<Instant>,
+    /// A handover or a way back under way (`handover`, `back`): its
+    /// databases are read or placed, so no core runs and no other one
+    /// begins.
+    handing: bool,
 }
 
 /// What a staged identity's maintenance read found: its owner's contact
@@ -1186,7 +1352,147 @@ impl Manager {
                 }
                 self.publish_relaying();
             }
+            Msg::Handover { agent, ticket, reply } => {
+                let _ = reply.send(self.handover(&agent, &ticket).await);
+            }
+            Msg::Packed { agent, failed, reply } => {
+                self.packed(&agent, failed);
+                let _ = reply.send(());
+            }
+            Msg::Back { agent, ticket, reply } => {
+                let _ = reply.send(self.back(&agent, &ticket));
+            }
+            Msg::Placed { agent, link, behind, reply } => {
+                let _ = reply.send(self.placed(&agent, link.map(|l| *l), behind));
+            }
         }
+    }
+
+    /// Whether `f`'s link was handed over to its door: its own file says
+    /// so, or the platform's record does (a save of this computer's from
+    /// before the move, restored, holds no mark of it).
+    fn moved(&self, f: &str) -> bool {
+        self.slots.get(f).is_some_and(|s| s.saved.moved.is_some()) || self.computer.as_ref().is_some_and(|c| c.simplex_moved.iter().any(|a| a == f))
+    }
+
+    /// A handover's ticket for `agent`: its link marked moved (written
+    /// first, so no start after this one runs its core), its core stopped,
+    /// and what its pack reads. The same ticket again (its answer lost) is
+    /// answered again, from the same stopped files. Refused, nothing
+    /// changes: a link not bound, or one whose agent works in its chat, or
+    /// whose messages or files are on their way (each would be lost or
+    /// sent twice across the move): its owner's messages wait at their
+    /// servers meanwhile.
+    async fn handover(&mut self, agent: &str, t: &Ticket) -> Result<Handing, Refused> {
+        let again = self.slots.get(agent).and_then(|s| s.saved.moved.as_ref()).map(|m| m.nonce == t.nonce);
+        match again {
+            Some(true) => {
+                let computer = self.computer.as_ref().map(|c| c.computer.clone()).ok_or_else(|| Refused::new(503, "this computer is starting: try again in a moment"))?;
+                let s = self.slots.get(agent).expect("moved: its slot");
+                let key = s.agent.key.clone().ok_or_else(|| Refused::new(403, "this platform does not sign links yet"))?;
+                door::check(t, "handover", agent, &computer, &key, crate::log::now_ms() as i64).map_err(|why| Refused::new(403, why))?;
+                if s.handing {
+                    return Err(Refused::new(503, "it is being handed over: ask again in a moment").coded("busy"));
+                }
+            }
+            Some(false) => return Err(Refused::new(409, "it was handed over already, by another ticket").coded("moved")),
+            None => {
+                self.take(agent, t, "handover")?;
+                let s = &self.slots[agent];
+                if !matches!(s.saved.link.phase, Phase::Linked { .. }) {
+                    return Err(Refused::new(409, "it is not linked to a SimpleX app").coded("not_linked"));
+                }
+                let busy = if s.adopting.is_some() || s.committing.is_some() || s.staging || s.handing {
+                    Some("its old SimpleX chat is being kept or set aside")
+                } else if !s.working.is_empty() {
+                    Some("its agent is working in its SimpleX chat")
+                } else if !s.saved.receiving.is_empty() || !s.saved.sending.is_empty() || !s.files.is_empty() || s.saved.abandoned.values().any(|a| *a == Abandoned::Cancelling) {
+                    Some("files are on their way")
+                } else if !s.outstanding.is_empty() || !s.pending.is_empty() {
+                    Some("messages are on their way")
+                } else {
+                    None
+                };
+                if let Some(why) = busy {
+                    return Err(Refused::new(409, format!("{why}: hand it over in a moment")).coded("busy"));
+                }
+                let s = self.slots.get_mut(agent).expect("its slot");
+                s.saved.moved = Some(Moved { nonce: t.nonce.clone(), at: crate::log::now_ms() as i64 });
+                if let Err(e) = store(&s.dir, &s.saved) {
+                    s.saved.moved = None;
+                    return Err(Refused::new(500, format!("SimpleX could not mark it moved: {e}")));
+                }
+                self.stop_core(agent).await;
+                self.publish_relaying();
+            }
+        }
+        let s = self.slots.get_mut(agent).expect("its slot");
+        s.handing = true;
+        let Phase::Linked { contact, .. } = s.saved.link.phase else { unreachable!("only a bound link is handed over") };
+        let state = serde_json::to_vec(&serde_json::json!({ "link": s.saved.link })).expect("a link serializes");
+        crate::ev!("simplex.handing_over", { "agent": agent, "again": again.is_some() });
+        Ok(Handing { dir: s.dir.clone(), state, contact, chat: s.saved.chat.clone() })
+    }
+
+    /// A handover's pack ended. One that failed gave nothing: moved no
+    /// more, its core starts again (unless the platform says it moved).
+    fn packed(&mut self, agent: &str, failed: bool) {
+        let Some(s) = self.slots.get_mut(agent) else { return };
+        s.handing = false;
+        if failed {
+            s.saved.moved = None;
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
+            }
+        }
+        crate::ev!("simplex.handed_over", { "agent": agent, "failed": failed });
+        self.publish_relaying();
+    }
+
+    /// A way back's ticket for `agent`, a link handed over: what places
+    /// its door's newest save, and its door's key, which the platform takes
+    /// back with this ticket before anything is placed.
+    fn back(&mut self, agent: &str, t: &Ticket) -> Result<(PathBuf, Key), Refused> {
+        if !self.slots.contains_key(agent) {
+            return Err(Refused::new(404, format!("no agent {agent} runs on this computer")));
+        }
+        if !self.moved(agent) {
+            return Err(Refused::new(409, "it was not handed over").coded("not_moved"));
+        }
+        if self.slots[agent].handing {
+            return Err(Refused::new(503, "it is being handed over: ask again in a moment").coded("busy"));
+        }
+        let key = self.slots[agent].door.clone().ok_or_else(|| Refused::new(409, "it holds no door key to take back").coded("not_linked"))?;
+        self.take(agent, t, "back")?;
+        let s = self.slots.get_mut(agent).expect("its slot");
+        s.handing = true;
+        Ok((s.dir.clone(), key))
+    }
+
+    /// A way back's save placed (`link`: the link it holds) or not: placed,
+    /// the link is moved no more, and its core starts again once the
+    /// platform says so too; `behind` (its door ended before its last save
+    /// held its newest effects), it syncs first.
+    fn placed(&mut self, agent: &str, link: Option<Link>, behind: bool) -> Result<View, Refused> {
+        let s = self.slots.get_mut(agent).ok_or_else(|| Refused::new(404, format!("no agent {agent} runs on this computer")))?;
+        s.handing = false;
+        if let Some(mut link) = link {
+            // behind its door's newest effects: as a rollback's start leaves
+            // a bound link (`Input::Started`), its first act a forced sync
+            if behind && matches!(link.phase, Phase::Linked { .. }) {
+                link.syncing = true;
+                link.forced = true;
+            }
+            s.saved.link = link;
+            s.saved.moved = None;
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
+                return Err(Refused::new(500, format!("SimpleX placed its door's save, and could not write its link: {e}")));
+            }
+            crate::ev!("simplex.back", { "agent": agent, "behind": behind });
+        }
+        self.publish_relaying();
+        Ok(self.view(agent, None).expect("its slot"))
     }
 
     fn view(&self, agent: &str, session: Option<&str>) -> Option<View> {
@@ -1200,10 +1506,15 @@ impl Manager {
     /// is refused while one is bound.
     fn take(&mut self, agent: &str, t: &Ticket, act: &str) -> Result<(), Refused> {
         let computer = self.computer.as_ref().map(|c| c.computer.clone()).ok_or_else(|| Refused::new(503, "this computer is starting: try again in a moment"))?;
+        let moved = self.moved(agent);
         let s = self.slots.get_mut(agent).ok_or_else(|| Refused::new(404, format!("no agent {agent} runs on this computer")))?;
         let key = s.agent.key.clone().ok_or_else(|| Refused::new(403, "this platform does not sign links yet"))?;
         let now = crate::log::now_ms() as i64;
         door::check(t, act, agent, &computer, &key, now).map_err(|why| Refused::new(403, why))?;
+        // its door holds its link: only the way back acts on it here
+        if moved && matches!(act, "link" | "unlink" | "adopt") {
+            return Err(Refused::new(409, "its SimpleX chat moved: Settings opens it").coded("moved"));
+        }
         s.saved.used.retain(|_, exp| *exp >= now);
         if s.saved.used.contains_key(&t.nonce) {
             return Err(Refused::new(403, "that ticket was used already: start again from your Settings"));
@@ -1492,7 +1803,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None });
             let door = Key::load(&dir);
             let staged = stage::ready(&dir);
             let resume = stage::pending(&dir);
@@ -1543,6 +1854,7 @@ impl Manager {
                 adopting: None,
                 committing,
                 commit_at: None,
+                handing: false,
             });
             // a set-aside a bridge before this one began and did not finish
             if let Some(stage) = resume {
@@ -1886,10 +2198,12 @@ impl Manager {
         let now = Instant::now();
         let names: Vec<String> = self.slots.keys().cloned().collect();
         for f in names {
+            let moved = self.moved(&f);
             let s = &self.slots[&f];
             // linked, or with an unlink's let-go still to do
-            // none while an adoption replaces its databases
-            let quiet = s.adopting.is_some() || s.committing.is_some();
+            // none while an adoption replaces its databases, nor while a
+            // handover reads them; none for a link handed over to its door
+            let quiet = s.adopting.is_some() || s.committing.is_some() || s.handing || moved;
             let want = !self.held && always_on && !quiet && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || !s.saved.link.leftovers.is_empty()) && s.broken.is_none();
             match (want, s.core.is_some()) {
                 (true, false) if s.retry_at.is_none_or(|t| now >= t) => self.start_core(&f),
@@ -1909,6 +2223,9 @@ impl Manager {
     }
 
     fn start_core(&mut self, f: &str) {
+        // two cores on one identity break its ratchets (FIN-483): the door's
+        // runs where this one ran
+        assert!(!self.moved(f), "a link handed over to its door never starts its core here: {f}");
         // not running, then held: the bridge's answer to a hold that came
         // as this start began waits for it, and it is called off
         self.quiet.store(false, Ordering::SeqCst);
@@ -2346,7 +2663,7 @@ impl Manager {
     /// poster started, so its chat is made as the link is bound, before
     /// anything is said.
     fn publish_relaying(&mut self) {
-        let linked: Vec<String> = self.slots.iter().filter(|(_, s)| matches!(s.saved.link.phase, Phase::Linked { .. })).map(|(f, _)| f.clone()).collect();
+        let linked: Vec<String> = self.slots.iter().filter(|(_, s)| matches!(s.saved.link.phase, Phase::Linked { .. }) && s.saved.moved.is_none()).map(|(f, _)| f.clone()).collect();
         for f in &linked {
             self.poster(f);
         }
@@ -2398,6 +2715,11 @@ impl Manager {
     /// changed, then what it asks.
     fn apply(&mut self, f: &str, input: Input<'_>) {
         let Some(s) = self.slots.get_mut(f) else { return };
+        // handed over: its link is its door's now, as its save holds it
+        if s.saved.moved.is_some() {
+            crate::ev!("simplex.moved_dropped", { "agent": f });
+            return;
+        }
         let before = s.saved.clone();
         let mut actions = s.saved.link.apply(input);
         // what it shows working follows each change (a start, a ratchet in
@@ -2887,6 +3209,7 @@ mod tests {
             generation,
             restored: restored.map(|(generation, rollback)| api::Restored { generation, rollback }),
             disk: None,
+            simplex_moved: vec![],
         }
     }
 
@@ -3713,7 +4036,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -3729,7 +4052,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()) };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec![("juniper--k3x9".to_string(), Some("juniper-simplex--w9x2".to_string()))]);
@@ -3803,7 +4126,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None },
             name: None,
             named_at: None,
             naming: false,
@@ -3841,6 +4164,7 @@ mod tests {
             adopting: None,
             committing: None,
             commit_at: None,
+            handing: false,
         }
     }
 
@@ -3882,6 +4206,192 @@ mod tests {
         s.agent.key = Some(key.public_hex());
         let api = Api::new("http://127.0.0.1:9").expect("an address");
         Manager { cfg, api, quiet: Arc::new(AtomicBool::new(true)), hold: dir.join("hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), s)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying, socks: None, offer: watch::channel(None).0, stop }
+    }
+
+    /// Databases as a core's are, by the tables a door's restore checks
+    /// (save.rs `stage`), its owner contact `contact`.
+    fn core_dbs(dir: &Path, contact: i64) {
+        std::fs::create_dir_all(dir).expect("a directory");
+        let chat = rusqlite::Connection::open(dir.join("sx_chat.db")).expect("opened");
+        chat.execute_batch("CREATE TABLE contacts (contact_id INTEGER PRIMARY KEY); CREATE TABLE chat_items (id INTEGER);").expect("made");
+        chat.execute("INSERT INTO contacts (contact_id) VALUES (?1)", [contact]).expect("its owner");
+        let agent = rusqlite::Connection::open(dir.join("sx_agent.db")).expect("opened");
+        agent.execute_batch("CREATE TABLE connections (id INTEGER); CREATE TABLE ratchets (id INTEGER);").expect("made");
+    }
+
+    /// A manager that reads `dir`'s link afresh from its file, as a
+    /// bridge's start does, given `computer`'s view: whether it tried to
+    /// start its core (no binary here, so a try is `broken`).
+    async fn started_afresh(dir: &Path, key: &Key, computer: api::Computer) -> (bool, bool) {
+        let mut m = manager(dir, key, Phase::Off);
+        m.slots.clear();
+        m.computer(computer, vec![agent()]).await;
+        let f = "juniper--k3x9";
+        (m.slots[f].broken.is_some(), m.moved(f))
+    }
+
+    /// Goal (D4, Paul's FIN-731): a link is handed over to its door whole,
+    /// and once, and its core never runs here again. Invalid: a link whose
+    /// agent works in its chat, or whose files or messages are on their
+    /// way (`busy`), one not bound (`not_linked`), a forged ticket and
+    /// another act's: refused, nothing marked. Valid: marked moved on disk
+    /// before its core stops, its door's first save made from its stopped
+    /// databases, holding its link (its cursor) as the door's runner keeps
+    /// it, checked as the door's restore checks it. Replay: the same ticket
+    /// again answers the same save, byte for byte; another handover's, and
+    /// its owner's link and unlink, are refused (`moved`); its link changes
+    /// no more. Restart: read afresh it never starts its core; nor does a
+    /// link whose file went back to before the move (its computer restored
+    /// from an older save), the platform's record of it in the view.
+    #[tokio::test]
+    async fn a_link_is_handed_over_whole_and_once() {
+        let dir = std::env::temp_dir().join(format!("simplex-handover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&dir, &key, Phase::Off);
+        let link_dir = m.slots[f].dir.clone();
+        core_dbs(&link_dir, 3);
+        let unmarked = |why: &str| assert!(load(&link_dir, &agent()).is_none_or(|s| s.moved.is_none()), "{why}: nothing marked");
+        let r = m.handover(f, &signed("handover", &"01".repeat(16))).await.err().expect("not bound");
+        assert_eq!((r.status, r.code), (409, Some("not_linked")));
+        unmarked("not bound");
+        m.slots.get_mut(f).expect("its slot").saved.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
+        for (n, busy) in ["working", "receiving", "outstanding"].into_iter().enumerate() {
+            let s = m.slots.get_mut(f).expect("its slot");
+            match busy {
+                "working" => {
+                    s.working.insert(5);
+                }
+                "receiving" => {
+                    s.saved.receiving.insert(9);
+                }
+                _ => {
+                    s.outstanding.insert(40);
+                }
+            }
+            let r = m.handover(f, &signed("handover", &format!("{:02x}", 0x10 + n).repeat(16))).await.err().expect("busy");
+            assert_eq!((r.status, r.code), (409, Some("busy")), "{busy}: {}", r.why);
+            unmarked(busy);
+            let s = m.slots.get_mut(f).expect("its slot");
+            s.working.clear();
+            s.saved.receiving.clear();
+            s.outstanding.clear();
+        }
+        let mut forged = signed("handover", &"02".repeat(16));
+        forged.sig = "ab".repeat(64);
+        assert_eq!(m.handover(f, &forged).await.err().expect("forged").status, 403);
+        assert_eq!(m.handover(f, &signed("link", &"03".repeat(16))).await.err().expect("a link's").status, 403);
+        unmarked("forged, or another act's");
+
+        let s = m.slots.get_mut(f).expect("its slot");
+        s.saved.link.delivered = 41;
+        s.saved.chat = Some("juniper-simplex--w9x2".into());
+        let nonce = "0a".repeat(16);
+        let h = m.handover(f, &signed("handover", &nonce)).await.expect("handed over");
+        let on_disk = load(&link_dir, &agent()).expect("its file");
+        assert_eq!(on_disk.moved.as_ref().map(|m| m.nonce.as_str()), Some(nonce.as_str()), "marked moved on disk");
+        assert!(m.moved(f) && m.slots[f].handing && m.relaying.borrow().is_empty(), "moved, relaying nothing");
+        assert_eq!(h.chat.as_deref(), Some("juniper-simplex--w9x2"));
+        let packed = pack_handover(&h).expect("packed");
+        m.packed(f, false);
+        assert!(m.moved(f) && !m.slots[f].handing);
+        assert!(!link_dir.join(HANDOVER_DIR).exists(), "its scratch gone");
+        let at_door = dir.join("door");
+        let state = super::super::save::stage(&packed, &at_door).expect("staged as its door's restore stages it");
+        assert!(super::super::save::staged_contact(&at_door, 3).expect("read"), "its owner's contact in it");
+        let kept: serde_json::Value = serde_json::from_slice(&state).expect("its state");
+        assert_eq!((kept["link"]["phase"].as_str(), kept["link"]["contact"].as_i64(), kept["link"]["delivered"].as_i64()), (Some("linked"), Some(3), Some(41)), "{kept}");
+
+        let again = m.handover(f, &signed("handover", &nonce)).await.expect("the same ticket again");
+        assert_eq!(sha256_hex(&pack_handover(&again).expect("packed again")), sha256_hex(&packed), "the same save, byte for byte");
+        m.packed(f, false);
+        let r = m.handover(f, &signed("handover", &"0b".repeat(16))).await.err().expect("another");
+        assert_eq!((r.status, r.code), (409, Some("moved")));
+        for act in ["link", "unlink"] {
+            let r = m.take(f, &signed(act, &"0c".repeat(16)), act).err().expect("its owner's");
+            assert_eq!((r.status, r.code), (409, Some("moved")), "{act}");
+        }
+        let before = m.slots[f].saved.clone();
+        m.apply(f, Input::Posted { seq: 9, item: 50 });
+        assert_eq!(m.slots[f].saved, before, "its link changes no more");
+
+        assert_eq!(started_afresh(&dir, &key, computer(true, 1, None)).await, (false, true), "read afresh: no core");
+        let mut rolled_back = on_disk.clone();
+        rolled_back.moved = None;
+        store(&link_dir, &rolled_back).expect("written");
+        let mut said = computer(true, 1, None);
+        said.simplex_moved = vec![f.into()];
+        assert_eq!(started_afresh(&dir, &key, said).await, (false, true), "its file from before the move: the platform's record holds");
+        assert_eq!(started_afresh(&dir, &key, computer(true, 1, None)).await, (true, false), "the control: no record anywhere, its core is started");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (D4): a handover whose save would not be made gives nothing
+    /// and changes nothing. Its databases lack the contact its link is
+    /// bound to (`corrupt`): moved no more, on disk too, so its core starts
+    /// again.
+    #[tokio::test]
+    async fn a_handover_that_cannot_pack_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("simplex-handover-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
+        let link_dir = m.slots[f].dir.clone();
+        core_dbs(&link_dir, 4);
+        let h = m.handover(f, &signed("handover", &"0a".repeat(16))).await.expect("taken");
+        let e = pack_handover(&h).err().expect("no contact 3");
+        assert_eq!(save_refused(e).code, Some("corrupt"));
+        m.packed(f, true);
+        assert!(!m.moved(f) && !m.slots[f].handing);
+        assert!(load(&link_dir, &agent()).expect("its file").moved.is_none(), "unmarked on disk");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (D4): the way back. Invalid: a link never handed over
+    /// (`not_moved`), and a door's save whose databases lack the contact
+    /// its link is bound to: nothing placed, still moved. Valid: its door's
+    /// newest save placed as its databases and its link, moved no more;
+    /// behind its door's newest effects, its link forces a sync first, as
+    /// a rollback's does, and is one its next start reads (not set aside).
+    #[tokio::test]
+    async fn the_way_back_places_its_doors_save() {
+        let dir = std::env::temp_dir().join(format!("simplex-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
+        m.slots.get_mut(f).expect("its slot").door = Some(key.clone());
+        let link_dir = m.slots[f].dir.clone();
+        core_dbs(&link_dir, 3);
+        let r = m.back(f, &signed("back", &"01".repeat(16))).err().expect("never moved");
+        assert_eq!((r.status, r.code), (409, Some("not_moved")));
+        let h = m.handover(f, &signed("handover", &"0a".repeat(16))).await.expect("handed over");
+        pack_handover(&h).expect("packed");
+        m.packed(f, false);
+        // its door went on: a newer cursor, the same databases
+        let mut at_door = Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, delivered: 57, ..Link::default() };
+        let door_dir = dir.join("door");
+        core_dbs(&door_dir, 3);
+        let newest = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": at_door, "mark": 9 })).expect("json")).expect("its door's save");
+        let stranger = Link { phase: Phase::Linked { contact: 8, name: "someone".into() }, ..Link::default() };
+        let wrong = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": stranger })).expect("json")).expect("a save");
+        let (into, _) = m.back(f, &signed("back", &"0d".repeat(16))).expect("taken");
+        assert_eq!(place_back(&into, &wrong).err().map(|e| save_refused(e).code), Some(Some("corrupt")));
+        m.placed(f, None, false).expect("its view");
+        assert!(m.moved(f), "nothing placed: still moved");
+        let (into, _) = m.back(f, &signed("back", &"0e".repeat(16))).expect("taken");
+        let link = place_back(&into, &newest).expect("placed");
+        m.placed(f, Some(link), true).expect("its view");
+        let read = load(&link_dir, &agent()).expect("its file");
+        assert!(read.moved.is_none() && !m.moved(f), "moved no more");
+        at_door.syncing = true;
+        at_door.forced = true;
+        assert_eq!(read.link, at_door, "its door's link, forced to sync as it was behind");
+        assert!(!link_dir.join("restoring").exists(), "its stage placed");
+        assert_eq!(started_afresh(&dir, &key, computer(true, 1, None)).await, (true, false), "read afresh, its core is started");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The vectors' agent key (crates/core/src/door.rs: secret 0x07 × 32),
@@ -4150,7 +4660,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -4192,6 +4702,7 @@ mod tests {
             adopting: None,
             committing: None,
             commit_at: None,
+            handing: false,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
@@ -4311,7 +4822,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None },
             name: None,
             named_at: None,
             naming: false,
@@ -4349,6 +4860,7 @@ mod tests {
             adopting: None,
             committing: None,
             commit_at: None,
+            handing: false,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };

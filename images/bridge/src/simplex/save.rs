@@ -96,6 +96,29 @@ pub fn copy(source: &Path, target: &Path) -> Result<(), SaveError> {
     c.backup(rusqlite::MAIN_DB, target, None).map_err(io)
 }
 
+/// Each database in `dir` whole, as a stopped core left it: opened for
+/// writing, so a journal its last transaction left is rolled back, and
+/// checked (`quick_check`). A handover's first step (a computer's link
+/// handed to its door): `copy` reads them read-only.
+pub fn settle(dir: &Path) -> Result<(), SaveError> {
+    for db in DBS {
+        let path = dir.join(db);
+        if !path.is_file() {
+            return Err(SaveError::Corrupt(format!("no {db}")));
+        }
+        let checked = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(sqlite).and_then(|c| {
+            c.busy_timeout(Duration::from_millis(BUSY_MS)).map_err(sqlite)?;
+            c.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)).map_err(sqlite)
+        });
+        match checked {
+            Ok(ok) if ok == "ok" => {}
+            Ok(said) => return Err(SaveError::Corrupt(format!("{db}: {said}"))),
+            Err(e) => return Err(e.within(db)),
+        }
+    }
+    Ok(())
+}
+
 /// The order a save copies the databases in: the agent's, then the chat's.
 /// The core commits a message to its chat database before its agent
 /// acknowledges it to the server (and lets it go), so a chat copy made

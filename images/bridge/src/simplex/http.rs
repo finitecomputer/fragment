@@ -16,7 +16,12 @@
 //! - `POST /simplex/unlink?agent=…` with an unlink's ticket;
 //! - `POST /simplex/adopt?agent=…` with an adoption's ticket: its owner
 //!   keeps their SimpleX chat with their old agent (FIN-463, `stage`),
-//!   staged from its move, its contact the same in their app.
+//!   staged from its move, its contact the same in their app;
+//! - `POST /simplex/handover?agent=…` with a handover's ticket, the
+//!   platform's alone (D4): its link handed to its connector's door, the
+//!   answer that door's first save (`x-door-sha256`, `x-simplex-chat`);
+//! - `POST /simplex/back?agent=…`, the way back, its ticket in
+//!   `x-door-ticket` and its door's newest save the body (`x-door-behind`).
 //!
 //! The tickets come from the owner's Settings alone, signed by the
 //! platform (`door`): the agent's tools, which reach this port too, can
@@ -38,6 +43,13 @@ use crate::net::{self, Body};
 
 /// A ticket's body is at most this.
 const TICKET_MAX_BYTES: usize = 2_048;
+/// A handover's answer: its save's SHA-256 (hex), and its SimpleX chat.
+const SHA_HEADER: &str = "x-door-sha256";
+const CHAT_HEADER: &str = "x-simplex-chat";
+/// The way back's ticket (its body is its door's save), and whether that
+/// save is behind its door's newest effects (`1`).
+const TICKET_HEADER: &str = "x-door-ticket";
+const BEHIND_HEADER: &str = "x-door-behind";
 
 /// The screen's way to SimpleX: whether the image names a core, and the
 /// manager once the bridge has started it (past the restore gate).
@@ -101,10 +113,38 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
         };
     }
     let path = req.uri().path().to_string();
+    if req.method() == Method::POST && path == "/simplex/handover" {
+        return match ticket_of(req).await {
+            Err(why) => refused(Refused { status: 403, why, code: None }),
+            Ok(t) => match h.handover(&agent, t).await {
+                Ok(p) => {
+                    let mut r = Response::builder().status(StatusCode::OK).header("content-type", "application/octet-stream").header(SHA_HEADER, &p.sha256);
+                    if let Some(chat) = &p.chat {
+                        r = r.header(CHAT_HEADER, chat);
+                    }
+                    r.body(Body::new(p.bytes.into())).expect("a well-formed answer")
+                }
+                Err(r) => refused(r),
+            },
+        };
+    }
+    if req.method() == Method::POST && path == "/simplex/back" {
+        let ticket = req.headers().get(TICKET_HEADER).and_then(|v| serde_json::from_slice::<Ticket>(v.as_bytes()).ok());
+        let behind = req.headers().get(BEHIND_HEADER).is_some_and(|v| v == "1");
+        let Some(t) = ticket else { return refused(Refused { status: 403, why: "the way back carries its ticket".into(), code: None }) };
+        let packed = match Limited::new(req.into_body(), super::run::BACK_MAX_BYTES).collect().await {
+            Ok(b) => b.to_bytes().to_vec(),
+            Err(_) => return refused(Refused { status: 413, why: "the way back's save is past a save's bound".into(), code: Some("too_large") }),
+        };
+        return match h.back(&agent, t, packed, behind).await {
+            Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
+            Err(r) => refused(r),
+        };
+    }
     let answer = match (req.method().clone(), path.as_str()) {
-        (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer") }),
+        (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer"), code: None }),
         (Method::POST, "/simplex/link" | "/simplex/unlink" | "/simplex/adopt") => match ticket_of(req).await {
-            Err(why) => Err(Refused { status: 403, why }),
+            Err(why) => Err(Refused { status: 403, why, code: None }),
             Ok(t) if path == "/simplex/link" => h.link(&agent, t).await,
             Ok(t) if path == "/simplex/adopt" => h.adopt(&agent, t).await,
             Ok(t) => h.unlink(&agent, t).await,
@@ -113,19 +153,22 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
     };
     match answer {
         Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
-        Err(r) => {
-            let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let code = match r.status {
-                403 => "forbidden",
-                404 => "not_found",
-                409 => "conflict",
-                422 => "invalid",
-                503 => "starting",
-                _ => "failed",
-            };
-            net::refusal(status, code, &r.why)
-        }
+        Err(r) => refused(r),
     }
+}
+
+/// A refusal as the platform reads one: its code, else its status's.
+fn refused(r: Refused) -> Response<Body> {
+    let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let code = r.code.unwrap_or(match r.status {
+        403 => "forbidden",
+        404 => "not_found",
+        409 => "conflict",
+        422 => "invalid",
+        503 => "starting",
+        _ => "failed",
+    });
+    net::refusal(status, code, &r.why)
 }
 
 /// A link's or an unlink's ticket: the request's body, as the owner's

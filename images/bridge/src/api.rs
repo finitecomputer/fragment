@@ -128,6 +128,11 @@ pub struct Computer {
     /// it, or before its first read.
     #[serde(default)]
     pub disk: Option<Disk>,
+    /// Its agents whose SimpleX link was handed over to a door (the
+    /// platform's record of each move, which a save restored from before
+    /// it cannot take back): none of their cores starts here again.
+    #[serde(default, rename = "simplexMoved")]
+    pub simplex_moved: Vec<String>,
 }
 
 /// A computer's disk, as its view says it: the room it has left before its

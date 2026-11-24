@@ -344,7 +344,8 @@ impl Fake {
         let sig = agent_key(label).sign_raw(&t.digest(), &[0u8; 32]).expect("signed");
         t.sig = fragment_bridge::records::hex(&sig.to_bytes());
         self.with(|w| {
-            if act == "link" || act == "adopt" {
+            // a way back opens it again, as a link does
+            if act == "link" || act == "adopt" || act == "back" {
                 w.door_tickets.insert(agent, nonce);
             } else {
                 w.door_tickets.remove(&agent);
