@@ -27,7 +27,8 @@ routes are docs/api.md, Ledger; seats and Stripe are docs/billing.md.
   is charged nothing (`ledger.unknown-usage`).
 - **Plans** (decision 25): `guest`, for someone who never had a seat;
   `seat` (`SEAT_INCLUDED` a month); `seat_always_on`
-  (`SEAT_ALWAYS_ON_INCLUDED`, its awake time not metered), the one seat
+  (`SEAT_ALWAYS_ON_INCLUDED`, its awake time included up to a bound:
+  "Who pays"), the one seat
   sold. Included credit arrives each UTC month while the seat is
   `active` and expires at the month's end; a seat that becomes active or
   a plan that grows mid-month gets the difference once, and nothing is
@@ -253,9 +254,14 @@ left this month, okay to proceed?"), and reads the balance rather than
 guessing after a refusal. Each item is a row's usage times its calls,
 charged by `ledger::row_charge`, the function a ledger's own rows are
 charged by, with the book the answering release charges with: so it
-prices every key and unit the book has (`Catalog::key_prices`), the always-on
-seat's awake time at nothing, and a name the book does not price is
-unknown, never guessed. Its payer is the one a charge resolves to (an
+prices every key and unit the book has (`Catalog::key_prices`), and a name
+the book does not price is unknown, never guessed. A $200 seat's awake
+time is quoted against the hours its month still includes: its ledger's
+status's `awake` (what its rows have used of `SEAT_AWAKE_INCLUDED_MS`,
+the figure they are metered against), spent once across the whole
+quote, in its order, as its rows would spend it (`quote::awake_left`).
+Within them a call is quoted nothing; an item's `eachMicros` is a call's
+charge past them, and its `chargeMicros` what its calls come to. Its payer is the one a charge resolves to (an
 agent's owner). It is as accurate as the units it is given: a unit its
 vendor's answer counts (speech's characters, Grok's ticks:
 `Catalog::counted`) must be said, a model's tokens are an estimate,

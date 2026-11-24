@@ -7,7 +7,7 @@
 //! book does not price is said to be unknown, never guessed. A quote holds
 //! and keeps nothing.
 
-use fragment_proto::ledger::{Plan, Planned, Quoted, Unquoted, QUOTE_CALLS_MAX, QUOTE_ITEMS_MAX};
+use fragment_proto::ledger::{LedgerStatus, Plan, Planned, Quoted, Unquoted, QUOTE_CALLS_MAX, QUOTE_ITEMS_MAX};
 
 use super::row_charge;
 use crate::models::Models;
@@ -58,20 +58,31 @@ pub fn check(items: &[Planned]) -> Result<(), QuoteFault> {
     Ok(())
 }
 
-/// What `items` would be charged on a ledger of `plan`, priced with `book`,
-/// a model named by the route's names resolved by `models` as the model
-/// route resolves them, a key's units said where they are `counted`
-/// (`Catalog::counted`: a vendor's number, its ticks or characters): each
-/// item's quote, in order, and the priced ones' total. `items` pass
-/// `check` first.
-pub fn quote(items: &[Planned], book: &PriceBook, models: &Models, plan: Plan, counted: &[String]) -> (Vec<Quoted>, i64) {
+/// What `items` would be charged on the ledger whose status is `payer`,
+/// priced with `book`, a model named by the route's names resolved by
+/// `models` as the model route resolves them, a key's units said where
+/// they are `counted` (`Catalog::counted`: a vendor's number, its ticks or
+/// characters): each item's quote, in order, and the priced ones' total.
+/// A $200 seat's awake time is quoted against the hours its month still
+/// includes (`awake_left`, the figure its ledger meters against), spent
+/// once across the whole quote, in its order, as its rows would spend
+/// them. `items` pass `check` first.
+pub fn quote(items: &[Planned], book: &PriceBook, models: &Models, payer: &LedgerStatus, counted: &[String]) -> (Vec<Quoted>, i64) {
     assert_eq!(check(items), Ok(()), "a quote's items are checked before they are priced");
-    let quoted: Vec<Quoted> = items.iter().map(|item| quote_one(item, book, models, plan, counted)).collect();
+    let mut left = awake_left(payer);
+    let quoted: Vec<Quoted> = items.iter().map(|item| quote_one(item, book, models, payer.plan, &mut left, counted)).collect();
     let total = quoted.iter().filter_map(|q| q.charge_micros).sum();
     (quoted, total)
 }
 
-fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan, counted: &[String]) -> Quoted {
+/// The awake time a $200 seat's month still includes, as its ledger's
+/// status says it (`awake`: what its rows have used of the bound); none on
+/// any other plan.
+pub fn awake_left(payer: &LedgerStatus) -> i64 {
+    payer.awake.map_or(0, |a| (a.included_ms - a.used_ms).max(0))
+}
+
+fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan, left: &mut i64, counted: &[String]) -> Quoted {
     let calls = calls_of(item).unwrap_or(1);
     let unknown = |priced_as: Option<String>, why| Quoted { priced_as, each_micros: None, calls, charge_micros: None, unknown: Some(why) };
     let usage = match usage_of(item, models, counted) {
@@ -79,17 +90,39 @@ fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan, coun
         Err((priced_as, why)) => return unknown(priced_as, why),
     };
     let priced_as = Some(name_of(&usage));
-    // a quote reads the seat's month as unspent: an hour of a $200 seat's
-    // awake time is included, whatever its ledger let off so far
-    match row_charge(&usage, book, plan, super::SEAT_AWAKE_INCLUDED_MS) {
-        Ok((_, each, _)) => {
-            let charge = i64::try_from(calls).ok().and_then(|c| each.checked_mul(c)).expect("QUOTE_CALLS_MAX × CHARGE_MAX fits an i64");
-            Quoted { priced_as, each_micros: Some(each), calls, charge_micros: Some(charge), unknown: None }
-        }
+    // a call's charge past a seat's included hours, and its calls' against
+    // what the seat has left of them
+    match row_charge(&usage, book, plan, 0).and_then(|(_, each, _)| Ok((each, charge_of(&usage, book, plan, calls, each, left)?))) {
+        Ok((each, charge)) => Quoted { priced_as, each_micros: Some(each), calls, charge_micros: Some(charge), unknown: None },
         Err(PriceError::NoPrice) => unknown(priced_as, Unquoted::NoPrice),
         Err(PriceError::Invalid(_)) => unknown(priced_as, Unquoted::Invalid),
         Err(PriceError::TooLarge) => unknown(priced_as, Unquoted::TooLarge),
     }
+}
+
+/// What `calls` calls of `usage` are charged, each `each` past a seat's
+/// included hours: a $200 seat's awake calls spend `left` first, in order,
+/// as its rows would (`row_charge`): the calls inside it nothing, the one
+/// across it its part past it, the rest `each`. Bounded: a few prices,
+/// whatever its calls.
+fn charge_of(usage: &Usage, book: &PriceBook, plan: Plan, calls: u64, each: i64, left: &mut i64) -> Result<i64, PriceError> {
+    let calls_i = |n: u64| i64::try_from(n).expect("at most QUOTE_CALLS_MAX calls");
+    let (Usage::Awake { ms, .. }, Plan::SeatAlwaysOn) = (usage, plan) else {
+        return Ok(each.checked_mul(calls_i(calls)).expect("QUOTE_CALLS_MAX × CHARGE_MAX fits an i64"));
+    };
+    let ms = i64::try_from(*ms).expect("a row's time is bounded");
+    // the calls the seat's hours hold whole
+    let inside = match ms {
+        0 => calls,
+        ms => calls.min(u64::try_from(*left / ms).expect("left is not negative")),
+    };
+    *left -= calls_i(inside) * ms;
+    let Some(rest) = calls.checked_sub(inside).filter(|r| *r > 0) else { return Ok(0) };
+    // the call across the bound, then calls past it
+    let (_, across, waived) = row_charge(usage, book, plan, *left)?;
+    *left -= waived;
+    assert!(*left >= 0, "a seat's hours are spent no further than they go");
+    Ok(across + each.checked_mul(calls_i(rest - 1)).expect("QUOTE_CALLS_MAX × CHARGE_MAX fits an i64"))
 }
 
 /// One call of `item` as the ledger's row of it: a key's or a part's
@@ -185,11 +218,11 @@ mod tests {
             json!({ "kind": "key", "key": "perplexity", "units": 1 }),
         ];
         for named in every {
-            let (quoted, _) = quote(&[usage(named.clone(), None)], &book(), &Models::defaults(), Plan::Seat, &counted());
+            let (quoted, _) = quote(&[usage(named.clone(), None)], &book(), &Models::defaults(), &seat(), &counted());
             assert_eq!(quoted[0].unknown, None, "{named}: {quoted:?}");
             let mut object = named.clone();
             object["kind"] = json!({ named["kind"].as_str().unwrap(): null });
-            let (quoted, total) = quote(&[usage(object.clone(), None)], &book(), &Models::defaults(), Plan::Seat, &counted());
+            let (quoted, total) = quote(&[usage(object.clone(), None)], &book(), &Models::defaults(), &seat(), &counted());
             assert_eq!((quoted[0].unknown, total), (Some(Unquoted::Invalid), 0), "{object}: {quoted:?}");
         }
     }
@@ -200,11 +233,18 @@ mod tests {
         store: Memory,
         book: PriceBook,
         n: u32,
+        /// The ledger's clock, and when its rows end.
+        now: i64,
+    }
+
+    /// A $100 seat's ledger's status, for a quote that meters nothing.
+    fn seat() -> fragment_proto::ledger::LedgerStatus {
+        Payer::on(Plan::Seat).status()
     }
 
     impl Payer {
         fn on(plan: Plan) -> Payer {
-            let mut p = Payer { ledger: Ledger::new(T0), store: Memory::default(), book: book(), n: 0 };
+            let mut p = Payer { ledger: Ledger::new(T0), store: Memory::default(), book: book(), n: 0, now: T0 };
             apply(&mut p.ledger, &mut p.store, &Op::Plan(SetPlan { id: "plan:1".into(), plan }), T0, &mut p.book).unwrap();
             p
         }
@@ -212,16 +252,21 @@ mod tests {
         /// What the ledger charges for `calls` rows of `usage`, each a
         /// call's own batch, as the swap and the model route send them.
         fn charged(&mut self, usage: &Usage, calls: u64) -> i64 {
-            let before = self.ledger.status(&self.store, T0, &self.book).balance_micros;
+            let before = self.status().balance_micros;
             for _ in 0..calls {
                 self.n += 1;
                 let reference = format!("key:c:{}", self.n);
-                let row = MeterRow { reference: reference.clone(), usage: usage.clone(), fragment: None, agent: None, computer: None, at_ms: T0 };
-                let answer = apply(&mut self.ledger, &mut self.store, &Op::Meter(Meter { batch: reference, rows: vec![row] }), T0, &mut self.book).unwrap();
+                let row = MeterRow { reference: reference.clone(), usage: usage.clone(), fragment: None, agent: None, computer: None, at_ms: self.now };
+                let answer = apply(&mut self.ledger, &mut self.store, &Op::Meter(Meter { batch: reference, rows: vec![row] }), self.now, &mut self.book).unwrap();
                 let Outcome::Metered(m) = answer else { panic!("a batch answers Metered") };
                 assert_eq!((m.rows_new, m.refused.len()), (1, 0), "{usage:?} is charged");
             }
-            before - self.ledger.status(&self.store, T0, &self.book).balance_micros
+            before - self.status().balance_micros
+        }
+
+        /// Its ledger's status now, as the quote's route reads it.
+        fn status(&self) -> fragment_proto::ledger::LedgerStatus {
+            self.ledger.status(&self.store, self.now, &self.book)
         }
     }
 
@@ -257,7 +302,7 @@ mod tests {
             usage(json!({ "kind": "storage", "class": "r2", "byte_hours": 24_000_000_000u64 }), Some(5)),
         ];
         let mut payer = Payer::on(Plan::Seat);
-        let (quoted, total) = quote(&items, &payer.book.clone(), &models, Plan::Seat, &counted());
+        let (quoted, total) = quote(&items, &payer.book.clone(), &models, &payer.status(), &counted());
         let rows = [
             (Usage::Key { key: "elevenlabs:character".into(), units: 200 }, 300),
             (Usage::Key { key: "elevenlabs:character".into(), units: 60_000 }, 1),
@@ -292,17 +337,55 @@ mod tests {
         assert_eq!((quoted[4].each_micros, quoted[5].each_micros), (Some(9_000), Some(185_186)));
     }
 
-    /// Goal: the always-on seat's awake time is quoted at nothing, as its
-    /// ledger charges it (decision 25). Method: the same hour on both seats.
+    /// Goal: the $200 seat's awake time is quoted at nothing within the
+    /// hours its month includes, as its ledger charges it; its `eachMicros`
+    /// is a call's charge past them. Method: the same hour on both seats.
     #[test]
-    fn an_always_on_seats_awake_time_is_quoted_free() {
+    fn an_always_on_seats_awake_time_is_quoted_free_within_its_hours() {
         let hour = [usage(json!({ "kind": "awake", "instance": crate::price::INSTANCE, "ms": 3_600_000 }), None)];
         let models = Models::defaults();
-        for (plan, each) in [(Plan::Seat, 64_224 * 3 / 2), (Plan::SeatAlwaysOn, 0)] {
+        let each = 64_224 * 3 / 2;
+        for (plan, charge) in [(Plan::Seat, each), (Plan::SeatAlwaysOn, 0)] {
             let mut payer = Payer::on(plan);
-            let (quoted, total) = quote(&hour, &payer.book.clone(), &models, plan, &counted());
+            let (quoted, total) = quote(&hour, &payer.book.clone(), &models, &payer.status(), &counted());
             let charged = payer.charged(&Usage::Awake { instance: crate::price::INSTANCE.into(), ms: 3_600_000 }, 1);
-            assert_eq!((quoted[0].each_micros, total, charged), (Some(each), each, each), "{plan:?}");
+            assert_eq!((quoted[0].each_micros, total, charged), (Some(each), charge, charge), "{plan:?}");
+        }
+    }
+
+    /// Goal (Alex on #1537): a $200 seat's awake time is quoted against the
+    /// hours its month still includes (the figure its ledger meters
+    /// against), spent once across the whole quote: a seat that has used
+    /// them all is quoted each hour; one with an hour and a half left is
+    /// quoted the part past it, whether one item's calls cross the bound or
+    /// its items do. Method: each quote, then the same rows metered on that
+    /// ledger, a call a batch, in the quote's order, item by item.
+    #[test]
+    fn a_seats_awake_time_is_quoted_against_the_hours_it_has_left() {
+        let models = Models::defaults();
+        let hour = |calls| usage(json!({ "kind": "awake", "instance": crate::price::INSTANCE, "ms": crate::ledger::HOUR_MS }), calls);
+        let row = Usage::Awake { instance: crate::price::INSTANCE.into(), ms: crate::ledger::HOUR_MS as u64 };
+        let seat = crate::ledger::SEAT_AWAKE_INCLUDED_MS;
+        let half = crate::ledger::HOUR_MS / 2;
+        for (used, items, calls) in [
+            // every included hour used: another hour is charged
+            (seat, vec![hour(None)], vec![1]),
+            // an hour and a half left: three hours, in one item's calls
+            (seat - 3 * half, vec![hour(Some(3))], vec![3]),
+            // and across two items
+            (seat - 3 * half, vec![hour(None), hour(Some(2))], vec![1, 2]),
+        ] {
+            let mut payer = Payer::on(Plan::SeatAlwaysOn);
+            // six hours into the month, its rows its own month's
+            payer.now = T0 + 6 * crate::ledger::HOUR_MS;
+            payer.ledger.money.awake_waived_ms = used;
+            let (quoted, total) = quote(&items, &payer.book.clone(), &models, &payer.status(), &counted());
+            let charged: Vec<i64> = calls.iter().map(|c| payer.charged(&row, *c)).collect();
+            assert!(charged.iter().sum::<i64>() > 0, "past the bound, charged");
+            for (q, c) in quoted.iter().zip(&charged) {
+                assert_eq!(q.charge_micros, Some(*c), "used {used}: {items:?} quoted what the ledger charged");
+            }
+            assert_eq!(total, charged.iter().sum::<i64>(), "used {used}: the quote's total");
         }
     }
 
@@ -328,7 +411,7 @@ mod tests {
             usage(json!({ "kind": "requests", "count": crate::price::QUANTITY_MAX + 1 }), None),
             key("elevenlabs:character", Some(crate::price::QUANTITY_MAX), None),
         ];
-        let (quoted, total) = quote(&items, &book(), &models, Plan::Seat, &counted());
+        let (quoted, total) = quote(&items, &book(), &models, &seat(), &counted());
         let why: Vec<_> = quoted.iter().map(|q| q.unknown).collect();
         use Unquoted::*;
         assert_eq!(why, [None, Some(NoPrice), Some(NoUnits), Some(NoUnits), Some(NoUnits), Some(NoPrice), Some(NoPrice), Some(NoPrice), Some(Invalid), Some(Invalid), Some(Invalid), Some(TooLarge)]);
@@ -336,7 +419,7 @@ mod tests {
         assert_eq!(total, quoted[0].charge_micros.unwrap(), "only the priced item counts");
         assert_eq!((quoted[1].calls, quoted[2].priced_as.as_deref()), (4, Some("elevenlabs:character")), "it says what was asked");
         // a deployment that offers no ElevenLabs prices none of it: its unit unknown too
-        let (bare, _) = quote(&[key("elevenlabs:character", Some(200), None)], &PriceBook::defaults(), &models, Plan::Seat, &counted());
+        let (bare, _) = quote(&[key("elevenlabs:character", Some(200), None)], &PriceBook::defaults(), &models, &seat(), &counted());
         assert_eq!(bare[0].unknown, Some(NoPrice));
     }
 
@@ -355,7 +438,7 @@ mod tests {
         }
         // the largest quote's total fits: every item its most calls of the dearest row
         let dearest = PriceBook { keys: vec![KeyPrice { key: "dear".into(), micros: CHARGE_MAX * 2 / 3, per: 1 }], ..PriceBook::defaults() };
-        let (quoted, total) = quote(&vec![key("dear", None, Some(QUOTE_CALLS_MAX)); QUOTE_ITEMS_MAX], &dearest, &Models::defaults(), Plan::Seat, &[]);
+        let (quoted, total) = quote(&vec![key("dear", None, Some(QUOTE_CALLS_MAX)); QUOTE_ITEMS_MAX], &dearest, &Models::defaults(), &seat(), &[]);
         assert!(quoted.iter().all(|q| q.unknown.is_none()), "{:?}", quoted[0]);
         assert_eq!(total, QUOTE_ITEMS_MAX as i64 * QUOTE_CALLS_MAX as i64 * quoted[0].each_micros.unwrap());
     }

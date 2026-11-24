@@ -345,7 +345,10 @@ pub struct Quoted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub each_micros: Option<i64>,
     pub calls: u64,
-    /// `calls` × `eachMicros`.
+    /// `calls` × `eachMicros`, but the awake time a $200 seat's month
+    /// still includes (its status's `awake`), spent once across the quote
+    /// in its order: within it, nothing; `eachMicros` is a call's charge
+    /// past it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charge_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
