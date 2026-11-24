@@ -1486,7 +1486,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     roster_ui(s, api, &mut b, &page, &me, &shots)?;
     ask_cli(s, api, &me)?;
     // the chat list as home (FIN-722): squeezed, its agent, pins, delete
-    chat_list_home_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
+    chat_list_home_ui(s, api, &mut b, &page, &me, &chat, &reader, &reader_id, &shots)?;
 
     // an app's window: the desktop's (its dock and its windows)
     let desktop = b.until(&page, "document.getElementById('layout').classList.contains('right-open') && document.getElementById('viewer').getBoundingClientRect().width > 0 && !!document.querySelector('#apps #add-app')", wait);
@@ -6590,8 +6590,12 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 /// - Delete: a chat of theirs its agent spoke in, from its row's ⋯, asked
 ///   once more naming it: it leaves the list and the platform (404), and
 ///   their agent still answers in another chat. Invalid: none on the
-///   agent's own chat, nor on one someone shared with them.
-fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, chat: &str, shots: &std::path::Path) -> Result<()> {
+///   agent's own chat, nor on one someone shared with them, nor, in either
+///   menu, on a Telegram or SimpleX connector with a label of its own bound
+///   as their agent's door. The open chat deleted gives its place to a chat
+///   the list shows, never a newer agents' pair chat, which has no row.
+#[allow(clippy::too_many_arguments)]
+fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, chat: &str, reader: &str, reader_id: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
     // the chat open now, open again at the end: the checks after these say in it
@@ -6764,6 +6768,34 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     b.until(page, &format!("!!{}", row(&theirs)), wait);
     let own_chat_items = items_of(b, chat)?;
     let shared_items = items_of(b, &theirs)?;
+    // connectors with labels of their own (no `-telegram`), each bound as
+    // their agent's door: its reach says so, whatever its label, in the
+    // row's ⋯ and the open chat's
+    let mut connectors = vec![];
+    let mut connector_items = serde_json::Map::new();
+    for (template, label, title) in [("telegram", "home-desk", "Help desk"), ("simplex", "home-line", "Phone line")] {
+        let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": template, "title": title })), &[])?;
+        let name = r.body["name"].as_str().unwrap_or_default().to_string();
+        let linked = shell(api, me.session, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": main })), &[])?;
+        anyhow::ensure!(r.status == 200 && linked.status == 200, "{title}, a {template} connector, bound as their agent's door: {r} {linked}");
+        connectors.push(name.clone());
+        b.until(page, &format!("!!{}", row(&name)), wait);
+        let reach = own_row_of(api, me.session, &name)["sharing"]["reach"].clone();
+        let in_row = items_of(b, &name)?;
+        open_row(b, page, &name, wait)?;
+        b.click(page, "#chat-options")?;
+        b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').querySelectorAll('button').length > 0", wait);
+        let in_chat = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
+        b.press(page, "Escape", false)?;
+        b.until(page, "document.getElementById('menu').hidden", wait);
+        connector_items.insert(template.to_string(), json!({ "reach": reach, "row": in_row, "chat": in_chat }));
+    }
+    open_row(b, page, chat, wait)?;
+    s.ok(
+        "FIN-722: a Telegram and a SimpleX connector, each with a label of its own and bound as their agent's door, offer no Delete in their row's ⋯ nor the open chat's",
+        connector_items.len() == 2 && connector_items.values().all(|c| c["reach"] == true && !strings(&c["row"]).iter().any(|i| i == "Delete…") && !strings(&c["chat"]).iter().any(|i| i == "Delete…") && !strings(&c["row"]).is_empty() && !strings(&c["chat"]).is_empty()),
+        Value::Object(connector_items.clone()),
+    );
     let zinnia_items = items_of(b, &zinnia)?;
     let asked = row_menu(b, &zinnia)?
         && menu_item(b, page, "Delete…")?
@@ -6787,7 +6819,28 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         json!({ "own chat": own_chat_items, "shared": shared_items, "zinnia": zinnia_items, "asked": asked, "gone": gone, "status": status.status, "unlisted": unlisted, "answers": answers }),
     );
 
-    // the open chat, deleted from its own ⋯: another opens in its place
+    // the open chat, deleted from its own ⋯: another opens in its place, one
+    // the list shows; an agents' pair chat (no row), newer, is passed over
+    let pair_label = pair_label(label_of(&main), label_of(reader));
+    let listed = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
+    let found = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == "chat" && f["name"].as_str().map(label_of) == Some(pair_label.as_str())).and_then(|f| f["name"].as_str().map(str::to_string)));
+    let made_pair = found.is_none();
+    let pair = match found {
+        Some(name) => name,
+        None => {
+            let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": pair_label, "template": "chat" })), &[])?;
+            let name = r.body["name"].as_str().unwrap_or_default().to_string();
+            for id in [first_id.as_str(), reader_id] {
+                let joined = shell(api, me.session, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })), &[])?;
+                anyhow::ensure!(r.status == 200 && joined.status == 200, "their two agents' pair chat: {r} {joined}");
+            }
+            name
+        }
+    };
+    let r = said(&pair, "home-pair-1", "a newer pair chat")?;
+    let newest = r.status == 200
+        && s.eventually(wait, || own_row_of(api, me.session, &pair)["preview"].as_str().is_some_and(|p| p.contains("a newer pair chat")))
+        && b.until(page, &format!("!{}", row(&pair)), wait);
     let lily = names[4].clone();
     open_row(b, page, &lily, wait)?;
     b.click(page, "#chat-options")?;
@@ -6797,10 +6850,11 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     let moved = offered
         && b.until(page, &format!("!document.getElementById('delete-chat-dialog').open && !{} && (({open_now}) ?? {}) !== {} && !!document.querySelector('#chats [data-key=\"chat:' + ({open_now}) + '\"]') && document.getElementById('chat-title').textContent !== 'Lily' && {settled}", row(&lily), js(&lily), js(&lily)), wait);
     let _ = b.screenshot(page, &shots.join("desktop-deleted-open-chat.png"));
+    let opened = b.eval(page, open_now)?;
     s.ok(
-        "FIN-722: the open chat, deleted from its own ⋯, leaves the list and another chat of theirs opens in its place",
-        moved && shell(api, me.session, "GET", &format!("/api/f/{lily}/status"), None, &[])?.status == 404,
-        json!({ "offered": offered, "open": b.eval(page, open_now)?, "title": b.eval(page, "document.getElementById('chat-title').textContent")? }),
+        "FIN-722: the open chat, deleted from its own ⋯, leaves the list and another chat of theirs the list shows opens in its place, not their agents' newer pair chat",
+        newest && moved && opened != json!(pair) && shell(api, me.session, "GET", &format!("/api/f/{lily}/status"), None, &[])?.status == 404,
+        json!({ "offered": offered, "newest": newest, "pair": pair, "open": opened, "title": b.eval(page, "document.getElementById('chat-title').textContent")? }),
     );
 
     // as they were: nothing pinned, the chats made here and the shared one gone
@@ -6811,6 +6865,9 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
     }
     api.signed(&other, "DELETE", &format!("/api/f/{theirs}"), None)?;
+    for name in connectors.iter().chain(made_pair.then_some(&pair)) {
+        shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
+    }
     anyhow::ensure!(b.until(page, &format!("{} && {settled}", names.iter().chain([&theirs]).map(|n| format!("!{}", row(n))).collect::<Vec<_>>().join(" && ")), wait), "the chats made here gone from the list");
     if was_open.is_empty() {
         return Ok(());
@@ -6822,6 +6879,18 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
 fn unread_of(api: &Api, session: &str, chat: &str) -> i64 {
     let r = shell(api, session, "GET", "/api/fragments", None, &[]);
     r.ok().and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat).map(|f| f["unread"].as_i64().unwrap_or(0)))).unwrap_or(-1)
+}
+
+/// Two agents' pair chat's label, as threads.js `pairLabel` makes it: their
+/// labels in order, joined by `-`, each cut to fit when both do not.
+fn pair_label(a: &str, b: &str) -> String {
+    const ROOM: usize = 39;
+    let (x, y) = if a <= b { (a, b) } else { (b, a) };
+    if x.len() + 1 + y.len() <= ROOM {
+        return format!("{x}-{y}");
+    }
+    let cut = |l: &str| l[..l.len().min((ROOM - 1) >> 1)].trim_end_matches('-').to_string();
+    format!("{}-{}", cut(x), cut(y))
 }
 
 /// The fragment of the chat the shell shows (its frame not hidden).

@@ -1269,15 +1269,18 @@ async function setPinned(name, pinned) {
 // ---- deleting a chat (FIN-722): the owner's `DELETE /api/f/{name}`, gone
 // for everyone in it. Offered on a chat of theirs alone, never one someone
 // shared with them, nor one an agent of theirs needs: its own chat
-// (`agentsOwnChat`), or a connector's (`connectorLabel`'s, its door's:
-// Settings removes it). An agent's home is one of those two (connections.js
-// `homeChatOf`), so this is known from the list alone, before its home is
+// (`agentsOwnChat`), a connector's (`connectorLabel`'s, its door's:
+// Settings removes it), or any chat with reach (its row's `sharing.reach`:
+// it holds a key or is bound as a door, whatever its label; the Apps page
+// and Settings manage those), nor an agents' pair chat (`threads.isPair`,
+// which the list never shows). An agent's home is one of those (connections.js
+// `homeChatOf`), so this is known from the list alone, before any door is
 // read. Asked once more in the shell's dialog, which names it, and asked
 // again as it is confirmed. ----
 const DOOR_CHAT = new RegExp(`-(?:${[TELEGRAM.door, SIMPLEX.door].join("|")})(?:-\\d+)?$`);
 function deleteItems(name) {
   const f = byName(name);
-  if (!f || f.kind !== "chat" || !own(f) || DOOR_CHAT.test(labelOf(name))) return [];
+  if (!f || f.kind !== "chat" || !own(f) || f.sharing?.reach === true || DOOR_CHAT.test(labelOf(name)) || threads.isPair(f)) return [];
   if (state.fragments.some((a) => a.kind === "agent" && own(a) && agentsOwnChat(a.name)?.name === name)) return [];
   return [{ icon: "trash", text: "Delete…", onClick: () => askDelete(name) }];
 }
@@ -1316,9 +1319,10 @@ $("delete-chat-form").onsubmit = async (e) => {
     for (const id of ["delete-chat-go", "delete-chat-cancel"]) $(id).disabled = false;
   }
   deleteDialog.close();
-  // the open chat, deleted, gives its place to another: the newest shown,
-  // else the newest archived one
-  const others = chats().filter((f) => f.name !== name);
+  // the open chat, deleted, gives its place to another the list shows: the
+  // newest shown, else the newest archived one; never an agents' pair chat,
+  // which has no row
+  const others = chats().filter((f) => f.name !== name && !threads.isPair(f));
   const newest = (list) => [...list].sort(newestChat)[0];
   const next = (newest(shown(others)) ?? newest(others))?.name ?? null;
   if (state.current === name) {
