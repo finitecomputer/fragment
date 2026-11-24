@@ -266,6 +266,16 @@ impl RegistryCell {
         Ok(self.row::<Row>("SELECT person FROM org_payers WHERE org = ?", vec![org.into()])?.map(|r| r.person))
     }
 
+    /// The customer `buyer`'s Checkout for `org` is made on: the org's
+    /// own only for its last payer (`fragment_core::stripe::checkout_customer`).
+    fn payers_customer(&self, org: &str, buyer: &str) -> CellResult<Option<String>> {
+        let payer = self.last_payer(org)?;
+        let customer = self.billing_row(org)?.and_then(|r| r.customer);
+        let chosen = fragment_core::stripe::checkout_customer(buyer, payer.as_deref(), customer.as_deref()).map(str::to_string);
+        assert!(chosen.is_none() || payer.as_deref() == Some(buyer), "only the org's last payer buys on its customer");
+        Ok(chosen)
+    }
+
     /// `person`'s Checkout made `org`'s subscription: they pay for it.
     fn set_payer(&self, org: &str, person: &str, subscription: &str) -> CellResult<()> {
         self.exec(
@@ -322,10 +332,7 @@ impl RegistryCell {
                 }
                 // the org's customer is its last payer's: anyone else buys on
                 // one of their own, which the org then keeps
-                let customer = match self.last_payer(&o.id)?.as_deref() == Some(who.id.as_str()) {
-                    true => self.billing_row(&o.id)?.and_then(|r| r.customer),
-                    false => None,
-                };
+                let customer = self.payers_customer(&o.id, &who.id)?;
                 CheckoutPlan { person: who.id.clone(), email, org: o.id, org_name: o.name, customer, kind, quantity, trial, hold: None }
             }
         };
@@ -354,7 +361,10 @@ impl RegistryCell {
             (Some(_), _) => return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins buy credit for its members")),
         };
         let o = self.stored_org(&org)?;
-        let customer = self.billing_row(&org)?.and_then(|r| r.customer);
+        // as a seat's Checkout: the org's customer is its last payer's,
+        // and anyone else's pack is made on a customer of their own (the
+        // credit is the metadata's person's either way: billing.rs `pack_paid`)
+        let customer = self.payers_customer(&org, &who.id)?;
         Ok(PackPlan { buyer: who.id, person, email, org, org_name: o.name, customer })
     }
 

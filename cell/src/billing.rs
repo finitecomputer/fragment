@@ -197,7 +197,8 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     if stripe_cfg.tax {
         form = form.push("automatic_tax[enabled]", "true");
     }
-    // the org's customer when it has paid; a comped org's pack makes none of its own
+    // the org's customer for its last payer; anyone else's, or a comped
+    // org's, is made on the buyer's email (registry/billing.rs `pack_begin`)
     form = billed(form, plan.customer.as_deref(), &plan.email, stripe_cfg.tax);
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-pack-{}-{attempt}", plan.org)).await?;
