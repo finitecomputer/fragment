@@ -803,7 +803,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `sha256` is its blob. A blessed template's data from the release is listed beneath (`release: true`) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); with none of its own there, a blessed template's data file |
-| `PUT /api/f/{name}/blobs/{sha256}` | editor; on a hosted door, also its bound agent acting as itself (its replies' files: An agent's doors) | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
+| `PUT /api/f/{name}/blobs/{sha256}` | editor; on a hosted door, also its bound agent acting as itself (its replies' files: An agent's doors; `fragment_core::permit` rule 5) | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges 206) |
 | `GET /api/f/{name}/card` | viewer | → the preview card: a 1280×800 JPEG, `ETag` its SHA-256, `private, no-cache`, `X-Fragment-Ref` the live it shows (an upload has none); `If-None-Match` 304; none yet 404 (Cards) |
 | `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again (Cards). A chat, agent or members-only fragment, or nothing deployed, 400; an owner who pays for nothing 402; within `card::AGAIN_EVERY_MS` of the last ask, 429 |
@@ -2359,10 +2359,11 @@ nor speak through one (`fragment_core::door`):
   (docs/chat-records.md). The binding is the connector's, so several
   connectors may each be a door of one agent; an unlink leaves the agent
   a viewer. Its bound agent, acting as itself, uploads the files its
-  replies there carry (`PUT /api/f/{name}/blobs/{sha256}`), which its
-  door sends on where it can (a SimpleX door's) and says are in the chat
-  where it cannot (Telegram's); it is a viewer there for all else. Its
-  rules are cell/src/doors.rs's.
+  replies there carry (`PUT /api/f/{name}/blobs/{sha256}`: rule 5's one
+  exception, `fragment_core::permit`), which its door sends on where it
+  can (a SimpleX door's) and says are in the chat where it cannot
+  (Telegram's); it is a viewer there for all else. Its rules are
+  cell/src/doors.rs's.
 - **A SimpleX connector's door** (`simplex`) is the platform's SimpleX
   door of the connector's life (cell/door.mjs): named for its name and
   its npub's digits (`fragment_core::door::door_id`), as its repo is, so

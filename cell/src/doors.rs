@@ -168,16 +168,6 @@ impl FragmentCell {
         Ok(self.open_binding()?.map(|b| (npub::display(&b.identity), b.door)))
     }
 
-    /// Whether `caller` is the agent this connector is an open door of,
-    /// acting as itself: a viewer here (rule 5 of `fragment_core::permit`),
-    /// it uploads the files its replies here carry (blobs.rs `put_blob`),
-    /// which its door sends on (a SimpleX connector's: templates/simplex
-    /// `mirror`), as its words go.
-    pub(crate) fn door_agent(&self, caller: &Caller) -> CellResult<bool> {
-        let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_none() && s.kind == IdentityKind::Agent) else { return Ok(false) };
-        Ok(self.open_binding()?.is_some_and(|b| npub::display(&b.identity) == npub::display(&signed.id)))
-    }
-
     /// What this fragment may relay now (`effects::check_record`).
     pub(crate) fn hosted_door(&self) -> CellResult<Option<Hosted>> {
         let owner = npub::display(&self.must(MetaKey::Owner)?);

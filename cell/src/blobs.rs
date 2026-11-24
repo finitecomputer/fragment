@@ -103,11 +103,7 @@ impl FragmentCell {
     }
 
     async fn store_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
-        // a connector's own agent, a viewer there, uploads the files its
-        // replies there carry (doors.rs `door_agent`)
-        if !self.door_agent(caller)? {
-            self.require(caller, false, Role::Editor)?;
-        }
+        crate::fragment::decide(self.visibility()?, self.standing(caller, false)?, fragment_core::permit::Action::Upload)?;
         self.writable().await?;
 
         check_sha(sha)?;
