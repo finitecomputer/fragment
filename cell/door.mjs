@@ -164,13 +164,16 @@ export class SimplexDoor extends DurableObject {
       if (this.#over) return refusal(410, "over", "this door's connector is gone: it never starts again");
       // ended, only a start makes it again (its connector's connect, the
       // lever's start); anything else is refused, its storage left empty
-      const starts = (url.pathname === "/job/connect" && request.method === "POST") || lever?.op === "start";
+      // a save given (`/door/import`) begins it too, as a start would
+      const imports = url.pathname === "/door/import" && request.method === "PUT";
+      const starts = (url.pathname === "/job/connect" && request.method === "POST") || lever?.op === "start" || lever?.op === "import" || imports;
       if (this.#ended && !starts) return refusal(410, "ended", "this door has ended: its connector's connect starts it again");
       if (this.#ended) {
         this.#migrate();
         this.#ended = false;
       }
       if (lever) return await this.#lever(lever);
+      if (imports) return await this.#import(request);
       if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore(request);
       if (url.pathname === "/egress/save" && request.method === "PUT") return await this.#save(request, url);
       if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await bounded(request));
@@ -258,6 +261,54 @@ export class SimplexDoor extends DurableObject {
     await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
     await this.#ensure("asked");
     return json({ started: this.#door().started, door });
+  }
+
+  // A door that never saved begins from a save it is given (a computer's
+  // link handed over: the platform's, `/door/import`, its door and its
+  // agent's name in the platform's headers): its file under its prefix and
+  // its row, as though it had saved it, its mark none (its link in step: the
+  // core that wrote it ended whole). It does not start: its connector's
+  // connect starts it, restoring this save. Given again (its SHA-256 the
+  // same), the same answer; a door that saved, or was given another, never
+  // takes one (409), so no link it holds is written over.
+  async #import(request) {
+    const door = request.headers.get(DOOR_NAME_HEADER);
+    const agent = request.headers.get("x-door-agent");
+    const sha = request.headers.get(FILE_SHA_HEADER);
+    const length = Number(request.headers.get("content-length"));
+    const refuse = async (status, error, message) => (await request.body?.cancel(), refusal(status, error, message));
+    if (!nameOk(door) || typeof agent !== "string" || !agent || agent.length > 64 || !shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
+      return refuse(400, "invalid", "an import names its door, its agent and its save's SHA-256, and says its length");
+    }
+    const d = this.#door();
+    if (d && d.door !== door) return refuse(409, "another_door", `this door is ${d.door}`);
+    const had = this.ctx.storage.sql.exec("SELECT sha FROM imported").toArray()[0];
+    if (had?.sha === sha) return (await request.body.cancel(), json({ imported: sha, again: true }));
+    if (had) return refuse(409, "imported", "this door was given another save");
+    if (d && (d.saved > 0 || d.started > 0)) return refuse(409, "has_saves", "this door has started, or saved: it takes no save given");
+    const key = saveKey(door, 0, 1);
+    if (this.#uploading.has(key)) return refuse(409, "taken", "a save is being given");
+    this.#uploading.add(key);
+    const ends = this.#ends;
+    try {
+      const { readable, writable } = new FixedLengthStream(length);
+      const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      if (this.#ends !== ends) {
+        await this.env.BLOBS.delete(key);
+        return refusal(410, "ended", "this door ended as its save came");
+      }
+      // generation 0: no life of its own is numbered so, nor will be
+      this.ctx.storage.transactionSync(() => {
+        if (!this.#door()) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
+        this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (0, 1, 0, ?, ?, 0)", put.size, Date.now());
+        this.ctx.storage.sql.exec("UPDATE door SET saved = 1 WHERE id = 1");
+        this.ctx.storage.sql.exec("INSERT INTO imported (sha, at) VALUES (?, ?)", sha, Date.now());
+      });
+    } finally {
+      this.#uploading.delete(key);
+    }
+    this.#log("door.imported", { sha, bytes: length });
+    return json({ imported: sha });
   }
 
   // What it is: its row, its saves, its deliveries (and how many its
@@ -728,6 +779,13 @@ export class SimplexDoor extends DurableObject {
         return this.#ask(`/${a.op}`);
       case "reply":
         return await this.#reply({ key: a.key, text: a.text, files: a.files });
+      // a save to begin from, as a computer's link handed over gives one
+      // (`bytes`, base64, a door's packed save): its SHA-256
+      case "import": {
+        const bytes = Uint8Array.from(atob(String(a.bytes ?? "")), (c) => c.charCodeAt(0));
+        const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+        return this.#import(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "content-length": String(bytes.length) }, body: bytes }));
+      }
       // a file as its runner gives one (`bytes`, base64), for a delivery
       // or a reply to name: its SHA-256; or (`sha`) what the door holds
       // under that name, hashed again: the e2e's look at its bytes

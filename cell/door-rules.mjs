@@ -66,6 +66,9 @@ export const STEPS = [
   // its runner's give (`given`) until the delivery naming it is made; each
   // once, so an answer said again releases nothing more
   "CREATE TABLE uses (sha TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (sha, owner))",
+  // the save it was given to begin from (`/door/import`), by its SHA-256:
+  // at most one, ever
+  "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL)",
 ];
 
 // The steps a schema at `version` has yet to take, in order.

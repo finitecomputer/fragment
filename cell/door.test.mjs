@@ -760,3 +760,41 @@ test("the e2e's lever gives a file as its runner does, and hashes again what it 
   const looked = await (await d.lever("file", { door: DOOR, sha: sha256 })).json();
   assert.deepEqual(looked, { sha256, size: 11, type: "audio/mp4" });
 });
+
+test("a door that never saved begins from a save it is given, and starts only when its connector connects", async () => {
+  const d = door();
+  const given = await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("a packed save") });
+  assert.equal(given.status, 200, await given.clone().text());
+  const { imported } = await given.json();
+  assert.match(imported, /^[0-9a-f]{64}$/);
+  assert.deepEqual(d.row(), { started: 0, generation: 0, saved: 1, stopped: null }, "its row, as though it had saved");
+  assert.deepEqual(d.saves(), [{ id: "0-1", unreadable: 0 }]);
+  assert.deepEqual(d.prefixed(), [`doors/${DOOR}/saves/0-1`]);
+  assert.deepEqual(d.c.starts, [], "not started: its connector's connect starts it");
+  await d.connect();
+  assert.equal(d.c.starts.length, 1, "its connector's connect starts it");
+  const r = await d.restore(d.row().started);
+  assert.deepEqual([r.status, r.headers.get("x-door-save"), r.headers.get("x-door-behind"), await r.text()], [200, "0-1", "0", "a packed save"], "its runner restores the save it was given, in step");
+});
+
+test("a save given again is answered the same; another, or one to a door that saved, is refused; a door over takes none", async () => {
+  const d = door();
+  const give = (bytes, name = DOOR) => d.lever("import", { door: name, agent: "Juniper", bytes: btoa(bytes) });
+  assert.equal((await give("first")).status, 200);
+  assert.equal((await (await give("first")).json()).again, true, "given again: the same");
+  const other = await give("second");
+  assert.deepEqual([other.status, (await other.json()).error], [409, "imported"], "another save: refused, the first kept");
+  assert.deepEqual(d.saves(), [{ id: "0-1", unreadable: 0 }]);
+  // a door that started and saved of its own
+  const e = door();
+  await e.connect();
+  const life1 = life(await e.restore(e.row().started));
+  await e.save(life1, 1);
+  const late = await e.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("late") });
+  assert.deepEqual([late.status, (await late.json()).error], [409, "has_saves"], "a door that saved takes none");
+  // a door whose connector's life is over
+  const f = door();
+  await f.connect();
+  await f.end(DOOR, true);
+  assert.equal((await f.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("x") })).status, 410);
+});
