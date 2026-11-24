@@ -5097,7 +5097,9 @@ async fn teammates_ask_each_other() {
     within(&fake, &pair, &c, 30_000, "maple's reply in their chat", |w| !reply(w, &pair, &mturn).is_empty()).await;
     let (manswer, a) =fake.with(|w| (reply(w, &pair, &mturn), answers_of(w, "juniper", "ping from juniper")[0].clone()));
     assert!(manswer.contains("ping from juniper"), "maple answered in their chat: {manswer}");
-    assert_eq!((&a["principal"], &a["body"]["name"], &a["body"]["outcome"], &a["body"]["turn"]), (&json!("npub1juniper"), &json!("Maple"), &json!("idle"), &json!(mturn)));
+    // signed by maple, who answered (acting for their owner on juniper's
+    // tasks), on one computer as on two: docs/chat-records.md, "An ask's answer"
+    assert_eq!((&a["principal"], &a["body"]["name"], &a["body"]["outcome"], &a["body"]["turn"]), (&json!("npub1maple"), &json!("Maple"), &json!("idle"), &json!(mturn)));
     let woken = fake.with(|w| w.bodies(&jchat, "work", "turn.start").into_iter().find(|b| b["turn"] == woke("juniper", &a).as_str())).expect("its start");
     assert_eq!(woken["asker"], "npub1maple", "asked as the agent that answered");
     let told_as = handed(&model, "juniper--k3x9", "Maple answered your question").first().map(|m| m.body["messages"].as_array().and_then(|ms| ms.iter().rev().find(|x| x["role"] == "user")).map(content_text).unwrap_or_default()).unwrap_or_default();
