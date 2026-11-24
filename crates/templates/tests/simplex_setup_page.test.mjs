@@ -57,9 +57,13 @@ async function opened(role = "owner") {
   globalThis.__fragment = {
     me: async () => ({ role, platform: "https://platform.example" }),
     call: async (op) => (w.calls.push(op), { run: w.calls.length, status: "queued" }),
-    live: (_op, _input, onResult) => {
+    live: (_op, _input, onResult, onError) => {
       w.push = async (s) => {
         onResult(s);
+        await settled();
+      };
+      w.lose = async () => {
+        onError(new Error("its socket closed"));
         await settled();
       };
     },
@@ -89,7 +93,7 @@ const NEW = { connected: false, invitation: null, linked: null, why: null };
 const CONNECTED = { ...NEW, connected: true };
 const invitation = (at) => ({ ...CONNECTED, invitation: { link: "simplex:/invitation#/?v=2-7&smp=s", short: "https://smp.example/i#short", qr: { size: 21, dark: "10".repeat(220) + "1" }, at } });
 const LINKED = { ...CONNECTED, linked: { name: "Robin", at: 1 } };
-const failed = (at, code = "starting") => ({ text: `the door answered 503: ${code}`, code, at });
+const failed = (at, code = "starting", step = null) => ({ text: `the door answered 503: ${code}`, code, at, step });
 
 test("opened new, it starts its door, asks a link, shows its link and code, then whom it linked; unlinked, it waits for Link", async () => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
@@ -131,17 +135,53 @@ test("a step whose job never answers is said failed after its wait, with Try aga
   }
 });
 
-test("Try again after a failed unlink unlinks again, never asking a link", async () => {
+test("a step answered after its wait still counts: the page goes on as it would have", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  try {
+    const w = await opened();
+    await w.push(NEW);
+    mock.timers.tick(3 * 60_000);
+    await settled();
+    assert.equal(w.said().line, "Couldn't reach SimpleX. Try again.");
+    // a door's slow first start: its connect answers late
+    await w.push(CONNECTED);
+    assert.deepEqual([w.calls, w.said().line], [["connect", "link"], "Making a link…"]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("Try again after a failed unlink unlinks again, once, never asking a link", async () => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
   try {
     const w = await opened();
     await w.push(LINKED);
     await w.press("Unlink");
     // its unlink asked (its link let go in its state), its door refusing it
-    await w.push({ ...CONNECTED, why: failed(Date.now()) });
+    await w.push({ ...CONNECTED, why: failed(Date.now(), "starting", "unlink") });
     assert.deepEqual(w.said(), { line: "Couldn't reach SimpleX. Try again.", buttons: ["Try again"], qr: false });
     await w.press("Try again");
     assert.deepEqual(w.calls, ["unlink", "unlink"]);
+    // the failure it tries again stays in its state until the job asks:
+    // no answer to this try, so no Try again to press twice
+    assert.deepEqual(w.said(), { line: "Unlinking…", buttons: [], qr: false });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("Try again repeats the step its failure names, whichever tab asked it", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  try {
+    const w = await opened();
+    await w.push(NEW);
+    await w.push(CONNECTED);
+    await w.push(invitation(Date.now()));
+    assert.deepEqual(w.calls, ["connect", "link"]);
+    // another tab's unlink, refused by its door
+    await w.push({ ...CONNECTED, why: failed(Date.now(), "starting", "unlink") });
+    await w.press("Try again");
+    assert.deepEqual(w.calls, ["connect", "link", "unlink"], "its failed unlink again, not this tab's link");
   } finally {
     mock.timers.reset();
   }
@@ -183,6 +223,16 @@ test("an invitation left open is looked at once as its link's watch ends, and an
   } finally {
     mock.timers.reset();
   }
+});
+
+test("its live state lost is said, with nothing to press, until it answers again", async () => {
+  const w = await opened();
+  await w.push(LINKED);
+  await w.lose();
+  assert.deepEqual(w.said(), { line: "Couldn't reach SimpleX.", buttons: [], qr: false });
+  await w.push(LINKED);
+  assert.deepEqual(w.said(), { line: "Linked with Robin.", buttons: ["Unlink"], qr: false });
+  assert.deepEqual(w.calls, [], "nothing asked of it meanwhile");
 });
 
 test("a deployment that runs no doors says so, with nothing to try; a viewer is told it is its owner's", async () => {

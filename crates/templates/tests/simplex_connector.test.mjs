@@ -115,7 +115,7 @@ test("connect gives the door the inbox's secret as a placeholder the platform fi
   assert.deepEqual(w.asked[0].body, { name: "Juniper" });
   const none = world({ connect: [[409, { error: "no_doors", message: "this deployment runs no doors (no container for them)" }]] });
   assert.deepEqual(await none.app.connect({ name: "Juniper" }, none.job("call")), { connected: false, error: "the door answered 409: this deployment runs no doors (no container for them)" });
-  assert.deepEqual([none.app.state().why.text, none.app.state().why.code], ["the door answered 409: this deployment runs no doors (no container for them)", "no_doors"], "said to its setup page, with the door's code");
+  assert.deepEqual([none.app.state().why.text, none.app.state().why.code, none.app.state().why.step], ["the door answered 409: this deployment runs no doors (no container for them)", "no_doors", "connect"], "said to its setup page, with the door's code and its step");
 });
 
 test("the invitation for its owner's app is kept for its owner's query alone, never in a run's output", async () => {
@@ -190,6 +190,16 @@ test("a door linked already keeps whom it linked; check looks once, for its own 
   assert.equal(late.app.state().linked, null);
 });
 
+test("a check that reads an unlink's number keeps no link, the door not yet unlinked", async () => {
+  const c = world({ state: [runner({ phase: "linked", name: "Robin" })] });
+  c.app.asking({ unlink: true });
+  assert.deepEqual(await c.app.check({}, c.job("call")), { linked: false, why: "unlinked since" });
+  assert.equal(c.app.state().linked, null);
+  // a link asked after it is kept again
+  const { n } = c.app.asking({});
+  assert.deepEqual(c.app.linked({ n, name: "Robin" }), { kept: true });
+});
+
 test("a step that fails says why to its setup page, until another is asked", async () => {
   const w = world({ link: [[409, { message: "not running" }], [202, {}]], state: Array(30).fill(runner({ phase: "asking" })) });
   assert.deepEqual(await w.app.link({}, w.job("call")), { invited: false, why: "the door answered 409: not running" });
@@ -198,7 +208,8 @@ test("a step that fails says why to its setup page, until another is asked", asy
   assert.equal(w.app.state().why.text, "no invitation yet", "the newer step's");
   const u = world({ unlink: [[503, { error: "starting", message: "starting" }]] });
   assert.deepEqual(await u.app.unlink({}, u.job("call")), { unlinked: false });
-  assert.deepEqual([u.app.state().why.text, u.app.state().why.code], ["the door answered 503: starting", "starting"]);
+  assert.deepEqual([u.app.state().why.text, u.app.state().why.code, u.app.state().why.step], ["the door answered 503: starting", "starting", "unlink"], "and which step failed, for its page to try again");
+  assert.equal(w.app.state().why.step, "link");
   u.app.asking();
   assert.equal(u.app.state().why, null, "let go as another step is asked");
   // a failure of a link asked before the newest is no one's

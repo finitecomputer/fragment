@@ -23,9 +23,10 @@ const JSON_TYPE = { "content-type": "application/json" };
 // how long `link` watches for their app (app.mjs `LINK_WAITS_MS`): an
 // invitation still unanswered then is looked at once (`check`)
 const WATCH_MS = 8.5 * 60_000;
-// how long a step asked here waits for `state` to answer it: a job that
-// failed outright writes nothing (a connect whose door never came up),
-// and is said failed after it, with Try again
+// how long a step asked here waits for `state` to answer it before it is
+// said failed, with Try again: a job that failed outright writes nothing
+// (a connect whose door never came up). Its answer, if it comes later,
+// still counts (a door's first start may be slow)
 const STEP_WAIT_MS = 120_000;
 // a QR code's quiet zone, in modules, each side
 const QUIET = 4;
@@ -97,6 +98,8 @@ export async function setup(root) {
   let checking = null;
   // what failed here, outside `state` (its secret not set, a call refused)
   let error = "";
+  // its live `state` lost (its socket down), until it answers again
+  let lost = false;
   // its door's binding, read once: unread is no word of it either way
   const bound = platformJson("./__door").then((d) => d.bound, () => undefined);
   let state = null;
@@ -104,19 +107,20 @@ export async function setup(root) {
   const ask = async (step, line, fn) => {
     took.add(step);
     last = step;
-    const asked = (waiting = { step, line, why: state?.why?.at ?? null, invitation: state?.invitation?.at ?? null });
+    const asked = (waiting = { step, line, why: state?.why?.at ?? null, invitation: state?.invitation?.at ?? null, late: false });
     error = "";
     clearTimeout(waited);
     waited = setTimeout(() => {
       if (waiting !== asked) return;
-      waiting = null;
-      error = "Couldn't reach SimpleX. Try again.";
+      asked.late = true;
       draw();
     }, STEP_WAIT_MS);
     draw();
     try {
       await fn();
     } catch {
+      // refused before its job began: only this ask's wait ends
+      if (waiting !== asked) return;
       waiting = null;
       error = "Couldn't reach SimpleX. Try again.";
     }
@@ -133,10 +137,11 @@ export async function setup(root) {
   // unlinked, it waits for Link
   const unlink = () => (took.add("link"), ask("unlink", "Unlinking…", () => fragment.call("unlink")));
 
-  // whether `state` answers the step under way
+  // whether `state` answers the step under way: a failure newer than the
+  // one shown when it was asked, or its own outcome
   const answers = (s) => {
     if (!waiting) return true;
-    if (s.why && s.why.at !== waiting.why) return true;
+    if (s.why) return s.why.at !== waiting.why;
     if (waiting.step === "connect") return s.connected;
     if (waiting.step === "link") return !!((s.invitation && s.invitation.at !== waiting.invitation) || s.linked);
     return !s.linked && !s.invitation;
@@ -162,9 +167,14 @@ export async function setup(root) {
   async function draw() {
     if (!state) return;
     const s = state;
+    if (lost) return say(el("p", "setup-error", "Couldn't reach SimpleX."));
     if (waiting && answers(s)) waiting = null;
-    // the step that failed here, again; one another tab asked, the next due
-    const again = button("Try again", "", () => (steps[last] ?? (s.connected ? link : connect))());
+    // the step its failure names, again (whichever tab asked it); one that
+    // failed here before its job began, again; else the next due
+    const again = button("Try again", "", () => (steps[s.why?.step] ?? steps[last] ?? (s.connected ? link : connect))());
+    // a step still unanswered past its wait: said failed, its answer
+    // still taken when it comes
+    if (waiting?.late) return say(el("p", "setup-error", "Couldn't reach SimpleX. Try again."), row(again));
     if (waiting) return say(el("p", "setup-now", waiting.line));
     if (error) return say(el("p", "setup-error", error), row(again));
     if (s.why) return say(el("p", "setup-error", failure(s.why)), ...(s.why.code === "no_doors" ? [] : [row(again)]));
@@ -201,12 +211,14 @@ export async function setup(root) {
     (s) => {
       if (!state && (s.linked || s.invitation)) took.add("link");
       state = s;
+      lost = false;
       draw().then(() => next(s));
     },
+    // read again by itself as its socket comes back: nothing to press
     () => {
-      error = "Couldn't reach SimpleX. Try again.";
+      lost = true;
       if (state) draw();
-      else say(el("p", "setup-error", error));
+      else say(el("p", "setup-error", "Couldn't reach SimpleX."));
     },
   );
 }

@@ -54,6 +54,8 @@ const INVITE_LOOKS_MAX = 30;
 const LINK_WAITS_MS = [...Array(30).fill(2_000), ...Array(24).fill(5_000), ...Array(20).fill(15_000)];
 // A QR code's side, in modules, at most (version 40's).
 const QR_SIZE_MAX = 177;
+// The steps a failure names, the one its setup page tries again.
+const STEPS = ["connect", "link", "unlink"];
 
 // An ask of its door, as its job's fetch: its status, and what it said.
 async function door(job, ask, body = {}, headers = {}) {
@@ -134,7 +136,7 @@ export class App extends DurableObject {
     const { status, said } = await door(job, "connect", { name }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
     if (status !== 200) {
       const error = answered(status, said);
-      await job.call("failed", { why: error, code: codeOf(said) });
+      await job.call("failed", { why: error, code: codeOf(said), step: "connect" });
       return { connected: false, error };
     }
     // its door, its life's: a delivery from any other is no one's here
@@ -149,11 +151,12 @@ export class App extends DurableObject {
     return { ok: true };
   }
 
-  // its owner's (its jobs'): why a step failed, until another is asked
-  // (`at`: which failure it is, one said again included)
-  failed({ n, why, code }) {
+  // its owner's (its jobs'): why a step failed, and which (`connect`,
+  // `link` or `unlink`, the one a setup page tries again), until another
+  // is asked (`at`: which failure it is, one said again included)
+  failed({ n, why, code, step }) {
     if (n !== undefined && this.get("asked") !== n) return { kept: false };
-    this.put("why", { text: String(why).slice(0, 300), code: typeof code === "string" ? code.slice(0, 40) : null, at: Date.now() });
+    this.put("why", { text: String(why).slice(0, 300), code: typeof code === "string" ? code.slice(0, 40) : null, at: Date.now(), step: STEPS.includes(step) ? step : null });
     return { kept: true };
   }
 
@@ -163,7 +166,7 @@ export class App extends DurableObject {
     const asked = await door(job, "link", { n });
     if (asked.status !== 202) {
       const why = answered(asked.status, asked.said);
-      await job.call("failed", { n, why, code: codeOf(asked.said) });
+      await job.call("failed", { n, why, code: codeOf(asked.said), step: "link" });
       return { invited: false, why };
     }
     let invitation = null;
@@ -175,7 +178,7 @@ export class App extends DurableObject {
       if (typeof runner.link === "string" && runner.link) invitation = runner;
     }
     if (!invitation) {
-      await job.call("failed", { n, why: "no invitation yet" });
+      await job.call("failed", { n, why: "no invitation yet", step: "link" });
       return { invited: false, why: "no invitation yet" };
     }
     const short = typeof invitation.short === "string" && invitation.short ? { short: invitation.short } : {};
@@ -211,10 +214,11 @@ export class App extends DurableObject {
 
   // its owner's (its link and unlink jobs'), never its agent's, a viewer
   // here: each link or unlink numbered, its invitation, its link and why
-  // a step failed let go
-  asking() {
+  // a step failed let go; an unlink's number is one no link is kept under
+  asking({ unlink } = {}) {
     const n = (this.get("asked") ?? 0) + 1;
     this.put("asked", n);
+    this.put("unlinking", unlink === true ? n : null);
     this.put("invitation", null);
     this.put("linked", null);
     this.put("why", null);
@@ -235,18 +239,20 @@ export class App extends DurableObject {
   }
 
   // whom link `n`'s invitation linked (their SimpleX name), kept only
-  // while no link or unlink was asked after it; its invitation is used
+  // while no link or unlink was asked after it, and never under an
+  // unlink's number (a `check` that read it while the door had yet to
+  // unlink); its invitation is used
   linked({ n, name }) {
-    if ((this.get("asked") ?? 0) !== n) return { kept: false };
+    if ((this.get("asked") ?? 0) !== n || this.get("unlinking") === n) return { kept: false };
     this.put("linked", { name: String(name ?? "").slice(0, 200), at: Date.now() });
     this.put("invitation", null);
     return { kept: true };
   }
 
   async unlink(_, job) {
-    const { n } = await job.call("asking", {});
+    const { n } = await job.call("asking", { unlink: true });
     const { status, said } = await door(job, "unlink", { n });
-    if (status !== 202) await job.call("failed", { n, why: answered(status, said), code: codeOf(said) });
+    if (status !== 202) await job.call("failed", { n, why: answered(status, said), code: codeOf(said), step: "unlink" });
     return { unlinked: status === 202 };
   }
 
