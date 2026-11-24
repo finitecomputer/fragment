@@ -1239,7 +1239,7 @@ async fn vouched(api: &Api, agent: &Agent, body: &Value, by: &str, chat: &str) -
 /// read that fails fails it, so the routine is read again, never sent
 /// elsewhere; but for a door's look that failed while its computer's link
 /// stands, which leaves the routine to that link's chat.
-l) -> Result<HomeChat, ApiError> {
+async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>, waited: bool) -> Result<HomeChat, ApiError> {
     let home = api.home(&agent.fragment).await?;
     let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
     let mine = api.fragments(&agent.fragment).await?;
@@ -1528,7 +1528,7 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                 // given up: it is its question's only delivery, so it is
                 // tried until the platform answers it.
                 let tries = if channel == records::TASKS { u32::MAX } else { limits::POST_TRIES_MAX };
-                let sent = post_attached(&api, &fragment, &agent, for_.as_deref(), channel, &id, body, &[], None, tries, stop.clone()).await.0;
+                let sent = post(&api, &fragment, &agent, for_.as_deref(), channel, &id, body, &[], None, tries, stop.clone()).await;
                 if sent.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id, kept: sent == Sent::Posted })).await;
                 }
@@ -1658,10 +1658,11 @@ impl Sent {
 /// A post, tried until the platform answers it, or `tries` times on a
 /// transport error, 429 or 5xx (a jittered backoff between: lesson 5), or
 /// refused at once. A relayed record is signed by its `door` at each try,
-/// its files' refs in it (simplex/door.rs).
+/// its files' refs in it (simplex/door.rs). `for_`: acting for that person
+/// (an answer on a teammate's own `tasks`: `Api::post_for`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
-    post_seq(api, fragment, agent, channel, id, body, files, door, tries, stop).await.0
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, for_: Option<&str>, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+    post_attached(api, fragment, agent, for_, channel, id, body, files, door, tries, stop).await.0
 }
 
 /// `post`, and the record's seq on its channel when `Posted`: what a
@@ -2560,7 +2561,7 @@ mod tests {
             };
             tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
             let api = Api::new(&format!("http://{addr}")).expect("an address");
-            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", None, records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
             assert_eq!(sent, want, "{status}");
             assert!(sent.ended());
             assert_eq!(sent.on_chat(), status == 200 || status == 409, "on the chat, ours or another life's: {status}");

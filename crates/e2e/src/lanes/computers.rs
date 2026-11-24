@@ -2069,6 +2069,106 @@ fn deleted_agent_leaves(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str,
     Ok(())
 }
 
+/// A computer per agent (2026-11-24): a person's agents on computers of
+/// their own. Each agent's own computer is made by its agent fragment's
+/// name, its id its key's, and runs that agent alone; their list shows each,
+/// the first made first. An ask from one to the other crosses computers:
+/// the asked agent's computer wakes, answers, and signs its answer on the
+/// asker's own `tasks`, which the asker's computer takes once its own
+/// question vouches for it. Deleted, an agent ends its own computer.
+/// Invalid: another's agent fragment, another agent's own computer, an
+/// unassign from an agent's own.
+fn own_computers(s: &mut Suite, api: &Api, scripted: bool, wake: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let stranger = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    // of kind `agent`, as the shell's are: its list row names its agent
+    const KIND_AGENT_JSON: &[u8] = br#"{ "kind": "agent", "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
+    let agent = |s: &mut Suite, label: &str| -> Result<(String, String)> {
+        let name = s.named(api, &owner, label)?;
+        let made = s.create(api, &owner, &name)?;
+        s.commit(&made, &[("fragment.json", Some(KIND_AGENT_JSON))]);
+        s.deploy(&made);
+        members_only(api, &owner, &name)?;
+        Ok((name, made["npub"].as_str().unwrap_or("").to_string()))
+    };
+    let (rowan, rowan_key) = agent(s, "rowan")?;
+    let (fern, fern_key) = agent(s, "fern")?;
+    let make = |who: &crate::Keys, of: &str| api.signed(who, "POST", "/api/computers", Some(&json!({ "agent": of })));
+    let r = make(&owner, &rowan)?;
+    let rowans = r.body["computer"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "an agent's own computer is made by its agent fragment's name, asleep, its id its key's",
+        r.status == 200 && rowans == fragment_core::computer::default_computer_of(&rowan_key) && r.body["phase"] == "asleep" && r.body["owner"] == owner_id.as_str(),
+        &r,
+    );
+    let again = make(&owner, &rowan)?;
+    let stolen = make(&stranger, &rowan)?;
+    s.ok("made again, the same one; no one else makes it", again.status == 200 && again.body["computer"] == rowans.as_str() && stolen.status == 403, json!({ "again": again.status, "stolen": stolen.to_string() }));
+    let ferns = make(&owner, &fern)?.body["computer"].as_str().unwrap_or("").to_string();
+    let assign = |computer: &str, of: &str| api.signed(&owner, "PUT", &format!("/api/computers/{computer}/agents/{of}"), Some(&json!({})));
+    let r = assign(&rowans, &fern)?;
+    s.ok("another agent's own computer takes no agent but its own", r.status == 403, &r);
+    let identity = |r: &crate::api::Reply| r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
+    let r = assign(&rowans, &rowan)?;
+    let rowan_id = identity(&r);
+    let f = assign(&ferns, &fern)?;
+    let fern_id = identity(&f);
+    s.ok(
+        "each agent runs on its own computer, alone",
+        r.status == 200 && f.status == 200 && rowan_id == rowan_key && fern_id == fern_key && r.body["agents"].as_array().map(Vec::len) == Some(1) && f.body["agents"].as_array().map(Vec::len) == Some(1),
+        json!({ "rowan": r.to_string(), "fern": f.to_string() }),
+    );
+    let listed = api.signed(&owner, "GET", "/api/computers", None)?;
+    let ids: Vec<&str> = listed.body["computers"].as_array().into_iter().flatten().filter_map(|c| c["computer"].as_str()).collect();
+    s.ok("their list shows each agent's computer, the first made first", listed.status == 200 && ids == [rowans.as_str(), ferns.as_str()], &listed);
+    let notices = api.signed(&owner, "GET", "/api/notices", None)?;
+    s.ok("their notices read every computer of theirs", notices.status == 200 && notices.body["notices"].is_array(), &notices);
+    let r = api.signed(&owner, "DELETE", &format!("/api/computers/{rowans}/agents/{rowan}"), None)?;
+    s.ok("an agent's own computer runs it until it is deleted: no unassign", r.status == 409, &r);
+
+    // an ask across two computers (docs/chat-records.md, "An ask")
+    let label = "an ask crosses computers: the asked agent's own computer wakes and answers, its answer signed by it on the asker's tasks, taken by the asker's computer once its question vouches for it, the hand-off counted";
+    if scripted {
+        let chat = s.named(api, &owner, "chat")?;
+        let made = s.create(api, &owner, &chat)?;
+        s.commit(&made, &[("fragment.json", Some(CHAT_JSON))]);
+        s.deploy(&made);
+        api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{rowan_id}"), Some(&json!({ "role": "editor" })))?;
+        let woke = s.eventually(wake, || phase(api, &owner, &rowans) == "awake");
+        let fern_label = fern.split('.').next().unwrap_or("").split("--").next().unwrap_or("").to_string();
+        let t0 = std::time::Instant::now();
+        let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "ask-1", "body": { "text": format!("ask {fern_label} what is the time") } })))?;
+        let answered = |r: &Value| r["body"]["text"].as_str().is_some_and(|t| t.contains(" answered your question in "));
+        let back = s.eventually(wake + wake, || agent_replies(&records(api, &owner, &chat, "chat"), &rowan_id).iter().any(answered));
+        let took = t0.elapsed();
+        let answers = records(api, &owner, &rowan, "tasks").into_iter().filter(|r| r["body"]["kind"] == "answer").collect::<Vec<_>>();
+        let pair = answers.first().and_then(|a| a["body"]["asked"]["fragment"].as_str()).unwrap_or("").to_string();
+        let asked = if pair.is_empty() { vec![] } else { records(api, &owner, &pair, "chat") };
+        let question = asked.iter().find(|q| q["principal"] == rowan_id.as_str() && q["body"]["to"][0] == fern_id.as_str());
+        let counted = question.is_some_and(|q| q["body"]["return_to"] == chat.as_str() && q["body"]["hop"].as_u64() == Some(1) && q["body"]["turn"].is_string());
+        let signed = answers.len() == 1 && answers[0]["principal"] == fern_id.as_str() && answers[0]["body"]["by"] == fern_id.as_str();
+        println!("      (asked and answered across computers in {took:.1?})");
+        s.ok(
+            label,
+            r.status == 200 && woke && back && signed && counted && phase(api, &owner, &ferns) != "asleep",
+            json!({ "woke": woke, "back": back, "answers": answers, "question": question }),
+        );
+    } else {
+        s.skip(label, "it needs the stub's scripted runtime");
+    }
+
+    // deleted, an agent ends its own computer, its saves too
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{fern}"), None)?;
+    let gone = s.eventually(Duration::from_secs(60), || api.signed(&owner, "GET", &format!("/api/computers/{ferns}"), None).is_ok_and(|v| v.status == 404));
+    let listed = api.signed(&owner, "GET", "/api/computers", None)?;
+    let left: Vec<&str> = listed.body["computers"].as_array().into_iter().flatten().filter_map(|c| c["computer"].as_str()).collect();
+    s.ok("deleted, an agent ends its own computer; their list keeps the rest", r.status == 200 && gone && left == [rowans.as_str()], &listed);
+    let (cleaned, last) = s.ended_cleaned(api, &fern);
+    s.ok("the ended life's cleanup completes, its own computer's end with it", cleaned, last);
+    Ok(())
+}
+
 /// A $200 seat comped before its holder has a computer finds none to tell
 /// (its push counts as done); the computer's making asks the registry to
 /// push again. When that ask fails (a lever fails the registry's
@@ -2931,6 +3031,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
     deleted_agent_leaves(s, api, &owner, &id, &chat_name, chat["viewToken"].as_str().unwrap_or(""), &identity)?;
+    own_computers(s, api, scripted, wake)?;
 
     // its ports, on its own origin, for its owner
     let r = api.signed(&stranger, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;

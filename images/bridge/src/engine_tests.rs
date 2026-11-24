@@ -2412,7 +2412,7 @@ fn a_teammate_on_another_computer_is_answered_on_its_own_tasks() {
     talk.names.insert("npub1rowan".into(), "Rowan".into());
     talk.fragments.insert(juniper.identity.clone(), juniper.fragment.clone());
     // rowan alone runs here: juniper runs on its own computer
-    let mut e = engine(&[rowan.clone()]);
+    let mut e = engine(std::slice::from_ref(&rowan));
     let asked = |seq: u64, turn: Option<&str>, hop: u32| rec(seq, "npub1juniper", json!({ "text": "Weather?", "to": ["npub1rowan"], "return_to": HOME, "turn": turn, "hop": hop }));
     let s = read(&mut e, &rowan, "talk--k3x9", asked(1, Some("t-juniper"), 2), Some(&talk), T0);
     let t = started(&s).expect("rowan's turn");
@@ -2449,7 +2449,7 @@ fn a_teammate_on_another_computer_is_answered_on_its_own_tasks() {
 #[test]
 fn an_answer_nothing_vouched_for_is_passed_over() {
     let juniper = agent("juniper");
-    let mut e = engine(&[juniper.clone()]);
+    let mut e = engine(std::slice::from_ref(&juniper));
     let body = records::answer(HOME, "Sunny.", "npub1rowan", "Rowan", &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 }, "t-rowan", &Outcome::Idle, 2, false);
     let s = read(&mut e, &juniper, &juniper.fragment, answer_task(1, "npub1rowan", body.clone()), None, T0);
     assert!(started(&s).is_none() && posts(&s).is_empty(), "not vouched for: {:?}", s.effects);
