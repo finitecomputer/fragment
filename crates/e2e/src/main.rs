@@ -1394,16 +1394,22 @@ pub fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
 }
 
 /// The lines a node's Workers logged as JSON, read from its log
-/// (`Suite::node_log`), each past the `[<worker>] ` a node of several
-/// Workers (the cell and the admin, in one `wrangler dev`) puts before
-/// every line of theirs; any other line passed over.
+/// (`Suite::node_log`), each past what the node puts before it: the
+/// `[<worker>] ` of a node of several Workers (the cell and the admin, in
+/// one `wrangler dev`), or celld's own log line (`<time>  INFO
+/// cell_console: `, then `ERROR ` or `WARN ` for a `console.error` or a
+/// `console.warn`); any other line passed over.
 pub fn logged_json(log: &str) -> Vec<Value> {
+    fn celld(l: &str) -> Option<&str> {
+        let (head, line) = l.split_once(" cell_console: ")?;
+        head.ends_with(" INFO").then(|| line.strip_prefix("ERROR ").or_else(|| line.strip_prefix("WARN ")).unwrap_or(line))
+    }
     let worker = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     log.lines()
         .map(str::trim)
         .map(|l| match l.strip_prefix('[').and_then(|r| r.split_once("] ")) {
             Some((name, line)) if worker(name) => line,
-            _ => l,
+            _ => celld(l).unwrap_or(l),
         })
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .collect()
@@ -1808,5 +1814,17 @@ mod tests {
         let log = "[fragment] {\"egress\":\"swap\",\"status\":200}\n{\"egress\":\"api\"}\n[fragment--admin] {\"n\":1}\n[wrangler:info] Ready on http://127.0.0.1:1\n[1,2] not a line of ours\n[Bad Name] {\"n\":2}\n  [fragment] {\"n\":3}  \n";
         let read = super::logged_json(log);
         assert_eq!(read, [serde_json::json!({ "egress": "swap", "status": 200 }), serde_json::json!({ "egress": "api" }), serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 3 })]);
+    }
+
+    /// Goal: on celld (`FRAGMENT_E2E_RUNTIME=celld`) a Worker's JSON line
+    /// is read past celld's own log line, whichever console call wrote it,
+    /// and celld's other lines are not read as one.
+    /// Method: lines as `celld dev` wrote them on 2026-11-24 (its
+    /// `console.error` and `console.warn` with their level before the line).
+    #[test]
+    fn a_workers_json_lines_are_read_past_celld_s_log_line() {
+        let log = "2026-11-24T21:41:57.320083Z  INFO cell_console: {\"egress\":\"swap\",\"grantsMs\":1,\"ownMs\":62}\n2026-11-24T21:41:57.4Z  INFO cell_console: ERROR {\"n\":1}\n2026-11-24T21:41:57.5Z  INFO cell_console: WARN {\"n\":2}\n2026-11-24T21:41:57.6Z  INFO celld::container_krun: {\"event\":\"bridge.boot\"} event=\"container_output\"\n2026-11-24T21:41:57.7Z  INFO cell_console: not json\n";
+        let read = super::logged_json(log);
+        assert_eq!(read, [serde_json::json!({ "egress": "swap", "grantsMs": 1, "ownMs": 62 }), serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 2 })]);
     }
 }
