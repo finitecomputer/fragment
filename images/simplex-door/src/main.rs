@@ -133,6 +133,11 @@ struct Kept {
     /// core's id (`SENDING_MAX`).
     #[serde(default)]
     sending: BTreeMap<wire::FileId, Upload>,
+    /// The file its door holds of the message at the front, by its item,
+    /// until that message is delivered: a start on a new disk, which finds
+    /// the core's received copy gone, delivers it as its door holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    given: Option<(i64, door::File)>,
 }
 
 /// A reply's file the core is uploading: its copy's folder (under
@@ -306,8 +311,8 @@ struct Outgoing {
     /// Asked again after a door that did not answer.
     at: Option<Instant>,
     /// Read, and asked of the core: each send's corr, its copy, what it
-    /// goes as, and the file it is (its SHA-256). None while they are read.
-    asked: Option<BTreeMap<u64, (PathBuf, wire::Kind, String)>>,
+    /// goes as, and the file it is. None while they are read.
+    asked: Option<BTreeMap<u64, (PathBuf, wire::Kind, door::File)>>,
 }
 
 fn env(name: &str, default: &str) -> String {
@@ -595,6 +600,9 @@ impl Runner {
                         let _ = std::fs::remove_file(path);
                     }
                 }
+                if self.kept.given.take().is_some() {
+                    self.due.changed(self.now());
+                }
                 self.delivering = false;
                 self.delivery_wait.reset();
                 self.mark_seen = self.mark_seen.max(mark);
@@ -840,11 +848,14 @@ impl Runner {
 
     // ---- files (files.rs) ----
 
-    /// The file of the message at the front, begun: one past SimpleX's
-    /// bound here noted at once; one received whole already (a catch-up's)
-    /// given to its door; else asked of the core.
+    /// The file of the message at the front, begun: one its door holds
+    /// already (an earlier life gave it) carried as it is; one past
+    /// SimpleX's bound here noted at once; one received whole already (a
+    /// catch-up's) given to its door; else asked of the core.
     fn receive(&mut self, i: &Inbound, f: &wire::FileRef) {
-        let state = if f.size > run::FILE_BYTES_MAX {
+        let state = if let Some((_, file)) = self.kept.given.as_ref().filter(|(item, _)| *item == i.item) {
+            Got::Carried { path: self.dir.join("files").join(f.path.as_deref().unwrap_or("")), file: file.clone() }
+        } else if f.size > run::FILE_BYTES_MAX {
             Got::Noted(run::file_note(&i.kind, &format!("was too large to carry here ({} MB)", f.size / 1_000_000)))
         } else if let Some(path) = &f.path {
             Got::Whole { path: self.dir.join("files").join(path), since: self.now() }
@@ -884,7 +895,12 @@ impl Runner {
         let Got::Giving { path, since } = &r.state else { return };
         let (path, since) = (path.clone(), *since);
         r.state = match result {
-            Ok(file) => Got::Carried { path, file },
+            Ok(file) => {
+                // held by its door: so a later life knows, whatever its disk holds
+                self.kept.given = Some((item, file.clone()));
+                self.due.changed(now);
+                Got::Carried { path, file }
+            }
             Err(NotGiven::Later(why)) if now.saturating_sub(since) < run::FILE_WAIT_MS => {
                 ev!("door.file_not_given", { "item": item, "why": why });
                 self.delivery_at = Some(Instant::now() + Duration::from_millis(self.delivery_wait.next_ms()));
@@ -908,19 +924,32 @@ impl Runner {
     fn awaiting_file(&mut self, i: &Inbound) -> bool {
         let Some(f) = &i.file else { return false };
         if self.receipt.as_ref().is_none_or(|r| r.item != i.item) {
+            // never begun while a save copies the databases: one that
+            // copied the core's receipt before its door held the file
+            // would lose it on a new disk (`Receipt::unheld`)
+            if self.saving {
+                return true;
+            }
             self.receive(i, f);
         }
+        self.give_whole();
+        !self.receipt.as_ref().is_some_and(Receipt::settled)
+    }
+
+    /// The front message's file, whole, given to its door (a planned stop
+    /// gives it too, before its core ends).
+    fn give_whole(&mut self) {
+        let Some(kind) = self.page.front().filter(|i| self.receipt.as_ref().is_some_and(|r| r.item == i.item)).map(|i| i.kind.clone()) else { return };
         let r = self.receipt.as_mut().expect("its receipt");
         if let Got::Whole { path, since } = &r.state {
             let path = path.clone();
             r.state = Got::Giving { path: path.clone(), since: *since };
-            let (door, to, item, kind) = (self.door.clone(), self.to.clone(), i.item, i.kind.clone());
+            let (door, to, item) = (self.door.clone(), self.to.clone(), r.item);
             tokio::spawn(async move {
                 let result = files::give(&door, &path, &kind).await;
                 let _ = to.send(Msg::Given { item, result }).await;
             });
         }
-        !self.receipt.as_ref().is_some_and(Receipt::settled)
     }
 
     /// A file waited for past `run::FILE_WAIT_MS`: its receiving cancelled
@@ -1001,20 +1030,20 @@ impl Runner {
             self.outgoing = None;
             return let_go(got);
         };
-        let shas: Vec<String> = self.kept.replies.front().map(|r| r.files.iter().map(|f| f.sha256.clone()).collect()).unwrap_or_default();
+        let files: Vec<door::File> = self.kept.replies.front().map(|r| r.files.clone()).unwrap_or_default();
         let mut asked = BTreeMap::new();
-        for (g, sha) in got.into_iter().zip(shas) {
+        for (g, file) in got.into_iter().zip(files) {
             match g {
                 Fetched::Copied { path, kind } => {
                     self.ask(Cmd::SendFile { contact, path: path.to_string_lossy().into_owned(), kind });
                     match self.pending.get(&self.corr) {
                         Some(Cmd::SendFile { .. }) => {
-                            asked.insert(self.corr, (path, kind, sha));
+                            asked.insert(self.corr, (path, kind, file));
                         }
-                        _ => self.kept_file(&path, kind.words(), &sha),
+                        _ => self.kept_file(&path, kind.words(), &file),
                     }
                 }
-                Fetched::Kept(words) => self.kept_file(Path::new(""), words, &sha),
+                Fetched::Kept(words) => self.kept_file(Path::new(""), words, &file),
             }
         }
         if asked.is_empty() {
@@ -1025,11 +1054,12 @@ impl Runner {
         }
     }
 
-    /// Reply's file `sha` taken by the core, or one that does not go: no
-    /// longer its reply's to send.
-    fn file_done(&mut self, sha: &str) {
+    /// Reply's file `file` taken by the core, or one that does not go: no
+    /// longer its reply's to send (the entry itself: two files of the same
+    /// bytes may go under two names).
+    fn file_done(&mut self, file: &door::File) {
         if let Some(r) = self.kept.replies.front_mut() {
-            if let Some(i) = r.files.iter().position(|f| f.sha256 == sha) {
+            if let Some(i) = r.files.iter().position(|f| f == file) {
                 r.files.remove(i);
                 self.due.changed(self.born.elapsed().as_millis() as u64);
             }
@@ -1037,9 +1067,9 @@ impl Runner {
     }
 
     /// A reply's file that does not go: its copy let go, its note sent.
-    fn kept_file(&mut self, path: &Path, words: &str, sha: &str) {
+    fn kept_file(&mut self, path: &Path, words: &str, file: &door::File) {
         files::let_go(path);
-        self.file_done(sha);
+        self.file_done(file);
         self.apply(Input::Reply(&run::kept_note(words)));
     }
 
@@ -1047,7 +1077,7 @@ impl Runner {
     /// made of it, watched until its upload ends; or, refused, its note.
     /// Its reply is done once each is answered.
     fn file_sent(&mut self, corr: u64, resp: &Resp) {
-        let Some((path, kind, sha)) = self.outgoing.as_mut().and_then(|o| o.asked.as_mut()).and_then(|a| a.remove(&corr)) else { return };
+        let Some((path, kind, file)) = self.outgoing.as_mut().and_then(|o| o.asked.as_mut()).and_then(|a| a.remove(&corr)) else { return };
         let id = match resp {
             Resp::Items(items) => items.iter().find(|i| !i.received).and_then(|i| i.file.as_ref()).map(|f| f.id),
             _ => None,
@@ -1059,11 +1089,11 @@ impl Runner {
                 ev!("door.file_sending", { "file": id, "kind": kind.words() });
                 self.kept.sending.insert(id, Upload { folder, kind, contact });
                 self.sends.insert(id, self.now());
-                self.file_done(&sha);
+                self.file_done(&file);
             }
             _ => {
                 ev!("door.file_unsendable", { "answer": wire::cut(&format!("{resp:?}"), 200) });
-                self.kept_file(&path, kind.words(), &sha);
+                self.kept_file(&path, kind.words(), &file);
             }
         }
         if self.outgoing.as_ref().and_then(|o| o.asked.as_ref()).is_some_and(BTreeMap::is_empty) {
@@ -1281,6 +1311,7 @@ impl Runner {
         self.sends_overdue();
         self.settle();
         if let Some((why, since)) = self.stopping {
+            self.give_whole();
             return self.stop(why, since);
         }
         self.send_reply();
@@ -2028,5 +2059,70 @@ mod tests {
         assert!(r.kept.sending.is_empty() && r.sends.is_empty(), "another contact's link: the upload forgotten");
         said_of(&mut r, snd_file("sndFileError", 63));
         assert!(asked_of(&mut writes).is_empty(), "its late end tells the new contact nothing");
+    }
+
+    /// Goal (Codex's fix check of S1): no receive begins while a save
+    /// copies the databases; a file its door holds is carried by a later
+    /// life whose disk lost the core's copy, never noted; a planned stop
+    /// gives a file received whole before its core ends; and a reply's two
+    /// files of the same bytes under two names are each its own. Method: a
+    /// scripted core.
+    #[tokio::test]
+    async fn a_file_its_door_holds_is_never_lost() {
+        // a save copying: the receive waits for it
+        let (mut r, mut writes) = scripted("saving", true);
+        r.page = VecDeque::from([carrying(70, "voice", 11, 1_000, None)]);
+        r.saving = true;
+        r.deliver(Instant::now());
+        assert!(asked_of(&mut writes).is_empty() && r.receipt.is_none(), "nothing asked while a save copies");
+        r.saving = false;
+        r.deliver(Instant::now());
+        assert_eq!(asked_of(&mut writes).iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), ["/freceive 11"]);
+
+        // given, then a new disk: the core's copy gone, its door's carried
+        let held = door::File { sha256: "f".repeat(64), name: "memo.m4a".into(), media_type: "audio/mp4".into(), size: 1_000 };
+        let (mut r, mut writes) = scripted("given", true);
+        r.page = VecDeque::from([carrying(71, "voice", 12, 1_000, Some("memo.m4a"))]);
+        r.deliver(Instant::now());
+        asked_of(&mut writes);
+        r.given(71, Ok(held.clone()));
+        let saved: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
+        assert_eq!(saved.given, Some((71, held.clone())), "its save says its door holds it");
+        let (mut r, mut writes) = scripted("new-disk", true);
+        r.kept = saved;
+        r.page = VecDeque::from([carrying(71, "voice", 12, 1_000, Some("memo.m4a"))]);
+        r.deliver(Instant::now());
+        assert!(asked_of(&mut writes).is_empty() && r.delivering, "delivered at once");
+        assert!(matches!(&r.receipt.as_ref().unwrap().state, Got::Carried { file, .. } if *file == held), "carried as its door holds it, never noted: {:?}", r.receipt);
+        r.on(Msg::Delivered { item: 71, mark: 1 });
+        assert_eq!(r.kept.given, None, "delivered: let go");
+
+        // a planned stop gives a file received whole
+        let (mut r, mut writes) = scripted("stopping", true);
+        r.page = VecDeque::from([carrying(72, "voice", 13, 1_000, None)]);
+        r.deliver(Instant::now());
+        asked_of(&mut writes);
+        said_of(&mut r, rcv_file("rcvFileComplete", 13, "memo.m4a"));
+        r.begin_stop("sigterm");
+        r.tick();
+        assert!(matches!(r.receipt.as_ref().unwrap().state, Got::Giving { .. }), "given before its core ends: {:?}", r.receipt);
+        assert!(r.core_stop.is_none(), "its core not yet asked to end");
+
+        // two files of the same bytes, two names: each its own
+        let (mut r, mut writes) = scripted("twins", true);
+        let (x, y) = (door::File { name: "x.bin".into(), ..file('a') }, door::File { name: "y.bin".into(), ..file('a') });
+        r.asked(Asked::Reply { key: "chat:5".into(), text: String::new(), files: vec![x.clone(), y.clone()], mark: 1 });
+        r.outgoing = Some(Outgoing { key: "chat:5".into(), at: None, asked: None });
+        let out = r.dir.join(run::OUT_DIR);
+        let copy = |n: &str, name: &str| {
+            let p = out.join(n).join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"123456789").unwrap();
+            p
+        };
+        r.fetched("chat:5", Ok(vec![Fetched::Copied { path: copy("1-7", "x.bin"), kind: wire::Kind::File }, Fetched::Copied { path: copy("1-8", "y.bin"), kind: wire::Kind::File }]));
+        let sends = asked_of(&mut writes);
+        r.frame(&sent_file(sends[1].0, 80));
+        assert_eq!(r.kept.replies[0].files, vec![x], "the one the core took, by its name too");
     }
 }

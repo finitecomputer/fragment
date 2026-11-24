@@ -2392,9 +2392,13 @@ nor speak through one (`fragment_core::door`):
   after its text; a file the door does not hold is 409 `no_file`, and a
   door whose runner carries no files (a container started before it did)
   409 `no_files`, its connector then sending the text alone. The door
-  holds at most 64 files, 1 GiB between them, each a day
-  (cell/door-rules.mjs `FILES_KEPT`), under its prefix; past them a new
-  one is 503 `files_full`, given again later. Its core reaches SimpleX's
+  holds at most 64 files, 1 GiB between them, each a day since it was
+  last given or used, but one a delivery its inbox has yet to take names
+  (cell/door-rules.mjs `FILES_KEPT`), under its prefix. Past them, files
+  already taken (its connector kept one; a reply naming one is done) make
+  room, the oldest first; with none, a new one is 503 `files_full`, given
+  again later, and its runner delivers a message whose file its door
+  keeps refusing with a note once 3 minutes pass. Its core reaches SimpleX's
   file servers through the platform's XFTP relay (docs/computers.md).
   While it invites, the door's `state` has the invitation's QR code
   (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of

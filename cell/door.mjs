@@ -172,7 +172,7 @@ export class SimplexDoor extends DurableObject {
       // a file its runner received, or one it sends (`/egress/file/<sha256>`)
       if (url.pathname.startsWith("/egress/file/")) {
         const sha = url.pathname.slice("/egress/file/".length);
-        if (request.method === "GET") return await this.#giveFile(sha);
+        if (request.method === "GET") return await this.#giveFile(sha, false);
         if (request.method === "PUT") return await this.#runnerFile(request, sha);
       }
       const [ask, sha, ...more] = url.pathname.startsWith("/job/") ? url.pathname.slice("/job/".length).split("/") : [];
@@ -318,7 +318,7 @@ export class SimplexDoor extends DurableObject {
     if (ask === "state") return this.#state();
     // a file its agent sends (`PUT`, one of the connector's blobs), or one
     // its owner sent (`GET`, kept as one of the connector's blobs)
-    if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request) : await this.#giveFile(sha);
+    if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request) : await this.#giveFile(sha, true);
     if (ask === "reply") return await this.#reply(await bounded(request));
     // a link or unlink, numbered by its connector: one older than the
     // newest it numbered (a retry of a link after its unlink) is refused,
@@ -346,7 +346,10 @@ export class SimplexDoor extends DurableObject {
     if (!r.ok) return r;
     const runner = await r.json().catch(() => null);
     if (runner?.files !== true) return refusal(409, "no_files", "this door's runner carries no files: its text alone");
-    return this.#ask("/reply", { key: body.key, text: body.text, files });
+    const asked = await this.#ask("/reply", { key: body.key, text: body.text, files });
+    // done: its files the core took, theirs to let go of from then on
+    if (asked.status === 200) for (const f of files) this.ctx.storage.sql.exec("UPDATE files SET taken = 1 WHERE sha = ?", f.sha256);
+    return asked;
   }
 
   // ---- the files it holds, on their way ----
@@ -413,22 +416,26 @@ export class SimplexDoor extends DurableObject {
   // (read by the one each was for), the oldest first; never one not yet
   // taken.
   async #room(key, length, now) {
-    const others = [...this.#incoming].filter(([k]) => k !== key).map(([, bytes]) => ({ bytes, at: now }));
-    const held = () => [...this.ctx.storage.sql.exec("SELECT bytes, at FROM files").toArray(), ...others];
-    if (fileRoom(held(), length, now)) return true;
+    // read again at each look, both at once: an upload ending meanwhile is
+    // a row or on its way, never both
+    const held = () => [...this.ctx.storage.sql.exec("SELECT bytes, at FROM files").toArray(), ...[...this.#incoming].filter(([k]) => k !== key).map(([, bytes]) => ({ bytes, at: now }))];
     const d = this.#door();
-    for (const f of this.ctx.storage.sql.exec("SELECT sha FROM files WHERE taken = 1 ORDER BY at").toArray()) {
-      this.ctx.storage.sql.exec("DELETE FROM files WHERE sha = ?", f.sha);
+    // bounded: one taken file let go a pass, of at most `FILES_KEPT`
+    while (!fileRoom(held(), length, now)) {
+      // the oldest taken now (one given again since is needed again)
+      const f = this.ctx.storage.sql.exec("DELETE FROM files WHERE sha = (SELECT sha FROM files WHERE taken = 1 ORDER BY at LIMIT 1) RETURNING sha").toArray()[0];
+      if (!f) return false;
       await this.env.BLOBS.delete(fileKey(d.door, f.sha));
-      if (fileRoom(held(), length, now)) return true;
     }
-    return false;
+    return true;
   }
 
-  // A file it holds, its bytes and its type, its name in `FILE_SHA_HEADER`:
-  // taken from then on (`#room` may let it go).
-  async #giveFile(sha) {
-    const row = shaOk(sha) ? this.ctx.storage.sql.exec("UPDATE files SET taken = 1, at = ? WHERE sha = ? RETURNING bytes, type", Date.now(), sha).toArray()[0] : null;
+  // A file it holds, its bytes and its type, its name in `FILE_SHA_HEADER`;
+  // `take`: read by the one it was for (its connector keeping its owner's
+  // file), so `#room` may let it go from then on. A reply's file is taken
+  // once its reply is done (`#reply`), its runner reading it again until.
+  async #giveFile(sha, take) {
+    const row = shaOk(sha) ? this.ctx.storage.sql.exec("UPDATE files SET taken = max(taken, ?), at = ? WHERE sha = ? RETURNING bytes, type", take ? 1 : 0, Date.now(), sha).toArray()[0] : null;
     if (!row) return refusal(404, "no_file", `the door holds no file ${String(sha).slice(0, 64)}`);
     const obj = await this.env.BLOBS.get(fileKey(this.#door().door, sha));
     if (!obj) {
@@ -438,11 +445,13 @@ export class SimplexDoor extends DurableObject {
     return new Response(obj.body, { headers: { "content-type": row.type, "content-length": String(row.bytes), [FILE_SHA_HEADER]: sha } });
   }
 
-  // The files held past `FILE_KEPT_MS`: their rows first, then their files.
+  // The files held past `FILE_KEPT_MS`, but those a delivery its inbox has
+  // yet to take names (an inbox down past a day): their rows first, then
+  // their files.
   async #staleFiles() {
     const d = this.#door();
     if (!d) return;
-    const old = this.ctx.storage.sql.exec("DELETE FROM files WHERE at <= ? RETURNING sha", Date.now() - FILE_KEPT_MS).toArray();
+    const old = this.ctx.storage.sql.exec("DELETE FROM files WHERE at <= ? AND sha NOT IN (SELECT json_extract(body, '$.file.sha256') FROM deliveries WHERE sent = 0 AND json_extract(body, '$.file.sha256') IS NOT NULL) RETURNING sha", Date.now() - FILE_KEPT_MS).toArray();
     if (old.length) await this.env.BLOBS.delete(old.map((f) => fileKey(d.door, f.sha)));
   }
 
@@ -475,9 +484,6 @@ export class SimplexDoor extends DurableObject {
     for (let n = 0; n <= DELIVERIES_KEPT; n += 1) {
       const next = this.ctx.storage.sql.exec("SELECT id, body FROM deliveries WHERE sent = 0 ORDER BY mark LIMIT 1").toArray()[0];
       if (!next) return;
-      // its file kept while its delivery waits (an inbox down past a day)
-      const file = JSON.parse(next.body).file;
-      if (file) this.ctx.storage.sql.exec("UPDATE files SET at = ? WHERE sha = ?", Date.now(), file.sha256);
       let r;
       try {
         r = await this.ctx.exports.default.fetch(to, { method: "POST", headers: { "content-type": "application/json", [INBOX_HEADER]: inbox.secret }, body: JSON.stringify({ source: "simplex", payload: { ...JSON.parse(next.body), door: d.door } }) });
@@ -487,6 +493,9 @@ export class SimplexDoor extends DurableObject {
       const said = (await r.text()).slice(0, 300);
       if (!r.ok) return this.#log("door.inbox_refused", { id: next.id, status: r.status, why: said });
       this.ctx.storage.sql.exec("UPDATE deliveries SET sent = 1 WHERE id = ?", next.id);
+      // its file, a day from now: its connector keeps it next
+      const file = JSON.parse(next.body).file;
+      if (file) this.ctx.storage.sql.exec("UPDATE files SET at = ? WHERE sha = ?", Date.now(), file.sha256);
     }
   }
 
@@ -698,7 +707,7 @@ export class SimplexDoor extends DurableObject {
       case "file": {
         const hex = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
         if (a.sha !== undefined) {
-          const held = await this.#giveFile(a.sha);
+          const held = await this.#giveFile(a.sha, false);
           if (!held.ok) return held;
           const bytes = new Uint8Array(await held.arrayBuffer());
           return json({ sha256: await hex(bytes), size: bytes.length, type: held.headers.get("content-type") });
