@@ -101,11 +101,11 @@ pub fn cell_as(profile: Profile) -> Result<()> {
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
     let ours: Vec<String> = local.remapped().into_iter().chain(CELL_TARGET_FLAGS.map(String::from)).collect();
     let flags = encoded_rustflags(given, &ours);
-    run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir))?;
+    run(crate::devstack::outside_cargo("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir))?;
     let size = wasm_built(&out, &local, profile, &Wasm::CELL)?;
     // the admin Worker: the same crate and flags, its other entry, after the
     // cell's (whose build clears `build/`)
-    let admin = Command::new("worker-build").args(profile.worker_build_args()).args(["--out-dir", ADMIN_BUILD, "--", "--features", "admin"]).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir).status();
+    let admin = crate::devstack::outside_cargo("worker-build").args(profile.worker_build_args()).args(["--out-dir", ADMIN_BUILD, "--", "--features", "admin"]).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir).status();
     anyhow::ensure!(admin.context("run worker-build for the admin Worker")?.success(), "worker-build for the admin Worker (--features admin) failed");
     let admin_size = wasm_built(&dir.join(ADMIN_BUILD), &local, profile, &Wasm::ADMIN)?;
     let (files, bytes) = fragment_templates::write_assets(&out.join("assets")).context("writing the release's files into cell/build/assets")?;
@@ -311,7 +311,7 @@ fn within_budget(w: &Wasm, size: u64) -> Result<String> {
 }
 
 fn worker_build_installed() -> Result<()> {
-    let out = Command::new("worker-build")
+    let out = crate::devstack::outside_cargo("worker-build")
         .arg("--version")
         .output()
         .context("worker-build is not installed: cargo install worker-build --version 0.8.5 --locked")?;
