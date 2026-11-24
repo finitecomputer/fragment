@@ -30,7 +30,8 @@ const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessing
 /// however it is pressed, opening no tab: its name, pressed or with the
 /// middle button (once a tab of the bare hash, whose file had no name or
 /// extension), and its Download with Ctrl held (once the browser's own
-/// download, without the frame's cookie: nothing saved). Its bytes, read
+/// download, without the frame's cookie: nothing saved). A read that
+/// stalls gives way to the next press, which saves it. Its bytes, read
 /// after the press's activation has lapsed (a big file, a slow line), wait
 /// for one more press, which saves them.
 fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &str) -> Result<()> {
@@ -58,7 +59,8 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
     let pdf = "(() => { const f = document.querySelector('.attachment-pdf[title=\"preview.pdf\"]'); if (!f) return 'none'; const d = f.contentDocument; return d ? d.contentType : 'refused'; })()";
     let shown = s.eventually(wait, || chrome.eval_in_frame(&page, name, &format!("{pdf} === 'application/pdf'")).ok() == Some(Value::Bool(true)));
     let seen = chrome.eval_in_frame(&page, name, pdf)?;
-    chrome.screenshot(&page, &s.dir("chat-files").join("pdf-in-the-platforms-frame.png"))?;
+    let shots = s.dir("chat-files");
+    chrome.screenshot(&page, &shots.join("pdf-in-the-platforms-frame.png"))?;
     s.ok("in the platform's frame, as the shell shows a chat, a PDF attachment's view shows the PDF", shown, &seen);
 
     // its Download, as a person presses it (the frame fills the page)
@@ -113,6 +115,30 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
         s.ok(&format!("in the platform's frame, a Word file's {how} saves it as notes.docx byte for byte, and opens no tab"), saved && opened == 0, json!({ "saved": files(&dir), "tabs opened": opened }));
     }
 
+    // its read stalled (a line that sends nothing more: the page's first
+    // fetch never answers), then pressed again
+    let dir = s.dir("chat-files-docx-stalled");
+    chrome.allow_downloads(&dir)?;
+    tabless(chrome)?;
+    let frame = chrome.frame(name)?;
+    let stall = "(() => { const real = window.fetch; window.fetch = (url, init) => { window.fetch = real; return new Promise((_, no) => init?.signal?.addEventListener('abort', () => no(new DOMException('stalled', 'AbortError')))); }; return true; })()";
+    chrome.eval(&frame, stall)?;
+    let reads = format!("{}?.textContent === 'Downloading\u{2026}'", find(docx_download));
+    let at = point(chrome, docx_download)?;
+    chrome.click_at(&page, at)?;
+    let stalled = s.eventually(wait, || chrome.eval(&frame, &reads).ok() == Some(Value::Bool(true)));
+    // ("Downloading…" is wider than "Download": aimed again)
+    let at = point(chrome, docx_download)?;
+    chrome.click_at(&page, at)?;
+    let saved = s.eventually(wait, || std::fs::read(dir.join("notes.docx")).ok().as_deref() == Some(NOTES_DOCX));
+    let after = chrome.eval(&frame, &format!("{}?.textContent", find(docx_download)))?;
+    chrome.detach(frame)?;
+    s.ok(
+        "in the platform's frame, a Word file's read that stalls holds it only until the next press, which reads it again and saves it as notes.docx byte for byte",
+        stalled && saved && after == "Download",
+        json!({ "stalled": stalled, "saved": files(&dir), "after": after }),
+    );
+
     // its bytes held past the press's activation, then let through
     let dir = s.dir("chat-files-docx-slow");
     chrome.allow_downloads(&dir)?;
@@ -130,7 +156,11 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
     let while_reading = chrome.eval(&frame, &format!("{}?.textContent", find(docx_download)))?;
     chrome.release(&frame, false)?;
     let says_save = s.eventually(wait, || chrome.eval(&frame, &format!("{}?.textContent === 'Save'", find(docx_download))).ok() == Some(Value::Bool(true)));
-    chrome.screenshot(&page, &s.dir("chat-files").join("docx-save-after-a-slow-read.png"))?;
+    chrome.screenshot(&page, &shots.join("docx-save-after-a-slow-read.png"))?;
+    chrome.viewport(&page, 390, 844, true)?;
+    let _ = point(chrome, docx_download)?;
+    chrome.screenshot(&page, &shots.join("docx-save-after-a-slow-read-390.png"))?;
+    chrome.viewport(&page, 1280, 860, false)?;
     let before = files(&dir);
     // ("Save" is narrower than "Download": aimed again)
     let at = point(chrome, docx_download)?;

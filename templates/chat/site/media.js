@@ -45,10 +45,11 @@ function saveAs(url, filename) {
 // frame's cookie, refused). The bytes come after the press, and a browser
 // may refuse a download once the press's activation has lapsed (about
 // 5 s), so bytes read after that wait: Download says Save, and its next
-// press saves them at once.
+// press saves them at once. A press while a read is under way starts it
+// again, so a read that stalls holds the file only until the next press.
 function saves(title, download, href, filename, name) {
   let ready = null;
-  let reading = false;
+  let reading = null;
   const say = (text) => {
     download.textContent = text;
     download.setAttribute("aria-label", `${text} ${name}`);
@@ -61,11 +62,12 @@ function saves(title, download, href, filename, name) {
       ready = null;
       return say("Download");
     }
-    if (reading) return;
-    reading = true;
+    reading?.abort();
+    const read = new AbortController();
+    reading = read;
     say("Downloading…");
     try {
-      const r = await fetch(href);
+      const r = await fetch(href, { signal: read.signal });
       if (!r.ok) throw new Error(`the file answered ${r.status}`);
       const url = URL.createObjectURL(await r.blob());
       if (navigator.userActivation?.isActive === false) {
@@ -76,10 +78,11 @@ function saves(title, download, href, filename, name) {
         say("Download");
       }
     } catch {
+      if (read.signal.aborted) return;
       say("Could not download");
       setTimeout(() => ready || reading || say("Download"), 1500);
     } finally {
-      reading = false;
+      if (reading === read) reading = null;
     }
   };
   for (const a of [title, download]) {
