@@ -242,7 +242,7 @@ const voice = (id, text = "") => ({ ...message(id, text, "voice"), file: { sha25
 test("its owner's voice message: its file kept as one of this chat's blobs, then published as its attachment", async () => {
   const w = world({ [`file/${SHA}`]: [[200, {}, { sha256: SHA, size: 300000, type: "audio/mp4" }]] });
   assert.deepEqual(await w.app.intake(w.delivered(voice("v1")), w.job("channel")), { relayed: true, file: true });
-  assert.deepEqual(w.asked, [{ url: `https://door.fragment.internal/file/${SHA}`, ask: `file/${SHA}`, method: "GET", headers: undefined, body: null, keep: true }], "kept from its own door");
+  assert.deepEqual(w.asked.map((a) => [a.ask, a.method, a.keep ?? null, a.body]), [[`file/${SHA}`, "GET", true, null], ["kept", "POST", null, { id: "v1" }]], "kept from its own door, then said kept, by its message");
   assert.deepEqual(w.published, [{ channel: "chat", body: { text: "", to: [AGENT], relayed: BOUND.relayed, attachments: [{ sha256: SHA, size: 300000, type: "audio/mp4", name: "memo.m4a" }] }, kind: "message" }]);
   // a photo with its caption: its words and its file
   const p = world({ [`file/${SHA}`]: [[200, {}, { sha256: SHA, size: 9, type: "image/jpeg" }]] });
@@ -255,6 +255,7 @@ test("a file kept by none (gone from its door, not what it names, a step that fa
     const w = world({ [`file/${SHA}`]: [answer] });
     assert.deepEqual(await w.app.intake(w.delivered(voice("v1", "listen")), w.job("channel")), { relayed: true, file: false });
     assert.deepEqual(w.published[0].body, { text: "listen\n\n(I sent a file over SimpleX that did not arrive.)", to: [AGENT], relayed: BOUND.relayed }, String(answer));
+    assert.ok(!w.asked.some((a) => a.ask === "kept"), "a file it does not have is never said kept");
   }
   const bad = world();
   await bad.app.intake(bad.delivered({ ...voice("v2"), file: { sha256: "nope" } }), bad.job("channel"));
@@ -266,7 +267,7 @@ test("its agent's reply's files are given to the door first, then sent with its 
   const two = { sha256: "02".repeat(32), name: "photo.png", type: "image/png", size: 9 };
   const w = world({ [`file/${two.sha256}`]: [[503, { error: "files_full" }]], reply: [[200, { done: true }]] });
   assert.deepEqual(await w.app.mirror(w.reply(41, { attachments: [one, two] }), w.job("channel")), { sent: 1 });
-  assert.deepEqual(w.asked.slice(0, 2).map((a) => [a.ask, a.method, a.blob, a.headers["content-type"]]), [[`file/${one.sha256}`, "PUT", one.sha256, "application/pdf"], [`file/${two.sha256}`, "PUT", two.sha256, "image/png"]], "each given as one of the chat's blobs");
+  assert.deepEqual(w.asked.slice(0, 2).map((a) => [a.ask, a.method, a.blob, a.headers["content-type"], a.headers["x-door-for"]]), [[`file/${one.sha256}`, "PUT", one.sha256, "application/pdf", "chat:41"], [`file/${two.sha256}`, "PUT", two.sha256, "image/png", "chat:41"]], "each given as one of the chat's blobs, for its reply");
   assert.deepEqual(w.asked[2].body, { key: "chat:41", text: "It'll be sunny.\n\n(I sent a file in our chat.)", files: [one] });
   // files alone, no words
   const f = world({ reply: [[200, { done: true }]] });

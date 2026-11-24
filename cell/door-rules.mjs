@@ -24,14 +24,14 @@ export const INBOX_HEADER = "x-simplex-door-secret";
 // What its connector's jobs ask (cell/src/jobs.rs sends each as
 // `/job/<ask>`): nothing of its runner's own or its levers'. `file` is a
 // file's, by its SHA-256 (`/job/file/<sha256>`).
-export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply", "file"];
+export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply", "file", "kept"];
 
 // The files a door holds between its connector and its runner (its
 // owner's, on their way to the connector's chat; its agent's, on their way
 // to its owner's SimpleX app), each for a moment: at most this many, this
 // many bytes between them, every one it holds counted, and each this long
 // since it was last given or used (but one a waiting delivery names).
-// Past the first two, those nothing still needs make room, the oldest
+// Past the first two, those nothing still uses make room, the oldest
 // first; with none, a new one is refused until older ones go (asked again
 // later). SimpleX's own bound on one file is its runner's
 // (images/simplex-door).
@@ -59,11 +59,13 @@ export const STEPS = [
   // whether its connector's inbox took it
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
   // the files it holds (`FILES_KEPT`): each by its SHA-256, its bytes, its
-  // type as its giver said, when it was last given or used, and the uses
-  // still to come (one each time its runner gives it, until its connector
-  // keeps it; one each time its connector gives it, until a reply naming
-  // it is done)
-  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL, needs INTEGER NOT NULL)",
+  // type as its giver said, and when it was last given or used
+  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL)",
+  // who still uses each: a delivery (`d:<its id>`) until its connector
+  // says it kept the file, a reply (`r:<its key>`) until it is done, and
+  // its runner's give (`given`) until the delivery naming it is made; each
+  // once, so an answer said again releases nothing more
+  "CREATE TABLE uses (sha TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (sha, owner))",
 ];
 
 // The steps a schema at `version` has yet to take, in order.

@@ -117,11 +117,12 @@ async function reply(job, key, text, files = []) {
   return { sent: 0, why: "the door still holds it unsent" };
 }
 
-// A reply's file, one of this chat's blobs, given to its door: whether
-// the door holds it now (a step that fails for good is one it does not).
-async function give(job, a) {
+// A reply's file, one of this chat's blobs, given to its door for reply
+// `key` (which uses it until it is done): whether the door holds it now (a
+// step that fails for good is one it does not).
+async function give(job, a, key) {
   try {
-    const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream" } });
+    const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream", "x-door-for": key } });
     return r.ok;
   } catch {
     return false;
@@ -327,6 +328,13 @@ export class App extends DurableObject {
     let text = m.text.trim();
     // its file, kept here; one that is not is said so in its words
     const file = m.file == null ? null : await keep(job, m.file);
+    // kept: its door may let go of its copy, this message's use of it ended
+    // (said again, nothing more)
+    if (file) {
+      try {
+        await door(job, "kept", { id: m.id });
+      } catch {}
+    }
     if (m.file != null && !file) text = [text, "(I sent a file over SimpleX that did not arrive.)"].filter(Boolean).join("\n\n");
     if (!text && !file) {
       await tell(job, `nothing:${m.id}`, "That message didn't reach your agent: only text and files do.");
@@ -354,7 +362,7 @@ export class App extends DurableObject {
     const files = [];
     let kept = 0;
     for (const a of attached) {
-      if (await give(job, a)) files.push({ sha256: a.sha256, name: typeof a.name === "string" && a.name ? a.name.slice(0, 200) : "file", type: typeof a.type === "string" ? a.type.slice(0, 128) : "application/octet-stream", size: Number.isInteger(a.size) ? a.size : 0 });
+      if (await give(job, a, `chat:${record.seq}`)) files.push({ sha256: a.sha256, name: typeof a.name === "string" && a.name ? a.name.slice(0, 200) : "file", type: typeof a.type === "string" ? a.type.slice(0, 128) : "application/octet-stream", size: Number.isInteger(a.size) ? a.size : 0 });
       else kept += 1;
     }
     const text = noted(said, kept);

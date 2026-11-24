@@ -2370,7 +2370,7 @@ nor speak through one (`fragment_core::door`):
   a name made again, by anyone, reaches a door of its own, never the
   earlier one's link. Its jobs reach it at
   `https://door.fragment.internal/<ask>` (`connect`, `state`, `link`,
-  `unlink`, `reply`, `file/<sha256>`), which the platform sends to that door alone, naming
+  `unlink`, `reply`, `file/<sha256>`, `kept`), which the platform sends to that door alone, naming
   it and the connector (`x-fragment-door`, `x-fragment-connector`) over
   whatever the job set; any other fragment's fetch of that host fails its
   step unsent (`fragment_core::door::door_route`). `connect` gives the
@@ -2396,12 +2396,13 @@ nor speak through one (`fragment_core::door`):
   holds at most 64 files, 1 GiB between them, every one counted, each a
   day since it was last given or used, but one a delivery its inbox has
   yet to take names (cell/door-rules.mjs `FILES_KEPT`), under its prefix.
-  Each counts its uses to come: one each time its runner gives it, until
-  its connector keeps it; one each time its connector gives it, until a
-  reply naming it is done. Past the bounds, files nothing needs make room,
-  the oldest first; with none, a new one is 503 `files_full`, given again
-  later, and its runner delivers a message whose file its door keeps
-  refusing with a note once 3 minutes pass. Its core reaches SimpleX's
+  Each records who still uses it, each once: a delivery naming it until
+  its connector says `kept {id}` (sent once the blob is stored, so a read
+  cut off releases nothing), and a reply naming it (given with its key,
+  `x-door-for`) until it is done. Past the bounds, files nothing uses make
+  room, the oldest first; with none, a new one is 503 `files_full`, given
+  again later, and its runner delivers a message whose file its door
+  keeps refusing with a note once 3 minutes pass. Its core reaches SimpleX's
   file servers through the platform's XFTP relay (docs/computers.md).
   While it invites, the door's `state` has the invitation's QR code
   (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of

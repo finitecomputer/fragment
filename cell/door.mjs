@@ -66,6 +66,9 @@ const SECRET_HEADER = "x-door-secret";
 // asked again, it deletes the rest.
 const END_PAGES_MAX = 10;
 
+// The header a reply's file comes with its reply's key in: its use's owner.
+const FOR_HEADER = "x-door-for";
+
 // The files deliveries its inbox has yet to take name: never let go.
 const WAITING_FILES = "SELECT json_extract(body, '$.file.sha256') FROM deliveries WHERE sent = 0 AND json_extract(body, '$.file.sha256') IS NOT NULL";
 
@@ -175,7 +178,7 @@ export class SimplexDoor extends DurableObject {
       // a file its runner received, or one it sends (`/egress/file/<sha256>`)
       if (url.pathname.startsWith("/egress/file/")) {
         const sha = url.pathname.slice("/egress/file/".length);
-        if (request.method === "GET") return await this.#giveFile(sha, false);
+        if (request.method === "GET") return await this.#giveFile(sha);
         if (request.method === "PUT") return await this.#runnerFile(request, sha);
       }
       const [ask, sha, ...more] = url.pathname.startsWith("/job/") ? url.pathname.slice("/job/".length).split("/") : [];
@@ -319,9 +322,12 @@ export class SimplexDoor extends DurableObject {
     }
     if (!d || !inbox) return refusal(409, "not_connected", "its connector's connect starts it first");
     if (ask === "state") return this.#state();
-    // a file its agent sends (`PUT`, one of the connector's blobs), or one
-    // its owner sent (`GET`, kept as one of the connector's blobs)
-    if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request) : await this.#giveFile(sha, true);
+    // a file its agent sends (`PUT`, one of the connector's blobs, its
+    // reply's to use), or one its owner sent (`GET`, kept as one of the
+    // connector's blobs); `kept`, once its connector has it, by the
+    // delivery that named it
+    if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request, `r:${String(request.headers.get(FOR_HEADER) ?? "").slice(0, 200)}`) : await this.#giveFile(sha);
+    if (ask === "kept") return this.#kept(await bounded(request));
     if (ask === "reply") return await this.#reply(await bounded(request));
     // a link or unlink, numbered by its connector: one older than the
     // newest it numbered (a retry of a link after its unlink) is refused,
@@ -351,7 +357,7 @@ export class SimplexDoor extends DurableObject {
     if (runner?.files !== true) return refusal(409, "no_files", "this door's runner carries no files: its text alone");
     const asked = await this.#ask("/reply", { key: body.key, text: body.text, files });
     // done: its files the core took, theirs to let go of from then on
-    if (asked.status === 200) for (const f of files) this.ctx.storage.sql.exec("UPDATE files SET needs = max(needs - 1, 0) WHERE sha = ?", f.sha256);
+    if (asked.status === 200) this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ?", `r:${body.key}`);
     return asked;
   }
 
@@ -366,16 +372,17 @@ export class SimplexDoor extends DurableObject {
       await request.body?.cancel();
       return refusal(409, "superseded", `life ${life} is not the door's running one`);
     }
-    return this.#keepFile(sha, request);
+    // its use until the delivery naming it is made (`#deliver`)
+    return this.#keepFile(sha, request, "given");
   }
 
   // A file kept under its name, its bytes streamed in (`content-length` of
   // them), its type as its giver said: once (one kept already is kept
   // again, its bytes unread), and only while there is room
-  // (`fileRoom`; else 503, asked again later); each time given, one use
-  // more to come (its delivery's, or its reply's). The door ending during
-  // its upload lets go of its file, as of a save's.
-  async #keepFile(sha, request) {
+  // (`fileRoom`; else 503, asked again later); its giver's use (`owner`)
+  // recorded, once. The door ending during its upload lets go of its
+  // file, as of a save's.
+  async #keepFile(sha, request, owner) {
     const length = Number(request.headers.get("content-length"));
     if (!shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
       await request.body?.cancel();
@@ -383,8 +390,9 @@ export class SimplexDoor extends DurableObject {
     }
     const d = this.#door();
     const now = Date.now();
-    // given again: one more use to come
-    if (this.ctx.storage.sql.exec("UPDATE files SET at = ?, needs = needs + 1 WHERE sha = ? RETURNING sha", now, sha).toArray().length) {
+    // given again: its giver's use, once
+    if (this.ctx.storage.sql.exec("UPDATE files SET at = ? WHERE sha = ? RETURNING sha", now, sha).toArray().length) {
+      this.ctx.storage.sql.exec("INSERT INTO uses (sha, owner) VALUES (?, ?) ON CONFLICT DO NOTHING", sha, owner);
       await request.body.cancel();
       return json({ kept: sha, again: true });
     }
@@ -408,7 +416,8 @@ export class SimplexDoor extends DurableObject {
         await this.env.BLOBS.delete(key);
         return refusal(410, "ended", "this door ended as its file came");
       }
-      this.ctx.storage.sql.exec("INSERT INTO files (sha, bytes, type, at, needs) VALUES (?, ?, ?, ?, 1) ON CONFLICT (sha) DO UPDATE SET at = excluded.at, needs = needs + 1", sha, length, typeOf(request.headers.get("content-type")), now);
+      this.ctx.storage.sql.exec("INSERT INTO files (sha, bytes, type, at) VALUES (?, ?, ?, ?) ON CONFLICT (sha) DO UPDATE SET at = excluded.at", sha, length, typeOf(request.headers.get("content-type")), now);
+      this.ctx.storage.sql.exec("INSERT INTO uses (sha, owner) VALUES (?, ?) ON CONFLICT DO NOTHING", sha, owner);
     } finally {
       this.#incoming.delete(key);
     }
@@ -417,8 +426,7 @@ export class SimplexDoor extends DurableObject {
 
   // Room for a file of `length` beside every one it holds and those on
   // their way in: made, when there is none, by letting go of files nothing
-  // still needs (each delivery naming one kept by its connector, each reply
-  // naming one done), the oldest first; never one still needed, nor one a
+  // still uses (`uses`), the oldest first; never one still used, nor one a
   // waiting delivery names.
   async #room(key, length) {
     // read again at each look, both at once: an upload ending meanwhile is
@@ -427,20 +435,20 @@ export class SimplexDoor extends DurableObject {
     const d = this.#door();
     // bounded: one file let go a pass, of at most `FILES_KEPT`
     while (!fileRoom(held(), length)) {
-      // the oldest none needs now (one given again since is needed again)
-      const f = this.ctx.storage.sql.exec(`DELETE FROM files WHERE sha = (SELECT sha FROM files WHERE needs = 0 AND sha NOT IN (${WAITING_FILES}) ORDER BY at LIMIT 1) RETURNING sha`).toArray()[0];
+      // the oldest none uses now (one given again since is used again)
+      const f = this.ctx.storage.sql.exec(`DELETE FROM files WHERE sha = (SELECT sha FROM files WHERE sha NOT IN (SELECT sha FROM uses) AND sha NOT IN (${WAITING_FILES}) ORDER BY at LIMIT 1) RETURNING sha`).toArray()[0];
       if (!f) return false;
       await this.env.BLOBS.delete(fileKey(d.door, f.sha));
     }
     return true;
   }
 
-  // A file it holds, its bytes and its type, its name in `FILE_SHA_HEADER`;
-  // `take`: its connector keeping its owner's file, one use done. A reply's
-  // file's use ends once its reply is done (`#reply`), its runner reading
-  // it again until.
-  async #giveFile(sha, take) {
-    const row = shaOk(sha) ? this.ctx.storage.sql.exec("UPDATE files SET needs = max(needs - ?, 0), at = ? WHERE sha = ? RETURNING bytes, type", take ? 1 : 0, Date.now(), sha).toArray()[0] : null;
+  // A file it holds, its bytes and its type, its name in `FILE_SHA_HEADER`.
+  // A read releases no use: its reader may be cut off and read it again
+  // (its connector says `kept` once it has it; a reply's file is used until
+  // its reply is done).
+  async #giveFile(sha) {
+    const row = shaOk(sha) ? this.ctx.storage.sql.exec("UPDATE files SET at = ? WHERE sha = ? RETURNING bytes, type", Date.now(), sha).toArray()[0] : null;
     if (!row) return refusal(404, "no_file", `the door holds no file ${String(sha).slice(0, 64)}`);
     const obj = await this.env.BLOBS.get(fileKey(this.#door().door, sha));
     if (!obj) {
@@ -451,13 +459,22 @@ export class SimplexDoor extends DurableObject {
   }
 
   // The files held past `FILE_KEPT_MS`, but those a delivery its inbox has
-  // yet to take names (an inbox down past a day): their rows first, then
-  // their files.
+  // yet to take names (an inbox down past a day): their rows and uses
+  // first (a use whose answer never came ends with them), then their files.
   async #staleFiles() {
     const d = this.#door();
     if (!d) return;
     const old = this.ctx.storage.sql.exec(`DELETE FROM files WHERE at <= ? AND sha NOT IN (${WAITING_FILES}) RETURNING sha`, Date.now() - FILE_KEPT_MS).toArray();
+    for (const f of old) this.ctx.storage.sql.exec("DELETE FROM uses WHERE sha = ?", f.sha);
     if (old.length) await this.env.BLOBS.delete(old.map((f) => fileKey(d.door, f.sha)));
+  }
+
+  // Its connector kept the file delivery `id` named: that delivery's use
+  // ends, and no other's (said again, nothing more).
+  #kept(body) {
+    if (!(typeof body.id === "string" && body.id.length > 0 && body.id.length <= 64)) throw Object.assign(new Error("kept names its delivery (id)"), { status: 400 });
+    const ended = this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ? RETURNING sha", `d:${body.id}`).toArray().length;
+    return json({ ended });
   }
 
   // ---- its owner's messages, on to its connector's inbox ----
@@ -671,6 +688,11 @@ export class SimplexDoor extends DurableObject {
     if (unsent >= DELIVERIES_KEPT) return refusal(503, "inbox_behind", `its inbox has yet to take ${unsent}: deliver it again later`);
     const mark = this.#mark();
     this.ctx.storage.sql.exec("INSERT INTO deliveries (id, mark, body, at) VALUES (?, ?, ?, ?)", m.id, mark, JSON.stringify(m), Date.now());
+    // its file's use is this delivery's now, until its connector keeps it
+    if (m.file != null) {
+      this.ctx.storage.sql.exec("DELETE FROM uses WHERE sha = ? AND owner = 'given'", m.file.sha256);
+      this.ctx.storage.sql.exec("INSERT INTO uses (sha, owner) VALUES (?, ?) ON CONFLICT DO NOTHING", m.file.sha256, `d:${m.id}`);
+    }
     // the ones its inbox took, but the newest few (each taken once by its id)
     this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE sent = 1 AND mark <= (SELECT mark FROM deliveries WHERE sent = 1 ORDER BY mark DESC LIMIT 1 OFFSET ?)", DELIVERIES_KEPT);
     // on to its inbox once the runner has its answer; its watch is the net
@@ -712,14 +734,14 @@ export class SimplexDoor extends DurableObject {
       case "file": {
         const hex = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
         if (a.sha !== undefined) {
-          const held = await this.#giveFile(a.sha, false);
+          const held = await this.#giveFile(a.sha);
           if (!held.ok) return held;
           const bytes = new Uint8Array(await held.arrayBuffer());
           return json({ sha256: await hex(bytes), size: bytes.length, type: held.headers.get("content-type") });
         }
         const bytes = Uint8Array.from(atob(String(a.bytes ?? "")), (c) => c.charCodeAt(0));
         const sha = await hex(bytes);
-        const r = await this.#keepFile(sha, new Request("http://door/", { method: "PUT", headers: { "content-type": typeOf(a.type), "content-length": String(bytes.length) }, body: bytes }));
+        const r = await this.#keepFile(sha, new Request("http://door/", { method: "PUT", headers: { "content-type": typeOf(a.type), "content-length": String(bytes.length) }, body: bytes }), "given");
         return r.ok ? json({ sha256: sha, size: bytes.length }) : r;
       }
       case "deliveries": {

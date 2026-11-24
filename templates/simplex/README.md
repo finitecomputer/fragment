@@ -54,7 +54,8 @@ file it loads are the chat template's, linked, so no copy drifts).
   platform knows which fragment publishes. A message's file (a voice
   message, a photo, a file), which its door holds, is kept first as one
   of this chat's blobs (`job.fetch(…/file/<sha256>, {keep: true})`) and
-  goes as its attachment; one kept by none is said so in its words.
+  goes as its attachment, and its door is told it was kept (`kept`, by
+  the message's id); one kept by none is said so in its words.
   Unbound, it tells their app so; a message with nothing to carry, that
   only text and files are carried. `mirror` sends each reply its bound
   agent posts here (not its interim words) through the door, by its
