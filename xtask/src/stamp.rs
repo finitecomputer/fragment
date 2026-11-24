@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn the_templates_build_script_reruns_for_a_kept_feature_variant() {
         let f = Fixture::new("templates");
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let repo = crate::devstack::repo_root();
         // its build dependencies at the versions the repo's lock names, which
         // the registry holds wherever the workspace was built (offline); the
         // lock is no part of the tree, as cargo prunes it at the first build

@@ -183,7 +183,7 @@ mod tests {
     /// bridge adopts, at its owner's word (docs/migrations.md).
     #[test]
     fn the_finite_computer_layout_never_reads_the_stages_own_files() {
-        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../templates/skills/skills/productivity/import-agent-home/profiles/finite-computer.layout.json");
+        let shipped = "../templates/skills/skills/productivity/import-agent-home/profiles/finite-computer.layout.json";
         let l = Layout::named(shipped).unwrap();
         let secret = l.secret_globs().unwrap();
         for p in [".finite-stage/simplex/chat.db", ".finite-stage/simplex/agent.db", ".finite-stage/simplex/owner.json"] {

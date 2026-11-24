@@ -1391,12 +1391,12 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
         ("workspace/projects/app/.git/objects/ab/cdef", pattern(4096, 5)),
         ("workspace/projects/app/.env", b"TOKEN=not-read".to_vec()),
     ];
-    let files = fragment_fakes::old_home::stage(&zip_at, &extra)?;
+    let files = fragment_fakes::old_home::stage(&crate::devstack::repo_root(), &zip_at, &extra)?;
     let zip = std::fs::read(&zip_at)?;
     let bytes: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
     anyhow::ensure!(zip.len() as u64 > 2 * BIG_ROOM, "the stage is larger than the computer's room");
     mover.home(zip.clone(), 16 * MIB, files.len() as u64, bytes);
-    let layout = fragment_fakes::old_home::layout().to_str().context("a utf-8 path")?.to_string();
+    let layout = fragment_fakes::old_home::layout(&crate::devstack::repo_root()).to_str().context("a utf-8 path")?.to_string();
 
     // Yes with this agent, and staged
     let people = vec![person(&workos_id, &[&old])];

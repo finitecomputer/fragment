@@ -64,7 +64,7 @@ fn home(tag: &str, key: Option<&str>) -> PathBuf {
 }
 
 fn fragment(home: &Path) -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_fragment"));
+    let mut c = Command::new(std::env::var_os("CARGO_BIN_EXE_fragment").expect("cargo names the binary to a test it runs"));
     c.env("HOME", home)
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("FRAGMENT_HOST")
