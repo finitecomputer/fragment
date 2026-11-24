@@ -43,12 +43,13 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-rustls.workspace = true
+# a SimpleX door's save (simplex/save.rs): its databases copied by SQLite's
+# online backup and checked whole, which a link handed over to a door makes
+# and its lab test reads; built in (bundled), at the lock's pin
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "backup"] }
 # Unicode's general categories, which SimpleX's core keeps a display name
 # by (simplex/wire.rs, `valid_name`: its `mkValidName`, ported)
 unicode-properties.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
-# a SimpleX door's save, read in its lab test (tests/door.rs): the core's
-# chat database inside it, at the lock's pin
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
