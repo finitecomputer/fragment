@@ -363,7 +363,9 @@ fn build_image() {
         return;
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Command::new("docker").args(["build", "--platform", "linux/amd64", "-q", "-f", "images/simplex-door/Dockerfile", "-t", DOOR_IMAGE, "."]).current_dir(&root).output().expect("docker runs");
+    // loaded into the local images whatever builder builds it (a
+    // docker-container builder keeps its result in its cache otherwise)
+    let out = Command::new("docker").args(["build", "--load", "--platform", "linux/amd64", "-q", "-f", "images/simplex-door/Dockerfile", "-t", DOOR_IMAGE, "."]).current_dir(&root).output().expect("docker runs");
     assert!(out.status.success(), "the door's image builds: {}", String::from_utf8_lossy(&out.stderr));
 }
 
