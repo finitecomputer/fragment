@@ -1558,9 +1558,10 @@ impl FragmentCell {
     }
 
     /// From the alarm: finished runs past their retention go, and past the
-    /// count kept, all but those that guard a call a retry may still repeat
-    /// (`run_retention`): those keep only their guard until their window
-    /// ends, so a retry never starts a run twice.
+    /// count kept, all but those that guard a call that ran, which a retry
+    /// may still repeat (`run_retention`): they stay until their window
+    /// ends, a succeeded one shed to its guard, so a retry never starts a
+    /// run that ran twice.
     pub(crate) fn trim_runs(&self) -> CellResult<()> {
         let now = js::now_ms();
         let window_start = now - crate::channels::retry_horizon_ms();
@@ -1570,6 +1571,7 @@ impl FragmentCell {
                 SqlStorageValue::Integer(now - limits::RUN_RETENTION_MS),
                 SqlStorageValue::Integer(limits::RUNS_KEPT),
                 SqlStorageValue::Integer(window_start),
+                SqlStorageValue::Integer(limits::HELD_RUNS_GUARDED),
             ],
         )?;
         self.exec(run_retention::RUNS_SHED_SQL, vec![SqlStorageValue::Integer(window_start), SqlStorageValue::Integer(limits::RUNS_KEPT)])?;
@@ -1655,11 +1657,10 @@ impl FragmentCell {
         self.writable().await?;
         let rows = self.rows(run_retention::RUN_REPLAY_SQL, vec![SqlStorageValue::Integer(body.run)])?;
         let Some(row) = rows.first() else {
-            let found = self.rows("SELECT error FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(body.run)])?;
-            return Err(match found.first() {
-                Some(r) if r["error"].as_str() == Some(run_retention::SHED_NOTE) => CellError::invalid(format!("run #{}: {}", body.run, run_retention::SHED_NOTE)),
-                Some(_) => CellError::invalid(format!("run #{} is not held or blocked", body.run)),
-                None => CellError::new(ErrorCode::NotFound, format!("no run #{}", body.run)),
+            let exists = !self.rows("SELECT id FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(body.run)])?.is_empty();
+            return Err(match exists {
+                true => CellError::invalid(format!("run #{} is not held or blocked", body.run)),
+                false => CellError::new(ErrorCode::NotFound, format!("no run #{}", body.run)),
             });
         };
         let by = npub::display(self.caller_id(caller)?);
