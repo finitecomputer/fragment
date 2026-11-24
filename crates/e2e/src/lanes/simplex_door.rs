@@ -116,6 +116,8 @@ fn door_name(label: &str) -> String {
 }
 
 pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
+    // named before the section's own check, so a plan knows the name
+    let real = s.names(super::simplex_setup::LINK);
     if !s.section_by_name(NAME, &[Need::Levers, Need::Doors], "its stack builds the door's image (SimpleX's core and its runner)") {
         return Ok(());
     }
@@ -210,7 +212,7 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     ensure!(deleted.status == 200, "deleting their connector: {deleted}");
     let (gone, files) = ended(api, &theirs, Duration::from_secs(60))?;
     s.ok("their connector deleted while its door runs: its door ends, its files gone", gone && files.as_array().is_some_and(Vec::is_empty), json!({ "ended": gone, "files": files }));
-    if s.links_simplex() {
+    if real {
         files_for_real(s, api)?;
     }
     Ok(())

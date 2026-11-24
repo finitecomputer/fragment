@@ -568,7 +568,7 @@ impl Suite {
 
     /// Whether the run names a real SimpleX link (`simplex-link`): its
     /// doors then reach the internet (`Fleet::door_internet`).
-    pub fn links_simplex(&self) -> bool {
+    fn links_simplex(&self) -> bool {
         self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_setup::LINK))
     }
 
