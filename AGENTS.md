@@ -112,16 +112,17 @@ locally. Run them from the checkout with `tools/boat/run`, for example
 your work then means that sandbox. Reading, editing, git and `gh` stay
 local.
 
-- Each run sends the checkout as it stands (HEAD plus uncommitted and
-  untracked files) to a fresh copy of a warm snapshot, prints the output,
-  and deletes the sandbox. Expect 1 to 2 minutes before the command starts.
-- `--keep` reuses one sandbox per checkout across runs; use it when you
-  will run more than once. `--stop` ends it, and `--id` gives its id for
-  `boat scp` of logs or screenshots.
-- Setup is in the header of `tools/boat/run`. `tools/boat/golden` makes
-  the snapshot on your own account and refreshes it from master.
-- Each run counts as one sandbox start, and a large sandbox bills at twice
-  the default rate. Check the plan's limits with `boat limits --all`, not
+- A checkout has one sandbox, started from a warm snapshot at its first
+  run and stopped by Boat when idle. Each run sends the checkout as it
+  stands (HEAD plus changed, new and deleted files) and prints the
+  command's output. Expect 1 to 2 minutes before a new sandbox's first
+  command, and seconds after that.
+- The run's first line names the sandbox, for `boat scp` of logs or
+  screenshots.
+- `tools/boat/run --rebuild` makes the snapshot on your own account, once;
+  `--refresh` brings it to master, and does nothing when it is there.
+- A large sandbox bills at twice the default rate, and each start counts
+  against the plan's daily limit. Check them with `boat limits --all`, not
   from memory.
 
 ## Proving your work

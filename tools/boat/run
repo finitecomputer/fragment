@@ -1,122 +1,106 @@
 #!/usr/bin/env bash
-# tools/boat/run: run a command from this checkout on a Boat sandbox
-# (boat.dev) started from the warm snapshot, instead of on this computer.
-# Optional; see "Building on Boat" in AGENTS.md.
+# tools/boat/run: run a command from this checkout on its Boat sandbox
+# (boat.dev) instead of on this computer. Optional; AGENTS.md, "Building on
+# Boat".
 #
-#   tools/boat/run [--keep] [--] COMMAND...   e.g. tools/boat/run cargo xtask check
-#   tools/boat/run --id | --stop | --delete   this checkout's kept sandbox
+#   tools/boat/run COMMAND...   e.g. tools/boat/run cargo xtask check
+#   tools/boat/run --refresh    bring the warm snapshot to master
+#   tools/boat/run --rebuild    make the snapshot from nothing (the first time)
 #
-# One argument is a shell command line ('cargo xtask check && cargo test');
-# several are one command and its arguments. The command runs in
-# ~/Projects/fragment on the sandbox, with this checkout as it stands there:
-# HEAD (sent as a git bundle when origin/master lacks it) and every
-# uncommitted, untracked or deleted file. Ignored files stay here. Only
-# files whose contents differ are written, so cargo rebuilds only what
-# changed since the snapshot.
+# A checkout has one sandbox, started from the snapshot at its first run and
+# stopped by Boat 15 minutes after its last; the next run resumes it. Each run
+# sends the checkout as it stands (HEAD and every changed, new and deleted
+# file that git does not ignore) as one git commit, and inside.sh checks it
+# out there and runs the command in it. One argument is a shell command
+# line; several are one command and its arguments. The run's first line
+# names the sandbox, for `boat scp` of what it left (~/Projects/fragment).
 #
-# Without --keep the sandbox is deleted when the command ends. With --keep
-# this checkout keeps one sandbox: later --keep runs reuse it (resuming it
-# if it stopped), it stops by itself FRAGMENT_BOAT_TTL seconds (default
-# 3600) after the last run, and --stop or --delete ends it sooner. One run
-# at a time per checkout. --id prints its id, for `boat scp ID:PATH .`
-# (failed e2e logs are in ~/Projects/fragment/target/e2e).
-#
-# First: install the boat CLI, `boat login`, and make the snapshot with
-# tools/boat/golden. Each run waits 1 to 2 minutes for the sandbox's disk
-# before the command starts; that wait is in start.sh, and why.
+# Needs the boat CLI (`boat login`) and jq. Shell, not xtask: it runs where
+# nothing is built, which is its point.
 set -euo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd)
-. "$HERE/lib.sh"
-TTL=${FRAGMENT_BOAT_TTL:-3600}
+here=$(cd "$(dirname "$0")" && pwd)
+B=${BOAT_BIN:-$(command -v boat || echo "$HOME/.ascii/bin/boat")}
+SNAPSHOT=${FRAGMENT_BOAT_SNAPSHOT:-fragment-warm}
+UNCHANGED=86 # inside.sh's exit when the snapshot is at master already
+# Seconds until Boat stops a sandbox: room for a run, then little to idle on.
+RUNNING=7200 IDLE=900
+die() { echo "tools/boat/run: $*" >&2; exit 1; }
+command -v jq >/dev/null || die "jq is not installed"
+[ -x "$B" ] || die "no boat CLI (https://boat.dev/install), or set BOAT_BIN"
 
-usage() { sed -n '6,7p' "$0" | sed 's/^# //' >&2; exit 2; }
-mode=once
-case "${1:-}" in
-  --keep) mode=keep; shift ;;
-  --id | --stop | --delete) mode=${1#--}; shift; [ $# -eq 0 ] || usage ;;
-  -h | --help | "") usage ;;
-esac
-[ "${1:-}" != -- ] || shift
-case $mode in once | keep) [ $# -gt 0 ] || usage ;; esac
+# new [boat new's options]: a sandbox, its id printed.
+new() {
+  local out
+  out=$("$B" new "$@" --type "${FRAGMENT_BOAT_TYPE:-large}" --no-env --ttl "$RUNNING" --json) || die "boat new: $out"
+  jq -rs '[.[] | (.id?, .sandbox.id?) | strings | select(startswith("bx_"))] | first // empty' <<< "$out"
+}
 
-ROOT=$(git rev-parse --show-toplevel)
-[ -f "$ROOT/tools/boat/sandbox/start.sh" ] || { echo "tools/boat/run: $ROOT is not a fragment checkout" >&2; exit 1; }
-STATE="$(git -C "$ROOT" rev-parse --absolute-git-dir)/boat-sandbox"
-kept=$(cat "$STATE" 2>/dev/null || true)
+# on ID COMMIT COMMAND: inside.sh there with those two, its output as it
+# comes and its exit code. boat answers in JSON frames, one a line.
+on() {
+  "$B" exec "$1" --timeout 0 --stream -- bash -lc "set -- $(printf '%q ' "$2" "$3")
+$(cat "$here/inside.sh")" | jq -Rrj --unbuffered '(fromjson? // {type: "stdout", data: (. + "\n")}) | objects | if .type == "stdout" or .type == "stderr" then .data elif .error then "boat: \(.error)\n" else empty end'
+  return "${PIPESTATUS[0]}"
+}
 
-case $mode in
-  id) [ -n "$kept" ] || { echo "tools/boat/run: this checkout has no kept sandbox" >&2; exit 1; }; echo "$kept"; exit 0 ;;
-  stop | delete)
-    [ -n "$kept" ] || { echo "tools/boat/run: this checkout has no kept sandbox" >&2; exit 0; }
-    if [ "$mode" = stop ]; then
-      case $(state_of "$kept") in stopped | gone) ;; *) "$B" stop "$kept" >/dev/null ;; esac
-      echo "tools/boat/run: $kept stopped; the next --keep run resumes it" >&2
-    else
-      [ "$(state_of "$kept")" = gone ] || "$B" delete "$kept" --yes >/dev/null
-      rm -f "$STATE"
-      echo "tools/boat/run: $kept deleted" >&2
-    fi
+case ${1:-} in
+  --refresh | --rebuild)
+    [ $# -eq 1 ] || die "$1 takes nothing after it"
+    from="--from $SNAPSHOT"
+    [ "$1" = --refresh ] || from=
+    # shellcheck disable=SC2086 # two words, or none
+    id=$(new $from --name "$SNAPSHOT-builder")
+    [ -n "$id" ] || die "boat new named no sandbox"
+    trap '"$B" delete "$id" --yes >/dev/null' EXIT
+    echo "tools/boat/run: building on $id" >&2
+    rc=0
+    on "$id" master "" || rc=$?
+    [ "$rc" != "$UNCHANGED" ] || exit 0
+    [ "$rc" = 0 ] || die "the build failed ($rc): $SNAPSHOT is as it was"
+    "$B" snapshot "$id" "$SNAPSHOT" >/dev/null
+    echo "tools/boat/run: $SNAPSHOT saved" >&2
     exit 0 ;;
+  "" | -h | --help) sed -n '6,8p' "$0" | cut -c3- >&2; exit 2 ;;
 esac
 
-if [ $# -eq 1 ]; then command_line=$1; else command_line=$(printf '%q ' "$@"); fi
-name="fragment-$(basename "$ROOT")"
-name=${name:0:120}
-new_sandbox() {
-  "$B" new --from "$SNAPSHOT" --type "$TYPE" --no-env --ttl "$TTL" --name "$name" --json | first_id
-}
+cd "$(git rev-parse --show-toplevel)"
+[ -f tools/boat/inside.sh ] || die "$PWD is not a fragment checkout"
+state=$(git rev-parse --absolute-git-dir)/boat-sandbox
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
 
-work=$(mktemp -d)
-id=""
-finish() {
-  rc=$?
-  rm -rf "$work"
-  if [ "$mode" = once ] && [ -n "$id" ]; then
-    "$B" delete "$id" --yes >/dev/null 2>&1 || echo "tools/boat/run: could not delete $id; run: boat delete $id --yes" >&2
-  fi
-  exit $rc
-}
-trap finish EXIT
-trap 'exit 130' INT TERM
+# The checkout as it stands, as one commit: HEAD itself when nothing is
+# changed, else a commit on it that this worktree's own ref keeps.
+cp "$(git rev-parse --git-path index)" "$tmp/index"
+GIT_INDEX_FILE=$tmp/index git add -A
+tree=$(GIT_INDEX_FILE=$tmp/index git write-tree)
+commit=$(git rev-parse HEAD)
+[ "$tree" = "$(git rev-parse "HEAD^{tree}")" ] || commit=$(git -c user.name=boat -c user.email=boat@localhost commit-tree "$tree" -p HEAD -m "the checkout as it stands")
+git update-ref refs/worktree/boat "$commit"
 
-if [ "$mode" = keep ] && [ -n "$kept" ]; then
-  for _ in $(seq 1 60); do
-    case $(state_of "$kept") in
-      stopped) "$B" resume "$kept" --ttl "$TTL" >/dev/null; id=$kept; break ;;
-      gone) break ;;
-      creating | starting | resuming | stopping | pending) sleep 5 ;;
-      *) "$B" extend "$kept" --ttl "$TTL" >/dev/null; id=$kept; break ;;  # running or idle
-    esac
-  done
-fi
+id=$(cat "$state" 2>/dev/null || true)
+for _ in $(seq 30); do # a sandbox between two states (stopping, resuming) is asked again
+  case $([ -z "$id" ] || "$B" info "$id" --json 2>/dev/null | jq -r '.sandbox | select(.dataExpiredAt | not) | .state') in
+    ready | idle | running) "$B" extend "$id" --ttl "$RUNNING" >/dev/null; break ;;
+    stopped) "$B" resume "$id" --ttl "$RUNNING" >/dev/null; break ;;
+    *ing) sleep 2 ;;
+    *) id=; break ;;
+  esac
+done
 if [ -z "$id" ]; then
-  id=$(new_sandbox)
-  [ "$mode" = once ] || echo "$id" > "$STATE"
+  id=$(new --from "$SNAPSHOT" --name "fragment-$(basename "$PWD")")
+  [ -n "$id" ] || die "boat new named no sandbox"
+  echo "$id" > "$state"
 fi
-echo "tools/boat/run: $id ($TYPE, from $SNAPSHOT)" >&2
+echo "tools/boat/run: $id" >&2
 
-started=$(date +%s)
-bx "$id" 'rm -rf ~/fragment-src ~/fragment-head.bundle'
-"$B" push "$id" "$ROOT" --to /home/user/fragment-src >/dev/null
-sha=$(git -C "$ROOT" rev-parse HEAD)
-if [ -n "$(git -C "$ROOT" rev-list -n 1 HEAD --not origin/master)" ]; then
-  git -C "$ROOT" bundle create -q "$work/head.bundle" HEAD --not origin/master
-  "$B" scp "$work/head.bundle" "$id:/home/user/fragment-head.bundle" >/dev/null
+# What master lacks of it goes as a bundle; the sandbox fetches master itself.
+if ! git merge-base --is-ancestor "$commit" origin/master; then
+  git bundle create -q "$tmp/bundle" refs/worktree/boat --not origin/master
+  "$B" scp "$tmp/bundle" "$id:/home/user/checkout-$commit.bundle" >/dev/null
 fi
-
-save_times=""
-[ "$mode" = once ] || save_times='python3 ~/fragment-src/tools/boat/sandbox/times.py save >/dev/null'
-set +e
-# Boat's user holds CAP_DAC_READ_SEARCH (it reads any file), which CI's
-# runner does not: tests that make a file unreadable fail. The command runs
-# without it.
-bx "$id" "bash ~/fragment-src/tools/boat/sandbox/start.sh ~/fragment-src $sha || exit 97
-cd ~/Projects/fragment
-setpriv --inh-caps=-all --ambient-caps=-all -- bash -c $(printf %q "$command_line")
-rc=\$?
-$save_times
-exit \$rc" 0
-rc=$?
-set -e
-echo "tools/boat/run: exit $rc after $(( $(date +%s) - started ))s on $id" >&2
-exit $rc
+if [ $# -eq 1 ]; then command=$1; else command=$(printf '%q ' "$@"); fi
+rc=0
+on "$id" "$commit" "$command" || rc=$?
+"$B" extend "$id" --ttl "$IDLE" >/dev/null || true
+exit "$rc"
