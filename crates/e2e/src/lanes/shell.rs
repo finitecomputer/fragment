@@ -5492,9 +5492,14 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // Alex's review of #619: one home a page, whatever comes in what order.
     // A pane of its link page stands in a frame (`data-simplex`), and its
     // asks are its messages (the shell takes a message only from such a
-    // frame, of its origin); the computer says its image does SimpleX
+    // frame, of its origin); the computer says its image does SimpleX, and
+    // it is kept on: Settings' SimpleX row is then the computer's own
+    // (`data-simplex-computer`), shown once the shell's view of it says so
+    // (every seat's Settings shows SimpleX, its connector's elsewhere)
     let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": true }))?;
+    const ITS_OWN: &str = "!!document.querySelector('#settings-simplex:not([hidden]) [data-simplex-computer]')";
     let write_home = |home: Option<&str>| {
         let text = match home {
             Some(h) => format!("{{\n  \"tier\": \"cheap\",\n  \"home\": {h:?}\n}}\n"),
@@ -5517,7 +5522,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         ok && shows(b, p, home)
     };
     // a link's ticked box, then an unlink, with Settings open: the home, the bell and the pick follow
-    b.until(page, "!!document.querySelector('#settings-simplex:not([hidden])')", wait);
+    b.until(page, ITS_OWN, wait);
     ask(b, page, "link", Some(true))?;
     let linked = shows(b, page, "simplex") && home_now() == Some(json!("simplex"));
     ask(b, page, "unlink", None)?;
@@ -5542,7 +5547,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     for (as404, before, want, after) in [(false, None, Some(true), "simplex"), (true, None, Some(true), "simplex"), (false, Some("simplex"), None, "")] {
         anyhow::ensure!(write_home(before)? == 200, "agent.json as the case starts");
         let p = b.open_with_script(&format!("{}/settings", api.base), &hold(as404))?;
-        let read = b.until(&p, "typeof window.__read === 'function' && !!document.querySelector('#settings-simplex:not([hidden])')", wait);
+        let read = b.until(&p, &format!("typeof window.__read === 'function' && {ITS_OWN}"), wait);
         ask(b, &p, if want.is_some() { "link" } else { "unlink" }, want)?;
         let written = shows(b, &p, after);
         b.eval(&p, "(window.__read(), true)")?;
@@ -5614,6 +5619,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{refresh}"), None, &[])?;
     anyhow::ensure!(deleted.status == 200, "the fragment made for a refresh deleted: {deleted}");
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;
