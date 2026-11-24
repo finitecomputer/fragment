@@ -3,9 +3,9 @@
 # cell, the CLI and the suite, and the computer images the node's boot
 # builds), with this commit's builds saved for the runs after it when
 # `save` says so.
-# ci.yml's shards run it before their sections, and on a master push whose
-# shards skip (`proven`), `e2e-build` runs it alone, so every later run
-# still starts from master's newest build and layers.
+# ci.yml's `e2e-build` runs it once per run, its shards running what it
+# built; on a master push whose shards skip (`proven`) too, so every later
+# run still starts from master's newest build and layers.
 name: e2e build
 description: the e2e's caches, its stub image and its build, saved when asked
 inputs:
@@ -15,16 +15,6 @@ inputs:
   worker-build-version:
     description: worker-build's version (xtask/src/build.rs, WORKER_BUILD_VERSION)
     required: true
-outputs:
-  builder:
-    description: the BuildKit builder the computer images were built in, for BUILDX_BUILDER
-    value: ${{ steps.buildx.outputs.name }}
-  js-cache-hit:
-    description: whether the JavaScript caches' key was restored whole
-    value: ${{ steps.js.outputs.cache-hit }}
-  js-cache-key:
-    description: the JavaScript caches' key, to save it under after a run
-    value: ${{ steps.js.outputs.cache-primary-key }}
 runs:
   using: composite
   steps:
