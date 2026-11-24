@@ -723,16 +723,19 @@ impl RegistryCell {
             None => true,
             Some(_) => site_signin::still_its_life(b.ended, now),
         };
+        // each statement answers its rows (RETURNING): read them all, as
+        // `sweep_signin` does, or the request's transaction cannot commit
+        // (SQLITE_BUSY: a statement still in progress)
         if forgets {
             for sql in site_signin::FORGETS {
-                self.exec(sql, vec![b.fragment.as_str().into()])?;
+                self.rows::<IgnoredAny>(sql, vec![b.fragment.as_str().into()])?;
             }
             assert_eq!(self.count("SELECT COUNT(*) AS n FROM sessions WHERE fragment = ?", vec![b.fragment.as_str().into()])?, 0, "a forgotten name keeps no site session");
         }
         if b.ended.is_some() {
             return Ok(SiteLife { life: now });
         }
-        self.exec(site_signin::NEXT_LIFE, vec![b.fragment.as_str().into()])?;
+        self.rows::<IgnoredAny>(site_signin::NEXT_LIFE, vec![b.fragment.as_str().into()])?;
         let life = self.site_life(&b.fragment)?;
         assert_eq!(life, now + 1, "a create counts the name's next life");
         Ok(SiteLife { life })
