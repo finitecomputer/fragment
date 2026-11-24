@@ -181,7 +181,7 @@ export class SimplexDoor extends DurableObject {
         this.#ended = false;
       }
       if (lever) return await this.#lever(lever);
-      if (imports) return await this.#import(request);
+      if (imports) return await this.#saveGiven(request);
       if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore(request);
       if (url.pathname === "/egress/save" && request.method === "PUT") return await this.#save(request, url);
       if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await bounded(request));
@@ -280,7 +280,7 @@ export class SimplexDoor extends DurableObject {
   // connect starts it, restoring this save. Given again (its SHA-256 the
   // same), the same answer; a door that saved, or was given another, never
   // takes one (409), so no link it holds is written over.
-  async #import(request) {
+  async #saveGiven(request) {
     const door = request.headers.get(DOOR_NAME_HEADER);
     const agent = request.headers.get("x-door-agent");
     const sha = request.headers.get(FILE_SHA_HEADER);
@@ -871,7 +871,7 @@ export class SimplexDoor extends DurableObject {
       case "import": {
         const bytes = Uint8Array.from(atob(String(a.bytes ?? "")), (c) => c.charCodeAt(0));
         const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
-        return this.#import(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "x-door-length": String(bytes.length), "x-door-staged": a.staged ? "1" : "0" }, body: bytes }));
+        return this.#saveGiven(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "x-door-length": String(bytes.length), "x-door-staged": a.staged ? "1" : "0" }, body: bytes }));
       }
       // a file as its runner gives one (`bytes`, base64), for a delivery
       // or a reply to name: its SHA-256; or (`sha`) what the door holds
