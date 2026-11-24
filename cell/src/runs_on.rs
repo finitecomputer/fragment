@@ -276,9 +276,6 @@ impl FragmentCell {
                     "closed" => return Ok(json!({ "closed": self.close_door(door::SIMPLEX, "its SimpleX link moved into its own chat's door")? })),
                     _ => return Err(CellError::invalid("act: handover, back or closed")),
                 };
-                if act == door::Act::Handover && !self.meta(MetaKey::Door)?.is_some_and(|d| d.starts_with(&format!("{} ", door::SIMPLEX))) {
-                    return Err(CellError::new(ErrorCode::Conflict, "no SimpleX link of its computer's holds its door open: nothing to move"));
-                }
                 self.door_allowed(door::SIMPLEX, if act.opens() { Action::Link } else { Action::Unlink })?;
                 if act.opens() {
                     self.reach_while_private()?;

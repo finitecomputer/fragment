@@ -138,6 +138,14 @@ struct Kept {
     /// the core's received copy gone, delivers it as its door holds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     given: Option<(i64, door::File)>,
+    /// Its owner's SimpleX chat with their old agent, handed over from
+    /// their computer staged (finite.computer's move set it aside there,
+    /// never kept: docs/bridge.md, "SimpleX"), and what its computer's read
+    /// of it found: in the save its door was given, which its door starts
+    /// only once its owner keeps it (its connector's connect `keep`), so it
+    /// is adopted as it is restored, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adopt: Option<run::Adoption>,
 }
 
 /// A reply's file the core is uploading: its copy's folder (under
@@ -339,7 +347,16 @@ async fn main() {
     let asks = to.clone();
     tokio::spawn(net::serve(listener, move |req, _| handle(asks.clone(), req), stop_rx));
 
-    let (kept, door_mark, behind, life) = restore(&door, &dir).await;
+    let (mut kept, door_mark, behind, life) = restore(&door, &dir).await;
+    // kept at its owner's word: its link bound to their contact, as their
+    // computer's adoption binds one (`link::Input::Adopt`: what their chat
+    // held is delivered already, its other contacts, groups and address
+    // let go), and their app told it moved, once; its next save holds it
+    if let Some(a) = kept.adopt.take() {
+        kept.link.apply(Input::Adopt { owner: a.owner, name: &a.name, newest: a.newest, leftovers: &a.leftovers });
+        kept.replies.push_back(Reply { key: "adopted".into(), text: run::moved(&name), contact: a.owner, files: vec![], said: false });
+        ev!("door.adopted", { "owner": a.owner, "leftovers": a.leftovers.len() });
+    }
     // every call of this life carries its generation
     let door = door.living(life);
     let generation = life;
@@ -471,7 +488,7 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool, u64) {
 fn staged(packed: &[u8], dir: &Path) -> Result<Kept, save::SaveError> {
     let state = save::stage(packed, dir)?;
     let kept: Kept = serde_json::from_slice(&state).map_err(|e| save::SaveError::Corrupt(format!("its state: {e}")))?;
-    if let Some(contact) = kept.link.contact() {
+    for contact in kept.link.contact().into_iter().chain(kept.adopt.as_ref().map(|a| a.owner)) {
         if !save::staged_contact(dir, contact)? {
             return Err(save::SaveError::Corrupt(format!("its link's contact {contact} is not in its chat database")));
         }

@@ -68,7 +68,7 @@ export const STEPS = [
   "CREATE TABLE uses (sha TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (sha, owner))",
   // the save it was given to begin from (`/door/import`), by its SHA-256:
   // at most one, ever
-  "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL)",
+  "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL, staged INTEGER NOT NULL DEFAULT 0)",
 ];
 
 // The steps a schema at `version` has yet to take, in order.

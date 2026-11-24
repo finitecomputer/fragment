@@ -23,6 +23,11 @@
 //!   4. **done**: its door's runner linked, its connector told so (its
 //!      `check`), and the person's old SimpleX chat archived (kept, its
 //!      history searchable).
+//!
+//!   A person's SimpleX chat with their old agent, staged on their
+//!   computer by finite.computer's move and never kept there, moves as
+//!   staged (**offered** after its import): never kept on their behalf, its
+//!   connector's setup page asks them to keep it or start a new chat.
 //! - `back`: the way back from wherever it stopped: its door's newest save
 //!   (its planned stop saves last) placed on its computer, which takes its
 //!   door key again and runs its core; then the connector deleted (its door
@@ -126,6 +131,7 @@ impl Move<'_> {
             "made" => "hand its link over",
             "imported" => "connect its door",
             "connecting" => "wait for its door to link",
+            "offered" => "nothing: its person keeps it, or starts a new chat, on its connector's setup page",
             "done" => "nothing: moved",
             _ => "its record says a step this release does not know",
         };
@@ -142,7 +148,8 @@ impl Move<'_> {
             return Some("its computer is asleep: `go` wakes it, then ask again".into());
         }
         let said = &read["link"]["said"];
-        (read["link"]["status"] != 200 || said["phase"] != "linked").then(|| format!("its computer holds no bound SimpleX link for it: {said}"))
+        let movable = said["phase"] == "linked" || (said["phase"] == "off" && said["staged"] == true);
+        (read["link"]["status"] != 200 || !movable).then(|| format!("its computer holds no bound SimpleX link for it, nor a staged chat: {said}"))
     }
 
     async fn go(&self) -> CellResult<Value> {
@@ -183,7 +190,12 @@ impl Move<'_> {
             rec = self.set(json!({ "step": "done" })).await?;
             self.note(format!("{}'s SimpleX moved into {connector}; {} archived", self.agent, rec["chat"].as_str().unwrap_or("no old chat"))).await?;
         }
-        Ok(json!({ "agent": self.agent, "record": rec, "next": if text(&rec, "step") == "done" { "nothing: moved" } else { "ask again" } }))
+        let next = match text(&rec, "step") {
+            "done" => "nothing: moved",
+            "offered" => "nothing: its person keeps it, or starts a new chat, on its connector's setup page",
+            _ => "ask again",
+        };
+        Ok(json!({ "agent": self.agent, "record": rec, "next": next }))
     }
 
     /// Its connector: made as the person's own from the SimpleX template,
@@ -221,14 +233,15 @@ impl Move<'_> {
     async fn hand_over(&self, rec: &Value) -> CellResult<Value> {
         let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false).await?.into();
         let head = |k: &str| save.headers().get(k).ok().flatten().unwrap_or_default();
-        let (sha, length) = (head("x-door-sha256"), head("x-door-length"));
+        let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
         let body = save.body().map(Into::into);
-        let headers = [("x-fragment-door", text(rec, "door")), ("x-door-agent", label_of(&self.agent)), ("x-door-sha256", sha.as_str()), ("x-door-length", length.as_str())];
+        let headers = [("x-fragment-door", text(rec, "door")), ("x-door-agent", label_of(&self.agent)), ("x-door-sha256", sha.as_str()), ("x-door-length", length.as_str()), ("x-door-staged", if staged { "1" } else { "0" })];
         let mut put = crate::routed::send(self.env, "SIMPLEX_DOOR", text(rec, "door"), crate::routed::internal_stream("door/import", Method::Put, &headers, body)?).await?;
         answer(&mut put, "its door's import").await?;
         crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
-        self.note(format!("{}'s SimpleX handed over to {}'s door ({sha}, {length} bytes)", self.agent, text(rec, "connector"))).await?;
-        self.set(json!({ "step": "imported" })).await
+        self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
+        // a staged chat waits for its person's word, never connected for them
+        self.set(json!({ "step": if staged { "offered" } else { "imported" } })).await
     }
 
     /// Its computer's half (`computer/simplex-hand`): a handover, or the
@@ -259,8 +272,14 @@ impl Move<'_> {
             let (save, behind) = match held.status_code() {
                 200 => {
                     let raw: worker::worker_sys::web_sys::Response = held.into();
-                    let behind = raw.headers().get("x-door-behind").ok().flatten().as_deref() == Some("1");
-                    (raw.body().map(Into::into), behind)
+                    let head = |k: &str| raw.headers().get(k).ok().flatten().unwrap_or_default();
+                    // the save it was given is its newest (it never saved one
+                    // of its own): its computer's own databases are that link's
+                    // still, untouched, and nothing is placed
+                    match head("x-door-save").as_str() {
+                        "0-1" => (None, false),
+                        _ => (raw.body().map(Into::into), head("x-door-behind") == "1"),
+                    }
                 }
                 204 => (None, false),
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),

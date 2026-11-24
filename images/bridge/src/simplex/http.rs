@@ -19,7 +19,9 @@
 //!   staged from its move, its contact the same in their app;
 //! - `POST /simplex/handover?agent=…` with a handover's ticket, the
 //!   platform's alone (D4): its link handed to its connector's door, the
-//!   answer that door's first save (`x-door-sha256`, `x-simplex-chat`);
+//!   answer that door's first save (`x-door-sha256`, `x-door-length`,
+//!   `x-simplex-chat`, and `x-simplex-staged` for its owner's staged chat
+//!   with their old agent, never kept here);
 //! - `POST /simplex/back?agent=…`, the way back, its ticket in
 //!   `x-door-ticket` and its door's newest save the body (`x-door-behind`).
 //!
@@ -49,6 +51,8 @@ const TICKET_MAX_BYTES: usize = 2_048;
 const SHA_HEADER: &str = "x-door-sha256";
 const LENGTH_HEADER: &str = "x-door-length";
 const CHAT_HEADER: &str = "x-simplex-chat";
+/// Its owner's staged chat with their old agent (`1`), never kept here.
+const STAGED_HEADER: &str = "x-simplex-staged";
 /// The way back's ticket (its body is its door's save), and whether that
 /// save is behind its door's newest effects (`1`).
 const TICKET_HEADER: &str = "x-door-ticket";
@@ -124,6 +128,9 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
                     let mut r = Response::builder().status(StatusCode::OK).header("content-type", "application/octet-stream").header(SHA_HEADER, &p.sha256).header(LENGTH_HEADER, p.bytes.len());
                     if let Some(chat) = &p.chat {
                         r = r.header(CHAT_HEADER, chat);
+                    }
+                    if p.staged {
+                        r = r.header(STAGED_HEADER, "1");
                     }
                     r.body(Body::new(p.bytes.into())).expect("a well-formed answer")
                 }

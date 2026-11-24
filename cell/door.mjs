@@ -285,6 +285,8 @@ export class SimplexDoor extends DurableObject {
     const agent = request.headers.get("x-door-agent");
     const sha = request.headers.get(FILE_SHA_HEADER);
     const length = Number(request.headers.get("x-door-length"));
+    // its owner's chat with their old agent, staged on their computer, never kept there
+    const staged = request.headers.get("x-door-staged") === "1" ? 1 : 0;
     const refuse = async (status, error, message) => (await request.body?.cancel(), refusal(status, error, message));
     if (!nameOk(door) || typeof agent !== "string" || !agent || agent.length > 64 || !shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
       return refuse(400, "invalid", "an import names its door, its agent and its save's SHA-256, and says its length");
@@ -318,7 +320,7 @@ export class SimplexDoor extends DurableObject {
         if (!this.#door()) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
         this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (0, 1, 0, ?, ?, 0)", put.size, Date.now());
         this.ctx.storage.sql.exec("UPDATE door SET saved = 1 WHERE id = 1");
-        this.ctx.storage.sql.exec("INSERT INTO imported (sha, at) VALUES (?, ?)", sha, Date.now());
+        this.ctx.storage.sql.exec("INSERT INTO imported (sha, at, staged) VALUES (?, ?, ?)", sha, Date.now(), staged);
       });
     } finally {
       this.#uploading.delete(key);
@@ -377,8 +379,27 @@ export class SimplexDoor extends DurableObject {
     }
     const n = this.ctx.storage.sql.exec("SELECT count(*) AS n, coalesce(sum(sent = 0), 0) AS unsent FROM deliveries").one();
     const inbox = this.ctx.storage.sql.exec("SELECT 1 FROM inbox WHERE id = 1").toArray().length === 1;
-    // `doors`: whether this deployment runs doors at all (a container for them)
-    return json({ door: this.#door(), saves: this.#saves(), deliveries: n.n, unsent: n.unsent, inbox, running: !!this.ctx.container?.running, runner, doors: !!this.ctx.container });
+    // `doors`: whether this deployment runs doors at all (a container for
+    // them); `staged`: a chat it was given waits for its owner's word
+    return json({ door: this.#door(), saves: this.#saves(), deliveries: n.n, unsent: n.unsent, inbox, running: !!this.ctx.container?.running, runner, doors: !!this.ctx.container, staged: this.#staged() });
+  }
+
+  // Whether it holds its owner's staged chat with their old agent, given
+  // (`/door/import`) and not yet kept or let go: it never started.
+  #staged() {
+    const i = this.ctx.storage.sql.exec("SELECT staged FROM imported").toArray()[0];
+    return !!(i?.staged && this.#door()?.started === 0);
+  }
+
+  // That chat let go (its owner starts a new one): its rows first, then its
+  // file, so no row names a file gone; its connect then begins a new door.
+  async #letGo() {
+    const d = this.#door();
+    this.ctx.storage.transactionSync(() => {
+      for (const t of ["saves", "imported", "door"]) this.ctx.storage.sql.exec(`DELETE FROM ${t}`);
+    });
+    await this.env.BLOBS.delete(saveKey(d.door, 0, 1));
+    this.#log("door.staged_let_go", {});
   }
 
   // An ask of its runner under a new mark, asked again under another while
@@ -423,6 +444,14 @@ export class SimplexDoor extends DurableObject {
       const body = await bounded(request);
       if (!secretOk(secret)) throw Object.assign(new Error(`connect gives its inbox's secret (${SECRET_HEADER})`), { status: 400 });
       if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them)");
+      // its owner's SimpleX chat with their old agent, handed over staged
+      // (never kept on their computer), starts only at their word: kept
+      // (`keep`: its runner adopts it as it restores), or let go for a new chat
+      if (this.#staged()) {
+        if (body.keep === true) this.ctx.storage.sql.exec("UPDATE imported SET staged = 0");
+        else if (body.keep === false) await this.#letGo();
+        else return refusal(409, "staged", "its owner's SimpleX chat with their old agent waits: keep it, or start a new chat");
+      }
       this.ctx.storage.sql.exec("INSERT INTO inbox (id, fragment, secret) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET secret = excluded.secret", connector, secret);
       const started = await this.#begin(door, body.name);
       this.#drain().catch(() => {});
@@ -837,11 +866,12 @@ export class SimplexDoor extends DurableObject {
       case "reply":
         return await this.#reply({ key: a.key, text: a.text, files: a.files });
       // a save to begin from, as a computer's link handed over gives one
-      // (`bytes`, base64, a door's packed save): its SHA-256
+      // (`bytes`, base64, a door's packed save; `staged`, its owner's chat
+      // with their old agent): its SHA-256
       case "import": {
         const bytes = Uint8Array.from(atob(String(a.bytes ?? "")), (c) => c.charCodeAt(0));
         const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
-        return this.#import(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "x-door-length": String(bytes.length) }, body: bytes }));
+        return this.#import(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "x-door-length": String(bytes.length), "x-door-staged": a.staged ? "1" : "0" }, body: bytes }));
       }
       // a file as its runner gives one (`bytes`, base64), for a delivery
       // or a reply to name: its SHA-256; or (`sha`) what the door holds

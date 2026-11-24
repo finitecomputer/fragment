@@ -1737,9 +1737,13 @@ fn run(cli: Cli) -> Result<()> {
             loop {
                 let v = ask("go")?;
                 let step = v["record"]["step"].as_str().unwrap_or("?").to_string();
-                if step == "done" {
+                if step == "done" || step == "offered" {
                     json_exit(j, &v);
-                    println!("{agent}'s SimpleX moved into {}: the same contact, its old chat archived", v["record"]["connector"].as_str().unwrap_or("?"));
+                    let into = v["record"]["connector"].as_str().unwrap_or("?");
+                    match step.as_str() {
+                        "done" => println!("{agent}'s SimpleX moved into {into}: the same contact, its old chat archived"),
+                        _ => println!("{agent}'s staged SimpleX chat moved into {into}: its person keeps it, or starts a new chat, on its setup page"),
+                    }
                     return Ok(());
                 }
                 if !j {

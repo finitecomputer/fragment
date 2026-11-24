@@ -842,3 +842,29 @@ test("the way back: a planned stop, its runner's last save, and that save handed
   const s = await (await d.call("POST", "/door/state", {}, "{}")).json();
   assert.equal(s.door.stopped, "handed back");
 });
+
+test("a door given its owner's chat with their old agent starts only at their word: kept, it restores it; let go, it begins anew", async () => {
+  const d = door();
+  assert.equal((await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("their old chat"), staged: true })).status, 200);
+  assert.equal((await (await d.call("POST", "/door/state", {}, "{}")).json()).staged, true, "its state says it waits");
+  const asked = await d.connect();
+  assert.deepEqual([asked.status, (await asked.json()).error], [409, "staged"], "a connect that says nothing of it");
+  assert.deepEqual([d.c.starts.length, d.st.sql.exec("SELECT 1 FROM inbox").toArray().length], [0, 0], "nothing started, nothing kept");
+  const kept = await d.job("connect", { name: "Juniper", keep: true }, { "x-door-secret": "s3cret-of-the-inbox" });
+  assert.equal(kept.status, 200, await kept.clone().text());
+  assert.equal(d.c.starts.length, 1, "kept: started");
+  const r = await d.restore(d.row().started);
+  assert.deepEqual([r.status, r.headers.get("x-door-save"), await r.text()], [200, "0-1", "their old chat"], "from the chat it was given (its runner adopts it)");
+  assert.equal((await (await d.call("POST", "/door/state", {}, "{}")).json()).staged, false);
+  // let go: a new chat instead
+  const e = door();
+  await e.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("their old chat"), staged: true });
+  const fresh = await e.job("connect", { name: "Juniper", keep: false }, { "x-door-secret": "s3cret-of-the-inbox" });
+  assert.equal(fresh.status, 200, await fresh.clone().text());
+  assert.deepEqual([e.saves(), e.prefixed(), e.row().saved], [[], [], 0], "its chat let go, rows and file");
+  assert.equal((await e.restore(e.row().started)).status, 204, "a new door: a new profile");
+  // a moved link (not staged) starts at its connect, as any door
+  const f = door();
+  await f.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("a linked link") });
+  assert.equal((await f.connect()).status, 200);
+});

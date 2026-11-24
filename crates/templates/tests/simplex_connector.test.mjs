@@ -122,6 +122,15 @@ test("connect gives the door the inbox's secret as a placeholder the platform fi
   assert.deepEqual([none.app.state().why.text, none.app.state().why.code, none.app.state().why.step], ["the door answered 409: this deployment runs no doors (no container for them)", "no_doors", "connect"], "said to its setup page, with the door's code and its step");
 });
 
+test("a door holding its owner's chat with their old agent waits for their word: connect says so, and carries it", async () => {
+  const w = world({ connect: [[409, { error: "staged", message: "its owner's SimpleX chat with their old agent waits" }], [200, { started: 1, door: "juniper-sx--k3x9--00112233aabb" }]] });
+  assert.equal((await w.app.connect({ name: "Juniper" }, w.job("call"))).connected, false);
+  assert.deepEqual([w.app.state().why.code, w.app.state().why.step], ["staged", "connect"], "its setup page asks them");
+  assert.deepEqual(await w.app.connect({ name: "Juniper", keep: true }, w.job("call")), { connected: true, started: 1 });
+  assert.deepEqual(w.asked.map((a) => a.body), [{ name: "Juniper" }, { name: "Juniper", keep: true }], "their word given to the door");
+  assert.equal(w.app.state().why, null);
+});
+
 test("the invitation for its owner's app is kept for its owner's query alone, never in a run's output", async () => {
   const link = "https://simplex.chat/invitation#/?v=2-7&smp=a-secret-invitation";
   const w = world({ link: [[202, {}]], unlink: [[202, {}]], state: [[200, { runner: { phase: "wanting" } }], [200, { runner: { link, short: "https://smp.example/i#short" } }]] });

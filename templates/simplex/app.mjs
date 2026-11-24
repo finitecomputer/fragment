@@ -177,8 +177,10 @@ export class App extends DurableObject {
     return { connected: this.get("door") !== null, invitation: this.get("invitation"), linked: this.get("linked"), why: this.get("why") };
   }
 
-  async connect({ name } = {}, job) {
-    const { status, said } = await door(job, "connect", { name }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
+  // `keep`: its owner's word on their SimpleX chat with their old agent,
+  // where its door holds one (its connect refuses `staged` until they say)
+  async connect({ name, keep } = {}, job) {
+    const { status, said } = await door(job, "connect", keep === undefined ? { name } : { name, keep }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
     if (status !== 200) {
       const error = answered(status, said);
       await job.call("failed", { why: error, code: codeOf(said), step: "connect" });

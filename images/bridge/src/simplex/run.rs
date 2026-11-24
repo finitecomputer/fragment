@@ -257,6 +257,7 @@ pub struct Handing {
     state: Vec<u8>,
     contact: ContactId,
     chat: Option<String>,
+    staged: bool,
 }
 
 /// A link's door's first save: its bytes, their SHA-256 (hex) and its
@@ -265,6 +266,9 @@ pub struct Packed {
     pub bytes: Vec<u8>,
     pub sha256: String,
     pub chat: Option<String>,
+    /// Its owner's staged chat with their old agent, never kept here: its
+    /// door keeps it only at their word.
+    pub staged: bool,
 }
 
 /// A way back's end: its door's save placed (the link it holds), or none to
@@ -538,13 +542,13 @@ impl Handle {
         let (reply, answer) = oneshot::channel();
         self.tx.send(Msg::Handover { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await.map_err(|_| gone())?;
         let h = answer.await.map_err(|_| gone())??;
-        let chat = h.chat.clone();
+        let (chat, staged) = (h.chat.clone(), h.staged);
         let packed = tokio::task::spawn_blocking(move || pack_handover(&h)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its pack stopped: {e}"))));
         let (reply, told) = oneshot::channel();
         self.tx.send(Msg::Packed { agent: agent.to_string(), failed: packed.is_err(), reply }).await.map_err(|_| gone())?;
         told.await.map_err(|_| gone())?;
         let bytes = packed.map_err(save_refused)?;
-        Ok(Packed { sha256: sha256_hex(&bytes), bytes, chat })
+        Ok(Packed { sha256: sha256_hex(&bytes), bytes, chat, staged })
     }
 
     /// The way back from `agent`'s door, by a back's ticket: its door's
@@ -831,11 +835,15 @@ pub struct Saved {
     pub moved: Option<Moved>,
 }
 
-/// A link handed over to its door.
+/// A link handed over to its door; or its staged identity, never kept here
+/// (`stage`), with what its read found (the same ticket again packs the
+/// same, unread again).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Moved {
     pub nonce: String,
     pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<Adoption>,
 }
 
 /// A file given up on: its cancel still to be taken by the core, or taken.
@@ -950,7 +958,7 @@ fn greeting(name: &str) -> String {
 
 /// What the owner's SimpleX app is told as their old conversation is kept:
 /// the same contact, its new home.
-fn moved(name: &str) -> String {
+pub fn moved(name: &str) -> String {
     format!("Hi, it's {name}. I've moved to my new home: write to me here, as before.")
 }
 
@@ -1208,7 +1216,7 @@ impl Slot {
         } else {
             self.broken.clone().or_else(|| self.note.clone())
         };
-        let staged = self.staged.is_some() && self.saved.link.phase == Phase::Off;
+        let staged = self.staged.is_some() && self.saved.link.phase == Phase::Off && self.saved.moved.is_none();
         View { agent: self.agent.fragment.clone(), phase, staged, link, short, name, hidden, always_on, running: self.core.is_some() && self.up, why }
     }
 }
@@ -1417,8 +1425,12 @@ impl Manager {
             None => {
                 self.take(agent, t, "handover")?;
                 let s = &self.slots[agent];
-                if !matches!(s.saved.link.phase, Phase::Linked { .. }) {
-                    return Err(Refused::new(409, "it is not linked to a SimpleX app").coded("not_linked"));
+                // a bound link, or its owner's staged chat with their old agent
+                // (finite.computer's move set it aside: `stage`), never kept
+                // here: its door keeps it only at their word
+                let staged = s.saved.link.phase == Phase::Off && s.saved.link.cleanup.is_none() && s.saved.link.leftovers.is_empty() && s.staged.is_some();
+                if !matches!(s.saved.link.phase, Phase::Linked { .. }) && !staged {
+                    return Err(Refused::new(409, "it is not linked to a SimpleX app, nor holds a staged chat").coded("not_linked"));
                 }
                 let busy = if s.adopting.is_some() || s.committing.is_some() || s.staging || s.handing {
                     Some("its old SimpleX chat is being kept or set aside")
@@ -1435,21 +1447,60 @@ impl Manager {
                     return Err(Refused::new(409, format!("{why}: hand it over in a moment")).coded("busy"));
                 }
                 let s = self.slots.get_mut(agent).expect("its slot");
-                s.saved.moved = Some(Moved { nonce: t.nonce.clone(), at: crate::log::now_ms() as i64 });
+                s.saved.moved = Some(Moved { nonce: t.nonce.clone(), at: crate::log::now_ms() as i64, staged: None });
                 if let Err(e) = store(&s.dir, &s.saved) {
                     s.saved.moved = None;
                     return Err(Refused::new(500, format!("SimpleX could not mark it moved: {e}")));
                 }
                 self.stop_core(agent).await;
                 self.publish_relaying();
+                if staged {
+                    self.read_staged(agent).await?;
+                }
             }
         }
         let s = self.slots.get_mut(agent).expect("its slot");
         s.handing = true;
-        let Phase::Linked { contact, .. } = s.saved.link.phase else { unreachable!("only a bound link is handed over") };
-        let state = serde_json::to_vec(&serde_json::json!({ "link": s.saved.link })).expect("a link serializes");
-        crate::ev!("simplex.handing_over", { "agent": agent, "again": again.is_some() });
-        Ok(Handing { dir: s.dir.clone(), state, contact, chat: s.saved.chat.clone() })
+        let adopt = s.saved.moved.as_ref().and_then(|m| m.staged.clone());
+        let (dir, contact, state) = match &adopt {
+            Some(a) => (s.dir.join(stage::STAGED_DIR), a.owner, serde_json::json!({ "link": Link::default(), "adopt": a })),
+            None => {
+                let Phase::Linked { contact, .. } = s.saved.link.phase else { unreachable!("only a bound link, or a staged chat, is handed over") };
+                (s.dir.clone(), contact, serde_json::json!({ "link": s.saved.link }))
+            }
+        };
+        crate::ev!("simplex.handing_over", { "agent": agent, "again": again.is_some(), "staged": adopt.is_some() });
+        Ok(Handing { dir, state: serde_json::to_vec(&state).expect("a link serializes"), contact, chat: s.saved.chat.clone(), staged: adopt.is_some() })
+    }
+
+    /// A staged chat's read, as its adoption's (`maintenance_read`), its
+    /// core alone on it, bounded: kept in its moved mark, so the same
+    /// ticket again packs the same. One that does not read is moved no
+    /// more, nothing changed.
+    async fn read_staged(&mut self, agent: &str) -> Result<(), Refused> {
+        let s = &self.slots[agent];
+        let (dir, name, owner) = (s.dir.clone(), display_name(None, &s.agent.name), s.staged.as_ref().map_or(0, |st| st.owner));
+        self.quiet.store(false, Ordering::SeqCst);
+        let read = tokio::time::timeout(Duration::from_millis(MAINT_MS_MAX), maintenance_read(&self.cfg, &dir, &name, owner)).await.unwrap_or_else(|_| Err(Read::Failed(format!("no answer in {MAINT_MS_MAX} ms"))));
+        kill_cores_of(&stage::core_prefix(&dir));
+        self.quiet.store(self.running() == 0, Ordering::SeqCst);
+        let s = self.slots.get_mut(agent).expect("its slot");
+        let refused = match read {
+            Ok(a) => {
+                s.saved.moved.as_mut().expect("marked moved").staged = Some(a);
+                match store(&s.dir, &s.saved) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => Refused::new(500, format!("SimpleX could not keep its staged chat's read: {e}")),
+                }
+            }
+            Err(Read::Invalid(why)) => Refused::new(422, format!("its staged chat does not read: {why}")).coded("corrupt"),
+            Err(Read::Failed(why)) => Refused::new(502, format!("its staged chat could not be read just now: {why}")),
+        };
+        s.saved.moved = None;
+        if let Err(e) = store(&s.dir, &s.saved) {
+            crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
+        }
+        Err(refused)
     }
 
     /// A handover's pack ended. One that failed gave nothing: moved no
@@ -1495,7 +1546,13 @@ impl Manager {
         let s = self.slots.get_mut(agent).ok_or_else(|| Refused::new(404, format!("no agent {agent} runs on this computer")))?;
         s.handing = false;
         let link = match back {
-            Back::Placed(link) => Some(*link),
+            Back::Placed(link) => {
+                // a staged chat its door kept is that door's save's now
+                if s.staged.take().is_some() {
+                    stage::forget(&s.dir);
+                }
+                Some(*link)
+            }
             Back::Untouched => Some(s.saved.link.clone()),
             Back::Failed => None,
         };
