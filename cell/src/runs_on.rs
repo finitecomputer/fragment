@@ -85,6 +85,10 @@ struct Sign {
     fragment: Option<String>,
 }
 
+/// The bridge lives an agent fragment remembers (`turn_life`): a late call
+/// from one of them is known as a retired life's.
+const TURN_LIVES_KEPT: i64 = 8;
+
 /// An open turn as its row holds it (`turns`, Fragment step 14).
 #[derive(Deserialize)]
 struct TurnRow {
@@ -221,8 +225,9 @@ impl FragmentCell {
     /// `computer/turns`: its bridge tells which turns it runs, so the
     /// agent's calls for its owner carry the proof of whose ask they are
     /// (`mandate::proof`): `open` one (`{turn, place, asker?, mandate?}`: no
-    /// asker is no one's, app code's words), `close` one, or `clear` them
-    /// all (a bridge's start). Its mandate is checked as the router checks
+    /// asker is no one's, app code's words), `close` one, or `take` them (a
+    /// bridge's start), each as one bridge life (`life`, `turn_life`): a
+    /// retired life's word changes nothing. Its mandate is checked as the router checks
     /// one (the platform's, for this agent, unexpired), and names whose ask
     /// the turn is, whatever the bridge said (a schedule's fire is its
     /// maker's, though the place's own key wrote it); one that does not
@@ -232,11 +237,18 @@ impl FragmentCell {
     async fn turns(&self, body: &Value) -> CellResult<Value> {
         let text = |k: &str| body[k].as_str().unwrap_or("");
         let now = js::now_ms();
-        match text("op") {
-            "clear" => {
-                self.exec("DELETE FROM turns", vec![])?;
-                Ok(json!({ "ok": true }))
-            }
+        let life = text("life");
+        if !(life.len() == 32 && life.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+            return Err(CellError::invalid("name the bridge life that tells its turns (32 lower-case hex)"));
+        }
+        let op = text("op");
+        if !matches!(op, "take" | "close" | "open") {
+            return Err(CellError::invalid("a turn is opened or closed, or a life takes its agent's turns"));
+        }
+        if !self.turn_life(life, now)? {
+            return Ok(json!({ "ok": true, "retired": true }));
+        }
+        match op {
             "close" => {
                 self.exec("DELETE FROM turns WHERE turn = ?", vec![text("turn").into()])?;
                 Ok(json!({ "ok": true }))
@@ -259,21 +271,49 @@ impl FragmentCell {
                 if held >= limits::TURNS_HELD_MAX as u64 {
                     return Err(CellError::new(ErrorCode::RateLimited, format!("this agent holds {held} open turns, the most it may: end one first")));
                 }
+                // the life again after the await: a newer one may have taken over meanwhile
+                if !self.turn_life(life, now)? {
+                    return Ok(json!({ "ok": true, "retired": true }));
+                }
                 self.exec(
-                    "INSERT INTO turns (turn, place, asker, mandate, until, at) VALUES (?, ?, ?, ?, ?, ?)
-                     ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, at = excluded.at",
+                    "INSERT INTO turns (turn, place, asker, mandate, until, life, at) VALUES (?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, life = excluded.life, at = excluded.at",
                     vec![
                         turn.into(),
                         place.into(),
                         asker.as_str().into(),
                         mandate.map_or(SqlStorageValue::Null, Into::into),
                         SqlStorageValue::Integer(until),
+                        life.into(),
                         SqlStorageValue::Integer(now),
                     ],
                 )?;
                 Ok(json!({ "ok": true }))
             }
-            _ => Err(CellError::invalid("a turn is opened, closed, or all cleared")),
+            // "take": the life heard, which is all it asks
+            _ => Ok(json!({ "ok": true })),
+        }
+    }
+
+    /// Whether bridge `life` speaks for this agent's turns: the life heard
+    /// first most lately does. A life never heard takes over, and every
+    /// other life's turns are forgotten (its bridge is gone: one computer
+    /// runs one bridge at a time); a life heard before it, retired, is not
+    /// heard again, so a late call from a bridge before changes nothing.
+    /// The last `TURN_LIVES_KEPT` lives are kept.
+    fn turn_life(&self, life: &str, now: i64) -> CellResult<bool> {
+        let kept = SqlStorageValue::Integer(TURN_LIVES_KEPT);
+        let lives = self.rows("SELECT life FROM turn_lives ORDER BY at DESC, life LIMIT ?", vec![kept.clone()])?;
+        let lives: Vec<&str> = lives.iter().filter_map(|r| r["life"].as_str()).collect();
+        match mandate::heard(&lives, life) {
+            mandate::Heard::Speaks => Ok(true),
+            mandate::Heard::Retired => Ok(false),
+            mandate::Heard::TakesOver => {
+                self.exec("INSERT INTO turn_lives (life, at) VALUES (?, ?)", vec![life.into(), SqlStorageValue::Integer(now)])?;
+                self.exec("DELETE FROM turns WHERE life != ?", vec![life.into()])?;
+                self.exec("DELETE FROM turn_lives WHERE life NOT IN (SELECT life FROM turn_lives ORDER BY at DESC, life LIMIT ?)", vec![kept])?;
+                Ok(true)
+            }
         }
     }
 

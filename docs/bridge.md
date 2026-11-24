@@ -135,13 +135,15 @@ mid-append leaves a torn last line, and the log is read up to it.
   owner's for theirs and for what is one entity's with them (a routine,
   another agent of this computer's answer), no one's for app code's
   words, and anyone else's as them. Not told, it is not this life's yet,
-  and is claimed again; a platform from before (404) is told nothing. Its
-  end is told as the engine ends it. No turn is told open while one its
-  agent ended may still be held open (whose mandate would sign its calls):
-  first the agent's fragment forgets the last life's turns (once a life),
-  and each ended turn whose close was slow or failed is told ended again
-  (`driver::Turns::settle`). One that can't be leaves the turn untold,
-  and its claim is asked again at the next tick.
+  and is claimed again; a platform from before (404) is told nothing.
+  Each word names this life, so the fragment forgets every other life's
+  turns and hears no retired one's. A turn is held as open from before it
+  is told so (its answer lost, it is still told ended), its end is told as
+  the engine ends it, and a close refused is told again at each step after.
+  No turn reaches its runtime while one its agent ended may still be held
+  open, whose mandate would sign its calls: the runtime lane tells those
+  ended first (`driver::Turns::settle`, a few tries; past them it goes on,
+  since one held only narrows the agent to its asker's mandate).
 - **In the journal's order.** A chat's turns are claimed in the order
   their causes were said (`Turn::said_at`, the platform's time, the same
   in every life), admission breaking ties. A new life that reads an

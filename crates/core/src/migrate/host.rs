@@ -343,6 +343,7 @@ mod tests {
         assert_eq!(same("water", "npub1ana", "npub1juniper"), None, "nor her agent's for her");
         assert_eq!(same("legacy", "npub1ana", "npub1juniper"), Some("npub1juniper -".into()), "one from before askers: its maker's add finds it");
         assert_eq!(same("legacy", "npub1ana", "npub1ana"), None, "and no one else's");
+        assert_eq!(same("legacy", "npub1ben", ""), None, "nor its maker's add on someone else's ask, which binds no maker");
     }
 
     /// Goal (FIN-720, Fragment step 14): a run's call id is its caller's,

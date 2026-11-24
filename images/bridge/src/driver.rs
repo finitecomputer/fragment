@@ -363,16 +363,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     // what the last life told its agents' fragments ran, forgotten: its
-    // turns ended with it (a restart ends a turn). One not forgotten now is
-    // forgotten before its agent's first turn is told (`Turns::settle`)
-    let turns = Turns::default();
+    // turns ended with it (a restart ends a turn). Its agent's fragment
+    // forgets them at this life's first word, this or a turn's
+    let turns = Turns::new(&life);
     for a in &computer.agents {
-        if let Err(e) = turns.forget_last_life(&api, &a.fragment).await {
-            crate::ev!("turns.unforgotten", { "agent": a.fragment, "error": e.to_string() });
+        if let Err(e) = turns.take(&api, &a.fragment).await {
+            crate::ev!("turns.untaken", { "agent": a.fragment, "error": e.to_string() });
         }
     }
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone(), turns: turns.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves, RuntimeLane::spawn(api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves, RuntimeLane::spawn(api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone(), turns.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     tokio::spawn(crate::load::watch(inbox_tx.clone(), Msg::Input, Duration::from_millis(limits::LOAD_SLICE_MS), held_rx.clone(), stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
@@ -396,18 +396,21 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                 }
             }
         }
+        // a turn held open that the engine runs no more is told ended, each
+        // in a task of its own (no lane waits on it), and one refused is
+        // told again at a step after (a tick's too)
         if step.dirty {
-            // a turn told as running that the engine runs no more is told
-            // ended, in a task of its own (no lane waits on it); one not
-            // told yet is told before its agent's next turn is (`settle`)
-            for (agent, turn) in turns.ended(|t| engine.state().turns.get(t).is_none_or(|t| t.phase == engine::Phase::Ended)) {
-                let (api, turns) = (api.clone(), turns.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = turns.close(&api, &agent, &turn).await {
-                        crate::ev!("turn.unended", { "turn": turn, "agent": agent, "error": e.to_string() });
-                    }
-                });
-            }
+            turns.ended(|t| engine.state().turns.get(t).is_none_or(|t| t.phase == engine::Phase::Ended));
+        }
+        for (agent, turn) in turns.due() {
+            let (api, turns) = (api.clone(), turns.clone());
+            tokio::spawn(async move {
+                if let Err(e) = turns.close(&api, &agent, &turn).await {
+                    crate::ev!("turn.unended", { "turn": turn, "agent": agent, "error": e.to_string() });
+                }
+            });
+        }
+        if step.dirty {
             store.lock().expect("store").write(engine.state())?;
             // a turn over lets its files go (bounded: the turns open)
             turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
@@ -1360,63 +1363,108 @@ struct Claims {
 
 /// What this life told its agents' fragments of their turns (docs/bridge.md,
 /// "A turn is told before it runs"). A turn's mandate signs its agent's
-/// calls for its owner while its fragment holds it open, so no turn is told
-/// open while one the engine ended may still be held there: the last
-/// life's are forgotten, and this life's ended ones told ended, first
-/// (`settle`), or the turn is not told, and its claim is asked again.
-#[derive(Clone, Default)]
+/// calls for its owner while its fragment holds it open, so a turn is
+/// held as open from before it is told so (an answer lost, it is still
+/// told ended), each ended one is told ended until that lands (`due`,
+/// at each step), and no turn reaches its runtime while one its agent
+/// ended may still be held open (`settle`). Each call names this life, so
+/// the fragment forgets every other life's turns, and a late call from
+/// one before changes nothing.
+#[derive(Clone)]
 struct Turns {
-    /// Told open and still run: turn → agent.
+    life: String,
+    /// Told open, or being told: turn → agent.
     open: Arc<Mutex<HashMap<String, String>>>,
-    /// Ended by the engine, and not yet told so: (agent, turn).
-    ending: Arc<Mutex<BTreeSet<(String, String)>>>,
-    /// Each agent's fragment forgetting the last life's turns: once a life,
-    /// whoever asks first (so none forgets a turn this life told).
-    forgot: Arc<Mutex<HashMap<String, Arc<tokio::sync::OnceCell<()>>>>>,
+    /// Ended by the engine, and not yet told so: (agent, turn) → a close
+    /// in flight.
+    ending: Arc<Mutex<BTreeMap<(String, String), bool>>>,
 }
 
+/// The tries `Turns::settle` gives an agent's ended turns' closes before
+/// its turn goes on (an ended turn held only narrows: its asker's mandate,
+/// never more), and the first wait between them, doubled each time.
+const SETTLE_TRIES: u32 = 5;
+const SETTLE_WAIT: Duration = Duration::from_millis(250);
+
 impl Turns {
-    /// The last life's turns of `agent`, forgotten by its fragment, once.
-    async fn forget_last_life(&self, api: &Api, agent: &str) -> Result<(), ApiError> {
-        let once = self.forgot.lock().expect("forgot").entry(agent.to_string()).or_default().clone();
-        once.get_or_try_init(|| api.turn_close(agent, None)).await.map(|_| ())
+    fn new(life: &str) -> Turns {
+        Turns { life: life.to_string(), open: Arc::default(), ending: Arc::default() }
     }
 
-    /// The turns told open that `gone` says the engine runs no more, moved
-    /// to ending (bounded: the turns told open).
-    fn ended(&self, gone: impl Fn(&str) -> bool) -> Vec<(String, String)> {
-        let mut open = self.open.lock().expect("turns");
-        let ended: Vec<(String, String)> = open.iter().filter(|(t, _)| gone(t)).map(|(t, a)| (a.clone(), t.clone())).collect();
-        let mut ending = self.ending.lock().expect("ending");
-        for (agent, turn) in &ended {
-            open.remove(turn);
-            ending.insert((agent.clone(), turn.clone()));
-        }
-        ended
+    /// `agent`'s turns taken by this life (a bridge's start).
+    async fn take(&self, api: &Api, agent: &str) -> Result<(), ApiError> {
+        api.turn_close(agent, &self.life, None).await
     }
 
-    /// `turn` of `agent` told ended, and so no longer ending.
-    async fn close(&self, api: &Api, agent: &str, turn: &str) -> Result<(), ApiError> {
-        api.turn_close(agent, Some(turn)).await?;
-        self.ending.lock().expect("ending").remove(&(agent.to_string(), turn.to_string()));
-        Ok(())
-    }
-
-    /// Before a turn of `agent` is told open: its last life's turns
-    /// forgotten, and each of its ended ones told ended (a close delayed, or
-    /// one that failed, told again now). The first that can't be fails it.
-    async fn settle(&self, api: &Api, agent: &str) -> Result<(), ApiError> {
-        self.forget_last_life(api, agent).await?;
-        let due: Vec<String> = self.ending.lock().expect("ending").iter().filter(|(a, _)| a == agent).map(|(_, t)| t.clone()).collect();
-        for turn in due {
-            self.close(api, agent, &turn).await?;
-        }
-        Ok(())
-    }
-
-    /// `turn` of `agent`, told open: told ended once the engine ends it.
-    fn opened(&self, agent: &str, turn: &str) {
+    /// `turn` of `agent` told open, held as open from before it is sent.
+    async fn open(&self, api: &Api, agent: &str, turn: &str, told: &engine::Told) -> Result<(), ApiError> {
         self.open.lock().expect("turns").insert(turn.to_string(), agent.to_string());
+        api.turn_open(agent, &self.life, turn, told).await
+    }
+
+    /// The turns held open that `gone` says the engine runs no more, moved
+    /// to ending (bounded: the turns held open).
+    fn ended(&self, gone: impl Fn(&str) -> bool) {
+        let mut open = self.open.lock().expect("turns");
+        let ended: Vec<String> = open.keys().filter(|t| gone(t)).cloned().collect();
+        let mut ending = self.ending.lock().expect("ending");
+        for turn in ended {
+            let agent = open.remove(&turn).expect("listed");
+            ending.entry((agent, turn)).or_insert(false);
+        }
+    }
+
+    /// The ending turns with no close in flight, each now in flight.
+    fn due(&self) -> Vec<(String, String)> {
+        let mut ending = self.ending.lock().expect("ending");
+        ending.iter_mut().filter(|(_, flying)| !**flying).map(|(k, flying)| {
+            *flying = true;
+            k.clone()
+        }).collect()
+    }
+
+    /// `turn` of `agent` told ended: no longer ending, or, refused, due again.
+    async fn close(&self, api: &Api, agent: &str, turn: &str) -> Result<(), ApiError> {
+        let told = api.turn_close(agent, &self.life, Some(turn)).await;
+        let mut ending = self.ending.lock().expect("ending");
+        let key = (agent.to_string(), turn.to_string());
+        match &told {
+            Ok(()) => {
+                ending.remove(&key);
+            }
+            Err(_) => {
+                if let Some(flying) = ending.get_mut(&key) {
+                    *flying = false;
+                }
+            }
+        }
+        told
+    }
+
+    /// Before a turn of `agent` reaches its runtime: each of its ended turns
+    /// told ended (a close slow or refused, told again now), tried
+    /// `SETTLE_TRIES` times. Past them it goes on: one held still only
+    /// narrows the agent's calls, to its asker's mandate.
+    async fn settle(&self, api: &Api, agent: &str) {
+        let mut wait = SETTLE_WAIT;
+        for attempt in 1..=SETTLE_TRIES {
+            let due: Vec<String> = self.ending.lock().expect("ending").keys().filter(|(a, _)| a == agent).map(|(_, t)| t.clone()).collect();
+            let mut held = 0;
+            for turn in &due {
+                if let Err(e) = self.close(api, agent, turn).await {
+                    held += 1;
+                    crate::ev!("turn.unended", { "turn": turn, "agent": agent, "attempt": attempt, "error": e.to_string() });
+                }
+            }
+            if held == 0 {
+                return;
+            }
+            if attempt < SETTLE_TRIES {
+                tokio::time::sleep(wait).await;
+                wait *= 2;
+            }
+        }
+        crate::ev!("turns.unsettled", { "agent": agent, "why": "its ended turns' closes were refused: it goes on, narrower meanwhile" });
     }
 }
 
@@ -1602,13 +1650,8 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                 // told, it is not this life's yet: its claim is asked again
                 if matches!(answer, ClaimAnswer::Ours { .. }) {
                     let told = proven(&api, &agent, told).await;
-                    let opened = async {
-                        // no turn of its agent's that ended still held open beside it
-                        claims.turns.settle(&api, &agent).await?;
-                        api.turn_open(&agent, &turn, &told?).await
-                    };
-                    match opened.await {
-                        Ok(()) => claims.turns.opened(&agent, &turn),
+                    match async { claims.turns.open(&api, &agent, &turn, &told?).await }.await {
+                        Ok(()) => {}
                         Err(e) => {
                             crate::ev!("turn.untold", { "turn": turn, "agent": agent, "error": e.to_string() });
                             answer = ClaimAnswer::Unanswered;
@@ -1881,7 +1924,7 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, marks: Marks, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, marks: Marks, scratch: Arc<Scratch>, turn_files: TurnFiles, turns: Turns) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -1908,6 +1951,9 @@ impl RuntimeLane {
                     _ => {}
                 }
                 if let Command::Start(ts) = &mut c {
+                    // no turn its agent ended still held open, whose mandate
+                    // would sign this one's calls
+                    turns.settle(&api, &ts.agent.fragment).await;
                     // what its runtime last took here: its marker, or one a
                     // hold keeps from its memory still (`Marks::seen`)
                     let memory = memory.as_ref().map(|m| m(&ts.agent.fragment));

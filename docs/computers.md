@@ -866,12 +866,15 @@ sleep answers within 14 minutes.
     redeemed with its door's public key (docs/api.md, "An agent's
     doors").
   - `GET /api/computer/relay?host=&port=`: the XFTP relay, below.
-  - `PUT /api/computer/turns {turn, place, asker?, mandate?}`, as the
-    agent its header names: a turn it runs, before its runtime hears of
-    it: whose ask it is (none, app code's words) and the mandate its
-    record carried. `DELETE /api/computer/turns {turn}` as it ends, and
-    `{}` at the bridge's start (a new life runs none of the old). The
-    agent's fragment holds at most `TURNS_HELD_MAX`, each for at most
+  - `PUT /api/computer/turns {life, turn, place, asker?, mandate?}`, as
+    the agent its header names: a turn it runs, before its runtime hears
+    of it: whose ask it is (none, app code's words) and the mandate its
+    record carried. `DELETE /api/computer/turns {life, turn}` as it ends,
+    and `{life}` at the bridge's start. Each names the bridge life it is
+    (`mandate::heard`): a life never heard takes the agent's turns (every
+    other life's forgotten: one computer runs one bridge), and one heard
+    before the latest is retired, its word changing nothing. The agent's
+    fragment holds at most `TURNS_HELD_MAX`, each for at most
     `TURN_HELD_MS`; a mandate that does not check holds that turn
     unproven, never refused. A platform from before sends it on to its
     API, which has no such route (404): a bridge takes that as nothing to

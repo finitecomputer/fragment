@@ -4478,8 +4478,9 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
         }
         // its bridge tells an agent's fragment which turns it runs, and whose
-        // ask each is (`computer/turns`, FIN-720): `PUT` one open, `DELETE`
-        // one ended, `DELETE` with no turn all of them (a bridge's start)
+        // ask each is (`computer/turns`, FIN-720), as one bridge life: `PUT`
+        // one open, `DELETE` one ended, `DELETE` with none to take them (a
+        // bridge's start: every other life's forgotten)
         // As the agent (its header): a platform from before sends it on to
         // its API, which has no such route (404), so a bridge tells it
         // nothing.
@@ -4489,10 +4490,10 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             let op = match (req.method(), v["turn"].is_string()) {
                 (Method::Put, true) => "open",
                 (Method::Delete, true) => "close",
-                (Method::Delete, false) => "clear",
-                _ => return Err(CellError::invalid("PUT a turn open, DELETE one ended, or DELETE them all")),
+                (Method::Delete, false) => "take",
+                _ => return Err(CellError::invalid("PUT a turn open, DELETE one ended, or DELETE with none to take its agent's turns")),
             };
-            let asked = json!({ "computer": computer, "op": op, "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
+            let asked = json!({ "computer": computer, "op": op, "life": v["life"], "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
             return json_response(&crate::fragment::ask(env, &agent, "computer/turns", &asked).await?);
         }
         // a link's ticket redeemed with its door's public key, at the agent

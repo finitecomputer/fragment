@@ -213,6 +213,27 @@ pub struct Held<'a> {
     pub place: &'a str,
 }
 
+/// Whether a bridge life's word on its agent's turns is heard (cell
+/// runs_on.rs `turn_life`), given the lives heard, the latest first: the
+/// latest's is; a life never heard takes over (its bridge is the computer's
+/// one now: every other life's turns are forgotten); a life heard before
+/// the latest is retired, its word (a late call from a bridge gone) not
+/// heard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heard {
+    Speaks,
+    TakesOver,
+    Retired,
+}
+
+pub fn heard(lives_latest_first: &[&str], life: &str) -> Heard {
+    match lives_latest_first.iter().position(|l| *l == life) {
+        Some(0) => Heard::Speaks,
+        Some(_) => Heard::Retired,
+        None => Heard::TakesOver,
+    }
+}
+
 /// One of an agent's open turns, as its bridge told its agent fragment: in
 /// `place` (a fragment's name), started by `asker`'s words, proven by
 /// their mandate when it carried one still unexpired.
@@ -385,6 +406,19 @@ mod tests {
         assert!(addressed(&to(serde_json::json!([juniper])), &juniper) && !addressed(&to(serde_json::json!([juniper])), &fred));
         assert!(!addressed(&to(serde_json::json!("everyone")), &juniper) && !addressed(&to(serde_json::json!({ "x": 1 })), &juniper), "another shape: no one");
         assert!(addressed(r#"{"text":"say "to" me"}"#, &juniper), "the word in a text names no one");
+    }
+
+    /// Goal (FIN-720): one bridge life speaks for an agent's turns at a
+    /// time: the latest heard; a new one takes over; one heard before it
+    /// is retired (its late word changes nothing); the same word again is
+    /// heard the same.
+    #[test]
+    fn the_latest_bridge_life_speaks_for_its_turns() {
+        assert_eq!(heard(&[], "a"), Heard::TakesOver, "the first life heard");
+        assert_eq!(heard(&["b", "a"], "b"), Heard::Speaks);
+        assert_eq!(heard(&["b", "a"], "a"), Heard::Retired, "a late word from the life before");
+        assert_eq!(heard(&["b", "a"], "c"), Heard::TakesOver, "a new life");
+        assert_eq!(heard(&["b", "a"], "b"), heard(&["b", "a"], "b"), "replay");
     }
 
     /// Goal: the narrowest ask an agent's call for its owner carries while
