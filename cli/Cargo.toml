@@ -43,7 +43,7 @@ notify-debouncer-full = "=0.7.0"
 fs2 = "=0.4.3"
 # Hermes' session database (`fragment session import`), read-only; the
 # bundled SQLite, as crates/core's host side pins it
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 # an agent's home to import (`fragment home`), as a zip: one old agent's
 # stage (zip64), read in place, locally or by HTTP ranges; deflate only,
 # by flate2, already in the lock
