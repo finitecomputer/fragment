@@ -80,114 +80,382 @@ struct NoticeFailure: Equatable, Sendable {
 /// What the person is told, over every page: each notice as the server
 /// said it, the most pressing first, and a line when the last read of them
 /// failed (what it said before stays under it, with Try again).
+///
+/// One is one line, its title and its main action; a tap opens its words.
+/// Several stack as iOS stacks notifications, the first with the edges of
+/// the rest behind it, and a tap fans them out full screen, as Notification
+/// Center does (`NoticesFan`, over the whole app): each card flies from
+/// its place in the stack to its place in the list, and the X folds them back.
 struct NoticesBand: View {
     let library: Library
     let api: FragmentAPI
     /// The most of the page it takes (`FragmentRoot`'s share of its
     /// height): past it, it scrolls, so the page and its toolbar stay.
     let maxHeight: CGFloat
+    /// All of them, fanned out full screen (`NoticesFan`).
+    @Binding var fanned: Bool
+    /// Where each card is in the stack, for the fan to fly from.
+    let space: Namespace.ID
     @State private var height: CGFloat = 0
-    @Environment(\.openURL) private var openURL
+    /// The one notice whose words are open, alone in the band.
+    @State private var opened = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // a countdown says its minutes live, and a notice whose time passed goes
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
-            let shown = library.notices.filter { $0.shown(at: now) && !$0.mustAnswer }
-            let refusals = library.refusals(at: now)
-            if library.noticesFailed || !shown.isEmpty || !refusals.isEmpty {
+            let items = NoticeItem.all(library, now: now)
+            if let first = items.first {
                 ScrollView {
-                    VStack(spacing: 8) {
-                        if library.noticesFailed { refresh }
-                        ForEach(shown) { notice in row(notice, now: now) }
-                        ForEach(refusals, id: \.id) { refusal in refused(refusal.id, refusal.failure) }
+                    Group {
+                        if items.count == 1 {
+                            NoticeItemView(item: first, library: library, api: api, now: now, open: opened) {
+                                withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { opened.toggle() }
+                            }
+                        } else {
+                            // fanned: its place kept, empty (and unread), while the cards are in the fan
+                            stacked(items, now: now).opacity(fanned ? 0 : 1).accessibilityHidden(fanned)
+                        }
                     }
-                    // room below for the glass's shadow to fade before the band clips it
-                    .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 28)
+                    // nothing below: the toolbar's own margin is the gap above its buttons
+                    .padding(.horizontal, 12).padding(.top, 6)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 // no shade of its own at its edges: the page shows through as it is
                 .scrollEdgeEffectHidden(true, for: .all)
+                // The glass's shadow falls past the band unless its notices
+                // overflow it; overflowing, they never scroll under the toolbar,
+                // however it was scrolled when a notice went.
+                .scrollClipDisabled(height <= maxHeight)
                 .frame(height: min(height, maxHeight))
-                // never under the toolbar, however it was scrolled when a notice went
-                .clipped()
+                .clipShape(Rectangle().inset(by: height > maxHeight ? 0 : -32))
             }
+        }
+        .sensoryFeedback(.selection, trigger: opened)
+        .sensoryFeedback(.impact(weight: .light), trigger: fanned)
+    }
+
+    private func fan() {
+        // no typing on the fan: the keyboard goes (Home's own waits, covered, until it folds)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        withAnimation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.15)) { fanned = true }
+    }
+
+    /// The first, with up to two glass edges of the rest beneath it, each
+    /// the place its card flies from as they fan out (the rest come from the
+    /// last edge); a tap anywhere but its button fans them out.
+    private func stacked(_ items: [NoticeItem], now: Int64) -> some View {
+        let edges = min(items.count - 1, 2)
+        return NoticeItemView(item: items[0], library: library, api: api, now: now, open: false, tap: fan)
+            .stackPlace(items[0].id, in: space, held: !fanned)
+            .background(alignment: .bottom) {
+                ZStack(alignment: .bottom) {
+                    ForEach((1...edges).reversed(), id: \.self) { depth in
+                        ZStack {
+                            // its card's place, and under the last edge the rest's: as
+                            // wide as the cards, so a card keeps its width (and its
+                            // words their lines) as it flies, and only its height grows
+                            Color.clear.stackPlace(items[depth].id, in: space, held: !fanned)
+                            if depth == edges {
+                                ForEach(items.dropFirst(edges + 1)) { item in
+                                    Color.clear.stackPlace(item.id, in: space, held: !fanned)
+                                }
+                            }
+                            Color.clear
+                                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+                                .padding(.horizontal, CGFloat(depth) * 12)
+                        }
+                        .frame(height: 36)
+                        // each 8 points lower than the one before: laid out
+                        // where it shows (not an offset), so a card flies from here
+                        .alignmentGuide(.bottom) { $0[.bottom] + CGFloat(edges - depth) * 8 }
+                    }
+                }
+                .alignmentGuide(.bottom) { $0[.bottom] - CGFloat(edges) * 8 }
+            }
+            .padding(.bottom, CGFloat(edges) * 8)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: fan)
+            .accessibilityAction(named: "Show all \(items.count)", fan)
+            .accessibilityIdentifier("noticesStack")
+    }
+}
+
+private extension View {
+    /// A card's place in the stack, while the stack `held` it: fanned out,
+    /// the stack lets go, so the fan's cards fly from here rather than
+    /// the stack's following them (and back, as the fan goes).
+    @ViewBuilder func stackPlace(_ id: String, in space: Namespace.ID, held: Bool) -> some View {
+        if held { matchedGeometryEffect(id: id, in: space, anchor: .top) } else { self }
+    }
+}
+
+/// A notice's full-size button pressed: dimmed and a little smaller, as
+/// iOS's own are, never its colour changed.
+private struct NoticePress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+/// Every notice fanned out over the whole app, as Notification Center shows
+/// them: each with all its words and actions, scrolling. From Home's band
+/// each card grows from its place in the stack (`NoticesBand`), never faded;
+/// from Settings' bell they fade in. The wallpaper beneath
+/// (`NoticesFanBackdrop`) and the title and X above (`NoticesFanHeader`)
+/// fade in and out around them. The X folds them back; so does the last
+/// one's going.
+struct NoticesFan: View {
+    let library: Library
+    let api: FragmentAPI
+    let space: Namespace.ID
+    let close: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            let now = Int64(context.date.timeIntervalSince1970 * 1000)
+            let items = NoticeItem.all(library, now: now)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        NoticeItemView(item: item, library: library, api: api, now: now, open: true, full: true) {}
+                            // top to top with its place in the stack: it unfolds down from there
+                            .matchedGeometryEffect(id: item.id, in: space, anchor: .top)
+                            // each over the ones below it, as the stack has them: they slide out from under
+                            .zIndex(Double(items.count - index))
+                    }
+                }
+                .padding(.horizontal, 12).padding(.bottom, 24)
+            }
+            .scrollClipDisabled()
+            // under the header's title and X
+            .contentMargins(.top, NoticesFanHeader.height, for: .scrollContent)
+            .onChange(of: items.count) { _, count in
+                // none left: it folds; one stays, "1 Notice" (Settings' bell opens even one)
+                if count == 0 { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
+            }
+        }
+        // Not `.isModal`: VoiceOver skips a modal element's siblings, and the
+        // header with its X is one, so Close was out of reach. The page under
+        // the fan is hidden from VoiceOver already (`FragmentRoot`); the
+        // escape gesture folds the fan too, as it closes a sheet.
+        .accessibilityAction(.escape) { withAnimation(reduceMotion ? nil : NoticesFanHeader.folding, close) }
+    }
+}
+
+/// The wallpaper under the fanned notices, as Home's glass sits on it.
+struct NoticesFanBackdrop: View {
+    var body: some View { DesktopWallpaper().ignoresSafeArea() }
+}
+
+/// The fan's title, how many there are ("3 Notices"), and its X, over its
+/// cards; the X folds them back into the stack.
+struct NoticesFanHeader: View {
+    static let height: CGFloat = 64
+    static let folding = Animation.spring(duration: 0.4, bounce: 0.1)
+    let library: Library
+    let close: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static func title(_ count: Int) -> String { count == 1 ? "1 Notice" : "\(count) Notices" }
+
+    var body: some View {
+        HStack {
+            // a notice whose time passes goes from the count as from the list
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                Text(Self.title(NoticeItem.all(library, now: Int64(context.date.timeIntervalSince1970 * 1000)).count))
+                    .font(.largeTitle).contentTransition(.numericText()).animation(.snappy, value: library.notices.count)
+            }
+            Spacer()
+            Button { withAnimation(reduceMotion ? nil : Self.folding, close) } label: {
+                Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 32, height: 32)
+            }
+            .buttonStyle(.glass).buttonBorderShape(.circle)
+            .accessibilityLabel("Close").accessibilityIdentifier("noticesClose")
+        }
+        .padding(.horizontal, 20).padding(.top, 8)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+}
+
+extension Library {
+    /// How many things the band tells at `now` (ms): its notices, a failed
+    /// read, refusals (`NoticeItem.all`).
+    func noticeCount(at now: Int64) -> Int { NoticeItem.all(self, now: now).count }
+}
+
+/// One thing the band tells: a failed read, a notice, or the refusal of an
+/// answer whose notice is gone.
+private enum NoticeItem: Identifiable {
+    case refresh, notice(Notice), refusal(String, NoticeFailure)
+    var id: String {
+        switch self { case .refresh: "refresh"; case .notice(let notice): "notice:" + notice.id; case .refusal(let id, _): "refused:" + id }
+    }
+    @MainActor static func all(_ library: Library, now: Int64) -> [NoticeItem] {
+        (library.noticesFailed ? [.refresh] : [])
+            + library.notices.filter { $0.shown(at: now) && !$0.mustAnswer }.map(NoticeItem.notice)
+            + library.refusals(at: now).map { .refusal($0.id, $0.failure) }
+    }
+}
+
+/// An item's card. In the band, a notice is one line with its main action,
+/// its words once `open`; `full` (the full screen), all its words and every
+/// action under them.
+private struct NoticeItemView: View {
+    let item: NoticeItem
+    let library: Library
+    let api: FragmentAPI
+    let now: Int64
+    let open: Bool
+    var full = false
+    /// The card's tap (anywhere but a button).
+    let tap: () -> Void
+    @Environment(\.openURL) private var openURL
+    /// At the accessibility text sizes a label on one line beside the title
+    /// outgrows the screen (it pushed the page's own toolbar off it): there
+    /// the main action goes under the title, actions stack, and labels wrap.
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var roomy: Bool { !typeSize.isAccessibilitySize }
+
+    var body: some View {
+        switch item {
+        case .refresh:
+            card { NoticesRefresh(library: library, api: api) }.accessibilityIdentifier("noticesRefresh")
+        case .notice(let notice): row(notice)
+        case .refusal(let id, let failure): refused(id, failure)
         }
     }
 
     /// A refusal whose notice is gone: its title and the server's words,
     /// until OK (which asks nothing).
     private func refused(_ id: String, _ failure: NoticeFailure) -> some View {
-        card(warns: failure.warns) {
-            VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(failure.title).font(.subheadline.weight(.semibold))
-                    Text(failure.said).font(.footnote).foregroundStyle(.secondary)
+        card {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.circle.fill").font(.system(size: 18)).foregroundStyle(.red)
+                    Text(failure.title).font(.subheadline.weight(.semibold)).lineLimit(full ? nil : 2)
+                    Spacer(minLength: 4)
+                    Button { library.failedNotices[id] = nil } label: { Text("OK").foregroundStyle(Color(.systemBackground)) }
+                        .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                Button { library.failedNotices[id] = nil } label: { Text("OK").foregroundStyle(Color(.systemBackground)) }
-                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
+                Text(failure.said).font(.footnote).foregroundStyle(.secondary).padding(.leading, 28)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .contentShape(Rectangle()).onTapGesture(perform: tap)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("refused:\(id)")
     }
 
-    private var refresh: some View {
-        card(warns: false) { NoticesRefresh(library: library, api: api) }
-            .accessibilityIdentifier("noticesRefresh")
-    }
-
-    private func row(_ notice: Notice, now: Int64) -> some View {
-        card(warns: notice.warns) {
+    private func row(_ notice: Notice) -> some View {
+        let failure = library.failedNotices[notice.id]
+        // why its last answer failed is never hidden
+        let open = open || failure != nil
+        let more = notice.text != nil || notice.until != nil || notice.detail != nil || notice.actions.count > 1
+        return card {
             VStack(alignment: .leading, spacing: 8) {
-                // every word it says, however little room the page leaves (the keyboard up)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(notice.title).font(.subheadline.weight(.semibold))
-                    if let text = notice.text { Text(text).font(.footnote).foregroundStyle(.secondary) }
-                    if let until = notice.until { Text(Notice.untilSaid(until, now: now)).font(.footnote).foregroundStyle(.secondary) }
-                    if let why = library.failedNotices[notice.id] { Text(why.said).font(.footnote).foregroundStyle(.secondary) }
-                    if let detail = notice.detail { Text(detail).font(.caption2).foregroundStyle(.tertiary).padding(.top, 2) }
+                HStack(spacing: 10) {
+                    Image(systemName: notice.warns ? "exclamationmark.circle.fill" : "info.circle.fill")
+                        .font(.system(size: 18)).foregroundStyle(notice.warns ? Color.red : Color.secondary)
+                    Text(notice.title).font(.subheadline.weight(.semibold)).lineLimit(open ? nil : 2)
+                    if more && !full {
+                        Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(open ? 180 : 0))
+                    }
+                    Spacer(minLength: 4)
+                    if !full && roomy, let main = notice.actions.first { button(notice, main, main: true) }
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                if !notice.actions.isEmpty {
-                    HStack(spacing: 8) {
-                        ForEach(Array(notice.actions.enumerated()), id: \.offset) { index, action in
-                            button(notice, action, main: index == 0)
+                if !full && !roomy, let main = notice.actions.first { button(notice, main, main: true).padding(.leading, 28) }
+                if open {
+                    // every word it says, however little room the page leaves (the keyboard up)
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let text = notice.text { Text(text).font(.footnote).foregroundStyle(.secondary) }
+                        if let until = notice.until { Text(Notice.untilSaid(until, now: now)).font(.footnote).foregroundStyle(.secondary) }
+                        if let failure { Text(failure.said).font(.footnote).foregroundStyle(.secondary) }
+                        if let detail = notice.detail { Text(detail).font(.caption2).foregroundStyle(.tertiary).padding(.top, 2) }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 28)
+                    // the full screen: every action under its words, full size and
+                    // sharing the card's width; the band: the rest, small
+                    let shown = full ? Array(notice.actions) : Array(notice.actions.dropFirst())
+                    if !shown.isEmpty {
+                        let row = roomy ? AnyLayout(HStackLayout(spacing: full ? 12 : 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                        row {
+                            ForEach(Array(shown.enumerated()), id: \.offset) { index, action in
+                                button(notice, action, main: full && index == 0, wide: full)
+                            }
                         }
+                        .padding(.leading, full ? 0 : 28).padding(.top, full ? 4 : 0)
                     }
                 }
             }
+            .contentShape(Rectangle())
+            .onTapGesture { if !full && (more || !open) { tap() } }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("notice:\(notice.id)")
     }
 
-    @ViewBuilder private func button(_ notice: Notice, _ action: Notice.Action, main: Bool) -> some View {
+    /// `wide`: full size, as wide as it is given (the full screen's).
+    @ViewBuilder private func button(_ notice: Notice, _ action: Notice.Action, main: Bool, wide: Bool = false) -> some View {
         let pressed = library.acting.contains(notice.id)
         let tap = {
             if let open = action.open, let url = URL(string: open) { openURL(url) }
             else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
         }
-        if main {
-            // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise)
-            Button(action: tap) { Text(action.label).foregroundStyle(Color(.systemBackground)) }
-                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
+        if wide {
+            // the full screen's: a plain glass pill with a fine rim, the main one tinted.
+            // Pressed, it dims and gives a little, as iOS's buttons do (interactive
+            // glass lit a light pill dark, its words lost in dark mode)
+            Button(action: tap) {
+                Text(action.label).font(.subheadline.weight(.semibold)).lineLimit(roomy ? 1 : nil).multilineTextAlignment(.center)
+                    .foregroundStyle(main ? Color(.systemBackground) : Color.primary)
+                    .padding(.vertical, roomy ? 0 : 10)
+                    .frame(maxWidth: .infinity).frame(minHeight: 44, maxHeight: roomy ? 44 : nil)
+                    .background {
+                        Capsule().strokeBorder(LinearGradient(colors: [.white.opacity(0.6), .white.opacity(0.05), .white.opacity(0.35)],
+                                                              startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
+                    }
+                    .glassEffect(.regular.tint(main ? Color(.label).opacity(0.9) : .clear), in: .capsule)
+                    .contentShape(.capsule)
+            }
+            .buttonStyle(NoticePress()).disabled(pressed).opacity(pressed ? 0.6 : 1)
+        } else if main {
+            // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise);
+            // on one line: the title gives way first
+            Button(action: tap) { label(action.label, wide: wide).foregroundStyle(Color(.systemBackground)) }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(wide ? .large : .small).disabled(pressed)
         } else {
-            Button(action.label, action: tap).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
+            Button(action: tap) { label(action.label, wide: wide) }
+                .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(wide ? .large : .small).disabled(pressed)
         }
     }
+    @ViewBuilder private func label(_ text: String, wide: Bool) -> some View {
+        if wide { Text(text).lineLimit(1).frame(maxWidth: .infinity) }
+        else if roomy { Text(text).lineLimit(1).fixedSize() }
+        else { Text(text).fixedSize(horizontal: false, vertical: true) }
+    }
 
-    private func card(warns: Bool, @ViewBuilder _ content: () -> some View) -> some View {
-        content()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            // an iOS banner's glass and corners; a warning keeps its red edge
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay {
-                if warns { RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Color.red.opacity(0.45)) }
-            }
+    private func card(@ViewBuilder _ content: () -> some View) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        // full: as tall as it's given while it flies (its own height at rest,
+        // in the fan's scroll), its words from the top, cut at its edge
+        return content()
+            .frame(maxWidth: .infinity, maxHeight: full ? .infinity : nil, alignment: .topLeading)
+            .padding(full ? 14 : 12)
+            // an iOS banner's glass and corners
+            .glassEffect(.regular, in: shape)
+            // full: it grows in sharp from the stack, not materializing (a blur)
+            .glassEffectTransition(full ? .identity : .materialize)
+            .clipShape(shape.inset(by: full ? 0 : -40))
     }
 }
 

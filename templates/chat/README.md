@@ -27,8 +27,8 @@ message is, a relay's as its members say),
 `markdown.js`
 (agents' text as DOM, never as markup: the platform's renderer,
 `./__markdown.js`, with the chat's choices), `media.js` (a message's
-attachments: images, audio and video shown inline, every one opened or
-downloaded), `response-actions.js` (copy, share and their feedback),
+attachments: images, audio and video shown inline, every one saved
+under its own name by the page itself), `response-actions.js` (copy, share and their feedback),
 `icons.js` (Lucide's shapes, each icon built through the DOM;
 `LUCIDE-LICENSE.txt`), `tooltips.js`, `frame-messages.js` (its messages
 with the shell that frames it, and the shell's: one definition, which

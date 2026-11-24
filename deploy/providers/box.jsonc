@@ -1,0 +1,20 @@
+// The person's Box account: Pipes' `box` provider, connected through the
+// browser once its OAuth app's secret is in the store (the app Pipes' Box
+// integration uses, with the platform's callback beside Pipes', and both
+// its scopes enabled). Box's authorize narrows a grant to the scope it asks
+// for: `root_readonly` read only, `root_readwrite` read and write. Its
+// answer names no `scope` (so the grant is what was asked), lasts an hour,
+// and its refresh token is single-use, rotating, for 60 days. Box lets read
+// only download no file's contents, and its note says so. Its token goes to
+// the API and the upload host; a download's redirect to dl.boxcloud.com
+// needs none. No `revoke`: Box's takes the client's id and secret beside
+// the token. Its skill is box-finite.
+{ "name": "box", "kind": "connection", "title": "Box",
+  "hosts": ["api.box.com", "upload.box.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "note": "Read only can list and search your files but not open them. To let your agents read a file, connect read and write.",
+  "connection_oauth": { "authorize": "https://account.box.com/api/oauth2/authorize",
+    "exchange": "https://api.box.com/oauth2/token",
+    "access": { "read": { "scopes": ["root_readonly"] }, "write": { "scopes": ["root_readwrite"] } } },
+  "scope_names": { "root_readonly": "Files and folders (read)", "root_readwrite": "Files and folders" },
+  "env": ["BOX_OAUTH_ACCESS_TOKEN"] }

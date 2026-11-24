@@ -63,6 +63,7 @@ pub(crate) mod simplex_door;
 mod shell;
 mod signin;
 mod simplex_settings;
+pub(crate) mod simplex_setup;
 mod site;
 mod slides;
 mod sync;
@@ -204,32 +205,36 @@ const LANES: &[Lane] = &[
 /// on a preview, so their shard reports each as the whole run does: one
 /// skip.
 ///
-/// Balanced by each section's time in the five green or cut-off master
-/// pushes of 2026-11-08 (306700d3b to 962a108bf, the slowest of each
-/// section's runs): 48 minutes in all. `computers` (630 s) and `shell-ui`
-/// (578 s) are one section each, so no split runs faster than the first:
-/// each is a shard nearly alone, and the other three each take about
-/// 620 s at their sections' slowest (590 at their medians). Before, the
-/// first shard held `computers` and 120 s more, and the fourth `chat` and
-/// 390 s more: 760 and 780 s, where the fifth took 460.
-/// Shard 3 holds `triggers` and the sections from the cron
+/// Balanced by each section's median time in the seven master pushes of
+/// 2026-11-22 and 23 that ran every shard (d1e171ee1 to 9094a72c5): 50
+/// minutes in all. `computers` (997 s) is a shard alone and the run's
+/// longest, so no split runs faster than it. The sections that make or
+/// wipe a computer, or use this machine's Docker (their needs and uses:
+/// needs.rs, `Suite::section_using`), are the second and third shards'
+/// alone: `shell-ui` (554 s) and three more (639 s), then `chat` and the
+/// rest (453 s with sections that make none). The last two hold only
+/// sections that make no computer (453 s each), so their nodes run no
+/// container and build no image. Before, the first shard held `computers`
+/// and 48 s more, and the others 414 to 554 s.
+/// Shard 4 holds `triggers` and the sections from the cron
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 5] = [
+    &["computers", "agent-app", "agent-ask", "agent-restart", "agent-smoke", "checkout", "hermes", "import-release", "pipe-live", "search-bench"],
+    &["shell-ui", "export", "computer-room", "faces"],
     &[
-        "keys", "levers", "delegation", "orgs", "admin-page", "computers", "computer-room", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
-        "agent-app", "agent-restart", "pipe-live", "checkout",
+        "chat", "billing-page", "move-ui", "restart", "admin", "sessions-ui", "billing", "wipe", "governance", "migrations", "move-import", "move",
+        "agent-sharing", "templates", "admin-page", "move-comp", "shell", "deploy", "blobs", "create", "sessions", "native", "reach", "auth", "secrets-page",
+        "home",
     ],
-    &["shell-ui"],
     &[
-        "lockdown", "templates", "faces", "agent-sharing", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
-        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "offload", "brain", "brain-release", "doc", "doc-for", "slides", "board", "export", "search", "search-across",
-        "sync", "migrations", "capability-cost", "simplex-door", "share", "isolation", "push", "blobs", "trials", "trial-seats", "transcribe",
+        "facet-cap", "capability-cost", "simplex-door", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes",
+        "cli", "browser", "jobs", "triggers", "finite-private", "brain", "search", "frames", "isolation", "members", "effects", "door", "trials",
+        "chat-history", "transcribe", "notes", "public", "files", "ops", "delegation", "secrets", "doc-for", "lockdown", "trial-seats",
     ],
-    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "identities", "signin", "door", "native", "connections", "vault", "secrets", "secrets-page", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page", "move", "move-import", "move-big", "move-ui", "move-comp",
+        "ledger", "chat-seed", "ai", "share", "signin", "sync", "slides", "push", "move-big", "connections", "board", "doc", "appfiles", "vault",
+        "brain-release", "levers", "schedules-ui", "search-across", "identities", "orgs", "keys", "offload",
     ],
 ];
 

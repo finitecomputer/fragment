@@ -61,7 +61,7 @@ esac
     for case in ["fresh", "existing", "repair", "repair-fails"] {
         for state in ["edited", "uploaded", "calls"] { let _ = fs::remove_file(dir.join(state)); }
         let output_file = dir.join("GITHUB_OUTPUT");
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask")).args(["cli-release", "record", "v0.15.1"])
+        let out = Command::new(std::env::var_os("CARGO_BIN_EXE_xtask").expect("cargo names the binary to a test it runs")).args(["cli-release", "record", "v0.15.1"])
             .env("PATH", &path).env("FAKE_GH_DIR", &dir).env("FAKE_GH_CASE", case)
             .env("GITHUB_REPOSITORY", "finitecomputer/fragment").env("GITHUB_OUTPUT", &output_file)
             .stdout(Stdio::from(fs::File::create(&output_file).unwrap())).output().unwrap();

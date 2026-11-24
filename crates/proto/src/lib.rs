@@ -123,6 +123,13 @@ pub mod limits {
     pub const PUBLIC_CALLS_PER_MIN_FRAGMENT: u32 = 600;
     /// A channel record's body.
     pub const RECORD_BODY_MAX_BYTES: usize = 64 * 1024;
+    /// How long a mandate holds from its asker's record's writing
+    /// (fragment_core::mandate): a day, a turn's whole life however long
+    /// it works, and old words start nothing new.
+    pub const MANDATE_LIFE_MS: i64 = 24 * 60 * 60 * 1000;
+    /// A mandate's text, at most: its names are each bounded, so one the
+    /// platform makes is about half this.
+    pub const MANDATE_MAX_BYTES: usize = 1024;
     /// Records per page of a channel read.
     pub const CHANNEL_PAGE: usize = 1000;
     /// A page of a channel on the live socket also ends at about this many
@@ -317,9 +324,17 @@ pub mod limits {
     const _: () = assert!(UPLOAD_MAX_BYTES_DEFAULT <= BLOB_MAX_BYTES);
     /// Files one chat message carries, at most (docs/chat-records.md).
     pub const FILES_PER_MESSAGE: u32 = 8;
-    /// Finished runs are kept this long, and at most this many.
+    /// Finished runs are kept this long, and at most this many, but for a
+    /// run that ran and guards a call, kept past the count for the retry
+    /// window (core `run_retention`).
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
+    /// A held run that guards a call is kept whole past `RUNS_KEPT` for the
+    /// retry window (core `run_retention`) while it is among the newest
+    /// this many held guards: a safety bound, so a window's held runs hold
+    /// at most the inputs the count alone would. Older ones go, and a
+    /// retry of one starts it again.
+    pub const HELD_RUNS_GUARDED: i64 = 10_000;
     /// Search (docs/api.md, Search): the text of one record a fragment
     /// sends its people's lists. A longer message is searched by its
     /// first 4 KiB (its record keeps all of it).
@@ -2177,6 +2192,14 @@ pub struct ChannelRecord {
     /// The JSON text the cell stored, passed through as it is: the cell
     /// neither parses a body it just wrote nor one it reads back.
     pub body: Box<RawValue>,
+    /// Proof that the agent reading it was asked by its owner (docs/api.md,
+    /// "Who asked: mandates"): on a channel read by an agent member as
+    /// itself, a record its owner wrote (or a door relayed for them)
+    /// carries one, which its calls carry in place of `for`. Absent
+    /// elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub mandate: Option<String>,
 }
 
 /// `POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a
@@ -2803,6 +2826,7 @@ mod tests {
             author: None,
             kind: "said".into(),
             body: RawValue::from_string(stored.into()).unwrap(),
+            mandate: None,
         };
         let text = serde_json::to_string(&record).unwrap();
         assert_eq!(text, format!(r#"{{"channel":"room","seq":7,"at":1,"principal":"platform","kind":"said","body":{stored}}}"#));

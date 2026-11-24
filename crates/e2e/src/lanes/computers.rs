@@ -359,14 +359,15 @@ const TOLD_FILLING: &str = "(told: Your computer is almost full: only 2.4 GB of 
 /// Its agent told to make room: a read that finds its disk filling (the
 /// `disk` lever, as a read after a save: a 20 GB disk with 9 GB free by
 /// `df` whose `/data` restores to 14.2 GB, 2.4 GB of room) reaches its
-/// guest at its next read of its view (the bridge's, a minute apart at
-/// most: the `saves` lever's `heard`), and its agent's next turn carries
+/// guest at its next read of its view (the bridge's, a few seconds apart
+/// in the stub: the `saves` lever's `heard`), and its agent's next turn carries
 /// the line first in its note, which the stub's scripted runtime says back;
 /// the turn after carries none (once per read). A read with room again,
 /// once its guest read it, tells nothing. Starts and ends awake. Answers
 /// how many replies of its agent it added.
 fn told_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
-    // its bridge reads its view a minute apart (images' COMPUTER_EVERY_MS), and some
+    // its bridge reads its view every few seconds (the stub's
+    // BRIDGE_COMPUTER_EVERY_MS), well within this; an image's, a minute apart
     let reread = Duration::from_secs(60 + 30);
     let heard = || lever(api, c.id, "saves").ok().and_then(|r| r.body["heard"].as_i64()).unwrap_or(0);
     let replies = || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity);
@@ -2742,6 +2743,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             // SimpleX's connector, on a door (run by name: its stack builds the door's image)
             let sx = super::simplex_door::Agent { owner: &owner, owner_id: &owner_id, computer: &id, agent: &agent_name, identity: &identity, wake };
             super::simplex_door::connector(s, api, &sx)?;
+            // and set up from Settings, its connector's (D3)
+            super::simplex_setup::from_settings(s, api, &sx)?;
         }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
@@ -2863,9 +2866,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok("a second agent runs on the same computer", r.status == 200 && fragment_core::npub::is_identity(&maple_id) && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
-    // the stub's bridge reads its agents again every minute (the Hermes lane
-    // proves the seconds of our Hermes image): a sleep and a wake follows the
-    // new one at once
+    // the stub's bridge reads its agents again every few seconds (an
+    // image's, every minute; the Hermes lane proves the seconds of our
+    // Hermes image): a sleep and a wake follows the new one at once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();

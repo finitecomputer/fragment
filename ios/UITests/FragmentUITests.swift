@@ -176,13 +176,93 @@ final class FragmentUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["pairingCode"].exists)
     }
 
+    /// The sidebar, against a real platform as the notices' tests are (a dev
+    /// stack's person with an agent, signed by a key it approved ahead): an
+    /// agent's round New chat opens a chat with them at once, empty and
+    /// ready to write in, listed under them; the search at its foot opens
+    /// Home; a swipe to the left closes it, over the page it was opened on.
+    func testTheSidebarStartsAChatWithAnAgentSearchesAndClosesByASwipe() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let show = app.buttons["sidebar"]
+        XCTAssertTrue(show.waitForExistence(timeout: 30), "Home, signed in")
+        show.tap()
+        let newChat = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "agentNewChat-")).firstMatch
+        XCTAssertTrue(newChat.waitForExistence(timeout: 30), "an agent's New chat")
+        let agent = String(newChat.identifier.dropFirst("agentNewChat-".count))
+        XCTAssertTrue(app.buttons["agentMenu-\(agent)"].exists, "beside its pill")
+        XCTAssertTrue(app.buttons["sidebarSearch"].exists, "search at the foot")
+        let chats = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "sidebarChat-"))
+        let before = Set(chats.allElementsBoundByIndex.map(\.identifier))
+        screenshot(app, "Sidebar")
+
+        newChat.tap()
+        XCTAssertTrue(newChat.waitForNonExistence(timeout: 5), "the sidebar goes")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 30), "the new chat opens ready to write in")
+        XCTAssertTrue(app.textViews["composer"].exists)
+        XCTAssertFalse(app.buttons["homeSettings"].exists, "a chat, not Home")
+        screenshot(app, "A new chat, empty")
+        show.tap()
+        XCTAssertTrue(newChat.waitForExistence(timeout: 10))
+        let made = Set(chats.allElementsBoundByIndex.map(\.identifier)).subtracting(before)
+        XCTAssertEqual(made.count, 1, "one chat more, listed")
+        XCTAssertTrue(app.staticTexts["No messages yet"].exists, "listed empty")
+
+        app.buttons["sidebarSearch"].tap()
+        XCTAssertTrue(newChat.waitForNonExistence(timeout: 5), "the sidebar goes")
+        XCTAssertTrue(app.buttons["homeSettings"].waitForExistence(timeout: 10), "search opens Home")
+
+        show.tap()
+        XCTAssertTrue(newChat.waitForExistence(timeout: 10))
+        app.swipeLeft()
+        XCTAssertTrue(newChat.waitForNonExistence(timeout: 5), "a swipe to the left closes it")
+        XCTAssertTrue(app.buttons["homeSettings"].exists, "over the page it was opened on")
+    }
+
+    /// At the largest text size, as above: an agent's name wraps and its
+    /// pill grows, so two agents named alike are told apart. A pill held to
+    /// one control's height cut a name to its first word.
+    func testAtTheLargestTextSizeAnAgentsNameWrapsBesideItsNewChat() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key,
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        XCTAssertTrue(app.buttons["sidebar"].waitForExistence(timeout: 30), "Home, signed in")
+        app.buttons["sidebar"].tap()
+        let pills = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "agentMenu-"))
+        XCTAssertTrue(pills.firstMatch.waitForExistence(timeout: 30), "an agent's pill")
+        screenshot(app, "Sidebar, the largest text")
+        // the longest name: one like "Turbo Quasar 486" takes two lines or more at this size
+        guard let pill = pills.allElementsBoundByIndex.max(by: { $0.label.count < $1.label.count }), pill.label.count >= 12 else {
+            throw XCTSkip("no agent named long enough to wrap")
+        }
+        let newChat = app.buttons["agentNewChat-" + pill.identifier.dropFirst("agentMenu-".count)]
+        XCTAssertGreaterThan(pill.frame.height, newChat.frame.height * 1.5, "its name wraps, the pill grows")
+        XCTAssertTrue(newChat.isHittable, "its New chat beside it")
+    }
+
     /// What the person is told (FIN-458), against a real platform: a dev
     /// stack (`cargo xtask dev`, its port forwarded to this Mac) whose
     /// person's computer has an update ready and saves that fail, signed as
-    /// that person by a key it approved ahead. Its notices show over Home in
-    /// the server's words, the warning saying when it stops and the platform's
-    /// own words, each with its actions; Later is the update's, and the
-    /// update goes. Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
+    /// that person by a key it approved ahead. Its notices stack over Home;
+    /// a tap fans them out, in the server's words, the warning saying when it
+    /// stops and the platform's own words, each with its actions, and the X
+    /// folds them back. They're Home's alone: Your Apps has none, and Settings
+    /// has a Notices row counting them that opens them too. Later is the update's,
+    /// and the update goes; one left, the fan stays, "1 Notice". Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
     /// `TEST_RUNNER_FRAGMENT_UITEST_KEY` (the key's 64 hex); skipped without.
     func testTheComputersNoticesShowAndTheirActionsWork() throws {
         let env = ProcessInfo.processInfo.environment
@@ -197,7 +277,12 @@ final class FragmentUITests: XCTestCase {
         if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
         let notice = { (id: String) in app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:\(id)")).firstMatch }
         let update = notice("update:"), unsaved = notice("unsaved")
-        XCTAssertTrue(update.waitForExistence(timeout: 30), "the update ready is told")
+        let stack = app.descendants(matching: .any)["noticesStack"], close = app.buttons["noticesClose"]
+        let fan = { stack.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.4)).tap() }
+        XCTAssertTrue(stack.waitForExistence(timeout: 30), "the two told, stacked")
+        screenshot(app, "Notices stacked")
+        fan()
+        XCTAssertTrue(update.waitForExistence(timeout: 10), "fanned: the update ready")
         XCTAssertTrue(unsaved.waitForExistence(timeout: 10), "and the saves failing")
         XCTAssertTrue(app.staticTexts["An update is ready for your computer"].exists)
         XCTAssertTrue(app.staticTexts["Your computer can't save right now"].exists)
@@ -211,17 +296,55 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Notices, dark")
         XCUIDevice.shared.appearance = .light
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "light, drawn")], timeout: 2)
-        // over a page pushed on Home too (Codex on #1151): Your Apps
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "the X folds them back")
+        // Home's alone: none over a page pushed on it (Your Apps)
         app.buttons["yourApps"].tap()
         XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
-        XCTAssertTrue(unsaved.waitForExistence(timeout: 5), "the notices stay over a pushed page")
-        screenshot(app, "Over Your Apps")
+        XCTAssertFalse(stack.exists, "no band over Your Apps")
         app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(update.waitForExistence(timeout: 5), "and back on Home")
+        XCTAssertTrue(stack.waitForExistence(timeout: 5), "and back on Home")
+        // Settings: a row, counting them, opens them
+        app.buttons["homeSettings"].tap()
+        let row = app.buttons["noticesRow"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Settings' Notices row")
+        XCTAssertFalse(stack.exists, "no band over Settings")
+        screenshot(app, "Settings' Notices row")
+        row.tap()
+        XCTAssertTrue(app.staticTexts["2 Notices"].waitForExistence(timeout: 5), "counted in the title")
+        XCTAssertTrue(update.buttons["Later"].waitForExistence(timeout: 5))
         update.buttons["Later"].tap()
         XCTAssertTrue(update.waitForNonExistence(timeout: 20), "Later: the update is told no more")
+        XCTAssertTrue(app.staticTexts["1 Notice"].waitForExistence(timeout: 5), "one left: the fan stays, counting it")
         XCTAssertTrue(unsaved.exists, "the other stays")
         screenshot(app, "After Later")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5))
+    }
+
+    /// At the largest text size, as above: a notice's title still shows, and
+    /// Home's own bar stays on the screen. Its main action, on one line
+    /// beside the title, once took the title's room and pushed the page
+    /// past the screen's edges, the sidebar's button and Your Apps with it.
+    func testAtTheLargestTextSizeANoticeKeepsItsTitleAndThePageItsBar() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key,
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let title = app.staticTexts["Your computer can't save right now"]
+        XCTAssertTrue(title.waitForExistence(timeout: 30), "the saves failing, told")
+        let screen = app.windows.firstMatch.frame
+        screenshot(app, "Notices, the largest text")
+        XCTAssertGreaterThan(title.frame.width, screen.width / 3, "its title has room")
+        for bar in ["sidebar", "yourApps"] {
+            XCTAssertTrue(screen.contains(app.buttons[bar].frame), "\(bar) on the screen")
+        }
     }
 
     /// An invite (FIN-458), against a real platform as above: someone shared
@@ -240,6 +363,9 @@ final class FragmentUITests: XCTestCase {
         if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
         let invite = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:invite:")).firstMatch
         XCTAssertTrue(invite.waitForExistence(timeout: 30), "the invite is told")
+        // one notice, one line: a tap opens its words and its other answers
+        invite.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
+        XCTAssertTrue(invite.buttons["Decline"].waitForExistence(timeout: 5), "opened")
         XCTAssertTrue(app.staticTexts[title].exists, "titled as it was sent")
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label ENDSWITH %@", "invited you to edit it.")).firstMatch.exists, "from whom, and as what")
         XCTAssertTrue(invite.buttons["Accept"].exists && invite.buttons["Decline"].exists)
@@ -248,6 +374,32 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 30), "Accept opens the app its answer names")
         screenshot(app, "Invite accepted")
         XCTAssertTrue(invite.waitForNonExistence(timeout: 10), "and the invite is told no more")
+    }
+
+    /// An invite accepted from the full screen, beside another notice, as
+    /// above: someone shared a chat titled `TEST_RUNNER_FRAGMENT_UITEST_FAN_INVITE`
+    /// with a person who has another notice too. Accept folds the fan and
+    /// shows the chat; the fan, left up, hid it while another stayed.
+    func testAnInviteAcceptedFromTheFanShowsItsPage() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let title = env["FRAGMENT_UITEST_FAN_INVITE"] else {
+            throw XCTSkip("no dev stack or invite beside another notice named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_FAN_INVITE)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let stack = app.descendants(matching: .any)["noticesStack"], close = app.buttons["noticesClose"]
+        XCTAssertTrue(stack.waitForExistence(timeout: 30), "the invite and another, stacked")
+        stack.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.4)).tap()
+        let invite = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:invite:"))
+            .containing(NSPredicate(format: "label == %@", title)).firstMatch
+        XCTAssertTrue(invite.buttons["Accept"].waitForExistence(timeout: 10), "fanned: the invite, with Accept")
+        invite.buttons["Accept"].tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 20), "the fan folds")
+        XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 30), "and the chat its answer names shows")
+        screenshot(app, "Invite accepted from the fan")
     }
 
     /// Notices that must be answered (FIN-458) show alone over the whole app,

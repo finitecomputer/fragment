@@ -8,7 +8,7 @@
 //! strings (xtask/src/eval_sinks.rs reads src/ as runtime code).
 #![cfg(feature = "platform")]
 
-use std::path::Path;
+use std::path::PathBuf;
 
 /// The relative module specifiers `source` imports.
 fn imports(source: &str) -> Vec<&str> {
@@ -28,7 +28,7 @@ fn imports(source: &str) -> Vec<&str> {
 
 #[test]
 fn every_module_a_page_imports_is_its_own() {
-    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+    let templates = PathBuf::from("../../templates");
     let mut checked = 0;
     for t in fragment_templates::ALL {
         for f in t.files.iter().filter(|f| f.path.starts_with("site/") && !fragment_templates::built(t.name, f.path) && [".js", ".mjs", ".html"].iter().any(|x| f.path.ends_with(x))) {
@@ -56,9 +56,34 @@ fn every_module_a_page_imports_is_its_own() {
 }
 
 /// A built name's own (`chat.3f9a2c1b4d5e.js` → `chat.js`): its hash out.
+/// A hash is as bundle.rs's `hashed_name` makes it: SHA-256's lowercase
+/// hex, 12 characters or more (longer until it holds a digit and a
+/// letter), so `shell.0499724193773a.css`'s 14 are a hash too.
 #[cfg(feature = "embed")]
 fn unhashed(name: &str) -> String {
-    name.split('.').filter(|p| !(p.len() == 12 && p.bytes().all(|b| b.is_ascii_hexdigit()))).collect::<Vec<_>>().join(".")
+    let hash = |p: &str| {
+        (12..=64).contains(&p.len())
+            && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && p.bytes().any(|b| b.is_ascii_digit())
+            && p.bytes().any(|b| b.is_ascii_alphabetic())
+    };
+    name.split('.').filter(|p| !hash(p)).collect::<Vec<_>>().join(".")
+}
+
+/// Goal: `unhashed` takes out every hash bundle.rs names, as long as it
+/// is. Valid: a 12-character hash, one made longer to hold a digit and a
+/// letter, and a whole SHA-256. Invalid: a name with no hash keeps every
+/// part, and a part too short, uppercase, or all digits is no hash.
+#[cfg(feature = "embed")]
+#[test]
+fn unhashed_takes_out_a_hash_of_any_length_the_bundler_names() {
+    assert_eq!(unhashed("chat.3f9a2c1b4d5e.js"), "chat.js");
+    assert_eq!(unhashed("shell.0499724193773a.css"), "shell.css");
+    assert_eq!(unhashed(&format!("shell.{}.css", "ab12".repeat(16))), "shell.css");
+    assert_eq!(unhashed("shell.css"), "shell.css");
+    assert_eq!(unhashed("a.3f9a2c1b4d5.js"), "a.3f9a2c1b4d5.js", "11 characters");
+    assert_eq!(unhashed("a.3F9A2C1B4D5E.js"), "a.3F9A2C1B4D5E.js", "uppercase");
+    assert_eq!(unhashed("a.049972419377.js"), "a.049972419377.js", "digits alone: the bundler goes on");
 }
 
 /// Goal: a built page (crates/templates/bundle.rs) comes in one wave and
@@ -74,7 +99,7 @@ fn unhashed(name: &str) -> String {
 #[cfg(feature = "embed")]
 #[test]
 fn a_built_page_names_its_hashed_files() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from("../..");
     let pages: Vec<(&str, &str)> = fragment_templates::BUILT.iter().copied().filter(|(_, p)| p.ends_with("index.html")).collect();
     assert_eq!(pages.len(), 5, "the shell's page and the chat's four: {pages:?}");
     for (at, _) in pages {
@@ -129,7 +154,7 @@ fn a_built_page_names_its_hashed_files() {
 /// the client's two, read from their files. Valid: equal.
 #[test]
 fn the_early_socket_waits_as_the_client_does() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from("../..");
     let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
     let number = |text: &str, after: &str| -> u64 {
         let at = text.find(after).unwrap_or_else(|| panic!("{after:?} is there")) + after.len();

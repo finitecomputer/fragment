@@ -163,6 +163,26 @@ struct View<'a> {
     waiting: usize,
     replies: usize,
     notices: &'a VecDeque<String>,
+    /// While inviting, its invitation's QR code (`qr`).
+    qr: Option<Qr>,
+}
+
+/// An invitation's QR code, for its owner's page to draw (templates/simplex
+/// site/setup.js): `size` modules a side, row by row in `dark`, a `1` each
+/// dark one. Of the short link where there is one, at error correction M,
+/// as the bridge's page draws its own (simplex/http.rs `qr_svg`); none
+/// past what a QR code holds.
+#[derive(Debug, Serialize)]
+struct Qr {
+    size: usize,
+    dark: String,
+}
+
+fn qr(text: &str) -> Option<Qr> {
+    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M).ok()?;
+    let dark: String = code.to_colors().iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect();
+    assert_eq!(dark.len(), code.width() * code.width(), "a QR code is square");
+    Some(Qr { size: code.width(), dark })
 }
 
 struct Runner {
@@ -827,6 +847,7 @@ impl Runner {
             waiting: self.page.len(),
             replies: self.kept.replies.len(),
             notices: &self.notices,
+            qr: short.or(link).and_then(qr),
         };
         net::respond(StatusCode::OK, "application/json", serde_json::to_vec(&view).expect("a view is JSON"))
     }
@@ -1059,6 +1080,35 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Kept>(&bytes).unwrap(), kept);
         let old: Kept = serde_json::from_str(r#"{"link":{"phase":"off"}}"#).unwrap();
         assert_eq!(old, Kept::default());
+    }
+
+    /// Goal: while inviting, its state carries the QR code of its short
+    /// link (else its link) whole, a square of modules; none otherwise, or
+    /// past what a QR code holds. Method: the view of a scripted runner as
+    /// its link's phase moves, and `qr` at its bound.
+    #[tokio::test]
+    async fn an_invitations_state_carries_its_qr_code() {
+        async fn read(r: &Runner) -> serde_json::Value {
+            serde_json::from_slice(&r.view().into_body().collect().await.unwrap().to_bytes()).unwrap()
+        }
+        let (mut r, _writes) = scripted("qr", false);
+        assert!(read(&r).await["qr"].is_null(), "off: none");
+        let short = "https://smp.example/i#short-invitation";
+        for (link, short, drawn) in [("simplex:/invitation#/?v=2-7&smp=long", Some(short), short), ("simplex:/invitation#/?v=2-7&smp=long", None, "simplex:/invitation#/?v=2-7&smp=long")] {
+            r.kept.link.phase = Phase::Inviting { conn: 7, link: link.into(), short: short.map(Into::into) };
+            let v = read(&r).await;
+            let code = qrcode::QrCode::with_error_correction_level(drawn.as_bytes(), qrcode::EcLevel::M).unwrap();
+            assert_eq!(v["qr"]["size"], code.width(), "{drawn}");
+            let dark = v["qr"]["dark"].as_str().unwrap();
+            assert_eq!(dark.len(), code.width() * code.width());
+            assert!(dark.bytes().all(|b| b == b'0' || b == b'1') && dark.contains('1') && dark.contains('0'));
+            assert_eq!(dark, qr(drawn).unwrap().dark);
+        }
+        r.kept.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
+        assert!(read(&r).await["qr"].is_null(), "linked: none");
+        let full = format!("simplex:/invitation#/?v=2-7&smp={}", "x".repeat(700));
+        assert!(qr(&full).is_some(), "a full invitation fits");
+        assert!(qr(&"x".repeat(5_000)).is_none(), "past what a QR code holds");
     }
 
     /// A runner on a core of the test's own (`Core::scripted`): what it

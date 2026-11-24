@@ -28,6 +28,7 @@ pub mod node;
 mod node_release;
 pub mod openbao;
 mod openbao_release;
+pub mod rows;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -56,9 +57,32 @@ pub const CACHE_DIR: &str = "target/cache";
 /// (`fragment_proto::limits::LABEL_ROOM_MIN_BYTES`).
 pub use fragment_proto::valid_branch;
 
+/// The repo this process works in, found as it runs. Cargo takes a crate
+/// as built wherever its checkout sits, so a target directory kept from
+/// another checkout (cloned into a new worktree, restored at another
+/// mount, shared by two checkouts) holds this crate with that checkout's
+/// path compiled in, and the xtask linked with it checked, built and
+/// deployed that checkout from this one (xtask/src/built_paths.rs keeps
+/// such paths out of the workspace). So, in order:
+/// - the checkout cargo says it runs this process for: `cargo run` and
+///   `cargo test` set `CARGO_MANIFEST_DIR` to the package's folder as it
+///   is now, and what they start inherits it (the e2e, from xtask);
+/// - the checkout whose `target/` holds this executable, for one run by
+///   hand, which cargo tells nothing;
+/// - the checkout this crate was built in, for a binary run from outside
+///   any checkout, as before.
 pub fn repo_root() -> PathBuf {
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    here.parent().and_then(Path::parent).expect("crates/devstack sits two levels below the repo root").to_path_buf()
+    let told = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let executable = std::env::current_exe().ok();
+    let built = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let found = [told.as_deref(), executable.as_deref(), Some(built)].into_iter().flatten().find_map(checkout_above);
+    found.expect("a fragment checkout holds this process: run it through cargo, or from a checkout's target directory")
+}
+
+/// The checkout `path` is in: the nearest folder at or above it that
+/// holds this crate where the repo does.
+fn checkout_above(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|dir| dir.join("crates/devstack/Cargo.toml").is_file()).map(Path::to_path_buf)
 }
 
 pub fn cell_dir() -> PathBuf {
@@ -242,18 +266,26 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
     Ok(())
 }
 
+/// The computers' container class (cell/src/computer.rs): in a local
+/// node's config only when it runs computers (`Fleet::computers`).
+/// `wrangler dev` builds every image its config names as it starts (the
+/// stub's two, 7 to 20 s of every boot when all of it is cached), which a
+/// node whose run makes no computer needs none of.
+pub const COMPUTER_CLASS: &str = "Computer";
+
 /// The SimpleX door's container class (cell/door.mjs): in a local node's
-/// config only when it runs doors (`Fleet::doors`). `wrangler dev` builds
-/// every image its config names as it starts, and the door's (SimpleX's
+/// config only when it runs doors (`Fleet::doors`). Its image (SimpleX's
 /// core and its runner, built from source) would be every stack's cost; a
 /// node without it still has the door's object, which says it runs none.
 pub const DOOR_CLASS: &str = "SimplexDoor";
 
-fn without_doors(config: &mut serde_json::Value) -> Result<()> {
+/// `config` less the container class `class`: a node's that runs none of
+/// its containers (`COMPUTER_CLASS`, `DOOR_CLASS`) builds none of its images.
+fn without_class(config: &mut serde_json::Value, class: &str) -> Result<()> {
     let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) else { return Ok(()) };
     let before = containers.len();
-    containers.retain(|c| c["class_name"] != DOOR_CLASS);
-    anyhow::ensure!(containers.len() + 1 >= before, "one door container class at most");
+    containers.retain(|c| c["class_name"] != class);
+    anyhow::ensure!(containers.len() + 1 >= before, "one {class} container class at most");
     Ok(())
 }
 
@@ -283,11 +315,14 @@ pub fn admin_local_config(project: &Path) -> PathBuf {
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
 /// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], doors: bool) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], computers: bool, doors: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
-    if !doors {
-        without_doors(&mut config)?;
+    for (runs, class) in [(computers, COMPUTER_CLASS), (doors, DOOR_CLASS)] {
+        if !runs {
+            without_class(&mut config, class)?;
+        }
     }
+    anyhow::ensure!(computers || images.is_empty(), "computer images beside the config's own are for a node that runs computers");
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
         for (name, image) in images {
@@ -509,6 +544,10 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether it runs computers (`COMPUTER_CLASS`'s container, and its
+    /// images built as the node starts): dev's always, an e2e run's when a
+    /// section it runs makes them.
+    pub computers: bool,
     /// Whether it runs SimpleX doors (`DOOR_CLASS`'s container, and its
     /// image built as the node starts): the e2e's door lane's alone.
     pub doors: bool,
@@ -523,6 +562,11 @@ pub struct Fleet {
     /// depend on public DNS (#1017: every save of a boot failed when it did
     /// not answer). `cargo xtask dev`'s are on, as a deployment's are.
     pub computer_internet: bool,
+    /// Whether SimpleX doors reach the internet (`FRAGMENT_DOOR_INTERNET`,
+    /// `off` when not), as `computer_internet` says of computers: the e2e's
+    /// are off but for a run whose door links to SimpleX's servers for real
+    /// (its `simplex-link`); `cargo xtask dev`'s are on.
+    pub door_internet: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
@@ -647,7 +691,7 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.doors)?;
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.computers, self.doors)?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -757,6 +801,9 @@ impl Fleet {
         if !self.computer_internet {
             vars.push(("FRAGMENT_COMPUTER_INTERNET", "off"));
         }
+        if !self.door_internet {
+            vars.push(("FRAGMENT_DOOR_INTERNET", "off"));
+        }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {
             vars.push(("FRAGMENT_COMPUTER_UNSAVED_MAX_MS", ms.as_str()));
@@ -772,6 +819,29 @@ impl Fleet {
         }
         write_dev_vars(project, &vars)
     }
+}
+
+/// `program`, started as a shell would start it: without what cargo told
+/// this process about its own package. `cargo xtask` is a `cargo run`,
+/// which sets `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and
+/// `CARGO_PKG_*` for xtask, and a cargo started with them takes them for
+/// its own environment. A build script that reads one is rerun when it
+/// changes (ring's reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so
+/// every build by hand after one of xtask's, and the other way round,
+/// built ring again, and reqwest and every crate of ours above them; and
+/// since `CARGO_MANIFEST_DIR` names the checkout, no build of them was
+/// good in another checkout. For cargo, and for what runs cargo:
+/// worker-build, and wrangler, whose build command for the cell is a
+/// `cargo run` of xtask (cell/wrangler.jsonc; `node::Node::command`).
+pub fn outside_cargo(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        let own_package = name.to_str().is_some_and(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_"));
+        if own_package {
+            cmd.env_remove(name);
+        }
+    }
+    cmd
 }
 
 /// Random hex from the OS.
@@ -1232,6 +1302,58 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: the cargo xtask starts is told nothing of xtask's own package,
+    /// so it builds as cargo run by hand does. Before, it inherited what
+    /// `cargo xtask` (a `cargo run`) sets for xtask, and ring's build
+    /// script, which reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`, was
+    /// rerun whenever a build by hand followed one of xtask's or the other
+    /// way round: ring, reqwest and every crate of ours above them, built
+    /// again. Method: `env` started as xtask starts cargo, from this test,
+    /// for which `cargo test` sets the same variables. Valid: every other
+    /// variable is passed on, cargo's own settings among them.
+    #[test]
+    fn what_is_started_outside_cargo_is_told_nothing_of_this_package() {
+        for set in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR"] {
+            assert!(std::env::var_os(set).is_some(), "cargo sets {set} for this test, as it does for xtask");
+        }
+        let out = super::outside_cargo("env").env("CARGO_TERM_COLOR", "never").output().expect("env runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let names: Vec<&str> = text.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name).collect();
+        let own: Vec<&&str> = names.iter().filter(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_")).collect();
+        assert!(own.is_empty(), "passed on: {own:?}");
+        for kept in ["PATH", "HOME", "CARGO_TERM_COLOR"] {
+            assert!(names.contains(&kept), "{kept} is passed on: {names:?}");
+        }
+    }
+
+    /// Goal: a local node's config holds the container classes it runs,
+    /// and no other: wrangler builds every image its config names as it
+    /// boots. Valid: computers and doors, either, or neither (no image at
+    /// all). Invalid: computer images beside the config's own (dev's
+    /// Hermes) for a node that runs no computers. Method: the checked-in
+    /// config, written as a staged copy is.
+    #[test]
+    fn a_node_config_holds_only_the_containers_it_runs() {
+        let dir = std::env::temp_dir().join(format!("devstack-classes-{}", super::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = super::read_config(&super::cell_dir()).unwrap();
+        super::absolute_images(&mut config, &super::cell_dir()).unwrap();
+        std::fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        std::fs::copy(super::cell_dir().join(super::ADMIN_CONFIG), dir.join(super::ADMIN_CONFIG)).unwrap();
+        let classes = |computers, doors| {
+            let path = super::write_local_config(&dir, &[], &[], &[], computers, doors).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            config["containers"].as_array().unwrap().iter().map(|c| c["class_name"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(classes(true, true), [super::COMPUTER_CLASS, super::DOOR_CLASS]);
+        assert_eq!(classes(true, false), [super::COMPUTER_CLASS]);
+        assert_eq!(classes(false, true), [super::DOOR_CLASS]);
+        assert!(classes(false, false).is_empty(), "no container, so no image built at boot");
+        let hermes = [("hermes".to_string(), serde_json::json!({ "dockerfile": "/x/Dockerfile", "build_context": "/x" }))];
+        assert!(super::write_local_config(&dir, &[], &[], &hermes, false, false).is_err(), "a computer image for a node with no computers");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Goal: a staged cell (dev's, the e2e's) holds every module its shim
     /// imports from beside it, as the source tree a deploy runs from does
     /// (a module left out failed the e2e's build: "Could not resolve
