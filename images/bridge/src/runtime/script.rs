@@ -534,7 +534,8 @@ async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest
 /// CLI a minute past: this a little more.
 const VAULT_ASK_WAIT: Duration = Duration::from_secs(12 * 60);
 
-/// `vault-ask <name> <host|-> <why>`: the CLI's ask, as the agent.
+/// `vault-ask <name> <host|-> <why>`: the CLI's ask, as the agent
+/// (`vault-ask-nowait`: `--no-wait`, answered with the ask's id and link).
 async fn vault_ask(agent: &crate::runtime::Agent, rest: &str, no_wait: bool) -> String {
     let mut words = rest.trim().splitn(3, char::is_whitespace);
     let (Some(name), Some(host), Some(why)) = (words.next(), words.next(), words.next()) else {
@@ -547,48 +548,45 @@ async fn vault_ask(agent: &crate::runtime::Agent, rest: &str, no_wait: bool) -> 
     if no_wait {
         args.push("--no-wait");
     }
-    let run = tokio::process::Command::new(CLI).args(&args).env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner).kill_on_drop(true).output();
-    let out = match tokio::time::timeout(VAULT_ASK_WAIT, run).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return format!("vault-ask refused: the CLI did not run ({e})"),
-        Err(_) => return format!("vault-ask refused: no answer in {} s", VAULT_ASK_WAIT.as_secs()),
-    };
-    let said: serde_json::Value = String::from_utf8_lossy(&out.stdout).lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
-    if said["ok"] != true {
-        let why = said["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).chars().take(300).collect());
-        return format!("vault-ask refused: {why}");
+    match vault_cli(agent, &args, "vault-ask").await {
+        Err(refused) => refused,
+        Ok(d) if no_wait => format!("vault-ask-started {} {}", d["ask"]["id"].as_str().unwrap_or("?"), d["ask"]["url"].as_str().unwrap_or("?")),
+        Ok(d) => vault_asked(&d),
     }
-    let d = &said["data"];
-    if no_wait {
-        return format!(
-            "vault-ask-started {} {}",
-            d["ask"]["id"].as_str().unwrap_or("?"),
-            d["ask"]["url"].as_str().unwrap_or("?")
-        );
-    }
-    format!("vault-asked {} {}", d["ask"]["state"].as_str().unwrap_or("?"), d["placeholder"].as_str().unwrap_or("none"))
 }
 
-/// `vault-wait <id>`: waits on an existing ask via `fragment vault wait <id>`.
+/// `vault-wait <id>`: `fragment vault wait <id>`, as the agent.
 async fn vault_wait(agent: &crate::runtime::Agent, id: &str) -> String {
     let id = id.trim();
     if id.is_empty() {
         return "say `vault-wait <id>`".into();
     }
-    let args = ["--json", "vault", "wait", id];
+    match vault_cli(agent, &["--json", "vault", "wait", id], "vault-wait").await {
+        Err(refused) => refused,
+        Ok(d) => vault_asked(&d),
+    }
+}
+
+/// How an ask the CLI followed ended: its state, and the stand-in if saved.
+fn vault_asked(d: &serde_json::Value) -> String {
+    format!("vault-asked {} {}", d["ask"]["state"].as_str().unwrap_or("?"), d["placeholder"].as_str().unwrap_or("none"))
+}
+
+/// The CLI run with `args` as the agent: its JSON answer's `data`, or
+/// `<what> refused: <why>`.
+async fn vault_cli(agent: &crate::runtime::Agent, args: &[&str], what: &str) -> Result<serde_json::Value, String> {
     let run = tokio::process::Command::new(CLI).args(args).env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner).kill_on_drop(true).output();
     let out = match tokio::time::timeout(VAULT_ASK_WAIT, run).await {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => return format!("vault-wait refused: the CLI did not run ({e})"),
-        Err(_) => return format!("vault-wait refused: no answer in {} s", VAULT_ASK_WAIT.as_secs()),
+        Ok(Err(e)) => return Err(format!("{what} refused: the CLI did not run ({e})")),
+        Err(_) => return Err(format!("{what} refused: no answer in {} s", VAULT_ASK_WAIT.as_secs())),
     };
     let said: serde_json::Value = String::from_utf8_lossy(&out.stdout).lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
     if said["ok"] != true {
         let why = said["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).chars().take(300).collect());
-        return format!("vault-wait refused: {why}");
+        return Err(format!("{what} refused: {why}"));
     }
-    let d = &said["data"];
-    format!("vault-asked {} {}", d["ask"]["state"].as_str().unwrap_or("?"), d["placeholder"].as_str().unwrap_or("none"))
+    Ok(said["data"].clone())
 }
 
 /// A sync of a large file is the CLI hashing it, uploading its bytes and

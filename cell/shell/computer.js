@@ -468,7 +468,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         hit?.focus?.();
       }
     }
-    if (want && !pending.has(want) && !told.some((n) => n.id === want)) {
+    // gone only from notices read as they are (a failed read shows none)
+    if (want && !own.length && !pending.has(want) && !told.some((n) => n.id === want)) {
       autoFocused = null;
       clearFocusedNotice(false);
     }

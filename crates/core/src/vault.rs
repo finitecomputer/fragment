@@ -398,12 +398,11 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
 /// asking agent's fragment name, `agent` is what its person calls it (its
 /// title, else its label), `picture` its face, and `held` is the secret
 /// currently kept under `ask.name` beside its revision (`"none"` if none).
-/// - For a new secret (`None`): shows the masked field, Save (carrying
-///   `{ held }`), and Decline.
-/// - For an existing secret (`Some`): shows no field — offers Allow
-///   (carrying `{ allow: true, held }`) and Decline, keeping the sealed
-///   value intact while clearly calling out any new hosts or shared agents
-///   (or Decline alone if the union would exceed host/agent limits).
+/// - a new secret (`None`): the masked field, Save (carrying `{ held }`),
+///   and Decline;
+/// - one already kept (`Some`): no field, Allow (carrying `{ allow: true,
+///   held }`) and Decline, saying what an Allow adds (this agent, new
+///   hosts); Decline alone when that would pass the secret's limits.
 pub fn ask_notice(
     id: &str,
     ask: &AskSecret,
@@ -429,57 +428,35 @@ pub fn ask_notice(
             )
         }
         (Some(secret), revision) => {
-            let already_agent = secret.agents.iter().any(|a| a == agent_fragment);
-            let other_agents = secret.agents.iter().any(|a| a != agent_fragment);
-            let all_hosts = join_unique(&secret.hosts, &ask.hosts);
-            let new_hosts: Vec<String> = all_hosts.iter().filter(|h| !secret.hosts.contains(*h)).cloned().collect();
-            let all_agents_len = secret.agents.len() + usize::from(!already_agent);
-            if all_hosts.len() > HOSTS_MAX {
-                (
-                    format!("{agent} asks to use {}", ask.name),
-                    format!("You already keep {}, and adding {} would exceed the {HOSTS_MAX}-host limit. Decline it, or edit {} in Settings → Secrets.", ask.name, new_hosts.join(", "), ask.name),
-                    None,
-                    vec![decline],
-                )
-            } else if all_agents_len > AGENTS_MAX {
-                (
-                    format!("{agent} asks to use {}", ask.name),
-                    format!("You already keep {}, and it is already shared with the maximum {AGENTS_MAX} agents. Decline it, or edit {} in Settings → Secrets.", ask.name, ask.name),
-                    None,
-                    vec![decline],
-                )
+            let shares = !secret.agents.iter().any(|a| a == agent_fragment);
+            let hosts = join_unique(&secret.hosts, &ask.hosts);
+            let new_hosts: Vec<&str> = hosts.iter().filter(|h| !secret.hosts.contains(h)).map(String::as_str).collect();
+            let title = format!("{agent} asks to use {}", ask.name);
+            let kept = match secret.hosts.is_empty() {
+                true => format!("You already keep {}, parked: sent nowhere yet.", ask.name),
+                false => format!("You already keep {} for {}.", ask.name, secret.hosts.join(", ")),
+            };
+            if hosts.len() > HOSTS_MAX || secret.agents.len() + usize::from(shares) > AGENTS_MAX {
+                let detail = format!("{kept} Allowing this would pass its limit of {HOSTS_MAX} hosts and {AGENTS_MAX} agents: decline it, or change {} in Settings → Secrets.", ask.name);
+                (title, detail, None, vec![decline])
             } else {
-                let allow = NoticeAction::post("Allow", route, serde_json::json!({ "allow": true, "held": revision }));
-                let other_note = if other_agents { " Your other agents that use it can send there too." } else { "" };
-                let (title, detail) = match (already_agent, new_hosts.is_empty()) {
-                    (false, true) => {
-                        let detail = if secret.hosts.is_empty() {
-                            format!("You already keep {} (parked — sent nowhere yet). Allowing shares it with {agent}, still sent nowhere until you add a host in Settings → Secrets.", ask.name)
-                        } else {
-                            format!("You already keep {} for {}. Allowing shares that saved secret with {agent}; it gets a stand-in, never the secret itself.", ask.name, secret.hosts.join(", "))
-                        };
-                        (format!("{agent} asks to use {}", ask.name), detail)
-                    }
-                    (false, false) => (
-                        format!("{agent} asks to use {}", ask.name),
-                        format!("You already keep {}. Allowing shares it with {agent} and also sends it to {} (all hosts: {}).{other_note} {agent} gets a stand-in, never the secret itself.", ask.name, new_hosts.join(", "), all_hosts.join(", ")),
-                    ),
-                    (true, false) => (
-                        format!("{agent} asks to use {} somewhere new", ask.name),
-                        format!("Adds {} to the {} you already keep (all hosts: {}).{other_note} {agent} still gets only a stand-in, never the secret itself.", new_hosts.join(", "), ask.name, all_hosts.join(", ")),
-                    ),
-                    (true, true) => {
-                        let where_part = if secret.hosts.is_empty() {
-                            " (parked — sent nowhere yet)".to_string()
-                        } else {
-                            format!(" for {}", secret.hosts.join(", "))
-                        };
-                        (
-                            format!("{agent} asks for {}", ask.name),
-                            format!("You already share {} with {agent}{where_part}. Allowing confirms access without changing the saved value (edit or replace it in Settings → Secrets).", ask.name),
-                        )
-                    }
+                let mut grants = Vec::new();
+                if shares {
+                    grants.push(format!("shares it with {agent}"));
+                }
+                if !new_hosts.is_empty() {
+                    grants.push(format!("sends it to {} too", new_hosts.join(", ")));
+                }
+                let does = match grants.is_empty() {
+                    true => "Allowing changes nothing saved.".to_string(),
+                    false => format!("Allowing {}.", grants.join(" and ")),
                 };
+                let others = match !new_hosts.is_empty() && secret.agents.iter().any(|a| a != agent_fragment) {
+                    true => " Your other agents that use it can send there too.",
+                    false => "",
+                };
+                let detail = format!("{kept} {does}{others} {agent} gets a stand-in, never the secret itself.");
+                let allow = NoticeAction::post("Allow", route, serde_json::json!({ "allow": true, "held": revision }));
                 (title, detail, None, vec![allow, decline])
             }
         }
@@ -861,7 +838,7 @@ mod tests {
     /// agent never sees it: Save + masked field for a new secret, and
     /// Allow + Decline (no field, carrying held revision) when the secret
     /// already exists (sharing to another agent, widening hosts, or
-    /// confirming existing access). Method: every card variant on the wire.
+    /// changing nothing). Method: every card variant on the wire.
     #[test]
     fn the_card_says_who_why_where_and_carries_the_field_or_allow() {
         let id = "0123456789abcdef0123456789abcdef";
@@ -887,21 +864,21 @@ mod tests {
         assert!(!share.actions[0].field);
         assert_eq!(share.actions[0].body, Some(serde_json::json!({ "allow": true, "held": "rev1" })));
         assert_eq!(share.actions[1].label, "Decline");
-        assert!(share.detail.as_deref().is_some_and(|d| d.contains("shares that saved secret with Bea") && d.contains("api.github.com")), "{:?}", share.detail);
+        assert_eq!(share.detail.as_deref(), Some("You already keep github for api.github.com. Allowing shares it with Bea. Bea gets a stand-in, never the secret itself."));
 
         // Another agent asking for an existing secret + new host: calls out new host & other agents
         let widen = ask_notice(id, &ask("github", "Upload release", &["uploads.github.com"]), "bea--k3x9", "Bea", None, 9, (Some(&existing), "rev1"));
-        assert!(widen.detail.as_deref().is_some_and(|d| d.contains("uploads.github.com") && d.contains("Your other agents that use it can send there too")), "{:?}", widen.detail);
+        assert_eq!(widen.detail.as_deref(), Some("You already keep github for api.github.com. Allowing shares it with Bea and sends it to uploads.github.com too. Your other agents that use it can send there too. Bea gets a stand-in, never the secret itself."));
 
         // Same agent asking to widen hosts
         let same_widen = ask_notice(id, &ask("github", "Upload release", &["uploads.github.com"]), AGENT, "Juniper", None, 9, (Some(&existing), "rev1"));
-        assert_eq!(same_widen.title, "Juniper asks to use github somewhere new");
+        assert!(same_widen.detail.as_deref().is_some_and(|d| d.contains("Allowing sends it to uploads.github.com too.") && !d.contains("other agents")), "{:?}", same_widen.detail);
         assert_eq!(same_widen.actions[0].label, "Allow");
 
-        // Same agent already has secret and host: Allow confirms without replacing
+        // Same agent already has secret and host: Allow changes nothing
         let same_have = ask_notice(id, &ask("github", "Need token", &["api.github.com"]), AGENT, "Juniper", None, 9, (Some(&existing), "rev1"));
         assert!(same_have.field.is_none() && same_have.actions[0].label == "Allow");
-        assert!(same_have.detail.as_deref().is_some_and(|d| d.contains("Settings → Secrets")), "{:?}", same_have.detail);
+        assert!(same_have.detail.as_deref().is_some_and(|d| d.contains("Allowing changes nothing saved.")), "{:?}", same_have.detail);
 
         // Host cap exceeded: Decline alone
         let eight = held(&["a.example.com", "b.example.com", "c.example.com", "d.example.com", "e.example.com", "f.example.com", "g.example.com", "h.example.com"], Place::default(), &[AGENT]);

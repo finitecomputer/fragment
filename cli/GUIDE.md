@@ -1224,14 +1224,12 @@ chat, where it lands in records and in your context:
 fragment vault ask github --why "To push your shop's code" --to api.github.com
 ```
 
-They get a card on their page (who asks, your why, where it goes) — and a
-direct platform link (`{{platform}}/vault/ask/<id>`) you can share in chat
-when they are messaging over Telegram or SimpleX. For a new secret, the card
-has a masked field; what they paste goes into their Vault, never to you. For
-a secret they already keep, the card offers **Allow** or **Decline**, sharing
-the saved secret (or adding new hosts) without asking for the password again
-or overwriting it; they can edit or replace secrets anytime in Settings →
-Secrets. The command waits (at most 10 minutes) and prints the stand-in to
+They get a card on their page (who asks, your why, where it goes), also at
+its own link (`{{platform}}/vault/ask/<id>`). For a new secret, the card
+has a masked field; what they paste goes into their Vault, never to you.
+For one they already keep, it offers Allow or Decline: Allow shares the
+saved secret (and any new hosts) without asking for it again. The command
+waits (at most 10 minutes) and prints the stand-in to
 send in the secret's place (`fck_github_…`, as a bearer token unless they set
 it otherwise), which works only toward the hosts named. Pass `--no-wait` to
 return the ask id and link right away so you can send the link in chat and

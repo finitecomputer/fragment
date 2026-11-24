@@ -1081,8 +1081,9 @@ impl VaultCell {
     }
 }
 
-/// Which value a stored secret holds: its sealed text's SHA-256, which a
-/// new seal (its random nonce) always changes.
+/// `text`'s SHA-256, as hex: a stored secret's seal says which value it
+/// holds (a new seal's random nonce always changes it); with what the
+/// secret says, which grant (`held_at`).
 fn revision_of(sealed: &str) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(sealed.as_bytes()))

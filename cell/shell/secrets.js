@@ -1,21 +1,17 @@
 // Settings → Secrets: manage the person's Vault secrets in the browser
 // (`GET /api/vault`, `PUT /api/vault/{name}`, `DELETE /api/vault/{name}`).
-// Never reads or displays a secret value; masked inputs clear immediately
-// after saving.
+// Never reads or displays a secret value; a masked input is cleared once
+// saved, and when its sheet closes.
 import { icon } from "./icons.js";
 import { closeOnOutsidePress } from "./dialog.js";
 
 // A Vault secret's placement in plain words.
 export function placeLabel(place) {
-  if (!place || typeof place !== "object") return "Authorization: Bearer";
-  if (place.sign) return place.sign === "nip98" ? "NIP-98 signing" : `Sign (${place.sign})`;
-  if (place.query) return `Query: ${place.query}`;
-  if (place.basic) return `Basic auth (${place.basic})`;
-  if (place.header) {
-    const isDefault = place.header.toLowerCase() === "authorization" && (!place.format || place.format === "Bearer {}");
-    if (isDefault) return "Authorization: Bearer";
-    return place.format && place.format !== "{}" ? `Header: ${place.header} (${place.format})` : `Header: ${place.header}`;
-  }
+  if (place?.sign) return place.sign === "nip98" ? "NIP-98 signing" : `Sign (${place.sign})`;
+  if (place?.query) return `Query: ${place.query}`;
+  if (place?.basic) return `Basic auth (${place.basic})`;
+  const bearer = place?.header?.toLowerCase() === "authorization" && (!place.format || place.format === "Bearer {}");
+  if (place?.header && !bearer) return place.format && place.format !== "{}" ? `Header: ${place.header} (${place.format})` : `Header: ${place.header}`;
   return "Authorization: Bearer";
 }
 
@@ -30,13 +26,15 @@ function formatDate(ms) {
 }
 
 export function createSecrets({ api, el, section, named, computer, asks, isOpen, reopenSettings }) {
-  // Keep the open detail sheet across reloads in the same settings visit.
+  // Keep the open detail sheet across reloads in the same settings visit
+  // (leaving Settings closes it: connections.js closes every provider-sheet).
   let openSheet = null;
-  const settingsPage = document.getElementById("settings-page");
-  if (settingsPage && typeof MutationObserver === "function") {
-    new MutationObserver(() => {
-      if (settingsPage.hidden) for (const d of settingsPage.querySelectorAll("dialog.secret-sheet[open]")) d.close();
-    }).observe(settingsPage, { attributes: true, attributeFilter: ["hidden"] });
+  // the secret as the Vault holds it now, so a change made since its sheet
+  // was drawn (an agent's Allow) is never written back over
+  async function latest(name) {
+    const now = (await api("GET", "/api/vault")).secrets?.find((x) => x.name === name);
+    if (!now) throw new Error(`${name} is no longer saved.`);
+    return now;
   }
 
   function secretsSection(vault) {
@@ -56,7 +54,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     } else {
       s.append(el("p", "muted", "No secrets saved yet. Add one here, or let an agent ask when it needs one."));
     }
-    const add = addSecretControl(agents);
+    const add = addSecretControl(agents, new Set(list.map((sec) => sec.name)));
     s.append(add.button, add.dialog);
     return s;
   }
@@ -184,8 +182,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         named(flip, fragment, (t) => `${t} may use ${sec.name}`, "aria-label");
         flip.onclick = async () => {
           agentSaid.hidden = true;
-          const next = allowed ? (sec.agents ?? []).filter((x) => x !== fragment) : [...new Set([...(sec.agents ?? []), fragment])];
-          if (!next.length) {
+          if (allowed && (sec.agents ?? []).length === 1) {
             agentSaid.textContent = "Keep at least one agent, or remove the secret instead.";
             agentSaid.hidden = false;
             return;
@@ -194,7 +191,10 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
           flip.disabled = true;
           openSheet = { secret: sec.name, visit };
           try {
-            await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { hosts: sec.hosts, place: sec.place, agents: next });
+            const now = await latest(sec.name);
+            const next = allowed ? now.agents.filter((x) => x !== fragment) : [...new Set([...now.agents, fragment])];
+            if (!next.length) throw new Error("Keep at least one agent, or remove the secret instead.");
+            await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { hosts: now.hosts, place: now.place, agents: next });
             await reopenSettings();
           } catch (e) {
             agentSaid.textContent = e.message || "That was not changed";
@@ -232,11 +232,8 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       hostsSave.disabled = true;
       openSheet = { secret: sec.name, visit };
       try {
-        await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, {
-          hosts: parseHosts(hostsInput.value),
-          place: sec.place,
-          agents: sec.agents,
-        });
+        const now = await latest(sec.name);
+        await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { hosts: parseHosts(hostsInput.value), place: now.place, agents: now.agents });
         await reopenSettings();
       } catch (err) {
         hostsSaid.textContent = err.message || "Could not update hosts";
@@ -277,12 +274,8 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       replaceSave.disabled = true;
       openSheet = { secret: sec.name, visit };
       try {
-        await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, {
-          value: val,
-          hosts: sec.hosts,
-          place: sec.place,
-          agents: sec.agents,
-        });
+        const now = await latest(sec.name);
+        await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { value: val, hosts: now.hosts, place: now.place, agents: now.agents });
         valueInput.value = "";
         await reopenSettings();
       } catch (err) {
@@ -293,14 +286,6 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     };
     replaceBlock.append(replaceForm, replaceSaid);
     inner.append(replaceBlock);
-
-    // Details
-    const factsBlock = el("div", "provider-block");
-    const facts = el("dl", "provider-facts");
-    facts.append(el("dt", null, "Placement"), el("dd", null, place));
-    if (when) facts.append(el("dt", null, "Last set"), el("dd", null, when));
-    factsBlock.append(facts);
-    inner.append(factsBlock);
 
     sheet.append(top, inner);
     closeOnOutsidePress(sheet);
@@ -322,7 +307,9 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     return card;
   }
 
-  function addSecretControl(agents) {
+  // `kept`: the names already saved; a PUT sets a secret whole, so Add never
+  // takes one of them (its own sheet changes it)
+  function addSecretControl(agents, kept) {
     const button = el("button", "quiet agent-add-open");
     button.type = "button";
     button.dataset.action = "add-secret";
@@ -420,6 +407,12 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       const chosen = [...selected];
       if (!name) {
         said.textContent = "Enter a name for the secret.";
+        said.hidden = false;
+        nameInput.focus();
+        return;
+      }
+      if (kept.has(name)) {
+        said.textContent = `You already keep ${name}: open it to change it.`;
         said.hidden = false;
         nameInput.focus();
         return;

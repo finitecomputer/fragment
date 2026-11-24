@@ -1,8 +1,9 @@
 // cell/shell/secrets.js's Settings → Secrets section: lists Vault secrets
 // without values, toggles per-agent access (refusing to remove the last
-// agent), edits allowed hosts keeping the sealed value, replaces a value
-// through a masked input that clears immediately, adds a secret, and
-// removes one via two-step confirmation.
+// agent) from the secret as it is now, edits allowed hosts keeping the
+// sealed value, replaces a value through a masked input cleared once
+// saved, adds a secret (never over one already kept), and removes one via
+// two-step confirmation.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
@@ -62,7 +63,8 @@ class Node {
 
 const walk = (n) => (n && typeof n === "object" ? [n, ...(n.children ?? []).flatMap(walk)] : []);
 
-function setup(agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }]) {
+// `vault`: what `GET /api/vault` answers (the secret as it is now)
+function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }]) {
   globalThis.MutationObserver ??= class {
     observe() {}
     disconnect() {}
@@ -78,6 +80,7 @@ function setup(agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }]) 
   const calls = [];
   let reopened = 0;
   const api = async (method, path, body) => {
+    if (method === "GET") return vault;
     calls.push({ method, path, body });
     return {};
   };
@@ -112,11 +115,11 @@ test("placeLabel and parseHosts format placements and normalize host lists", () 
   assert.deepEqual(parseHosts("   "), []);
 });
 
+const github = () => ({ name: "github", hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], setAt: 1700000000000 });
+
 test("toggling per-agent access sends PUT without value and refuses removing the last agent", async () => {
-  const { secretsSection, calls, reopened } = setup();
-  const s = secretsSection({
-    secrets: [{ name: "github", hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], setAt: 1700000000000 }],
-  });
+  const { secretsSection, calls, reopened } = setup({ secrets: [github()] });
+  const s = secretsSection({ secrets: [github()] });
   const card = walk(s).find((n) => n.dataset?.secret === "github");
   assert.ok(card, "card rendered");
   const switches = walk(card).filter((n) => n.className === "provider-switch");
@@ -140,11 +143,19 @@ test("toggling per-agent access sends PUT without value and refuses removing the
   assert.equal(reopened(), 1);
 });
 
+test("an edit writes the secret as it is now: an agent's Allow since the sheet was drawn is kept", async () => {
+  const now = { ...github(), hosts: ["api.github.com", "uploads.github.com"], agents: ["ada--k3x9", "cy--k3x9"] };
+  const { secretsSection, calls } = setup({ secrets: [now] });
+  const card = walk(secretsSection({ secrets: [github()] })).find((n) => n.dataset?.secret === "github");
+  const bea = walk(card).find((n) => n.dataset?.agent === "bea--k3x9");
+  await bea.onclick();
+  assert.deepEqual(calls[0].body.agents, ["ada--k3x9", "cy--k3x9", "bea--k3x9"]);
+  assert.deepEqual(calls[0].body.hosts, ["api.github.com", "uploads.github.com"]);
+});
+
 test("updating hosts keeps value, replacing value clears masked input, and remove requires confirmation", async () => {
-  const { secretsSection, calls } = setup();
-  const s = secretsSection({
-    secrets: [{ name: "github", hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], setAt: 1700000000000 }],
-  });
+  const { secretsSection, calls } = setup({ secrets: [github()] });
+  const s = secretsSection({ secrets: [github()] });
   const card = walk(s).find((n) => n.dataset?.secret === "github");
 
   // Update hosts
@@ -156,14 +167,14 @@ test("updating hosts keeps value, replacing value clears masked input, and remov
   assert.equal("value" in calls[0].body, false);
   assert.deepEqual(calls[0].body.hosts, ["api.github.com", "uploads.github.com"]);
 
-  // Replace value (masked; cleared immediately)
+  // Replace value (masked; cleared once saved)
   const replaceForm = walk(card).find((n) => n.className.includes("secret-replace-form"));
   const valueInput = walk(replaceForm).find((n) => n.tag === "input");
   assert.equal(valueInput.type, "password");
   valueInput.value = "ghp_rotated_999";
   await replaceForm.onsubmit({ preventDefault() {} });
   assert.equal(calls[1].body.value, "ghp_rotated_999");
-  assert.equal(valueInput.value, "", "masked input cleared immediately");
+  assert.equal(valueInput.value, "", "masked input cleared once saved");
 
   // Two-step remove
   const rm = walk(card).find((n) => n.dataset?.action === "remove-secret");
@@ -195,4 +206,16 @@ test("Add secret submits name, masked value, hosts, and selected agents, then cl
   assert.deepEqual(calls[0].body, { value: "sk_test_123", hosts: ["api.stripe.com"], agents: ["ada--k3x9"] });
   assert.equal(valueInput.value, "", "value cleared after save");
   assert.equal(reopened(), 1);
+});
+
+test("Add secret never takes a name already kept: a PUT would set it whole", async () => {
+  const { secretsSection, calls } = setup({ secrets: [github()] });
+  const dialog = walk(secretsSection({ secrets: [github()] })).find((n) => n.dataset?.addSecret === "1");
+  const form = walk(dialog).find((n) => n.tag === "form");
+  walk(form).find((n) => n.dataset?.field === "name").value = "GitHub";
+  walk(form).find((n) => n.dataset?.field === "value").value = "ghp_other";
+  await form.onsubmit({ preventDefault() {} });
+  assert.equal(calls.length, 0);
+  const said = walk(form).find((n) => n.className.includes("secret-said") && !n.hidden);
+  assert.match(said.textContent, /already keep github/);
 });

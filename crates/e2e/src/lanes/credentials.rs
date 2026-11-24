@@ -1548,7 +1548,7 @@ pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
 fn ask_card(s: &Suite, api: &Api, owner: &crate::Keys, name: &str) -> Result<Value> {
     let card = || -> Option<Value> {
         let r = api.signed(owner, "GET", "/api/notices", None).ok()?;
-        r.body["notices"].as_array()?.iter().find(|n| n["kind"] == "vault_ask" && n["title"].as_str().is_some_and(|t| t.contains(name))).cloned()
+        r.body["notices"].as_array()?.iter().find(|n| n["kind"] == "vault_ask" && n["title"].as_str().is_some_and(|t| t.ends_with(&format!(" {name}")))).cloned()
     };
     s.eventually(Duration::from_secs(60), || card().is_some());
     Ok(card().unwrap_or(Value::Null))

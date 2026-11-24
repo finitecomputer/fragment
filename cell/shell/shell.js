@@ -993,7 +993,7 @@ function newView() {
 function openChat(name, push = true, path = null) {
   if (!byName(name)) return;
   newView();
-  if (push && !state.focusAsk) at("/");
+  if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
@@ -2355,7 +2355,8 @@ async function start(open) {
   // `?chat=` is an address any page may send its tab to, so its load is
   // no sign. An alert comes as its agent replies, so its computer is
   // awake then, and for the idle wait after (computer.js `prewake`).
-  else if (pick) openChat(pick);
+  // an ask's link keeps its path until the ask is answered or gone
+  else if (pick) openChat(pick, !state.focusAsk);
   else if (state.guest) guestHome(mine.offer);
   else if (!state.focusAsk) notice("No chats yet", "Make an agent to start.");
   if (state.focusAsk) renderComputer();

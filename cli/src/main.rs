@@ -1142,7 +1142,7 @@ fn vault_ask(c: &api::Client, j: bool, ask: fragment_proto::vault::AskSecret, no
     };
     let at: SecretAsk = c.call_as(c.post_json("/api/vault/asks", &ask)?)?;
     if no_wait {
-        json_exit(j, &json!({ "ask": at, "placeholder": Value::Null, "hosts": Value::Null }));
+        json_exit(j, &json!({ "ask": at }));
         println!("asked your person for {} (id: {})", at.name, at.id);
         println!("open: {}", at.url);
         println!("wait for their answer with: fragment vault wait {}", at.id);
