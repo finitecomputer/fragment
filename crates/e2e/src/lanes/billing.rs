@@ -83,8 +83,7 @@ pub(super) fn subscription_of(s: &Suite, org: &str) -> Option<String> {
 }
 
 pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
-    // its wipes reach each person's computer (the wipe's computer step)
-    if !s.section_using("billing", &[Need::Fakes], &[Need::Computers]) {
+    if !s.section("billing", &[Need::Fakes]) {
         return Ok(());
     }
     let op_session = api.sign_in("operator@e2e.test")?;
