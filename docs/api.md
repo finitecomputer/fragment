@@ -2401,7 +2401,13 @@ Where an agent reaches its owner when no one asked:
 - **Its SimpleX chat** is its owner's chat labelled `<label>-simplex`,
   titled "SimpleX", the agent a member: the chat its SimpleX link mirrors,
   made by its computer as the link is first bound and kept through an
-  unlink (docs/bridge.md, "SimpleX").
+  unlink (docs/bridge.md, "SimpleX"). With no link on its computer, it is
+  the chat bound as its SimpleX door (a connector its owner set up from
+  Settings: An agent's doors), as the agent's own row of that chat's
+  members says (`door`). Its computer reads the members of at most a few
+  of its owner's chats it is in to find it, those labelled as its SimpleX
+  chat first (images/bridge api.rs `door_candidates`), and Settings offers
+  SimpleX as its home once either is there.
 - A routine naming no chat runs in its home, read as it fires; its computer
   tells the agent where its home is at every turn (docs/computers.md).
 - Its owner sets it in Settings, and through the SimpleX link page's

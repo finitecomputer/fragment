@@ -11,6 +11,9 @@
 //! - Locally the door reaches no SimpleX server, so no invitation comes:
 //!   the page says so in a few words, with Try again. Done, its row has
 //!   Open, its chat.
+//! - Its agent's "Reaches you in" offers SimpleX, the door's chat: picked,
+//!   a routine that names no chat runs there (the bridge's `home_chat`
+//!   finds the chat bound as its SimpleX door), its bell on that chat.
 //! - With `simplex-link` named too (`--only computers,simplex-door,
 //!   simplex-link`), the door reaches SimpleX's servers, as a deployment's
 //!   does, and so does a SimpleX app of the run's own: the lab's client
@@ -161,6 +164,7 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<(
     });
     s.ok("Done, its row has Open, its connector's chat, and Set up", seen["buttons"] == json!(["Open", "Set up"]) && seen["connector"] == true, &seen);
     shoot_both(&mut b, &page, &shots, "a5-settings-done", Some("#settings-simplex"))?;
+    home_in_its_door(s, api, a, &mut b, &page, &shots, &name)?;
 
     // deleted, its door ends with it (FIN-614 item 4)
     let deleted = api.signed(a.owner, "DELETE", &format!("/api/f/{name}"), None)?;
@@ -170,6 +174,39 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<(
         deleted.status == 200 && ended && files.as_array().is_some_and(Vec::is_empty),
         json!({ "deleted": deleted.status, "ended": ended, "files": files }),
     );
+    Ok(())
+}
+
+/// Its agent's "Reaches you in": SimpleX offered once its door is bound,
+/// picked, and a routine that names no chat runs in the door's chat; then
+/// back to its own chat, as the lanes after it expect.
+fn home_in_its_door(s: &mut Suite, api: &Api, a: &Agent<'_>, b: &mut Browser, page: &Page, shots: &Path, door: &str) -> Result<()> {
+    let pick = format!("document.querySelector('select[data-home-for={:?}]')", a.agent);
+    let offered = s.eventually(WAIT, || b.eval(page, &format!("(() => {{ const p = {pick}; return !!p && p.dataset.read === '1' && [...p.options].some((o) => o.value === 'simplex'); }})()")).is_ok_and(|v| v == true));
+    let choose = |b: &mut Browser, value: &str| b.eval(page, &format!("(() => {{ const p = {pick}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"));
+    let home_now = || api.signed(a.owner, "GET", &format!("/api/f/{}/file?path=agent.json", a.agent), None).ok().and_then(|r| serde_json::from_str::<Value>(&r.text).ok()).and_then(|j| j.get("home").cloned());
+    choose(b, "simplex")?;
+    let picked = s.eventually(WAIT, || home_now() == Some(json!("simplex")));
+    // its bell in the list, on the door's chat (`data-key`: `chat:<name>`)
+    let bell = s.eventually(WAIT, || b.eval(page, &format!("[...document.querySelectorAll('#chats .home-mark')].some((m) => m.closest('[data-key]')?.dataset.key === {:?})", format!("chat:{door}"))).is_ok_and(|v| v == true));
+    let _ = b.eval(page, &format!("({pick}?.scrollIntoView({{ block: 'center' }}), true)"));
+    shoot_both(b, page, shots, "a6-home-simplex", None)?;
+    let routine = json!({ "kind": "routine", "text": "say hi through the door" });
+    let scheduled = api.signed(a.owner, "POST", &format!("/api/f/{}/schedules", a.agent), Some(&json!({ "cron": "0 0 1 1 *", "channel": "tasks", "record": routine })))?;
+    let fired = super::computers::cron_now(api, a.agent)?;
+    let ran = s.eventually(a.wake + Duration::from_secs(60), || {
+        super::computers::agent_replies(&super::jobs::records(api, a.owner, door, "chat"), a.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("[your routine] say hi through the door")))
+    });
+    s.ok(
+        "its agent's \"Reaches you in\" offers SimpleX once its door is bound; picked, its bell is on the door's chat, and a routine that names no chat runs there",
+        offered && picked && bell && scheduled.status == 200 && fired.body["records"] == 1 && ran,
+        json!({ "offered": offered, "picked": picked, "bell": bell, "scheduled": scheduled.status, "fired": fired.body, "replies": super::computers::agent_replies(&super::jobs::records(api, a.owner, door, "chat"), a.identity) }),
+    );
+    let id = scheduled.body["schedule"]["id"].as_i64().unwrap_or(0);
+    let removed = api.signed(a.owner, "DELETE", &format!("/api/f/{}/schedules/{id}", a.agent), None)?;
+    choose(b, "")?;
+    let back = s.eventually(WAIT, || home_now().is_none());
+    anyhow::ensure!(removed.status == 200 && back, "its routine removed ({}) and its home its own chat again ({back})", removed.status);
     Ok(())
 }
 
