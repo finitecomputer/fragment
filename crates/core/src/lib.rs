@@ -48,6 +48,7 @@ pub mod levers;
 pub mod listed;
 pub mod live;
 pub mod mail;
+pub mod mandate;
 pub mod manifest;
 pub mod migrate;
 pub mod migrations;

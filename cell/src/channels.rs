@@ -58,6 +58,7 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
 
 use fragment_core::permit::{self, Action, Standing};
 use fragment_core::effects::{self, Effect};
+use fragment_core::mandate::{self, Mandate};
 use fragment_core::{door, npub};
 use fragment_proto::{
     limits, valid_channel_name, valid_op_id, Author, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
@@ -240,7 +241,7 @@ impl RecordRow {
             None => None,
             Some(name) => Some(Author::parse(name).ok_or_else(|| CellError::host(format!("record {}#{}: its stored author {name:?} does not decode", self.channel, self.seq)))?),
         };
-        Ok(ChannelRecord { principal: npub::display(&self.principal), author, channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body })
+        Ok(ChannelRecord { principal: npub::display(&self.principal), author, channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body, mandate: None })
     }
 }
 
@@ -316,7 +317,7 @@ impl FragmentCell {
                 vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
             )?;
         }
-        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw };
+        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw, mandate: None };
         self.broadcast_record(&record);
         Ok(Some(record))
     }
@@ -903,9 +904,43 @@ impl FragmentCell {
     }
 
     /// `GET /api/f/<name>/channels/<channel>?after=|before=&limit=`
-    pub(crate) fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
+    pub(crate) async fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
         self.channel_reader(caller, channel)?;
-        json_response(&self.channel_page(channel, after, before, limit)?)
+        let mut page = self.channel_page(channel, after, before, limit)?;
+        self.mandated(caller, &mut page).await?;
+        json_response(&page)
+    }
+
+    /// A page read by an agent member as itself: each record whose words
+    /// are its owner's own here (`mandate::asker_of`), written within a
+    /// mandate's life, carries their mandate for this agent (docs/api.md,
+    /// "Who asked: mandates"): the proof that its owner asked it, which its
+    /// calls carry in place of `for`. Its owner and it are one entity
+    /// (decision 64); anyone else's words give it none yet. Whose words
+    /// each is, and the membership, are read before the await, as the page
+    /// was.
+    async fn mandated(&self, caller: &Caller, page: &mut ChannelPage) -> CellResult<()> {
+        let Some((agent, owner)) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()).and_then(|s| Some((s, s.owner.as_deref()?))) else { return Ok(()) };
+        if self.member_role(&agent.id)?.is_none() {
+            return Ok(());
+        }
+        let (place, now) = (self.must(MetaKey::Npub)?, js::now_ms());
+        let mandates: Vec<Option<Mandate>> = page
+            .records
+            .iter()
+            .map(|r| {
+                let owners = mandate::asker_of(&r.principal, r.author, r.body.get()).filter(|asker| npub::display(asker) == npub::display(owner));
+                owners.and_then(|asker| Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at)).filter(|m| m.until >= now)
+            })
+            .collect();
+        if mandates.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let keys = crate::keys::mandate_keys(&self.env).await?;
+        for (record, m) in page.records.iter_mut().zip(mandates) {
+            record.mandate = m.map(|m| m.text(&keys[0]));
+        }
+        Ok(())
     }
 
     /// `GET /api/f/<name>/channels/<channel>/newest` (`channel_newest`):

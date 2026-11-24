@@ -1,5 +1,6 @@
-// cell/shell/connections.js `createTelegram`: Settings' Telegram row, one
-// per agent. Which chat is whose is read, never guessed: each of the
+// cell/shell/connections.js `createConnectors`: Settings' Telegram row, one
+// per agent, and SimpleX's, as its connector's is the same (its own at the
+// end). Which chat is whose is read, never guessed: each of the
 // person's own chats with reach, its door as its owner reads it; a read
 // that fails, or a list not read, shows no Set up (which would make a
 // second chat beside one not read). Set up opens a bound chat's setup page;
@@ -9,7 +10,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createTelegram } from "../shell/connections.js";
+import { createConnectors } from "../shell/connections.js";
 
 // a node as the section draws it: its tag, text, children and data
 class Node {
@@ -41,7 +42,8 @@ const DOORS = { "maple-telegram--e5f6": { door: "telegram", agent: "maple--a1b2"
 
 // `link(name, body, doors)`: the binding's answer (its default binds it)
 // `vault`: the person's Vault as its list answers it (none: its read fails)
-function world({ refuse = new Set(), listed = true, link = (name, body, doors) => (doors[name] = { door: "telegram", agent: body.agent }), vault } = {}) {
+// `computerRow`: SimpleX's row on an agent's computer, where it keeps one
+function world({ refuse = new Set(), listed = true, link = (name, body, doors) => (doors[name] = { door: name.includes("-simplex--") ? "simplex" : "telegram", agent: body.agent }), vault, computerRow } = {}) {
   const doors = { ...DOORS };
   // the person's list as the platform holds it, and as this page last read it
   const server = listOf();
@@ -114,11 +116,12 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
   const message = async (e) => {
     for (const fn of listeners) await fn(e);
   };
-  const telegram = createTelegram({
+  const telegram = createConnectors({
     api, el: (tag, cls, text) => new Node(tag, cls, text), section, actionLine, named: (node, f) => Object.assign(node, { textContent: f }), seg: (s) => s,
     computer: () => ({ agents: AGENTS }), fragments: () => list, listed: () => at.listed, own: (f) => f.role === "owner",
     connectorLabel: (agent, door) => `${agent.split("--")[0]}-${door}`, markOffer: (node, agent, what) => Object.assign(node, { offer: [agent, what] }),
     framed: (name, path) => `/auth/frame?name=${name}&return=${path}`, frameOf, originAt, pressSetup: () => 1, openSetup: (o) => opened.push(o), openChat: () => {},
+    titleOf: (agent) => `${agent[0].toUpperCase()}${agent.slice(1).split("--")[0]}`, computerRow, computerKey: () => "",
     notice: (...n) => notices.push(n), load: async () => {
       at.loads++;
       if (at.listFails) {
@@ -130,8 +133,14 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
     },
   });
   let drawn = null;
-  globalThis.document = { getElementById: (id) => (id === "settings-telegram" ? drawn : null), querySelector: () => null };
-  const draw = () => (drawn = telegram.telegramSection());
+  let sections = {};
+  globalThis.document = { getElementById: (id) => sections[id] ?? null, querySelector: () => null };
+  // `kind`: which connector's section (Telegram's, unless SimpleX's)
+  const draw = (kind = "telegram") => {
+    drawn = kind === "simplex" ? telegram.simplexSection() : telegram.telegramSection();
+    sections = { [`settings-${kind}`]: drawn };
+    return drawn;
+  };
   const rows = () => drawn.children.filter((c) => c.className.includes("settings-line"));
   const said = () => drawn.children.find((c) => c.tag === "p")?.textContent;
   const press = (i, text) => buttons(rows()[i]).find((b) => b.textContent === text).onclick();
@@ -146,7 +155,7 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
 
 test("its own chats with reach are read, and an agent's bound one is Open and Set up; another's Set up alone", async () => {
   const w = world();
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   assert.deepEqual(w.asked.sort(), ["GET /api/f/keyed-chat--j9k2/door", "GET /api/f/maple-telegram--e5f6/door"], "no other's, and none without reach");
   assert.deepEqual(w.shown(), [["Open", "Set up"], ["Set up"]]);
@@ -157,7 +166,7 @@ test("its own chats with reach are read, and an agent's bound one is Open and Se
 
 test("a door read that fails, or a list not read, shows no Set up: Try again", async () => {
   for (const w of [world({ refuse: new Set(["keyed-chat--j9k2"]) }), world({ listed: false })]) {
-    await w.telegram.readTelegram();
+    await w.telegram.readConnectors();
     w.draw();
     assert.deepEqual(w.shown(), [["Try again"], ["Try again"]]);
     assert.equal(w.said(), "Couldn't read your Telegram chats.");
@@ -166,16 +175,16 @@ test("a door read that fails, or a list not read, shows no Set up: Try again", a
 
 test("a read that fails after one that answered shows no Set up either: its doors are the latest read's", async () => {
   const w = world();
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   w.refuse.add("keyed-chat--j9k2");
-  await w.telegram.refreshTelegram(true);
+  await w.telegram.refreshConnectors(true);
   assert.deepEqual(w.shown(), [["Try again"], ["Try again"]]);
 });
 
 test("Try again with the list not read reads the list, then its doors", async () => {
   const w = world({ listed: false });
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(1, "Try again");
   assert.equal(w.at.loads, 1);
@@ -184,11 +193,11 @@ test("Try again with the list not read reads the list, then its doors", async ()
 
 test("Set up opens a bound chat's setup page, making nothing", async () => {
   const w = world();
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(0, "Set up");
   assert.equal(w.opened.length, 1);
-  assert.deepEqual({ ...w.opened[0], onClose: undefined, frame: undefined }, { pressed: 1, src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", onClose: undefined, frame: undefined });
+  assert.deepEqual({ ...w.opened[0], onClose: undefined, frame: undefined }, { pressed: 1, src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", tall: false, onClose: undefined, frame: undefined });
   // its frame, Settings' own, sent to its setup page
   assert.equal(w.opened[0].frame, w.frames[0]);
   assert.equal(w.frames[0].dataset.src, w.opened[0].src);
@@ -203,13 +212,13 @@ test("Set up names the bot its person's Vault holds for that agent, toward api.t
     { name: "telegram-maple--a1b2", hosts: ["api.telegram.org"], agents: ["maple--a1b2"] },
   ];
   const w = world({ vault });
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(0, "Set up");
   assert.equal(w.opened[0].src, "/auth/frame?name=maple-telegram--e5f6&return=/setup.html?vault=telegram-maple--a1b2");
   // none of its: the page as before; nor with a Vault not read
   const none = world({ vault: vault.slice(0, 3) });
-  await none.telegram.readTelegram();
+  await none.telegram.readConnectors();
   none.draw();
   await none.press(0, "Set up");
   assert.equal(none.opened[0].src, "/auth/frame?name=maple-telegram--e5f6&return=/setup.html");
@@ -217,7 +226,7 @@ test("Set up names the bot its person's Vault holds for that agent, toward api.t
 
 test("Set up reads the list and its doors anew first: a chat another tab made since, which this page's list does not show yet, is opened, and none made", async () => {
   const w = world();
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   w.elsewhere("wren-telegram--x1y2", "wren--c3d4");
   assert.ok(!w.list.some((f) => f.name === "wren-telegram--x1y2"), "this page's list is behind");
@@ -226,22 +235,22 @@ test("Set up reads the list and its doors anew first: a chat another tab made si
   assert.ok(!w.asked.some((a) => a.startsWith("POST")), "none made");
   // and a list that comes showing it reads it, no press
   const v = world();
-  await v.telegram.readTelegram();
+  await v.telegram.readConnectors();
   v.draw();
   v.elsewhere("wren-telegram--x1y2", "wren--c3d4");
   v.list.push(structuredClone(v.server.at(-1)));
-  await v.telegram.refreshTelegram();
+  await v.telegram.refreshConnectors();
   assert.deepEqual(v.shown(), [["Open", "Set up"], ["Open", "Set up"]]);
 });
 
 test("Set up whose list or doors read fails makes nothing, and says so", async () => {
   const w = world();
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   w.refuse.add("keyed-chat--j9k2");
   await w.press(1, "Set up");
   const v = world();
-  await v.telegram.readTelegram();
+  await v.telegram.readConnectors();
   v.draw();
   v.at.listFails = true;
   await v.press(1, "Set up");
@@ -253,7 +262,7 @@ test("Set up whose list or doors read fails makes nothing, and says so", async (
 
 test("with none, Set up makes one, binds it as the agent's door, and opens its setup page, the list read first", async () => {
   const w = world();
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(1, "Set up");
   assert.deepEqual(w.asked.filter((a) => !a.startsWith("GET")), ["POST /api/fragments", "POST /api/f/wren-telegram--n1p4/door"]);
@@ -261,7 +270,7 @@ test("with none, Set up makes one, binds it as the agent's door, and opens its s
   assert.deepEqual(w.opened.map((o) => [o.name, o.agent]), [["wren-telegram--n1p4", "wren--c3d4"]]);
   assert.deepEqual(w.shown()[1], ["Open", "Set up"], "drawn bound at once");
   // read again, the list not yet knowing it has reach: read all the same
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   assert.ok(w.asked.includes("GET /api/f/wren-telegram--n1p4/door"));
   assert.deepEqual(w.shown()[1], ["Open", "Set up"]);
@@ -269,7 +278,7 @@ test("with none, Set up makes one, binds it as the agent's door, and opens its s
 
 test("a binding refused deletes the chat it made, and says so; nothing opens", async () => {
   const w = world({ link: () => { throw Object.assign(new Error("telegram is not allowed"), { status: 403 }); } });
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(1, "Set up");
   assert.deepEqual(w.asked.filter((a) => !a.startsWith("GET")), ["POST /api/fragments", "POST /api/f/wren-telegram--n1p4/door", "DELETE /api/f/wren-telegram--n1p4"]);
@@ -285,21 +294,21 @@ test("a binding whose answer was lost is read: bound to its agent, it opens; to 
   };
   // bound, its answer lost on the way
   const w = world({ link: lost(true) });
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(1, "Set up");
   assert.deepEqual(w.opened.map((o) => o.name), ["wren-telegram--n1p4"]);
   assert.ok(!w.asked.some((a) => a.startsWith("DELETE")), "kept");
   // not bound (a 502): read, and deleted
   const v = world({ link: lost(null) });
-  await v.telegram.readTelegram();
+  await v.telegram.readConnectors();
   v.draw();
   await v.press(1, "Set up");
   assert.ok(v.asked.includes("DELETE /api/f/wren-telegram--n1p4"));
   assert.equal(v.opened.length, 0);
   // its door unreadable: kept, and said
   const u = world({ link: (name, body, doors) => { u.refuse.add(name); throw Object.assign(new Error("Failed to fetch"), {}); } });
-  await u.telegram.readTelegram();
+  await u.telegram.readConnectors();
   u.draw();
   await u.press(1, "Set up");
   assert.ok(!u.asked.some((a) => a.startsWith("DELETE")), "kept");
@@ -309,7 +318,7 @@ test("a binding whose answer was lost is read: bound to its agent, it opens; to 
     doors[name] = { door: "telegram", agent: "maple--a1b2" };
     throw Object.assign(new Error("Failed to fetch"), {});
   } });
-  await t.telegram.readTelegram();
+  await t.telegram.readConnectors();
   t.draw();
   await t.press(1, "Set up");
   assert.ok(!t.asked.some((a) => a.startsWith("DELETE")), "kept: another agent's now");
@@ -324,7 +333,7 @@ test("a binding whose answer was lost is read: bound to its agent, it opens; to 
 const OFFERED = [{ name: "telegram-maple--a1b2", hosts: ["api.telegram.org"], agents: ["maple--a1b2"] }];
 async function offered(opts = {}) {
   const w = world({ vault: OFFERED, ...opts });
-  await w.telegram.readTelegram();
+  await w.telegram.readConnectors();
   w.draw();
   await w.press(0, "Set up");
   const frame = w.frames[0];
@@ -357,7 +366,7 @@ test("no move for a frame at another origin, another window, a frame offered not
   assert.deepEqual(frame.posted, []);
   // with no bot in the Vault for its agent, its frame is offered nothing
   const none = world({ vault: [] });
-  await none.telegram.readTelegram();
+  await none.telegram.readConnectors();
   none.draw();
   await none.press(0, "Set up");
   await none.message({ data: { fragment: "vault-move", nonce: "c" }, source: none.frames[0].contentWindow, origin: none.originAt("maple-telegram--e5f6") });
@@ -366,4 +375,41 @@ test("no move for a frame at another origin, another window, a frame offered not
   w.opened[0].onClose();
   await from({ fragment: "vault-move", nonce: "d" });
   assert.ok(!w.asked.some((a) => a.startsWith("PUT")));
+});
+
+// SimpleX's section is its connector's, as Telegram's is, on any seat:
+// its kind's words, its setup page named for its agent at its QR code's
+// height; and its computer's row instead where its computer keeps it
+test("SimpleX's row makes its agent's connector, bound as its door, and opens its setup page named for that agent", async () => {
+  const w = world();
+  await w.telegram.readConnectors();
+  const s = w.draw("simplex");
+  assert.equal(s.id, "settings-simplex");
+  assert.equal(w.said(), "Message your agents from SimpleX Chat.");
+  const tags = s.children.find((c) => c.className === "connector-tags").children.map((t) => [t.textContent, t.title ?? ""]);
+  assert.deepEqual(tags, [["Experimental", ""], ["Secure", "SimpleX's servers can't read these messages"]]);
+  assert.deepEqual(w.shown(), [["Set up"], ["Set up"]], "Maple's Telegram is no SimpleX");
+  assert.deepEqual(w.rows().map((r) => [buttons(r)[0].dataset.simplexFor, r.offer]), [["maple--a1b2", ["maple--a1b2", "doors"]], ["wren--c3d4", ["wren--c3d4", "doors"]]]);
+  await w.press(1, "Set up");
+  const made = w.bodies.find((b) => b?.template);
+  assert.deepEqual(made, { label: "wren-simplex", template: "simplex" });
+  const name = Object.keys(w.doors).find((n) => n.startsWith("wren-simplex--"));
+  assert.deepEqual(w.doors[name], { door: "simplex", agent: "wren--c3d4" }, "bound as Wren's SimpleX door");
+  assert.equal(w.opened.length, 1);
+  assert.deepEqual([w.opened[0].title, w.opened[0].tall, w.opened[0].src], ["SimpleX", true, `/auth/frame?name=${name}&return=/setup.html?name=Wren`]);
+  assert.ok(!w.asked.includes("GET /api/vault"), "no Vault offer: SimpleX has no bot to move");
+  assert.deepEqual(w.notices, []);
+  w.draw("simplex");
+  assert.deepEqual(w.shown(), [["Set up"], ["Open", "Set up"]], "its chat, to open");
+});
+
+test("where its computer keeps an agent's SimpleX, its row is its computer's; Telegram's never is", async () => {
+  const kept = { tag: "div", className: "settings-line its-computer", textContent: "", children: [], dataset: {}, hidden: false };
+  const w = world({ computerRow: (a) => (a.fragment === "maple--a1b2" ? kept : null) });
+  await w.telegram.readConnectors();
+  w.draw("simplex");
+  assert.equal(w.rows()[0], kept);
+  assert.deepEqual(buttons(w.rows()[1]).map((b) => b.textContent), ["Set up"]);
+  w.draw("telegram");
+  assert.ok(!w.rows().includes(kept));
 });

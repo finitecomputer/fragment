@@ -32,7 +32,7 @@ import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
-import { createConnections, createAgentHomes, createSimplex, createTelegram } from "./connections.js";
+import { createConnections, createAgentHomes, createSimplex, createConnectors } from "./connections.js";
 import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -973,10 +973,12 @@ const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, 
 // what each agent's runtime offers beyond its chats (agent-runtimes.js),
 // from its agent.json as Settings reads it
 const { loadRuntimes, offers, markOffer } = createRuntimes({ agentJson: (agent) => agentJson(agent), agents: () => state.agents, own, byName });
-const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf } = createAgentHomes({
+const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf, forgetDoors } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
   agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
   agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
+  // a connector's binding, as its owner reads it (a deleted one binds nothing)
+  readDoor: (name) => api("GET", `/api/f/${seg(name)}/door`).then((r) => r.bound ?? null, (e) => (e.status === 404 ? null : Promise.reject(e))),
 });
 
 // Each time the middle column is given a view (a chat, settings, Apps,
@@ -1459,19 +1461,23 @@ const screensActive = screenActive({
 for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) addEventListener(type, () => document.hidden || screensActive(), { capture: true, passive: true });
 
 const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
-const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
-  api, el, section, actionLine, named, seg, computer: () => state.computer, getAgents: () => state.agents, computerFor, getSeat: () => state.seat,
-  titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome,
+// an agent's SimpleX on its computer, where its computer keeps it, as a row
+// of Settings' SimpleX (`computerRow`); the connectors' sections, each
+// agent's Telegram and SimpleX
+const { computerRow, computerKey, nameSimplex } = createSimplex({
+  api, el, actionLine, named, seg, computer: () => state.computer, getAgents: () => state.agents, computerFor,
+  titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh: () => refreshConnectors(),
 });
-const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
+const { telegramSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
   api, el, section, actionLine, named, seg, computer: () => state.computer, getAgents: () => state.agents, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
-  connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load,
+  connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow, computerKey,
+  doorsRead: () => (forgetDoors(), renderChats()),
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
-// review): what Settings' SimpleX says follows it at once.
+// review): Settings' SimpleX follows it at once.
 function seatIs(seat) {
   state.seat = seat;
-  refreshSimplex();
+  refreshConnectors();
 }
 
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
@@ -1853,8 +1859,7 @@ function computerIs(v) {
   renderComputer();
   renderChats();
   rosterChanged();
-  refreshSimplex();
-  refreshTelegram();
+  refreshConnectors();
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
@@ -2111,7 +2116,7 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readTelegram },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readConnectors },
   agents: { getComputer: () => state.computer, computerFor, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
@@ -2216,8 +2221,7 @@ async function load(changed = false) {
   rosterChanged();
   // Settings shown: their Agents drawn again in place, an agent come or gone
   settingsAgentsChanged();
-  refreshSimplex();
-  refreshTelegram();
+  refreshConnectors();
   markSeen();
   launcher.agentsRead();
   renderAgentFaces();

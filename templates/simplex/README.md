@@ -31,9 +31,19 @@ file it loads are the chat template's, linked, so no copy drifts).
   in order, one at a time; what the inbox did not take at once, the door's
   watch sends again every 30 s.
 - **The SimpleX link:** `link` asks the door for a one-time invitation and
-  keeps it, unless an unlink came after it (each numbered, `asking`, as
-  the door is told), for its owner alone (`state`, an owner's query: never a run's
-  output, which every viewer reads, its agent included); `unlink` ends it.
+  keeps it, with its QR code as the door draws it, unless an unlink came
+  after it (each numbered, `asking`, as the door is told), for its owner
+  alone (`state`, an owner's query: never a run's output, which every
+  viewer reads, its agent included); it then watches for their app to
+  answer it, about 8 minutes, and keeps whom it linked (`linked`); `check`
+  looks once, later; `unlink` ends it. A step that fails says why in
+  `state` (`failed`), the door's code with it.
+- **Its setup page** (`site/setup.html`), which Settings opens in a dialog
+  (or a tab, where the frame can't sign in), as Telegram's: its owner's
+  alone, nothing to fill in. It sets the inbox's secret, made by the
+  browser, and `connect`s as the agent's name Settings gives it, asks a
+  link, and shows the invitation's QR code with its link to open or copy;
+  then whom it linked, with Unlink. It follows `state` live.
 - **The door (the binding):** its owner binds it to their agent (`POST
   /api/f/{name}/door`, in person), which makes the agent a viewer here.
   Then `intake`, the inbox's trigger alone, publishes each text message
@@ -47,6 +57,7 @@ file it loads are the chat template's, linked, so no copy drifts).
   words) through the door, by its record, asking again until the door's
   runner says it is sent, its link ended, or there is none.
 
-Made only by a test or the e2e for now: no Settings page makes one yet,
-and an agent's existing SimpleX chat (its computer's) is not moved here
-(docs/technical-debt-ledger.md, "Two SimpleX doors").
+Settings makes one for an agent (`Set up`, bound as its door as it is
+made) on every seat, but where an always-on computer that does SimpleX
+keeps the agent's own; an agent's existing SimpleX chat (its computer's)
+is not moved here (docs/technical-debt-ledger.md, "Two SimpleX doors").

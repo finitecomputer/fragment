@@ -41,7 +41,7 @@ use crate::fragment::calls::{WipeMembership, WipeOwned};
 use crate::principal::calls::{WipeEnd, WipeExports, WipeView};
 use crate::registry::calls::{self, WipeBegin, WipeBilling, WipeFacts, WipeLook, WipeStep};
 use crate::registry::wipe::refused;
-use crate::{acting_for, ask_registry, authenticate, js, json_answer, principal, read_body, routed};
+use crate::{ask_registry, authenticate, js, json_answer, principal, read_body, routed};
 
 /// The marker a wipe's internal calls carry (routed.rs `marker`): the
 /// router never passes it, so a request with it came from here.
@@ -72,7 +72,7 @@ impl Operator {
 /// (no registry is asked: a wipe of its holder leaves it working), or by
 /// the key of an identity it lists. Anyone else is 403.
 async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8]) -> CellResult<Operator> {
-    if acting_for(url)?.is_some() {
+    if crate::names_for(req, url)? {
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
     let key = authenticate(req, url, Payload::Read(body))?;

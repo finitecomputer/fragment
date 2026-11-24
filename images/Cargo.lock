@@ -298,6 +298,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "qrcode",
  "rusqlite",
  "serde",
  "serde_json",
