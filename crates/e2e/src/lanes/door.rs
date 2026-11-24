@@ -196,6 +196,15 @@ fn cases(s: &mut Suite, api: &Api, provider: &Oidc, door: Door, callback: &str) 
     provider.fail_next("access_denied");
     let t = sign_in(api, grace)?;
     s.ok("the provider's own refusal is shown on the platform's page, and signs no one in", t.page_says("access_denied") && t.page_says("the sign-in provider said"), t.said());
+    // the same redirect, made by anyone, for no sign-in this browser began:
+    // its code is named, and its words are its maker's, never the page's
+    let forged = "/auth/callback?error=access_denied&error_description=your%20account%20is%20locked%3A%20call%20evil.example&state=made-up";
+    let r = api.unsigned("GET", forged, None)?;
+    s.ok(
+        "a sign-in error's link no sign-in here began names its code, and none of its words (fragment_core::public_error::oauth_description)",
+        r.status == 400 && r.text.contains("access_denied") && !r.text.contains("evil.example") && !r.text.contains("locked"),
+        &r,
+    );
 
     // the door's state lives in the browser; its codes, in its memory
     let start = api.unsigned("GET", &format!("/auth/login?return=/x&login_hint={}", url_enc(grace)), None)?;

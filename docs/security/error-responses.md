@@ -14,10 +14,19 @@ pages. A few refusals a browser navigates to are HTML pages instead (a
 fragment's sign-in or access page, `auth::refused`; sign-in's own,
 `auth.rs`): they say the same sentences, HTML-escaped, and never a
 redacted code's message. A sign-in's callback that WorkOS sent back with
-an `error` names only that OAuth code (`access_denied`, when it is shaped
-like one: `public_error::oauth_error`), never the redirect's
-`error_description`: whoever made the link wrote those words, so they go
-to the logs. A panic in the Worker gets Cloudflare's generic error page, which
+an `error` names that OAuth code (`access_denied`, when it is shaped like
+one: `public_error::oauth_error`). It says the redirect's
+`error_description` too, escaped, without control characters and at most
+300 characters, only when the redirect's `state` is the one this
+browser's own sign-in holds (`public_error::oauth_description`): then the
+provider of that sign-in wrote it (the identity door's explanations,
+"the sign-in provider has not verified the email …"; WorkOS's), as OAuth
+means it, for the person. A link no sign-in here began brings its
+maker's words, so those go to the logs alone. The identity door's
+`the sign-in provider said: …` passes on its upstream provider's own
+description, which the door cuts to 200 characters and the same rule
+binds: only a redirect of the door's, back to the browser that began it,
+can bring it. A panic in the Worker gets Cloudflare's generic error page, which
 shows no detail.
 
 ## The platform's own failures say nothing about why
@@ -97,7 +106,8 @@ what the asker sent or may already see.
   - WorkOS: connected accounts, a connection's state, disconnect
     (`cell/src/keys.rs`), a connection's token (`cell/src/computer.rs`),
     and the sign-in exchange (`cell/src/registry/signin.rs`). A 400 there
-    now says "this sign-in was used already or is too old: start again";
+    now says "this sign-in was used already or is too old: start the sign-in
+    again";
   - Stripe (`cell/src/stripe.rs`): our request path names Stripe ids, so
     it is logged too, and the refusal says "Stripe refused the call
     (<status>)". Its timeout, an over-long answer and one that does not

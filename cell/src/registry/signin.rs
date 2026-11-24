@@ -482,7 +482,7 @@ impl RegistryCell {
             // so this is no outage. Anything else is WorkOS failing.
             crate::error::vendor_said("WorkOS", "authenticate", status, &why);
             return Err(match status {
-                400 => CellError::invalid("this sign-in was used already or is too old: start again"),
+                400 => CellError::invalid("this sign-in was used already or is too old: start the sign-in again"),
                 _ => CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status})")),
             });
         }

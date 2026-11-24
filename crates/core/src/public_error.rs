@@ -66,12 +66,34 @@ pub const OAUTH_ERROR_MAX_BYTES: usize = 64;
 
 /// The OAuth error code (RFC 6749 §4.1.2.1, `access_denied`) a sign-in's
 /// callback names on its page, when its redirect's `error` is shaped like
-/// one. Never its `error_description`: whoever made the link wrote it, so
-/// a page of the platform's would say an attacker's words (it goes to the
-/// logs).
+/// one: a link anyone made may bring it, so it is checked, not trusted.
+/// Its `error_description` is said only as `oauth_description` allows.
 pub fn oauth_error(error: &str) -> Option<&str> {
     let shaped = !error.is_empty() && error.len() <= OAUTH_ERROR_MAX_BYTES && error.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
     shaped.then_some(error)
+}
+
+/// The most characters of a sign-in provider's own description a
+/// sign-in's page says (the identity door cuts its own at 200).
+pub const OAUTH_DESCRIPTION_MAX_CHARS: usize = 300;
+
+/// The `error_description` a sign-in's callback says on its page, beside
+/// its code (`oauth_error`): why the sign-in did not finish, in the words
+/// of the provider of that sign-in (the identity door's own explanations,
+/// docs/self-host.md seam 4; WorkOS's). Only when the redirect's `state` is
+/// the one this browser's own sign-in holds (`bound`, the cell's
+/// `auth::trip_bound`): no one who made a link knows it, so an unbound
+/// redirect's words are whoever made it, and go to the logs alone. Then
+/// without control characters, and at most `OAUTH_DESCRIPTION_MAX_CHARS`
+/// of it: the provider's words to the person, as OAuth means them (RFC
+/// 6749 §4.1.2.1), never an answer's body. The page escapes it.
+pub fn oauth_description(description: &str, bound: bool) -> Option<String> {
+    if !bound {
+        return None;
+    }
+    let said: String = description.chars().take(OAUTH_DESCRIPTION_MAX_CHARS).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let said = said.trim();
+    (!said.is_empty()).then(|| said.to_string())
 }
 
 /// The most bytes of a reference a request may bring (`Cf-Ray` is 16 hex
@@ -212,6 +234,30 @@ mod tests {
         let long = "a".repeat(OAUTH_ERROR_MAX_BYTES + 1);
         for words in ["", "your account is locked: call +1 555 0100", "<b>x</b>", "Access_Denied", long.as_str()] {
             assert_eq!(oauth_error(words), None, "{words:?}");
+        }
+    }
+
+    /// Goal: a sign-in's page says why it did not finish in the words of
+    /// the provider of that very sign-in (the identity door's own
+    /// explanations, WorkOS's), bounded, and never words a link brought.
+    /// Method: the door's explanations bound to this browser's sign-in,
+    /// then the same unbound, control characters, an over-long one and
+    /// an empty one.
+    #[test]
+    fn a_sign_in_page_says_its_own_providers_words_alone() {
+        for why in [
+            "the sign-in provider has not verified the email \"jo@corp.e2e.test\", and this door vouches for no address in its domain",
+            "the sign-in provider said: a failure the test asked for",
+            "the sign-in provider's answer was not one to trust: the id_token's signature does not verify; start the sign-in again",
+        ] {
+            assert_eq!(oauth_description(why, true).as_deref(), Some(why));
+            assert_eq!(oauth_description(why, false), None, "a link's words: {why:?}");
+        }
+        assert_eq!(oauth_description("line one\nline\u{7}two", true).as_deref(), Some("line one line two"));
+        let long = "a".repeat(OAUTH_DESCRIPTION_MAX_CHARS + 50);
+        assert_eq!(oauth_description(&long, true).map(|s| s.chars().count()), Some(OAUTH_DESCRIPTION_MAX_CHARS));
+        for nothing in ["", "\n\t", "   "] {
+            assert_eq!(oauth_description(nothing, true), None, "{nothing:?}");
         }
     }
 
