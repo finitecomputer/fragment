@@ -889,7 +889,7 @@ impl Api {
 
     // ---- as an agent acting for a person (`for`: decision 36) ----
 
-    /// `GET /api/f/{name}?for=`: `fragment`'s code repo, as its status says
+    /// `GET /api/f/{name}/status?for=`: `fragment`'s code repo, as its status says
     /// it to the agent acting for `person`: its life's (a name made again
     /// has another), `""` before its first file makes one.
     pub async fn repo_for(&self, agent: &str, person: &str, fragment: &str) -> Result<String, ApiError> {
@@ -898,7 +898,7 @@ impl Api {
             #[serde(default)]
             repo: String,
         }
-        let s: Status = self.json(Method::GET, &format!("/api/f/{}?for={}", name(fragment)?, encode(person)), Some(agent), None).await?;
+        let s: Status = self.json(Method::GET, &format!("/api/f/{}/status?for={}", name(fragment)?, encode(person)), Some(agent), None).await?;
         Ok(s.repo)
     }
 

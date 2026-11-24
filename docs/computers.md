@@ -1363,7 +1363,10 @@ skills fragment), one labelled `shared` first, else the first by name
   or to another host than the syncs reach. The CLI refuses a folder bound
   elsewhere, so handing over files would stop, and one it never bound it
   would send to the new one. The folder's repo (its status's, read as the
-  first agent for its owner) is read only when a sync is about to start.
+  first agent for its owner) is read only when a sync is about to start:
+  a folder made again while its sync runs ends that sync (the CLI's
+  watch stops on a folder bound to another repo), and the boot starts it
+  again within `shared::RESTART_MS`, keeping the earlier life's folder.
   The journal is read as the CLI reads it (schema 3; another it rebuilds
   in place, binding nothing), never waited on (a FIFO at its path is
   none) and at most 64 MiB of it.

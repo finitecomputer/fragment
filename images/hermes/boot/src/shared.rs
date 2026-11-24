@@ -422,19 +422,23 @@ mod tests {
 
     /// Goal (Alex on #1537): the team folder deleted and made again under
     /// its full name while its sync runs (a new life: another repo, which
-    /// the CLI's world binding refuses, so that sync ends): the sync started
-    /// again finds `~/shared` bound to the earlier life, keeps it beside it,
-    /// unsent edits and all, and starts in a clean folder. Invalid: the same
-    /// life again moves nothing. Method: `bind` stands in for the CLI's
-    /// first pass, with the host and repo it checks.
+    /// the CLI's world binding refuses, and its watch ends with it:
+    /// cli/src/watch.rs): the sync started again finds `~/shared` bound to
+    /// the earlier life, keeps it beside it, unsent edits and all, and
+    /// starts in a clean folder. Invalid: the same life again moves
+    /// nothing. Method: `bind` stands in for the CLI's first pass, with the
+    /// host and repo it checks, and a watcher that ends by itself once the
+    /// folder is made again (`made-again`) for its watch; nothing kills it.
     #[test]
     fn a_team_folder_made_again_under_its_name_gets_a_clean_folder() {
         let root = scratch("shared-life");
         let dir = root.join(DIR);
+        let made_again = root.join("made-again");
+        let watch = format!("while [ ! -e '{}' ]; do sleep 0.05; done; exit 1", made_again.display());
         let spawn = |_agent: &str, fragment: &str, previous: Option<&str>, now: Option<&str>| {
             prepare(&dir, fragment, previous, now)?;
             bind(&dir, fragment, now.unwrap_or_default())?;
-            std::process::Command::new("sleep").arg("30").spawn()
+            std::process::Command::new("sh").arg("-c").arg(&watch).spawn()
         };
         let mut syncs = Syncs::default();
         let want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
@@ -443,12 +447,17 @@ mod tests {
         syncs.keep(&want, Some(&first), &spawn);
         assert!(!syncs.due(&want), "running: not due");
         std::fs::write(dir.join("handover.txt"), "unsent").unwrap();
-        // made again: its sync refused by the CLI, and ended
+        // made again: its watch refused by the CLI, and ended by itself
+        std::fs::write(&made_again, "").unwrap();
         let r = syncs.running.get_mut("juniper--k3x9").expect("running");
-        if let Some(c) = r.child.as_mut() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+        let ended = (0..200).any(|_| {
+            let done = r.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(Some(_))));
+            if !done {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            done
+        });
+        assert!(ended, "the watcher ended by itself");
         r.started -= Duration::from_millis(RESTART_MS);
         assert!(syncs.due(&want), "ended a RESTART_MS ago: due");
         syncs.keep(&want, Some(&second), &spawn);

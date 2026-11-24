@@ -422,7 +422,10 @@ fragment verify my-thing --dir .            # full-content audit
   echo of a pull, cost nothing. After 60 s of quiet a sweep compares the
   folder with its journal and main with the last head it saw (one
   request), and passes only when either moved or the change feed is
-  down.
+  down. A refusal that stays (a folder sync never sends, or a folder
+  bound to another repo or host, as when its fragment is deleted and made
+  again under its name) stops the watch, saying why; any other failure
+  is tried again.
 - **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped, 5 changes not sent (you may only read it).
 
 ## The app

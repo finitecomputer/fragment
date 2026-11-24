@@ -63,6 +63,8 @@ pub struct Frag {
     pub blobs: HashMap<String, (String, Bytes)>,
     pub files: BTreeMap<String, Bytes>,
     pub commits: Vec<Value>,
+    /// Its life's code repo, as its status says it (`""`: none yet).
+    pub repo: String,
 }
 
 struct LiveSock {
@@ -806,7 +808,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     match (method, &p[3..]) {
         // what a status says of it that the image reads: its title (an
         // agent's name: hermes-boot's Bot Mode identity)
-        (Method::GET, ["status"]) => answer(StatusCode::OK, json!({ "name": fragment, "kind": f.kind, "title": f.title })),
+        (Method::GET, ["status"]) => answer(StatusCode::OK, json!({ "name": fragment, "kind": f.kind, "title": f.title, "repo": f.repo })),
         (Method::GET, ["channels"]) if w.broken.contains(&fragment) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "a broken fragment, as asked"),
         (Method::GET, ["channels"]) => {
             let list: Vec<Value> = f.channels.iter().map(|(n, c)| json!({ "name": n, "read": "viewer", "post": c.post, "seq": c.records.len() })).collect();
