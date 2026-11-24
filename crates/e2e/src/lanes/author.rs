@@ -177,7 +177,7 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let (name, _) = chat(s, api, &owner, "live")?;
+    let (name, c) = chat(s, api, &owner, "live")?;
     api.op(&owner, &name, "say", "l1", json!({ "text": "before" }))?;
 
     let mut a = Socket::open(api, &name, "__live", None, None)?;
@@ -241,6 +241,33 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     api.op(&owner, &name, "say", "l3b", json!({ "text": "after waking" }))?;
     let rec = b.until("record", 5)?;
     s.ok("a socket that followed before the object woke still gets records", rec["body"]["text"] == "after waking" && rec["seq"] == 4, &rec);
+    // a deploy that raises a channel's read role stops it at once for the
+    // sockets below it: the visitor's socket still follows the room, and
+    // is sent nothing of it while only viewers read it (a pong asked
+    // after the record comes with no record before it); declared public
+    // again, it is sent the room again
+    let mut raised: Value = serde_json::from_slice(CHAT_JSON)?;
+    raised["channels"]["room"]["read"] = json!("viewer");
+    ship(s, &c, CHAT_APP, raised.to_string().as_bytes());
+    api.op(&owner, &name, "say", "l3c", json!({ "text": "for viewers now" }))?;
+    b.send(&json!({ "type": "ping" }))?;
+    let mut ahead = vec![];
+    for _ in 0..20 {
+        let f = b.next()?;
+        if f["type"] == "pong" {
+            break;
+        }
+        ahead.push(f);
+    }
+    let unsent = !ahead.iter().any(|f| f["type"] == "record");
+    ship(s, &c, CHAT_APP, CHAT_JSON);
+    api.op(&owner, &name, "say", "l3d", json!({ "text": "for everyone again" }))?;
+    let again = b.until("record", 5)?;
+    s.ok(
+        "a deploy that makes a channel viewers' stops it for a visitor's socket at once, and making it public again sends it again",
+        unsent && again["body"]["text"] == "for everyone again" && again["seq"] == 6,
+        json!({ "ahead": ahead, "again": again }),
+    );
 
     // presence: whole in hello, then one socket's change at a time
     let mut c = Socket::open(api, &name, "__live", Some(&owner), None)?;

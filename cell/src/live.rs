@@ -13,7 +13,13 @@
 //! client pages comes in a later page, never live ahead of the records
 //! before it, so a client's cursor never jumps a gap.
 //!
-//! A socket's role is fixed when it connects; removing a member closes
+//! A socket's role is fixed when it connects, and it reads a channel as
+//! `permit::decide` says over that kept standing and the channel as it is
+//! declared now (`socket_reads`): at its subscribe, at each record and
+//! draft sent to the channel's followers, and at each query. So a deploy
+//! that raises a channel's read role stops what reaches the sockets below
+//! it at once; they still follow it, and are sent it again should it come
+//! back down. Removing a member closes
 //! theirs, and rotating the share link closes link holders' (4003);
 //! deleting the fragment closes every socket (4004). Both codes are
 //! final: the browser library does not reconnect after them. A member
@@ -166,12 +172,20 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-/// What a broadcast reads of a socket's attachment: its id and the
-/// channels it follows, and no more (its presence is any JSON a page set).
+/// What a broadcast reads of a socket's attachment: its id, its role and
+/// the channels it follows, and no more (its presence is any JSON a page
+/// set). Every release's attachment has carried its role (`LiveState`).
 #[derive(Deserialize)]
 struct Follows {
     id: String,
+    role: Role,
     subs: Vec<String>,
+}
+
+/// Whether a socket at `role` reads what needs `read` (a channel, a
+/// query): `decide`, over the socket's kept standing.
+fn socket_reads(role: Role, read: Role) -> CellResult<Role> {
+    crate::fragment::decide(Visibility::Members, Standing::kept(role), Action::Read(read))
 }
 
 fn follows_of(ws: &WebSocket) -> Option<Follows> {
@@ -279,18 +293,23 @@ impl FragmentCell {
         }
     }
 
-    /// A record to the sockets following its channel: none are looked at
-    /// when no socket may follow it (`LiveMemory::followers`).
+    /// A record to the sockets following its channel that read it now
+    /// (`socket_reads`): none are looked at when no socket may follow it
+    /// (`LiveMemory::followers`). One that may not read it still follows,
+    /// and a channel not declared now is read by none.
     pub(crate) fn broadcast_record(&self, r: &ChannelRecord) {
         if !self.followed(&r.channel) {
             return;
         }
+        let read = self.channel_read_role(&r.channel).ok();
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = follows_of(&ws) else { continue };
             if st.subs.contains(&r.channel) {
-                let _ = ws.send_with_str(&frame);
+                if read.is_some_and(|read| socket_reads(st.role, read).is_ok()) {
+                    let _ = ws.send_with_str(&frame);
+                }
                 found.insert(st.id);
             }
         }
@@ -299,7 +318,8 @@ impl FragmentCell {
         }
     }
 
-    /// A draft to the sockets following its channel, at most
+    /// A draft to the sockets following its channel that read it now
+    /// (`socket_reads`), at most
     /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
     /// sends only its latest): `false` when past that pace, and dropped.
     /// `thinking`: ms a text step's model has reasoned with no words yet.
@@ -311,9 +331,10 @@ impl FragmentCell {
         if !self.followed(channel) {
             return true;
         }
+        let read = self.channel_read_role(channel).ok();
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel) && read.is_some_and(|read| socket_reads(st.role, read).is_ok())) {
                 send(&ws, &frame);
             }
         }
@@ -410,10 +431,7 @@ impl FragmentCell {
         match frame {
             LiveIn::Ping => send(ws, &LiveOut::Pong),
             LiveIn::Subscribe(Subscribe { channel, from }) => {
-                let read = self.channel_read_role(&channel)?;
-                if st.role < read {
-                    return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} needs the {} role", read.as_str())));
-                }
+                socket_reads(st.role, self.channel_read_role(&channel)?)?;
                 let live = st.subs.contains(&channel);
                 if !live && st.subs.len() >= SUBSCRIPTIONS_MAX {
                     return Err(CellError::invalid(format!("a socket follows at most {SUBSCRIPTIONS_MAX} channels")));
@@ -543,7 +561,7 @@ impl FragmentCell {
         if decl.kind != OpKind::Query {
             return Err(CellError::invalid(format!("{op} is not a query: only queries run over the live socket (call it through __op)")));
         }
-        crate::fragment::decide(Visibility::Members, Standing::kept(st.role), Action::Read(decl.role))?;
+        socket_reads(st.role, decl.role)?;
         let inv = Invocation { principal: &st.principal, asker: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
         self.invoke(inv).await
     }
