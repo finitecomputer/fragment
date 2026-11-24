@@ -716,3 +716,15 @@ test("its end lets go of the files it holds with the rest", async () => {
   await d.end();
   assert.deepEqual(d.prefixed(), [], "every file under its prefix gone");
 });
+
+test("the e2e's lever gives a file as its runner does, and hashes again what it holds", async () => {
+  const d = door();
+  await d.connect();
+  const given = await d.lever("file", { door: DOOR, bytes: btoa("voice bytes"), type: "audio/mp4" });
+  assert.equal(given.status, 200, await given.clone().text());
+  const { sha256, size } = await given.json();
+  assert.equal(size, 11);
+  assert.equal(d.st.sql.exec("SELECT needs FROM files WHERE sha = ?", sha256).one().needs, 1, "one use to come: the delivery that names it");
+  const looked = await (await d.lever("file", { door: DOOR, sha: sha256 })).json();
+  assert.deepEqual(looked, { sha256, size: 11, type: "audio/mp4" });
+});
