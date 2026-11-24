@@ -232,15 +232,9 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
             }
             // and the columns later steps added: step 5's `ended.search`,
             // step 11's `records.author`, step 12's `pending.code` and step
-            // 14's askers and lend
-            sql.exec(
-                &format!(
-                    "ALTER TABLE ended DROP COLUMN search; ALTER TABLE records DROP COLUMN author; ALTER TABLE pending DROP COLUMN code; \
-                     ALTER TABLE record_schedules DROP COLUMN asker; ALTER TABLE records DROP COLUMN asker; ALTER TABLE runs DROP COLUMN asker; ALTER TABLE members DROP COLUMN lend; \
-                     DROP TABLE _schema; {plant}"
-                ),
-                None,
-            )?;
+            // 14's askers, lend and turns
+            let later = "ALTER TABLE ended DROP COLUMN search; ALTER TABLE records DROP COLUMN author; ALTER TABLE pending DROP COLUMN code; ALTER TABLE record_schedules DROP COLUMN asker; ALTER TABLE records DROP COLUMN asker; ALTER TABLE runs DROP COLUMN asker; ALTER TABLE members DROP COLUMN lend; DROP TABLE turns; DROP TABLE _schema";
+            sql.exec(&format!("{later}; {plant}"), None)?;
             Ok(json!({ "members": columns(&sql, "members")?, "runs": columns(&sql, "runs")? }))
         }
         ("schema-try", Some(step @ ("adds" | "fails"))) => {
