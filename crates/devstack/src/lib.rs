@@ -774,6 +774,29 @@ impl Fleet {
     }
 }
 
+/// `program`, started as a shell would start it: without what cargo told
+/// this process about its own package. `cargo xtask` is a `cargo run`,
+/// which sets `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and
+/// `CARGO_PKG_*` for xtask, and a cargo started with them takes them for
+/// its own environment. A build script that reads one is rerun when it
+/// changes (ring's reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so
+/// every build by hand after one of xtask's, and the other way round,
+/// built ring again, and reqwest and every crate of ours above them; and
+/// since `CARGO_MANIFEST_DIR` names the checkout, no build of them was
+/// good in another checkout. For cargo, and for what runs cargo:
+/// worker-build, and wrangler, whose build command for the cell is a
+/// `cargo run` of xtask (cell/wrangler.jsonc; `node::Node::command`).
+pub fn outside_cargo(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        let own_package = name.to_str().is_some_and(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_"));
+        if own_package {
+            cmd.env_remove(name);
+        }
+    }
+    cmd
+}
+
 /// Random hex from the OS.
 pub fn random_hex(bytes: usize) -> String {
     use std::io::Read;
@@ -1232,6 +1255,30 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: the cargo xtask starts is told nothing of xtask's own package,
+    /// so it builds as cargo run by hand does. Before, it inherited what
+    /// `cargo xtask` (a `cargo run`) sets for xtask, and ring's build
+    /// script, which reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`, was
+    /// rerun whenever a build by hand followed one of xtask's or the other
+    /// way round: ring, reqwest and every crate of ours above them, built
+    /// again. Method: `env` started as xtask starts cargo, from this test,
+    /// for which `cargo test` sets the same variables. Valid: every other
+    /// variable is passed on, cargo's own settings among them.
+    #[test]
+    fn what_is_started_outside_cargo_is_told_nothing_of_this_package() {
+        for set in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR"] {
+            assert!(std::env::var_os(set).is_some(), "cargo sets {set} for this test, as it does for xtask");
+        }
+        let out = super::outside_cargo("env").env("CARGO_TERM_COLOR", "never").output().expect("env runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let names: Vec<&str> = text.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name).collect();
+        let own: Vec<&&str> = names.iter().filter(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_")).collect();
+        assert!(own.is_empty(), "passed on: {own:?}");
+        for kept in ["PATH", "HOME", "CARGO_TERM_COLOR"] {
+            assert!(names.contains(&kept), "{kept} is passed on: {names:?}");
+        }
+    }
+
     /// Goal: a staged cell (dev's, the e2e's) holds every module its shim
     /// imports from beside it, as the source tree a deploy runs from does
     /// (a module left out failed the e2e's build: "Could not resolve

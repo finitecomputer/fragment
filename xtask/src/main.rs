@@ -211,28 +211,6 @@ fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
 
-/// `program` (cargo, or worker-build, which runs cargo), started as a
-/// shell would start it: without what cargo told this process about
-/// xtask's own package. `cargo xtask` is a `cargo run`, which sets
-/// `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` for
-/// xtask, and a cargo started with them takes them for its own
-/// environment. A build script that reads one is rerun when it changes
-/// (ring's reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so every
-/// build by hand after one of xtask's, and the other way round, built ring
-/// again, and reqwest and every crate of ours above them; and since
-/// `CARGO_MANIFEST_DIR` names the checkout, no build of them was good in
-/// another checkout.
-fn outside_cargo(program: &str) -> Command {
-    let mut cmd = Command::new(program);
-    for (name, _) in std::env::vars_os() {
-        let own_package = name.to_str().is_some_and(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_"));
-        if own_package {
-            cmd.env_remove(name);
-        }
-    }
-    cmd
-}
-
 fn run(cmd: &mut Command) -> Result<()> {
     let shown = shown(cmd);
     let status = cmd.status().with_context(|| format!("could not start {shown}"))?;
@@ -631,7 +609,7 @@ fn try_template(args: &[String]) -> Result<()> {
         bail!("nothing answers on :{DEV_PORT}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
     }
     let root = devstack::repo_root();
-    run(outside_cargo("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
+    run(devstack::outside_cargo("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
     let cli = root.join("target/debug/fragment");
     let host = format!("http://127.0.0.1:{DEV_PORT}");
     let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
@@ -705,7 +683,7 @@ fn e2e(args: &[String]) -> Result<()> {
 /// The suite alone, for this machine.
 fn build_suite() -> Result<()> {
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
+    run(devstack::outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
 }
 
 /// The suite, as `build_e2e` leaves it.
@@ -733,7 +711,7 @@ fn build_e2e() -> Result<()> {
 fn build_native() -> Result<()> {
     let t0 = std::time::Instant::now();
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    run(devstack::outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
     build_suite()?;
     println!("built the CLI and the suite in {:.1?}", t0.elapsed());
     Ok(())
@@ -829,14 +807,14 @@ fn check() -> Result<()> {
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     javascript_parses(&root)?;
     javascript_tests(&root)?;
-    run(outside_cargo("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
-    run(outside_cargo("cargo")
+    run(devstack::outside_cargo("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
+    run(devstack::outside_cargo("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
         .current_dir(&root))?;
     // the cell's build, then the admin Worker's (cell/src/lib.rs, "Two
     // Workers, one crate"): each its own exports
     for features in [&[][..], &["--features", "admin"]] {
-        run(outside_cargo("cargo")
+        run(devstack::outside_cargo("cargo")
             .args(["clippy", "--target", "wasm32-unknown-unknown"])
             .args(features)
             .args(["--", "-D", "warnings"])
@@ -905,30 +883,6 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// Goal: the cargo xtask starts is told nothing of xtask's own package,
-    /// so it builds as cargo run by hand does. Before, it inherited what
-    /// `cargo xtask` (a `cargo run`) sets for xtask, and ring's build
-    /// script, which reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`, was
-    /// rerun whenever a build by hand followed one of xtask's or the other
-    /// way round: ring, reqwest and every crate of ours above them, built
-    /// again. Method: `env` started as xtask starts cargo, from this test,
-    /// for which `cargo test` sets the same variables. Valid: every other
-    /// variable is passed on, cargo's own settings among them.
-    #[test]
-    fn what_xtask_starts_is_told_nothing_of_xtasks_own_package() {
-        for set in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR"] {
-            assert!(std::env::var_os(set).is_some(), "cargo sets {set} for this test, as for xtask");
-        }
-        let out = super::outside_cargo("env").env("CARGO_TERM_COLOR", "never").output().expect("env runs");
-        let text = String::from_utf8_lossy(&out.stdout);
-        let names: Vec<&str> = text.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name).collect();
-        let own: Vec<&&str> = names.iter().filter(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_")).collect();
-        assert!(own.is_empty(), "passed on: {own:?}");
-        for kept in ["PATH", "HOME", "CARGO_TERM_COLOR"] {
-            assert!(names.contains(&kept), "{kept} is passed on: {names:?}");
-        }
-    }
-
     /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
     /// `--models` without its config, and `--models` without `--real-agent`
     /// are refused before anything builds.
