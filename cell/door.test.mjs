@@ -692,6 +692,23 @@ test("a reply its runner says ended (410: its link ended first) lets go of its f
   assert.deepEqual(uses(d, 2), ["r:chat:3"], "ended with its files: its own use let go, the other reply's kept");
 });
 
+test("a reply its runner refuses for good (not linked, or not there to ask) lets go of its files: its connector asks no more, and a full door takes a new file after (the fix-check of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  // as many replies' files as it holds, each refused: its link unlinked
+  // (409 not linked), or its runner not up to say (its state unread)
+  for (let n = 1; n <= 64; n += 1) {
+    assert.equal((await replyFileOf(d, n, `chat:${n}`)).status, 200, `file ${n}`);
+    if (n % 2) d.c.answers.push([200, { phase: "off", files: true }], [409, { error: "not_linked" }]);
+    else d.c.answers.push([503, { error: "starting" }]);
+    const r = await d.job("reply", { key: `chat:${n}`, text: "here", files: replyFiles1(n) });
+    assert.ok([409, 503].includes(r.status), `refused: ${r.status}`);
+  }
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM uses").one().n, 0, "no refused reply's use left");
+  const taken = await replyFileOf(d, 99, "chat:99");
+  assert.equal(taken.status, 200, `a full door makes room of files nothing uses: ${await taken.clone().text()}`);
+});
+
 test("an old file a waiting delivery keeps counts toward the door's bounds (the review of #1538)", async () => {
   const d = door();
   await d.connect();

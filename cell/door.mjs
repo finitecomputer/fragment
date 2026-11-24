@@ -499,15 +499,19 @@ export class SimplexDoor extends DurableObject {
   async #reply(body) {
     const files = replyFiles(body.files);
     if (!files) throw Object.assign(new Error("a reply's files are [{sha256, name, type, size}], at most a message's"), { status: 400 });
-    // its key's uses of the files its connector gave for it, let go once its
-    // runner says it is done (200) or ended (410: never sent), whatever it
-    // carried: its files, or its text alone (a runner that carries none);
-    // a reply still under way keeps them, and another key's are its own
-    const settled = (asked) => {
-      if (asked.status === 200 || asked.status === 410) this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ?", `r:${body.key}`);
-      return asked;
-    };
-    if (!files.length) return settled(await this.#ask("/reply", { key: body.key, text: body.text }));
+    // its key's uses of the files its connector gave for it last while its
+    // runner holds the reply (202: its connector asks again); any other
+    // answer is its end, its connector asking no more for these files:
+    // sent (200), its link ended first (410), not linked, its runner not
+    // there to ask, or one that cannot send them (it sends its text alone
+    // next, under the same key). Another key's uses are its own.
+    const asked = await this.#replyAsked(body, files);
+    if (asked.status !== 202) this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ?", `r:${body.key}`);
+    return asked;
+  }
+
+  async #replyAsked(body, files) {
+    if (!files.length) return this.#ask("/reply", { key: body.key, text: body.text });
     const held = new Set(this.ctx.storage.sql.exec("SELECT sha FROM files").toArray().map((r) => r.sha));
     const missing = files.find((f) => !held.has(f.sha256));
     if (missing) return refusal(409, "no_file", `the door holds no file ${missing.sha256}: give it first`);
@@ -515,7 +519,7 @@ export class SimplexDoor extends DurableObject {
     if (!r.ok) return r;
     const runner = await r.json().catch(() => null);
     if (runner?.files !== true) return refusal(409, "no_files", "this door's runner carries no files: its text alone");
-    return settled(await this.#ask("/reply", { key: body.key, text: body.text, files }));
+    return this.#ask("/reply", { key: body.key, text: body.text, files });
   }
 
   // ---- the files it holds, on their way ----
