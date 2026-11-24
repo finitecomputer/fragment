@@ -242,7 +242,7 @@ fn questions(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         let r = api.share(&name, who, role)?;
         anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
     }
-    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"chat":{"read":"viewer","post":"viewer"},"desk":{"read":"editor","post":"editor"}}}"#))]);
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"chat":{"read":"viewer","post":"viewer"},"desk":{"read":"editor","post":"editor"},"open":{"read":"public","post":"public"}}}"#))]);
     s.deploy(&c);
     let seq = |r: &Reply| r.body["record"]["seq"].as_i64().unwrap_or(0);
     let mut asked = vec![];
@@ -317,6 +317,29 @@ fn questions(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         "an answer sent again after its question is no longer kept is still its record, replayed",
         !kept.iter().any(|r| r["seq"] == card) && replay.status == 200 && replay.body["replayed"] == true && seq(&replay) == seq(&mine) && chat() == 5,
         format!("{replay}; work keeps {:?}", kept.iter().map(|r| r["seq"].clone()).collect::<Vec<_>>()),
+    );
+    // Public now: a person who reads `work` through their own agent's
+    // membership (a viewer's read, never an act) answers a question there
+    // that asks them, from a channel anyone posts to; a stranger asked
+    // there cannot read it, so it is no question to them.
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    anyhow::ensure!(r.status == 200, "making it public: {r}");
+    let (theirs, stranger) = (api.person()?, api.person()?);
+    let (_, their_agent) = super::delegation::agent_of(api, &theirs)?;
+    let r = api.share(&name, &their_agent, "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding their agent: {r}");
+    let mut asked = vec![];
+    for who in [&theirs, &stranger] {
+        let r = post(api, &agent, &name, "work", &format!("ask-{}", api.identity(who)?), json!({ "text": "May I?", "asks": api.identity(who)? }))?;
+        anyhow::ensure!(r.status == 200, "a question on work: {r}");
+        asked.push(seq(&r));
+    }
+    let through = post(api, &theirs, &name, "open", "o1", answer("work", asked[0]))?;
+    let unread = post(api, &stranger, &name, "open", "o2", answer("work", asked[1]))?;
+    s.ok(
+        "a person reading a question through their agent's membership answers it, posting where anyone may; a stranger it asks, who may not read it, is refused (403)",
+        through.status == 200 && refused(&unread),
+        format!("{through} {unread}"),
     );
     Ok(())
 }

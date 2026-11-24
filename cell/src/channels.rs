@@ -324,19 +324,21 @@ impl FragmentCell {
     /// A post that answers a question (`permit::answers`) is taken only
     /// from whom the question asks, as themselves (`permit::may_answer`;
     /// docs/api.md, "Questions and answers"), and only of a question its
-    /// poster may read (`channel_read_role`): one they may not, one not
-    /// here and one asking someone else are one refusal, which tells
-    /// nothing of a channel they cannot read. The same post again is the
-    /// record it appended (`posted`), whatever became of its question
-    /// since. Read with no await before its append.
-    fn answer_admitted(&self, caller: &Caller, role: Role, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<()> {
+    /// poster may read (`channel_read_role`, decided as a read of it is,
+    /// over the standing the post read): one they may not, one not here
+    /// and one asking someone else are one refusal, which tells nothing of
+    /// a channel they cannot read. The same post again is the record it
+    /// appended (`posted`), whatever became of its question since. Read
+    /// with no await before its append.
+    #[allow(clippy::too_many_arguments)]
+    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<()> {
         let Some(question) = permit::answers(body) else { return Ok(()) };
         let question = question.map_err(|why| CellError::invalid(format!("an answer's `answers` {why}")))?;
         if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?.is_empty() {
             return Ok(());
         }
         let readable = match self.channel_read_role(&question.channel) {
-            Ok(read) => role >= read,
+            Ok(read) => decide(facts.visibility, standing, Action::Read(read)).is_ok(),
             Err(e) if e.code == ErrorCode::NotFound => false,
             Err(e) => return Err(e),
         };
@@ -600,7 +602,7 @@ impl FragmentCell {
             (false, Some(IdentityKind::Agent)) => Author::Agent,
             (false, Some(IdentityKind::Person) | None) => Author::Person,
         };
-        self.answer_admitted(caller, role, principal, author, &key, body)?;
+        self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
         // the append and the look for an earlier one are one step (no await between)
         let (record, appended) = match self.append(channel, principal, author, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
