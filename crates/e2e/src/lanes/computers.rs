@@ -86,7 +86,7 @@ const ASKER_CHECKS: &[&str] = &[
 /// terminal signs one), and its owner the same: each call goes as whose ask
 /// it is, held to their role, using what its owner lends that chat.
 /// Answers how many of the agent's turns in the chat they took.
-fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Duration, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Duration) -> Result<usize> {
     let turns = std::cell::Cell::new(0);
     let owner_id = api.identity(w.owner)?;
     let ben = api.person()?;
@@ -102,15 +102,17 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let r = api.share(&board, &ben_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Ben on the board: {r}");
     let op = |name: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{board}/ops/{name}?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
-    let asked_by_ben = |s: &Suite, n: u32, text: &str| -> Result<String> {
+    // each ask's own id, apart from the lane's numbered `m<n>` ones
+    let asked_by = |s: &Suite, who: &crate::Keys, id: &str, text: &str| -> Result<String> {
         turns.set(turns.get() + 1);
-        let r = api.signed(&ben, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("ben{n}"), "body": { "text": text } })))?;
-        anyhow::ensure!(r.status == 200, "Ben asks: {r}");
+        let r = api.signed(who, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("asker-{id}"), "body": { "text": text } })))?;
+        anyhow::ensure!(r.status == 200, "{id} asks: {r}");
         let turn = turn_of(w.agent, chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
         let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
         s.eventually(wake, || reply().is_some());
         Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     };
+    let asked_by_ben = |s: &Suite, n: u32, text: &str| asked_by(s, &ben, &format!("ben{n}"), text);
     // who the app was told, and at what role (`whoami`'s answer)
     let whose = |said: &str| -> Value {
         let body = said.strip_prefix("fetched 200: ").unwrap_or("");
@@ -118,16 +120,14 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     };
 
     let bens = asked_by_ben(s, 1, &op("whoami", "who-ben"))?;
-    turns.set(turns.get() + 1);
-    let owners = fetched(s, 300, &op("whoami", "who-owner"))?;
+    let owners = asked_by(s, w.owner, "owner1", &op("whoami", "who-owner"))?;
     s.ok(
         ASKER_CHECKS[0],
         whose(&bens) == json!({ "principal": ben_id, "role": "viewer" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
         json!({ "ben": bens, "owner": owners }),
     );
     let bens = asked_by_ben(s, 2, &op("backstage", "back-ben"))?;
-    turns.set(turns.get() + 1);
-    let owners = fetched(s, 301, &op("backstage", "back-owner"))?;
+    let owners = asked_by(s, w.owner, "owner2", &op("backstage", "back-owner"))?;
     s.ok(ASKER_CHECKS[1], bens.starts_with("fetched 403") && whose(&owners) == json!({ "role": "editor" }), json!({ "ben": bens, "owner": owners }));
 
     let schedules = format!("/api/f/{chat}/schedules");
@@ -2828,7 +2828,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
         replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
-        replies_so_far += asker_checks(s, api, &swapping, &chat_name, wake, &fetched)?;
+        replies_so_far += asker_checks(s, api, &swapping, &chat_name, wake)?;
     }
     // its uses from before the move, owed to its owner's ledger (M16)
     uses_checks(s, api, &owner, &id, &agent_name, &month)?;
