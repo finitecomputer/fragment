@@ -90,6 +90,30 @@ impl FragmentCell {
         Ok(json!({ "ok": true, "removed": gone.len() }))
     }
 
+    /// The browsers' pushes `principal` asked for here end with its
+    /// standing, as its channel subscriptions do (`drop_subscriptions`): a
+    /// member removed, or an agent's owner who read through it alone. A
+    /// push tagged `*` or with their npub goes only to who may still see
+    /// the fragment; let in again, a page subscribes again.
+    pub(crate) fn drop_pushes(&self, principal: &str) -> CellResult<()> {
+        self.exec("DELETE FROM push_subs WHERE principal = ?", vec![principal.into()])
+    }
+
+    /// Made members only, the pushes of everyone who is no member go: link
+    /// holders and visitors (`anon:…`, `anonymous`) and anyone signed in
+    /// who is not in. An owner who reads through their agent in here keeps
+    /// theirs, as their sockets stay open (members.rs `remove_member`).
+    /// Answers how many went.
+    pub(crate) fn drop_outsiders_pushes(&self) -> CellResult<usize> {
+        let gone = self.rows(
+            "DELETE FROM push_subs WHERE principal NOT IN (SELECT principal FROM members) \
+             AND principal NOT IN (SELECT owner FROM members WHERE owner IS NOT NULL) RETURNING id",
+            vec![],
+        )?;
+        assert!(gone.len() as u64 <= limits::PUSH_SUBS_MAX, "a fragment holds at most PUSH_SUBS_MAX push subscriptions");
+        Ok(gone.len())
+    }
+
     /// Accepts a push to every subscription tagged `who` (`*`: all), once
     /// per `key` (a mutation's effect or a job's step): written to the
     /// delivery outbox, then sent after the answer (deliveries.rs). Answers
