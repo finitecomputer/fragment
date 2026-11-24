@@ -474,7 +474,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // ~/shared (made once, as the skills are). The computer is assigned
     // before it wakes, with the agent's configuration deployed.
     const agent = await agentWritten();
-    const prepared = await Promise.allSettled([skillsFragment(), sharedFragment(), computerOf(agent)]);
+    // one already on a computer (an Add from before a computer per agent,
+    // cut short after its assign) goes on there: one computer runs it
+    const runs = [...agents().values()].find((a) => a.fragment === agent)?.computer;
+    const prepared = await Promise.allSettled([skillsFragment(), sharedFragment(), runs ? Promise.resolve({ computer: runs }) : computerOf(agent)]);
     // Finish them all before offering Retry: no previous create is left in flight.
     for (const result of prepared) if (result.status === "rejected") throw result.reason;
     const computer = prepared[2].value;

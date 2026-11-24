@@ -114,14 +114,18 @@ the answer for the count as for any write.
 computer-month a month, all its person's computers together (Paul,
 2026-11-20 and 11-23; a computer per agent): `SEAT_AWAKE_INCLUDED_MS`,
 744 hours, a 31-day month of one computer, so one computer that never
-sleeps is never charged. The head counts what this month let off
-(`awake_waived_ms`, reset as the month rolls), after a row's reference
-is checked, so a replayed row never spends the included hours twice;
-the row past the bound is charged its part past it, and every row after
-it whole, at the book's price, from credit, with no cap or question. A
-row of an earlier month, late past its end, is let off whole and counts
-in no month (a few minutes at most, in the person's favour). Its status
-says what is used (`awake: {usedMs, includedMs}`), Billing's line.
+sleeps is never charged. An always-on computer's hours are metered and
+counted too (decision 25's waiver is this bound now), so no other
+computer's ride free beside it. The head counts what this month let off
+(`awake_waived_ms`) and what the month before did (`awake_waived_before_ms`,
+kept as the month rolls, for rows heard late), after a row's reference
+is checked, so a replayed row never spends the included hours twice. A
+row counts in each month its time falls in (`awake_parts`: it ends at its
+`at` and lasted its `ms`, so one across a month's start is two parts); a
+part in an older month is let off whole and counts in none, in the
+person's favour. What is past a month's bound is charged at the book's
+price, from credit, with no cap or question. Its status says what this
+month used (`awake: {usedMs, includedMs}`), Billing's line.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
 bills them); a computer's time kept for its failed saves (the platform's:

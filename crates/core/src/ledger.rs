@@ -144,6 +144,22 @@ impl Month {
         format!("{:04}-{:02}", 1970 + self.0 / 12, self.0 % 12 + 1)
     }
 
+    /// Its first moment, in ms since 1970 (`of`'s inverse at a month's start).
+    pub fn start_ms(self) -> i64 {
+        let (y, m) = (1970 + i64::from(self.0 / 12), i64::from(self.0 % 12) + 1);
+        // days from 1970-01-01 to the first of the month (H. Hinnant's
+        // days_from_civil, the inverse of `cron::civil`)
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let ms = days * DAY_MS;
+        assert_eq!(Month::of(ms), self, "a month starts in itself");
+        ms
+    }
+
     /// The month `label` (`YYYY-MM`, `label`'s inverse) names.
     pub fn parse(label: &str) -> Option<Month> {
         let (y, m) = label.split_once('-')?;
@@ -801,6 +817,21 @@ pub fn row_charge(usage: &Usage, book: &PriceBook, plan: Plan, awake_left_ms: i6
     Ok((priced, charge, i64::try_from(waived).expect("a row's time fits an i64")))
 }
 
+/// An awake row's time (`ms`, ending at `at_ms`) in the months of a
+/// ledger at `month`: its part in `month` or later (a row's clock may run a
+/// little ahead), in the month before it, and in any older, which sum to
+/// it.
+pub fn awake_parts(at_ms: i64, ms: i64, month: Month) -> [i64; 3] {
+    assert!(ms >= 0, "a row lasts no less than nothing");
+    let start = at_ms - ms;
+    let this = month.start_ms();
+    let before = Month(month.0.saturating_sub(1)).start_ms().min(this);
+    let within = |from: i64, to: i64| (at_ms.min(to) - start.max(from)).max(0);
+    let parts = [within(this, i64::MAX), within(before, this), within(i64::MIN, before)];
+    assert_eq!(parts.iter().sum::<i64>(), ms, "a row's parts are all of it");
+    parts
+}
+
 /// A person's standing, from their plan, seat, balance, and whether the
 /// overdraft made their fragments read-only (decision 27).
 pub fn standing_of(plan: Plan, seat: SeatState, balance: i64, read_only: bool) -> Standing {
@@ -840,10 +871,13 @@ struct Money {
     included_granted: i64,
     included_left: i64,
     /// The seat's awake time let off this month (`SEAT_AWAKE_INCLUDED_MS`),
-    /// all its person's computers together. A head kept before the bound
-    /// holds none: its month counts from then.
+    /// all its person's computers together, and the month before's, kept
+    /// for rows of it heard late. A head kept before the bound holds none:
+    /// its month counts from then.
     #[serde(default)]
     awake_waived_ms: i64,
+    #[serde(default)]
+    awake_waived_before_ms: i64,
     /// Purchased credit left; below zero while the person owes.
     purchased_left: i64,
     /// Set at the overdraft, cleared above zero.
@@ -870,7 +904,9 @@ impl Money {
         self.totals.expired += self.included_left;
         self.included_left = 0;
         self.included_granted = 0;
-        // the seat's included awake time is each month's own, too
+        // the seat's included awake time is each month's own, too: the
+        // month just ended's kept for its late rows, an older one's none
+        self.awake_waived_before_ms = if month.0 == self.month.0 + 1 { self.awake_waived_ms } else { 0 };
         self.awake_waived_ms = 0;
         self.month = month;
         self.entitle();
@@ -919,6 +955,7 @@ impl Money {
         assert!(self.included_left <= self.included_granted, "included credit never carries past its month");
         assert!(self.included_granted <= SEAT_ALWAYS_ON_INCLUDED, "a month includes at most the largest seat's credit");
         assert!((0..=SEAT_AWAKE_INCLUDED_MS).contains(&self.awake_waived_ms), "a month lets off at most the seat's included awake time");
+        assert!((0..=SEAT_AWAKE_INCLUDED_MS).contains(&self.awake_waived_before_ms), "so did the month before");
         assert!(self.purchased_left >= 0 || self.included_left == 0, "a debt is paid from included credit as it arrives");
         assert!((0..=OVERDRAFT_MAX).contains(&self.overdraft), "an overdraft is within its limit");
         let balance = self.balance();
@@ -990,6 +1027,7 @@ impl Ledger {
             included_granted: 0,
             included_left: 0,
             awake_waived_ms: 0,
+            awake_waived_before_ms: 0,
             purchased_left: 0,
             read_only: false,
             totals: Totals::default(),
@@ -1132,19 +1170,33 @@ impl Ledger {
         self.money.roll(Month::of(now_ms));
     }
 
-    /// A usage's price, its charge here (`row_charge`), and the seat's
-    /// awake time it was let off, counted in this month's bound. A row of
-    /// an earlier month (late past its end, whose count went with that
-    /// month) is let off whole and counts in no month: a few minutes'
-    /// worth at most, in the person's favour, so one computer is never
-    /// charged for being awake. Nothing is changed when it is not priced.
-    fn charge_for(&mut self, usage: &Usage, book: &PriceBook, month: Month) -> Result<(Priced, i64), PriceError> {
-        let this_month = month >= self.money.month;
-        let left = if this_month { SEAT_AWAKE_INCLUDED_MS - self.money.awake_waived_ms } else { i64::MAX };
-        let (priced, charge, waived) = row_charge(usage, book, self.money.plan, left)?;
-        if this_month {
-            self.money.awake_waived_ms += waived;
-        }
+    /// A usage's price and its charge here (`row_charge`). A $200 seat's
+    /// awake row counts in the bound of each month its time falls in: it
+    /// ends at `at_ms` and lasted its `ms`, so a row across a month's start
+    /// is two parts, the earlier counted in the month before (kept for rows
+    /// heard late), and a part in an older month let off whole (counted in
+    /// none: in the person's favour). So one computer is never charged for
+    /// being awake, whatever its rows straddle. Nothing is changed when it
+    /// is not priced.
+    fn charge_for(&mut self, usage: &Usage, book: &PriceBook, at_ms: i64) -> Result<(Priced, i64), PriceError> {
+        let (Usage::Awake { instance, ms }, Plan::SeatAlwaysOn) = (usage, self.money.plan) else {
+            let (priced, charge, _) = row_charge(usage, book, self.money.plan, 0)?;
+            return Ok((priced, charge));
+        };
+        let priced = book.price(usage)?;
+        let parts = awake_parts(at_ms, i64::try_from(*ms).expect("a row's time is bounded"), self.money.month);
+        // this month's (and one ahead's, within the clock's skew), the month
+        // before's, an older one's: each let off up to what its bound has left
+        let left = [SEAT_AWAKE_INCLUDED_MS - self.money.awake_waived_ms, SEAT_AWAKE_INCLUDED_MS - self.money.awake_waived_before_ms, i64::MAX];
+        let waived: [i64; 3] = std::array::from_fn(|i| parts[i].min(left[i].max(0)));
+        let over: i64 = parts.iter().zip(&waived).map(|(p, w)| p - w).sum();
+        let charge = match over {
+            0 => 0,
+            over => book.price(&Usage::Awake { instance: instance.clone(), ms: u64::try_from(over).expect("over is a part of the row") })?.charge,
+        };
+        assert!(charge <= priced.charge, "a row's part past the bound costs at most the whole row");
+        self.money.awake_waived_ms += waived[0];
+        self.money.awake_waived_before_ms += waived[1];
         Ok((priced, charge))
     }
 
@@ -1348,7 +1400,7 @@ impl Ledger {
             // another body under this reference, or a record from before
             Some(_) => return Err(Refused::ConflictingBody),
         }
-        let (priced, charge) = self.charge_for(&row.usage, book, Month::of(row.at_ms))?;
+        let (priced, charge) = self.charge_for(&row.usage, book, row.at_ms)?;
         // a row counts in its own month: a late one from last month does
         // not spend this month's cap
         self.charge(store, charge, row.fragment.as_deref(), Month::of(row.at_ms));

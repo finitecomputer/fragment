@@ -594,9 +594,12 @@ impl RegistryCell {
         assert!(gone.len() <= 1, "an agent names one fragment");
         assert!(self.agent_fragment(&b.identity)?.as_deref() != Some(b.fragment.as_str()), "a forgotten agent is named by its fragment no more");
         // its owner's seat is pushed again: an always-on seat's computer was
-        // its first agent's own, and is the next one's now
+        // its first agent's own, and is the next one's now; never while a
+        // wipe of them runs, whose steps empty their ledger and computers
         if let Some(owner) = self.row::<OwnerRow>("SELECT owner FROM identities WHERE id = ?", vec![b.identity.as_str().into()])?.and_then(|r| r.owner).filter(|_| !gone.is_empty()) {
-            self.sync_seat(orgs::SyncSeat { person: owner })?;
+            if !self.wiping(&owner)? {
+                self.sync_seat(orgs::SyncSeat { person: owner })?;
+            }
         }
         Ok(AgentForgotten { forgot: !gone.is_empty() })
     }

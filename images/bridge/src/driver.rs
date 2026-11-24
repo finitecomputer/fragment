@@ -403,7 +403,10 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     let relay = mirrored.then(|| for_simplex(channel, &body, files.len())).flatten();
                     // an asked turn's files go with its answer too (#721)
                     let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
-                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
+                    // a refused question's answer, posted unkept past the
+                    // turns' bound, on its asker's own `tasks`: as an answer is
+                    let for_ = (channel == records::TASKS && agent != fragment).then(|| engine.agent(&agent).map(|a| a.owner.clone())).flatten();
+                    lanes.push(&fragment, Job::Post { agent, for_, channel, id, body, files, relay, answers })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
@@ -1324,7 +1327,7 @@ enum Job {
     /// a post in its owner's SimpleX chat (`for_simplex`), with its files.
     /// `answers`: its turn answers an ask, and its files go with that
     /// answer (`Answer`).
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
+    Post { agent: String, for_: Option<String>, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// A live card answer's closure on `work`, whose answer the engine
@@ -1491,10 +1494,10 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files, relay, answers } => {
+            Job::Post { agent, for_, channel, id, body, files, relay, answers } => {
                 let turn = body["turn"].as_str().map(str::to_string);
                 // what goes back over SimpleX goes only once it is on the chat
-                let (sent, refs, _) = post_attached(&api, &fragment, &agent, None, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
+                let (sent, refs, _) = post_attached(&api, &fragment, &agent, for_.as_deref(), channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
                 if let (Some(text), true, Some(sx)) = (relay, sent.on_chat(), claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }

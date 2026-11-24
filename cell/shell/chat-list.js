@@ -48,7 +48,8 @@ export function askedAgentOf({ open, own, agentsOf, mine, main }) {
 
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load }) {
   const { $, el, patch, agentFace, notice } = ui;
-  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
+  // `phaseOf`: the phase of the computer an agent (its identity) runs on
+  const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, phaseOf, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
   // `onScreen`: the chat whose row is active (making.js `shownChat`);
   // `reading`: the chat whose messages are on screen (`readChat`), the one
   // alone marked seen and counted nothing unread (a chat being made's room
@@ -146,13 +147,14 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // first, each with when it stops counting (`until`).
   function doingIn(f, who) {
     if (!who.length || !listLive()) return [];
-    const awake = computer()?.phase === "awake";
     const now = Date.now();
     const out = [];
     for (const r of f.listed ?? []) {
       const kind = r.channel === "work" && who.includes(r.principal) ? DOING_OF_KIND[r.kind] : undefined;
       if (!kind) continue;
       if (r.kind === "turn.prompt.closed" && r.fields?.outcome !== "answered") continue;
+      // the computer of the agent that wrote it (a computer per agent)
+      const awake = (phaseOf ? phaseOf(r.principal) : computer()?.phase) === "awake";
       if (!awake && r.kind !== "turn.prompt") continue;
       const doing = kind === "asked" ? (r.fields?.asks === personId() ? "you" : "waiting") : kind;
       const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];

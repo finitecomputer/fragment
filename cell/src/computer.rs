@@ -2953,6 +2953,12 @@ impl ComputerCell {
     /// part is idempotent: a wipe cut anywhere is done by the next call.
     async fn wipe(&self) -> CellResult<Value> {
         let id = self.meta(MetaKey::Id)?;
+        // wiped already, to its end (its record emptied, the mark kept): done
+        // at once, so a person's wipe over many computers (a computer per
+        // agent) gets past those its earlier calls finished
+        if self.wiped.get() && id.is_none() && self.saves()?.every_record().is_empty() {
+            return Ok(json!({ "destroyed": true, "records": 0, "objects": 0, "more": false }));
+        }
         if !self.wiped.get() {
             self.sql().exec("INSERT INTO wiped (at) VALUES (?)", vec![js::now_ms().into()])?;
             self.wiped.set(true);

@@ -2442,6 +2442,41 @@ fn a_teammate_on_another_computer_is_answered_on_its_own_tasks() {
     assert_eq!(e.state().turns[&t.turn].ret, None, "no one to answer back");
 }
 
+/// Goal (a computer per agent): a person's @mention of a teammate on
+/// another computer is that teammate's alone: the lead here does not answer
+/// it as the chat's lead. Invalid: a mention of no agent of the chat falls
+/// to the lead, as ever.
+#[test]
+fn a_mention_of_a_teammate_elsewhere_is_not_the_leads() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let mut talk = view(&[&rowan, &juniper]);
+    talk.fragments.insert(juniper.identity.clone(), juniper.fragment.clone());
+    let mut e = engine(std::slice::from_ref(&rowan));
+    let s = read(&mut e, &rowan, "talk--k3x9", rec(1, "npub1paul", json!({ "text": "@juniper what do you think" })), Some(&talk), T0);
+    assert!(started(&s).is_none(), "juniper's, on its own computer: {:?}", s.effects);
+    let s = read(&mut e, &rowan, "talk--k3x9", rec(2, "npub1paul", json!({ "text": "@nobody what do you think" })), Some(&talk), T0 + 1);
+    assert!(started(&s).is_some(), "named no agent of the chat: the lead's");
+}
+
+/// Goal (a computer per agent): one answer a question. A second answer to
+/// the same question (another record, vouched for all the same) starts no
+/// second turn, after a restart too (the state keeps what it took).
+#[test]
+fn a_question_takes_one_answer() {
+    let juniper = agent("juniper");
+    let mut e = engine(std::slice::from_ref(&juniper));
+    let asked = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 7 };
+    let body = |text: &str| records::answer(HOME, text, "npub1rowan", "Rowan", &asked, "t-rowan", &Outcome::Idle, 2, false);
+    let s = read(&mut e, &juniper, &juniper.fragment, answer_task(1, &juniper.identity, body("Sunny.")), None, T0);
+    assert!(started(&s).is_some(), "the first answer: a turn");
+    let s = read(&mut e, &juniper, &juniper.fragment, answer_task(2, &juniper.identity, body("Sunny, really.")), None, T0 + 1);
+    assert!(started(&s).is_none() && posts(&s).is_empty(), "the same question again: nothing: {:?}", s.effects);
+    let state = e.state().clone();
+    assert_eq!(state.answered.len(), 1);
+    let back: State = serde_json::from_str(&serde_json::to_string(&state).expect("a state")).expect("read back");
+    assert_eq!(back.answered, state.answered, "kept across a restart");
+}
+
 /// Goal (a computer per agent): an answer is taken as the agent's own key's
 /// or once its own question vouched for it (the driver hands that on as
 /// the agent's own: driver.rs `vouched`). Invalid: one signed by another

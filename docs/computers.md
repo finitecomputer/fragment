@@ -19,6 +19,9 @@ between a runtime and the platform is the bridge (docs/bridge.md).
   /api/computers {agent}`, owned by the agent's person, and runs that
   agent alone (`AGENTS_ON_OWN_MAX`): its fragment takes no other computer
   but its owner's from before (`may_run`), and the computer asserts it.
+  Its fragment names it from its making, before its assign, so an Add cut
+  between them leaves none its delete cannot end; and one computer runs
+  an agent at a time (another's assign is 409 until it is unassigned).
   A person's computer from before (decision 13), its id derived from
   them, runs the agents put on it then, at most 16, until they move (the
   debt ledger, "Computers from before a computer per agent run several
@@ -1329,7 +1332,8 @@ every profile (`agent.bot_mode_protocol: false`): no roster, no
 
 Since a computer per agent no two of a person's agents share a disk, so
 their shared work is files in a fragment (Paul, 2026-11-23: git, never a
-shared read-write disk). Each agent's work keeps `~/shared` in step with
+shared read-write disk). Each Hermes agent keeps `~/shared` (in its home,
+its terminal's and its file tools' `~`: `hermes::home_dir`) in step with
 its owner's team folder: their fragment of kind `shared` (the blessed
 `shared` template, which the shell makes with an agent, as it makes their
 skills fragment), one labelled `shared` first, else the first by name
@@ -1511,10 +1515,12 @@ gates it.
 Awake time, operator keys' calls and model calls are metered to the
 computer's owner, and its saves are not (docs/ledger.md, "Who pays"). A
 $200 seat's awake time is included up to one computer-month (744 hours)
-a month, all its person's computers together; past it, it is charged
-from their credit (`fragment_core::ledger::SEAT_AWAKE_INCLUDED_MS`). The
-seat's always-on computer is their computer from before, else their
-first agent's own: their other agents' sleep when idle.
+a month, all its person's computers together, its always-on one's hours
+metered and counted too; past it, it is charged from their credit
+(`fragment_core::ledger::SEAT_AWAKE_INCLUDED_MS`). The seat's always-on
+computer is their computer from before, else their first agent's own,
+each push telling the other it is not: their other agents' sleep when
+idle.
 Awake time is time the computer was shown up: from its start's `Ready`
 (or, for a start put to sleep before it, that sleep), in the intervals
 the DO hears, each alarm's at least every five minutes and each step of

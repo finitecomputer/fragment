@@ -967,11 +967,12 @@ async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragme
     (faces, team, folder)
 }
 
-/// Each agent's team folder (shared.rs), its owner's `folder`: none
-/// without one.
+/// Each Hermes agent's team folder (shared.rs), its owner's `folder`, in
+/// its `~`: none without one. Another runtime's agent keeps none (its `~`
+/// is not its own; runtimes differ).
 fn team_folders(agents: &[Agent], folder: Option<&str>) -> BTreeMap<String, String> {
     let Some(folder) = folder else { return BTreeMap::new() };
-    agents.iter().map(|a| (a.fragment.clone(), folder.to_string())).collect()
+    agents.iter().filter(|a| agents::of_hermes(a)).map(|a| (a.fragment.clone(), folder.to_string())).collect()
 }
 
 /// An agent's sync of its team folder `fragment` into its `~/shared`: the

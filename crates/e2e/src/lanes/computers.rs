@@ -2092,6 +2092,12 @@ fn own_computers(s: &mut Suite, api: &Api, scripted: bool, wake: Duration) -> Re
         members_only(api, &owner, &name)?;
         Ok((name, made["npub"].as_str().unwrap_or("").to_string()))
     };
+    // their computer from before a computer per agent, its agent on it
+    let before = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
+    let olds = before.body["computer"].as_str().unwrap_or("").to_string();
+    let (oak, _) = agent(s, "oak")?;
+    let r = api.signed(&owner, "PUT", &format!("/api/computers/{olds}/agents/{oak}"), Some(&json!({})))?;
+    s.ok("a person's computer from before runs its agent as ever", before.status == 200 && r.status == 200, &r);
     let (rowan, rowan_key) = agent(s, "rowan")?;
     let (fern, fern_key) = agent(s, "fern")?;
     let make = |who: &crate::Keys, of: &str| api.signed(who, "POST", "/api/computers", Some(&json!({ "agent": of })));
@@ -2121,7 +2127,9 @@ fn own_computers(s: &mut Suite, api: &Api, scripted: bool, wake: Duration) -> Re
     );
     let listed = api.signed(&owner, "GET", "/api/computers", None)?;
     let ids: Vec<&str> = listed.body["computers"].as_array().into_iter().flatten().filter_map(|c| c["computer"].as_str()).collect();
-    s.ok("their list shows each agent's computer, the first made first", listed.status == 200 && ids == [rowans.as_str(), ferns.as_str()], &listed);
+    s.ok("their list shows their computer from before, then each agent's own, the first made first", listed.status == 200 && ids == [olds.as_str(), rowans.as_str(), ferns.as_str()], &listed);
+    let r = assign(&olds, &rowan)?;
+    s.ok("one computer runs an agent at a time: on its own, its owner's from before takes it only once it is unassigned there", r.status == 409, &r);
     let notices = api.signed(&owner, "GET", "/api/notices", None)?;
     s.ok("their notices read every computer of theirs", notices.status == 200 && notices.body["notices"].is_array(), &notices);
     let r = api.signed(&owner, "DELETE", &format!("/api/computers/{rowans}/agents/{rowan}"), None)?;
@@ -2163,9 +2171,17 @@ fn own_computers(s: &mut Suite, api: &Api, scripted: bool, wake: Duration) -> Re
     let gone = s.eventually(Duration::from_secs(60), || api.signed(&owner, "GET", &format!("/api/computers/{ferns}"), None).is_ok_and(|v| v.status == 404));
     let listed = api.signed(&owner, "GET", "/api/computers", None)?;
     let left: Vec<&str> = listed.body["computers"].as_array().into_iter().flatten().filter_map(|c| c["computer"].as_str()).collect();
-    s.ok("deleted, an agent ends its own computer; their list keeps the rest", r.status == 200 && gone && left == [rowans.as_str()], &listed);
+    s.ok("deleted, an agent ends its own computer; their list keeps the rest", r.status == 200 && gone && left == [olds.as_str(), rowans.as_str()], &listed);
     let (cleaned, last) = s.ended_cleaned(api, &fern);
     s.ok("the ended life's cleanup completes, its own computer's end with it", cleaned, last);
+    // an Add cut short after its computer was made, before its assign: the
+    // agent's delete ends that computer too, which its fragment named
+    let (cut, _) = agent(s, "cut")?;
+    let made = make(&owner, &cut)?;
+    let cuts = made.body["computer"].as_str().unwrap_or("").to_string();
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{cut}"), None)?;
+    let ended = s.eventually(Duration::from_secs(60), || api.signed(&owner, "GET", &format!("/api/computers/{cuts}"), None).is_ok_and(|v| v.status == 404));
+    s.ok("an agent whose making stopped after its computer was made: its delete ends that computer", made.status == 200 && r.status == 200 && ended, &made);
     Ok(())
 }
 

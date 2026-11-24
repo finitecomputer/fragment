@@ -594,15 +594,20 @@ impl RegistryCell {
         }
         // the seat's computer: theirs from before, else their first agent's
         // own (a computer per agent: the seat keeps one computer always on,
-        // as before, and its other agents' sleep when idle)
+        // as before, and its other agents' sleep when idle). Both are told
+        // each push, the first made on as the seat says and the other off, so
+        // a computer from before made after the first agent's own leaves no
+        // two always on
         let first = self.live_agents_of(super::calls::AgentsOf { person: person.to_string() })?.agents.into_iter().next();
+        let mut on = d.always_on;
         for computer in fragment_core::computer::computers_of(person, first.as_slice()) {
-            match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": d.always_on })).await {
+            match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": on })).await {
                 // none made: the next, or no computer yet, whose making (or
                 // its agent's assigning) asks for a push, and fails (to be
                 // made again) when it cannot (cell/src/orgs.rs, `computer_made`)
                 Err(e) if e.code == ErrorCode::NotFound => continue,
-                answered => return answered.map(|_| ()),
+                Err(e) => return Err(e),
+                Ok(_) => on = false,
             }
         }
         Ok(())

@@ -445,18 +445,23 @@ fn the_owner_puts_it_to_sleep() {
     assert!(l.apply(Event::Sleep, T + 10_000).actions.is_empty(), "asleep, a sleep does nothing");
 }
 
-/// Goal: an always-on computer never sleeps and its awake time is not
-/// metered (decision 25).
+/// Goal: an always-on computer never sleeps (decision 25), and its awake
+/// time is metered as any computer's: its seat's ledger lets it off within
+/// the seat's monthly bound, all its person's computers together (a
+/// computer per agent), so another computer's hours never ride free.
 #[test]
-fn always_on_never_sleeps_nor_meters() {
+fn always_on_never_sleeps_and_meters() {
     let mut l = Lifecycle::new();
     let s = l.apply(Event::AlwaysOn { on: true }, T);
     assert_eq!(s.actions, vec![Action::Start { generation: 1 }]);
     l.apply(Event::Ready { generation: 1 }, T + 3_000);
+    let mut metered = 0;
     for i in 1..20 {
         let s = l.apply(Event::Alarm, T + i * IDLE_MS);
-        assert!(s.actions.is_empty(), "{s:?}");
+        assert!(s.actions.iter().all(|a| matches!(a, Action::Meter { .. })), "nothing but its meter: {s:?}");
+        metered += s.actions.iter().map(|a| match a { Action::Meter { from_ms, to_ms } => to_ms - from_ms, _ => 0 }).sum::<i64>();
     }
+    assert_eq!(metered, T + 19 * IDLE_MS - (T + 3_000), "every awake moment from its start's ready, once");
 }
 
 /// Goal: the state survives a restart of its Durable Object (it is kept

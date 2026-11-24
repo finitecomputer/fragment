@@ -917,6 +917,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
+    phaseOf: (identity) => state.computers.find((c) => c.computer === state.agents.get(identity)?.computer)?.phase,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
     offers: (agent, what) => offers(agent, what) },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,

@@ -185,7 +185,17 @@ impl FragmentCell {
                 if self.must(MetaKey::Owner)? != body["owner"].as_str().unwrap_or("") {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner makes its computer"));
                 }
-                Ok(json!({ "identity": self.must(MetaKey::Npub)? }))
+                let npub = self.must(MetaKey::Npub)?;
+                let own = fragment_core::computer::default_computer_of(&npub);
+                // named from its making, before its assign: an Add cut short
+                // between the two leaves no computer its end cannot find
+                // (ended.rs); one on another computer already keeps that
+                match self.meta(MetaKey::Computer)? {
+                    Some(other) if other != own => return Err(CellError::new(ErrorCode::Conflict, format!("{} runs on {other}: it is moved there, never given a second computer", self.name()?))),
+                    Some(_) => {}
+                    None => self.set_meta(MetaKey::Computer, &own)?,
+                }
+                Ok(json!({ "identity": npub }))
             }
             "assign" => {
                 let b: Assign = crate::json_body(body)?;
@@ -197,6 +207,11 @@ impl FragmentCell {
                 let npub = self.must(MetaKey::Npub)?;
                 if fragment_core::computer::may_run(&b.computer, &b.owner, &npub) == fragment_core::computer::Runs::Neither {
                     return Err(CellError::new(ErrorCode::Forbidden, format!("{} runs on its owner's computer or its own, never {}", self.name()?, b.computer)));
+                }
+                // one computer runs it at a time: on another, it is unassigned
+                // there first, so no computer keeps running it beside this one
+                if let Some(other) = self.meta(MetaKey::Computer)?.filter(|c| *c != b.computer) {
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{} runs on {other}: unassign it there first", self.name()?)));
                 }
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
                     Some(id) => id,

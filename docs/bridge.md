@@ -516,7 +516,9 @@ a turn:
   own key's, or once the question it names vouches for it: that agent
   asked it itself, of the agent that signed the answer, back to that
   chat (`records::vouches`, read by the driver before the engine sees the
-  record; `vouched`). Nothing else on its `tasks` is taken. The owed record is the delivery: it is
+  record; `vouched`). Nothing else on its `tasks` is taken, and one answer
+  a question: another for it starts nothing (`State::answered`, the newest
+  `ANSWERED_KEPT`). The owed record is the delivery: it is
   retried under one id until the platform answers it, and nothing waits
   or is held awake for it. An asked agent taken off the computer still
   answers an asker that stays, also when the bridge first sees it gone at
@@ -539,6 +541,10 @@ a turn:
 The count lives here because the platform holds no chat record
 (docs/cloudflare-v1.md, the rule), and only the bridge knows which turn
 an agent is in.
+
+**A mention** names any agent of the chat, on this computer or another
+(by its label, of the fragment the chat's people name it by): a message
+that mentions one elsewhere is that agent's alone, never the lead's here.
 
 ## Commands
 

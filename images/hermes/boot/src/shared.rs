@@ -37,9 +37,10 @@ pub fn pick(fragments: &[FragmentEntry]) -> Option<String> {
     labelled.or(theirs.first()).map(|n| n.to_string())
 }
 
-/// An agent's `~/shared`.
+/// A Hermes agent's `~/shared`: in its home, its terminal's and its file
+/// tools' `~` (`hermes::home_dir`).
 pub fn dir_of(agent_fragment: &str) -> PathBuf {
-    crate::hermes::work_dir(agent_fragment).join(DIR)
+    crate::hermes::home_dir(agent_fragment).join(DIR)
 }
 
 /// One agent's sync: of which fragment, its process, and when it started.
@@ -152,7 +153,8 @@ mod tests {
         assert_eq!(pick(&list).as_deref(), Some("shared--z9z9"), "labelled shared first, theirs");
         assert_eq!(pick(&list[..2]).as_deref(), Some("work--p2m4"), "else the first by name");
         assert_eq!(pick(&[entry("shared--a1a1", "shared", false), entry("shared--b2b2", "skills", true)]), None);
-        assert_eq!(dir_of("juniper--k3x9"), PathBuf::from("/data/work/juniper--k3x9/shared"));
+        assert_eq!(dir_of("juniper--k3x9"), crate::hermes::home_dir("juniper--k3x9").join("shared"), "where its `~` is");
+        assert!(dir_of("juniper--k3x9").starts_with(crate::hermes::work_dir("juniper--k3x9")), "in its work, saved with it");
     }
 
     /// Goal: one sync an agent, of the folder wanted; an agent gone, or a

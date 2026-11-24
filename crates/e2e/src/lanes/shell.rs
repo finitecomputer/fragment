@@ -4638,7 +4638,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let wait = std::time::Duration::from_secs(30);
     let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
     let computer = computers.body["computers"][0].clone();
-    let agents: Vec<(String, String)> = computer["agents"].as_array().map(|l| l.iter().map(|a| (a["fragment"].as_str().unwrap_or("").to_string(), a["identity"].as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
+    let agents: Vec<(String, String)> = all_agents(&computers.body).iter().map(|a| (a["fragment"].as_str().unwrap_or("").to_string(), a["identity"].as_str().unwrap_or("").to_string())).collect();
     let Some((lead, lead_id)) = agents.first().cloned() else {
         s.ok("the Connections page has agents to show", false, &computers);
         return Ok(());
@@ -5747,7 +5747,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let options = options.as_array().cloned().unwrap_or_default();
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
-    let view = || shell(api, session, "GET", "/api/computers", None, &[]).map(|r| r.body["computers"][0].clone()).unwrap_or(Value::Null);
+    let view = || shell(api, session, "GET", "/api/computers", None, &[]).map(|r| computer_running(&r.body, &lead)).unwrap_or(Value::Null);
     let runs_on = |v: &Value| v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["modelProviders"].clone()).unwrap_or(Value::Null);
     let connected = view();
     let cheap = connected["models"]["cheap"].as_str().unwrap_or("").to_string();
@@ -6481,7 +6481,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
     let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
-    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agents = all_agents(&r.body);
     let id_of = |label: &str| agents.iter().find(|a| a["fragment"].as_str().map(label_of) == Some(label)).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let first_label = me.first;
     let (lead, other) = (id_of("reader"), id_of(first_label));
@@ -9579,18 +9579,20 @@ fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     Ok(())
 }
 
-/// Another agent of the person's, made through the public API as the CLI
-/// or an agent makes one (the shell makes only the first): its fragment,
-/// its job, assigned to their computer, its own chat with it in it, and
-/// its hello. Its fragment, its chat and its identity.
+/// Another agent of the person's, made through the public API in the order
+/// the shell's Add makes one (cell/shell/onboarding.js `makeAgent`): its
+/// fragment, its job, a computer of its own and the assign there, its own
+/// chat with it in it, its hello, and the wake. Its fragment, its chat and
+/// its identity.
 fn extra_agent(api: &Api, session: &str, label: &str, title: &str, job: &str) -> Result<(String, String, String)> {
     let call = |method: &'static str, path: &str, body: Value| shell(api, session, method, path, Some(&body), &[]);
     let name = |r: &Reply| r.body["name"].as_str().unwrap_or("").to_string();
     let made = call("POST", "/api/fragments", json!({ "label": label, "template": "agent", "title": title }))?;
     anyhow::ensure!(made.status == 200, "the agent: {made}");
     let agent = name(&made);
-    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
-    let computer = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let own = call("POST", "/api/computers", json!({ "agent": agent }))?;
+    let computer = own.body["computer"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(own.status == 200 && !computer.is_empty(), "its own computer: {own}");
     let assigned = call("PUT", &format!("/api/computers/{computer}/agents/{agent}"), json!({}))?;
     let id = assigned.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == agent.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     anyhow::ensure!(fragment_core::npub::is_identity(&id), "its computer took it: {assigned}");
@@ -9604,7 +9606,20 @@ fn extra_agent(api: &Api, session: &str, label: &str, title: &str, job: &str) ->
     let joined = call("PUT", &format!("/api/f/{chat}/members/{id}"), json!({ "role": "editor" }))?;
     let hello = call("POST", &format!("/api/f/{agent}/channels/tasks"), json!({ "id": "hello", "body": { "kind": "routine", "chat": chat, "text": "You were just made: say hello." } }))?;
     anyhow::ensure!(joined.status == 200 && hello.status == 200, "it joins its chat: {joined} {hello}");
+    let woke = call("POST", &format!("/api/computers/{computer}/wake"), json!({}))?;
+    anyhow::ensure!(woke.status == 200, "its computer wakes: {woke}");
     Ok((agent, chat, id))
+}
+
+/// Every agent on the person's computers (`GET /api/computers`), in the
+/// computers' order: an agent made since a computer per agent is on its own.
+fn all_agents(view: &Value) -> Vec<Value> {
+    view["computers"].as_array().into_iter().flatten().flat_map(|c| c["agents"].as_array().cloned().unwrap_or_default()).collect()
+}
+
+/// The computer that runs agent `fragment`, from the person's computers' view.
+fn computer_running(view: &Value, fragment: &str) -> Value {
+    view["computers"].as_array().into_iter().flatten().find(|c| c["agents"].as_array().is_some_and(|l| l.iter().any(|a| a["fragment"] == fragment))).cloned().unwrap_or(Value::Null)
 }
 
 /// The sidebar's sections (Paul, 2026-10-31: one per agent of theirs, its
@@ -9914,7 +9929,7 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     let wait = std::time::Duration::from_secs(30);
     let agent = own_named(api, session, "wren")?;
     let chat = own_named(api, session, "wren-chat")?;
-    let before = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["agents"].as_array().map(Vec::len).unwrap_or(0);
+    let before = all_agents(&shell(api, session, "GET", "/api/computers", None, &[])?.body).len();
     b.click(page, "#settings")?;
     let ask = format!("document.querySelector({})", js(&format!("[data-remove-agent={}]", js(&agent))));
     let offered = b.until(page, &format!("!!{ask}"), wait);
@@ -9967,7 +9982,7 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     b.eval(page, "(document.getElementById('edit-agent').close(), true)")?;
     let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
     // off its computer a moment after its list (agent-settings.js `liveOwn`)
-    let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().and_then(|r| r.body["computers"][0]["agents"].as_array().map(Vec::len)).unwrap_or(0);
+    let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().map(|r| all_agents(&r.body).len()).unwrap_or(0);
     let left = s.eventually(wait, || on_computer() + 1 == before);
     let after = on_computer();
     let archived = own_row_of(api, session, &chat)["archived"] == true;
@@ -10157,10 +10172,10 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     Ok(())
 }
 
-/// The person's agents (the computer's), by fragment label: their identities.
+/// The person's agents (their computers'), by fragment label: their identities.
 fn agent_ids(api: &Api, session: &str, labels: &[&str]) -> Result<Vec<String>> {
     let r = shell(api, session, "GET", "/api/computers", None, &[])?;
-    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agents = all_agents(&r.body);
     let ids: Vec<String> = labels
         .iter()
         .map(|l| agents.iter().find(|a| a["fragment"].as_str().map(label_of) == Some(*l)).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string())
@@ -10231,12 +10246,14 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         "new Promise((done) => { addEventListener('message', (e) => { if (e.data?.fragment === 'agents') done(e.data.agents.map((a) => [a.identity, a.phase ?? null])); }); \
          parent.postMessage({ fragment: 'agents?' }, '*'); setTimeout(() => done(null), 5000); })",
     )?;
-    let phase = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["phase"].clone();
-    let mut want_phases = vec![json!([reader, phase]), json!([first, phase])];
+    let view = shell(api, me.session, "GET", "/api/computers", None, &[])?.body;
+    let phase_of = |identity: &str| view["computers"].as_array().into_iter().flatten().find(|c| c["agents"].as_array().is_some_and(|l| l.iter().any(|a| a["identity"] == identity))).map(|c| c["phase"].clone()).unwrap_or(Value::Null);
+    let phase = json!([phase_of(&reader), phase_of(&first)]);
+    let mut want_phases = vec![json!([reader, phase[0]]), json!([first, phase[1]])];
     let mut got_phases = phases.as_array().cloned().unwrap_or_default();
     want_phases.sort_by_key(Value::to_string);
     got_phases.sort_by_key(Value::to_string);
-    s.ok("the shell's roster names each agent with its computer's phase (awake)", phase == "awake" && got_phases == want_phases, json!({ "roster": phases, "computer": phase }));
+    s.ok("the shell's roster names each agent with its own computer's phase (awake)", phase == json!(["awake", "awake"]) && got_phases == want_phases, json!({ "roster": phases, "computers": phase }));
 
     // a page's own add (no click in the shell) asks its person in the
     // shell's dialog, and adds no one while it waits, nor on Cancel

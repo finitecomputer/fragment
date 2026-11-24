@@ -229,6 +229,14 @@ pub struct State {
     /// `until` (`limits::HELPERS_LEASE_MS`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Helper>,
+    /// The questions its agents took an answer to, by `agent|<chat>/<seq>`
+    /// (the question's record), with the answer's time: one answer a
+    /// question, however many a teammate on another computer posts (it
+    /// signs its own: a computer per agent). The newest
+    /// `limits::ANSWERED_KEPT`. A state without it (an earlier bridge's)
+    /// holds none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub answered: BTreeMap<String, i64>,
 }
 
 /// A helper running (`State::children`): the chat its set goes to (its
@@ -248,7 +256,7 @@ pub struct Helper {
 
 impl Default for State {
     fn default() -> State {
-        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new() }
+        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new(), answered: BTreeMap::new() }
     }
 }
 
@@ -1413,6 +1421,21 @@ impl Engine {
             // deep than the turn that answered, so a callback resets no
             // depth and spends that chat's budget.
             Task::Answer { chat, text, by, name, hop, refused, files, asked } if record.principal == agent.identity => {
+                // one answer a question: another for the same is passed over
+                if let Some((fragment, seq)) = records::answers(&record.body) {
+                    let key = format!("{}|{fragment}/{seq}", agent.fragment);
+                    if self.state.answered.contains_key(&key) {
+                        crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "its question took an answer already" });
+                        return;
+                    }
+                    self.state.answered.insert(key, record.at);
+                    // bounded: the oldest go past ANSWERED_KEPT
+                    while self.state.answered.len() > limits::ANSWERED_KEPT {
+                        let oldest = self.state.answered.iter().min_by_key(|(k, at)| (**at, (*k).clone())).map(|(k, _)| k.clone()).expect("over the bound, so not empty");
+                        self.state.answered.remove(&oldest);
+                    }
+                    self.dirty = true;
+                }
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 // what the asked agent sent: blobs of the chat it was asked
                 // in, which this agent, its asker, reads as itself (#721)
@@ -1450,9 +1473,17 @@ impl Engine {
             return m.to.iter().any(|t| t == &agent.identity).then_some(0);
         }
         let words = records::mentions(&m.text);
-        let named: Vec<&Agent> = self.agents.iter().filter(|a| view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).collect();
+        // every agent of the chat a mention names, this computer's or one on
+        // another (a computer per agent: by its label, of the fragment the
+        // chat's people name it by), so one mentioned elsewhere is no
+        // reason for the lead here to answer too
+        let names = |id: &str, w: &str| match self.agents.iter().find(|a| a.identity == id) {
+            Some(a) => answers_to(a, w),
+            None => view.fragments.get(id).is_some_and(|f| crate::api::label(f).eq_ignore_ascii_case(w)),
+        };
+        let named: Vec<&String> = view.agents.iter().filter(|id| words.iter().any(|w| names(id, w))).collect();
         if !named.is_empty() {
-            return named.iter().any(|a| a.identity == agent.identity).then_some(0);
+            return named.iter().any(|id| **id == agent.identity).then_some(0);
         }
         (view.lead() == Some(agent.identity.as_str())).then_some(0)
     }

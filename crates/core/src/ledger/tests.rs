@@ -822,7 +822,7 @@ fn a_seats_included_awake_time_is_pooled_and_bounded() {
     w.now = NOVEMBER + HOUR_MS;
     assert_eq!(used(&w), Some((0, SEAT_AWAKE_INCLUDED_MS)));
     let now = w.now;
-    assert_eq!(charged_by(&mut w, "b4", vec![awake_row("a:5", one, hours(3), now)]), 0);
+    assert_eq!(charged_by(&mut w, "b4", vec![awake_row("a:5", one, hours(1), now)]), 0);
     // a $100 seat's awake time is charged from its first hour, and says no bound
     let mut seat = World::seat();
     let at = seat.now;
@@ -855,8 +855,8 @@ fn a_replayed_row_never_spends_included_hours_twice() {
 /// Goal: a person with one computer is never charged for its awake time,
 /// even one never asleep for the longest month. Method: October whole
 /// (31 days) in five-minute rows from one computer, its last rows heard
-/// after November began (late past the month's end: let off, counting in
-/// neither month), then November whole the same way.
+/// after November began (late past the month's end: counted in October's
+/// bound, kept for them), then November whole the same way.
 #[test]
 fn one_computer_is_never_charged_for_being_awake() {
     let mut w = World::seat();
@@ -872,13 +872,61 @@ fn one_computer_is_never_charged_for_being_awake() {
     }
     w.now = NOVEMBER + 60_000;
     assert_eq!(charged_by(&mut w, "oct:late", late.to_vec()), 0, "October's last rows, heard in November");
-    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(0), "late rows count in no month");
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(0), "late rows count in their own month's bound, not this one's");
     for (i, batch) in month_rows(NOVEMBER, 30).chunks(BATCH_ROWS_MAX).enumerate() {
         w.now = batch.last().expect("a batch has rows").at_ms;
         assert_eq!(charged_by(&mut w, &format!("nov:{i}"), batch.to_vec()), 0);
     }
-    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(30 * DAY_MS));
+    // November's first row began in October: its five minutes count there
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(30 * DAY_MS - five));
     assert_eq!(w.ledger.totals().charged, 0);
+}
+
+/// Goal: a row across a month's start counts each part in its own month,
+/// so one computer awake the whole of a 31-day month and the next is never
+/// charged, and a late row of the month before counts in that month's
+/// bound, not the new one's. Method: December 2026 then January 2027, both
+/// 31 days, in rows of an hour ending at a quarter past each hour (each row
+/// across midnight of New Year's Eve split in two), the last of December's
+/// heard after January began; then a second computer's late December hour,
+/// past December's bound, is charged whole, and January's bound is untouched.
+/// Invalid: a part older than the month before is let off and counts in none.
+#[test]
+fn a_row_counts_in_the_months_its_time_falls_in() {
+    let december = Month::parse("2026-12").expect("a month").start_ms();
+    let january = Month::parse("2027-01").expect("a month").start_ms();
+    assert_eq!((january - december) / DAY_MS, 31);
+    let mut w = World::seat();
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    let quarter = 15 * 60_000;
+    // rows of an hour, each ending at a quarter past, from December's first quarter past
+    let rows_until = |from: i64, to: i64| -> Vec<MeterRow> { (0..).map(|i| from + quarter + i * HOUR_MS).take_while(|at| *at <= to).map(|at| awake_row(&format!("a:{at}"), "computer:0a1b", HOUR_MS, at)).collect() };
+    let december_rows = rows_until(december, january - 1);
+    for (i, batch) in december_rows.chunks(BATCH_ROWS_MAX).enumerate() {
+        w.now = batch.last().expect("rows").at_ms;
+        assert_eq!(charged_by(&mut w, &format!("d:{i}"), batch.to_vec()), 0);
+    }
+    // the row across midnight, heard in January: 45 minutes of December's, 15 of January's
+    w.now = january + quarter + 60_000;
+    assert_eq!(charged_by(&mut w, "nye", vec![awake_row("a:nye", "computer:0a1b", HOUR_MS, january + quarter)]), 0, "one computer, never charged");
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(quarter), "January's bound holds its part alone");
+    assert_eq!(w.ledger.money.awake_waived_before_ms, SEAT_AWAKE_INCLUDED_MS, "December's 31 days whole, each row's part of it (its first row's November part counted in November's)");
+    // a second computer's late December hour: December's bound is spent, so
+    // it is charged whole; January's untouched
+    let hour = w.book.price(&Usage::Awake { instance: "2vcpu-6gib".into(), ms: HOUR_MS as u64 }).expect("priced").charge;
+    assert_eq!(charged_by(&mut w, "late", vec![awake_row("a:late", "computer:2c3d", HOUR_MS, january - 60_000)]), hour);
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(quarter), "a late row spends its own month's bound");
+    // the rest of January, one computer: never charged
+    for (i, batch) in rows_until(january + HOUR_MS, january + 31 * DAY_MS - HOUR_MS).chunks(BATCH_ROWS_MAX).enumerate() {
+        w.now = batch.last().expect("rows").at_ms;
+        assert_eq!(charged_by(&mut w, &format!("j:{i}"), batch.to_vec()), 0);
+    }
+    assert_eq!(w.ledger.totals().charged, hour, "only the second computer's hour past December's bound");
+    // a part older than the month before: let off, in no month's count
+    assert_eq!(awake_parts(january + HOUR_MS, 40 * DAY_MS, Month::of(january)), [HOUR_MS, 31 * DAY_MS, 9 * DAY_MS - HOUR_MS]);
+    for at in [0, december, january, january + 17] {
+        assert_eq!(Month::of(at).start_ms(), Month::of(Month::of(at).start_ms()).start_ms(), "a month's start is in it");
+    }
 }
 
 /// A head kept before the bound (no `awake_waived_ms`) reads as a month
