@@ -234,6 +234,51 @@ pub fn remove(project: &Path) -> Result<Removed> {
     bail!("{} container(s) of {} still there after {PASSES_MAX} passes: {}{why}", left.len(), project.display(), left.join(", "))
 }
 
+/// Removes the images the project's nodes built: those labeled for it
+/// (`scope_images`, `PROJECT_LABEL`), never another project's, each by its
+/// tags (wrangler adds one at every boot) and, left with none, by its ID.
+/// Never forced: an image a container still uses stays, and fails this.
+/// Their layers stay in the builder's cache, so the next project's build of
+/// the same Dockerfile takes every step from it. Call it once the
+/// project's containers are gone (`remove`). Answers how many images went.
+pub fn remove_images(project: &Path) -> Result<u32> {
+    // a project no node built an image for (its config names none) asks
+    // Docker nothing: scope_images writes its Dockerfiles before any build
+    if !images_dir(project).is_dir() {
+        return Ok(0);
+    }
+    let _one = REMOVING.lock().unwrap_or_else(PoisonError::into_inner);
+    let filter = format!("label={PROJECT_LABEL}={}", project_label(project)?);
+    let list = || docker(&["image", "ls", "--all", "--no-trunc", "--filter", &filter, "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}"]);
+    let (refs, images) = image_refs(&list()?);
+    if !refs.is_empty() {
+        let mut args = vec!["image", "rm"];
+        args.extend(refs.iter().map(String::as_str));
+        docker(&args)?;
+    }
+    let left = list()?;
+    ensure!(left.trim().is_empty(), "images of {} still there after their removal: {}", project.display(), left.trim().replace('\n', ", "));
+    Ok(images)
+}
+
+/// What `remove_images` removes, from `docker image ls`'s lines of the
+/// project's images (`<id>\t<repository>:<tag>`): every tag, and the ID of
+/// an image that has none (`<none>:<none>`, or a repository's `:<none>`);
+/// and how many images those are.
+fn image_refs(listing: &str) -> (Vec<String>, u32) {
+    let mut refs = vec![];
+    let mut ids = BTreeSet::new();
+    for (id, name) in listing.lines().filter_map(|l| l.split_once('\t')) {
+        ids.insert(id);
+        refs.push(match name.ends_with(":<none>") {
+            true => id.to_string(),
+            false => name.to_string(),
+        });
+    }
+    refs.dedup();
+    (refs, u32::try_from(ids.len()).expect("a project's few images"))
+}
+
 /// The rule a computer's networking sidecar drops public DNS by, in the
 /// network namespace it shares with its container (its NET_ADMIN lets it):
 /// proxy-everything (image 3cb1195) marks each query it forwards to public
@@ -320,6 +365,20 @@ mod tests {
 
     fn row(name: &str, label: &str) -> (String, String) {
         (name.to_string(), label.to_string())
+    }
+
+    /// Goal: a project's images go by every tag a node's boot gave them,
+    /// and by ID only when they have none, each counted once. Valid: an
+    /// image tagged at two boots, and one left untagged. Invalid: an
+    /// untagged image's `<none>:<none>`, which names nothing, removed by
+    /// name; a line that is no listing's.
+    #[test]
+    fn a_projects_images_go_by_their_tags_or_their_id() {
+        let listing = "sha256:aa\tcloudflare-dev/computer-stub-1:b1\nsha256:aa\tcloudflare-dev/computer-stub-1:b2\nsha256:bb\t<none>:<none>\nsha256:cc\tcloudflare-dev/computer-stub-1:<none>\nnot a listing's line\n";
+        let (refs, images) = image_refs(listing);
+        assert_eq!(refs, ["cloudflare-dev/computer-stub-1:b1", "cloudflare-dev/computer-stub-1:b2", "sha256:bb", "sha256:cc"]);
+        assert_eq!(images, 3);
+        assert_eq!(image_refs(""), (vec![], 0));
     }
 
     /// The label goes on the final stage, after the image's own text,

@@ -56,7 +56,7 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
     Ok((after, before, limit))
 }
 
-use fragment_core::permit::{Action, Standing};
+use fragment_core::permit::{self, Action, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::{door, npub};
 use fragment_proto::{
@@ -321,6 +321,50 @@ impl FragmentCell {
         Ok(Some(record))
     }
 
+    /// A post that answers a question (`permit::answers`) is taken only
+    /// from whom the question asks, as themselves (`permit::may_answer`;
+    /// docs/api.md, "Questions and answers"), and only of a question its
+    /// poster may read (`channel_read_role`, decided as a read of it is,
+    /// over the standing the post read): one they may not, one not here
+    /// and one asking someone else are one refusal, which tells nothing of
+    /// a channel they cannot read. The same post again is the record it
+    /// appended (`posted`), whatever became of its question since. Read
+    /// with no await before its append.
+    #[allow(clippy::too_many_arguments)]
+    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<()> {
+        let Some(question) = permit::answers(body) else { return Ok(()) };
+        let question = question.map_err(|why| CellError::invalid(format!("an answer's `answers` {why}")))?;
+        if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?.is_empty() {
+            return Ok(());
+        }
+        let readable = match self.channel_read_role(&question.channel) {
+            Ok(read) => decide(facts.visibility, standing, Action::Read(read)).is_ok(),
+            Err(e) if e.code == ErrorCode::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        let asks = if readable { self.asks(&question)? } else { None };
+        let acts_for = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
+        match permit::may_answer(asks.as_deref(), principal, author, acts_for) {
+            true => Ok(()),
+            false => Err(CellError::new(ErrorCode::Forbidden, "a question is answered only by whom it asks, in their own post")),
+        }
+    }
+
+    /// Whom the record `question` names asks (its body's `asks`, when a
+    /// string): `None` when it asks no one, or is not here (never written,
+    /// or no longer kept).
+    fn asks(&self, question: &permit::Answers) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            asks: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT CASE WHEN json_type(body, '$.asks') = 'text' THEN json_extract(body, '$.asks') END AS asks FROM records WHERE channel = ? AND seq = ?",
+            vec![question.channel.as_str().into(), SqlStorageValue::Integer(question.seq)],
+        )?;
+        Ok(rows.into_iter().next().and_then(|r| r.asks))
+    }
+
     /// A record just appended to `channel`, which keeps each poster's newest
     /// of `kinds` (`ChannelDecl::newest`), in its append's turn: of such a
     /// kind (its body's `kind`), it is its poster's newest of it now, and
@@ -558,6 +602,7 @@ impl FragmentCell {
             (false, Some(IdentityKind::Agent)) => Author::Agent,
             (false, Some(IdentityKind::Person) | None) => Author::Person,
         };
+        self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
         // the append and the look for an earlier one are one step (no await between)
         let (record, appended) = match self.append(channel, principal, author, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
@@ -725,6 +770,11 @@ impl FragmentCell {
         // this is the floor beneath them.
         if door::relays(body) {
             return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own relays no one (`relayed`)"));
+        }
+        // nor answers a question: the fragment's own key is asked nothing
+        // (`schedule::fires` checks first; docs/api.md, Questions and answers)
+        if permit::answers(body).is_some() {
+            return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own answers no question (`answers`)"));
         }
         let own = self.own_key()?;
         let (record, appended) = self.append_once(channel, &own, Author::Platform, POST_KIND, body, (key, POST_INDEX))?;

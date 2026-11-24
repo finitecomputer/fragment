@@ -53,7 +53,7 @@ fn at_page(p: u32) -> String {
 
 /// The starter deck's build (fixtures/slides-site).
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/slides-site")
+    crate::devstack::repo_root().join("crates/e2e/fixtures/slides-site")
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {
@@ -305,7 +305,7 @@ mod tests {
     /// again; a built file edited by hand; a live file copied stale.
     #[test]
     fn the_slides_fixture_is_the_templates_build() {
-        let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/slides");
+        let template = crate::devstack::repo_root().join("templates/slides");
         let site = fixture();
         let inputs: Vec<String> = ["live", "open-slide.config.ts", "package-lock.json", "package.json", "scripts", "slides"].map(String::from).to_vec();
         let stamp: serde_json::Value = serde_json::from_slice(&std::fs::read(site.join("build.json")).expect("build.json")).expect("json");

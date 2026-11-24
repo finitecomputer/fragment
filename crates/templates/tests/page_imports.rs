@@ -8,7 +8,7 @@
 //! strings (xtask/src/eval_sinks.rs reads src/ as runtime code).
 #![cfg(feature = "platform")]
 
-use std::path::Path;
+use std::path::PathBuf;
 
 /// The relative module specifiers `source` imports.
 fn imports(source: &str) -> Vec<&str> {
@@ -28,7 +28,7 @@ fn imports(source: &str) -> Vec<&str> {
 
 #[test]
 fn every_module_a_page_imports_is_its_own() {
-    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+    let templates = PathBuf::from("../../templates");
     let mut checked = 0;
     for t in fragment_templates::ALL {
         for f in t.files.iter().filter(|f| f.path.starts_with("site/") && !fragment_templates::built(t.name, f.path) && [".js", ".mjs", ".html"].iter().any(|x| f.path.ends_with(x))) {
@@ -74,7 +74,7 @@ fn unhashed(name: &str) -> String {
 #[cfg(feature = "embed")]
 #[test]
 fn a_built_page_names_its_hashed_files() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from("../..");
     let pages: Vec<(&str, &str)> = fragment_templates::BUILT.iter().copied().filter(|(_, p)| p.ends_with("index.html")).collect();
     assert_eq!(pages.len(), 5, "the shell's page and the chat's four: {pages:?}");
     for (at, _) in pages {
@@ -129,7 +129,7 @@ fn a_built_page_names_its_hashed_files() {
 /// the client's two, read from their files. Valid: equal.
 #[test]
 fn the_early_socket_waits_as_the_client_does() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from("../..");
     let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
     let number = |text: &str, after: &str| -> u64 {
         let at = text.find(after).unwrap_or_else(|| panic!("{after:?} is there")) + after.len();
