@@ -297,6 +297,7 @@ export class SimplexDoor extends DurableObject {
     }
     const d = this.#door();
     if (d && d.door !== door) return refuse(409, "another_door", `this door is ${d.door}`);
+    if (d?.stopped === HANDED_BACK) return refuse(409, "handed_back", "this door handed its link back to its computer: it takes no save");
     const had = this.ctx.storage.sql.exec("SELECT sha FROM imported").toArray()[0];
     if (had?.sha === sha) return (await request.body.cancel(), json({ imported: sha, again: true }));
     if (had) return refuse(409, "imported", "this door was given another save");
@@ -351,7 +352,11 @@ export class SimplexDoor extends DurableObject {
   async #handback(body) {
     if (!nameOk(body.door)) throw Object.assign(new Error("a way back names its door"), { status: 400 });
     let d = this.#door();
-    if (!d) return new Response(null, { status: 204 });
+    // one never begun is fenced too: no save given after, nor start
+    if (!d) {
+      this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, '', 0, 0, 0, 0, ?)", body.door, HANDED_BACK);
+      return new Response(null, { status: 204 });
+    }
     if (d.door !== body.door) return refusal(409, "another_door", `this door is ${d.door}`);
     if (d.stopped !== HANDED_BACK) this.#stop(HANDED_BACK);
     // a start under way sees the stop before it launches, or launched
@@ -365,10 +370,8 @@ export class SimplexDoor extends DurableObject {
       if (c.running) await c.destroy();
     }
     await this.#drain();
-    // nor while a message its connector took still has a file to take from it
     const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
-    const unkept = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM uses WHERE owner LIKE 'd:%'").one().n;
-    if (unsent + unkept > 0) return refusal(409, "busy", `its owner's messages still go to its connector (${unsent} to send, ${unkept} files to take): ask again in a moment`);
+    if (unsent > 0) return refusal(409, "busy", `${unsent} of its owner's messages still go to its connector: ask again in a moment`);
     // bounded: each pass marks one save unreadable, of at most the kept few
     for (;;) {
       d = this.#door();
@@ -459,6 +462,8 @@ export class SimplexDoor extends DurableObject {
       const body = await bounded(request);
       if (!secretOk(secret)) throw Object.assign(new Error(`connect gives its inbox's secret (${SECRET_HEADER})`), { status: 400 });
       if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them)");
+      // fenced before anything (a new chat's let-go included): its computer runs its link now
+      if (d?.stopped === HANDED_BACK) return refusal(409, "handed_back", "this door handed its link back to its computer: it never starts again");
       // its owner's SimpleX chat with their old agent, handed over staged
       // (never kept on their computer), starts only at their word: kept
       // (`keep`: its runner adopts it as it restores), or let go for a new chat

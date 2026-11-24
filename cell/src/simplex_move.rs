@@ -29,9 +29,12 @@
 //!   staged (**offered** after its import): never kept on their behalf, its
 //!   connector's setup page asks them to keep it or start a new chat.
 //! - `back`: the way back from wherever it stopped: its door's newest save
-//!   (its planned stop saves last) placed on its computer, which takes its
-//!   door key again and runs its core; then the connector deleted (its door
-//!   ends with it), the old chat unarchived, the record forgotten.
+//!   (its planned stop saves last, once what it took reached its
+//!   connector) placed on its computer, which takes its door key again and
+//!   runs its core, carrying what its door took and had not sent; then the
+//!   connector, once it has published what its door delivered, unbound (its
+//!   door ends) and archived, its history kept; the old chat unarchived;
+//!   the record forgotten.
 //!
 //! Refused with its reason, nothing changed: an agent not on the person's
 //! computer, a link not bound, a deployment that runs no doors; its
@@ -270,17 +273,14 @@ impl Move<'_> {
             let door = text(&rec, "door");
             let mut held = crate::routed::send(self.env, "SIMPLEX_DOOR", door, crate::routed::internal_request("door/handback", &json!({ "door": door }).to_string())?).await?;
             let (save, behind) = match held.status_code() {
+                // its save, whatever it is, the one it was given too (its
+                // computer may have gone back to an older save since): the
+                // bridge places a link's, and keeps a staged chat its door
+                // never kept staged as it was
                 200 => {
                     let raw: worker::worker_sys::web_sys::Response = held.into();
-                    let head = |k: &str| raw.headers().get(k).ok().flatten().unwrap_or_default();
-                    // a staged chat its door never ran (never kept, nor let go):
-                    // its computer keeps it staged as it was, nothing placed;
-                    // any other is placed, the save it was given too (its
-                    // computer may have gone back to an older save since)
-                    match rec["staged"] == true && head("x-door-started") == "0" {
-                        true => (None, false),
-                        false => (raw.body().map(Into::into), head("x-door-behind") == "1"),
-                    }
+                    let behind = raw.headers().get("x-door-behind").ok().flatten().as_deref() == Some("1");
+                    (raw.body().map(Into::into), behind)
                 }
                 204 => (None, false),
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),
@@ -290,15 +290,33 @@ impl Move<'_> {
                 crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: chat.into(), own: crate::principal::calls::Own::Archived, on: false }).await?;
             }
         }
+        // its connector kept, its chat's history with it: unbound (its door
+        // ends) once it has taken what its door delivered, and archived
         if let Some(connector) = rec["connector"].as_str() {
-            match self.as_person(connector, Method::Delete, "/delete", None).await {
+            if self.intake_waiting(connector).await? {
+                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} still takes messages its door delivered: ask again in a moment")));
+            }
+            match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
                 Err(e) if e.code != ErrorCode::NotFound => return Err(e),
-                _ => {}
+                Err(_) => {}
+                Ok(_) => crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: connector.into(), own: crate::principal::calls::Own::Archived, on: true }).await?,
             }
         }
         self.forget().await?;
-        self.note(format!("{}'s SimpleX went back to its computer; {} deleted", self.agent, rec["connector"].as_str().unwrap_or("no connector"))).await?;
+        self.note(format!("{}'s SimpleX went back to its computer; {} unbound and archived", self.agent, rec["connector"].as_str().unwrap_or("no connector"))).await?;
         Ok(json!({ "agent": self.agent, "back": true, "connector": rec["connector"] }))
+    }
+
+    /// Whether `connector` has a run of its `intake` queued or under way:
+    /// a message its door delivered, not yet published there.
+    async fn intake_waiting(&self, connector: &str) -> CellResult<bool> {
+        let mut url = self.url.clone();
+        url.set_query(Some("op=intake&limit=50"));
+        let bare = Request::new(url.as_str(), Method::Get)?;
+        let routed = Routed { name: connector.into(), url, signed: Some(self.person.clone()), credential: None };
+        let mut r = crate::forward(self.env, &bare, None, crate::Forward { routed, inner: "/api/runs".into(), extra: vec![] }).await?;
+        let runs = answer(&mut r, &format!("{connector}'s runs")).await?;
+        Ok(runs["runs"].as_array().is_some_and(|runs| runs.iter().any(|r| r["status"] == "queued" || r["status"] == "running")))
     }
 }
 

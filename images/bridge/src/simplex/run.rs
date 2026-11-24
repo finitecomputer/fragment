@@ -275,11 +275,18 @@ pub struct Packed {
 /// place (a door that never held a save, so never ran: its own databases
 /// are untouched here), or nothing done.
 pub enum Back {
-    /// Its door's link, and the words of the replies it took and had not
-    /// sent, sent from here.
+    /// Its door's link, and what of the replies it took it had not sent,
+    /// sent from here.
     Placed(Box<Link>, Vec<String>),
     Untouched,
     Failed,
+}
+
+/// A door's save as a way back reads it: a link to place, or a staged chat
+/// its door never kept, which this computer keeps staged as it was.
+enum Placing {
+    Link(Link, Vec<String>),
+    Staged,
 }
 
 /// What a door's save says beside its databases that a way back takes:
@@ -291,16 +298,26 @@ struct DoorKept {
     /// their words go on from here (`placed`).
     #[serde(default)]
     replies: Vec<DoorReply>,
+    /// A staged chat its door holds and never kept (adopted as its door
+    /// would restore it): never placed here as this link's.
+    #[serde(default)]
+    adopt: Option<serde_json::Value>,
 }
 
-/// One of them (images/simplex-door's `Reply`): its words, and whether its
-/// door sent them already (its files stay with that door).
+/// One of them (images/simplex-door's `Reply`): its words, whether its door
+/// sent them already, and its files still to send (they stay with that door).
 #[derive(Deserialize)]
 struct DoorReply {
     text: String,
     #[serde(default)]
     said: bool,
+    #[serde(default)]
+    files: Vec<serde_json::Value>,
 }
+
+/// What its owner's app is told of a reply's file a way back could not
+/// bring from its door.
+const FILE_LEFT: &str = "(I sent a file here that didn't come through.)";
 
 /// A handover's scratch, in the agent's directory: its save made and
 /// checked there, gone after.
@@ -332,10 +349,14 @@ fn pack_handover(h: &Handing) -> Result<Vec<u8>, super::save::SaveError> {
 /// A way back's save placed as `dir`'s databases (its door's newest: the
 /// databases its door's core went on with), each checked first, and the
 /// contact its link is bound to in them: the link it holds.
-fn place_back(dir: &Path, packed: &[u8]) -> Result<(Link, Vec<String>), super::save::SaveError> {
+fn place_back(dir: &Path, packed: &[u8]) -> Result<Placing, super::save::SaveError> {
     use super::save::{self, SaveError};
     let state = save::stage(packed, dir)?;
     let kept: DoorKept = serde_json::from_slice(&state).map_err(|e| SaveError::Corrupt(format!("its state: {e}")))?;
+    if kept.adopt.is_some() {
+        let _ = std::fs::remove_dir_all(dir.join("restoring"));
+        return Ok(Placing::Staged);
+    }
     // one this bridge would set aside as it starts is never placed
     Link::from_json(&serde_json::to_string(&kept.link).expect("a link serializes")).map_err(|e| SaveError::Corrupt(format!("its link: {e}")))?;
     if let Phase::Linked { contact, .. } = kept.link.phase {
@@ -344,8 +365,16 @@ fn place_back(dir: &Path, packed: &[u8]) -> Result<(Link, Vec<String>), super::s
         }
     }
     save::place(dir)?;
-    let unsent: Vec<String> = kept.replies.into_iter().filter(|r| !r.said && !r.text.trim().is_empty()).map(|r| r.text).collect();
-    Ok((kept.link, unsent))
+    let mut carried = vec![];
+    for r in kept.replies {
+        if !r.said && !r.text.trim().is_empty() {
+            carried.push(r.text);
+        }
+        if !r.files.is_empty() {
+            carried.push(FILE_LEFT.to_string());
+        }
+    }
+    Ok(Placing::Link(kept.link, carried))
 }
 
 /// A save that would not be made or placed, as the platform is told it:
@@ -580,6 +609,7 @@ impl Handle {
         let nonce = ticket.nonce.clone();
         self.tx.send(Msg::Back { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await.map_err(|_| gone())?;
         let (dir, key) = answer.await.map_err(|_| gone())??;
+        let staged_here = stage::ready(&dir).is_some();
         // a staged chat never kept here, its door never run: no key to take
         // back, none made; one kept in its door: a key of its own made here
         let taken = match (key, packed.is_empty()) {
@@ -593,7 +623,13 @@ impl Handle {
         let placed = match taken {
             // a door that never held a save never ran: these databases are its link's still
             Ok(_) if packed.is_empty() => Ok(None),
-            Ok(_) => tokio::task::spawn_blocking(move || place_back(&dir, &packed)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its placing stopped: {e}")))).map(Some).map_err(save_refused),
+            Ok(_) => match tokio::task::spawn_blocking(move || place_back(&dir, &packed)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its placing stopped: {e}")))) {
+                Ok(Placing::Link(link, carried)) => Ok(Some((link, carried))),
+                // its staged chat kept here as it was, while it is here
+                Ok(Placing::Staged) if staged_here => Ok(None),
+                Ok(Placing::Staged) => Err(Refused::new(409, "its staged chat is in its door's save alone: its connector is kept").coded("staged")),
+                Err(e) => Err(save_refused(e)),
+            },
             Err(e) => Err(Refused::new(502, format!("the platform did not take its door's key back: {e}"))),
         };
         let back = match &placed {
@@ -858,6 +894,11 @@ pub struct Saved {
     /// answered again) and when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved: Option<Moved>,
+    /// What a way back brought from its door that its door had taken and
+    /// not sent (its replies' words, and a note for their files, which
+    /// stay with that door): sent once its core is next up, then let go.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<String>,
 }
 
 /// A link handed over to its door; or its staged identity, never kept here
@@ -1492,7 +1533,8 @@ impl Manager {
             (None, Phase::Linked { contact, .. }) => (s.dir.clone(), *contact, serde_json::json!({ "link": s.saved.link })),
             // a mark a release before this one left with nothing to pack:
             // its way back unmarks it
-            (None, _) => return Err(Refused::new(409, "it is marked moved, with no link to hand over: its way back first").coded("not_linked")),
+            // the platform's mark kept (`moved`), so its way back reaches here
+            (None, _) => return Err(Refused::new(409, "it is marked moved, with no link to hand over: its way back first").coded("moved")),
         };
         s.handing = true;
         crate::ev!("simplex.handing_over", { "agent": agent, "again": again.is_some(), "staged": adopt.is_some() });
@@ -1583,15 +1625,14 @@ impl Manager {
             }
             s.saved.link = link;
             s.saved.moved = None;
+            // what its door took and had not sent goes on from here, in
+            // order, once its core is up (`up`)
+            s.saved.carried.extend(unsent.iter().cloned());
             if let Err(e) = store(&s.dir, &s.saved) {
                 crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
                 return Err(Refused::new(500, format!("SimpleX placed its door's save, and could not write its link: {e}")));
             }
-            crate::ev!("simplex.back", { "agent": agent, "behind": behind, "replies": unsent.len() });
-            // what its door took and had not sent goes on from here, in order
-            for text in &unsent {
-                self.apply(agent, Input::Reply(text));
-            }
+            crate::ev!("simplex.back", { "agent": agent, "behind": behind, "carried": unsent.len() });
         }
         self.publish_relaying();
         Ok(self.view(agent, None).expect("its slot"))
@@ -1905,7 +1946,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] });
             let door = Key::load(&dir);
             let staged = stage::ready(&dir);
             let resume = stage::pending(&dir);
@@ -2522,6 +2563,17 @@ impl Manager {
         });
         if let Some(name) = told {
             self.apply(f, Input::Reply(&moved(&name)));
+        }
+        // what a way back brought from its door, sent once, then let go
+        let carried = self.slots.get_mut(f).map(|s| std::mem::take(&mut s.saved.carried)).unwrap_or_default();
+        if !carried.is_empty() {
+            for text in &carried {
+                self.apply(f, Input::Reply(text));
+            }
+            let s = &self.slots[f];
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+            }
         }
     }
 
@@ -4138,7 +4190,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -4154,7 +4206,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![] };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec![("juniper--k3x9".to_string(), Some("juniper-simplex--w9x2".to_string()))]);
@@ -4228,7 +4280,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
             name: None,
             named_at: None,
             naming: false,
@@ -4500,7 +4552,36 @@ mod tests {
         let s = m.slots.get_mut(f).expect("its slot");
         s.saved.moved = Some(Moved { nonce: "0e".repeat(16), at: 1, staged: None });
         let r = m.handover(f, &signed("handover", &"0e".repeat(16))).await.err().expect("nothing to pack");
-        assert_eq!((r.status, r.code), (409, Some("not_linked")));
+        assert_eq!((r.status, r.code), (409, Some("moved")), "the platform's mark kept, for its way back");
+        // a door's save of a staged chat it never kept is never placed as
+        // this link's: its staged copy here stays as it was
+        let read = Adoption { owner: 3, name: "paul".into(), newest: 40, leftovers: vec![] };
+        let held = dir.join("held");
+        core_dbs(&held, 3);
+        let unkept = super::super::save::make(&held, &held.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": Link::default(), "adopt": read })).expect("json")).expect("a save");
+        let before = std::fs::read(link_dir.join("sx_chat.db")).ok();
+        assert!(matches!(place_back(&link_dir, &unkept), Ok(Placing::Staged)));
+        assert_eq!(std::fs::read(link_dir.join("sx_chat.db")).ok(), before, "nothing placed");
+        assert!(!link_dir.join("restoring").exists() && stage::ready(&link_dir).is_some(), "its staged copy as it was");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (D4, Codex's fix-check of #1541): what a way back carried from its
+    /// door goes to its owner's app once its core is up, once, then is let
+    /// go, on disk too: never asked of a core that is not there.
+    #[tokio::test]
+    async fn carried_replies_go_once_its_core_is_up() {
+        let dir = std::env::temp_dir().join(format!("simplex-carried-{}", std::process::id()));
+        let (mut m, mut sent, _posts) = captured(&dir, 16);
+        let f = "juniper--k3x9";
+        let s = m.slots.get_mut(f).expect("its slot");
+        s.up = false;
+        s.saved.carried = vec!["taken, not yet sent".into()];
+        store(&s.dir.clone(), &s.saved).expect("written");
+        m.up(f, 1);
+        let lines: Vec<String> = sent_lines(&mut sent).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(lines.iter().filter(|l| l.contains("taken, not yet sent")).count(), 1, "sent once: {lines:?}");
+        assert!(m.slots[f].saved.carried.is_empty() && load(&m.slots[f].dir, &agent()).expect("its file").carried.is_empty(), "let go");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4553,7 +4634,8 @@ mod tests {
         let mut at_door = Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, delivered: 57, ..Link::default() };
         let door_dir = dir.join("door");
         core_dbs(&door_dir, 3);
-        let replies = serde_json::json!([{ "key": "chat:7", "text": "sent before it stopped", "contact": 3, "said": true }, { "key": "chat:8", "text": "taken, not yet sent", "contact": 3 }]);
+        let file = serde_json::json!({ "sha256": "ab".repeat(32), "name": "plan.pdf", "type": "application/pdf", "size": 4 });
+        let replies = serde_json::json!([{ "key": "chat:7", "text": "sent before it stopped", "contact": 3, "said": true }, { "key": "chat:8", "text": "taken, not yet sent", "contact": 3 }, { "key": "chat:9", "text": "its words sent", "contact": 3, "said": true, "files": [file] }]);
         let newest = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": at_door, "mark": 9, "replies": replies })).expect("json")).expect("its door's save");
         let stranger = Link { phase: Phase::Linked { contact: 8, name: "someone".into() }, ..Link::default() };
         let wrong = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": stranger })).expect("json")).expect("a save");
@@ -4562,16 +4644,14 @@ mod tests {
         m.placed(f, Back::Failed, false).expect("its view");
         assert!(m.moved(f), "nothing placed: still moved");
         let (into, _) = m.back(f, &signed("back", &"0e".repeat(16))).expect("taken");
-        let link = place_back(&into, &newest).expect("placed");
-        let (link, unsent) = link;
-        assert_eq!(unsent, ["taken, not yet sent"], "what its door had not sent");
-        m.placed(f, Back::Placed(Box::new(link), unsent), true).expect("its view");
+        let Ok(Placing::Link(link, carried)) = place_back(&into, &newest) else { panic!("placed") };
+        assert_eq!(carried, ["taken, not yet sent", FILE_LEFT], "what its door had not sent: words, and a note for a file it holds");
+        m.placed(f, Back::Placed(Box::new(link), carried), true).expect("its view");
         let read = load(&link_dir, &agent()).expect("its file");
         assert!(read.moved.is_none() && !m.moved(f), "moved no more");
+        assert_eq!(read.carried, ["taken, not yet sent", FILE_LEFT], "kept for its core's next start, on disk");
         at_door.syncing = true;
         at_door.forced = true;
-        // sent from here once its link is in step (it syncs first)
-        at_door.outbox = ["taken, not yet sent".to_string()].into();
         assert_eq!(read.link, at_door, "its door's link, forced to sync as it was behind");
         assert!(!link_dir.join("restoring").exists(), "its stage placed");
         assert_eq!(started_afresh(&dir, &key, computer(true, 1, None)).await, (true, false), "read afresh, its core is started");
@@ -4848,7 +4928,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -5010,7 +5090,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
             name: None,
             named_at: None,
             naming: false,

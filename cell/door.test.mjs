@@ -875,7 +875,6 @@ test("a save given whose bytes are not the SHA-256 it names is never kept", asyn
 test("the way back: a planned stop, its runner's last save, and that save handed back; again the same", async () => {
   const d = door();
   const back = (name = DOOR) => d.call("POST", "/door/handback", {}, JSON.stringify({ door: name }));
-  assert.equal((await back()).status, 204, "a door that never held a save: none");
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   await d.save(life1, 1, "its first");
@@ -925,6 +924,18 @@ test("the way back waits while its owner's messages still go to its connector, n
   await e.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("a link given") });
   const given = await e.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
   assert.deepEqual([given.status, given.headers.get("x-door-save"), given.headers.get("x-door-started")], [200, "0-1", "0"]);
+  // fenced first, a staged chat's let-go included: no new chat begins
+  const late = await e.job("connect", { name: "Juniper", keep: false }, { "x-door-secret": "s3cret-of-the-inbox" });
+  assert.deepEqual([late.status, (await late.json()).error], [409, "handed_back"]);
+  assert.deepEqual([e.saves().length, e.c.starts.length], [1, 0], "its save kept, nothing started");
+  // one never begun (its save not yet given, a move racing its way back):
+  // fenced too, taking no save and starting nothing after
+  const f = door();
+  assert.equal((await f.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }))).status, 204);
+  const after = await f.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("too late") });
+  assert.deepEqual([after.status, (await after.json()).error], [409, "handed_back"]);
+  assert.equal((await f.connect()).status, 409);
+  assert.deepEqual([f.saves(), f.c.starts.length], [[], 0]);
 });
 
 test("a door given its owner's chat with their old agent starts only at their word: kept, it restores it; let go, it begins anew", async () => {

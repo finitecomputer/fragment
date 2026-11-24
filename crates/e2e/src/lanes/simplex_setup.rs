@@ -469,7 +469,7 @@ impl Phone {
         }
     }
 
-    fn say(&mut self, contact: i64, text: &str) -> Result<()> {
+    pub(super) fn say(&mut self, contact: i64, text: &str) -> Result<()> {
         let body = json!([{ "msgContent": { "type": "text", "text": text } }]);
         let r = self.cmd(&format!("/_send @{contact} json {body}"))?;
         ensure!(tag(&r) == "newChatItems", "the phone's send: {r}");
@@ -477,7 +477,7 @@ impl Phone {
     }
 
     /// What it received from its contacts, in order, once `done` takes it.
-    fn received(&mut self, within: Duration, done: impl Fn(&[String]) -> bool) -> Result<Vec<String>> {
+    pub(super) fn received(&mut self, within: Duration, done: impl Fn(&[String]) -> bool) -> Result<Vec<String>> {
         let mut got = vec![];
         let t0 = Instant::now();
         // bounded by `within`

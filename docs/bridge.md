@@ -659,7 +659,11 @@ never reaches another agent's core.
   door key back at the platform, then places its door's newest save as
   its databases and link (one behind its door's newest effects forces a
   sync first, as a rollback's does), or, from a door that never ran,
-  nothing: its own databases are its link's still. Its databases stay
+  nothing: its own databases are its link's still. What its door took and
+  had not sent (its replies' words, and a note for their files, which
+  stay with that door) is kept in `link.json` (`carried`) and sent once
+  its core is next up. A staged chat its door never kept is never placed
+  as its link: its staged copy here stays as it was. Its databases stay
   here, untouched, until D5.
 - **Another client on its databases** (FIN-483: a core run elsewhere on
   a copy of them, such as an old finite.computer agent started again after
