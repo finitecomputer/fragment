@@ -81,7 +81,7 @@ impl FragmentCell {
     }
 
     /// A blob seen now; its type the latest upload's that declared one.
-    fn record_blob(&self, sha: &str, size: u64, mime: Option<&str>) -> CellResult<()> {
+    pub(crate) fn record_blob(&self, sha: &str, size: u64, mime: Option<&str>) -> CellResult<()> {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
             "INSERT INTO blobs (sha, size, uploaded_at, seen_at, mime) VALUES (?, ?, ?, ?, ?)
@@ -103,7 +103,11 @@ impl FragmentCell {
     }
 
     async fn store_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
-        self.require(caller, false, Role::Editor)?;
+        // a connector's own agent, a viewer there, uploads the files its
+        // replies there carry (doors.rs `door_agent`)
+        if !self.door_agent(caller)? {
+            self.require(caller, false, Role::Editor)?;
+        }
         self.writable().await?;
 
         check_sha(sha)?;

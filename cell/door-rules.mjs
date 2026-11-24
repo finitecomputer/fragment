@@ -22,8 +22,25 @@ export const STALE_ASKS = 3;
 export const INBOX_HEADER = "x-simplex-door-secret";
 
 // What its connector's jobs ask (cell/src/jobs.rs sends each as
-// `/job/<ask>`): nothing of its runner's own or its levers'.
-export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply"];
+// `/job/<ask>`): nothing of its runner's own or its levers'. `file` is a
+// file's, by its SHA-256 (`/job/file/<sha256>`).
+export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply", "file"];
+
+// The files a door holds between its connector and its runner (its
+// owner's, on their way to the connector's chat; its agent's, on their way
+// to its owner's SimpleX app), each for a moment: at most this many, this
+// many bytes between them, and each this long. Past the first two, a new
+// one is refused until older ones go (asked again later); SimpleX's own
+// bound on one file is its runner's (images/simplex-door).
+export const FILES_KEPT = 64;
+export const FILES_BYTES_MAX = 1024 * 1024 * 1024;
+export const FILE_KEPT_MS = 24 * 60 * 60 * 1000;
+// A reply's files, at most: a chat record's (fragment_proto
+// `limits::FILES_PER_MESSAGE`, held to it by xtask/src/guards.rs).
+export const REPLY_FILES_MAX = 8;
+// The header a file the door answers names its SHA-256 in
+// (fragment_core::door::FILE_SHA_HEADER).
+export const FILE_SHA_HEADER = "x-door-sha256";
 
 // The door's schema, step by step, from 1: a step released is never edited
 // or dropped, only one added after it (as the Rust objects' are,
@@ -38,6 +55,9 @@ export const STEPS = [
   "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), fragment TEXT NOT NULL, secret TEXT NOT NULL, asked INTEGER NOT NULL DEFAULT 0)",
   // whether its connector's inbox took it
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
+  // the files it holds (`FILES_KEPT`): each by its SHA-256, its bytes, its
+  // type as its giver said, and when it came
+  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL)",
 ];
 
 // The steps a schema at `version` has yet to take, in order.
@@ -80,6 +100,43 @@ export function stale(status, body) {
 export function doorPrefix(door) {
   if (!nameOk(door)) throw new Error(`no door is named ${JSON.stringify(door)}`);
   return `doors/${door}/`;
+}
+
+// A file it holds, in the bucket under the door's own prefix.
+export function fileKey(door, sha) {
+  if (!shaOk(sha)) throw new Error(`no file is named ${JSON.stringify(sha)}`);
+  return `${doorPrefix(door)}files/${sha}`;
+}
+
+// A file's name: its SHA-256, in lowercase hex.
+export function shaOk(sha) {
+  return typeof sha === "string" && /^[0-9a-f]{64}$/.test(sha);
+}
+
+// A file's type as its giver said it: a media type's shape, else none.
+export function typeOf(type) {
+  return typeof type === "string" && type.length <= 128 && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(type.toLowerCase()) ? type.toLowerCase() : "application/octet-stream";
+}
+
+// Whether a file of `bytes` may be held beside `files` (each {bytes, at})
+// at `now`: those past `FILE_KEPT_MS` are let go first (`stale`).
+export function fileRoom(files, bytes, now) {
+  const kept = files.filter((f) => now - f.at < FILE_KEPT_MS);
+  const held = kept.reduce((n, f) => n + f.bytes, 0);
+  return kept.length < FILES_KEPT && held + bytes <= FILES_BYTES_MAX;
+}
+
+// A reply's files as its connector names them: each {sha256, name, type,
+// size}, at most `REPLY_FILES_MAX`, else null.
+export function replyFiles(files) {
+  if (files === undefined) return [];
+  if (!Array.isArray(files) || files.length > REPLY_FILES_MAX) return null;
+  const out = [];
+  for (const f of files) {
+    if (!shaOk(f?.sha256) || typeof f.name !== "string" || f.name.length > 255 || !Number.isInteger(f.size) || f.size < 0) return null;
+    out.push({ sha256: f.sha256, name: f.name, type: typeOf(f.type), size: f.size });
+  }
+  return out;
 }
 
 // A save's file in the bucket, under the door's own prefix.

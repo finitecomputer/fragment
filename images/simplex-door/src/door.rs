@@ -14,6 +14,13 @@
 //!   409 when a newer generation runs (this runner then ends).
 //! - `POST /deliver`: one of its owner's messages (`Delivery`), taken with a
 //!   2xx whose `MARK_HEADER` numbers it as an effect.
+//! - `PUT /file/<sha256>`: a file its owner sent, received whole, for a
+//!   delivery to name (`File`); 503 while the door holds as many as it may
+//!   (given again later). `GET /file/<sha256>`: a file of a reply's, which
+//!   its connector gave the door.
+//! - `GET /relay?host=&port=`: a WebSocket to one of SimpleX's XFTP
+//!   servers, its bytes untouched both ways (the core's file traffic, which
+//!   a container cannot send itself: socks.rs in the bridge).
 //! - `POST /unreadable {save, why}`: the save given will not restore (its
 //!   bytes, never this container's disk); the runner then ends (exit 2)
 //!   and its door starts it from an older one.
@@ -31,7 +38,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Method, Request, StatusCode};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::save::UNPACKED_MAX_BYTES;
 
@@ -92,14 +99,26 @@ pub enum Saved {
 #[derive(Debug, Serialize)]
 pub struct Delivery<'a> {
     pub id: &'a str,
-    /// `text`, `image`, `voice`, `file`, `link`, …: only text is carried;
-    /// any other's text is its caption.
+    /// `text`, `image`, `voice`, `file`, `link`, …: any but text's text is
+    /// its caption.
     pub kind: &'a str,
-    pub text: &'a str,
+    /// Its text, and a note of a file it carried that did not come.
+    pub text: String,
     /// When its sender sent it, as the core wrote it.
     pub at: &'a str,
-    /// A file it carries, named, not yet carried itself.
-    pub file: Option<FileNote<'a>>,
+    /// The file it carries, which the door holds (`PUT /file`).
+    pub file: Option<&'a File>,
+}
+
+/// A file the door holds, by its SHA-256: one its owner sent, or one of a
+/// reply's (as its connector names it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct File {
+    pub sha256: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    pub size: u64,
 }
 
 #[derive(Serialize)]
@@ -119,15 +138,15 @@ struct Answer {
     body: Bytes,
 }
 
-#[derive(Debug, Serialize)]
-pub struct FileNote<'a> {
-    pub name: &'a str,
-    pub size: u64,
-}
-
 impl<'a> Delivery<'a> {
-    pub fn of(i: &'a Inbound) -> Delivery<'a> {
-        Delivery { id: &i.id, kind: &i.kind, text: &i.text, at: &i.at, file: i.file.as_ref().map(|f| FileNote { name: &f.name, size: f.size }) }
+    /// `i`, carrying `file`, or with `note` (why its file did not come).
+    pub fn of(i: &'a Inbound, file: Option<&'a File>, note: Option<&str>) -> Delivery<'a> {
+        let text = match note {
+            Some(n) if i.text.trim().is_empty() => n.to_string(),
+            Some(n) => format!("{}\n\n{n}", i.text.trim_end()),
+            None => i.text.clone(),
+        };
+        Delivery { id: &i.id, kind: &i.kind, text, at: &i.at, file }
     }
 }
 
@@ -237,6 +256,34 @@ impl Door {
         let _ = self.call(Method::POST, "/unreadable", &[("content-type", "application/json".to_string())], Some(Bytes::from(body))).await;
     }
 
+    /// A file its owner sent, whole, its type as its message says: held by
+    /// the door once this answers.
+    pub async fn put_file(&self, sha256: &str, media_type: &str, bytes: Bytes) -> Result<(), DoorError> {
+        let a = self.call(Method::PUT, &format!("/file/{sha256}"), &[("content-type", media_type.to_string())], Some(bytes)).await?;
+        match a.status.is_success() {
+            true => Ok(()),
+            false => Err(Door::refused(a.status, &a.body)),
+        }
+    }
+
+    /// A file of a reply's that the door holds, whole.
+    pub async fn file(&self, sha256: &str) -> Result<Bytes, DoorError> {
+        let a = self.call(Method::GET, &format!("/file/{sha256}"), &[], None).await?;
+        match a.status {
+            StatusCode::OK => Ok(a.body),
+            _ => Err(Door::refused(a.status, &a.body)),
+        }
+    }
+
+    /// An XFTP relay to `host` (a name of letters, digits, `.` and `-`) on
+    /// `port`, through its door (`GET /relay`, a WebSocket).
+    pub async fn relay(&self, host: &str, port: u16) -> Result<fragment_bridge::net::ClientWs, String> {
+        if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+            return Err(format!("{} is no host a relay names", fragment_bridge::simplex::wire::cut(host, 64)));
+        }
+        fragment_bridge::net::connect_ws(&self.base, &format!("/relay?host={host}&port={port}"), &[(GENERATION_HEADER, self.generation.to_string())]).await
+    }
+
     /// One message delivered: its mark, the door's number for it.
     pub async fn deliver(&self, d: &Delivery<'_>) -> Result<u64, DoorError> {
         let body = serde_json::to_vec(d).expect("a delivery is JSON");
@@ -315,7 +362,7 @@ mod tests {
         assert_eq!(saved, Err(DoorError::Answer { status: 500, body: "gone".into() }));
 
         let inbound = Inbound { id: "c2hhcmVk".into(), kind: "text".into(), text: "hi".into(), at: "2026-11-20T10:00:00Z".into(), item: 9, file: None };
-        let delivery = Delivery::of(&inbound);
+        let delivery = Delivery::of(&inbound, None, None);
         let (asked, mark) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-mark: 13\r\ncontent-length: 0\r\n\r\n"), door.deliver(&delivery));
         assert!(asked.ends_with(r#"{"id":"c2hhcmVk","kind":"text","text":"hi","at":"2026-11-20T10:00:00Z","file":null}"#), "{asked}");
         assert_eq!(mark, Ok(13));

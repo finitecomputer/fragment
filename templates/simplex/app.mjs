@@ -23,21 +23,28 @@
 //   delivers, once by its SimpleX id (`seen`), and publishes it here as
 //   its owner's words to their agent (`job.door`'s `relayed`, `to` that
 //   agent), which the platform takes only while its owner has bound this
-//   chat as that agent's `simplex` door. The agent's computer wakes for it
-//   as for any message: nothing here needs it awake.
+//   chat as that agent's `simplex` door. The file it carries (a voice
+//   message, a photo), which the door holds, is kept as one of this chat's
+//   blobs first (`job.fetch(…, {keep: true})`) and goes as its attachment.
+//   The agent's computer wakes for it as for any message: nothing here
+//   needs it awake.
 // - `mirror` (each reply its bound agent posts here) sends it through the
 //   door, once by its record, asking again until the door's runner says
-//   it is sent (or its link ended, or there is none).
+//   it is sent (or its link ended, or there is none); its files first
+//   given to the door (`job.fetch(…, {blob})`), which sends them after its
+//   text.
 //
 // No one but its owner edits this chat: its secrets, its code and the
 // operations here that are an owner's are theirs alone, the platform's
-// rule for a connector (docs/api.md, "An agent's doors"). Text only, for
-// now: another kind of message is answered so.
+// rule for a connector (docs/api.md, "An agent's doors").
 import { DurableObject } from "cloudflare:workers";
 
 const DOOR = "https://door.fragment.internal";
 // A message's text, as the platform's chat takes one (a person's post).
 const TEXT_MAX = 32 * 1024;
+// A reply's files sent on, at most: a message's (fragment_proto
+// `limits::FILES_PER_MESSAGE`; the door's `REPLY_FILES_MAX`).
+const FILES_MAX = 8;
 // Messages remembered, so one the door delivers again is taken once.
 const SEEN_MAX = 2000;
 // A reply asked again while the door's runner holds it unsent: after
@@ -86,18 +93,55 @@ function qrOf(qr) {
   return { size, dark: qr.dark };
 }
 
+// A file's name at its door: its SHA-256.
+const shaOk = (sha) => typeof sha === "string" && /^[0-9a-f]{64}$/.test(sha);
+
+// A reply's text, and a note of the files that stay in the chat alone.
+const noted = (text, kept) => [text, kept ? `(I sent ${kept === 1 ? "a file" : `${kept} files`} in our chat.)` : ""].filter(Boolean).join("\n\n");
+
 // A reply through the door, by `key`, asked until its runner says it is
-// sent (200), its link ended first (410), or it has no link (409).
-async function reply(job, key, text) {
+// sent (200), its link ended first (410), or it has no link (409). Its
+// files, each one the door holds (`give`); a door that cannot send them
+// (its runner carries no files yet, or one is gone from it) sends its
+// text alone, saying so.
+async function reply(job, key, text, files = []) {
   for (let ask = 0; ask < REPLY_ASKS_MAX; ask += 1) {
-    const { status, said } = await door(job, "reply", { key, text });
+    const { status, said } = await door(job, "reply", files.length ? { key, text, files } : { key, text });
     if (status === 200) return { sent: 1 };
+    if (status === 409 && files.length && (said.error === "no_files" || said.error === "no_file")) return reply(job, key, noted(text, files.length), []);
     if (status === 410) return { sent: 0, why: "its SimpleX link ended" };
     if (status === 409) return { sent: 0, why: "not linked" };
     if (status !== 202) return { sent: 0, why: `the door answered ${status}: ${String(said.message ?? "").slice(0, 200)}` };
     await job.sleep(Math.min(1000 * 2 ** ask, REPLY_WAIT_MAX_MS));
   }
   return { sent: 0, why: "the door still holds it unsent" };
+}
+
+// A reply's file, one of this chat's blobs, given to its door: whether
+// the door holds it now (a step that fails for good is one it does not).
+async function give(job, a) {
+  try {
+    const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream" } });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+// A file its owner sent, which its door holds, kept as one of this chat's
+// blobs: its attachment, or null (gone from the door, or not what it
+// names: a step that fails for good).
+async function keep(job, f) {
+  if (!shaOk(f?.sha256)) return null;
+  let r;
+  try {
+    r = await job.fetch(`${DOOR}/file/${f.sha256}`, { keep: true });
+  } catch {
+    return null;
+  }
+  if (!r.ok || r.blob?.sha256 !== f.sha256) return null;
+  const name = typeof f.name === "string" && f.name ? f.name.slice(0, 200) : "file";
+  return { sha256: r.blob.sha256, size: r.blob.size, type: typeof f.type === "string" ? f.type.slice(0, 128) : (r.blob.type ?? "application/octet-stream"), name };
 }
 
 // A word to its owner's app about a message not carried: tried, never
@@ -280,13 +324,18 @@ export class App extends DurableObject {
       await tell(job, `unlinked:${m.id}`, "This chat isn't linked to your agent.");
       return { ignored: "not linked" };
     }
-    const text = m.text.trim();
-    if (m.kind !== "text" || !text) {
-      await tell(job, `only-text:${m.id}`, "Only text reaches your agent from SimpleX for now.");
-      return { ignored: "not text" };
+    let text = m.text.trim();
+    // its file, kept here; one that is not is said so in its words
+    const file = m.file == null ? null : await keep(job, m.file);
+    if (m.file != null && !file) text = [text, "(I sent a file over SimpleX that did not arrive.)"].filter(Boolean).join("\n\n");
+    if (!text && !file) {
+      await tell(job, `nothing:${m.id}`, "That message didn't reach your agent: only text and files do.");
+      return { ignored: "nothing to carry" };
     }
-    await job.publish("chat", { text: [...text].slice(0, TEXT_MAX).join(""), to: [job.door.to], relayed: job.door.relayed }, "message");
-    return { relayed: true };
+    const body = { text: [...text].slice(0, TEXT_MAX).join(""), to: [job.door.to], relayed: job.door.relayed };
+    if (file) body.attachments = [file];
+    await job.publish("chat", body, "message");
+    return { relayed: true, file: !!file };
   }
 
   async mirror({ record } = {}, job) {
@@ -299,9 +348,17 @@ export class App extends DurableObject {
     const b = record?.body;
     if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
     const said = typeof b.text === "string" ? b.text.trim() : "";
-    const files = Array.isArray(b.attachments) ? b.attachments.length : 0;
-    const text = said || (files ? "(Sent a file: open the chat to see it.)" : "");
-    if (!text) return { sent: 0, why: "nothing said" };
-    return reply(job, `chat:${record.seq}`, text);
+    // its files, each given to the door first; one it does not take stays
+    // in the chat alone, and is said so
+    const attached = (Array.isArray(b.attachments) ? b.attachments : []).filter((a) => shaOk(a?.sha256)).slice(0, FILES_MAX);
+    const files = [];
+    let kept = 0;
+    for (const a of attached) {
+      if (await give(job, a)) files.push({ sha256: a.sha256, name: typeof a.name === "string" && a.name ? a.name.slice(0, 200) : "file", type: typeof a.type === "string" ? a.type.slice(0, 128) : "application/octet-stream", size: Number.isInteger(a.size) ? a.size : 0 });
+      else kept += 1;
+    }
+    const text = noted(said, kept);
+    if (!text && !files.length) return { sent: 0, why: "nothing said" };
+    return reply(job, `chat:${record.seq}`, text, files);
   }
 }

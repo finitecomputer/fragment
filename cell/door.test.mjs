@@ -153,8 +153,13 @@ function door({ noDoors = false } = {}) {
   // the same object started again over its storage (an eviction)
   d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
+  // a file its runner gives (`life`'s), and one its connector gives or reads
+  d.give = (life, sha, bytes, type = "audio/mp4") => call("PUT", `/egress/file/${sha}`, { "x-door-generation": String(life), "content-type": type, "content-length": String(bytes.length) }, bytes);
+  d.jobFile = (method, sha, bytes) => call(method, `/job/file/${sha}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...(bytes ? { "content-type": "application/pdf", "content-length": String(bytes.length) } : {}) }, bytes);
   return d;
 }
+
+const sha = (n) => String(n).padStart(2, "0").repeat(32);
 
 const life = (r) => Number(r.headers.get("x-door-life"));
 
@@ -525,4 +530,74 @@ test("its end names its own door alone", async () => {
   assert.equal((await d.end("not a door name!")).status, 400);
   assert.equal(d.prefixed().length, 2, "nothing ended");
   assert.ok(d.st.tables().includes("door"));
+});
+
+test("a file its runner received is held for its connector: once, from its running life alone, while there is room", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  assert.equal((await d.give(life1, sha(1), "voice bytes")).status, 200);
+  assert.deepEqual(await (await d.give(life1, sha(1), "voice bytes")).json(), { kept: sha(1), again: true }, "given again: held once");
+  assert.equal((await d.give(life1 + 1, sha(2), "x")).status, 409, "another life's: refused");
+  assert.equal((await d.give(life1, "nope", "x")).status, 400, "a file named by no SHA-256");
+  assert.equal((await d.call("PUT", `/egress/file/${sha(3)}`, { "x-door-generation": String(life1) })).status, 400, "no bytes, no length: refused");
+  // its connector keeps it as one of its blobs: its bytes, its type, named
+  const r = await d.jobFile("GET", sha(1));
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.headers.get("x-door-sha256"), r.headers.get("content-type"), r.headers.get("content-length"), await r.text()], [sha(1), "audio/mp4", "11", "voice bytes"]);
+  assert.equal((await d.jobFile("GET", sha(9))).status, 404, "one it does not hold");
+  assert.equal((await d.call("GET", `/job/file/${sha(1)}`, { "x-fragment-door": `${NAME}--fedcba987654`, "x-fragment-connector": NAME })).status, 409, "another life's connector: refused");
+  // as many as it may hold: refused until older ones go
+  for (let n = 10; n < 10 + 63; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
+  const full = await d.give(life1, sha(99), "x");
+  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"]);
+  // a day on, its watch lets them go, rows and files
+  d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
+  await d.o.alarm();
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 0);
+  assert.deepEqual(d.prefixed().filter((k) => k.includes("/files/")), [], "their files gone too");
+  assert.equal((await d.give(life1, sha(99), "x")).status, 200, "room again");
+});
+
+test("a delivery names its file by its SHA-256; a file named otherwise (an older runner's) goes as none", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(1), "voice bytes");
+  const file = { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 };
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v2", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { name: "memo.m4a", size: 11 } }));
+  await d.o.alarm();
+  assert.deepEqual(d.inbox.posts.map((p) => [p.body.payload.id, p.body.payload.file]), [["v1", file], ["v2", null]]);
+});
+
+test("a reply's files: given by its connector, then sent to a runner that carries files; one it does not hold, or a runner that carries none, refused", async () => {
+  const d = door();
+  await d.connect();
+  assert.equal((await d.jobFile("PUT", sha(5), "%PDF-1.7")).status, 200);
+  const files = [{ sha256: sha(5), name: "plan.pdf", type: "application/pdf", size: 8 }];
+  const no = await d.job("reply", { key: "chat:8", text: "here", files: [{ ...files[0], sha256: sha(6) }] });
+  assert.deepEqual([no.status, (await no.json()).error], [409, "no_file"], "a file it does not hold");
+  d.c.answers.push([200, { phase: "linked" }]);
+  const old = await d.job("reply", { key: "chat:8", text: "here", files });
+  assert.deepEqual([old.status, (await old.json()).error], [409, "no_files"], "a runner that carries no files: its connector sends the text alone");
+  d.c.answers.push([200, { phase: "linked", files: true }]);
+  assert.equal((await d.job("reply", { key: "chat:8", text: "here", files })).status, 202);
+  const asked = d.c.asked.filter((a) => a.path === "/reply");
+  assert.deepEqual(asked.map((a) => a.body), [{ key: "chat:8", text: "here", files }], "the runner asked once, with its files");
+  assert.equal((await d.job("reply", { key: "chat:8", text: "here", files: Array.from({ length: 9 }, () => files[0]) })).status, 400, "past a message's files");
+  // the file it holds is its runner's to read
+  const r = await d.call("GET", `/egress/file/${sha(5)}`);
+  assert.deepEqual([r.status, await r.text()], [200, "%PDF-1.7"]);
+});
+
+test("its end lets go of the files it holds with the rest", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(1), "voice bytes");
+  await d.jobFile("PUT", sha(2), "%PDF");
+  assert.equal(d.prefixed().filter((k) => k.includes("/files/")).length, 2);
+  await d.end();
+  assert.deepEqual(d.prefixed(), [], "every file under its prefix gone");
 });

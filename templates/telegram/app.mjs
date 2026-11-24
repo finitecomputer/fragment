@@ -302,8 +302,9 @@ export class App extends DurableObject {
     const b = record?.body;
     if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
     const said = typeof b.text === "string" ? b.text.trim() : "";
+    // its files stay in the chat (Telegram carries its words alone): said so
     const files = Array.isArray(b.attachments) ? b.attachments.length : 0;
-    const text = said || (files ? "(Sent a file: open the chat to see it.)" : "");
+    const text = [said, files ? "(Sent a file: open the chat to see it.)" : ""].filter(Boolean).join("\n\n");
     if (!text) return { sent: 0, why: "nothing said" };
     const { api, paired } = await job.call("route", {});
     if (!paired) return { sent: 0, why: "no account paired" };

@@ -250,7 +250,14 @@ Not built either:
   reaches another), and the door posts its
   owner's messages to the connector's inbox as a webhook does, which
   publishes each to the bound agent; the agent's computer wakes for it as
-  for any message, so it may sleep. Settings makes one for every seat,
+  for any message, so it may sleep. It carries files both ways (S1): its
+  owner's (a voice message, a photo) received by its core and given to the
+  door, which holds each a moment under `doors/<door>/files/` until its
+  connector keeps it as one of the chat's blobs; a reply's, which the bound
+  agent uploads to the connector's chat (a viewer there, it may upload its
+  replies' files), given to the door by its connector and sent after the
+  reply's text; its core's XFTP traffic through the door's relay (below).
+  Settings makes one for every seat,
   its setup page showing the invitation's QR code (D3); an always-on
   computer that does SimpleX keeps each agent's own (decision 32) until
   existing links move to doors.
@@ -890,6 +897,14 @@ relay` says why and holds its bounds). Only the targets the view's
 it); past a bound the socket closes with code 4008. The platform sees the
 host, the port, the byte counts and the times, never what is carried. Any
 process in the computer may use it.
+
+A SimpleX door's container has the same relay (`GET /relay?host=&port=`
+at `door.fragment.internal`: entry.mjs `DoorEgress`, `DoorRelay.target` in
+cell/src/doors.rs, relay.mjs pipes both): the same targets and each
+relay's bounds, its runner opening at most `relay::OPEN_MAX` at once. It
+keeps no day's budget of its own: a door runs no one's code but the
+platform's, and carries only its owner's files and its agent's replies'
+files, each bounded by its runner and the door's holding.
 
 ### Connector policy
 

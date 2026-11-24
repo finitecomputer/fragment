@@ -22,7 +22,10 @@
 //!   which an independent reader (`zbarimg`) reads from the screenshot as
 //!   the invitation's link; the phone connects with that link, and the page
 //!   says whom it linked; the phone's message reaches the agent, whose
-//!   reply comes back to the phone; Unlink ends it.
+//!   reply comes back to the phone; its voice message reaches the agent's
+//!   chat whole, and the agent's drawing comes back to it whole, both over
+//!   SimpleX's own file servers through the door's relay (the cell's,
+//!   entry.mjs `DoorEgress`); Unlink ends it.
 //!
 //! Its connector is deleted at the end, its door with it (FIN-614 item 4).
 
@@ -225,7 +228,8 @@ fn linked_for_real(s: &mut Suite, api: &Api, a: &Agent<'_>, b: &mut Browser, pag
         json!({ "said": said, "invitation": { "short": invitation["short"].is_string(), "qr": invitation["qr"]["size"] }, "read": read.as_deref() == Some(link.as_str()) }),
     );
 
-    let mut phone = Phone::start(&s.dir("simplex-phone"), &s.name("phone"))?;
+    let phone_dir = s.dir("simplex-phone");
+    let mut phone = Phone::start(&phone_dir, &s.name("phone"))?;
     let linked_up = (|| -> Result<(i64, Value)> {
         let r = phone.cmd(&format!("/c {link}"))?;
         ensure!(!tag(&r).contains("rror"), "the phone's connect: {r}");
@@ -255,6 +259,44 @@ fn linked_for_real(s: &mut Suite, api: &Api, a: &Agent<'_>, b: &mut Browser, pag
         "the phone's message reaches the agent through the connector, and its reply comes back to the phone",
         sent.is_ok() && back.as_ref().is_ok_and(|got| got.iter().any(|g| g.contains(text))),
         json!({ "sent": sent.map_err(|e| e.to_string()), "received": back.map_err(|e| e.to_string()) }),
+    );
+
+    // files, over SimpleX's own file servers through the door's relay: the
+    // phone's voice message (past what goes inline) reaches the agent's
+    // chat whole, and the agent's drawing comes back to the phone whole
+    let memo: Vec<u8> = (0..300_000u32).map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    let sha = fragment_core::blob::sha256_hex(&memo);
+    std::fs::write(phone_dir.join("files").join("memo.m4a"), &memo)?;
+    let body = json!([{ "filePath": "/data/files/memo.m4a", "msgContent": { "type": "voice", "text": "", "duration": 5 } }]);
+    let sent = phone.cmd(&format!("/_send @{contact} json {body}"));
+    let chat = || super::jobs::records(api, a.owner, name, "chat");
+    let voiced = s.eventually(SLOW, || chat().iter().any(|r| r["body"]["attachments"][0]["sha256"] == sha.as_str()));
+    let blob = api.signed(a.owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
+    s.ok(
+        "the phone's voice message reaches the agent's chat whole, over SimpleX's file servers through the door's relay",
+        sent.as_ref().is_ok_and(|r| tag(r) == "newChatItems") && voiced && blob.status == 200 && blob.bytes == memo,
+        json!({ "sent": sent.map(|r| tag(&r)).map_err(|e| e.to_string()), "voiced": voiced, "blob": blob.status, "bytes": blob.bytes.len(), "logs": if voiced { String::new() } else { phone.logs() } }),
+    );
+    let drawn = (|| -> Result<(Vec<u8>, Value)> {
+        phone.say(contact, "draw me something")?;
+        let is = |ci: &Value| ci["chatItem"]["chatDir"]["type"] == "directRcv" && ci["chatItem"]["file"]["fileId"].is_i64();
+        let e = phone.wait(a.wake + SLOW, |e| tag(e) == "newChatItems" && e["chatItems"].as_array().is_some_and(|cs| cs.iter().any(is)))?;
+        let ci = e["chatItems"].as_array().and_then(|cs| cs.iter().find(|c| is(c))).cloned().unwrap_or_default();
+        let id = ci["chatItem"]["file"]["fileId"].as_i64().unwrap_or(0);
+        phone.wait(SLOW, |e| tag(e) == "rcvFileDescrReady" && e["chatItem"]["chatItem"]["file"]["fileId"] == id)?;
+        let r = phone.cmd(&format!("/freceive {id}"))?;
+        ensure!(!tag(&r).contains("rror"), "/freceive {id}: {r}");
+        let done = phone.wait(SLOW, |e| tag(e) == "rcvFileComplete" && e["chatItem"]["chatItem"]["file"]["fileId"] == id)?;
+        let path = done["chatItem"]["chatItem"]["file"]["fileSource"]["filePath"].as_str().unwrap_or_default().to_string();
+        Ok((std::fs::read(phone_dir.join("files").join(path.rsplit('/').next().unwrap_or(&path)))?, ci["chatItem"]["content"]["msgContent"].clone()))
+    })();
+    let reply = super::computers::agent_replies(&chat(), a.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
+    let fsha = reply["body"]["attachments"][0]["sha256"].as_str().unwrap_or_default().to_string();
+    let theirs = api.signed(a.owner, "GET", &format!("/api/f/{name}/blobs/{fsha}"), None)?;
+    s.ok(
+        "the agent's drawing comes back to the phone whole, after its words, over SimpleX's file servers through the door's relay",
+        drawn.as_ref().is_ok_and(|(bytes, _)| !fsha.is_empty() && theirs.status == 200 && *bytes == theirs.bytes),
+        json!({ "received": drawn.as_ref().map(|(b, c)| json!({ "bytes": b.len(), "content": c })).map_err(|e| format!("{e:#}")), "reply": reply, "logs": if drawn.is_ok() { String::new() } else { phone.logs() } }),
     );
 
     // Unlink: its link ends, and the page offers Link

@@ -22,8 +22,12 @@
 //! delivers it reaches the connector's inbox, is published there as its
 //! owner's to the agent, whose computer, asleep, wakes and answers; the
 //! answer goes to the door's runner (which has no SimpleX link here, and
-//! says so); a delivery without the inbox's secret is refused, and one once
-//! its owner unbound it reaches no one.
+//! says so); its owner's voice message (a file its runner gave the door)
+//! is kept as one of the connector's blobs and published as its
+//! attachment; its agent's reply's file (uploaded there by its agent, a
+//! viewer) is given to the door, which holds those very bytes (hashed
+//! again there); a delivery without the inbox's secret is refused, and
+//! one once its owner unbound it reaches no one.
 
 use std::time::{Duration, Instant};
 
@@ -235,6 +239,19 @@ fn deliver(api: &Api, door: &str, id: &str, text: &str) -> Result<Value> {
     lever(api, door, "deliver", json!({ "message": { "id": id, "kind": "text", "text": text, "at": "2026-11-21T00:00:00Z", "file": null } }))
 }
 
+/// A file as the door's runner gives one (`bytes`, typed `type`): its
+/// SHA-256, which a delivery then names.
+fn give(api: &Api, door: &str, bytes: &[u8], kind: &str) -> Result<String> {
+    use base64::Engine as _;
+    let r = lever(api, door, "file", json!({ "bytes": base64::engine::general_purpose::STANDARD.encode(bytes), "type": kind }))?;
+    r["sha256"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("the door's file: {r}"))
+}
+
+/// One of its owner's messages carrying file `sha256`, as its runner delivers it.
+fn deliver_file(api: &Api, door: &str, id: &str, kind: &str, file: Value) -> Result<Value> {
+    lever(api, door, "deliver", json!({ "message": { "id": id, "kind": kind, "text": "", "at": "2026-11-24T00:00:00Z", "file": file } }))
+}
+
 /// A SimpleX connector of `owner`'s named `name`, its inbox's `secret`
 /// set, connected: its own job's connect starts its life's door
 /// (`fragment_core::door::door_id`) and gives it that secret. Its name,
@@ -312,6 +329,42 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
         "its agent's computer, asleep, wakes for it and answers; the answer goes to the door's runner, which has no SimpleX link here and says so",
         answered && mirror["output"] == json!({ "sent": 0, "why": "not linked" }),
         json!({ "replies": super::computers::agent_replies(&chat(), a.identity), "mirror": mirror }),
+    );
+
+    // its owner's voice message: its file, which its runner gave the door,
+    // kept as one of the connector's blobs and published as its attachment
+    // within a lever's body as base64 (cell/door.mjs `BODY_MAX`)
+    let memo: Vec<u8> = (0..150_000u32).map(|n| (n % 253) as u8).collect();
+    let sha = give(api, &door, &memo, "audio/mp4")?;
+    let named = json!({ "sha256": sha, "name": "memo.m4a", "type": "audio/mp4", "size": memo.len() });
+    deliver_file(api, &door, "sx-e2e-voice", "voice", named)?;
+    let intake = newest("intake");
+    let voiced = chat().into_iter().find(|r| r["body"]["attachments"][0]["sha256"] == sha.as_str()).unwrap_or_default();
+    let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
+    s.ok(
+        "its owner's voice message reaches their agent with its file, kept from the door as one of the connector's blobs, whole",
+        intake["output"] == json!({ "relayed": true, "file": true })
+            && voiced["body"]["attachments"] == json!([{ "sha256": sha, "size": memo.len(), "type": "audio/mp4", "name": "memo.m4a" }])
+            && voiced["body"]["relayed"]["via"] == "simplex"
+            && blob.status == 200
+            && blob.bytes == memo,
+        json!({ "intake": intake, "record": voiced, "blob": blob.status, "bytes": blob.bytes.len() }),
+    );
+
+    // its agent's reply's file (a drawing), uploaded there by its agent, a
+    // viewer: given to the door, which holds those very bytes
+    deliver(api, &door, "sx-e2e-draw", "draw me something")?;
+    let drew = s.eventually(a.wake, || super::computers::agent_replies(&chat(), a.identity).iter().any(|r| r["body"]["attachments"][0]["sha256"].is_string()));
+    let drawn = super::computers::agent_replies(&chat(), a.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
+    let file = drawn["body"]["attachments"][0].clone();
+    let fsha = file["sha256"].as_str().unwrap_or("").to_string();
+    let look = || api.unsigned("POST", "/api/test/door", Some(&json!({ "door": door, "op": "file", "sha": fsha }))).map(|r| r.body).unwrap_or_default();
+    let held = s.eventually(a.wake, || look()["sha256"] == fsha.as_str());
+    let mirror = newest("mirror");
+    s.ok(
+        "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes, and the door holds those very bytes",
+        drew && held && look()["size"] == file["size"] && mirror["output"] == json!({ "sent": 0, "why": "not linked" }) && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
+        json!({ "reply": drawn, "held": look(), "mirror": mirror }),
     );
 
     // a delivery without the inbox's secret, from anyone, starts nothing

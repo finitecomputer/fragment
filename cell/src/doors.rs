@@ -168,6 +168,16 @@ impl FragmentCell {
         Ok(self.open_binding()?.map(|b| (npub::display(&b.identity), b.door)))
     }
 
+    /// Whether `caller` is the agent this connector is an open door of,
+    /// acting as itself: a viewer here (rule 5 of `fragment_core::permit`),
+    /// it uploads the files its replies here carry (blobs.rs `put_blob`),
+    /// which its door sends on (a SimpleX connector's: templates/simplex
+    /// `mirror`), as its words go.
+    pub(crate) fn door_agent(&self, caller: &Caller) -> CellResult<bool> {
+        let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_none() && s.kind == IdentityKind::Agent) else { return Ok(false) };
+        Ok(self.open_binding()?.is_some_and(|b| npub::display(&b.identity) == npub::display(&signed.id)))
+    }
+
     /// What this fragment may relay now (`effects::check_record`).
     pub(crate) fn hosted_door(&self) -> CellResult<Option<Hosted>> {
         let owner = npub::display(&self.must(MetaKey::Owner)?);
@@ -289,5 +299,39 @@ impl FragmentCell {
         self.sharing_changed()?;
         self.event("door.bound", &format!("its owner's agent {agent}'s {} door", b.door), json!({ "door": b.door, "agent": agent, "identity": b.identity }));
         Ok(json!({ "door": b.door, "agent": agent, "relayed": Hosted { door: b.door.clone(), agent: agent.into(), owner: npub::display(&owner) }.relayed() }))
+    }
+}
+
+/// A SimpleX door's container's XFTP relay (entry.mjs `DoorEgress`,
+/// relay.mjs; docs/computers.md, "The XFTP relay"), as a computer's is: one
+/// of the deployment's connector relay targets alone (no open proxy), each
+/// relay at most `relay::BYTES_MAX` and `relay::MS_MAX`. A door runs no one's
+/// code but the platform's, and its relays carry only its owner's files and
+/// its agent's replies' files, each bounded by its runner (SimpleX's own
+/// bound) and the door's holding (cell/door-rules.mjs `FILES_KEPT`), so it
+/// keeps no day's budget of its own; its runner opens at most
+/// `relay::OPEN_MAX` at once. A class with a static method, as
+/// `InternalRoute` is; exported by the cell's build alone (lib.rs, "Two
+/// Workers, one crate").
+#[cfg(not(feature = "admin"))]
+mod door_relay {
+    use serde_json::json;
+    use worker::wasm_bindgen::{self, prelude::*, JsCast};
+
+    #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+    pub struct DoorRelay;
+
+    #[wasm_bindgen]
+    impl DoorRelay {
+        /// `{host, port, bytesMax, msMax}`, or `{error, message}` (403).
+        pub fn target(env: JsValue, host: &str, port: &str) -> JsValue {
+            let env: worker::Env = env.unchecked_into();
+            let cfg = crate::config::Config::from_env(&env);
+            let answer = match fragment_core::relay::target(&cfg.connectors, host, port) {
+                Ok((host, port)) => json!({ "host": host, "port": port, "bytesMax": fragment_core::relay::BYTES_MAX, "msMax": fragment_core::relay::MS_MAX }),
+                Err(refused) => json!({ "error": "forbidden", "message": refused.message() }),
+            };
+            crate::js::to_js(&answer)
+        }
     }
 }
