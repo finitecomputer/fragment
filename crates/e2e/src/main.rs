@@ -423,6 +423,8 @@ pub struct Suite {
     skipped: Vec<String>,
     /// The sections that ran, in order: the last is the one running.
     ran: Vec<String>,
+    /// What the section running said it needs and uses (`section_using`).
+    declared: Vec<Need>,
     /// A lane stopped early: the next section to run gets the node back as
     /// the lanes expect it first.
     recovery_due: bool,
@@ -583,8 +585,28 @@ impl Suite {
 
     /// Whether the local node runs computers: wrangler's always, celld's on
     /// the krun engine alone (docs/self-host.md, seam 2).
+    /// The section asking has said it uses them, or its lone run's node
+    /// would have none (`node_classes`).
     pub fn runs_computers(&self) -> bool {
+        self.declares_computers("runs_computers");
+        self.runtime_runs_computers()
+    }
+
+    /// `runs_computers`, for the node's own boot, which is no section's.
+    fn runtime_runs_computers(&self) -> bool {
         self.celld.as_ref().is_none_or(|c| c.engine.computers())
+    }
+
+    /// The section running said it uses computers (in what it needs, or in
+    /// what it uses where the run has them): `asked` is how it asks for
+    /// one now. One that had not is planned as using none, so run alone
+    /// its node has none, while a whole run's node would let it pass.
+    fn declares_computers(&self, asked: &str) {
+        let section = self.ran.last().map(String::as_str).unwrap_or_default();
+        assert!(
+            uses_computers(&self.declared),
+            "{section} asks for a computer ({asked}) and never said it uses one: name Need::Computers in what it needs, or in what it uses (Suite::section_using)"
+        );
     }
 
     /// Whether the node runs its Worker and every object in one isolate
@@ -672,6 +694,10 @@ impl Suite {
     /// Whether the section `name`, needing `needs`, runs in this suite:
     /// selected, on a rung that has what it needs, and not a dry run.
     pub fn runs(&self, name: &str, needs: &[Need]) -> bool {
+        // the section running, asking whether it has a computer to check
+        if self.plan.is_none() && self.ran.last().is_some_and(|running| running == name) && uses_computers(needs) {
+            self.declares_computers("Suite::runs");
+        }
         self.selected(name) && self.plan.is_none() && needs::unmet(needs, self.rung).is_none()
     }
 
@@ -702,6 +728,8 @@ impl Suite {
         }
         println!("\n# {name}");
         self.ran.push(name.to_string());
+        self.declared = needs.iter().chain(uses).copied().collect();
+        self.shared.section_starts(name, uses_computers(&self.declared));
         // a section that stopped early leaves Stripe's events as it held
         // them: each starts with them going out (billing-page's early stop
         // once held trials' webhooks back, failing its checks besides)
@@ -970,7 +998,7 @@ impl Suite {
             // on celld, computers only on the krun engine: they need the
             // runtime's egress intercepts and snapshots (docs/self-host.md,
             // seam 2)
-            computer_image: (self.runs_computers() && self.node_computers).then(|| "stub".into()),
+            computer_image: (self.runtime_runs_computers() && self.node_computers).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // each container class, and its images built at every boot, only
@@ -1102,6 +1130,12 @@ impl Suite {
     /// hosted run, which starts no node. Answers how many of each went.
     fn remove_containers(&mut self) -> Result<Option<(u32, u32)>> {
         if self.tools.is_none() || self.containers_removed {
+            return Ok(None);
+        }
+        // a wrangler node that ran no container class left none and built
+        // no image: its run asks Docker nothing, on a machine that may
+        // have none running (`node_classes`)
+        if self.celld.is_none() && !self.node_computers && !self.node_doors {
             return Ok(None);
         }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
@@ -1547,6 +1581,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         failed: vec![],
         skipped: vec![],
         ran: vec![],
+        declared: vec![],
         recovery_due: false,
         lost: None,
         cron: None,
@@ -1636,13 +1671,19 @@ fn local_rung(celld: Option<&devstack::celld::CelldTools>, rehearse: Option<u64>
     }
 }
 
+/// Whether what a section names gives a local node its computers' class:
+/// computers, or this machine's Docker.
+fn uses_computers(needs: &[Need]) -> bool {
+    needs.iter().any(|n| matches!(n, Need::Computers | Need::LocalDocker))
+}
+
 /// The container classes a local node runs, by its run's plan: computers
 /// (`devstack::COMPUTER_CLASS`) when a section it runs needs or uses
 /// computers or this machine's Docker, and SimpleX doors (`DOOR_CLASS`)
 /// when one needs doors. With none, the node's config names no container,
 /// so its boot builds no image.
 fn node_classes(planned: &[Planned]) -> (bool, bool) {
-    let computers = Need::Computers.used_by(planned) || Need::LocalDocker.used_by(planned);
+    let computers = planned.iter().any(|p| p.skip.is_none() && (uses_computers(&p.needs) || uses_computers(&p.uses)));
     (computers, Need::Doors.used_by(planned))
 }
 
@@ -1749,10 +1790,12 @@ mod tests {
         assert_eq!(classes(Some(&["simplex-door"]), &[], None), (false, true));
         assert_eq!(classes(Some(&["computers", "simplex-door"]), &[], None), (true, true));
         assert_eq!(classes(Some(&["admin"]), &[], None), (true, false), "admin uses computers where the run makes them");
-        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer"), ("billing", "its wipes"), ("move", "its wipes"), ("governance", "its wipes")] {
+        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer")] {
             assert_eq!(classes(Some(&[section]), &[], None), (true, false), "{section} uses computers: {uses}");
         }
         assert_eq!(classes(Some(&["auth", "create", "keys"]), &[], None), (false, false));
+        // a wipe finishes on a node with no computers' class (FIN-661)
+        assert_eq!(classes(Some(&["billing", "governance", "move"]), &[], None), (false, false), "their wipes need no computer");
         assert_eq!(classes(Some(&["chat"]), &[], None), (true, false), "this machine's Docker");
     }
 

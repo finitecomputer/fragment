@@ -51,4 +51,4 @@ webpki-roots.workspace = true
 [dev-dependencies]
 # a SimpleX door's save, read in its lab test (tests/door.rs): the core's
 # chat database inside it, at the lock's pin
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
