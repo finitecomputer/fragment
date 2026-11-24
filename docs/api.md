@@ -1947,7 +1947,11 @@ A subscribe answers one page of backlog (at most `CHANNEL_PAGE` records and
 `CHANNEL_PAGE_MAX_BYTES`); with `more: true`, subscribe again from `next`.
 The page that reaches the end makes it live, so records arrive in order.
 
-A socket's role is fixed when it connects. Removing a member, rotating the
+A socket's role is fixed when it connects, and a channel's records and
+drafts reach it only while that role may read the channel as declared now:
+a deploy that raises a channel's read role, or drops the channel, stops
+them at once for the sockets below it, which still follow the channel and
+get it again should the role come back down. Removing a member, rotating the
 share link, or a fragment leaving `public` closes the sockets it admitted;
 a role change closes theirs (and an agent's owner's) with 4001, after which
 the library reconnects. A signed-in socket is checked again with the

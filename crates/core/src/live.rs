@@ -1,10 +1,10 @@
 //! The live socket's bounds (cell/src/live.rs), as pure logic: the
-//! queries one principal may run over its sockets, and how often a socket
-//! may change its presence.
+//! queries one principal may run over its sockets, how often a socket
+//! may change its presence, and which channels' records it is sent.
 
 use std::collections::BTreeSet;
 
-use fragment_proto::limits;
+use fragment_proto::{limits, Role};
 
 /// Why a socket's query was not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,22 @@ pub fn presence_admit(due_ms: i64, now_ms: i64) -> Option<i64> {
     let next = due + PRESENCE_EVERY_MS;
     assert!(next > now_ms, "the next change is due after this one");
     Some(next)
+}
+
+/// Whether a socket connected at `role` is sent a channel's records and
+/// drafts now, the channel's read role as declared now being `read`
+/// (`None`: no channel by that name is declared now, so no socket reads
+/// it). A subscribe asks it, and so does every record and draft sent to a
+/// channel's followers: a deploy that raises a channel's read role, or
+/// drops the channel, stops what goes to a socket below it at once,
+/// though the socket still follows the channel (and is sent it again
+/// should its read role come back down). A socket's role is fixed while
+/// it is open: a member's changed role reopens their sockets.
+pub fn reads(role: Role, read: Option<Role>) -> bool {
+    match read {
+        Some(read) => role >= read,
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -184,5 +200,34 @@ mod tests {
         let flood: Vec<i64> = (0..10_000).map(|i| t + i).collect();
         let through = admitted(&flood).iter().filter(|a| **a).count() as i64;
         assert_eq!(through, limits::PRESENCE_BURST + 10 * limits::PRESENCE_PER_S - 1, "a burst, then ten a second");
+    }
+
+    /// Valid: a socket at or above a channel's read role is sent it.
+    #[test]
+    fn a_socket_reads_a_channel_its_role_may_read() {
+        assert!(reads(Role::Viewer, Some(Role::Viewer)));
+        assert!(reads(Role::Owner, Some(Role::Editor)));
+        assert!(reads(Role::Public, Some(Role::Public)));
+    }
+
+    /// Invalid: below the channel's read role, or on a channel no longer
+    /// declared, a socket is sent nothing of it.
+    #[test]
+    fn a_socket_below_a_channels_read_role_reads_none_of_it() {
+        assert!(!reads(Role::Viewer, Some(Role::Editor)));
+        assert!(!reads(Role::Public, Some(Role::Viewer)));
+        assert!(!reads(Role::Owner, None));
+    }
+
+    /// Becoming invalid: a viewer's socket follows a channel viewers read;
+    /// a deploy redeclares it for editors, and the same socket is sent
+    /// nothing more of it; declared for viewers again, it is.
+    #[test]
+    fn a_raised_read_role_stops_a_socket_that_followed_the_channel() {
+        let socket = Role::Viewer;
+        assert!(reads(socket, Some(Role::Viewer)), "followed while viewers read it");
+        assert!(!reads(socket, Some(Role::Editor)), "redeclared for editors");
+        assert!(!reads(socket, None), "dropped from the code");
+        assert!(reads(socket, Some(Role::Viewer)), "declared for viewers again");
     }
 }
