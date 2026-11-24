@@ -372,14 +372,14 @@ pub fn simplex_labelled(label: &str) -> bool {
 /// The chats an agent's SimpleX door may be (a connector its owner bound
 /// from Settings, templates/simplex), in the order their members are read
 /// (`HOME_DOORS_MAX` at most): its owner's chats it is in that are
-/// labelled as SimpleX chats (`simplex_labelled`), its own label's first.
-/// Which one is its door its row of that chat's members says
-/// (`Member::door`), never a label.
+/// labelled as SimpleX chats (`simplex_labelled`), its own label's first,
+/// then by name, as Settings orders them (connections.js
+/// `doorCandidates`), so both take the same one. Which one is its door its
+/// row of that chat's members says (`Member::door`), never a label.
 pub fn door_candidates(agent_fragment: &str, owners: &[FragmentEntry], mine: &[FragmentEntry]) -> Vec<String> {
     let sx = simplex_label(agent_fragment);
     let mut out: Vec<&FragmentEntry> = owners.iter().filter(|f| f.kind == "chat" && f.owned && simplex_labelled(label(&f.name)) && mine.iter().any(|m| m.name == f.name)).collect();
-    // stable: the list's order kept within each
-    out.sort_by_key(|f| !label(&f.name).starts_with(&sx));
+    out.sort_by(|a, b| (!label(&a.name).starts_with(&sx), &a.name).cmp(&(!label(&b.name).starts_with(&sx), &b.name)));
     out.into_iter().take(crate::limits::HOME_DOORS_MAX).map(|f| f.name.clone()).collect()
 }
 
@@ -1079,6 +1079,12 @@ mod tests {
         ];
         let mine: Vec<FragmentEntry> = owners.iter().filter(|f| f.name != "left-simplex--e5e5").cloned().collect();
         assert_eq!(door_candidates("juniper--k3x9", &owners, &mine), ["juniper-simplex-2--b2b2", "weekend-simplex--f6f6"]);
+        // its own label's first, then by name, whatever order the list has them in (as Settings orders them)
+        let mut two: Vec<FragmentEntry> = [listed("weekend-simplex--f6f6", "chat", true), listed("juniper-simplex-2--b2b2", "chat", true), listed("alpha-simplex--g7g7", "chat", true), listed("juniper-simplex--z9z9", "chat", true)].into();
+        let want = ["juniper-simplex--z9z9", "juniper-simplex-2--b2b2", "alpha-simplex--g7g7", "weekend-simplex--f6f6"];
+        assert_eq!(door_candidates("juniper--k3x9", &two, &two), want);
+        two.reverse();
+        assert_eq!(door_candidates("juniper--k3x9", &two, &two), want);
         let many: Vec<FragmentEntry> = (0..20).map(|i| listed(&format!("talk-{i}-simplex--k3x9"), "chat", true)).collect();
         assert_eq!(door_candidates("juniper--k3x9", &many, &many).len(), crate::limits::HOME_DOORS_MAX);
     }

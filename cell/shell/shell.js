@@ -969,10 +969,12 @@ const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, 
 // what each agent's runtime offers beyond its chats (agent-runtimes.js),
 // from its agent.json as Settings reads it
 const { loadRuntimes, offers, markOffer } = createRuntimes({ agentJson: (agent) => agentJson(agent), agents: () => state.agents, own, byName });
-const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf } = createAgentHomes({
+const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf, forgetDoors } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
   agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
-  agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats, simplexDoorOf: (agent) => simplexDoorOf(agent), needDoors: () => needDoors(),
+  agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
+  // a connector's binding, as its owner reads it (a deleted one binds nothing)
+  readDoor: (name) => api("GET", `/api/f/${seg(name)}/door`).then((r) => r.bound ?? null, (e) => (e.status === 404 ? null : Promise.reject(e))),
 });
 
 // Each time the middle column is given a view (a chat, settings, Apps,
@@ -1461,10 +1463,10 @@ const { computerRow, computerKey, nameSimplex } = createSimplex({
   api, el, actionLine, named, seg, computer: () => state.computer,
   titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh: () => refreshConnectors(),
 });
-const { telegramSection, simplexSection, refreshConnectors, readConnectors, simplexDoorOf, needDoors } = createConnectors({
+const { telegramSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
   connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow, computerKey,
-  doorsRead: () => (paintHomes(), renderChats()),
+  doorsRead: () => (forgetDoors(), renderChats()),
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): Settings' SimpleX follows it at once.

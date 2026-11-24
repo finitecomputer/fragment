@@ -584,7 +584,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
 }
 
 // Home reads and writes share the agent.json writer with model settings.
-export function createAgentHomes({ el, icon, named, actionLine, settingLabel, modelOption, savePick, agents, chats, own, labelOf, byName, titleOf, agentsOwnChat, agentJson, writeAgentJson, renderChats, simplexDoorOf = () => null, needDoors = () => {} }) {
+export function createAgentHomes({ el, icon, named, actionLine, settingLabel, modelOption, savePick, agents, chats, own, labelOf, byName, titleOf, agentsOwnChat, agentJson, writeAgentJson, renderChats, readDoor = async () => null, now = () => Date.now() }) {
   // An agent's SimpleX chat: the person's chat labelled `<label>-simplex`,
   // which the agent's computer makes for them as its SimpleX is linked, and
   // which mirrors their SimpleX app both ways (docs/bridge.md, "SimpleX").
@@ -597,16 +597,65 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
     return chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-simplex` && !!id && (f.agents ?? []).includes(id)) ?? null;
   };
   const simplexAgentOf = (name) => [...agents().values()].find((a) => simplexChatOf(a.fragment)?.name === name)?.fragment ?? null;
-  // The chat its SimpleX home is, as its computer's bridge picks it
-  // (images/bridge api.rs `home_chat`, `door_candidates`): the chat bound
-  // as its SimpleX door (a connector, createConnectors' binding as read),
-  // labelled as a SimpleX chat as Settings labels one; else its computer's
-  // SimpleX chat; else none
+  // ---- the chat bound as an agent's SimpleX door (a connector set up
+  // from Settings), found as its computer's bridge finds it (images/bridge
+  // api.rs `door_candidates`), so a SimpleX home offered here is the chat
+  // its routines run in: of the person's own chats it is in, those
+  // labelled as SimpleX chats (`…-simplex`, `…-simplex-<n>`, as Settings
+  // labels a connector), its own label's first, then by name, at most
+  // HOME_DOORS_MAX; the first whose binding (`GET …/door`, `readDoor`) is
+  // its SimpleX door. Each agent read alone, the first time something asks
+  // (its pick drawn, its home SimpleX); a look that failed is asked again
+  // DOOR_LOOK_AGAIN_MS after, as the page draws again; `forgetDoors` (a
+  // binding Settings made) has them read anew. ----
+  const HOME_DOORS_MAX = 8;
+  const DOOR_LOOK_AGAIN_MS = 30_000;
   const simplexLabelled = (label) => /-simplex(-\d+)?$/.test(label);
+  // each agent's look: {door, failed, at}, or one under way
+  const doorLooks = new Map();
+  const looking = new Set();
+  function doorCandidates(agent) {
+    const id = [...agents().values()].find((a) => a.fragment === agent)?.identity;
+    const sx = `${labelOf(agent)}-simplex`;
+    const mine = (f) => !labelOf(f.name).startsWith(sx);
+    return chats()
+      .filter((f) => own(f) && f.kind === "chat" && !!id && (f.agents ?? []).includes(id) && simplexLabelled(labelOf(f.name)))
+      .sort((a, b) => mine(a) - mine(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .slice(0, HOME_DOORS_MAX);
+  }
+  function lookForDoor(agent) {
+    const was = doorLooks.get(agent);
+    if (looking.has(agent) || (was && (!was.failed || now() - was.at < DOOR_LOOK_AGAIN_MS))) return;
+    looking.add(agent);
+    (async () => {
+      let failed = false;
+      for (const c of doorCandidates(agent)) {
+        try {
+          const b = await readDoor(c.name);
+          if (b?.door === "simplex" && b.agent === agent) return { door: c.name, failed: false };
+        } catch {
+          failed = true;
+        }
+      }
+      return { door: null, failed };
+    })().then((look) => {
+      looking.delete(agent);
+      doorLooks.set(agent, { ...look, at: now() });
+      renderChats();
+      paintHomes();
+    });
+  }
+  function forgetDoors() {
+    doorLooks.clear();
+    paintHomes();
+  }
+  // The chat its SimpleX home is, as its bridge picks it (api.rs
+  // `home_chat`): the chat bound as its SimpleX door, else its computer's
+  // SimpleX chat, else none (its door looked for while unknown)
   const simplexHomeOf = (agent) => {
-    const door = simplexDoorOf(agent);
-    const bound = door && simplexLabelled(labelOf(door)) ? (chats().find((f) => f.name === door) ?? null) : null;
-    return bound ?? simplexChatOf(agent);
+    lookForDoor(agent);
+    const door = doorLooks.get(agent)?.door;
+    return (door ? (chats().find((f) => f.name === door) ?? null) : null) ?? simplexChatOf(agent);
   };
   function chatTitle(name) {
     const agent = byName(name)?.title === SIMPLEX_TITLE ? simplexAgentOf(name) : null;
@@ -662,9 +711,6 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
   }
   function homeIs(agent, home) {
     homes.set(agent, home === "simplex" ? "simplex" : "chat");
-    // its SimpleX home may be a door: the bindings read, so its bell is on
-    // the chat its routines run in wherever the page opened
-    if (home === "simplex") needDoors();
     renderChats();
     paintHomes();
   }
@@ -743,14 +789,16 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
     if (!home || pick.dataset.saving) return;
     const chat = agentsOwnChat(agent);
     const options = [modelOption("", chat ? chatTitle(chat.name) : "Its chat")];
-    if (home === "simplex" || simplexHomeOf(agent)) options.push(modelOption("simplex", SIMPLEX_TITLE));
+    // (its door looked for either way: its bell reads the same)
+    const simplex = simplexHomeOf(agent);
+    if (home === "simplex" || simplex) options.push(modelOption("simplex", SIMPLEX_TITLE));
     pick.replaceChildren(...options);
     pick.value = pick.dataset.was = home === "simplex" ? "simplex" : "";
     pick.disabled = false;
     pick.dataset.read = "1";
   }
   const paintHomes = () => document.querySelectorAll("select[data-home-for]").forEach(paintHome);
-  return { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf };
+  return { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf, forgetDoors };
 }
 
 // The computer port UI owns its frame-message listener and origin checks.
@@ -921,7 +969,7 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
     if (mine !== reads) return false;
     const whole = answers.every(([, b]) => b !== undefined);
     doors = whole ? new Map(answers) : null;
-    // what reads a binding (an agent's SimpleX home) drawn again
+    // what reads a binding (an agent's SimpleX home) reads it again
     doorsRead();
     return whole;
   }
@@ -1078,14 +1126,5 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
       if (s && s.dataset.key !== keyOf(kind)) fill(kind, s);
     }
   }
-  // the chat bound as `agent`'s SimpleX door, as the latest read says
-  const simplexDoorOf = (agent) => boundOf(SIMPLEX.door, agent);
-  // the bindings read once, where none is (a SimpleX home on a page that
-  // opened elsewhere than Settings); one under way is left to answer
-  let reading = null;
-  const needDoors = () => {
-    if (doors || reading || !listed()) return;
-    reading = readDoors().finally(() => (reading = null));
-  };
-  return { telegramSection: () => sectionOf(TELEGRAM), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors, simplexDoorOf, needDoors };
+  return { telegramSection: () => sectionOf(TELEGRAM), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors };
 }

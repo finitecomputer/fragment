@@ -1182,7 +1182,8 @@ async fn a_routine_is_a_turn() {
 /// (`<label>-chat`) with no agent.json; its SimpleX chat, the one its link
 /// names (its `link.json`), once agent.json's `home` says `simplex`. A home
 /// that cannot be read (its owner's list refused) loses no fire: it is read
-/// again, and the routine runs once. A restart reads the fires again and
+/// again, and the routine runs once; a look for a SimpleX door that fails
+/// leaves it to its link's chat. A restart reads the fires again and
 /// runs none twice; its link let go, `simplex` is its own chat; one with no
 /// chat of its own at all runs nowhere.
 #[tokio::test]
@@ -1221,6 +1222,14 @@ async fn a_routine_with_no_chat_runs_at_home() {
         w.append("juniper--k3x9", "tasks", "npub1paul", home("check the shelf"));
     });
     fake.until(WAIT * 2, "the routine whose home was read again", |w| said(w, &simplex).len() == 2).await;
+    // its look for a SimpleX door failing (every chat's members), its link
+    // standing: its link's chat all the same, never held
+    fake.with(|w| {
+        w.fail_members = 1000;
+        w.append("juniper--k3x9", "tasks", "npub1paul", home("check the stove"));
+    });
+    fake.until(WAIT, "the routine in its link's chat while its door's look fails", |w| said(w, &simplex).len() == 3).await;
+    fake.with(|w| w.fail_members = 0);
     // maple has no chat of its own: its routine runs nowhere
     fake.with(|w| w.append("maple--k3x9", "tasks", "npub1paul", home("nowhere to go")));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1235,7 +1244,7 @@ async fn a_routine_with_no_chat_runs_at_home() {
     bridge.stop().await;
     fake.with(|w| {
         assert_eq!(said(w, &own), ["echo: [your routine] water the plants", "echo: [your routine] feed the cat"]);
-        assert_eq!(said(w, &simplex), ["echo: [your routine] call mom", "echo: [your routine] check the shelf"], "nothing again after a restart");
+        assert_eq!(said(w, &simplex), ["echo: [your routine] call mom", "echo: [your routine] check the shelf", "echo: [your routine] check the stove"], "nothing again after a restart");
         let maples: Vec<Value> = w.fragments.values().flat_map(|f| f.channels.get("work").map(|c| c.records.clone()).unwrap_or_default()).filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["agent"] == "npub1maple").collect();
         assert!(maples.is_empty(), "maple's routine ran nowhere: {maples:?}");
     });

@@ -1167,13 +1167,19 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
 /// that names no chat fires (at most every 15 minutes a schedule);
 /// `waited`: the routine fired `limits::HOME_CHAT_WAIT_MS` ago or more. A
 /// read that fails fails it, so the routine is read again, never sent
-/// elsewhere.
+/// elsewhere; but for a door's look that failed while its computer's link
+/// stands, which leaves the routine to that link's chat.
 async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>, waited: bool) -> Result<HomeChat, ApiError> {
     let home = api.home(&agent.fragment).await?;
     let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
     let mine = api.fragments(&agent.fragment).await?;
+    let linked = simplex.is_some_and(|c| mine.iter().any(|m| m.name == c));
     let door = match home {
-        api::Home::Simplex => simplex_door(api, agent, &api::door_candidates(&agent.fragment, &owners, &mine)).await?,
+        api::Home::Simplex => match simplex_door(api, agent, &api::door_candidates(&agent.fragment, &owners, &mine)).await {
+            Ok(door) => door,
+            Err(_) if linked => None,
+            Err(e) => return Err(e),
+        },
         api::Home::Chat => None,
     };
     Ok(api::home_chat(&agent.fragment, home, simplex, door.as_deref(), &owners, &mine, waited))
