@@ -202,7 +202,9 @@ jobs:
           worker-build-version: ${{ env.WORKER_BUILD_VERSION }}
       # what a shard runs, for shards that run: xtask (its debug info
       # stripped: most of its 200 MB), the CLI, the suite and the built
-      # cell, in a tarball, as an artifact keeps no file's mode
+      # cell, in a tarball (35 MB), as an artifact keeps no file's mode.
+      # Kept as long as GitHub lets a run's failed jobs be run again (30
+      # days): a shard run again reuses this job's artifact, not a build
       - if: needs.proven.outputs.proven != 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/pack/target/debug"
@@ -215,7 +217,7 @@ jobs:
           name: e2e-build
           path: ${{ runner.temp }}/e2e-build.tar.zst
           compression-level: 0
-          retention-days: 1
+          retention-days: 30
           if-no-files-found: error
 
   e2e-shard:
