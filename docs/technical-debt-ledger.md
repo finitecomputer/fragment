@@ -851,18 +851,6 @@ unfinished design, not debt.
 - **Delete when:** Cloudflare deploys several Workers as one, or the
   admin moves back into the cell.
 
-## celld runs no admin Worker
-
-- **Shortcut:** `celld dev` runs one Worker, so its render drops the
-  cell's binding to the admin (crates/devstack celld.rs `DROPPED`), and
-  the cell there answers the admin's routes with a host failure saying
-  so (cell/src/admin.rs `forward`).
-- **Risk:** a self-hosted node has no admin page or admin API; CI runs
-  no celld lane (tag `celld-final`), so nothing else notices.
-- **Delete when:** celld runs a deployment's Workers together, with a
-  service binding between them and object bindings across them, or the
-  celld lane is retired.
-
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
 - **Shortcut:** wrangler's teardown removes containers by image ID (other
