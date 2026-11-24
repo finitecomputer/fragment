@@ -110,7 +110,9 @@ const fn retry_after_ms(tries: i64) -> i64 {
     }
 }
 
-const fn retry_horizon_ms() -> i64 {
+/// How long a passing failure is tried again, in all: a retry of a post,
+/// a mutation's effects or a publish comes within it.
+pub(crate) const fn retry_horizon_ms() -> i64 {
     let mut total = 0;
     let mut tries = 1;
     while tries <= TRIES_MAX {

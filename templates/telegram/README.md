@@ -72,8 +72,16 @@ where that frame can't sign in, in a tab.
   `relayed`, `{via: "telegram", for, agent}`, `to` that agent), which the
   platform takes only from a connector its owner bound as that agent's
   door, while it runs this template unforked and the deployment allows
-  `telegram`. `mirror` sends each reply an agent posts here (not its
-  interim words) to the paired chat, in at most four messages, while the
+  `telegram`. Its words alone go as theirs: a message they forward, or
+  send through an inline bot, is someone else's, so it goes with a first
+  line of the connector's saying so and where Telegram says it came from
+  (a user's name, a hidden sender's, a group's or channel's title and its
+  signature, the bot's username: each on one line, at most 64
+  characters), then its text with every line quoted (`> `), so none of it
+  reads as theirs; a reply to another chat's message keeps their words
+  theirs, after a line naming where the message came from and the part
+  they quoted, quoted so. Only their own `/start` pairs. `mirror` sends
+  each reply an agent posts here (not its interim words) to the paired chat, in at most four messages, while the
   door is open. While the agent works on a message relayed from Telegram,
   `typing` shows the bot typing there (Bot API `sendChatAction`, which
   Telegram shows for five seconds at most, so it is sent again every four)

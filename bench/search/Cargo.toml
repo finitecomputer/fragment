@@ -13,7 +13,7 @@ publish = false
 # 0.40.0 (0.41.0 is younger than the two-week dependency cooldown); its
 # job.rs names an error variant only `remote` defines, so it builds only with it.
 lancedb = { version = "=0.40.0", features = ["remote"] }
-rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

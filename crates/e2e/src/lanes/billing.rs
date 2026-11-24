@@ -83,8 +83,7 @@ pub(super) fn subscription_of(s: &Suite, org: &str) -> Option<String> {
 }
 
 pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
-    // its wipes reach each person's computer (the wipe's computer step)
-    if !s.section_using("billing", &[Need::Fakes], &[Need::Computers]) {
+    if !s.section("billing", &[Need::Fakes]) {
         return Ok(());
     }
     let op_session = api.sign_in("operator@e2e.test")?;
@@ -425,6 +424,25 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     s.stripe.complete(&pack2).map_err(anyhow::Error::msg)?;
     let theirs = s.eventually(PUSHED, || purchased(&fay) == fay_before + 25_000_000);
     s.ok("an org's admin buys a pack for a member who holds a seat: the credit is the member's", r.status == 200 && theirs && purchased(&ann) == before + 25_000_000, ledger(api, &fay));
+    // a pack's Checkout is made on the org's customer for its last payer
+    // alone, as a seat's is: a seat's holder buys theirs on their own email
+    // (the org's customer, its address and its receipts are its payer's)
+    let org_customer = subscription_of(s, &org).and_then(|id| s.stripe.subscription(&id)).map(|x| x.customer).unwrap_or_default();
+    let payers = asked.form.get("customer").cloned();
+    let fay_id = api.identity(&fay)?;
+    let mine = api.signed(&fay, "POST", "/api/billing/packs", Some(&json!({})))?;
+    let fays = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a seat's holder's pack Checkout")?;
+    s.ok(
+        "a pack's Checkout is made on the org's customer for its last payer alone: a seat's holder's own pack is made on their email, for their own ledger",
+        !org_customer.is_empty()
+            && payers.as_ref() == Some(&org_customer)
+            && mine.status == 200
+            && !fays.form.contains_key("customer")
+            && fays.form.get("customer_email") == Some(&Api::email_of(&fay))
+            && fays.form.get("metadata[fragment_person]") == Some(&fay_id)
+            && fays.form.get("metadata[fragment_buyer]") == Some(&fay_id),
+        json!({ "orgCustomer": org_customer, "payers": payers, "theirs": format!("{:?}", fays.form), "answer": mine.body }),
+    );
     let not_admin = api.signed(&fay, "POST", "/api/billing/packs", Some(&json!({ "member": fay_row })))?;
     let seatless = api.signed(&api.person()?, "POST", "/api/billing/packs", Some(&json!({})))?;
     s.ok("a member who is no admin buys none for others (403); someone with no seat buys none (400)", not_admin.status == 403 && seatless.status == 400, json!([not_admin.status, seatless.status]));

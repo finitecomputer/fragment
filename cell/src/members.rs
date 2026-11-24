@@ -891,6 +891,7 @@ impl FragmentCell {
             agents_left |= removed.first().is_some_and(|r| r["kind"] == "agent");
             self.listed_left(who)?;
             self.drop_subscriptions(who)?;
+            self.drop_pushes(who)?;
             self.agent_removed(who)?;
             self.index_change(who, None)?;
             self.close_sockets(&format!("p:{who}"), "membership revoked");
@@ -899,6 +900,7 @@ impl FragmentCell {
                 let still = self.member_role(owner)?.is_some() || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.into()])?.is_empty();
                 if !still {
                     self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
+                    self.drop_pushes(owner)?;
                 }
             }
         }
@@ -1298,6 +1300,8 @@ impl FragmentCell {
         }
         if body.visibility == Visibility::Members {
             self.close_sockets("view", "the fragment is now members only");
+            // and what is pushed reaches its members alone (push.rs)
+            self.drop_outsiders_pushes()?;
         }
         self.event(
             "visibility",

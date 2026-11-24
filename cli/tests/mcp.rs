@@ -52,13 +52,15 @@ fn host() -> (Server, Seen) {
     (server, seen)
 }
 
-/// A HOME of its own: with `key`, a config holding that secret.
+/// A HOME of its own: with `key`, a config holding that secret, where the
+/// CLI's `dirs::config_dir()` looks for it on this platform.
 fn home(tag: &str, key: Option<&str>) -> PathBuf {
     let home = std::env::temp_dir().join(format!("fragment-mcp-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(home.join(".config/fragment")).unwrap();
+    let dir = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&dir).unwrap();
     if let Some(key) = key {
-        std::fs::write(home.join(".config/fragment/config.json"), json!({ "secret_key": key }).to_string()).unwrap();
+        std::fs::write(dir.join("config.json"), json!({ "secret_key": key }).to_string()).unwrap();
     }
     home
 }
