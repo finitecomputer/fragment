@@ -1,27 +1,15 @@
-//! Preview follows master's image inputs, not a mutable `latest` tag.
+//! Preview follows master's image inputs, not a mutable `latest` tag:
+//! each image it runs (image.rs, `IMAGES`: Hermes and the SimpleX door) by
+//! its own input key, in its own preview repository (`Image::preview`).
 //! The registry keeps the input-keyed tag even when BuildKit's cache is
 //! evicted. Only a missing tag authorizes a build; registry errors fail.
-//! The workflow passes the digest alone between jobs: a reference that
+//! The workflow passes digests alone between jobs: a reference that
 //! contains the masked account ID would be dropped as a secret output.
 //! Master's image job, one at a time, is the only writer of an input tag.
 
 use super::*;
+use std::collections::BTreeMap;
 use std::path::Path;
-
-/// The preview's registry repository. Its name is the canary's, which
-/// preview once ran: every input tag (`inputs-<key>`) lives here, so a new
-/// name would build each image again, cold.
-pub(crate) const REPOSITORY: &str = "fragment-preview-computer-hermes-canary";
-
-/// The Dockerfile's local inputs, including manifest-only workspace
-/// members. The host test below holds this list to every local COPY.
-/// Nothing stamps a commit, clock, cell, shell or chat into the key.
-const INPUTS: &[&str] = &[
-    ".dockerignore", "images/hermes", "images/bridge", "images/Cargo.toml", "images/Cargo.lock", "images/simplex-door/Cargo.toml",
-    "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates",
-    "templates/blank", "templates/board", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/slides", "templates/todo",
-    "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/identity-door/Cargo.toml", "xtask/Cargo.toml",
-];
 
 #[derive(Debug, serde::Serialize)]
 struct Resolution {
@@ -32,10 +20,11 @@ struct Resolution {
     build: bool,
 }
 
-/// A probe writes the key, an existing input tag's digest or null, and
-/// whether a build is needed. `--build` reuses the input tag, or builds
-/// it, and waits for preparation before writing a digest the deploy can
-/// consume. No Worker, DNS or deploy config changes here.
+/// A probe writes, for each image by name, its key, an existing input
+/// tag's digest or null, and whether a build is needed. `--build` reuses
+/// each input tag, or builds it, and waits for every image's preparation
+/// before writing the digests the deploy can consume. No Worker, DNS or
+/// deploy config changes here.
 pub(super) fn run(args: &[String]) -> Result<()> {
     let usage = || anyhow::anyhow!("usage: cargo xtask image preview --output <file> [--build | --dry-run] [--summary <file>]");
     let (mut output, mut build, mut dry_run, mut summary) = (None, false, false, None);
@@ -54,47 +43,74 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     anyhow::ensure!(!dry_run || summary.is_none(), "--dry-run cannot build or record a ready image summary");
     // A failed retry must not leave a prior resolution for a caller to use.
     if output.exists() { fs::remove_file(&output)?; }
-    let root = devstack::repo_root();
-    let key = input_key(&root)?;
+    let keys = input_keys(&devstack::repo_root())?;
     if dry_run {
-        println!("preview image input key: {key}\nwould resolve {REGISTRY}/<account>/{REPOSITORY}:inputs-{key}, and build it only if it is not there; prepare before deploy, then pin both preview names at its digest (no requests made)");
-        fs::write(output, serde_json::to_vec(&Resolution { key, digest: None, build: true })?)?;
+        let mut plan = BTreeMap::new();
+        for (image, key) in keys {
+            println!("preview image {} input key: {key}\nwould resolve {REGISTRY}/<account>/{}:inputs-{key}, and build it only if it is not there", image.name, image.preview);
+            plan.insert(image.name, Resolution { key, digest: None, build: true });
+        }
+        println!("then prepare every image before the deploy, which pins each at its digest (no requests made)");
+        fs::write(output, serde_json::to_vec(&plan)?)?;
         return Ok(());
     }
-    let inputs = parse(&[
-        "push".into(), "hermes".into(), "--repository".into(), REPOSITORY.into(),
-        "--tag".into(), format!("inputs-{key}"),
-    ], |name| std::env::var(name).ok())?;
     let tools = devstack::Tools::locate()?;
-    let found = existing(&inputs, &tools)?;
-    let needs_build = found.is_none();
-    let mut reference = found;
-    if reference.is_none() && build {
-        // built under a tag of its own, and named by its inputs only once it
-        // fits the disk budget (disk.rs): a retry after a refusal finds no
-        // input-keyed image, so it builds and measures again, never reusing
-        // one unmeasured (Codex on #1422)
-        let unchecked = parse(&[
-            "push".into(), "hermes".into(), "--repository".into(), REPOSITORY.into(),
-            "--tag".into(), format!("unchecked-{key}"),
-        ], |name| std::env::var(name).ok())?;
-        let built = push(&unchecked, &tools)?;
-        super::disk::check(&built)?;
-        reference = Some(named(&inputs, &built, &tools)?);
+    // every image's input tag looked up before any is built: a registry
+    // that fails one lookup builds nothing
+    let mut found = vec![];
+    for (image, key) in keys {
+        let inputs = tagged(image, &format!("inputs-{key}"))?;
+        let reference = existing(&inputs, &tools)?;
+        found.push(Found { image, build: reference.is_none(), key, inputs, reference });
     }
     if build {
-        let reference = reference.as_deref().expect("reused or built the input-keyed image");
-        println!("preview image inputs {key}: {reference}; waiting for Cloudflare before allowing its preview deploy (the running preview is unchanged)");
-        prepare(&inputs, reference)?;
+        for f in found.iter_mut().filter(|f| f.reference.is_none()) {
+            // built under a tag of its own, and named by its inputs only once
+            // it fits the disk budget (disk.rs): a retry after a refusal finds
+            // no input-keyed image, so it builds and measures again, never
+            // reusing one unmeasured (Codex on #1422)
+            let built = push(&tagged(f.image, &format!("unchecked-{}", f.key))?, &tools)?;
+            super::disk::check(&built)?;
+            f.reference = Some(named(&f.inputs, &built, &tools)?);
+        }
+        let references: Vec<&str> = found.iter().map(|f| f.reference.as_deref().expect("reused or built each input-keyed image")).collect();
+        println!("preview images {}; waiting for Cloudflare before allowing their preview deploy (the running preview is unchanged)", references.join(", "));
+        prepare(&found[0].inputs.account, &references)?;
         if let Some(path) = summary {
             let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
-            writeln!(file, "### Preview image\n\nInputs: `{key}`\n\nDigest: `{}`\n\nReference: `{}`\n\n`hermes` uses this image; production is pinned separately.\n",
-                reference.split_once('@').expect("pinned").1, reference.replace(&inputs.account, "<account>"))?;
+            for Found { image, key, inputs, reference, .. } in &found {
+                let reference = reference.as_deref().expect("ready");
+                let uses = match image.runs {
+                    Runs::Computers => format!("`{}` uses this image", image.name),
+                    Runs::Doors => "The SimpleX doors use this image".to_string(),
+                };
+                writeln!(file, "### Preview image `{}`\n\nInputs: `{key}`\n\nDigest: `{}`\n\nReference: `{}`\n\n{uses}; production is pinned separately.\n",
+                    image.name, reference.split_once('@').expect("pinned").1, reference.replace(&inputs.account, "<account>"))?;
+            }
         }
     }
-    let digest = reference.as_deref().map(|r| r.split_once('@').expect("pinned").1.to_string());
-    fs::write(output, serde_json::to_vec(&Resolution { key, digest, build: needs_build })?)?;
+    let written: BTreeMap<_, _> = found.into_iter().map(|f| {
+        let digest = f.reference.as_deref().map(|r| r.split_once('@').expect("pinned").1.to_string());
+        (f.image.name, Resolution { key: f.key, digest, build: f.build })
+    }).collect();
+    fs::write(output, serde_json::to_vec(&written)?)?;
     Ok(())
+}
+
+/// One image's resolution as a run makes it: its key, the push its input
+/// tag names, the image there (or built), and whether it had to be built.
+struct Found {
+    image: &'static Image,
+    key: String,
+    inputs: Request,
+    reference: Option<String>,
+    build: bool,
+}
+
+/// `image`'s push to its preview repository under `tag`, checked as any
+/// push is (image.rs, `parse`), the account from the environment.
+fn tagged(image: &Image, tag: &str) -> Result<Request> {
+    parse(&["push".into(), image.name.into(), "--repository".into(), image.preview.into(), "--tag".into(), tag.into()], |name| std::env::var(name).ok())
 }
 
 /// Names `built` (pushed as `unchecked-<key>`, its share of the disk
@@ -115,19 +131,22 @@ fn named(inputs: &Request, built: &str, tools: &devstack::Tools) -> Result<Strin
     Ok(found)
 }
 
-/// Waits until Cloudflare has prepared `reference` on the account's
-/// network (prepare.rs): a deploy that pins it then starts it at once.
-fn prepare(req: &Request, reference: &str) -> Result<()> {
-    let mut api = crate::cloudflare::Api::from_env(&req.account)?;
-    crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &[reference], crate::prepare::IMAGE_LIMIT)
-        .context("preview image is not ready: blocked this preview deploy before any Worker change; retry this job to reuse its input-keyed image")
+/// Waits until Cloudflare has prepared each of `references` on `account`'s
+/// network (prepare.rs): a deploy that pins them then starts them at once.
+fn prepare(account: &str, references: &[&str]) -> Result<()> {
+    let mut api = crate::cloudflare::Api::from_env(account)?;
+    crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), references, crate::prepare::IMAGE_LIMIT)
+        .context("a preview image is not ready: blocked this preview deploy before any Worker change; retry this job to reuse its input-keyed images")
 }
 
-/// Hash git's path, mode and blob records rather than a commit ID or
-/// worktree mtimes. A dirty image input is refused: Docker must build the
-/// content the key names. Git's ignored targets and caches are not inputs.
-fn input_key(root: &Path) -> Result<String> {
-    crate::inputs::key(root, INPUTS)
+/// Each image's key: git's path, mode and blob records of its inputs
+/// (`Image::inputs`) hashed, rather than a commit ID or worktree mtimes,
+/// so a change to one image's inputs alone moves that image alone. A dirty
+/// image input is refused: Docker must build the content the key names.
+/// Git's ignored targets and caches are not inputs. Nothing stamps a
+/// commit, clock, cell, shell or chat into a key.
+fn input_keys(root: &Path) -> Result<Vec<(&'static Image, String)>> {
+    IMAGES.iter().map(|image| Ok((image, crate::inputs::key(root, image.inputs)?))).collect()
 }
 
 /// Inspect this one tag, never list the repository: Cloudflare rejects
@@ -177,37 +196,42 @@ fn inspect_answer(tagged: &str, success: bool, manifest: &[u8], stderr: &[u8]) -
 mod tests {
     use super::*;
 
-    /// Every local COPY is covered. Stage copies and inline heredocs are
-    /// already content of the Dockerfile; remote ADDs are checksum-pinned.
+    /// Each image's Dockerfile and every local COPY of it are covered by
+    /// its inputs. Stage copies and inline heredocs are already content of
+    /// the Dockerfile; remote ADDs are checksum-pinned.
     #[test]
     fn the_key_covers_the_dockerfiles_local_inputs() {
-        let text = fs::read_to_string(devstack::repo_root().join("images/hermes/Dockerfile")).unwrap();
-        for line in text.lines().filter_map(|l| l.strip_prefix("COPY ")) {
-            if line.contains("--from=") || line.contains("<<") { continue; }
-            let fields: Vec<_> = line.split_whitespace().collect();
-            for field in &fields[..fields.len() - 1] {
-                assert!(!field.starts_with('-'), "new COPY syntax needs review: {line}");
-                assert!(INPUTS.iter().any(|p| field == p || field.starts_with(&format!("{p}/"))), "input key lacks {field}");
+        for image in &IMAGES {
+            let covered = |path: &str| image.inputs.iter().any(|p| path == *p || path.starts_with(&format!("{p}/")));
+            assert!(covered(image.dockerfile), "{}'s inputs lack its Dockerfile", image.name);
+            let text = fs::read_to_string(devstack::repo_root().join(image.dockerfile)).unwrap();
+            for line in text.lines().filter_map(|l| l.strip_prefix("COPY ")) {
+                if line.contains("--from=") || line.contains("<<") { continue; }
+                let fields: Vec<_> = line.split_whitespace().collect();
+                for field in &fields[..fields.len() - 1] {
+                    assert!(!field.starts_with('-'), "new COPY syntax needs review: {line}");
+                    assert!(covered(field), "{}'s input key lacks {field}", image.name);
+                }
             }
-        }
-        for line in text.lines().filter(|l| l.starts_with("ADD ")) {
-            assert!(line.contains("--checksum=sha256:") && line.contains("https://"), "local ADD or unpinned remote inputs need review: {line}");
-        }
-        for path in ["cell/src/lib.rs", "cell/shell/index.html", "templates/chat/index.html", "xtask/src/main.rs", "crates/e2e/src/main.rs"] {
-            assert!(!INPUTS.iter().any(|p| path == *p || path.starts_with(&format!("{p}/"))), "not an image input: {path}");
+            for line in text.lines().filter(|l| l.starts_with("ADD ")) {
+                assert!(line.contains("--checksum=sha256:") && line.contains("https://"), "local ADD or unpinned remote inputs need review: {line}");
+            }
+            for path in ["cell/src/lib.rs", "cell/shell/index.html", "templates/chat/index.html", "xtask/src/main.rs", "crates/e2e/src/main.rs"] {
+                assert!(!covered(path), "not an input of {}: {path}", image.name);
+            }
         }
     }
 
-    /// images.yml's Docker lane runs on a change to any input of the image
-    /// (#715): each is in its `docker` filter. The workflow itself starts on
-    /// every change (no `paths` filter of its own: a required check that
-    /// never starts never reports).
+    /// images.yml's Docker lane runs on a change to any input of the Hermes
+    /// image, which it builds (#715): each is in its `docker` filter. The
+    /// workflow itself starts on every change (no `paths` filter of its own:
+    /// a required check that never starts never reports).
     #[test]
     fn the_docker_lane_watches_every_input() {
         let root = devstack::repo_root();
         let workflow = fs::read_to_string(root.join(".github/workflows/images.yml")).unwrap();
         assert!(!workflow.lines().any(|l| l.trim_start().starts_with("paths:")), "the workflow starts on every change; its jobs decide");
-        for input in INPUTS {
+        for input in by_name("hermes").unwrap().inputs {
             let glob = if root.join(input).is_dir() { format!("{input}/**") } else { input.to_string() };
             assert!(workflow.lines().any(|l| l.trim() == format!("- {glob}")), "the docker filter lacks {glob}");
         }
@@ -314,35 +338,50 @@ mod tests {
     /// A new commit, dirty unrelated files, or a restarted process cannot
     /// change identity. A changed input does; reverting its content reuses
     /// the old key. Dirty inputs must never be built under a committed key.
+    /// Preview resolves each image by its own key: the CLI moves Hermes
+    /// alone, the door's runner the door alone, and the bridge, in both,
+    /// both.
     #[test]
     fn identity_is_inputs_not_the_commit_or_build_cache() {
         let root = std::env::temp_dir().join(format!("preview-inputs-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        fs::create_dir_all(root.join("cli")).unwrap();
+        for dir in ["cli", "images/bridge", "images/simplex-door"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
         let git = |args: &[&str]| {
             let out = Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]).args(args).current_dir(&root).output().unwrap();
             assert!(out.status.success(), "{}", said(&out));
         };
+        let keys = || input_keys(&root).map(|k| k.into_iter().map(|(image, key)| (image.name, key)).collect::<BTreeMap<_, _>>());
+        let commit = |path: &str, text: &str, message: &str| {
+            fs::write(root.join(path), text).unwrap();
+            git(&["add", path]);
+            git(&["commit", "-qm", message]);
+            keys().unwrap()
+        };
         git(&["init", "-q"]);
         fs::write(root.join("cli/main.rs"), "first").unwrap();
-        git(&["add", "cli"]);
+        fs::write(root.join("images/bridge/lib.rs"), "first").unwrap();
+        fs::write(root.join("images/simplex-door/main.rs"), "first").unwrap();
+        git(&["add", "cli", "images"]);
         git(&["commit", "-qm", "first"]);
-        let first = input_key(&root).unwrap();
+        let first = keys().unwrap();
+        assert_eq!(first.keys().copied().collect::<Vec<_>>(), ["door", "hermes"], "one key for each image preview follows");
+        assert_ne!(first["door"], first["hermes"]);
         fs::write(root.join("cell.txt"), "not in image").unwrap();
-        assert_eq!(input_key(&root).unwrap(), first);
-        git(&["add", "cell.txt"]);
-        git(&["commit", "-qm", "cell changed"]);
-        assert_eq!(input_key(&root).unwrap(), first);
+        assert_eq!(keys().unwrap(), first);
+        assert_eq!(commit("cell.txt", "not in image", "cell changed"), first);
         fs::write(root.join("cli/main.rs"), "second").unwrap();
-        assert!(input_key(&root).is_err());
-        git(&["add", "cli"]);
-        git(&["commit", "-qm", "CLI changed"]);
-        assert_ne!(input_key(&root).unwrap(), first);
-        fs::write(root.join("cli/main.rs"), "first").unwrap();
-        git(&["add", "cli"]);
-        git(&["commit", "-qm", "CLI restored"]);
-        assert_eq!(input_key(&root).unwrap(), first);
+        assert!(keys().is_err());
+        let cli = commit("cli/main.rs", "second", "CLI changed");
+        assert!(cli["hermes"] != first["hermes"] && cli["door"] == first["door"], "the CLI moves Hermes alone");
+        assert_eq!(commit("cli/main.rs", "first", "CLI restored"), first);
+        let door = commit("images/simplex-door/main.rs", "second", "door changed");
+        assert!(door["door"] != first["door"] && door["hermes"] == first["hermes"], "the door's runner moves the door alone");
+        assert_eq!(commit("images/simplex-door/main.rs", "first", "door restored"), first);
+        let bridge = commit("images/bridge/lib.rs", "second", "bridge changed");
+        assert!(bridge["door"] != first["door"] && bridge["hermes"] != first["hermes"], "the bridge moves both");
         fs::write(root.join("cli/untracked.rs"), "not keyed").unwrap();
-        assert!(input_key(&root).is_err());
+        assert!(keys().is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
