@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use crate::api::{Api, Call};
 use crate::{Keys, Need, Suite};
 
-pub const NAME: &str = "simplex-door";
+pub const NAME: &str = fragment_devstack::DOOR_LANE;
 
 fn lever(api: &Api, door: &str, op: &str, more: Value) -> Result<Value> {
     let mut body = json!({ "door": door, "op": op });
