@@ -1713,8 +1713,8 @@ fn finish(s: &mut Suite) -> Result<()> {
 mod tests {
     /// Goal: a local run's node runs the container classes its sections
     /// use, and no other, so its boot builds no image a run never uses.
-    /// Valid: the whole run and every CI shard (each holds a section that
-    /// makes computers) run computers and no door; a run naming the door's
+    /// Valid: the whole run and CI's first three shards run computers and
+    /// no door, its last two (lanes/mod.rs SHARDS) neither; a run naming the door's
     /// lane runs doors; a section that only uses computers where the run
     /// has them (admin's pin) runs them too; sections that make none run
     /// neither (no container, no image). Method: the lanes' own plan.
@@ -1726,7 +1726,7 @@ mod tests {
         };
         assert_eq!(classes(None, &[], None), (true, false), "the whole run");
         for k in 1..=crate::lanes::SHARDS.len() as u32 {
-            assert_eq!(classes(None, &[], Some(k)), (true, false), "shard {k}");
+            assert_eq!(classes(None, &[], Some(k)), (k <= 3, false), "shard {k}: only the first three make computers");
         }
         assert_eq!(classes(Some(&["simplex-door"]), &[], None), (false, true));
         assert_eq!(classes(Some(&["computers", "simplex-door"]), &[], None), (true, true));
