@@ -139,6 +139,12 @@ impl Source {
     fn digest(&self) -> &str {
         self.reference.split_once('@').expect("a source is pinned by digest").1
     }
+
+    /// Its repository in its account's registry.
+    fn repository(&self) -> &str {
+        let at = self.reference.strip_prefix(&format!("{REGISTRY}/{}/", self.account)).expect("a source is in its account's registry");
+        at.split_once('@').expect("a source is pinned by digest").0
+    }
 }
 
 impl Request {
@@ -196,7 +202,7 @@ fn parse(rest: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Reques
         }
     }
     let (image, repository, tag) = (image.ok_or_else(usage)?, repository.ok_or_else(usage)?, tag.ok_or_else(usage)?);
-    let Some(&Image { name: image, dockerfile, context, .. }) = by_name(&image) else {
+    let Some(&Image { name: image, dockerfile, context, preview, .. }) = by_name(&image) else {
         bail!("no image {image:?}: {}", IMAGES.map(|i| i.name).join(", "));
     };
     let set = |name: &str| env(name).filter(|v| !v.is_empty());
@@ -212,6 +218,10 @@ fn parse(rest: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Reques
             anyhow::ensure!(account_ok(&source_account), "FROM_CLOUDFLARE_ACCOUNT_ID is no account id (32 lowercase hex digits)");
             anyhow::ensure!(set("FROM_CLOUDFLARE_API_TOKEN").is_some(), "FROM_CLOUDFLARE_API_TOKEN is not set: the token a copy mints its credentials for the source's registry with");
             let source = source_of(&from, &source_account).with_context(|| format!("--from {from:?} is no reference pinned by digest in FROM_CLOUDFLARE_ACCOUNT_ID's registry ({REGISTRY}/<account>/<repository>@sha256:<64 hex>)"))?;
+            // a promotion copies the image the preview ran as this one: one
+            // from another image's repository would be pinned as this one
+            // (Hermes copied as the door's: Codex on #1534)
+            anyhow::ensure!(source.repository() == preview, "--from {from:?} is in {}, not the {image}'s preview repository {preview}: a copy of {image} reads the {image} image the preview ran", source.repository());
             Some(source)
         }
     };
@@ -511,6 +521,15 @@ mod tests {
         for bad in [whole.replace(&format!("@sha256:{digest}"), ":r8"), whole.replace(PREVIEW, ACCOUNT), whole.replace(PREVIEW, "<other>"), whole.replace(&digest, &digest[..12])] {
             assert!(refused(copy(&bad), &all).contains("is no reference pinned by digest"), "{bad}");
         }
+        // a copy reads the chosen image's own preview repository: Hermes's
+        // reference given for the door (or the door's for Hermes) is refused
+        // before anything is minted (Codex on #1534)
+        let door = whole.replace("fragment-preview-computer-hermes-canary", "fragment-preview-door");
+        let copy_door = |from: &str| args(&["copy", "door", "--from", from, "--repository", "fragment-door", "--tag", "r9"]);
+        assert_eq!(parse(&copy_door(&door), &all).unwrap().from.unwrap().reference, door);
+        assert!(refused(copy_door(&whole), &all).contains("not the door's"), "Hermes copied as the door");
+        assert!(refused(copy(&door), &all).contains("not the hermes's"), "the door copied as Hermes");
+        assert!(refused(copy(&whole.replace("-canary", "")), &all).contains("not the hermes's"), "another repository");
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_API_TOKEN", "t")])).contains("FROM_CLOUDFLARE_ACCOUNT_ID is not set"));
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_ACCOUNT_ID", "x"), ("FROM_CLOUDFLARE_API_TOKEN", "t")])).contains("no account id"));
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_ACCOUNT_ID", PREVIEW), ("FROM_CLOUDFLARE_API_TOKEN", "")])).contains("FROM_CLOUDFLARE_API_TOKEN is not set"));
