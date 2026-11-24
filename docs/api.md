@@ -2280,7 +2280,9 @@ On a computer's origin `/__ticket?t=` redeemed by a top-level visit sets
 `fragment_computer_frame` (`HttpOnly; Secure; SameSite=None;
 Partitioned`); both `__Host-` over https, for 12 hours, naming its owner
 only. Every answer there but a socket's upgrade carries `frame-ancestors
-<platform>`. Its cookies count as on a fragment's origin (Which cookies
+<platform>` and no `Service-Worker-Allowed`. No service worker is served
+there: any `Service-Worker: script` request is 404 before `/__ticket` or a
+port sees it, so no port's page registers one. Its cookies count as on a fragment's origin (Which cookies
 count); a socket from any page but its own is 403.
 
 A guest's request to a provider's host has its placeholders swapped
