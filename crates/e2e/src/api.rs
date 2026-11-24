@@ -82,6 +82,14 @@ fn with_body(req: reqwest::blocking::RequestBuilder, method: &str, body: &[u8]) 
     }
 }
 
+/// The one client every plan's lanes share (`Api::planned`,
+/// `Api::planned_local`): a plan sends nothing, and each client built is
+/// its TLS roots read again.
+fn unsent() -> reqwest::blocking::Client {
+    static UNSENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    UNSENT.get_or_init(|| client(Pool::Fresh)).clone()
+}
+
 fn client(pool: Pool) -> reqwest::blocking::Client {
     client_waiting(pool, REQUEST_WAIT)
 }
@@ -348,8 +356,13 @@ pub struct Api {
 impl Api {
     /// The local node's API (`suffix`: where fragments have their hosts).
     pub fn new(port: u16, suffix: &str, run: &Arc<Run>) -> Api {
+        Api::new_with(port, suffix, run, Some(client(Pool::Fresh)))
+    }
+
+    /// The local node's API with `http` (none: the plans' unsent one).
+    fn new_with(port: u16, suffix: &str, run: &Arc<Run>, http: Option<reqwest::blocking::Client>) -> Api {
         let base = format!("http://127.0.0.1:{port}");
-        Api { http: client(Pool::Fresh), base, port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
+        Api { http: http.unwrap_or_else(unsent), base, port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
     }
 
     /// The local node's API, the node shaped as the branch `branch`.
@@ -370,8 +383,13 @@ impl Api {
     /// about 40 ms in debug; one per lane made each plan cost 1.7 s, and
     /// the plan's tests 10 s of the check (FIN-452).
     pub fn planned(preview: &Preview, run: &Arc<Run>) -> Api {
-        static UNSENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-        Api::hosted_with(preview, run, UNSENT.get_or_init(|| client(Pool::Fresh)).clone())
+        Api::hosted_with(preview, run, unsent())
+    }
+
+    /// `new` for a local run's plan (`hosted::plan_local`), which sends
+    /// nothing: its lanes share the plans' one client, as `planned`'s do.
+    pub fn planned_local(port: u16, suffix: &str, run: &Arc<Run>) -> Api {
+        Api::new_with(port, suffix, run, None)
     }
 
     fn hosted_with(preview: &Preview, run: &Arc<Run>, http: reqwest::blocking::Client) -> Api {

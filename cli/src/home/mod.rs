@@ -271,15 +271,20 @@ mod tests {
     use super::*;
     use source::tests::Temp;
 
+    /// The repo root: cargo runs a package's tests in the package's folder.
+    fn repo() -> PathBuf {
+        std::env::current_dir().unwrap().parent().expect("cli sits below the repo root").to_path_buf()
+    }
+
     /// The old agent's home every test reads: synthetic, laid out as
     /// finite.computer kept one (`crates/fakes/fixtures/old-home`).
     pub fn fixture() -> PathBuf {
-        fragment_fakes::old_home::root()
+        fragment_fakes::old_home::root(&repo())
     }
 
     /// The fixture's own layout, as a platform's skill carries one.
     fn fixture_layout() -> Layout {
-        Layout::named(fragment_fakes::old_home::layout().to_str().unwrap()).unwrap()
+        Layout::named(fragment_fakes::old_home::layout(&repo()).to_str().unwrap()).unwrap()
     }
 
     /// Goal: a file that may hold a secret (by its name, or the layout's

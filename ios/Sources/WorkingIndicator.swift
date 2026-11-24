@@ -7,6 +7,8 @@ struct WorkingIndicator: View {
         let id: TurnKey
         let name: String
         var home: String? = nil
+        /// Its agent fragment, for its picture on the line (`BotMark`).
+        var agent: FragmentSummary? = nil
     }
 
     let agents: [Agent]
@@ -46,7 +48,7 @@ struct WorkingIndicator: View {
                 if $0.key.agent != $1.key.agent { return $0.key.agent < $1.key.agent }
                 return $0.key.id < $1.key.id
             }
-            .map { Agent(id: $0.key, name: library.agent(for: $0.key.agent)?.displayTitle ?? "The agent") }
+            .map { Agent(id: $0.key, name: library.agent(for: $0.key.agent)?.displayTitle ?? "The agent", agent: library.agent(for: $0.key.agent)) }
         hints = WorkingActivity(timeline).hints
     }
 
@@ -56,7 +58,7 @@ struct WorkingIndicator: View {
     }
 
     init(card: ToolCard, agent: FragmentSummary?) {
-        agents = [Agent(id: card.turn, name: agent?.displayTitle ?? "The agent", home: agent?.name)]
+        agents = [Agent(id: card.turn, name: agent?.displayTitle ?? "The agent", home: agent?.name, agent: agent)]
         cards = [card]
     }
 
@@ -64,7 +66,10 @@ struct WorkingIndicator: View {
         self.hints = hints; self.cards = card.map { [$0] } ?? []
         self.principal = principal; self.phase = phase; self.present = present
         let keys = hints.map(\.id) + self.cards.map(\.turn)
-        agents = keys.map { Agent(id: $0, name: library.agent(for: $0.agent)?.displayTitle ?? "The agent", home: library.agent(for: $0.agent)?.name) }
+        agents = keys.map { key in
+            let agent = library.agent(for: key.agent)
+            return Agent(id: key, name: agent?.displayTitle ?? "The agent", home: agent?.name, agent: agent)
+        }
     }
 
     var body: some View {
@@ -118,7 +123,6 @@ struct WorkingIndicator: View {
                 return ("Working", since)
             }
         }()
-        let asked: Bool = { if case .asked = hint.kind { true } else { false } }()
         // a problem, or a wait on someone, never shimmers; everything else does
         let moving: Bool = {
             switch hint.kind {
@@ -127,9 +131,20 @@ struct WorkingIndicator: View {
             case .pending: return !late && phase != "wont_wake"
             }
         }()
+        // a wait on someone breathes; waking spins; a long wait looks about;
+        // work throbs; a problem (or going to sleep) holds still
+        let motion: BotMark.Motion = {
+            switch hint.kind {
+            case .working: return .throb
+            case .asked: return .breathe
+            case .pending:
+                if !moving { return late ? .wobble : .still }
+                if phase == "starting" || phase == "asleep" { return .spin }
+                return phase == "sleeping" ? .still : .throb
+            }
+        }()
         return HStack(spacing: 8) {
-            // a wait on someone breathes; work runs a wave; a problem holds still
-            LogoStripes(elapsed: moving || asked ? now.timeIntervalSinceReferenceDate : nil, size: lineSize, breathing: asked).foregroundStyle(secondary)
+            BotMark(agent: agent.agent, motion: motion, time: now.timeIntervalSinceReferenceDate, size: lineSize + 5)
             HStack(spacing: 6) {
                 if moving { shimmer(text, elapsed: elapsed, active: true) } else { Text(text).foregroundStyle(secondary) }
                 if let since { Text("· " + Self.duration(milliseconds - since)).monospacedDigit() }
@@ -166,13 +181,21 @@ struct WorkingIndicator: View {
             Button { toggle(steps: card.steps.count) } label: {
                 HStack(spacing: 6) {
                     // gone once it's done: the line is then a summary, not a working one
-                    if card.running { LogoStripes(elapsed: now.timeIntervalSinceReferenceDate, size: lineSize).foregroundStyle(secondary).padding(.trailing, 2) }
+                    let who = agents.first { $0.id == card.turn }
+                    if card.running {
+                        BotMark(agent: who?.agent, motion: BotMark.motion(card.nowWord),
+                                time: now.timeIntervalSinceReferenceDate, size: lineSize + 5).padding(.trailing, 2)
+                    } else {
+                        // done: who it was, still, by what it says
+                        AgentAvatar(agent: who?.agent, size: lineSize + 5, round: true).padding(.trailing, 2)
+                    }
                     if card.running {
                         // a word for what it does now, held long enough to read
                         HeldWord(word: card.nowWord) { shimmer($0, elapsed: elapsed, active: true) }
                         Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - card.since)).monospacedDigit()
                     } else {
-                        Text(card.doneWord + " for " + Self.duration((card.until ?? card.since) - card.since))
+                        // "XP cooked · 50s"
+                        Text("\(who?.name ?? "The agent") \(card.doneWord.lowercased()) · " + Self.duration((card.until ?? card.since) - card.since))
                     }
                     glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0)).animation(.easeInOut(duration: 0.14), value: expanded)
                 }.font(.system(size: lineSize)).frame(minHeight: 24).contentShape(Rectangle())
@@ -381,54 +404,65 @@ private struct HeldWord<Content: View>: View {
     }
 }
 
-/// The working line's mark, after the logo's bars: a circle made of
-/// rounded lines, each as wide as the circle where it sits, in the line's own
-/// color. While something is under way (`elapsed`, the
-/// line's clock) they light in a wave running up and down; while it waits on
-/// someone they breathe, all together; otherwise (nil, or Reduce Motion) they
-/// hold still. Each line sits on whole pixels. Its clock is the time of day,
-/// never the line's own (which restarts with each step): it flows on unbroken
-/// as the word changes, and from Thinking into the working line.
-private struct LogoStripes: View {
+/// The working line's mark: the agent's own picture in a circle, moving as
+/// it works. It throbs as it thinks, hops as it runs or writes, looks about
+/// (a wobble) as it searches or reads, spins as it draws, asks a helper or
+/// wakes, and breathes slowly while it waits on someone; a problem holds it
+/// still, as does Reduce Motion. A change of motion blends from the old to
+/// the new over a moment, never a jump. Its clock is the time of day, never
+/// the line's own (which restarts with each step), so it flows on unbroken
+/// as the word changes.
+struct BotMark: View {
+    enum Motion: Equatable { case still, throb, breathe, bounce, wobble, spin }
+    let agent: FragmentSummary?
+    let motion: Motion
     /// Seconds on a clock that never restarts (`timeIntervalSinceReferenceDate`).
-    let elapsed: TimeInterval?
+    let time: TimeInterval
     let size: CGFloat
-    /// All its lines lit together, slowly up and down, rather than in a wave.
-    var breathing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.displayScale) private var scale
-    static let lines = 5
+    /// The motion it is leaving, and when it began to.
+    @State private var from: Motion = .still
+    @State private var changed: TimeInterval = 0
+    static let blend: TimeInterval = 0.35
+
+    /// The motion for the working line's word (`ToolCard.nowWord`).
+    static func motion(_ word: String) -> Motion {
+        switch word {
+        case "Working", "Running", "Writing": return .bounce
+        case "Searching", "Browsing", "Reading": return .wobble
+        case "Drawing", "Asking a helper": return .spin
+        default: return .throb
+        }
+    }
+
+    /// Where a motion has it at `t`: its size, its turn and its lift.
+    struct Pose { var scale = 1.0, angle = 0.0, lift = 0.0 }
+    static func pose(_ motion: Motion, _ t: TimeInterval) -> Pose {
+        switch motion {
+        case .still: return Pose()
+        case .throb: return Pose(scale: 1 + 0.22 * (0.5 - 0.5 * cos(2 * .pi * t / 0.9)))
+        case .breathe: return Pose(scale: 1 + 0.16 * (0.5 - 0.5 * cos(2 * .pi * t / 2.2)))
+        // a hop: up and back, landing sharp
+        case .bounce: return Pose(lift: -6 * abs(sin(.pi * t / 0.5)))
+        case .wobble: return Pose(angle: 20 * sin(2 * .pi * t / 0.8))
+        // a turn every 1.5 seconds, the shortest way round (for blending)
+        case .spin:
+            let turned = (t * 240).truncatingRemainder(dividingBy: 360)
+            return Pose(angle: turned > 180 ? turned - 360 : turned)
+        }
+    }
 
     var body: some View {
-        let lit: Double? = reduceMotion ? nil : elapsed
-        // a whole number of points, so its pixel grid starts where the view does
-        let side = (size * 0.95).rounded()
-        let scale = self.scale
-        Canvas { context, box in
-            // one whole-pixel pitch for every line: each gap the same, each edge sharp
-            let height = (box.height * scale).rounded(.down)
-            let pitch = (height / CGFloat(Self.lines)).rounded(.down)
-            let thick = max(1, (pitch * 0.5).rounded())
-            let first = ((height - (CGFloat(Self.lines) * pitch - (pitch - thick))) / 2).rounded(.down)
-            // the lit line, sweeping from top to bottom and back
-            let at = breathing ? nil : lit.map { (1 - cos($0 * 2.2)) / 2 * Double(Self.lines - 1) }
-            // breathing: every line together, in and out about every four seconds
-            let breath = breathing ? lit.map { (1 - cos($0 * 1.6)) / 2 } : nil
-            for index in 0..<Self.lines {
-                let glow = breath ?? at.map { max(0, 1 - abs(Double(index) - $0) / 1.3) } ?? 0.6
-                var line = context
-                line.opacity = 0.3 + 0.7 * glow
-                // each line as wide as the circle is where it sits, a capsule
-                // centered on whole pixels: together, the lines make the circle
-                let top = first + CGFloat(index) * pitch
-                let across = (box.width * scale) / 2, middle = top + thick / 2 - height / 2
-                let half = (sqrt(max(0, across * across - middle * middle))).rounded(.down)
-                let width = max(thick, 2 * half)
-                let rect = CGRect(x: ((box.width * scale - width) / 2).rounded() / scale, y: top / scale, width: width / scale, height: thick / scale)
-                line.fill(Path(roundedRect: rect, cornerRadius: rect.height / 2), with: .foreground)
-            }
-        }
-        .frame(width: side, height: side)
-        .accessibilityHidden(true)
+        let still = reduceMotion
+        let old = Self.pose(still ? .still : from, time), new = Self.pose(still ? .still : motion, time)
+        // eased from the old motion's pose into the new one's
+        let w = min(1, max(0, (time - changed) / Self.blend)), e = w * w * (3 - 2 * w)
+        AgentAvatar(agent: agent, size: size, round: true)
+            .scaleEffect(old.scale + (new.scale - old.scale) * e)
+            .rotationEffect(.degrees(old.angle + (new.angle - old.angle) * e))
+            .offset(y: old.lift + (new.lift - old.lift) * e)
+            .frame(width: size, height: size)
+            .onChange(of: motion) { previous, _ in from = previous; changed = time }
+            .accessibilityHidden(true)
     }
 }

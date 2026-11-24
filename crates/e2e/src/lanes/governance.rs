@@ -21,7 +21,8 @@ use crate::api::{Api, Reply};
 use crate::{Need, Suite};
 
 pub fn governance(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("governance", &[Need::Fakes]) {
+    // its wipes reach each person's computer (the wipe's computer step)
+    if !s.section_using("governance", &[Need::Fakes], &[Need::Computers]) {
         return Ok(());
     }
     let pam = api.person()?;

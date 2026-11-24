@@ -1,0 +1,23 @@
+# cargo-deny's policy for the cell's Cargo.lock (the Worker's own
+# workspace): as the root's deny.toml, which says how this list is kept;
+# docs/security/dependency-scanning.md.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+unsound = "all"
+unmaintained = "workspace"
+yanked = "warn"
+unused-ignored-advisory = "deny"
+ignore = [
+    # crypto-bigint 0.5.5 (through k256/p256 0.13): the cell signs Web Push
+    # VAPID and code.storage tokens with p256 keys of the platform's. Fixed
+    # only in 0.7.6, behind the k256/p256 0.14 migration (FIN-636).
+    { id = "RUSTSEC-2026-0387", reason = "needs the k256/p256 0.14 migration: FIN-636" },
+    # libsqlite3-sys 0.38.2: a build dependency here (fragment-devstack under
+    # fragment-templates' build script), never in the Worker's Wasm, which
+    # uses the Durable Objects' SQLite. rusqlite 0.41 fixes it (FIN-637).
+    { id = "RUSTSEC-2026-0459", reason = "build-time only, not in the Wasm; FIN-637" },
+]

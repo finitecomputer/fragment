@@ -550,6 +550,32 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    /// Goal: a big move never tells the agent to reply to its owner mid-turn
+    /// before `fragment home files --store` runs (FIN-701). A reply ends the
+    /// agent's turn in Hermes, so steps 3 to 8 never run and nothing wakes it.
+    #[test]
+    fn the_import_skill_does_not_reply_before_step_3_finishes() {
+        let skills = template("skills").unwrap();
+        let f = skills.file("skills/productivity/import-agent-home/SKILL.md").unwrap();
+        let text = String::from_utf8(bytes_of(skills, f)).unwrap();
+        let step3: String = text
+            .split_once("## 3. Files, into an app")
+            .and_then(|(_, rest)| rest.split_once("## 4. Personality"))
+            .expect("step 3..4 section in import-agent-home/SKILL.md")
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !step3.contains("first tell your owner"),
+            "step 3 must not ask the agent to send a mid-turn message before running home files"
+        );
+        assert!(
+            step3.contains("Don't reply to your owner until step 8"),
+            "step 3 must warn against replying mid-turn"
+        );
+    }
+
     #[test]
     fn faults_say_why() {
         assert!(CodeFault::TooManyModules(65).message().contains("64"));
