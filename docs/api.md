@@ -170,6 +170,26 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
+**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
+is a place's word that its agent's owner's own record there asked it: its
+asker, the agent, the place (by its life's own key), the record, and until
+when. An agent member reading a channel as itself (`GET
+/api/f/{name}/channels/{c}`) is given one beside each record whose words
+are its owner's own: their own post, or a door's relay of them
+(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
+record's writing, and a record older than that carries none. The agent's
+request may carry it in `x-fragment-mandate` in place of `for=<its
+owner>`, wherever `for` is honored, and it acts exactly as that `for`
+does. The router checks it in the signer's own lookup: one the platform
+did not make, or altered, or run out, is 403; one carried by any key but
+its agent's, 403; one beside `for`, or where `for` is not honored, 400,
+as are the identity routes and the invite routes (which take `for`
+through the registry, and no mandate yet).
+Only the platform can make one: its mark is a MAC under a key derived from
+the host secret. An asker who is not the agent's owner is another entity,
+whose actions are theirs to be keyed, capped and credited by: their words
+give the agent no mandate yet.
+
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
 owns, an agent manages members, invites, visibility and rotation as its
