@@ -6728,9 +6728,14 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     let made_here = (!before.contains(&fresh)).then_some(fresh);
 
     // ---- pins: from the open chat's ⋯ and a row's; by title, held ----
-    // (unfolded, so each row and its newest words are drawn; folded again at the end)
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
-    anyhow::ensure!(b.until(page, &unfolded(true), wait), "their agent's chats unfolded");
+    // (unfolded, so each row and its newest words are drawn; folded again at
+    // the end; a More pressed to reach a row since, as `open_row` presses
+    // it, is kept, so each is pressed only when it is not so already)
+    let fold_to = |b: &mut Browser, open: bool| -> Result<bool> {
+        b.eval(page, &format!("({} && document.querySelector({more}).click(), true)", unfolded(!open)))?;
+        Ok(b.until(page, &unfolded(open), wait))
+    };
+    anyhow::ensure!(fold_to(b, true)?, "their agent's chats unfolded");
     // a row's ⋯, pressed by script: shown on hover alone where a pointer hovers
     let row_menu = |b: &mut Browser, name: &str| -> Result<bool> {
         let more = js(&format!("#chats [data-key={}] .row-more", js(&format!("chat:{name}"))));
@@ -6755,8 +6760,7 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         && b.until(page, &format!("{}?.textContent.includes('pins hold tulip') && {}?.textContent.includes('pins hold rose') && {by_title} && {main_chats}.indexOf({}) > 1", row(&tulip), row(&rose), js(&rose)), agent_wait);
     let main_menu = hero_menu(b, page, &hero)?;
     // folded again: both pinned still shown, first
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
-    let kept = b.until(page, &format!("{} && {by_title} && {settled}", unfolded(false)), wait);
+    let kept = fold_to(b, false)? && b.until(page, &format!("{} && {by_title} && {settled}", unfolded(false)), wait);
     let _ = b.screenshot(page, &shots.join("desktop-pins-1280-light.png"));
     b.color_scheme(page, "dark")?;
     let _ = b.screenshot(page, &shots.join("desktop-pins-1280-dark.png"));
