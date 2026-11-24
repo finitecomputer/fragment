@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use fragment_devstack as devstack;
 
@@ -29,17 +30,26 @@ fn child() {
     }
 }
 
-/// A folder of its own, gone when dropped.
-struct Temp(PathBuf);
+/// Held by a test from its first copy to its last child. A child forked
+/// while another test writes its copy of the binary holds that file open
+/// for writing until its own exec, and running the copy in that window
+/// fails ("text file busy", as crates/devstack/src/node.rs met it): so no
+/// test forks while another copies.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// A folder of its own, gone when dropped, and the tests' turn, held
+/// until then.
+struct Temp(PathBuf, #[allow(dead_code)] MutexGuard<'static, ()>);
 
 impl Temp {
     fn new() -> Temp {
+        let turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         // the real path: macOS's temporary folder is reached through a link,
         // which a process's own path (`current_exe`) does not keep
         let base = std::env::temp_dir().canonicalize().expect("the temporary folder");
         let dir = base.join(format!("repo-root-{}", devstack::random_hex(6)));
         std::fs::create_dir_all(&dir).expect("a folder of the test's own");
-        Temp(dir)
+        Temp(dir, turn)
     }
 
     /// Another checkout: all `repo_root` asks of one.
@@ -68,16 +78,23 @@ impl Drop for Temp {
 /// The root the child at `exe` finds, told `manifest_dir` by cargo (or
 /// nothing).
 fn root_found_by(exe: &Path, manifest_dir: Option<&Path>) -> PathBuf {
+    root_found_or_why(exe, manifest_dir).unwrap_or_else(|why| panic!("the child failed: {why}"))
+}
+
+/// The same, or what the child said as it failed.
+fn root_found_or_why(exe: &Path, manifest_dir: Option<&Path>) -> Result<PathBuf, String> {
     let mut cmd = Command::new(exe);
     cmd.args(["--exact", "child", "--nocapture"]).env(CHILD, "1").env_remove("CARGO_MANIFEST_DIR");
     if let Some(dir) = manifest_dir {
         cmd.env("CARGO_MANIFEST_DIR", dir);
     }
     let out = cmd.output().expect("the child runs");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(out.status.success(), "the child failed: {text}{}", String::from_utf8_lossy(&out.stderr));
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() {
+        return Err(text);
+    }
     let said = text.lines().find_map(|l| l.strip_prefix(SAID)).unwrap_or_else(|| panic!("the child named no root: {text}"));
-    PathBuf::from(said)
+    Ok(PathBuf::from(said))
 }
 
 /// Where this crate really is: the checkout this test was built in and
@@ -130,11 +147,17 @@ fn cargos_word_comes_before_where_the_binary_is() {
 }
 
 /// Goal: a binary outside any checkout, with nothing from cargo, still
-/// works in the checkout that built it, as before. Valid: a copy of this
-/// binary in a bare folder.
+/// works in the checkout that built it, as before, and never in a folder
+/// that is no checkout. Valid: a copy of this binary in a bare folder
+/// names a checkout: this one, or in a build kept from another checkout,
+/// that one (the last resort is the path compiled in). Invalid: that
+/// checkout is gone, and the binary says so and stops.
 #[test]
 fn a_build_outside_any_checkout_works_where_it_was_built() {
     let t = Temp::new();
     let stray = t.copy_of_this_binary("bin/repo_root-stray");
-    assert_eq!(root_found_by(&stray, None).canonicalize().expect("a root that is there"), this_checkout());
+    match root_found_or_why(&stray, None) {
+        Ok(root) => assert!(root.join("crates/devstack/Cargo.toml").is_file(), "{} is a checkout", root.display()),
+        Err(why) => assert!(why.contains("a fragment checkout holds this process"), "{why}"),
+    }
 }
