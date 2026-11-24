@@ -285,7 +285,7 @@ pub enum Back {
 /// A door's save as a way back reads it: a link to place, or a staged chat
 /// its door never kept, which this computer keeps staged as it was.
 enum Placing {
-    Link(Link, Vec<String>),
+    Link(Box<Link>, Vec<String>),
     Staged,
 }
 
@@ -374,7 +374,7 @@ fn place_back(dir: &Path, packed: &[u8]) -> Result<Placing, super::save::SaveErr
             carried.push(FILE_LEFT.to_string());
         }
     }
-    Ok(Placing::Link(kept.link, carried))
+    Ok(Placing::Link(Box::new(kept.link), carried))
 }
 
 /// A save that would not be made or placed, as the platform is told it:
@@ -624,7 +624,7 @@ impl Handle {
             // a door that never held a save never ran: these databases are its link's still
             Ok(_) if packed.is_empty() => Ok(None),
             Ok(_) => match tokio::task::spawn_blocking(move || place_back(&dir, &packed)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its placing stopped: {e}")))) {
-                Ok(Placing::Link(link, carried)) => Ok(Some((link, carried))),
+                Ok(Placing::Link(link, carried)) => Ok(Some((*link, carried))),
                 // its staged chat kept here as it was, while it is here
                 Ok(Placing::Staged) if staged_here => Ok(None),
                 Ok(Placing::Staged) => Err(Refused::new(409, "its staged chat is in its door's save alone: its connector is kept").coded("staged")),
@@ -4646,7 +4646,7 @@ mod tests {
         let (into, _) = m.back(f, &signed("back", &"0e".repeat(16))).expect("taken");
         let Ok(Placing::Link(link, carried)) = place_back(&into, &newest) else { panic!("placed") };
         assert_eq!(carried, ["taken, not yet sent", FILE_LEFT], "what its door had not sent: words, and a note for a file it holds");
-        m.placed(f, Back::Placed(Box::new(link), carried), true).expect("its view");
+        m.placed(f, Back::Placed(link, carried), true).expect("its view");
         let read = load(&link_dir, &agent()).expect("its file");
         assert!(read.moved.is_none() && !m.moved(f), "moved no more");
         assert_eq!(read.carried, ["taken, not yet sent", FILE_LEFT], "kept for its core's next start, on disk");
