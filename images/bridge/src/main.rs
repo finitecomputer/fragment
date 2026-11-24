@@ -201,6 +201,10 @@ async fn main() {
                     0 => fail("BRIDGE_KEEPALIVE_PING_MS is more than 0"),
                     ms => ms,
                 }),
+                computer_every: Duration::from_millis(match parse_ms("BRIDGE_COMPUTER_EVERY_MS", limits::COMPUTER_EVERY_MS) {
+                    0 => fail("BRIDGE_COMPUTER_EVERY_MS is more than 0"),
+                    ms => ms,
+                }),
                 simplex: simplex_config(),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()), "simplex": cfg.simplex.is_some() });

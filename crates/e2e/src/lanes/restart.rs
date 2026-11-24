@@ -201,7 +201,8 @@ fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
 }
 
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers]) {
+    // an own key's computer from before the move, where the run makes computers
+    if !s.section_using("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers], &[crate::Need::Computers]) {
         return Ok(());
     }
     let api = s.api();

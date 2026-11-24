@@ -73,6 +73,11 @@ impl Need {
         Need::Move,
     ];
 
+    /// Whether a section of `planned` that would run needs or uses this.
+    pub fn used_by(self, planned: &[crate::Planned]) -> bool {
+        planned.iter().any(|p| p.skip.is_none() && (p.needs.contains(&self) || p.uses.contains(&self)))
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Need::Fakes => "fakes",
