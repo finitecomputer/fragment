@@ -29,8 +29,9 @@ export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply", "file"];
 // The files a door holds between its connector and its runner (its
 // owner's, on their way to the connector's chat; its agent's, on their way
 // to its owner's SimpleX app), each for a moment: at most this many, this
-// many bytes between them, and each this long since it was last given or
-// used. Past the first two, those already taken make room, the oldest
+// many bytes between them, every one it holds counted, and each this long
+// since it was last given or used (but one a waiting delivery names).
+// Past the first two, those nothing still needs make room, the oldest
 // first; with none, a new one is refused until older ones go (asked again
 // later). SimpleX's own bound on one file is its runner's
 // (images/simplex-door).
@@ -58,9 +59,11 @@ export const STEPS = [
   // whether its connector's inbox took it
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
   // the files it holds (`FILES_KEPT`): each by its SHA-256, its bytes, its
-  // type as its giver said, when it was last given or used, and whether the
-  // one it was for has read it
-  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL, taken INTEGER NOT NULL)",
+  // type as its giver said, when it was last given or used, and the uses
+  // still to come (one each time its runner gives it, until its connector
+  // keeps it; one each time its connector gives it, until a reply naming
+  // it is done)
+  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL, needs INTEGER NOT NULL)",
 ];
 
 // The steps a schema at `version` has yet to take, in order.
@@ -121,12 +124,12 @@ export function typeOf(type) {
   return typeof type === "string" && type.length <= 128 && /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(type.toLowerCase()) ? type.toLowerCase() : "application/octet-stream";
 }
 
-// Whether a file of `bytes` may be held beside `files` (each {bytes, at})
-// at `now`: those past `FILE_KEPT_MS` are let go first (`stale`).
-export function fileRoom(files, bytes, now) {
-  const kept = files.filter((f) => now - f.at < FILE_KEPT_MS);
-  const held = kept.reduce((n, f) => n + f.bytes, 0);
-  return kept.length < FILES_KEPT && held + bytes <= FILES_BYTES_MAX;
+// Whether a file of `bytes` may be held beside `files` (each {bytes}):
+// every one it holds counts, an old one a waiting delivery keeps included
+// (those past `FILE_KEPT_MS` that none needs are let go before it asks).
+export function fileRoom(files, bytes) {
+  const held = files.reduce((n, f) => n + f.bytes, 0);
+  return files.length < FILES_KEPT && held + bytes <= FILES_BYTES_MAX;
 }
 
 // A reply's files as its connector names them: each {sha256, name, type,

@@ -71,7 +71,7 @@ const RELEASED = [
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
   "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), fragment TEXT NOT NULL, secret TEXT NOT NULL, asked INTEGER NOT NULL DEFAULT 0)",
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
-  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL, taken INTEGER NOT NULL)",
+  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL, needs INTEGER NOT NULL)",
 ];
 
 test("the schema's released steps are as released, and taken in order", () => {
@@ -116,15 +116,14 @@ test("a file it holds is named by its SHA-256, under its own prefix, and typed a
   for (const bad of ["audio", "audio/mp4; codecs=x", "text/html\r\nx: y", "", null, "a/".repeat(80)]) assert.equal(typeOf(bad), "application/octet-stream", String(bad));
 });
 
-test("it holds files while there is room: at most so many, so many bytes between them, each for a day", () => {
-  const now = 1_790_000_000_000;
-  const f = (bytes, age = 0) => ({ bytes, at: now - age });
-  assert.equal(fileRoom([], 1, now), true);
-  assert.equal(fileRoom(Array.from({ length: FILES_KEPT - 1 }, () => f(1)), 1, now), true);
-  assert.equal(fileRoom(Array.from({ length: FILES_KEPT }, () => f(1)), 1, now), false, "as many as it may");
-  assert.equal(fileRoom([f(FILES_BYTES_MAX - 1)], 1, now), true);
-  assert.equal(fileRoom([f(FILES_BYTES_MAX - 1)], 2, now), false, "past its bytes");
-  assert.equal(fileRoom(Array.from({ length: FILES_KEPT }, () => f(FILES_BYTES_MAX, FILE_KEPT_MS)), FILES_BYTES_MAX, now), true, "those past a day count for nothing");
+test("it holds files while there is room: at most so many, so many bytes between them, every one counted", () => {
+  const f = (bytes) => ({ bytes });
+  assert.equal(fileRoom([], 1), true);
+  assert.equal(fileRoom(Array.from({ length: FILES_KEPT - 1 }, () => f(1)), 1), true);
+  assert.equal(fileRoom(Array.from({ length: FILES_KEPT }, () => f(1)), 1), false, "as many as it may");
+  assert.equal(fileRoom([f(FILES_BYTES_MAX - 1)], 1), true);
+  assert.equal(fileRoom([f(FILES_BYTES_MAX - 1)], 2), false, "past its bytes");
+  assert.ok(FILE_KEPT_MS > 0, "an old file a waiting delivery keeps is one it holds: its door's cleanup lets the others go first");
 });
 
 test("a reply's files are a message's at most, each named by its SHA-256", () => {

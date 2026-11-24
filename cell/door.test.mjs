@@ -547,14 +547,18 @@ test("a file its runner received is held for its connector: once, from its runni
   assert.deepEqual([r.headers.get("x-door-sha256"), r.headers.get("content-type"), r.headers.get("content-length"), await r.text()], [sha(1), "audio/mp4", "11", "voice bytes"]);
   assert.equal((await d.jobFile("GET", sha(9))).status, 404, "one it does not hold");
   assert.equal((await d.call("GET", `/job/file/${sha(1)}`, { "x-fragment-door": `${NAME}--fedcba987654`, "x-fragment-connector": NAME })).status, 409, "another life's connector: refused");
-  // as many as it may hold: the one taken (read by its connector) makes
-  // room; then, none taken, a new one is refused until older ones go
+  // as many as it may hold: one its connector kept as often as it was
+  // given makes room; then, every one still needed, a new one is refused
+  // until older ones go
   for (let n = 10; n < 10 + 63; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
-  assert.equal((await d.give(life1, sha(98), "x")).status, 200, "room made by the file already taken");
-  assert.deepEqual(d.st.sql.exec("SELECT sha FROM files WHERE sha = ?", sha(1)).toArray(), [], "the taken one let go");
+  const still = await d.give(life1, sha(98), "x");
+  assert.deepEqual([still.status, (await still.json()).error], [503, "files_full"], "given twice, kept once: still needed, never let go");
+  assert.equal((await d.jobFile("GET", sha(1))).status, 200);
+  assert.equal((await d.give(life1, sha(98), "x")).status, 200, "kept as often as given: its room is the new one's");
+  assert.deepEqual(d.st.sql.exec("SELECT sha FROM files WHERE sha = ?", sha(1)).toArray(), [], "the one none needs let go");
   assert.ok(!d.prefixed().includes(`doors/${DOOR}/files/${sha(1)}`), "its file too");
   const full = await d.give(life1, sha(99), "x");
-  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"], "none taken: refused");
+  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"], "every one still needed: refused");
   // a day on, its watch lets them go, rows and files
   d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
   await d.o.alarm();
@@ -606,28 +610,68 @@ test("every delivery its inbox has yet to take keeps its file past a day", async
   for (const n of [1, 2]) assert.equal((await d.jobFile("GET", sha(n))).status, 200, `its connector keeps file ${n} once its inbox takes the delivery`);
 });
 
-test("a reply's file is taken once its reply is done, never by its runner's read; one given again is needed again", async () => {
+test("a reply's file is needed until its reply is done, whatever its runner reads; given again, needed again", async () => {
   const d = door();
   await d.connect();
   await d.jobFile("PUT", sha(5), "%PDF");
-  const taken = () => d.st.sql.exec("SELECT taken FROM files WHERE sha = ?", sha(5)).one().taken;
+  const needs = () => d.st.sql.exec("SELECT needs FROM files WHERE sha = ?", sha(5)).one().needs;
+  assert.equal(needs(), 1, "given: its reply's use to come");
   await d.call("GET", `/egress/file/${sha(5)}`);
-  assert.equal(taken(), 0, "its runner's read: not taken (a reply read again after a sync finds it)");
+  assert.equal(needs(), 1, "its runner's read ends nothing (a reply read again after a sync finds it)");
   const files = [{ sha256: sha(5), name: "plan.pdf", type: "application/pdf", size: 4 }];
   d.c.answers.push([200, { files: true }], [202, { done: false }]);
   await d.job("reply", { key: "chat:9", text: "", files });
-  assert.equal(taken(), 0, "not yet done");
+  assert.equal(needs(), 1, "not yet done");
   d.c.answers.push([200, { files: true }], [200, { done: true }]);
   await d.job("reply", { key: "chat:9", text: "", files });
-  assert.equal(taken(), 1, "done: taken");
+  assert.equal(needs(), 0, "done: needed no more");
   await d.jobFile("PUT", sha(5), "%PDF");
-  assert.equal(taken(), 0, "given again: needed again");
-  // a full door: a file given again (taken no more) is never let go for room
+  assert.equal(needs(), 1, "given again: needed again");
+  // a full door: a file still needed is never let go for room
   const life1 = life(await d.restore(d.row().started));
   for (let n = 10; n < 10 + 63; n += 1) await d.give(life1, sha(n), "x");
   const full = await d.give(life1, sha(99), "x");
   assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"]);
-  assert.equal(taken(), 0);
+  assert.equal(needs(), 1);
+});
+
+test("an old file a waiting delivery keeps counts toward the door's bounds (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  d.inbox.status = 503;
+  await d.give(life1, sha(1), "voice");
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 } }));
+  d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
+  await d.o.alarm();
+  for (let n = 10; n < 10 + 63; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
+  const past = await d.give(life1, sha(99), "x");
+  assert.deepEqual([past.status, (await past.json()).error], [503, "files_full"], "64 held, the old one among them: no 65th");
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 64);
+});
+
+test("one file two messages name: kept for the first, still there for the second however full the door (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  d.inbox.status = 503;
+  const file = { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 };
+  for (const id of ["v1", "v2"]) {
+    await d.give(life1, sha(1), "voice");
+    await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
+  }
+  d.inbox.status = 200;
+  await d.o.alarm();
+  assert.deepEqual(d.st.sql.exec("SELECT id, sent FROM deliveries ORDER BY mark").toArray(), [{ id: "v1", sent: 1 }, { id: "v2", sent: 1 }], "both taken by its inbox, neither kept yet");
+  assert.equal((await d.jobFile("GET", sha(1))).status, 200, "the first kept");
+  // full of files none needs any more (each kept), older than it is not
+  for (let n = 10; n < 10 + 63; n += 1) {
+    await d.give(life1, sha(n), "x");
+    await d.jobFile("GET", sha(n));
+  }
+  assert.ok(d.st.sql.exec("SELECT at FROM files ORDER BY at LIMIT 1").one().at === d.st.sql.exec("SELECT at FROM files WHERE sha = ?", sha(1)).one().at, "it is the oldest");
+  for (let n = 90; n < 95; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `room made for ${n}`);
+  assert.equal((await d.jobFile("GET", sha(1))).status, 200, "the second still kept: never let go while a message needs it");
 });
 
 test("a delivery names its file by its SHA-256; a file named otherwise (an older runner's) goes as none", async () => {

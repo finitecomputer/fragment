@@ -66,6 +66,9 @@ const SECRET_HEADER = "x-door-secret";
 // asked again, it deletes the rest.
 const END_PAGES_MAX = 10;
 
+// The files deliveries its inbox has yet to take name: never let go.
+const WAITING_FILES = "SELECT json_extract(body, '$.file.sha256') FROM deliveries WHERE sent = 0 AND json_extract(body, '$.file.sha256') IS NOT NULL";
+
 const json = (v, status = 200, headers = {}) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
 const refusal = (status, error, message) => json({ error, message }, status);
 const own = (env) => env.FRAGMENT_DEPLOY_ID || "dev";
@@ -318,7 +321,8 @@ export class SimplexDoor extends DurableObject {
     if (ask === "state") return this.#state();
     // a file its agent sends (`PUT`, one of the connector's blobs), or one
     // its owner sent (`GET`, kept as one of the connector's blobs)
-    if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request) : await this.#giveFile(sha, true);
+    // a reply's file, given: one use to come, its reply's
+    if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request, 1) : await this.#giveFile(sha, true);
     if (ask === "reply") return await this.#reply(await bounded(request));
     // a link or unlink, numbered by its connector: one older than the
     // newest it numbered (a retry of a link after its unlink) is refused,
@@ -348,7 +352,7 @@ export class SimplexDoor extends DurableObject {
     if (runner?.files !== true) return refusal(409, "no_files", "this door's runner carries no files: its text alone");
     const asked = await this.#ask("/reply", { key: body.key, text: body.text, files });
     // done: its files the core took, theirs to let go of from then on
-    if (asked.status === 200) for (const f of files) this.ctx.storage.sql.exec("UPDATE files SET taken = 1 WHERE sha = ?", f.sha256);
+    if (asked.status === 200) for (const f of files) this.ctx.storage.sql.exec("UPDATE files SET needs = max(needs - 1, 0) WHERE sha = ?", f.sha256);
     return asked;
   }
 
@@ -363,7 +367,8 @@ export class SimplexDoor extends DurableObject {
       await request.body?.cancel();
       return refusal(409, "superseded", `life ${life} is not the door's running one`);
     }
-    return this.#keepFile(sha, request);
+    // one use to come: the delivery that names it, until its connector keeps it
+    return this.#keepFile(sha, request, 1);
   }
 
   // A file kept under its name, its bytes streamed in (`content-length` of
@@ -371,7 +376,7 @@ export class SimplexDoor extends DurableObject {
   // again, its bytes unread), and only while there is room
   // (`fileRoom`; else 503, asked again later). The door ending during its
   // upload lets go of its file, as of a save's.
-  async #keepFile(sha, request) {
+  async #keepFile(sha, request, uses) {
     const length = Number(request.headers.get("content-length"));
     if (!shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
       await request.body?.cancel();
@@ -379,8 +384,8 @@ export class SimplexDoor extends DurableObject {
     }
     const d = this.#door();
     const now = Date.now();
-    // given again: needed again, not yet taken
-    if (this.ctx.storage.sql.exec("UPDATE files SET at = ?, taken = 0 WHERE sha = ? RETURNING sha", now, sha).toArray().length) {
+    // given again: its uses added
+    if (this.ctx.storage.sql.exec("UPDATE files SET at = ?, needs = needs + ? WHERE sha = ? RETURNING sha", now, uses, sha).toArray().length) {
       await request.body.cancel();
       return json({ kept: sha, again: true });
     }
@@ -394,7 +399,7 @@ export class SimplexDoor extends DurableObject {
     const ends = this.#ends;
     try {
       await this.#staleFiles();
-      if (!(await this.#room(key, length, now))) {
+      if (!(await this.#room(key, length))) {
         await request.body.cancel();
         return refusal(503, "files_full", "the door holds as many files as it may: give it again later");
       }
@@ -404,26 +409,27 @@ export class SimplexDoor extends DurableObject {
         await this.env.BLOBS.delete(key);
         return refusal(410, "ended", "this door ended as its file came");
       }
-      this.ctx.storage.sql.exec("INSERT INTO files (sha, bytes, type, at, taken) VALUES (?, ?, ?, ?, 0) ON CONFLICT (sha) DO UPDATE SET at = excluded.at, taken = 0", sha, length, typeOf(request.headers.get("content-type")), now);
+      this.ctx.storage.sql.exec("INSERT INTO files (sha, bytes, type, at, needs) VALUES (?, ?, ?, ?, ?) ON CONFLICT (sha) DO UPDATE SET at = excluded.at, needs = needs + excluded.needs", sha, length, typeOf(request.headers.get("content-type")), now, uses);
     } finally {
       this.#incoming.delete(key);
     }
     return json({ kept: sha });
   }
 
-  // Room for a file of `length` beside those it holds and those on their
-  // way in: made, when there is none, by letting go of files already taken
-  // (read by the one each was for), the oldest first; never one not yet
-  // taken.
-  async #room(key, length, now) {
+  // Room for a file of `length` beside every one it holds and those on
+  // their way in: made, when there is none, by letting go of files nothing
+  // still needs (each delivery naming one kept by its connector, each reply
+  // naming one done), the oldest first; never one still needed, nor one a
+  // waiting delivery names.
+  async #room(key, length) {
     // read again at each look, both at once: an upload ending meanwhile is
     // a row or on its way, never both
-    const held = () => [...this.ctx.storage.sql.exec("SELECT bytes, at FROM files").toArray(), ...[...this.#incoming].filter(([k]) => k !== key).map(([, bytes]) => ({ bytes, at: now }))];
+    const held = () => [...this.ctx.storage.sql.exec("SELECT bytes FROM files").toArray(), ...[...this.#incoming].filter(([k]) => k !== key).map(([, bytes]) => ({ bytes }))];
     const d = this.#door();
-    // bounded: one taken file let go a pass, of at most `FILES_KEPT`
-    while (!fileRoom(held(), length, now)) {
-      // the oldest taken now (one given again since is needed again)
-      const f = this.ctx.storage.sql.exec("DELETE FROM files WHERE sha = (SELECT sha FROM files WHERE taken = 1 ORDER BY at LIMIT 1) RETURNING sha").toArray()[0];
+    // bounded: one file let go a pass, of at most `FILES_KEPT`
+    while (!fileRoom(held(), length)) {
+      // the oldest none needs now (one given again since is needed again)
+      const f = this.ctx.storage.sql.exec(`DELETE FROM files WHERE sha = (SELECT sha FROM files WHERE needs = 0 AND sha NOT IN (${WAITING_FILES}) ORDER BY at LIMIT 1) RETURNING sha`).toArray()[0];
       if (!f) return false;
       await this.env.BLOBS.delete(fileKey(d.door, f.sha));
     }
@@ -431,11 +437,11 @@ export class SimplexDoor extends DurableObject {
   }
 
   // A file it holds, its bytes and its type, its name in `FILE_SHA_HEADER`;
-  // `take`: read by the one it was for (its connector keeping its owner's
-  // file), so `#room` may let it go from then on. A reply's file is taken
-  // once its reply is done (`#reply`), its runner reading it again until.
+  // `take`: its connector keeping its owner's file, one use done. A reply's
+  // file's use ends once its reply is done (`#reply`), its runner reading
+  // it again until.
   async #giveFile(sha, take) {
-    const row = shaOk(sha) ? this.ctx.storage.sql.exec("UPDATE files SET taken = max(taken, ?), at = ? WHERE sha = ? RETURNING bytes, type", take ? 1 : 0, Date.now(), sha).toArray()[0] : null;
+    const row = shaOk(sha) ? this.ctx.storage.sql.exec("UPDATE files SET needs = max(needs - ?, 0), at = ? WHERE sha = ? RETURNING bytes, type", take ? 1 : 0, Date.now(), sha).toArray()[0] : null;
     if (!row) return refusal(404, "no_file", `the door holds no file ${String(sha).slice(0, 64)}`);
     const obj = await this.env.BLOBS.get(fileKey(this.#door().door, sha));
     if (!obj) {
@@ -451,7 +457,7 @@ export class SimplexDoor extends DurableObject {
   async #staleFiles() {
     const d = this.#door();
     if (!d) return;
-    const old = this.ctx.storage.sql.exec("DELETE FROM files WHERE at <= ? AND sha NOT IN (SELECT json_extract(body, '$.file.sha256') FROM deliveries WHERE sent = 0 AND json_extract(body, '$.file.sha256') IS NOT NULL) RETURNING sha", Date.now() - FILE_KEPT_MS).toArray();
+    const old = this.ctx.storage.sql.exec(`DELETE FROM files WHERE at <= ? AND sha NOT IN (${WAITING_FILES}) RETURNING sha`, Date.now() - FILE_KEPT_MS).toArray();
     if (old.length) await this.env.BLOBS.delete(old.map((f) => fileKey(d.door, f.sha)));
   }
 
