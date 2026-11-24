@@ -1,8 +1,12 @@
-# Manual image preparation and production promotion. Preview normally
-# follows master through ci.yml's preview-image job: this workflow resolves
-# and prepares that same input-keyed image.
+# Manual image preparation and production promotion, for each image
+# xtask builds (xtask/src/image.rs, `IMAGES`): Hermes, the computers', and
+# the SimpleX doors' (door). Preview normally follows master through
+# ci.yml's preview-image job: this workflow resolves and prepares those
+# same input-keyed images, every one whichever `image` is chosen.
 # Production remains manual: copy the exact preview digest a full round
-# proved (from), or explicitly build a new image not proved by that round.
+# proved (from), image by image, or explicitly build a new image not
+# proved by that round. Production's repositories are
+# fragment-computer-hermes and fragment-door.
 #
 # Each environment uses its own token and account ID; a production copy
 # also needs PREVIEW_REGISTRY_TOKEN and PREVIEW_ACCOUNT_ID. Only master may
@@ -30,10 +34,10 @@ on:
       image:
         description: "The image"
         type: choice
-        options: [hermes]
+        options: [hermes, door]
         default: hermes
       from:
-        description: "Production only: copy this proven preview image rather than build one (registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:<64 hex>, <account> standing for the preview's)"
+        description: "Production only: copy this proven preview image rather than build one (registry.cloudflare.com/<account>/<repository>@sha256:<64 hex>, <account> standing for the preview's; hermes's repository fragment-preview-computer-hermes-canary, the door's fragment-preview-door)"
         type: string
         required: false
         default: ""
@@ -81,6 +85,10 @@ jobs:
     permissions:
       contents: read
     environment: ${{ inputs.environment }}
+    env:
+      # production's repository for the image: Hermes's as it has always
+      # been, the door's its own (a door is no computer)
+      REPOSITORY: ${{ inputs.image == 'door' && 'fragment-door' || 'fragment-computer-hermes' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,11 +121,10 @@ jobs:
               exit 0
               ;;
             production)
-              repository="fragment-computer-$IMAGE"
               echo "::warning::a production build is a new image, not the one a round proved: with no layer cache, its digest is not the one preview ran. A promotion copies the proven digest (from)."
               ;;
           esac
-          cargo xtask image push "$IMAGE" --repository "$repository" --tag "${TAG:-${GITHUB_SHA::12}}" --summary "$GITHUB_STEP_SUMMARY"
+          cargo xtask image push "$IMAGE" --repository "$REPOSITORY" --tag "${TAG:-${GITHUB_SHA::12}}" --summary "$GITHUB_STEP_SUMMARY"
       - name: copy
         if: inputs.from != ''
         env:
@@ -135,4 +142,4 @@ jobs:
           done
           command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
           digest=${FROM##*@sha256:}
-          cargo xtask image copy "$IMAGE" --from "$FROM" --repository "fragment-computer-$IMAGE" --tag "${TAG:-${digest:0:12}}" --summary "$GITHUB_STEP_SUMMARY"
+          cargo xtask image copy "$IMAGE" --from "$FROM" --repository "$REPOSITORY" --tag "${TAG:-${digest:0:12}}" --summary "$GITHUB_STEP_SUMMARY"
