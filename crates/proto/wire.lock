@@ -36,6 +36,7 @@ bound ListedFragment.agentRole default null
 bound ListedFragment.agents default []
 bound ListedFragment.archived default false
 bound ListedFragment.dock default true
+bound ListedFragment.identity default null
 bound ListedFragment.kind default "app"
 bound ListedFragment.listed default []
 bound ListedFragment.owned default false
@@ -234,6 +235,7 @@ field ListedFragment.agentRole optional string|null
 field ListedFragment.agents optional array<string>
 field ListedFragment.archived optional boolean
 field ListedFragment.dock optional boolean
+field ListedFragment.identity optional string|null
 field ListedFragment.kind required FragmentKind
 field ListedFragment.listed optional array<ListedRecord>
 field ListedFragment.name required string
@@ -999,6 +1001,7 @@ value FragmentKind brain
 value FragmentKind chat
 value FragmentKind other
 value FragmentKind sessions
+value FragmentKind shared
 value FragmentKind skills
 value IdentityKind agent
 value IdentityKind person

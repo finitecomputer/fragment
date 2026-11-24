@@ -427,13 +427,13 @@ enum Cmd {
         /// The question's post id (a retry with the same --id posts nothing again)
         #[arg(long)]
         id: Option<String>,
-        /// An agent's, asking inside a turn: that turn's id and how many
-        /// hand-offs deep the question is (one past the turn), so a teammate
-        /// on another computer counts it (the bridge's `FRAGMENT_TURN` and
-        /// `FRAGMENT_HOP` say them)
-        #[arg(long, env = "FRAGMENT_TURN", requires = "hop")]
+        /// An agent's, asking inside a turn: that turn's id (with --hop)
+        #[arg(long, requires = "hop")]
         turn: Option<String>,
-        #[arg(long, env = "FRAGMENT_HOP", requires = "turn")]
+        /// How many hand-offs deep the question is, one past the turn it is
+        /// asked from, so a teammate on another computer counts it (our
+        /// image's `fragment_ask` reads it from the bridge)
+        #[arg(long, requires = "turn")]
         hop: Option<u32>,
     },
     /// List a fragment's channels, or read one (--follow keeps streaming)

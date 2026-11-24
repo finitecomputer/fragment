@@ -110,6 +110,19 @@ A self-hosted node's celld honors `allowUnconfirmed` the same way from
 futurepaul/celld#33 (no gate waits on such a write); one without it holds
 the answer for the count as for any write.
 
+**A $200 seat's awake time** (decision 25) is included up to one
+computer-month a month, all its person's computers together (Paul,
+2026-11-20 and 11-23; a computer per agent): `SEAT_AWAKE_INCLUDED_MS`,
+744 hours, a 31-day month of one computer, so one computer that never
+sleeps is never charged. The head counts what this month let off
+(`awake_waived_ms`, reset as the month rolls), after a row's reference
+is checked, so a replayed row never spends the included hours twice;
+the row past the bound is charged its part past it, and every row after
+it whole, at the book's price, from credit, with no cap or question. A
+row of an earlier month, late past its end, is let off whole and counts
+in no month (a few minutes at most, in the person's favour). Its status
+says what is used (`awake: {usedMs, includedMs}`), Billing's line.
+
 Not metered: a person's own keys (decisions 37 and 60: their provider
 bills them); a computer's time kept for its failed saves (the platform's:
 docs/computers.md); a computer's saves, an app facet's database and git

@@ -494,29 +494,42 @@ a turn:
   `ENDED_HOPS_MS`, or its deepest turn elsewhere, whichever is deepest.
   An agent in no turn counts as `HOPS_MAX`. A record's `hop` only raises
   the count, so a post made around the bridge (the CLI, the API) resets
-  nothing. Another computer's agent is held to the hop it claims, at
-  least 1. A person's agents all run on one computer (decision 13), so
-  every hand-off between them meets this count.
+  nothing. Another computer's agent, whose turns this bridge cannot see,
+  is held to the hop it claims, at least 1: since a computer per agent, a
+  person's agents mostly run on computers of their own, so an ask made in
+  a turn says that turn and one past its depth (`turn`, `hop`: the CLI's
+  `--turn` and `--hop`, which our image's `fragment_ask` reads from the
+  Relay's `/relay/turns/<turn>`). An ask that says none is one deep, and
+  the chat's budget still holds it.
 - **A chat's budget.** Its agents start at most
   `AGENT_TURNS_PER_CHAT_MAX` turns of each other in
   `AGENT_TURNS_WINDOW_MS`, counted by the causing records' times and kept
   in the state. Past the budget a hand-off is refused, its end saying
   why. A person's message never counts.
 - **An answer comes back** (docs/chat-records.md, "An ask"). An asked
-  turn keeps where to return, and its end owes one more record: the
-  answer, on the asking agent's own `tasks`, which that agent reads as a
-  turn in the chat it asked from. The owed record is the delivery: it is
+  turn keeps where to return (the asking agent's fragment: this
+  computer's, or one on another, by the fragment the chat's people name it
+  by, `__people`), and its end owes one more record: the answer, on the
+  asking agent's own `tasks`, signed by the agent asked (acting for their
+  owner there, an editor: permit rule 3), which the asking agent reads as
+  a turn in the chat it asked from. Its bridge takes an answer only as its
+  own key's, or once the question it names vouches for it: that agent
+  asked it itself, of the agent that signed the answer, back to that
+  chat (`records::vouches`, read by the driver before the engine sees the
+  record; `vouched`). Nothing else on its `tasks` is taken. The owed record is the delivery: it is
   retried under one id until the platform answers it, and nothing waits
   or is held awake for it. An asked agent taken off the computer still
   answers an asker that stays, also when the bridge first sees it gone at
   a start: a turn not over ends, its answer saying so (`LEFT`), and an
-  answer not yet landed is kept. The asked agent's identity is kept with
-  the turn (`Return::by`), so the answer is by it once it is gone (#722).
+  answer not yet landed is kept, posted then as its asker, whose own key
+  it is. The asked agent's identity is kept with the turn (`Return::by`),
+  so the answer is by it once it is gone (#722).
   A turn saved before `by` was kept, whose agent is first seen gone at a
   start, has no one to be by and goes unanswered, as before.
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key or its owner. Another of the
-  owner's agents, which may post there, is passed over.
+  owner's agents, which may post there, is passed over, but for an
+  answer its own question vouches for.
 - **A routine that names no chat runs at home**, read as it fires
   (docs/api.md, "An agent's home"); a home that does not read is read
   again, so no fire is lost. A SimpleX chat named but not made yet is

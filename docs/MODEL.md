@@ -50,7 +50,9 @@ the wire contract; docs/cloudflare-v1.md holds the decisions.
   nothing proves they asked. Acting for another member will come with
   proof that they asked, such as their own signed chat record. A computer is a
   container a person owns, run by its `Computer` object; its image
-  decides what runs (docs/computers.md).
+  decides what runs (docs/computers.md). Since a computer per agent, each
+  new agent runs on a computer of its own, whose id its identity names;
+  a person's computer from before runs the agents put on it then.
 
 | Part | Cloudflare primitive | Holds |
 |---|---|---|
@@ -123,7 +125,10 @@ Every change is checked against this table.
 | Which connectors may be linked, and each one's relay targets | the deployment's `connectors` (`FRAGMENT_CONNECTORS`; absent, `connectors::Policy::default`) | none: every door and relay asks `Policy::authorize` at the time |
 | An agent's colour | its identity, through one function (`agent-color.js`) | none: never stored |
 | The model route's models, its routes (name, label, default) and each route's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
-| A computer's agents | the Computer DO's `agents` | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it (cell/src/ended.rs) |
+| A computer's agents | the Computer DO's `agents`; which computer may run an agent, its fragment's assign (`fragment_core::computer::may_run`: its owner's from before, or its own) | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it, and ends its own computer (cell/src/ended.rs) |
+| A person's computers | none: their computer from before, and each of their live agents' own (`computers_of`, the registry's `AgentsOf`) | walked by the list, the notices, an export, a wipe, the operators' pages |
+| A person's team folder | their fragment of kind `shared` (templates/shared) | each agent's `~/shared`, kept in step by the CLI's sync (docs/computers.md, "The team folder in our Hermes image") |
+| A $200 seat's awake time let off this month | their ledger's head (`awake_waived_ms`, bounded by `SEAT_AWAKE_INCLUDED_MS`) | its status's `awake`, Billing's line |
 | What a person's agents used of each provider, by month | their ledger's `uses` (`fragment_core::ledger::uses`), counted after each swap's answer, best effort | none; a computer's months from before the move (Computer step 7) are owed, taken once by id, then forgotten |
 | What a person's agents' calls on shared keys cost this last hour | their ledger's `spend_slots` (`fragment_core::ledger::uses::spend`), counted with each swap's uses | its `spending` notice, worked out on read, told at each step |
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |

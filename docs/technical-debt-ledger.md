@@ -1333,3 +1333,26 @@ unfinished design, not debt.
 - **Delete when:** Settings itself offers the move where no frame can ask
   (a Use it of its own in the setup dialog's note, or a move token a tab
   carries), or every supported browser signs in the frame.
+
+## Computers from before a computer per agent run several agents
+
+- **Shortcut:** since a computer per agent (2026-11-24), Add agent and the
+  first run make each new agent a computer of its own (its id the agent's
+  identity's, `fragment_core::computer::may_run`). A person's computer
+  from before, its id derived from them, runs on as it was: the agents
+  put on it then (at most 16), its saves, its always-on seat. So the
+  platform keeps both shapes: the multi-agent code of the bridge and the
+  boot, an agent's fragment taking either computer at its assign, `POST
+  /api/computers` with no agent making the person's own, and the lists
+  (computers, notices, wipe, export, the glance) walking theirs and their
+  agents' own.
+- **Why:** moving an agent's files off a shared disk is its own work, of
+  its own risk (copy a save, prune it, a way back: the plan's PR 2), and
+  never breaking an existing agent comes first (Paul, 2026-10-21).
+- **Risk:** two agents on one computer from before still share its disk,
+  its restarts and its always-on time; one agent's big build fills
+  another's disk there. Each walk above pays one call more a computer.
+- **Delete when:** every computer from before runs one agent, moved by
+  the operator's move (the plan's PR 2). Then the hard cut: the bridge's
+  and the boot's multi-agent code, the person's own computer's making,
+  and this entry go (decisions 13 and 14 rewritten).

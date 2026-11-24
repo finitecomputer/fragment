@@ -479,7 +479,7 @@ Values: `invalid_request`, `unauthenticated`, `forbidden`, `not_found`, `unknown
 
 out, open. What a fragment is to the people who use it (`fragment.json`'s `kind`, decision 6): the shell lists each kind in its own place. An app unless it says otherwise. Open (`x-fragment-open`, docs/wire): a kind this build does not know reads as `Other`.
 
-Values: `app`, `chat`, `agent`, `brain`, `skills`, `sessions`, `other`.
+Values: `app`, `chat`, `agent`, `brain`, `skills`, `sessions`, `shared`, `other`.
 
 ### `FragmentList`
 
@@ -587,6 +587,7 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 | `agents` | `array` of `string` | optional | Its agent members, the first added (a chat's lead) first, at most `limits::LISTED_AGENTS_MAX`, as the fragment last said. |
 | `archived` | `boolean` | optional | The signer archived it: their own view, not the fragment's (the shell's sidebar leaves it out; search still finds it). |
 | `dock` | `boolean` | optional | On the signer's dock: their own choice, not the fragment's (`PUT /api/fragments/{name}/dock`), true until they take it off (the shell's dock shows apps and brains, less these and the archived). Left out while true, so a row from before the choice, or from an older platform, reads as on it. |
+| `identity` | `string` or `null` | optional | An agent fragment's agent: its identity (an npub), which a message's `to` names, so its owner's other agents ask it on any computer. Never any other fragment's; none from a row kept before it, until its fragment's next change. |
 | `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
 | `name` | `string` | required |  |
