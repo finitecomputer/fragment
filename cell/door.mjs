@@ -504,14 +504,25 @@ export class SimplexDoor extends DurableObject {
   async #reply(body) {
     const files = replyFiles(body.files);
     if (!files) throw Object.assign(new Error("a reply's files are [{sha256, name, type, size}], at most a message's"), { status: 400 });
-    // its key's uses of the files its connector gave for it last while its
-    // runner holds the reply (202: its connector asks again); any other
-    // answer is its end, its connector asking no more for these files:
-    // sent (200), its link ended first (410), not linked, its runner not
-    // there to ask, or one that cannot send them (it sends its text alone
-    // next, under the same key). Another key's uses are its own.
+    // its key's uses of the files its connector gave for it: once its
+    // runner has taken the reply (202), they are its runner's (`R:<key>`),
+    // kept until it says the reply is done (200) or ended (410: never
+    // sent), whatever a poll between says (its state unread as it starts
+    // again: it may hold the reply still); before that (`r:<key>`), any
+    // answer but 202 ends them, its connector asking no more for these
+    // files (not linked, its runner not there, or one that cannot send
+    // them: its text alone next, under the same key). A day unused, a file
+    // goes all the same (`#staleFiles`). Another key's uses are its own.
     const asked = await this.#replyAsked(body, files);
-    if (asked.status !== 202) this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ?", `r:${body.key}`);
+    const [mine, taken] = [`r:${body.key}`, `R:${body.key}`];
+    if (asked.status === 202) {
+      this.ctx.storage.sql.exec("INSERT INTO uses (sha, owner) SELECT sha, ? FROM uses WHERE owner = ? ON CONFLICT DO NOTHING", taken, mine);
+      this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ?", mine);
+    } else if (asked.status === 200 || asked.status === 410) {
+      this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ? OR owner = ?", mine, taken);
+    } else {
+      this.ctx.storage.sql.exec("DELETE FROM uses WHERE owner = ?", mine);
+    }
     return asked;
   }
 
