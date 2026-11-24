@@ -825,6 +825,7 @@ impl Suite {
         println!("\n# {name}");
         self.ran.push(name.to_string());
         self.declared = needs.iter().chain(also).copied().collect();
+        self.shared.section_starts(name, self.declared.iter().any(|n| n.containers()));
         // a section that stopped early leaves Stripe's events as it held
         // them: each starts with them going out (billing-page's early stop
         // once held trials' webhooks back, failing its checks besides)
