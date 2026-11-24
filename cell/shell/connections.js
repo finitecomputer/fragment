@@ -1090,7 +1090,9 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
     tags.append(el("span", "role-tag connector-tag", "Experimental"), what);
     s.append(tags, el("p", "muted", doors ? kind.said : `Couldn't read your ${kind.title} chats.`));
     const rows = agentsNow().map((a) => {
-      const its = kind === SIMPLEX ? computerRow(a) : null;
+      // an agent whose SimpleX is a connector's (its computer's moved into
+      // one: docs/bridge.md, "SimpleX") has that connector's row
+      const its = kind === SIMPLEX && !boundOf(kind.door, a.fragment) ? computerRow(a) : null;
       if (its) return its;
       const connector = boundOf(kind.door, a.fragment);
       const busy = making.has(`${kind.door} ${a.fragment}`);

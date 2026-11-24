@@ -148,6 +148,13 @@ pub enum Act {
     Link,
     Unlink,
     Adopt,
+    /// The operators' move of its computer's link into its connector's
+    /// door (docs/bridge.md, "SimpleX"): its computer's core stopped for
+    /// good, its databases that door's first save.
+    Handover,
+    /// That move's way back: its door's newest save placed on its computer,
+    /// whose door key is taken again.
+    Back,
 }
 
 impl Act {
@@ -156,13 +163,15 @@ impl Act {
             Act::Link => "link",
             Act::Unlink => "unlink",
             Act::Adopt => "adopt",
+            Act::Handover => "handover",
+            Act::Back => "back",
         }
     }
 
     /// Whether it opens the door (a key is redeemed with its ticket): a
-    /// link, or an adoption.
+    /// link, an adoption, or a move's way back.
     pub fn opens(self) -> bool {
-        matches!(self, Act::Link | Act::Adopt)
+        matches!(self, Act::Link | Act::Adopt | Act::Back)
     }
 }
 
@@ -402,7 +411,7 @@ mod tests {
         other.act = Act::Adopt;
         assert_eq!(hex::encode(other.digest()), ADOPT_DIGEST, "an adoption's, the bridge's too");
         assert!(!fragment_nip98::verify_digest(agent.pubkey_hex(), &other.digest(), &sig), "nor an adoption's");
-        assert!(Act::Link.opens() && Act::Adopt.opens() && !Act::Unlink.opens());
+        assert!(Act::Link.opens() && Act::Adopt.opens() && Act::Back.opens() && !Act::Unlink.opens() && !Act::Handover.opens());
     }
 
     /// images/bridge/src/simplex/door.rs holds the same.

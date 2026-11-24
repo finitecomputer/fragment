@@ -593,6 +593,27 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Move an agent's SimpleX link from its person's computer into a
+    /// SimpleX connector of theirs, on a door of its own: the same contact
+    /// in their SimpleX app, its databases carried, nothing for them to
+    /// do; their old SimpleX chat archived. Alone (or --dry-run) it says
+    /// what it would do next and changes nothing; --yes moves it, going on
+    /// where it stopped; --back takes it back to the computer from
+    /// wherever it stopped
+    SimplexMove {
+        /// The person (an npub)
+        npub: String,
+        /// The agent fragment (`<label>--<suffix>`)
+        agent: String,
+        #[arg(long, conflicts_with_all = ["yes", "back"])]
+        dry_run: bool,
+        #[arg(long, conflicts_with = "back")]
+        yes: bool,
+        #[arg(long)]
+        back: bool,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Start a person's computer from one of the saves it keeps (its
     /// number, as `person` lists them), while it is asleep or won't wake:
     /// its next start restores that save, and the newer are set aside, kept
@@ -1687,6 +1708,49 @@ fn run(cli: Cli) -> Result<()> {
             let told = if v["notices"].as_array().is_some_and(|n| n.iter().any(|n| n["kind"] == "update")) { "; its owner is told an update is ready" } else { "" };
             println!("pinned {npub}'s computer to {}: {runs}, its next start runs {}{told}", v["image"].as_str().unwrap_or("?"), v["latest"].as_str().unwrap_or("?"));
             return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::SimplexMove { npub, agent, dry_run, yes, back, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let path = format!("/api/admin/people/{npub}/simplex-move");
+            let ask = |act: &str| -> Result<Value> { admin_answer(&c, c.post_json(&path, &json!({ "agent": agent, "act": act }))?) };
+            if back {
+                let v = ask("back")?;
+                json_exit(j, &v);
+                println!("{agent}'s SimpleX is on its computer again; {} deleted", v["connector"].as_str().unwrap_or("no connector"));
+                return Ok(());
+            }
+            if dry_run || !yes {
+                let v = ask("plan")?;
+                json_exit(j, &v);
+                println!("{agent}: next, {}", v["next"].as_str().unwrap_or("?"));
+                println!("  its computer {}, its link {}", if v["awake"] == true { "awake" } else { "asleep" }, v["link"]["phase"].as_str().unwrap_or("unread"));
+                if let Some(why) = v["blocked"].as_str() {
+                    println!("  it may not begin: {why}");
+                }
+                if !dry_run {
+                    println!("say --dry-run to only see it, --yes to move it");
+                }
+                return Ok(());
+            }
+            // bounded: a door links within minutes; each ask goes on from its record
+            let t0 = std::time::Instant::now();
+            loop {
+                let v = ask("go")?;
+                let step = v["record"]["step"].as_str().unwrap_or("?").to_string();
+                if step == "done" {
+                    json_exit(j, &v);
+                    println!("{agent}'s SimpleX moved into {}: the same contact, its old chat archived", v["record"]["connector"].as_str().unwrap_or("?"));
+                    return Ok(());
+                }
+                if !j {
+                    println!("  {step}: {}", v["next"].as_str().unwrap_or(""));
+                }
+                if t0.elapsed() > std::time::Duration::from_secs(15 * 60) {
+                    json_exit(j, &v);
+                    anyhow::bail!("{agent}'s move is at {step} after 15 minutes: --yes again goes on, --back goes back");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
         }
         Cmd::Operator { sub: OperatorCmd::StartFrom { npub, save, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;

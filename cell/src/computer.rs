@@ -322,6 +322,9 @@ const PORT_MAX: u16 = 65_535;
 /// A port's request to a computer still starting is asked again after
 /// this: one held-up try's destroy wait (`DESTROY_MS`).
 const PORT_RETRY_MS: u64 = DESTROY_MS as u64;
+/// Its bridge's screen port, where an agent's SimpleX routes are
+/// (images/bridge simplex/http.rs): the operators' move calls them.
+const SIMPLEX_PORT: u16 = 6080;
 /// Awake intervals one flush sends (one is made every five minutes awake).
 const METER_ROWS_MAX: u64 = 64;
 
@@ -405,6 +408,12 @@ enum MetaKey {
     /// it (`fragment_core::computer::sizes_of`, `ComputerSizes`): a cache
     /// its owner's view shows, its own row so its saves' stay small.
     Sizes,
+    /// The operators' moves of its agents' SimpleX links into doors of
+    /// their own (docs/bridge.md, "SimpleX"), by agent: `{connector, door,
+    /// step, moved, ticket, chat}`, kept until each is done or gone back.
+    /// One `moved` is never started on its computer again (`simplexMoved`
+    /// in its guest's view), whatever a save restored there says.
+    SimplexMoves,
 }
 
 impl MetaKey {
@@ -438,6 +447,7 @@ impl MetaKey {
             MetaKey::StallUnhold => "stall_unhold",
             MetaKey::FailRestore => "fail_restore",
             MetaKey::Sizes => "sizes",
+            MetaKey::SimplexMoves => "simplex_moves",
         }
     }
 }
@@ -2736,6 +2746,8 @@ impl ComputerCell {
         let targets = self.relay_targets()?;
         view.relay = Some(fragment_proto::computer::RelayOffer { hosts: targets.iter().filter(|t| t.port == fragment_core::relay::PORT).map(|t| t.host.clone()).collect(), port: fragment_core::relay::PORT });
         view.relay_targets = Some(targets);
+        // the agents whose SimpleX link moved: their cores never start here
+        view.simplex_moved = self.simplex_moves()?.into_iter().filter(|(_, r)| r["moved"] == true).map(|(agent, _)| agent).collect();
         // the key each agent's fragment signs as: a door's ticket is checked with it
         for agent in &mut view.agents {
             agent.key = fragment_core::npub::parse(&agent.identity);
@@ -2933,6 +2945,7 @@ impl ComputerCell {
                 s
             }),
             room_first: saves.update_waits(),
+            simplex_moved: vec![],
         }))
     }
 
@@ -3427,6 +3440,13 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             // an operator's pin (orgs.rs); its owner's is `PUT …/image`
+            // the operators' SimpleX move of one of its agents (admin.rs
+            // `simplex_move`): its record, and its bridge's word on its link
+            "computer/simplex-moves" => {
+                let b: Value = body_json(&mut req).await?;
+                json_response(&self.simplex_record(&b).await?)
+            }
+            "computer/simplex-hand" => self.simplex_hand(req).await,
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
                 json_response(&self.pin(&b.image).await?)
@@ -4147,6 +4167,153 @@ impl ComputerCell {
 
     /// A request to one of its ports, from its owner (a session the router
     /// read from the cookie, or a signer it resolved).
+    /// The operators' SimpleX moves, by agent (`MetaKey::SimplexMoves`).
+    fn simplex_moves(&self) -> CellResult<serde_json::Map<String, Value>> {
+        Ok(self.meta(MetaKey::SimplexMoves)?.and_then(|t| crate::json_text::<serde_json::Map<String, Value>>(&t).ok()).unwrap_or_default())
+    }
+
+    fn set_simplex_moves(&self, moves: &serde_json::Map<String, Value>) -> CellResult<()> {
+        match moves.is_empty() {
+            true => self.exec("DELETE FROM meta WHERE key = ?", vec![MetaKey::SimplexMoves.key().into()]),
+            false => self.set_meta(MetaKey::SimplexMoves, &Value::Object(moves.clone()).to_string()),
+        }
+    }
+
+    /// A call to its bridge's SimpleX routes (images/bridge simplex/http.rs,
+    /// on its screen port), as the operators' move makes them.
+    async fn simplex_call(&self, req: worker_sys::web_sys::Request) -> CellResult<Response> {
+        let out = self.call("port", &[JsValue::from_f64(f64::from(SIMPLEX_PORT)), JsValue::from(req), JsValue::from_f64(0.0)]).await?;
+        let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
+        Ok(Response::from(resp))
+    }
+
+    /// One agent's SimpleX move record (`op`): `read` (it, whether its
+    /// computer is awake, and its bridge's word on its link then), `set`
+    /// (its connector, door, step and chat, as its move goes on; never its
+    /// mark, which only its handover and way back set), or `forget` (done
+    /// or gone back; never one still marked moved).
+    async fn simplex_record(&self, b: &Value) -> CellResult<Value> {
+        let agent = b["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name its agent"))?;
+        if self.rows("SELECT 1 FROM agents WHERE fragment = ?", vec![agent.into()])?.is_empty() {
+            return Err(CellError::new(ErrorCode::NotFound, format!("{agent} is not on this computer")));
+        }
+        let mut moves = self.simplex_moves()?;
+        match b["op"].as_str().unwrap_or("") {
+            "read" => {
+                let awake = matches!(self.lifecycle()?.phase, Phase::Awake { .. });
+                let mut link = Value::Null;
+                if awake {
+                    let asked = worker_sys::web_sys::Request::new_with_str(&format!("http://computer/simplex/state?agent={agent}")).map_err(|_| CellError::host("a request"))?;
+                    let mut r = self.simplex_call(asked).await?;
+                    link = json!({ "status": r.status_code(), "said": r.read_json::<Value>().await.unwrap_or(Value::Null) });
+                }
+                Ok(json!({ "record": moves.get(agent), "awake": awake, "link": link }))
+            }
+            "set" => {
+                let rec = moves.entry(agent.to_string()).or_insert_with(|| json!({ "moved": false }));
+                for k in ["connector", "door", "step", "chat"] {
+                    if let Some(v) = b["record"].get(k).filter(|v| v.is_string()) {
+                        rec[k] = v.clone();
+                    }
+                }
+                let rec = rec.clone();
+                self.set_simplex_moves(&moves)?;
+                Ok(rec)
+            }
+            "forget" => {
+                if moves.get(agent).is_some_and(|r| r["moved"] == true) {
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX is marked moved: its way back first")));
+                }
+                moves.remove(agent);
+                self.set_simplex_moves(&moves)?;
+                Ok(json!({ "forgot": agent }))
+            }
+            op => Err(CellError::invalid(format!("no op {op:?}: read, set or forget"))),
+        }
+    }
+
+    /// An operator's SimpleX move of an agent (`x-door-agent`) at its
+    /// bridge, its computer awake (asleep, it is woken, and asked again):
+    /// its handover (`x-door-act: handover`), marked moved before its
+    /// bridge is asked, so no start after this one runs its core; its
+    /// ticket kept, so an answer lost is asked again with the same one,
+    /// which its bridge answers with the same save. Or its way back
+    /// (`back`): its door's newest save the
+    /// body (`x-door-behind` passed on), marked moved no more once its
+    /// bridge placed it. Its bridge's answer is passed on as it came; a
+    /// handover it refused (a 4xx but `moved`: it changed nothing) is
+    /// marked moved no more.
+    async fn simplex_hand(&self, req: Request) -> CellResult<Response> {
+        let header = |k: &str| req.headers().get(k).ok().flatten().unwrap_or_default();
+        let (act, agent, behind) = (header("x-door-act"), header("x-door-agent"), header("x-door-behind"));
+        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. }) {
+            self.wake(Wake::Tab).await?;
+            return Err(CellError::new(ErrorCode::Conflict, "its computer is waking: ask again in a moment").retry_after(PORT_RETRY_MS));
+        }
+        let mut moves = self.simplex_moves()?;
+        let mut rec = moves.get(&agent).cloned().ok_or_else(|| CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {agent:?} begun here")))?;
+        let computer = self.must(MetaKey::Id)?;
+        let handover = match act.as_str() {
+            "handover" => true,
+            "back" => false,
+            _ => return Err(CellError::invalid("x-door-act: handover or back")),
+        };
+        let ticket = match rec["ticket"].clone() {
+            t if handover && rec["moved"] == true && t.is_object() => t,
+            _ => crate::fragment::ask(&self.env, &agent, "computer/simplex-move", &json!({ "computer": computer, "act": act })).await?,
+        };
+        // a handover marked before its bridge is asked; a way back unmarked
+        // only once its bridge placed its door's save (until then a retry
+        // is the way back again, never a connector deleted beside a link
+        // still moved)
+        if handover {
+            rec["moved"] = json!(true);
+            rec["ticket"] = ticket.clone();
+            moves.insert(agent.clone(), rec.clone());
+            self.set_simplex_moves(&moves)?;
+        }
+        let headers = worker_sys::web_sys::Headers::new().map_err(|_| CellError::host("headers"))?;
+        let init = worker_sys::web_sys::RequestInit::new();
+        init.set_method("POST");
+        if handover {
+            headers.set("content-type", "application/json").map_err(|_| CellError::host("a header"))?;
+            init.set_body(&JsValue::from_str(&ticket.to_string()));
+        } else {
+            headers.set("x-door-ticket", &ticket.to_string()).map_err(|_| CellError::host("a header"))?;
+            headers.set("x-door-behind", if behind == "1" { "1" } else { "0" }).map_err(|_| CellError::host("a header"))?;
+            if let Some(body) = req.inner().body() {
+                init.set_body(&body);
+            }
+        }
+        init.set_headers(&headers);
+        let path = if handover { "handover" } else { "back" };
+        let asked = worker_sys::web_sys::Request::new_with_str_and_init(&format!("http://computer/simplex/{path}?agent={agent}"), &init).map_err(|_| CellError::host("a request"))?;
+        let mut answer = self.simplex_call(asked).await?;
+        let status = answer.status_code();
+        if !handover && status == 200 {
+            rec["moved"] = json!(false);
+            rec["ticket"] = Value::Null;
+            moves.insert(agent.clone(), rec);
+            self.set_simplex_moves(&moves)?;
+        } else if handover && status == 200 {
+            if let Some(chat) = answer.headers().get("x-simplex-chat")?.filter(|c| fragment_proto::valid_fragment_name(c)) {
+                rec["chat"] = json!(chat);
+                moves.insert(agent.clone(), rec);
+                self.set_simplex_moves(&moves)?;
+            }
+        } else if handover && (400..500).contains(&status) {
+            let said: Value = answer.read_json().await.unwrap_or(Value::Null);
+            if said["error"] != "moved" {
+                rec["moved"] = json!(false);
+                rec["ticket"] = Value::Null;
+                moves.insert(agent.clone(), rec);
+                self.set_simplex_moves(&moves)?;
+            }
+            return Ok(json_response(&said)?.with_status(status));
+        }
+        Ok(answer)
+    }
+
     async fn port(&self, req: Request) -> CellResult<Response> {
         let owner = self.must(MetaKey::Owner)?;
         let who = match (req.headers().get(SESSION_HEADER)?, req.headers().get(SIGNER_HEADER)?) {

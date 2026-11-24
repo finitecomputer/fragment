@@ -72,9 +72,15 @@ function storage() {
 function bucket() {
   const b = { files: new Map(), uploading: null };
   b.get = async (k) => (b.files.has(k) ? { body: new Blob([b.files.get(k)]).stream() } : null);
-  b.put = async (k, v) => {
+  // R2's put: a SHA-256 asked of it is checked as it stores (else it throws)
+  b.put = async (k, v, opts = {}) => {
     const bytes = typeof v === "string" ? v : await new Response(v).text();
     if (b.uploading) await b.uploading();
+    if (opts.sha256) {
+      const raw = typeof v === "string" ? new TextEncoder().encode(v) : new TextEncoder().encode(bytes);
+      const got = [...new Uint8Array(await crypto.subtle.digest("SHA-256", raw))].map((x) => x.toString(16).padStart(2, "0")).join("");
+      if (got !== opts.sha256) throw new Error(`put: the SHA-256 asked is not its bytes' (${got})`);
+    }
     b.files.set(k, bytes);
     return { size: bytes.length };
   };
@@ -797,4 +803,42 @@ test("a save given again is answered the same; another, or one to a door that sa
   await f.connect();
   await f.end(DOOR, true);
   assert.equal((await f.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("x") })).status, 410);
+});
+
+test("a save given whose bytes are not the SHA-256 it names is never kept", async () => {
+  const d = door();
+  const bytes = "a packed save";
+  const wrong = "ab".repeat(32);
+  const r = await d.call("PUT", "/door/import", { "x-fragment-door": DOOR, "x-door-agent": "Juniper", "x-door-sha256": wrong, "x-door-length": String(bytes.length) }, bytes);
+  assert.deepEqual([r.status, (await r.json()).error], [422, "not_its_sha"]);
+  assert.deepEqual([d.saves(), d.prefixed(), d.row()], [[], [], undefined], "no row, no save, no file");
+  // the same bytes under their own SHA-256: taken
+  assert.equal((await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa(bytes) })).status, 200);
+});
+
+test("the way back: a planned stop, its runner's last save, and that save handed back; again the same", async () => {
+  const d = door();
+  const back = (name = DOOR) => d.call("POST", "/door/handback", {}, JSON.stringify({ door: name }));
+  assert.equal((await back()).status, 204, "a door that never held a save: none");
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its first");
+  // its runner's planned stop: it saves last, then ends
+  d.c.signal = async (n) => {
+    d.c.signals.push(n);
+    await d.save(life1, 2, "its last");
+    d.c.running = false;
+  };
+  assert.deepEqual([(await back("juniper-simplex--0000--0123456789ab")).status], [409], "another door's");
+  const r = await back();
+  assert.deepEqual([r.status, r.headers.get("x-door-save"), r.headers.get("x-door-behind"), await r.text()], [200, `${life1}-2`, "0", "its last"]);
+  assert.deepEqual(d.c.signals, [15], "a planned stop");
+  assert.equal(d.row().stopped, "handed back", "and not started again");
+  const again = await back();
+  assert.deepEqual([again.status, await again.text()], [200, "its last"], "asked again: the same");
+  assert.deepEqual(d.c.signals, [15], "stopped once");
+  assert.equal(d.c.starts.length, 1, "never started again");
+  // its state, as the operators' move reads it
+  const s = await (await d.call("POST", "/door/state", {}, "{}")).json();
+  assert.equal(s.door.stopped, "handed back");
 });

@@ -43,8 +43,11 @@ use crate::net::{self, Body};
 
 /// A ticket's body is at most this.
 const TICKET_MAX_BYTES: usize = 2_048;
-/// A handover's answer: its save's SHA-256 (hex), and its SimpleX chat.
+/// A handover's answer: its save's SHA-256 (hex), its length (the
+/// platform's own header for it: a stream's length may be dropped on its
+/// way), and its SimpleX chat.
 const SHA_HEADER: &str = "x-door-sha256";
+const LENGTH_HEADER: &str = "x-door-length";
 const CHAT_HEADER: &str = "x-simplex-chat";
 /// The way back's ticket (its body is its door's save), and whether that
 /// save is behind its door's newest effects (`1`).
@@ -118,7 +121,7 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
             Err(why) => refused(Refused { status: 403, why, code: None }),
             Ok(t) => match h.handover(&agent, t).await {
                 Ok(p) => {
-                    let mut r = Response::builder().status(StatusCode::OK).header("content-type", "application/octet-stream").header(SHA_HEADER, &p.sha256);
+                    let mut r = Response::builder().status(StatusCode::OK).header("content-type", "application/octet-stream").header(SHA_HEADER, &p.sha256).header(LENGTH_HEADER, p.bytes.len());
                     if let Some(chat) = &p.chat {
                         r = r.header(CHAT_HEADER, chat);
                     }

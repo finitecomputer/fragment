@@ -62,6 +62,10 @@ const CONNECTOR_HEADER = "x-fragment-connector";
 // The inbox secret its connector's `connect` gives, filled at the
 // platform's egress (never the connector's code's to read).
 const SECRET_HEADER = "x-door-secret";
+// How long a way back waits for its runner's planned stop: its link quiet
+// (images/simplex-door `STOP_MS_MAX`, 8 s) and its last save taken (twice
+// that), with room.
+const HANDBACK_MS = 30_000;
 // Pages of its files (the bucket's, up to 1000 keys each) one end deletes;
 // asked again, it deletes the rest.
 const END_PAGES_MAX = 10;
@@ -158,6 +162,10 @@ export class SimplexDoor extends DurableObject {
       // constructor), nothing else (cell/src/routed.rs `PROBED`)
       if (url.pathname === "/__probe" && request.headers.has("x-fragment-probe")) return json({ ready: true });
       if (url.pathname === "/door/end" && request.method === "POST") return await this.#end(await bounded(request));
+      // the operators' move (docs/bridge.md, "SimpleX"): what it is, and
+      // its way back, whatever it is
+      if (url.pathname === "/door/state" && request.method === "POST") return await this.#state();
+      if (url.pathname === "/door/handback" && request.method === "POST") return await this.#handback(await bounded(request));
       const lever = url.pathname === "/door/lever" && request.method === "POST" ? await bounded(request) : null;
       // the e2e's look at its files, whatever it is
       if (lever?.op === "files") return json(await this.#files(lever.door));
@@ -264,8 +272,9 @@ export class SimplexDoor extends DurableObject {
   }
 
   // A door that never saved begins from a save it is given (a computer's
-  // link handed over: the platform's, `/door/import`, its door and its
-  // agent's name in the platform's headers): its file under its prefix and
+  // link handed over: the platform's, `/door/import`, its door, its
+  // agent's name and its length in the platform's headers: a stream's
+  // length is its own header, never one a runtime may drop): its file under its prefix and
   // its row, as though it had saved it, its mark none (its link in step: the
   // core that wrote it ended whole). It does not start: its connector's
   // connect starts it, restoring this save. Given again (its SHA-256 the
@@ -275,7 +284,7 @@ export class SimplexDoor extends DurableObject {
     const door = request.headers.get(DOOR_NAME_HEADER);
     const agent = request.headers.get("x-door-agent");
     const sha = request.headers.get(FILE_SHA_HEADER);
-    const length = Number(request.headers.get("content-length"));
+    const length = Number(request.headers.get("x-door-length"));
     const refuse = async (status, error, message) => (await request.body?.cancel(), refusal(status, error, message));
     if (!nameOk(door) || typeof agent !== "string" || !agent || agent.length > 64 || !shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
       return refuse(400, "invalid", "an import names its door, its agent and its save's SHA-256, and says its length");
@@ -292,7 +301,14 @@ export class SimplexDoor extends DurableObject {
     const ends = this.#ends;
     try {
       const { readable, writable } = new FixedLengthStream(length);
-      const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      // the bucket checks its SHA-256 as it stores it: other bytes are never kept
+      let put;
+      try {
+        [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable, { sha256: sha })]);
+      } catch (e) {
+        await this.env.BLOBS.delete(key).catch(() => {});
+        return refusal(422, "not_its_sha", `its bytes are not the save its SHA-256 names: ${String((e && e.message) || e).slice(0, 200)}`);
+      }
       if (this.#ends !== ends) {
         await this.env.BLOBS.delete(key);
         return refusal(410, "ended", "this door ended as its save came");
@@ -311,6 +327,46 @@ export class SimplexDoor extends DurableObject {
     return json({ imported: sha });
   }
 
+  // The way back of the operators' move (docs/bridge.md, "SimpleX"): a
+  // planned stop (its runner stops its core and saves last), not started
+  // again but by its connector's connect, then its newest save that
+  // restores, as a start would restore it, and whether it is behind its
+  // newest effects (`x-door-behind`): the computer the link came from
+  // places it. None (204) for a door that never held one; 410 for one none
+  // of whose saves restores. Asked again, the same. A runner not ended
+  // within `HANDBACK_MS` is ended, its last save not taken (its newest is
+  // then behind, and says so).
+  async #handback(body) {
+    if (!nameOk(body.door)) throw Object.assign(new Error("a way back names its door"), { status: 400 });
+    let d = this.#door();
+    if (!d) return new Response(null, { status: 204 });
+    if (d.door !== body.door) return refusal(409, "another_door", `this door is ${d.door}`);
+    if (!d.stopped) this.#stop("handed back");
+    // a start under way sees the stop before it launches, or launched
+    if (this.#starting) await this.#starting.catch(() => {});
+    const c = this.ctx.container;
+    if (c?.running) {
+      await c.signal(15);
+      const until = Date.now() + HANDBACK_MS;
+      // bounded by HANDBACK_MS
+      while (c.running && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+      if (c.running) await c.destroy();
+    }
+    // bounded: each pass marks one save unreadable, of at most the kept few
+    for (;;) {
+      d = this.#door();
+      const r = restoreOf(this.#saves(), d.saved);
+      if (r.kind === "none") return new Response(null, { status: 204 });
+      if (r.kind === "exhausted") return refusal(410, "exhausted", "this door saved, and no save of it restores");
+      const obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
+      if (obj) {
+        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks) });
+        return new Response(obj.body, { status: 200, headers: { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "content-type": "application/octet-stream" } });
+      }
+      this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
+    }
+  }
+
   // What it is: its row, its saves, its deliveries (and how many its
   // inbox has yet to take), and its runner's own state while it runs.
   async #state() {
@@ -321,7 +377,8 @@ export class SimplexDoor extends DurableObject {
     }
     const n = this.ctx.storage.sql.exec("SELECT count(*) AS n, coalesce(sum(sent = 0), 0) AS unsent FROM deliveries").one();
     const inbox = this.ctx.storage.sql.exec("SELECT 1 FROM inbox WHERE id = 1").toArray().length === 1;
-    return json({ door: this.#door(), saves: this.#saves(), deliveries: n.n, unsent: n.unsent, inbox, running: !!this.ctx.container?.running, runner });
+    // `doors`: whether this deployment runs doors at all (a container for them)
+    return json({ door: this.#door(), saves: this.#saves(), deliveries: n.n, unsent: n.unsent, inbox, running: !!this.ctx.container?.running, runner, doors: !!this.ctx.container });
   }
 
   // An ask of its runner under a new mark, asked again under another while
@@ -784,7 +841,7 @@ export class SimplexDoor extends DurableObject {
       case "import": {
         const bytes = Uint8Array.from(atob(String(a.bytes ?? "")), (c) => c.charCodeAt(0));
         const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
-        return this.#import(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "content-length": String(bytes.length) }, body: bytes }));
+        return this.#import(new Request("http://door/door/import", { method: "PUT", headers: { [DOOR_NAME_HEADER]: a.door, "x-door-agent": String(a.agent ?? ""), [FILE_SHA_HEADER]: sha, "x-door-length": String(bytes.length) }, body: bytes }));
       }
       // a file as its runner gives one (`bytes`, base64), for a delivery
       // or a reply to name: its SHA-256; or (`sha`) what the door holds

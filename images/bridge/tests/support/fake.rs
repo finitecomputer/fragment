@@ -347,7 +347,9 @@ impl Fake {
             // a way back opens it again, as a link does
             if act == "link" || act == "adopt" || act == "back" {
                 w.door_tickets.insert(agent, nonce);
-            } else {
+            } else if act != "handover" {
+                // a handover leaves it open: the platform closes it once the
+                // door holds the link
                 w.door_tickets.remove(&agent);
                 w.doors.remove(&agent);
             }
