@@ -114,7 +114,8 @@ Put an evidence pack in the PR body and in your report:
 - **What and why:** what changed and why, in plain words. Say whether it
   touches the wire, stored rows or money.
 - **What ran:** each command with its result and counts, on the final head
-  merged with current `master`:
+  merged with `master` as it was when the proof started; name both SHAs.
+  `master` moving while a proof runs doesn't restart it:
   - `cargo xtask check`.
   - `cargo xtask e2e --only …` for every section that covers a changed file.
     Grep `crates/e2e` for each file and run every lane that uses it.
