@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,9 @@ pub struct Config {
     /// `BRIDGE_KEEPALIVE_PING_MS`: how often the keepalive pings; silent
     /// twice that, it is opened again (`limits::KEEPALIVE_PING_MS`).
     pub keepalive_ping: Duration,
+    /// `BRIDGE_COMPUTER_EVERY_MS`: how often the computer's view is read
+    /// again while awake (`limits::COMPUTER_EVERY_MS`).
+    pub computer_every: Duration,
     /// `BRIDGE_SIMPLEX_BIN` and the rest: each linked agent's SimpleX core
     /// (simplex/run.rs); none, no SimpleX, and nothing of it runs.
     pub simplex: Option<crate::simplex::run::Config>,
@@ -481,6 +484,10 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     let mut tick = tokio::time::interval(Duration::from_millis(1000));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut computer_read = Instant::now();
+    // one read of the computer at a time, and one asked for while it runs
+    // starts once it ends (`OneRead`)
+    let one_read = OneRead::default();
+    let mut read_due = false;
     let mut stop_rx = stop.clone();
     // the hold as the runtimes see it: as it comes, the state's log is
     // written into its snapshot, which its answer waits for
@@ -566,9 +573,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                 // that changed is read at once: an agent the image just made
                 // ready is followed within a tick.
                 let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
-                if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
+                read_due |= ready_changed || computer_read.elapsed() >= cfg.computer_every;
+                if let Some(reading) = read_due.then(|| one_read.begin()).flatten() {
+                    read_due = false;
                     computer_read = Instant::now();
-                    reread(&api, cfg.simplex.is_some(), &runtime_names, &inbox_tx);
+                    reread(&api, cfg.simplex.is_some(), &runtime_names, &inbox_tx, reading);
                 }
             }
             ((name, r), _, _) = &mut runtime_ended => break runtime_result(r, name),
@@ -587,15 +596,42 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 }
 
 /// Reads `GET /api/computer` in a task of its own (a slow platform never
-/// holds the engine), into the inbox.
-fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<Msg>) {
+/// holds the engine), into the inbox, `reading` held until its view is in
+/// the inbox.
+fn reread(api: &Api, simplex: bool, names: &RuntimeNames, inbox: &mpsc::Sender<Msg>, reading: Reading) {
     let (api, names, inbox) = (api.clone(), names.clone(), inbox.clone());
     tokio::spawn(async move {
         if let Some(mut c) = ask_once(&api, simplex).await {
             (c.agents, _) = with_runtimes(&api, c.agents, &names, true).await;
             let _ = inbox.send(Msg::Computer(c)).await;
         }
+        drop(reading);
     });
+}
+
+/// The computer's reads (`reread`), one at a time: a read can take seconds
+/// (each agent's `agent.json` read again), so with reads seconds apart (the
+/// stub's `BRIDGE_COMPUTER_EVERY_MS`) two overlapped, and the older, its
+/// roster from before an agent was assigned, could land last and drop that
+/// agent's turn. A read begins only once the one before it is in the inbox.
+#[derive(Debug, Default)]
+struct OneRead(Arc<AtomicBool>);
+
+/// A read under way (`OneRead::begin`): its end, however it ends, lets the
+/// next begin.
+struct Reading(Arc<AtomicBool>);
+
+impl OneRead {
+    /// A read begun, or none while one is under way.
+    fn begin(&self) -> Option<Reading> {
+        self.0.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok().map(|_| Reading(Arc::clone(&self.0)))
+    }
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Each agent's runtime as its `agent.json` named it last (`None`: it names
@@ -1161,15 +1197,47 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
 }
 
 /// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
-/// its SimpleX chat while linked (the one its link mirrors: `simplex`),
-/// its owner's list and its own, read as a routine that names no chat
-/// fires (at most every 15 minutes a schedule); `waited`: the routine fired
-/// `limits::HOME_CHAT_WAIT_MS` ago or more.
+/// its home SimpleX, the chat bound as its SimpleX door (`simplex_door`),
+/// else its SimpleX chat while linked (the one its computer's link
+/// mirrors: `simplex`), its owner's list and its own, read as a routine
+/// that names no chat fires (at most every 15 minutes a schedule);
+/// `waited`: the routine fired `limits::HOME_CHAT_WAIT_MS` ago or more. A
+/// read that fails fails it, so the routine is read again, never sent
+/// elsewhere; but for a door's look that failed while its computer's link
+/// stands, which leaves the routine to that link's chat.
 async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>, waited: bool) -> Result<HomeChat, ApiError> {
     let home = api.home(&agent.fragment).await?;
     let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
     let mine = api.fragments(&agent.fragment).await?;
-    Ok(api::home_chat(&agent.fragment, home, simplex, &owners, &mine, waited))
+    let linked = simplex.is_some_and(|c| mine.iter().any(|m| m.name == c));
+    let door = match home {
+        api::Home::Simplex => match simplex_door(api, agent, &api::door_candidates(&agent.fragment, &owners, &mine)).await {
+            Ok(door) => door,
+            Err(_) if linked => None,
+            Err(e) => return Err(e),
+        },
+        api::Home::Chat => None,
+    };
+    Ok(api::home_chat(&agent.fragment, home, simplex, door.as_deref(), &owners, &mine, waited))
+}
+
+/// The chat bound as `agent`'s SimpleX door among `candidates`, as its own
+/// row of each one's members says (`door`: docs/api.md, "An agent's
+/// doors"), read in order until one does: the connector's binding, the one
+/// place it is kept. A read that fails is passed over for the next; only
+/// with no door found does it fail the home, so the routine is read again
+/// rather than sent to another chat.
+async fn simplex_door(api: &Api, agent: &Agent, candidates: &[String]) -> Result<Option<String>, ApiError> {
+    assert!(candidates.len() <= crate::limits::HOME_DOORS_MAX, "a home reads a bounded few chats' members");
+    let mut failed = None;
+    for chat in candidates {
+        match api.members(&agent.fragment, chat).await {
+            Ok(members) if members.iter().any(|m| m.principal == agent.identity && m.door.as_deref() == Some(crate::simplex::door::DOOR)) => return Ok(Some(chat.clone())),
+            Ok(_) => {}
+            Err(e) => failed = failed.or(Some(e)),
+        }
+    }
+    failed.map_or(Ok(None), Err)
 }
 
 /// The agent's wake subscription on the channel: made unless it has one.
@@ -2477,5 +2545,25 @@ mod tests {
         assert!(!own_words("npub1paul", &json!({ "text": "hi" }), &agent));
         let for_someone_else = records::relayed_message("x", &crate::runtime::Agent { owner: "npub1skyler".into(), ..agent.clone() }, records::VIA_SIMPLEX, &[]);
         assert!(own_words("npub1juniper", &for_someone_else, &agent), "a relay for anyone else is no owner's");
+    }
+
+    /// Goal: the computer's reads never overlap, so none lands after a
+    /// newer one. Valid: a read begins; the next begins once it ended, by
+    /// its end or its task's panic (the guard dropped). Invalid: a second
+    /// read while one is under way.
+    #[test]
+    fn the_computer_is_read_once_at_a_time() {
+        let one = super::OneRead::default();
+        let first = one.begin().expect("the first read begins");
+        assert!(one.begin().is_none(), "no second read while the first is under way");
+        drop(first);
+        let second = one.begin().expect("the next read begins once the first ended");
+        let ended = std::thread::spawn(move || {
+            let _held = second;
+            panic!("a read's task that panics");
+        })
+        .join();
+        assert!(ended.is_err());
+        assert!(one.begin().is_some(), "a panicked read lets the next begin");
     }
 }

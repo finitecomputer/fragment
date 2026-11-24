@@ -56,8 +56,9 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
     Ok((after, before, limit))
 }
 
-use fragment_core::permit::{Action, Standing};
+use fragment_core::permit::{self, Action, Standing};
 use fragment_core::effects::{self, Effect};
+use fragment_core::mandate::{self, Mandate};
 use fragment_core::{door, npub};
 use fragment_proto::{
     limits, valid_channel_name, valid_op_id, Author, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
@@ -240,7 +241,7 @@ impl RecordRow {
             None => None,
             Some(name) => Some(Author::parse(name).ok_or_else(|| CellError::host(format!("record {}#{}: its stored author {name:?} does not decode", self.channel, self.seq)))?),
         };
-        Ok(ChannelRecord { principal: npub::display(&self.principal), author, channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body })
+        Ok(ChannelRecord { principal: npub::display(&self.principal), author, channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body, mandate: None })
     }
 }
 
@@ -316,9 +317,53 @@ impl FragmentCell {
                 vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
             )?;
         }
-        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw };
+        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw, mandate: None };
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// A post that answers a question (`permit::answers`) is taken only
+    /// from whom the question asks, as themselves (`permit::may_answer`;
+    /// docs/api.md, "Questions and answers"), and only of a question its
+    /// poster may read (`channel_read_role`, decided as a read of it is,
+    /// over the standing the post read): one they may not, one not here
+    /// and one asking someone else are one refusal, which tells nothing of
+    /// a channel they cannot read. The same post again is the record it
+    /// appended (`posted`), whatever became of its question since. Read
+    /// with no await before its append.
+    #[allow(clippy::too_many_arguments)]
+    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<()> {
+        let Some(question) = permit::answers(body) else { return Ok(()) };
+        let question = question.map_err(|why| CellError::invalid(format!("an answer's `answers` {why}")))?;
+        if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?.is_empty() {
+            return Ok(());
+        }
+        let readable = match self.channel_read_role(&question.channel) {
+            Ok(read) => decide(facts.visibility, standing, Action::Read(read)).is_ok(),
+            Err(e) if e.code == ErrorCode::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        let asks = if readable { self.asks(&question)? } else { None };
+        let acts_for = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
+        match permit::may_answer(asks.as_deref(), principal, author, acts_for) {
+            true => Ok(()),
+            false => Err(CellError::new(ErrorCode::Forbidden, "a question is answered only by whom it asks, in their own post")),
+        }
+    }
+
+    /// Whom the record `question` names asks (its body's `asks`, when a
+    /// string): `None` when it asks no one, or is not here (never written,
+    /// or no longer kept).
+    fn asks(&self, question: &permit::Answers) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            asks: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT CASE WHEN json_type(body, '$.asks') = 'text' THEN json_extract(body, '$.asks') END AS asks FROM records WHERE channel = ? AND seq = ?",
+            vec![question.channel.as_str().into(), SqlStorageValue::Integer(question.seq)],
+        )?;
+        Ok(rows.into_iter().next().and_then(|r| r.asks))
     }
 
     /// A record just appended to `channel`, which keeps each poster's newest
@@ -558,6 +603,7 @@ impl FragmentCell {
             (false, Some(IdentityKind::Agent)) => Author::Agent,
             (false, Some(IdentityKind::Person) | None) => Author::Person,
         };
+        self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
         // the append and the look for an earlier one are one step (no await between)
         let (record, appended) = match self.append(channel, principal, author, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
@@ -726,6 +772,11 @@ impl FragmentCell {
         if door::relays(body) {
             return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own relays no one (`relayed`)"));
         }
+        // nor answers a question: the fragment's own key is asked nothing
+        // (`schedule::fires` checks first; docs/api.md, Questions and answers)
+        if permit::answers(body).is_some() {
+            return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own answers no question (`answers`)"));
+        }
         let own = self.own_key()?;
         let (record, appended) = self.append_once(channel, &own, Author::Platform, POST_KIND, body, (key, POST_INDEX))?;
         self.published(&record, appended, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
@@ -853,9 +904,43 @@ impl FragmentCell {
     }
 
     /// `GET /api/f/<name>/channels/<channel>?after=|before=&limit=`
-    pub(crate) fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
+    pub(crate) async fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
         self.channel_reader(caller, channel)?;
-        json_response(&self.channel_page(channel, after, before, limit)?)
+        let mut page = self.channel_page(channel, after, before, limit)?;
+        self.mandated(caller, &mut page).await?;
+        json_response(&page)
+    }
+
+    /// A page read by an agent member as itself: each record whose words
+    /// are its owner's own here (`mandate::asker_of`), written within a
+    /// mandate's life, carries their mandate for this agent (docs/api.md,
+    /// "Who asked: mandates"): the proof that its owner asked it, which its
+    /// calls carry in place of `for`. Its owner and it are one entity
+    /// (decision 64); anyone else's words give it none yet. Whose words
+    /// each is, and the membership, are read before the await, as the page
+    /// was.
+    async fn mandated(&self, caller: &Caller, page: &mut ChannelPage) -> CellResult<()> {
+        let Some((agent, owner)) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()).and_then(|s| Some((s, s.owner.as_deref()?))) else { return Ok(()) };
+        if self.member_role(&agent.id)?.is_none() {
+            return Ok(());
+        }
+        let (place, now) = (self.must(MetaKey::Npub)?, js::now_ms());
+        let mandates: Vec<Option<Mandate>> = page
+            .records
+            .iter()
+            .map(|r| {
+                let owners = mandate::asker_of(&r.principal, r.author, r.body.get()).filter(|asker| npub::display(asker) == npub::display(owner));
+                owners.and_then(|asker| Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at)).filter(|m| m.until >= now)
+            })
+            .collect();
+        if mandates.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let keys = crate::keys::mandate_keys(&self.env).await?;
+        for (record, m) in page.records.iter_mut().zip(mandates) {
+            record.mandate = m.map(|m| m.text(&keys[0]));
+        }
+        Ok(())
     }
 
     /// `GET /api/f/<name>/channels/<channel>/newest` (`channel_newest`):

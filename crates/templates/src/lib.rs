@@ -291,7 +291,7 @@ pub(crate) mod tests {
     use std::path::PathBuf;
 
     fn repo() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+        PathBuf::from("../..")
     }
 
     /// A built file's bytes: embedded, or, without `embed`, none to read

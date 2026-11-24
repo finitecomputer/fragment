@@ -139,11 +139,13 @@ impl Node {
     /// rest of PATH kept (Docker, worker-build, cargo, clang are found as
     /// before); `XDG_CACHE_HOME` at `cache` (miniflare keeps the Chrome for
     /// Testing that Browser Rendering runs on in
-    /// `$XDG_CACHE_HOME/.wrangler/chrome`); and none of `VARS_CLEARED`.
+    /// `$XDG_CACHE_HOME/.wrangler/chrome`); none of `VARS_CLEARED`; and
+    /// nothing of this process's own cargo package (`outside_cargo`):
+    /// wrangler dev builds the cell with a `cargo run` of xtask.
     pub fn command(&self, cache: &Path) -> Result<Command, NodeError> {
         assert!(cache.is_absolute(), "a cache directory is named absolutely: its processes run elsewhere");
         let path = self.path(std::env::var_os("PATH").as_deref())?;
-        let mut cmd = Command::new(&self.node);
+        let mut cmd = crate::outside_cargo(&self.node);
         cmd.env("PATH", path).env("XDG_CACHE_HOME", cache);
         for var in VARS_CLEARED {
             cmd.env_remove(var);
@@ -597,6 +599,10 @@ mod tests {
         assert!(envs.contains(&(OsStr::new("XDG_CACHE_HOME"), Some(OsStr::new("/r/target/cache")))));
         for var in VARS_CLEARED {
             assert!(envs.contains(&(OsStr::new(var), None)), "{var} is cleared");
+        }
+        // cargo sets these for this test, as `cargo run` does for xtask
+        for var in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME"] {
+            assert!(std::env::var_os(var).is_some() && envs.contains(&(OsStr::new(var), None)), "{var} is not passed on");
         }
     }
 }

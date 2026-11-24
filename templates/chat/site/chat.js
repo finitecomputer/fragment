@@ -7,9 +7,11 @@
 //   - `chat`: what is said. People's messages (`{text, to?, attachments?}`,
 //     posted here with an id of their own), agents' replies (`{text, turn,
 //     attachments?}`), Stop (`{kind: "stop", turn}`), and prompt answers
-//     (`{kind: "prompt_response", prompt, option, agent, turn}`: the card's
-//     own agent and turn, so an answer to one agent's card is never another
-//     agent's that reused its prompt id; id `pr:<a hash of the three>`).
+//     (`{kind: "prompt_response", prompt, option, agent, turn, answers}`:
+//     the card's own agent and turn, so an answer to one agent's card is
+//     never another agent's that reused its prompt id, and its record on
+//     `work`, `answers: {channel, seq}`, which the platform takes only from
+//     whom the card asks; id `pr:<a hash of the three>`).
 //   - `work`: an agent's progress, which only the chat's agents post
 //     (`"from": "agent"`): `turn.start`, `turn.call` (a tool call asked
 //     for, before it runs), `turn.step` (one ended), `turn.prompt`,
@@ -3309,7 +3311,8 @@ export function mount(root) {
     try {
       const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(card)));
       const id = `pr:${[...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-      await fragment.post("chat", { kind: "prompt_response", prompt, option, agent: t.agent, turn: t.id, ...(text ? { text } : {}) }, { id });
+      const answers = { channel: "work", seq: t.prompts.get(prompt).n };
+      await fragment.post("chat", { kind: "prompt_response", prompt, option, agent: t.agent, turn: t.id, answers, ...(text ? { text } : {}) }, { id });
     } catch (err) {
       // 409: another option was sent first, from another page: the card says which once closed
       if (err.status !== 409) {
