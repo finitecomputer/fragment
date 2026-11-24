@@ -356,19 +356,23 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // agent is doing (`busy`); then More, which shows the rest, and Less,
   // which folds them again. Which are unfolded is kept on this device
   // (FIN-722: whoever keeps a section open keeps it open), the newest
-  // FOLDS_MAX; storage is a convenience (`store`'s reads and writes never
-  // throw), so without it a section starts folded.
+  // FOLDS_MAX, each by `fold`: an agent's by its fragment, which it has
+  // before and after their computer is read. A press changes its own
+  // section in what is stored now, so another tab's presses stay. Storage
+  // is a convenience (`store`'s reads and writes never throw), so without
+  // it a section starts folded.
   const FOLDS = "finite.sidebar.unfolded.v1";
-  const unfolded = foldsOf(store.get(FOLDS, []));
-  function foldAgain(key) {
-    if (unfolded.has(key)) unfolded.delete(key);
-    else unfolded.add(key);
-    for (const k of unfolded) if (unfolded.size > FOLDS_MAX) unfolded.delete(k);
+  let unfolded = foldsOf(store.get(FOLDS, []));
+  function foldAgain(fold, open) {
+    unfolded = foldsOf(store.get(FOLDS, [...unfolded]));
+    unfolded.delete(fold);
+    if (open) unfolded.add(fold);
+    unfolded = foldsOf([...unfolded]);
     store.set(FOLDS, [...unfolded]);
     renderChats();
   }
-  function sectionRows(key, list, rowOf, busy) {
-    const open = unfolded.has(key);
+  function sectionRows(key, list, rowOf, busy, fold = key) {
+    const open = unfolded.has(fold);
     const { shown, more: many } = sectionShown(list, { unfolded: open, current: onScreen(), busy, title: (f) => chatTitle(f.name) });
     const rows = shown.map(rowOf);
     if (many) {
@@ -376,7 +380,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       more.type = "button";
       more.dataset.key = `more:${key}`;
       more.setAttribute("aria-expanded", String(open));
-      more.onclick = () => foldAgain(key);
+      more.onclick = () => foldAgain(fold, !open);
       rows.push(more);
     }
     return rows;
@@ -451,7 +455,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       return [row];
     };
     const rows = [];
-    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...makingRow(key), ...sectionRows(key, list, rowOf, busy));
+    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...makingRow(key), ...sectionRows(key, list, rowOf, busy, `agent:${agent.fragment}`));
     rows.push(...sectionRows("own", loose, rowOf, busy));
     if (shared.length) {
       const head = el("div", "section-head", "Shared");

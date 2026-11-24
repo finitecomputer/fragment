@@ -6704,21 +6704,25 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     let stored_folded = b.eval(page, kept)?;
     s.ok(
         "FIN-722: a section's More, pressed, shows all its chats and stays so after a reload (kept on this device); its Less, pressed, folds it again, and a reload keeps it folded",
-        listed && opened && still_open && stored_open.as_array().is_some_and(|l| l.contains(&json!(first_id))) && still_folded && stored_folded.as_array().is_some_and(|l| !l.contains(&json!(first_id))),
+        listed && opened && still_open && stored_open.as_array().is_some_and(|l| l.contains(&json!(format!("agent:{main}")))) && still_folded && stored_folded.as_array().is_some_and(|l| !l.contains(&json!(format!("agent:{main}")))),
         json!({ "opened": opened, "after reload": still_open, "stored": stored_open, "folded after reload": still_folded, "stored folded": stored_folded }),
     );
-    // the pill opens its agent's menu, as before; its New chat makes a chat with it
+    // the pill opens its agent's menu, as before; the Reader's New chat, from
+    // their main agent's chat, makes a chat with the Reader alone, one
     let pill_menu = hero_menu(b, page, &hero)?;
+    let reader_hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
+    open_row(b, page, chat, wait)?;
     let before = chat_names()?;
-    b.click(page, &format!("{hero} .agent-new-chat"))?;
+    b.click(page, &format!("{reader_hero} .agent-new-chat"))?;
     let started = b.until(page, &format!("document.getElementById('menu').hidden && document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden) && {settled}"), wait);
     let fresh = open_chat(b, page);
     let fresh_row = own_row_of(api, me.session, &fresh);
+    let added: Vec<String> = chat_names()?.into_iter().filter(|n| !before.contains(n)).collect();
     let _ = b.screenshot(page, &shots.join("desktop-agent-new-chat.png"));
     s.ok(
-        "FIN-722: pressing their agent's pill opens its menu as before (New chat first); the New chat at the pill's end opens a new chat with that agent alone",
-        pill_menu.first().map(String::as_str) == Some("New chat") && started && fresh_row["agents"] == json!([first_id]) && fresh_row["title"] == "New chat",
-        json!({ "menu": pill_menu, "opened": fresh, "row": fresh_row }),
+        "FIN-722: pressing their agent's pill opens its menu as before (its New chat among it); the Reader's New chat at its pill's end opens a new chat with the Reader alone, one at most made",
+        pill_menu.iter().any(|m| m == "New chat") && started && fresh != chat && fresh_row["agents"] == json!([reader_id]) && fresh_row["title"] == "New chat" && added.len() <= 1 && added.iter().all(|n| *n == fresh),
+        json!({ "menu": pill_menu, "opened": fresh, "row": fresh_row, "made": added }),
     );
     // made by it (not a blank chat it opened again): gone at the end
     let made_here = (!before.contains(&fresh)).then_some(fresh);
