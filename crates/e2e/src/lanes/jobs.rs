@@ -1242,8 +1242,8 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     let unfired = events(api, &owner, &name).into_iter().rev().find(|e| e["kind"] == "schedule.unfired").unwrap_or_default();
     s.ok(
         "its maker gone from the fragment, it fires no more for them, saying why; it is kept, for its owner to remove",
-        out.status == 200 && lever.body["records"] == 0 && pinged().len() == before && unfired.to_string().contains("no longer in this fragment") && list().iter().any(|x| x["id"] == sid),
-        json!({ "removed": out.status, "lever": lever.body, "event": unfired }),
+        out.status == 200 && pinged().len() == before && unfired["data"]["schedule"] == sid && unfired.to_string().contains("no longer in this fragment") && list().iter().any(|x| x["id"] == sid),
+        json!({ "removed": out.status, "lever": lever.body, "pinged": pinged().len() - before, "event": unfired }),
     );
     api.share(&name, editor.pubkey_hex(), "editor")?;
     cron_now(api, &name)?;
