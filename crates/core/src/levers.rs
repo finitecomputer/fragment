@@ -65,8 +65,11 @@ pub fn fleet_of(branch: bool, local: bool) -> Fleet {
 
 /// What the e2e may make on a branch deployment in one day (UTC), in all:
 /// people, and paid calls lent to them. A test secret that leaked spends
-/// at most this, and nothing of anyone else's (`Fleet::Branch`'s levers
-/// reach the e2e's own fragments and people alone).
+/// at most this. On a branch deployment the levers reach e2e people's
+/// ledgers, lists, exports and computers alone, and the fragment levers
+/// fragments labelled `e2e-…`, acting as or for e2e people alone
+/// (`acts_for`); a label is not reserved, so a real person's fragment so
+/// labelled is within the other fragment levers' reach.
 pub const E2E_PEOPLE_DAILY_MAX: u64 = 1000;
 pub const E2E_PAID_CALLS_DAILY_MAX: u64 = 2000;
 
@@ -114,6 +117,55 @@ pub fn admit(day: Day, new: bool, paid_calls: u64) -> Result<Day, DayFull> {
 /// label starts `e2e-`. On a branch deployment, levers reach no other.
 pub fn is_e2e_fragment(name: &str) -> bool {
     fragment_proto::split_fragment_name(name).is_some_and(|(label, _)| label.starts_with(E2E_LABEL_PREFIX))
+}
+
+/// The field of a fragment lever's body (`/api/test/fragment`) that
+/// names the person it acts as or for, when it has one: `member` adds
+/// `who` without their yes, and `records` posts as `principal`. On a
+/// branch deployment such a lever must name an e2e person (`acts_for`).
+pub fn acting_for(op: &str) -> Option<&'static str> {
+    match op {
+        "member" => Some("who"),
+        "records" => Some("principal"),
+        _ => None,
+    }
+}
+
+/// The person behind `identity`: an agent's owner, or a person themself.
+pub fn person_behind<'a>(identity: &'a str, owner: Option<&'a str>) -> &'a str {
+    owner.unwrap_or(identity)
+}
+
+/// Why a branch deployment's fragment lever refuses to act as or for
+/// someone (`acts_for`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotE2e {
+    /// The fragment is not an e2e person's (or their agent's), whatever its label.
+    Owner,
+    /// The one it would act as or for is not an e2e person, nor their agent.
+    Person,
+}
+
+impl NotE2e {
+    pub fn message(self) -> String {
+        match self {
+            NotE2e::Owner => format!("on a preview, a lever that acts for someone reaches fragments of e2e people (<name>@{E2E_EMAIL_DOMAIN}) alone"),
+            NotE2e::Person => format!("on a preview, a lever acts as or for e2e people (<name>@{E2E_EMAIL_DOMAIN}) and their agents alone"),
+        }
+    }
+}
+
+/// Whether a fragment lever that acts as or for someone (`acting_for`)
+/// may, on a branch deployment: the fragment's owner and the one it names
+/// are each an e2e person, or an agent of one (`person_behind`), so a
+/// leaked test secret adds no real person anywhere and posts as no one
+/// real. A local fleet's levers reach everyone, and ask nothing.
+pub fn acts_for(owner_is_e2e: bool, person_is_e2e: bool) -> Result<(), NotE2e> {
+    match (owner_is_e2e, person_is_e2e) {
+        (false, _) => Err(NotE2e::Owner),
+        (true, false) => Err(NotE2e::Person),
+        (true, true) => Ok(()),
+    }
 }
 
 /// What a fragment's label has in it for an invite to it to be told as a
@@ -315,6 +367,39 @@ mod tests {
         assert!(is_e2e_fragment("e2e-1a2b3c-todo--k3x9"));
         for other in ["todo--k3x9", "my-e2e-todo--k3x9", "e2e--k3x9", "e2e-todo.paul", "e2e-", "e2e-todo"] {
             assert!(!is_e2e_fragment(other), "{other}");
+        }
+    }
+
+    /// Goal: on a branch deployment, the fragment levers that add someone
+    /// (`member`) or post as them (`records`) name the field that says
+    /// who, and no other op does.
+    #[test]
+    fn a_lever_that_acts_for_someone_names_them() {
+        assert_eq!(acting_for("member"), Some("who"));
+        assert_eq!(acting_for("records"), Some("principal"));
+        for other in ["members", "legacy-visibility", "legacy-member-kind", "ended", "posted-kept", "", "Member"] {
+            assert_eq!(acting_for(other), None, "{other:?}");
+        }
+    }
+
+    /// An agent is reached through its owner; a person is themself.
+    #[test]
+    fn the_person_behind_an_agent_is_its_owner() {
+        assert_eq!(person_behind("npub1agent", Some("npub1owner")), "npub1owner");
+        assert_eq!(person_behind("npub1person", None), "npub1person");
+    }
+
+    /// Goal: such a lever acts only where both the fragment's owner and the
+    /// one it names are e2e people (or theirs); either one real refuses,
+    /// the owner first, and the refusal says the rule.
+    #[test]
+    fn a_lever_acts_for_e2e_people_alone() {
+        assert_eq!(acts_for(true, true), Ok(()));
+        assert_eq!(acts_for(false, true), Err(NotE2e::Owner));
+        assert_eq!(acts_for(true, false), Err(NotE2e::Person));
+        assert_eq!(acts_for(false, false), Err(NotE2e::Owner));
+        for why in [NotE2e::Owner, NotE2e::Person] {
+            assert!(why.message().contains(E2E_EMAIL_DOMAIN), "{why:?}");
         }
     }
 
