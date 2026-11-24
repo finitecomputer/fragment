@@ -43,6 +43,40 @@ pub fn dir_of(agent_fragment: &str) -> PathBuf {
     crate::hermes::home_dir(agent_fragment).join(DIR)
 }
 
+/// The most folders kept beside `~/shared` under one name (`prepare`).
+const KEPT_MAX: u32 = 64;
+
+/// Readies `dir` for a sync of `fragment`, before its process starts. A
+/// folder another team folder's sync bound (its journal, the CLI's
+/// `.fragment/state.json`, names another fragment: one replaced while it
+/// ran, or found so at a boot) is kept beside it, unsent edits, journal and
+/// all, as `shared-<that fragment>` (`-2`, `-3`… when one has that name),
+/// and the chosen one starts in a clean folder: the CLI refuses a folder
+/// bound to another fragment, so file handoff would stop. A journal naming
+/// it by its bare label (`shared` for `shared--z9z9`) is its own, as the
+/// CLI reads it; one unreadable the CLI rebuilds.
+pub fn prepare(dir: &std::path::Path, fragment: &str) -> std::io::Result<()> {
+    if let Some(bound) = bound_to(dir).filter(|b| b != fragment && fragment.rsplit_once("--").is_none_or(|(label, _)| label != b)) {
+        let parent = dir.parent().ok_or_else(|| std::io::Error::other("~/shared has a parent"))?;
+        let base = format!("{DIR}-{}", bound.replace('/', "_"));
+        // bounded: a name of its own among at most KEPT_MAX
+        let to = (1..=KEPT_MAX)
+            .map(|n| parent.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
+            .find(|p| !p.exists())
+            .ok_or_else(|| std::io::Error::other(format!("{KEPT_MAX} folders already kept as {base}")))?;
+        std::fs::rename(dir, &to)?;
+        ev!("shared.kept", { "from": bound, "to": to.display().to_string(), "now": fragment });
+    }
+    std::fs::create_dir_all(dir)
+}
+
+/// The fragment `dir`'s sync journal names, if it has a readable one.
+fn bound_to(dir: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join(".fragment").join("state.json")).ok()?;
+    let journal: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    journal["name"].as_str().filter(|n| !n.is_empty()).map(str::to_string)
+}
+
 /// One agent's sync: of which fragment, its process, and when it started.
 struct Running {
     fragment: String,
@@ -155,6 +189,98 @@ mod tests {
         assert_eq!(pick(&[entry("shared--a1a1", "shared", false), entry("shared--b2b2", "skills", true)]), None);
         assert_eq!(dir_of("juniper--k3x9"), crate::hermes::home_dir("juniper--k3x9").join("shared"), "where its `~` is");
         assert!(dir_of("juniper--k3x9").starts_with(crate::hermes::work_dir("juniper--k3x9")), "in its work, saved with it");
+    }
+
+    /// The CLI's first pass as it binds `dir` to `fragment` (cli/src/sync/
+    /// journal.rs `read_state`): refused when its journal names another
+    /// fragment (its bare label is the same one's), else its journal
+    /// written, naming it.
+    fn bind(dir: &std::path::Path, fragment: &str) -> std::io::Result<()> {
+        let journal = dir.join(".fragment").join("state.json");
+        if let Ok(bytes) = std::fs::read(&journal) {
+            let named = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v["name"].as_str().map(str::to_string)).unwrap_or_default();
+            let bare = fragment.rsplit_once("--").is_some_and(|(label, _)| label == named);
+            if named != fragment && !bare {
+                return Err(std::io::Error::other(format!("directory is synced to fragment '{named}', not '{fragment}'")));
+            }
+        }
+        std::fs::create_dir_all(dir.join(".fragment"))?;
+        std::fs::write(&journal, serde_json::json!({ "schemaVersion": 3, "name": fragment, "files": {} }).to_string())
+    }
+
+    /// A folder of its own for a test, under the temporary folder.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch folder");
+        root
+    }
+
+    /// Goal (Alex on #1537): the team folder replaced while its sync runs,
+    /// the new one's sync starts in a clean `~/shared`, and the old folder,
+    /// its unsent edits and its journal, is kept beside it. Invalid: the
+    /// same folder (or its journal naming it by its bare label) moves
+    /// nothing. Method: `sleep` stands in for the CLI, `bind` for its
+    /// first pass.
+    #[test]
+    fn a_replaced_team_folder_gets_a_clean_folder_and_the_old_is_kept() {
+        let root = scratch("shared-switch");
+        let dir = root.join(DIR);
+        let spawn = |_agent: &str, fragment: &str| {
+            prepare(&dir, fragment)?;
+            bind(&dir, fragment)?;
+            std::process::Command::new("sleep").arg("30").spawn()
+        };
+        let mut syncs = Syncs::default();
+        let mut want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
+        syncs.keep(&want, &spawn);
+        assert!(syncs.running["juniper--k3x9"].child.is_some(), "the first started");
+        std::fs::write(dir.join("handover.txt"), "unsent").unwrap();
+        // the same folder again: nothing moves
+        prepare(&dir, "shared--z9z9").unwrap();
+        assert!(dir.join("handover.txt").exists());
+        // replaced
+        want.insert("juniper--k3x9".into(), "shared--w4w4".into());
+        syncs.keep(&want, &spawn);
+        assert!(syncs.running["juniper--k3x9"].child.is_some(), "the new one's sync started");
+        assert!(!dir.join("handover.txt").exists(), "~/shared is the new folder's, clean");
+        let kept = root.join("shared-shared--z9z9");
+        assert_eq!(std::fs::read_to_string(kept.join("handover.txt")).ok().as_deref(), Some("unsent"), "the old folder kept, its edits in it");
+        assert!(std::fs::read_to_string(kept.join(".fragment/state.json")).unwrap().contains("shared--z9z9"), "and its journal");
+        syncs.keep(&BTreeMap::new(), &spawn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Alex on #1537): a boot that finds `~/shared` bound to another
+    /// team folder (its journal on disk) starts the chosen one's sync in a
+    /// clean folder, the old kept beside it under a name of its own, even
+    /// when one from before has that name. Invalid: a journal naming it by
+    /// its bare label is the same folder's, and stays.
+    #[test]
+    fn a_boot_with_the_old_journal_on_disk_starts_clean() {
+        let root = scratch("shared-boot");
+        let dir = root.join(DIR);
+        bind(&dir, "shared--z9z9").unwrap();
+        std::fs::write(dir.join("draft.md"), "unsent").unwrap();
+        std::fs::create_dir_all(root.join("shared-shared--z9z9")).unwrap();
+        let spawn = |_agent: &str, fragment: &str| {
+            prepare(&dir, fragment)?;
+            bind(&dir, fragment)?;
+            std::process::Command::new("sleep").arg("30").spawn()
+        };
+        let mut syncs = Syncs::default();
+        syncs.keep(&BTreeMap::from([("juniper--k3x9".to_string(), "team--w4w4".to_string())]), &spawn);
+        assert!(syncs.running["juniper--k3x9"].child.is_some(), "the chosen folder's sync started");
+        assert!(!dir.join("draft.md").exists(), "in a clean ~/shared");
+        assert_eq!(std::fs::read_to_string(root.join("shared-shared--z9z9-2").join("draft.md")).ok().as_deref(), Some("unsent"), "the old kept, beside one of that name");
+        syncs.keep(&BTreeMap::new(), &spawn);
+        // a journal naming the folder by its bare label is the same one's
+        let bare = root.join("bare");
+        bind(&bare, "shared").unwrap();
+        std::fs::write(bare.join("draft.md"), "kept").unwrap();
+        prepare(&bare, "shared--z9z9").unwrap();
+        assert!(bare.join("draft.md").exists(), "its own folder, by its label");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Goal: one sync an agent, of the folder wanted; an agent gone, or a

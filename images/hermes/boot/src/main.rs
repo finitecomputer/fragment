@@ -981,7 +981,7 @@ fn team_folders(agents: &[Agent], folder: Option<&str>) -> BTreeMap<String, Stri
 /// of the computer's log.
 fn spawn_sync(agent: &str, owner: &str, fragment: &str) -> std::io::Result<Child> {
     let dir = shared::dir_of(agent);
-    std::fs::create_dir_all(&dir)?;
+    shared::prepare(&dir, fragment)?;
     chown(&dir, hermes_ids());
     let mut c = Command::new("/command/s6-setuidgid");
     c.args(["hermes", FRAGMENT_CLI, "sync", fragment, "--watch", "--dir"]).arg(&dir);

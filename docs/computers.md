@@ -1350,6 +1350,12 @@ skills fragment), one labelled `shared` first, else the first by name
   Hermes' own start, so a teammate's latest is coming in as Hermes boots.
   A sync that ended starts again at most once a minute
   (`shared::RESTART_MS`). An agent gone ends its sync; its folder stays.
+- **A team folder replaced** (another chosen while a sync runs, or found
+  so at a boot: `~/shared`'s sync journal names another fragment) keeps
+  the old folder beside it, unsent edits and journal and all, as
+  `~/shared-<that fragment>`, and the new one's sync starts in a clean
+  `~/shared` (`shared::prepare`): the CLI refuses a folder bound to
+  another fragment, so handing over files would stop.
 - **A hold stops every sync** (SIGSTOP) before the boot answers it, as a
   round under way is waited for, and they go on after it: nothing under
   `/data` changes while a save is taken.
