@@ -878,8 +878,9 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response").cloned().unwrap_or_default();
     let asked = records(api, &owner, &chat_name, "work").into_iter().find(|x| x["body"]["kind"] == "turn.prompt" && x["body"]["prompt"] == answer["body"]["prompt"]).unwrap_or_default();
     s.ok(
-        "the page answered with a prompt_response for the card's option, naming the card's agent and turn",
-        answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string() && answer["body"]["agent"] == identity.as_str() && answer["body"]["turn"] == asked["body"]["turn"] && asked["principal"] == identity.as_str(),
+        "the page answered with a prompt_response for the card's option, naming the card's agent and turn, and its record (`answers`)",
+        answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string() && answer["body"]["agent"] == identity.as_str() && answer["body"]["turn"] == asked["body"]["turn"] && asked["principal"] == identity.as_str()
+            && answer["body"]["answers"] == json!({ "channel": "work", "seq": asked["seq"] }),
         json!({ "answer": answer, "card": asked }),
     );
     s.ok("the member's card closes too", chrome.until(&theirs, "!!document.querySelector('.prompt.closed .outcome.answered')", TURN), "");

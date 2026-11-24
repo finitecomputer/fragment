@@ -797,7 +797,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
-| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed` 403; past the overdraft 402 |
+| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed`, or that answers a question, 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
@@ -858,6 +858,30 @@ chose its words:
 
 A record stored before the stamp has no `author`, and reads as it did. A
 reader meets an author it does not know as `other`.
+
+### Questions and answers
+
+A question is answered only by whom it asks (FIN-615,
+`fragment_core::permit::may_answer`), in any fragment:
+
+- **A question** is a record whose body names whom it asks: `asks`, an
+  identity (a chat's card asks its agent's owner).
+- **An answer** is a record whose body names the question's record in the
+  same fragment: `"answers": {"channel": "work", "seq": 12}`, exactly
+  those two fields. An `answers` naming no `seq` is the app's own field.
+- **Who answers.** An answer comes only as a post: the asked identity's
+  own, written as itself (`author` `person` or `agent`, acting for no
+  one). Anyone else's is 403 and appends nothing: another person, an
+  agent acting for whom it asks (an agent never answers its own card), an
+  agent answering for someone. App code answers nothing (a mutation's
+  effect or a job step that answers is refused), nor does a scheduled
+  record (403 at its add) or a door. So is an answer to a record that asks
+  no one, is not kept, or is on a channel its poster may not read: one
+  refusal for all three. A malformed `answers` is 400. The same post again
+  is the record it appended, whatever became of its question.
+
+A reader still attributes an answer by its `principal`, as any record: a
+record stored before this rule promises nothing.
 
 ### Listed records
 
@@ -1816,8 +1840,9 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   `RECORD_SCHEDULE_EVERY_MIN_MINUTES` (each fire wakes and costs its owner;
   more often belongs in a cron trigger), else `invalid_request`; `record`
   any JSON of at most `RECORD_SCHEDULE_BODY_MAX_BYTES` as canonical JSON,
-  else `too_large`, and relaying no one (no `relayed`: the fragment's own
-  key is no door), else 403; `channel` declared, taking posts, and not
+  else `too_large`, relaying no one (no `relayed`: the fragment's own
+  key is no door) and answering no question (no `answers` naming a seq:
+  Questions and answers), else 403; `channel` declared, taking posts, and not
   only from one kind of member (`from`), else `invalid_request`, and the
   caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
 - The same schedule again answers the one there (`replayed: true`).
