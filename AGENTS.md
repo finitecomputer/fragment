@@ -192,9 +192,9 @@ second round only checks the fixes, and there is no third.
 
 Keep PRs small, and each one whole: one thing that stands on its own,
 something a person can use or a step that is safe and useful by itself.
-If two PRs mean nothing without each other, they are one PR. Split only
-where a piece stands alone, or must wait (a deletion after a migration
-has run). A plan that grows a PR each review round is a smell; merge the
+If two PRs mean nothing without each other, they are one PR. Split when
+a piece stands alone, or must wait (a deletion after a migration has
+run). A plan that grows a PR each review round is a smell; merge the
 pieces back.
 
 ### Hit every surface
