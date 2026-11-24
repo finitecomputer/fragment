@@ -61,7 +61,7 @@ use fragment_core::effects::{self, Effect};
 use fragment_core::mandate::{self, Mandate};
 use fragment_core::{door, npub};
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, Author, Lend, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
+    limits, valid_channel_name, valid_op_id, Author, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
@@ -940,23 +940,21 @@ impl FragmentCell {
     /// are a person's own here (`mandate::asker_of`), to this agent
     /// (`mandate::addressed`) and within a mandate's life, carries their
     /// mandate for it (docs/api.md, "Who asked: mandates"): the proof that
-    /// they asked it, which its calls carry in place of `for`, and what its
-    /// owner lends this place (everything, to its owner's own words). Whose
-    /// words each is, the membership and the lend are read before the
-    /// await, as the page was.
+    /// they asked it, which its calls carry in place of `for`. Whose words
+    /// each is and the membership are read before the await, as the page
+    /// was.
     async fn mandated(&self, caller: &Caller, page: &mut ChannelPage) -> CellResult<()> {
-        let Some((agent, owner)) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()).and_then(|s| Some((s, s.owner.as_deref()?))) else { return Ok(()) };
+        let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) else { return Ok(()) };
         if self.member_role(&agent.id)?.is_none() {
             return Ok(());
         }
-        let (place, now, lent) = (self.must(MetaKey::Npub)?, js::now_ms(), self.lend_of(&agent.id)?);
+        let (place, now) = (self.must(MetaKey::Npub)?, js::now_ms());
         let mandates: Vec<Option<Mandate>> = page
             .records
             .iter()
             .map(|r| {
                 let asker = mandate::asker_of(&r.principal, r.author, r.asker.as_deref(), r.body.get()).filter(|_| mandate::addressed(r.body.get(), &agent.id))?;
-                let lend = if npub::display(&asker) == npub::display(owner) { Lend::OWNER } else { lent };
-                Mandate::of_record(&asker, &agent.id, &place, (&r.channel, r.seq, r.at), lend).filter(|m| m.until >= now)
+                Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at).filter(|m| m.until >= now)
             })
             .collect();
         if mandates.iter().all(Option::is_none) {

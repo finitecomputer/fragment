@@ -1106,6 +1106,7 @@ impl FragmentCell {
             DoorCheck::PATH => reply::<DoorCheck>(self.door_check(decode(body)?)),
             DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
+            calls::LendOf::PATH => reply::<calls::LendOf>(self.lend_here(&decode(body)?)),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
             calls::AgentJoined::PATH => reply::<calls::AgentJoined>(self.agent_joined(decode(body)?).await),
@@ -1151,7 +1152,7 @@ impl FragmentCell {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
             if route == "grants" {
-                return json_response(&self.grants(&req.bytes().await?)?);
+                return json_response(&self.grants(&req.bytes().await?).await?);
             }
             let route = route.to_string();
             let body = req.bytes().await?;

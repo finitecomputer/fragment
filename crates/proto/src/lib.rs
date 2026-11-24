@@ -1670,7 +1670,7 @@ impl Lend {
     /// What no one's proven ask lends: nothing of the owner's.
     pub const NONE: Lend = Lend { spend: false, accounts: false };
 
-    /// As a stored row and a mandate write it: 0 to 3.
+    /// As a stored row writes it: 0 to 3.
     pub fn bits(self) -> u8 {
         u8::from(self.spend) + 2 * u8::from(self.accounts)
     }

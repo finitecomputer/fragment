@@ -318,4 +318,23 @@ mod tests {
         let fine: &'static [Step] = Box::leak(vec![Step { name: "baseline", sql: LEDGER.steps[0].sql }, Step { name: "caps_note", sql: "ALTER TABLE caps ADD COLUMN note TEXT;\n" }].into_boxed_slice());
         assert!(lock(&[&Class { steps: fine, ..LEDGER }]).is_ok(), "a step it takes locks");
     }
+
+    /// Goal (FIN-720, Fragment step 14): a run's call id is its caller's,
+    /// and an agent's for someone else than its owner is theirs: Juniper's
+    /// `sync` for Ana (no asker) and for Ben are two runs; the same again
+    /// for either is refused, so a replay finds the one there, as a run
+    /// from before the step does. Method: the steps as checked in, on the
+    /// host's SQLite.
+    #[test]
+    fn a_runs_call_id_is_its_askers_own() {
+        let db = Lite::new();
+        super::super::migrate(&db, &FRAGMENT, 1).expect("the Fragment's steps apply");
+        let run = |asker: &str| format!("INSERT INTO runs (op, via, principal, role, depth, call_id, input, status, attempt, created_at, asker) VALUES ('sync', 'call', 'npub1juniper', 'editor', 0, 'sync', '{{}}', 'queued', 0, 1, {asker})");
+        assert_eq!(db.exec(&run("NULL")), Ok(()), "for its owner");
+        assert_eq!(db.exec(&run("'npub1ben'")), Ok(()), "the same id, for Ben: his own");
+        for again in ["NULL", "'npub1ben'"] {
+            assert!(db.exec(&run(again)).is_err_and(|e| e.contains("UNIQUE")), "the same call again ({again}) is the one there");
+        }
+        assert_eq!(db.count("SELECT COUNT(*) FROM runs"), 2);
+    }
 }

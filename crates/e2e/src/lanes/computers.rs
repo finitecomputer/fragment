@@ -70,6 +70,7 @@ pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 const ASKER_CHECKS: &[&str] = &[
     "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the record is theirs, the agent its author; its owner's same ask is its owner's",
     "held to their role: where they may not (a channel only editors post to, they a viewer), it is refused, though its owner's same ask goes",
+    "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
     "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
     "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
 ];
@@ -122,6 +123,23 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let owners = fetched(s, 201, &post("staff", "staff-owner"))?;
     s.ok(ASKER_CHECKS[1], bens.starts_with("fetched 403") && owners.starts_with("fetched 200") && whose(&owners).0 == owner_id, json!({ "ben": bens, "owner": owners }));
 
+    let schedules = format!("/api/f/{chat}/schedules");
+    let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": post("wall", "wall-schedule") } })))?;
+    cron_now(api, chat)?;
+    let fire = || records(api, w.owner, chat, "chat").into_iter().find(|r| r["author"] == "platform" && r["asker"] == ben_id.as_str());
+    s.eventually(wake, || fire().is_some());
+    let turn = turn_of(w.agent, chat, "chat", fire().and_then(|r| r["seq"].as_i64()).unwrap_or(0));
+    turns.set(turns.get() + 1);
+    let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+    s.eventually(wake, || reply().is_some());
+    let said = reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let removed = api.signed(&ben, "DELETE", &format!("{schedules}/{}", made.body["schedule"]["id"]), None)?;
+    s.ok(
+        ASKER_CHECKS[2],
+        made.status == 200 && fire().is_some() && said.starts_with("fetched 200") && whose(&said) == (ben_id.clone(), "agent".to_string()) && removed.status == 200,
+        json!({ "made": made.status, "fire": fire(), "said": said, "removed": removed.status }),
+    );
+
     let paid = format!("fetch http://api.perplexity.ai/search with {}", placeholder(s, w.id, w.agent, "perplexity"));
     let account = format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION));
     let spent = asked_by_ben(s, 3, &paid)?;
@@ -129,7 +147,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let unlent = asked_by_ben(s, 4, &account)?;
     let unreached = s.upstream.seen().len() == seen;
     s.ok(
-        ASKER_CHECKS[2],
+        ASKER_CHECKS[3],
         spent.starts_with("fetched 200") && unlent.starts_with("fetched 403") && unlent.contains("hasn't lent it their accounts and keys") && unreached,
         json!({ "paid": spent, "account": unlent }),
     );
@@ -142,7 +160,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let back = lend(true, false)?;
     let again = asked_by_ben(s, 7, &account)?;
     s.ok(
-        ASKER_CHECKS[3],
+        ASKER_CHECKS[4],
         switched.status == 200
             && unpaid.starts_with("fetched 403")
             && unpaid.contains("hasn't lent it their credit")

@@ -26,6 +26,8 @@
 
 use fragment_core::grants::Grants;
 use fragment_core::mandate::{self, Proof};
+
+use crate::fragment::calls::LendOf;
 use fragment_core::{connectors::Action, door, npub};
 use fragment_proto::{limits, valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Lend, Role};
 use serde::Deserialize;
@@ -90,14 +92,12 @@ struct TurnRow {
     asker: String,
     mandate: Option<String>,
     until: i64,
-    lend: i64,
 }
 
 /// A turn's row read as `mandate::proof` reads one: its mandate only while
 /// it holds.
 fn turn_of(r: &TurnRow, now: i64) -> mandate::Turn<'_> {
-    let lend = u8::try_from(r.lend).ok().and_then(Lend::from_bits).unwrap_or(Lend::NONE);
-    let mandate = r.mandate.as_deref().filter(|_| r.until >= now).map(|text| mandate::Held { text, until: r.until, lend });
+    let mandate = r.mandate.as_deref().filter(|_| r.until >= now).and_then(|text| Some(mandate::Held { text, until: r.until, place: mandate::place_of(text)? }));
     mandate::Turn { place: &r.place, asker: &r.asker, mandate }
 }
 
@@ -165,7 +165,7 @@ impl FragmentCell {
     /// with `provider` and `account`: their computer's routes, which a
     /// signed person alone reaches). Read field by field, as this file's
     /// other bodies are (the cell's Wasm budget).
-    pub(crate) fn grants(&self, body: &[u8]) -> CellResult<Grants> {
+    pub(crate) async fn grants(&self, body: &[u8]) -> CellResult<Grants> {
         use fragment_core::grants::{answered, Change, Row};
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
         let body: Value = crate::json_body(body)?;
@@ -206,14 +206,14 @@ impl FragmentCell {
             self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
         }
         // narrowed, at this use, by someone else's open ask (FIN-720)
-        Ok(Grants { lend: self.lent_now()?, ..grants })
+        Ok(Grants { lend: self.lent_now().await?, ..grants })
     }
 
     /// Its open turns' rows, as its bridge told them and not yet forgotten
     /// (`limits::TURN_HELD_MS`).
     fn turn_rows(&self, now: i64) -> CellResult<Vec<TurnRow>> {
         self.typed(
-            "SELECT place, asker, mandate, until, lend FROM turns WHERE at >= ? ORDER BY turn LIMIT ?",
+            "SELECT place, asker, mandate, until FROM turns WHERE at >= ? ORDER BY turn LIMIT ?",
             vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
         )
     }
@@ -223,9 +223,12 @@ impl FragmentCell {
     /// (`mandate::proof`): `open` one (`{turn, place, asker?, mandate?}`: no
     /// asker is no one's, app code's words), `close` one, or `clear` them
     /// all (a bridge's start). Its mandate is checked as the router checks
-    /// one (the platform's, for this agent, of that asker, unexpired); one
-    /// that is not proves nothing, and the turn is held unproven: narrower,
-    /// never refused. Read field by field (the cell's Wasm budget).
+    /// one (the platform's, for this agent, unexpired), and names whose ask
+    /// the turn is, whatever the bridge said (a schedule's fire is its
+    /// maker's, though the place's own key wrote it); one that does not
+    /// check proves nothing, and the turn is held as the bridge said it,
+    /// unproven: narrower, never refused. Read field by field (the cell's
+    /// Wasm budget).
     async fn turns(&self, body: &Value) -> CellResult<Value> {
         let text = |k: &str| body[k].as_str().unwrap_or("");
         let now = js::now_ms();
@@ -243,11 +246,11 @@ impl FragmentCell {
                 if !fragment_proto::valid_op_id(turn) || !valid_fragment_name(place) || !(asker.is_empty() || npub::is_identity(asker)) {
                     return Err(CellError::invalid("a turn is its id, the fragment it runs in, and who asked (an identity, or no one)"));
                 }
-                let unproven = (None, now + limits::MANDATE_LIFE_MS, Lend::NONE);
-                let (mandate, until, lend) = match body["mandate"].as_str().filter(|_| !asker.is_empty()) {
+                let unproven = (asker.to_string(), None, now + limits::MANDATE_LIFE_MS);
+                let (asker, mandate, until) = match body["mandate"].as_str() {
                     None => unproven,
                     Some(m) => match mandate::open(&crate::keys::mandate_keys(&self.env).await?, m, js::now_ms()) {
-                        Ok(o) if Some(o.agent.as_str()) == self.meta(MetaKey::AgentIdentity)?.as_deref() && o.asker == asker => (Some(m.to_string()), o.until, o.lend),
+                        Ok(o) if Some(o.agent.as_str()) == self.meta(MetaKey::AgentIdentity)?.as_deref() => (o.asker, Some(m.to_string()), o.until),
                         _ => unproven,
                     },
                 };
@@ -257,15 +260,14 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::RateLimited, format!("this agent holds {held} open turns, the most it may: end one first")));
                 }
                 self.exec(
-                    "INSERT INTO turns (turn, place, asker, mandate, until, lend, at) VALUES (?, ?, ?, ?, ?, ?, ?)
-                     ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, lend = excluded.lend, at = excluded.at",
+                    "INSERT INTO turns (turn, place, asker, mandate, until, at) VALUES (?, ?, ?, ?, ?, ?)
+                     ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, at = excluded.at",
                     vec![
                         turn.into(),
                         place.into(),
-                        asker.into(),
+                        asker.as_str().into(),
                         mandate.map_or(SqlStorageValue::Null, Into::into),
                         SqlStorageValue::Integer(until),
-                        SqlStorageValue::Integer(i64::from(lend.bits())),
                         SqlStorageValue::Integer(now),
                     ],
                 )?;
@@ -292,7 +294,7 @@ impl FragmentCell {
         let turns: Vec<mandate::Turn> = rows.iter().map(|r| turn_of(r, now)).collect();
         match mandate::proof(&npub::display(&owner), &turns) {
             Proof::Bare => Ok((at.to_string(), None)),
-            Proof::Owner(m) | Proof::Asker(m) => Ok((without_for(&url), Some(m.text.to_string()))),
+            Proof::Owner(m) | Proof::Asker { held: m, .. } => Ok((without_for(&url), Some(m.text.to_string()))),
             Proof::Itself(places) if fragment.is_some_and(|f| places.contains(&f)) => Ok((without_for(&url), None)),
             Proof::Itself(_) => Err(CellError::new(
                 ErrorCode::Forbidden,
@@ -302,13 +304,30 @@ impl FragmentCell {
     }
 
     /// What of its owner's its open turns lend it now: `None` while only
-    /// its owner's own ask is open (or none is), everything of theirs.
-    fn lent_now(&self) -> CellResult<Option<Lend>> {
+    /// its owner's own ask is open (or none is), everything of theirs; one
+    /// other person's, the narrowest of what each place their turns are in
+    /// lends it now, read there (`LendOf`: a lend is kept on its member row
+    /// alone, so a switch turned off holds from the next use); no one
+    /// proven's, nothing. A place that does not answer lends nothing.
+    async fn lent_now(&self) -> CellResult<Option<Lend>> {
         let now = js::now_ms();
         let rows = self.turn_rows(now)?;
         let turns: Vec<mandate::Turn> = rows.iter().map(|r| turn_of(r, now)).collect();
         let owner = npub::display(&self.must(MetaKey::Owner)?);
-        Ok(Some(mandate::proof(&owner, &turns).lend()).filter(|l| *l != Lend::OWNER))
+        let at = match mandate::proof(&owner, &turns) {
+            Proof::Bare | Proof::Owner(_) => return Ok(None),
+            Proof::Itself(_) => return Ok(Some(Lend::NONE)),
+            Proof::Asker { at, .. } => at,
+        };
+        let agent = self.must(MetaKey::AgentIdentity)?;
+        // bounded: the places of its open turns, at most `TURNS_HELD_MAX`
+        let calls: Vec<(&str, LendOf)> = at.iter().map(|(name, place)| (*name, LendOf { agent: agent.clone(), place: place.to_string() })).collect();
+        let asked = calls.iter().map(|(name, call)| crate::fragment::call(&self.env, name, call));
+        let lent = futures_util::future::join_all(asked).await.into_iter().fold(Lend::OWNER, |lent, here| {
+            let here = here.unwrap_or(Lend::NONE);
+            Lend { spend: lent.spend && here.spend, accounts: lent.accounts && here.accounts }
+        });
+        Ok(Some(lent))
     }
 
     /// `computer/…`: the internal calls a computer's routes and egress make.

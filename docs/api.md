@@ -178,16 +178,13 @@ identity, 400; an agent naming anyone but its owner, 403. A site request's query
 **Who asked: mandates** (FIN-615, FIN-720, `fragment_core::mandate`). A
 mandate is a place's word that a person's own record there asked its
 agent: its asker, the agent, the place (by its life's own key), the
-record, until when, and what the agent's owner lends that ask (`Lend`).
-An agent member reading a channel as itself (`GET
+record, and until when. An agent member reading a channel as itself (`GET
 /api/f/{name}/channels/{c}`) is given one beside each record whose words
 are a person's own (their post, a door's relay of them, or the
 platform's record of a schedule's fire for its maker:
 `mandate::asker_of`) and to it (its body's `to` names it, or names no
 one: `mandate::addressed`) (`ChannelRecord.mandate`); a live frame
-carries none. Its owner's own
-lends everything of theirs; anyone else's, the agent's lend there (An
-agent's lend). It holds for `MANDATE_LIFE_MS` from its record's writing,
+carries none. It holds for `MANDATE_LIFE_MS` from its record's writing,
 and a record older than that carries none. The agent's request may carry
 it in `x-fragment-mandate` in place of `for`, wherever `for` is honored:
 it acts for its asker as `for` does for its owner, held to the lower of
@@ -214,18 +211,25 @@ their newest mandate; turns of more than one other person, or of one
 unproven, the agent as itself, with no `for`, in those turns' places
 alone, and 403 anywhere else. Since decision 64 an agent's own
 memberships mirror its owner's, so acting as itself elsewhere would reach
-what is its owner's for someone it cannot name. While someone else's turn
-is open, the agent's grants carry `lend`, what of its owner's it uses
-then: paid tools (an operator key) by `spend`, their accounts and keys (a
-connection, a Vault secret) by `accounts`. A paid tool used on someone
-else's turn is billed to the owner only while lent.
+what is its owner's for someone it cannot name. A mandate names whose ask
+a turn is, whatever its bridge says (a schedule's fire is its maker's,
+though the place's own key wrote it). While someone else's turn is open,
+the agent's grants carry `lend`, what of its owner's it uses then, read
+at each use from each place that person's turns are in, the narrowest of
+them: paid tools (an operator key) by `spend`, their accounts and keys (a
+connection, a Vault secret) by `accounts`; no one proven's, nothing. Its
+owner's own ask lends everything. A paid tool used on someone else's turn
+is billed to the owner only while lent. The computer tells its own turns,
+which its agent could undo (the debt ledger, "An agent's computer tells
+its own turns").
 
 **An agent's lend** (the share sheet's card for an owner's own agent in
 a chat): `PUT /api/f/{name}/members/{agent}/lend` `{spend, accounts}` →
-the lend, kept on the agent's member row; its owner's alone, in person
-(the agent itself 403; anyone else refused as on any route). A member list says it to its owner,
-on their own agents' rows (`Member.lend`), and to no one else. One never
-set is `Lend::DEFAULT`: spend on, accounts off.
+the lend, kept on the agent's member row alone, so a switch holds from
+the next use, mid-turn too; its owner's alone, in person (the agent
+itself 403; anyone else refused as on any route). A member list says it
+to its owner, on their own agents' rows (`Member.lend`), and to no one
+else. One never set is `Lend::DEFAULT`: spend on, accounts off.
 
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner

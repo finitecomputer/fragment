@@ -172,15 +172,14 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
 
 /// Goal: proof of who asked (FIN-615, FIN-720; docs/api.md, "Who asked:
 /// mandates"). A place gives its agent members, reading it as themselves,
-/// a mandate beside each person's own words there to them, carrying what
-/// the agent's owner lends that ask; with its owner's, the agent's calls
-/// act for its owner exactly as `for` does, now proven; with anyone
+/// a mandate beside each person's own words there to them; with its
+/// owner's, the agent's calls act for its owner exactly as `for` does, now
+/// proven; with anyone
 /// else's, for them, held to their role. Method: Ana's room, where Ana's
 /// agent Juniper and Ben's agent Fred are members with Ben, and Ana, Ben
 /// and Juniper each say something. Valid: each agent's read gives a
 /// mandate beside Ana's and Ben's records and none beside Juniper's, a
-/// person's read none; Ana's to Juniper lends everything of hers, Ben's
-/// the room's lend (spend on, accounts off); with Ana's, Juniper acts for
+/// person's read none; with Ana's, Juniper acts for
 /// Ana in Ana's private app (the app told Ana, at Juniper's editor cap) and
 /// in the list, as `for` would; the same mandate again acts the same (a
 /// replay). With Ben's, Juniper acts as Ben in Ana's shared app, at Ben's
@@ -221,13 +220,6 @@ fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let mandate_of = |records: &[Value], by: &str| records.iter().find(|r| r["principal"] == by).and_then(|r| r["mandate"].as_str()).unwrap_or_default().to_string();
     let (anas, bens) = (mandate_of(&juniper_reads, &ana_id), mandate_of(&juniper_reads, &ben_id));
-    // fm1.<asker>.<agent>.<place>.<channel>.<seq>.<until>.<lend>.<mark>
-    let lend = |m: &str| m.split('.').nth(7).unwrap_or_default().to_string();
-    s.ok(
-        "each carries what Juniper's owner lends that ask: everything of Ana's to her own words (3), the room's lend to Ben's, spend on and accounts off until she says (1)",
-        lend(&anas) == "3" && lend(&bens) == "1",
-        json!({ "ana": lend(&anas), "ben": lend(&bens) }),
-    );
 
     let private = s.named(api, &ana, "private")?;
     let c = s.create(api, &ana, &private)?;

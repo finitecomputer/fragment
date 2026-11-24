@@ -98,7 +98,8 @@ mod tests {
     /// drops a table, an index or a trigger, but the test levers that plant
     /// the shapes the runner must tell apart (schema.rs, its
     /// `schema-unversion` dropping what later steps made, columns too, and
-    /// a list's `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
+    /// putting back step 1's index a later step replaced, and a list's
+    /// `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
     /// every object's schema was until 2026-10-19, never reaches an object
     /// made before it. Method: the cell's source, read.
     #[test]
@@ -110,7 +111,7 @@ mod tests {
                 *found.entry(file).or_default() += n;
             }
         }
-        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 8)]);
+        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 9)]);
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 

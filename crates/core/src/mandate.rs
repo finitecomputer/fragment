@@ -1,14 +1,15 @@
 //! Proof of who asked (FIN-615, FIN-720; docs/api.md, "Who asked:
 //! mandates"). A mandate is a place's word that a person's own record there
 //! asked one of its agents: its asker, the agent, the place, the record,
-//! until when, and what the agent's owner lends that place (`Lend`). As a
+//! and until when. As a
 //! place hands an agent member the records people wrote to it there (`GET
 //! …/channels/<c>`, read as the agent itself), each carries one. The
 //! agent's calls carry it beside their NIP-98 signature
 //! (`x-fragment-mandate`) in place of `for=<its owner>`, and the router
 //! checks it in the signer's own lookup, with no round trip: the call acts
 //! for its asker, held to their own role (`permit`, rule 3). Its owner's
-//! own word lends everything of theirs; anyone else's, only the lend.
+//! own word lends everything of theirs; anyone else's, only what its owner
+//! lends that place now (`Lend`, read where it is kept at each use).
 //!
 //! Only the platform makes one: its mark is a keyed MAC under a key derived
 //! from the host secret (as `swap::TagKey`'s), never stored, rotating with
@@ -75,9 +76,6 @@ pub struct Mandate {
     /// Until when it holds, ms since the epoch: its record's `at` and
     /// `limits::MANDATE_LIFE_MS`.
     pub until: i64,
-    /// What the agent's owner lends the place, as it was when the place
-    /// marked it; its owner's own mandate needs none (`Lend::OWNER`).
-    pub lend: Lend,
 }
 
 /// Why a request's mandate is no proof.
@@ -103,20 +101,20 @@ impl Refused {
 
 impl Mandate {
     /// The mandate for `agent` of a record `asker` wrote in `place`, on
-    /// `channel` at `seq`, at `at` (ms), under `lend`; none when a name is
-    /// not of its kind, which no mandate could carry.
-    pub fn of_record(asker: &str, agent: &str, place: &str, (channel, seq, at): (&str, i64, i64), lend: Lend) -> Option<Mandate> {
-        let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until: at.saturating_add(limits::MANDATE_LIFE_MS), lend };
+    /// `channel` at `seq`, at `at` (ms); none when a name is not of its
+    /// kind, which no mandate could carry.
+    pub fn of_record(asker: &str, agent: &str, place: &str, channel: &str, seq: i64, at: i64) -> Option<Mandate> {
+        let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until: at.saturating_add(limits::MANDATE_LIFE_MS) };
         well_formed(&m).then_some(m)
     }
 
-    /// Its text: `fm1.<asker>.<agent>.<place>.<channel>.<seq>.<until>.<lend>.<mark>`,
+    /// Its text: `fm1.<asker>.<agent>.<place>.<channel>.<seq>.<until>.<mark>`,
     /// its mark of all before it. No field holds a dot (each is of its
     /// kind: `well_formed`), so the text reads back as made.
     pub fn text(&self, key: &MandateKey) -> String {
         assert!(well_formed(self), "a mandate is made of names of their kind (`of_record`)");
-        let Mandate { asker, agent, place, channel, seq, until, lend } = self;
-        let fields = format!("{PREFIX}{asker}.{agent}.{place}.{channel}.{seq}.{until}.{}", lend.bits());
+        let Mandate { asker, agent, place, channel, seq, until } = self;
+        let fields = format!("{PREFIX}{asker}.{agent}.{place}.{channel}.{seq}.{until}");
         let mark = key.mac(fields.as_bytes()).finalize().into_bytes();
         let text = format!("{fields}.{}", hex::encode(&mark[..MARK_BYTES]));
         assert!(text.len() <= limits::MANDATE_MAX_BYTES, "a mandate's names are bounded, so its text is");
@@ -145,11 +143,10 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
     }
     // marked by the platform, so made by `text`: anything else is a fault
     let parts: Vec<&str> = fields[PREFIX.len()..].split('.').collect();
-    let [asker, agent, place, channel, seq, until, lend] = parts[..] else { return Err(Refused::Malformed) };
+    let [asker, agent, place, channel, seq, until] = parts[..] else { return Err(Refused::Malformed) };
     let number = |n: &str| n.parse::<i64>().ok().filter(|_| n.bytes().all(|b| b.is_ascii_digit()));
-    let lend = Some(lend).filter(|l| l.len() == 1).and_then(|l| l.parse::<u8>().ok()).and_then(Lend::from_bits);
-    let (Some(seq), Some(until), Some(lend)) = (number(seq), number(until), lend) else { return Err(Refused::Malformed) };
-    let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until, lend };
+    let (Some(seq), Some(until)) = (number(seq), number(until)) else { return Err(Refused::Malformed) };
+    let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until };
     if !well_formed(&m) {
         return Err(Refused::Malformed);
     }
@@ -157,6 +154,12 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
         return Err(Refused::Expired);
     }
     Ok(m)
+}
+
+/// The place a mandate's text names (its key), read from a text already
+/// opened (`open`), as an agent fragment keeps one for an open turn.
+pub fn place_of(text: &str) -> Option<&str> {
+    text.strip_prefix(PREFIX)?.split('.').nth(2)
 }
 
 /// Whose own words a record is, as a mandate names them: a person's own
@@ -201,12 +204,13 @@ pub fn addressed(body: &str, agent: &str) -> bool {
 }
 
 /// A mandate an agent's bridge holds for an open turn, as the agent
-/// fragment checked it: its text, and what of it the decisions read.
+/// fragment checked it: its text, and what of it the decisions read: its
+/// day, and its place's own key, where what its owner lends is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Held<'a> {
     pub text: &'a str,
     pub until: i64,
-    pub lend: Lend,
+    pub place: &'a str,
 }
 
 /// One of an agent's open turns, as its bridge told its agent fragment: in
@@ -232,24 +236,14 @@ pub enum Proof<'a> {
     /// Its owner's own words: their newest mandate.
     Owner(Held<'a>),
     /// One other person's words, proven: their newest mandate, theirs to
-    /// act for inside the place's lend.
-    Asker(Held<'a>),
+    /// act for inside what its owner lends each place their turns are in
+    /// (`at`: each fragment, by its name and its key), read there at each
+    /// use, the narrowest of them.
+    Asker { held: Held<'a>, at: Vec<(&'a str, &'a str)> },
     /// No single proven asker (two other people's turns, or one with no
     /// proof): the agent acts as itself, in those turns' places alone,
     /// and lends no one anything of its owner's.
     Itself(Vec<&'a str>),
-}
-
-impl Proof<'_> {
-    /// What of its owner's the agent may use meanwhile (the swap's grants,
-    /// narrowed).
-    pub fn lend(&self) -> Lend {
-        match self {
-            Proof::Bare | Proof::Owner(_) => Lend::OWNER,
-            Proof::Asker(m) => m.lend,
-            Proof::Itself(_) => Lend::NONE,
-        }
-    }
 }
 
 /// `owner`'s agent's proof while `turns` are open (`Proof`).
@@ -261,7 +255,12 @@ pub fn proof<'a>(owner: &str, turns: &[Turn<'a>]) -> Proof<'a> {
     }
     let one = others.iter().all(|t| t.asker == others[0].asker);
     match newest(&mut others.iter().copied()) {
-        Some(m) if one && others.iter().all(|t| t.mandate.is_some()) => Proof::Asker(m),
+        Some(held) if one && others.iter().all(|t| t.mandate.is_some()) => {
+            let mut at: Vec<(&'a str, &'a str)> = others.iter().filter_map(|t| Some((t.place, t.mandate?.place))).collect();
+            at.sort_unstable();
+            at.dedup();
+            Proof::Asker { held, at }
+        }
         _ => {
             let mut places: Vec<&'a str> = others.iter().map(|t| t.place).collect();
             places.sort_unstable();
@@ -288,7 +287,7 @@ mod tests {
 
     fn ben_asks_juniper(at: i64) -> Mandate {
         let (ben, juniper) = ids();
-        Mandate::of_record(&ben, &juniper, &a_room(), ("chat", 12, at), Lend::DEFAULT).expect("well formed")
+        Mandate::of_record(&ben, &juniper, &a_room(), "chat", 12, at).expect("well formed")
     }
 
     /// Goal: a place's mandate opens as itself until its record's day is
@@ -318,13 +317,6 @@ mod tests {
         assert_eq!(open(&old, &format!("{fields}.{mark}"), 2_000), Err(Refused::Forged), "another's fields under this one's mark");
         let later = text.replacen(&format!(".{}.", m.until), &format!(".{}.", m.until + 1), 1);
         assert_eq!(open(&old, &later, 2_000), Err(Refused::Forged), "its day lengthened");
-        let lent = text.replacen(&format!(".{}.1.", m.until), &format!(".{}.3.", m.until), 1);
-        assert!(lent != text && open(&old, &lent, 2_000) == Err(Refused::Forged), "its lend widened: {lent}");
-        // each lend reads back as marked
-        for lend in [Lend::NONE, Lend::DEFAULT, Lend { spend: false, accounts: true }, Lend::OWNER] {
-            let m = Mandate { lend, ..m.clone() };
-            assert_eq!(open(&old, &m.text(&old[0]), 2_000), Ok(m));
-        }
         let flipped = format!("{}{}", &text[..text.len() - 1], if text.ends_with('0') { '1' } else { '0' });
         assert_eq!(open(&old, &flipped, 2_000), Err(Refused::Forged));
         for bad in ["", "fm1.", "fm2.e30.00", "fm1.e30", &text[PREFIX.len()..], &format!("{text}0"), &"x".repeat(limits::MANDATE_MAX_BYTES + 1)] {
@@ -339,7 +331,7 @@ mod tests {
     #[test]
     fn a_mandate_is_made_only_of_names_of_their_kind() {
         let (ben, juniper, room) = (ids().0, ids().1, a_room());
-        assert!(Mandate::of_record(&ben, &juniper, &room, ("chat", 1, 1), Lend::DEFAULT).is_some());
+        assert!(Mandate::of_record(&ben, &juniper, &room, "chat", 1, 1).is_some());
         for (asker, agent, place, channel, seq) in [
             ("anon:0123456789abcdef0123456789abcdef", juniper.as_str(), room.as_str(), "chat", 1),
             (ben.as_str(), "npub1short", room.as_str(), "chat", 1),
@@ -347,18 +339,12 @@ mod tests {
             (ben.as_str(), juniper.as_str(), room.as_str(), "Chat", 1),
             (ben.as_str(), juniper.as_str(), room.as_str(), "chat", 0),
         ] {
-            assert_eq!(Mandate::of_record(asker, agent, place, (channel, seq, 1), Lend::DEFAULT), None, "{asker} {agent} {place} {channel} {seq}");
+            assert_eq!(Mandate::of_record(asker, agent, place, channel, seq, 1), None, "{asker} {agent} {place} {channel} {seq}");
         }
         // marked, yet not of a mandate's form: a field more, or a seq that is no number
         let key = MandateKey::derive(HOST);
         let (ben, juniper, room) = (ids().0, ids().1, a_room());
-        for fields in [
-            format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2.1.9"),
-            format!("{PREFIX}{ben}.{juniper}.{room}.chat.+1.2.1"),
-            format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2.4"),
-            format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2"),
-            format!("{PREFIX}{ben}.{juniper}.chat--k3x9.chat.1.2.1"),
-        ] {
+        for fields in [format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2.3"), format!("{PREFIX}{ben}.{juniper}.{room}.chat.+1.2"), format!("{PREFIX}{ben}.{juniper}.chat--k3x9.chat.1.2")] {
             let mark = hex::encode(&key.mac(fields.as_bytes()).finalize().into_bytes()[..MARK_BYTES]);
             assert_eq!(open(std::slice::from_ref(&key), &format!("{fields}.{mark}"), 1), Err(Refused::Malformed), "{fields}");
         }
@@ -403,28 +389,27 @@ mod tests {
 
     /// Goal: the narrowest ask an agent's call for its owner carries while
     /// turns are open (`Proof`): its owner's newest proof alone; anyone
-    /// else's beside it narrows it, theirs inside the place's lend; two
-    /// other people, or one unproven, leave no one's: the agent itself, in
-    /// their places alone, lending nothing; no turn proven of its owner's,
+    /// else's beside it narrows it, theirs, naming the place whose lend
+    /// holds it; two other people, or one unproven, leave no one's: the
+    /// agent itself, in their places alone; no turn proven of its owner's,
     /// or none at all, is the bare `for=` as before.
     #[test]
     fn the_narrowest_ask_is_carried() {
         let (ana, ben) = ids();
         let carol = crate::npub::encode(&"e".repeat(64));
-        let held = |text: &'static str, until: i64, lend: Lend| Some(Held { text, until, lend });
+        let held = |text: &'static str, until: i64, place: &'static str| Some(Held { text, until, place });
         let turn = |place: &'static str, asker: &str, mandate: Option<Held<'static>>| Turn { place, asker: Box::leak(asker.to_string().into_boxed_str()), mandate };
         assert_eq!(proof(&ana, &[]), Proof::Bare);
         assert_eq!(proof(&ana, &[turn("own", &ana, None)]), Proof::Bare, "its owner's, unproven: as before");
-        let (a1, a2) = (held("a1", 10, Lend::OWNER), held("a2", 20, Lend::OWNER));
+        let (a1, a2) = (held("a1", 10, "npub1own"), held("a2", 20, "npub1own"));
         assert_eq!(proof(&ana, &[turn("own", &ana, a1), turn("own", &ana, a2)]), Proof::Owner(a2.unwrap()), "its owner's newest");
-        let b = held("b", 5, Lend::DEFAULT);
-        let bens = proof(&ana, &[turn("own", &ana, a2), turn("room", &ben, b), turn("room", &ben, held("b2", 4, Lend::DEFAULT))]);
-        assert_eq!((bens.clone(), bens.lend()), (Proof::Asker(b.unwrap()), Lend::DEFAULT), "another's beside its owner's is the narrower");
-        let busy = proof(&ana, &[turn("room", &ben, b), turn("hall", &carol, held("c", 9, Lend::OWNER)), turn("room", &carol, None)]);
-        assert_eq!((busy.clone(), busy.lend()), (Proof::Itself(vec!["hall", "room"]), Lend::NONE), "two other people: no one's, in their places");
+        let b = held("b", 5, "npub1room");
+        let bens = proof(&ana, &[turn("own", &ana, a2), turn("room", &ben, b), turn("hall", &ben, held("b2", 4, "npub1hall")), turn("room", &ben, b)]);
+        assert_eq!(bens, Proof::Asker { held: b.unwrap(), at: vec![("hall", "npub1hall"), ("room", "npub1room")] }, "another's beside its owner's is the narrower: their newest, and each place of theirs");
+        let busy = proof(&ana, &[turn("room", &ben, b), turn("hall", &carol, held("c", 9, "npub1hall")), turn("room", &carol, None)]);
+        assert_eq!(busy, Proof::Itself(vec!["hall", "room"]), "two other people: no one's, in their places");
         assert_eq!(proof(&ana, &[turn("room", &ben, None)]), Proof::Itself(vec!["room"]), "one other, unproven");
         assert_eq!(proof(&ana, &[turn("room", &ben, b), turn("hall", &ben, None)]), Proof::Itself(vec!["hall", "room"]), "one other with a turn unproven");
-        assert_eq!((Proof::Bare.lend(), Proof::Owner(a1.unwrap()).lend()), (Lend::OWNER, Lend::OWNER));
         // replay: the same turns decide the same
         assert_eq!(proof(&ana, &[turn("room", &ben, b)]), proof(&ana, &[turn("room", &ben, b)]));
     }

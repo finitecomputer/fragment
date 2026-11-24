@@ -1097,8 +1097,9 @@ provider's own hosts.
   (`grants::answered`), then forgotten.
 - **Someone else's ask** (FIN-720). While a turn of anyone but its owner
   is open, the agent uses what its owner lends that place (docs/api.md,
-  "An agent's lend"), read with its grants at each request: an operator
-  key by `spend`, a connection or a Vault secret by `accounts`. One not
+  "An agent's lend"), asked of the place by its agent's fragment with its
+  grants at each request: an operator key by `spend`, a connection or a
+  Vault secret by `accounts`. One not
   lent is refused before any provider (403, saying the owner hasn't lent
   it), and a Vault's fill is never asked for.
 - Each call a provider answered is counted as its agent's in the owner's
