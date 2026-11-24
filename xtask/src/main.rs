@@ -134,6 +134,7 @@ use fragment_devstack as devstack;
 
 mod audit;
 mod build;
+mod built_paths;
 #[cfg(test)]
 mod ci_caches;
 #[cfg(test)]
@@ -854,12 +855,23 @@ fn no_remote_loads(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No crate of the workspace compiles in where its checkout is
+/// (xtask/src/built_paths.rs): cargo takes a build kept from another
+/// checkout as built, and such a path would still name that one.
+fn no_built_paths(root: &Path) -> Result<()> {
+    let sources = built_paths::sources(root)?;
+    built_paths::check(&sources, built_paths::ALLOWED)?;
+    println!("built paths: no checkout's path compiled into {} Rust files (1 allowed, with why)", sources.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
     no_remote_loads(&root)?;
+    no_built_paths(&root)?;
     schema_lock::holds(&root)?;
     wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));

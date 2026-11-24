@@ -977,7 +977,7 @@ mod tests {
     /// before versions). Method: each run bare, then migrated.
     #[test]
     fn every_deployed_schema_is_adopted() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/deployed");
+        let root = std::path::PathBuf::from("migrations/deployed");
         let mut commits: Vec<String> = std::fs::read_dir(&root).expect("the deployed schemas").map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned()).collect();
         commits.sort();
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
@@ -1086,7 +1086,7 @@ mod tests {
     /// makes. Method: the migrations directory, read.
     #[test]
     fn every_class_declares_its_files_in_order() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let root = std::path::PathBuf::from("migrations");
         for class in CLASSES {
             let dir = root.join(class.name.to_ascii_lowercase());
             let mut files: Vec<String> = std::fs::read_dir(&dir).expect("its directory").map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned()).collect();

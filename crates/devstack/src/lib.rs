@@ -56,9 +56,32 @@ pub const CACHE_DIR: &str = "target/cache";
 /// (`fragment_proto::limits::LABEL_ROOM_MIN_BYTES`).
 pub use fragment_proto::valid_branch;
 
+/// The repo this process works in, found as it runs. Cargo takes a crate
+/// as built wherever its checkout sits, so a target directory kept from
+/// another checkout (cloned into a new worktree, restored at another
+/// mount, shared by two checkouts) holds this crate with that checkout's
+/// path compiled in, and the xtask linked with it checked, built and
+/// deployed that checkout from this one (xtask/src/built_paths.rs keeps
+/// such paths out of the workspace). So, in order:
+/// - the checkout cargo says it runs this process for: `cargo run` and
+///   `cargo test` set `CARGO_MANIFEST_DIR` to the package's folder as it
+///   is now, and what they start inherits it (the e2e, from xtask);
+/// - the checkout whose `target/` holds this executable, for one run by
+///   hand, which cargo tells nothing;
+/// - the checkout this crate was built in, for a binary run from outside
+///   any checkout, as before.
 pub fn repo_root() -> PathBuf {
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    here.parent().and_then(Path::parent).expect("crates/devstack sits two levels below the repo root").to_path_buf()
+    let told = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let executable = std::env::current_exe().ok();
+    let built = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let found = [told.as_deref(), executable.as_deref(), Some(built)].into_iter().flatten().find_map(checkout_above);
+    found.expect("a fragment checkout holds this process: run it through cargo, or from a checkout's target directory")
+}
+
+/// The checkout `path` is in: the nearest folder at or above it that
+/// holds this crate where the repo does.
+fn checkout_above(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|dir| dir.join("crates/devstack/Cargo.toml").is_file()).map(Path::to_path_buf)
 }
 
 pub fn cell_dir() -> PathBuf {
