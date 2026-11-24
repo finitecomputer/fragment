@@ -338,7 +338,7 @@ fn dropped_packets(listing: &str) -> Option<u64> {
 }
 
 /// Where a project's own Dockerfiles are (`scope_images`).
-fn images_dir(project: &Path) -> PathBuf {
+pub(crate) fn images_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/images")
 }
 

@@ -894,6 +894,22 @@ unfinished design, not debt.
   pins the naming as the fork has it; a celld that moves it must move
   that test too.
 
+## A celld node's images stay in its krun engine
+
+- **Shortcut:** the krun engine's API removes no image, so the images a
+  `celld dev` node builds into it (the fork's `krun_build`) stay there
+  after its run, and devstack removes none (crates/e2e main.rs
+  `remove_leftovers`). Each is named by its content, unlabeled for the
+  run's project (devstack's `write_local_config`, `own_images`), so a
+  run on an unchanged tree loads nothing, and the engine gains an image
+  only when an image's sources change.
+- **Risk:** the engine's store, root's, grows by an image per change to
+  an image's sources (a Hermes is 1.5 GB compressed) until someone clears
+  it, on a box whose disk the other stacks share.
+- **Delete when:** the engine removes an image (`DELETE
+  /v1/images/<reference>`) and celld removes, at the end of a dev
+  session's builds, the names of its images no deployment names.
+
 ## A local node's port is a front door of ours, past wrangler's proxy
 
 - **Shortcut:** wrangler's proxy pools connections the runtime closes
