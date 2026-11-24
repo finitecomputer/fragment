@@ -863,27 +863,27 @@ impl Call for EndSession {
 }
 
 /// `POST /session/forget`: a fragment's name begins a life (its create,
-/// before the life is written) or ends one (its delete): every site and
-/// frame session, unspent redemption and remembered yes the registry keys
-/// by the name is forgotten (`fragment_core::site_signin`), so no life of
-/// a name signs anyone in to, or says yes for, the next. A second forget
-/// finds nothing, and is no error.
+/// before the life is written: `ended` none) or ended one (its delete,
+/// naming the life it counted). The registry forgets every site and frame
+/// session, unspent redemption and remembered yes the name keys
+/// (`fragment_core::site_signin`): a create always, counting the name's
+/// next life in the same turn; a delete only while its life is still the
+/// name's, so a life made since keeps its own. Answers the name's life.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForgetSite {
     pub fragment: String,
+    pub ended: Option<u64>,
 }
 
-/// `ForgetSite`'s answer: how many of each it forgot.
+/// The name's life as the registry counts it (`site_signin::LIFE_OF`).
 #[derive(Serialize, Deserialize)]
-pub(crate) struct SiteForgotten {
-    pub redemptions: u64,
-    pub sessions: u64,
-    pub consents: u64,
+pub(crate) struct SiteLife {
+    pub life: u64,
 }
 
 impl Call for ForgetSite {
     const PATH: &'static str = "/session/forget";
-    type Answer = SiteForgotten;
+    type Answer = SiteLife;
 }
 
 /// `POST /logout`: the platform session ends, and every site session made
@@ -943,6 +943,12 @@ pub(crate) struct Mint {
     /// person is asked to accept it rather than signed in as a stranger.
     #[serde(default)]
     pub invite_first: bool,
+    /// A member's mint (`Consent::Member`): the name's life (`Minted::life`,
+    /// or an invite's answer) read before the fragment was asked whether it
+    /// knows them. It mints only while that is still the name's life
+    /// (`site_signin::still_its_life`); any other mint names none.
+    #[serde(default)]
+    pub life: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -959,6 +965,10 @@ pub(crate) struct Minted {
     /// that route passes it (registry/invites.rs `waiting_on`).
     #[serde(default)]
     pub invite: Option<serde_json::Value>,
+    /// The name's life as the mint read it, before anything else: what a
+    /// member's mint after it names (`Mint::life`). No default: an answer
+    /// without it is no answer (0 is a life, one no create counted).
+    pub life: u64,
 }
 
 impl Call for Mint {

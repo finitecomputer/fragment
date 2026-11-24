@@ -461,7 +461,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                     Ok(posted) => posted,
                     Err(page) => return Ok(page),
                 };
-                let given = calls::Mint { token: Some(session), key: None, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None, invite_first: false };
+                let given = calls::Mint { token: Some(session), key: None, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None, invite_first: false, life: None };
                 let minted = ask_registry(env, &given).await?;
                 Ok(to_signin(env, cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?).await?.with_status(303))
             }
@@ -737,7 +737,7 @@ async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, 
         Minter::Session(token) => (Some(token.to_string()), None),
         Minter::Key(key) => (None, Some(key.to_string())),
     };
-    let mint = |consent, invite_first| calls::Mint {
+    let mint = |consent, invite_first, life| calls::Mint {
         token: token.clone(),
         key: key.clone(),
         fragment: name.to_string(),
@@ -745,8 +745,9 @@ async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, 
         consent,
         embedder: embedder.map(str::to_string),
         invite_first,
+        life,
     };
-    let first = mint(if asking == Asking::Given { Consent::Given } else { Consent::Remembered }, asking == Asking::InviteFirst);
+    let first = mint(if asking == Asking::Given { Consent::Given } else { Consent::Remembered }, asking == Asking::InviteFirst, None);
     let minted = match ask_registry(env, &first).await {
         Err(e) if e.code == ErrorCode::Unauthenticated => return Ok(Minting::SignedOut),
         minted => minted?,
@@ -756,11 +757,13 @@ async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, 
     }
     // silent on their own fragments and those shared with them, which know
     // them already (docs/api.md, Asking first): the fragment is asked that
-    // alone
-    let who = Signed::new(minted.identity, key.clone());
+    // alone, and the member minted only while the name's life is still the
+    // one the first mint read, before the fragment was asked
+    // (`site_signin::still_its_life`)
+    let (who, life) = (Signed::new(minted.identity, key.clone()), minted.life);
     match share::ask::<serde::de::IgnoredAny>(env, url, name, &who, Method::Get, "/signin/known", None).await {
         Ok(_) => {
-            let minted = ask_registry(env, &mint(Consent::Member, false)).await?;
+            let minted = ask_registry(env, &mint(Consent::Member, false, Some(life))).await?;
             Ok(Minting::Redeem(minted.redeem.ok_or_else(|| CellError::host("a member's mint answered no redemption"))?))
         }
         Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => Ok(Minting::Ask(who, minted.email, minted.invite)),

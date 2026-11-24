@@ -352,6 +352,10 @@ pub(crate) enum MetaKey {
     /// with a delete (`fragment_core::ended::repo_goes`). A life made
     /// before that naming has none: its repo, named by its owner, stays.
     RepoOfLife,
+    /// The name's life as the registry counted it at this life's create
+    /// (`fragment_core::site_signin`): its delete forgets only this life's
+    /// sign-ins. A life made before that count has none.
+    SiteLife,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
     /// its own app database (`app_facet`).
     AppFacet,
@@ -560,6 +564,7 @@ impl MetaKey {
             MetaKey::InboxToken => "inbox_token",
             MetaKey::Repo => "repo",
             MetaKey::RepoOfLife => "repo_of_life",
+            MetaKey::SiteLife => "site_life",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
             MetaKey::LaunchRetryAt => "launch_retry_at",
@@ -1434,15 +1439,6 @@ impl FragmentCell {
         let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
-            // no sign-in of an earlier life of the name's carries into this
-            // one (`fragment_core::site_signin`): forgotten before the life
-            // is written, so no one is known here until it knows them or
-            // they say yes to it. A registry that cannot answer makes nothing
-            let forgot = crate::ask_registry(&self.env, &crate::registry::calls::ForgetSite { fragment: body.name.clone() }).await?;
-            laps.lap("signins");
-            if forgot.sessions + forgot.consents + forgot.redemptions > 0 {
-                console_log!("{}", json!({ "event": "create.signins-forgotten", "fragment": body.name, "sessions": forgot.sessions, "consents": forgot.consents, "redemptions": forgot.redemptions }));
-            }
             // its maker's own agent, if it names one: asked before anything
             // is written, so one that is not theirs makes nothing
             let agent = match &body.agent {
@@ -1486,13 +1482,20 @@ impl FragmentCell {
                 }
                 false => None,
             };
-            Ok::<_, CellError>((agent, repo, fragment_npub, sealed, face))
+            // no sign-in of an earlier life of the name's carries into this
+            // one (`fragment_core::site_signin`): the registry forgets them
+            // and counts this life, its last await, so none is made for an
+            // earlier life after it (a member's mint names the life it was
+            // asked about). A registry that cannot answer makes nothing
+            let site = crate::ask_registry(&self.env, &crate::registry::calls::ForgetSite { fragment: body.name.clone(), ended: None }).await?;
+            laps.lap("signins");
+            Ok::<_, CellError>((agent, repo, fragment_npub, sealed, face, site.life))
         };
         // every await of its making is above: what follows is written in
         // one turn, its owner's row and its agent's together, so no list
         // row (this request's, `after_answer`'s, the alarm's) goes out
         // before either is in
-        let (agent, repo, fragment_npub, sealed, face) = match made.await {
+        let (agent, repo, fragment_npub, sealed, face, site_life) = match made.await {
             Ok(r) => r,
             Err(e) => {
                 self.del_meta(MetaKey::Name)?;
@@ -1520,6 +1523,7 @@ impl FragmentCell {
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
             (MetaKey::AppFacet, format!("{}@{created_at}", js::APP_FACET).as_str()),
+            (MetaKey::SiteLife, site_life.to_string().as_str()),
             // written last: a fragment exists once it has created_at
             (MetaKey::CreatedAt, created_at.as_str()),
         ] {
@@ -1637,25 +1641,30 @@ impl FragmentCell {
         // this life, which its end then clears, and never writes its pins,
         // tree or code into the next; asked again under the lock, which
         // another end may have taken first
-        let (name, ended) = {
+        let (name, ended, site_life) = {
             let _held = self.plane.lock().await;
             let name = self.name()?;
             self.require(caller, false, Role::Owner)?;
-            (name, self.end_life()?)
+            let site_life = self.meta(MetaKey::SiteLife)?.and_then(|l| l.parse::<u64>().ok());
+            (name, self.end_life()?, site_life)
         };
         self.tell_ended(Some(&ended.owner)).await;
         self.forget_invites(&name).await;
-        self.forget_signins(&name).await;
+        self.forget_signins(&name, site_life).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
     }
 
     /// The ended life's site sessions, their redemptions and its people's
-    /// yeses go now (`fragment_core::site_signin`), so none outlives it.
-    /// A registry that does not answer leaves them for the name's next
-    /// create, which forgets them before its life is written.
-    async fn forget_signins(&self, name: &str) {
-        let forget = crate::registry::calls::ForgetSite { fragment: name.to_string() };
+    /// yeses go now (`fragment_core::site_signin`), while `life`, the one it
+    /// counted at its create, is still the name's: a create since forgot
+    /// them itself, and every row after is the newer life's. A life from
+    /// before that count, or a registry that does not answer, leaves them
+    /// for the name's next create, or their own end; nothing answers on
+    /// the name meanwhile.
+    async fn forget_signins(&self, name: &str, life: Option<u64>) {
+        let Some(life) = life else { return };
+        let forget = crate::registry::calls::ForgetSite { fragment: name.to_string(), ended: Some(life) };
         if let Err(e) = crate::ask_registry(&self.env, &forget).await {
             console_error!("{name}: its ended life's sign-ins were not forgotten by the registry ({:?}): {}", e.code, e.message);
         }

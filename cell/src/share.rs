@@ -1008,7 +1008,7 @@ pub(crate) async fn invites(mut req: Request, env: &Env, url: &Url, rest: &[&str
         (Method::Post, [_, "accept" | "decline"]) if !empty => Err(CellError::invalid("this takes no body (or {})")),
         (Method::Post, [fragment, verb @ ("accept" | "decline")]) => {
             let (fragment, yes) = (crate::named_fragment(fragment)?, *verb == "accept");
-            match (ask_registry(env, &AnswerInvite { by, acting_for, fragment: fragment.clone(), yes }).await?, yes) {
+            match (ask_registry(env, &AnswerInvite { by, acting_for, fragment: fragment.clone(), yes }).await?.role, yes) {
                 // its page, which the person's client opens (FIN-458)
                 (Some(role), true) => crate::json_answer(&InviteAccepted { open: Some(crate::config::Config::from_env(env).canonical(url, &fragment)), fragment, role }),
                 (None, false) => crate::json_answer(&json!({ "ok": true, "declined": fragment })),

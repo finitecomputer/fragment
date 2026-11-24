@@ -81,7 +81,9 @@ impl Call for NoticesOf {
 
 /// `POST /invites/answer`: the asker's yes (`yes`) or no to `fragment`'s
 /// invite waiting on an email of theirs. Answers the role they hold there
-/// after a yes, none after a no; 404 when none waits (taken back,
+/// after a yes, none after a no, and the name's life as it read it before
+/// the fragment claimed it (`life`, which a member's mint after a yes
+/// names: calls.rs `Mint::life`); 404 when none waits (taken back,
 /// answered, run out). One call for both: the cell's Wasm carries one
 /// round trip, not two.
 #[derive(Serialize, Deserialize)]
@@ -92,9 +94,16 @@ pub(crate) struct AnswerInvite {
     pub yes: bool,
 }
 
+/// `AnswerInvite`'s answer.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct InviteAnswered {
+    pub role: Option<Role>,
+    pub life: u64,
+}
+
 impl Call for AnswerInvite {
     const PATH: &'static str = "/invites/answer";
-    type Answer = Option<Role>;
+    type Answer = InviteAnswered;
 }
 
 /// `POST /invites/forget`: `fragment`'s owner took back its invite waiting
@@ -350,9 +359,11 @@ impl RegistryCell {
     /// fragment deleted) is forgotten, a yes to it 404; one it cannot take
     /// or be told of now (full, or unreachable) is kept, and its refusal
     /// answered.
-    async fn answer_invite(&self, b: AnswerInvite) -> CellResult<Option<Role>> {
+    async fn answer_invite(&self, b: AnswerInvite) -> CellResult<InviteAnswered> {
         let who = self.invitee_by(&b.by, b.acting_for.as_deref())?;
         let email = self.invite_to(&who.id, &b.fragment)?;
+        // read before the fragment claims it: the life that claim is made in
+        let life = self.site_life(&b.fragment)?;
         let answer = InviteAnswer { email: email.clone(), identity: who.id.clone(), agents: self.agents_of(&who.id)?, yes: b.yes };
         let met = match crate::fragment::call(&self.env, &b.fragment, &answer).await {
             Ok(met) => Some(met),
@@ -365,8 +376,8 @@ impl RegistryCell {
         self.forget(&email, &b.fragment)?;
         self.tell_person(&who.id).await;
         match (b.yes, met) {
-            (false, _) => Ok(None),
-            (true, Some(met)) => met.map(Some).ok_or_else(|| CellError::host(format!("{}'s claim named no role", b.fragment))),
+            (false, _) => Ok(InviteAnswered { role: None, life }),
+            (true, Some(met)) => Ok(InviteAnswered { role: Some(met.ok_or_else(|| CellError::host(format!("{}'s claim named no role", b.fragment)))?), life }),
             (true, None) => Err(CellError::new(ErrorCode::NotFound, format!("the invite to {} is gone: it was taken back, or it was deleted", b.fragment)).because(Reason::Gone)),
         }
     }

@@ -601,10 +601,12 @@ a visitor there. The yes is kept per person and fragment (their newest
 is deleted.
 
 A fragment's site and frame sessions, their redemptions and its yeses are
-its life's alone (`fragment_core::site_signin`): its delete forgets them,
-and so does any create of its name, before the new life is written, so
-a name made again knows no one an earlier life knew until they sign in
-again, or say yes again.
+its life's alone (`fragment_core::site_signin`). Any create of its name
+forgets them before the new life is written, and the registry counts the
+name's lives: a sign-in as a member, or after an invite's yes, is minted
+only for the life that knew the person, and a delete forgets only its own
+life's rows, never a newer one's. A name made again knows no one an
+earlier life knew until they sign in again, or say yes again.
 
 ### Opening a fragment by its URL (docs/cloudflare-v1.md, R4)
 
