@@ -21,8 +21,12 @@ import { button, el, platformJson, randomHex, row, signedIn, stepper } from "./s
 const DOOR_HOST = "door.fragment.internal";
 const JSON_TYPE = { "content-type": "application/json" };
 // how long `link` watches for their app (app.mjs `LINK_WAITS_MS`): an
-// invitation older is looked at once as the page opens
+// invitation still unanswered then is looked at once (`check`)
 const WATCH_MS = 8.5 * 60_000;
+// how long a step asked here waits for `state` to answer it: a job that
+// failed outright writes nothing (a connect whose door never came up),
+// and is said failed after it, with Try again
+const STEP_WAIT_MS = 120_000;
 // a QR code's quiet zone, in modules, each side
 const QUIET = 4;
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -80,11 +84,17 @@ export async function setup(root) {
 
   const name = (new URLSearchParams(location.search).get("name") ?? "").trim().slice(0, 64) || "Agent";
   // this visit's steps taken by the page itself, each once (a failure
-  // waits for Try again, an unlink for Link)
+  // waits for Try again, an unlink for Link); opened on a link or an
+  // invitation, it asks none (another tab's unlink is no wish for one)
   const took = new Set();
   // the step under way, asked here: what it is, and the failure and the
-  // invitation shown when it was asked (a newer one answers it)
+  // invitation shown when it was asked (a newer one answers it); and the
+  // last step asked here, which Try again asks again
   let waiting = null;
+  let last = null;
+  let waited = null;
+  // the invitation looked at, or to be, as its link's watch ends
+  let checking = null;
   // what failed here, outside `state` (its secret not set, a call refused)
   let error = "";
   // its door's binding, read once: unread is no word of it either way
@@ -93,8 +103,16 @@ export async function setup(root) {
 
   const ask = async (step, line, fn) => {
     took.add(step);
-    waiting = { step, line, why: state?.why?.at ?? null, invitation: state?.invitation?.at ?? null };
+    last = step;
+    const asked = (waiting = { step, line, why: state?.why?.at ?? null, invitation: state?.invitation?.at ?? null });
     error = "";
+    clearTimeout(waited);
+    waited = setTimeout(() => {
+      if (waiting !== asked) return;
+      waiting = null;
+      error = "Couldn't reach SimpleX. Try again.";
+      draw();
+    }, STEP_WAIT_MS);
     draw();
     try {
       await fn();
@@ -129,17 +147,24 @@ export async function setup(root) {
     if (waiting || error || s.why) return;
     if (!s.connected && !took.has("connect")) return connect();
     if (s.connected && !s.invitation && !s.linked && !took.has("link")) return link();
-    if (s.invitation && !s.linked && !took.has("check") && Date.now() - s.invitation.at > WATCH_MS) {
-      took.add("check");
-      fragment.call("check").catch(() => {});
+    if (s.invitation && !s.linked && checking !== s.invitation.at) {
+      // answered after its watch ended: looked at once, then (or now,
+      // an invitation older than its watch)
+      const at = (checking = s.invitation.at);
+      const look = () => state?.invitation?.at === at && !state.linked && fragment.call("check").catch(() => {});
+      const due = at + WATCH_MS - Date.now();
+      if (due > 0) setTimeout(look, due);
+      else look();
     }
   }
+  const steps = { connect, link, unlink };
 
   async function draw() {
     if (!state) return;
     const s = state;
     if (waiting && answers(s)) waiting = null;
-    const again = button("Try again", "", () => (s.connected ? link : connect)());
+    // the step that failed here, again; one another tab asked, the next due
+    const again = button("Try again", "", () => (steps[last] ?? (s.connected ? link : connect))());
     if (waiting) return say(el("p", "setup-now", waiting.line));
     if (error) return say(el("p", "setup-error", error), row(again));
     if (s.why) return say(el("p", "setup-error", failure(s.why)), ...(s.why.code === "no_doors" ? [] : [row(again)]));
@@ -174,6 +199,7 @@ export async function setup(root) {
     "state",
     {},
     (s) => {
+      if (!state && (s.linked || s.invitation)) took.add("link");
       state = s;
       draw().then(() => next(s));
     },
