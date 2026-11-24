@@ -2942,6 +2942,28 @@ fn only_its_own_agent_is_answered_back() {
     assert!(started(&s).is_some(), "its own bridge's does");
 }
 
+/// Goal: an answer on an agent's `tasks` is its own bridge's only when its
+/// bridge posted it, signed as the agent (`author: agent`). What the
+/// platform appends there under the fragment's key (a schedule firing:
+/// `author: platform`) names the agent too, but no bridge wrote it, so it
+/// answers nothing; a routine the platform fires still starts its turn.
+/// Method: one answer body read with each author, then a routine.
+#[test]
+fn an_answer_the_platform_appended_is_not_its_bridges() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let mut e = engine(&[rowan.clone(), juniper.clone()]);
+    let body = json!({ "kind": "answer", "chat": HOME, "text": "Rowan answered", "by": "npub1rowan", "name": "Rowan", "asked": { "fragment": "talk--k3x9", "seq": 1 }, "turn": "t", "outcome": "idle", "hop": 1 });
+    let platform = Record { author: Some(records::PLATFORM.into()), ..answer_task(1, &juniper.identity, body.clone()) };
+    let s = read(&mut e, &juniper, &juniper.fragment, platform, None, T0);
+    assert!(s.effects.is_empty(), "the platform's record answers nothing: {:?}", s.effects);
+    let bridge = Record { author: Some("agent".into()), ..answer_task(2, &juniper.identity, body) };
+    let s = read(&mut e, &juniper, &juniper.fragment, bridge, None, T0);
+    assert!(started(&s).is_some(), "its bridge's answer, signed as the agent, does");
+    let routine = Record { author: Some(records::PLATFORM.into()), ..answer_task(3, &juniper.identity, json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" })) };
+    let s = read(&mut e, &juniper, &juniper.fragment, routine, None, T0);
+    assert!(started(&s).is_some_and(|t| t.routine), "a scheduled routine is a turn still");
+}
+
 /// Goal: an asked turn's answer and what it gathered are kept with it: a
 /// state saved mid-turn reads back whole, and a restart owes the answer
 /// with its end. Invalid: a state owing an answer to an agent its turn does

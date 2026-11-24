@@ -590,11 +590,14 @@ fn dev_providers(oauth: Option<serde_json::Value>) -> String {
     let bearer = serde_json::json!([{ "header": "authorization", "format": "Bearer {}" }]);
     let env = |name: &str| format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
     let notes = ["A stand-in web search.", "A stand-in page reader."];
+    // the stand-in's scopes for people, as a real row names its own; its
+    // sign-in's (openid) is unnamed, so it is no chip
+    let scope_names = serde_json::json!({ "mail.read": "Mail (read)", "files.read": "Files (read)", "mail.send": "Mail (send)" });
     let mut rows: Vec<serde_json::Value> = oauth
         .map(|oauth| {
             serde_json::json!({
                 "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"], "placements": bearer, "env": ["SAMPLE_TOKEN"],
-                "connection_oauth": oauth, "note": "A stand-in: nothing real is connected.",
+                "connection_oauth": oauth, "note": "A stand-in: nothing real is connected.", "scope_names": scope_names,
             })
         })
         .into_iter()
@@ -981,6 +984,12 @@ mod tests {
         let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(Some(oauth))).expect("rows");
         let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog");
         assert!(catalog.get(super::DEV_CONNECTION).is_some_and(|p| p.connection_oauth.is_some()));
+        // its scopes are named as a real row's are, but for its sign-in's
+        // (openid), so settings shows its chips locally (FIN-509)
+        let named: Vec<&str> = catalog.get(super::DEV_CONNECTION).map(|p| p.scope_names.keys().map(String::as_str).collect()).unwrap_or_default();
+        let shown: Vec<&str> = fragment_fakes::workos::CONNECTION_WRITE_SCOPES.into_iter().filter(|s| *s != "openid").collect();
+        assert_eq!(named.len(), shown.len(), "{named:?}");
+        assert!(shown.iter().all(|s| named.contains(s)), "{named:?}");
         for (name, micros, _) in super::DEV_OPERATOR_KEYS {
             assert!(catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator && p.price.is_some_and(|pr| pr.micros == micros)), "{name}");
         }

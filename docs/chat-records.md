@@ -161,6 +161,10 @@ mirrors:
 - A hosted door's (a connector chat) is published by the connector's
   own app, as its own key, in its own `chat`, its `relayed` exactly
   `{via, for, agent}`.
+- Its `text` is its owner's own words. What they pass on of someone
+  else's (Telegram's forwards, inline bots' messages, another chat's
+  quoted message) is marked so in it, by its connector, every line of
+  it quoted (templates/telegram/README.md).
 - Only that agent's own bridge honors it, and only when its door carried
   it: the agent itself (SimpleX's), or a key that is none of the chat's
   members in a chat whose members list marks that agent's row as that
@@ -568,7 +572,9 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
   asking agent when the asked one left its computer (#722). The asking
   agent's bridge takes it as its own key's, or once the question at
   `asked` vouches for it: posted by that agent itself, naming `by` in its
-  `to`, with this `chat` as its `return_to`; any other is passed over.
+  `to`, with this `chat` as its `return_to`; any other is passed over,
+  and so is a record the platform appended under the fragment's key
+  (`author: platform`, a schedule firing), which no bridge posted.
 - The agent takes it as a turn in `chat`, asked as the agent that
   answered (`by`, called `name`), and its owner's to stop as a routine
   is. `text` names the question and carries what the asked turn said

@@ -20,7 +20,7 @@
 //! and the app's own routes).
 
 use fragment_core::permit::Action;
-use fragment_core::site::VIEW_COOKIE;
+use fragment_core::site::{ANON_COOKIE, VIEW_COOKIE};
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
 use fragment_templates::{blessed, File, CLIENT_CSS, CLIENT_JS, FILES_CSS, FILES_JS, MARKDOWN_JS, SW_JS};
@@ -41,7 +41,6 @@ use fragment_core::gather::Gathered;
 /// app that sent it would only get its own fragment's refusal page, which
 /// a redirect of its own gets it anyway.
 pub(crate) const REFUSAL: &str = "x-fragment-refusal";
-const ANON_COOKIE: &str = "fragment_anon";
 const VIEW_COOKIE_AGE_S: i64 = 7 * 24 * 3600;
 const ANON_COOKIE_AGE_S: i64 = 365 * 24 * 3600;
 /// Pages up to this size get Open Graph tags from `meta`.
@@ -56,9 +55,11 @@ struct Origin {
 }
 
 impl Origin {
-    fn cookie(&self, name: &str, value: &str, max_age_s: i64) -> String {
-        let secure = if self.secure { "; Secure" } else { "" };
-        format!("{name}={value}; Path=/; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{secure}")
+    /// One of the origin's own cookies, `__Host-` over https as its
+    /// sessions are (`auth::set_cookie`), so no other fragment's page or
+    /// answer can set one in its place.
+    fn cookie(&self, base: &str, value: &str, max_age_s: i64) -> String {
+        crate::auth::set_cookie(base, value, "/", max_age_s, self.secure)
     }
 }
 
@@ -178,7 +179,7 @@ impl FragmentCell {
         let origin = Origin { secure: caller.url.scheme() == "https" };
         let cookies = req.headers().get("cookie")?.unwrap_or_default();
         let via_query = url.query_pairs().any(|(k, v)| k == "view" && eq_ct(&v, &facts.view_token));
-        let via_cookie = site::cookie(&cookies, VIEW_COOKIE).is_some_and(|v| eq_ct(v, &facts.view_token));
+        let via_cookie = site::origin_cookie(&cookies, VIEW_COOKIE, origin.secure).is_some_and(|v| eq_ct(v, &facts.view_token));
         let link = via_query || via_cookie;
         let mut set = vec![];
         if via_query {
@@ -194,7 +195,7 @@ impl FragmentCell {
             }
         }
         let path: String = rest.split('/').map(decode_segment).collect::<Vec<_>>().join("/");
-        let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
+        let anon = site::origin_cookie(&cookies, ANON_COOKIE, origin.secure).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
         // who a socket connected as is asked again later (live.rs)
         let credential = if path == "__live" { caller.unresolved.clone() } else { None };
         // what a socket's accept waited on, for its client (`Server-Timing`)

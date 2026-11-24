@@ -1419,8 +1419,12 @@ impl Engine {
             // owner's business in that chat still (`who_answers`: their
             // Stop, their words to a question it asks), and no fewer hops
             // deep than the turn that answered, so a callback resets no
-            // depth and spends that chat's budget.
-            Task::Answer { chat, text, by, name, hop, refused, files, asked } if record.principal == agent.identity => {
+            // depth and spends that chat's budget. A bridge posts it signed
+            // as an agent (the asked one's, vouched for here); what the
+            // platform appends under the fragment's key (a schedule firing)
+            // names the agent too, but no bridge wrote it, so it answers
+            // nothing.
+            Task::Answer { chat, text, by, name, hop, refused, files, asked } if record.principal == agent.identity && !record.by_platform() => {
                 // one answer a question from each agent asked it: another
                 // from the same agent is passed over (a message may ask two)
                 if let Some((fragment, seq)) = records::answers(&record.body) {

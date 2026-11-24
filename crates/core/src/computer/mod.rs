@@ -82,6 +82,7 @@ mod images;
 mod lifecycle;
 mod limits;
 mod notices;
+pub mod origin;
 mod saves;
 #[cfg(test)]
 mod testing;

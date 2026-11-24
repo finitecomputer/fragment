@@ -224,7 +224,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 .map(|(p, held)| (p, held, accounts::default_of(held)))
                 .map(|(p, held, account)| ProviderView {
                     provider: p.name.clone(),
-                    name: fragment_core::notice::provider_name(&p.name),
+                    name: p.title(),
                     kind: p.kind,
                     state: match p.kind {
                         Kind::Connection => states.get(&p.name).copied().unwrap_or(ProviderState::NotConnected),
@@ -244,6 +244,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     access: account.and_then(|a| access(p.connection_oauth.as_ref(), a)),
                     accesses: p.connection_oauth.as_ref().map(|o| o.access.offered()),
                     note: p.note.clone(),
+                    scope_names: (!p.scope_names.is_empty()).then(|| p.scope_names.clone()),
                     accounts: p.several().then(|| {
                         held.iter()
                             .filter_map(|a| {

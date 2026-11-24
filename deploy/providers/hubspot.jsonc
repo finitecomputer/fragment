@@ -1,0 +1,32 @@
+// The person's HubSpot account (its contacts, companies, deals, tickets
+// and owners): Pipes' `hubspot` provider, connected through the browser
+// once its app's secret is in the store (the app Pipes' HubSpot integration
+// uses, with the platform's callback beside Pipes' among its redirect
+// URLs). HubSpot errors at an install URL lacking a scope the app requires,
+// so the app requires read only's scopes and names read and write's
+// `.write` ones conditionally required: each access asks for its own,
+// space-separated (`oauth` is every app's). Its token answer lists
+// `scopes`, never `scope`: the grant is what was asked (RFC 6749 §5.1). Its
+// revocation takes a refresh token and the app's secret, not RFC 7009's
+// form, so the row names none: a disconnect deletes the account at Pipes,
+// and the person uninstalls the app in HubSpot. An account-level app
+// (HubSpot's default), its token reaches the whole account, whatever its
+// user may see; its note says so. Its endpoints are the 2026-09 API's (v1's
+// token endpoint goes on 2027-02-16). Its skill is hubspot-finite.
+{ "name": "hubspot", "kind": "connection", "title": "HubSpot",
+  "hosts": ["api.hubapi.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "note": "Needs a HubSpot super admin or Marketplace Access. Your agents reach every record in the account, not only yours.",
+  "connection_oauth": { "authorize": "https://app.hubspot.com/oauth/authorize",
+    "exchange": "https://api.hubapi.com/oauth/2026-09/token",
+    "access": {
+    "read": { "scopes": ["oauth", "crm.objects.contacts.read", "crm.objects.companies.read", "crm.objects.deals.read", "crm.objects.tickets.read", "crm.objects.owners.read"] },
+    "write": { "scopes": ["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write", "crm.objects.companies.read", "crm.objects.companies.write",
+      "crm.objects.deals.read", "crm.objects.deals.write", "crm.objects.tickets.read", "crm.objects.tickets.write", "crm.objects.owners.read"] } } },
+  "scope_names": { "oauth": "Basic access",
+    "crm.objects.contacts.read": "Contacts (read)", "crm.objects.contacts.write": "Contacts (manage)",
+    "crm.objects.companies.read": "Companies (read)", "crm.objects.companies.write": "Companies (manage)",
+    "crm.objects.deals.read": "Deals (read)", "crm.objects.deals.write": "Deals (manage)",
+    "crm.objects.tickets.read": "Tickets (read)", "crm.objects.tickets.write": "Tickets (manage)",
+    "crm.objects.owners.read": "Owners (read)" },
+  "env": ["HUBSPOT_OAUTH_ACCESS_TOKEN"] }
