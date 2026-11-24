@@ -979,13 +979,27 @@ fn team_folders(agents: &[Agent], folder: Option<&str>) -> BTreeMap<String, Stri
 /// CLI's own `fragment sync --watch`, as the agent, for its owner, as the
 /// agents' user, its progress lines (one a change, without end) left out
 /// of the computer's log.
-fn spawn_sync(agent: &str, owner: &str, fragment: &str, previous: Option<&str>) -> std::io::Result<Child> {
+/// The team folder's repo as its status says it now (`shared::prepare`:
+/// its life's), read as the first agent for its owner, only when a sync is
+/// `due` to start; none unread (a journal's repo is then not compared).
+async fn team_repo(api: &Api, agents: &[Agent], folder: Option<&str>, due: bool) -> Option<String> {
+    let (Some(folder), Some(a), true) = (folder, agents.first(), due) else { return None };
+    match api.repo_for(&a.fragment, &a.owner, folder).await {
+        Ok(repo) => Some(repo),
+        Err(e) => {
+            ev!("shared.repo_unread", { "fragment": folder, "error": e.to_string() });
+            None
+        }
+    }
+}
+
+fn spawn_sync(agent: &str, owner: &str, fragment: &str, previous: Option<&str>, repo: Option<&str>) -> std::io::Result<Child> {
     let dir = shared::dir_of(agent);
-    shared::prepare(&dir, fragment, previous)?;
+    shared::prepare(&dir, fragment, previous, repo)?;
     chown(&dir, hermes_ids());
     let mut c = Command::new("/command/s6-setuidgid");
     c.args(["hermes", FRAGMENT_CLI, "sync", fragment, "--watch", "--dir"]).arg(&dir);
-    c.env("FRAGMENT_AS_AGENT", agent).env("FRAGMENT_FOR", owner).env("FRAGMENT_API", "http://api.fragment.internal").env("HOME", hermes::work_dir(agent)).current_dir(&dir);
+    c.env("FRAGMENT_AS_AGENT", agent).env("FRAGMENT_FOR", owner).env("FRAGMENT_API", shared::SYNC_API).env("HOME", hermes::work_dir(agent)).current_dir(&dir);
     c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
     c.spawn()
 }
@@ -1638,8 +1652,10 @@ async fn boot_main() {
     // (shared.rs): a teammate's latest is coming in as Hermes starts
     let mut syncs = shared::Syncs::default();
     let team_owner = computer.owner.clone();
-    let spawn = move |agent: &str, fragment: &str, previous: Option<&str>| spawn_sync(agent, &team_owner, fragment, previous);
-    syncs.keep(&team_folders(&agents, folder.as_deref()), &spawn);
+    let spawn = move |agent: &str, fragment: &str, previous: Option<&str>, repo: Option<&str>| spawn_sync(agent, &team_owner, fragment, previous, repo);
+    let want = team_folders(&agents, folder.as_deref());
+    let repo = team_repo(&api, &agents, folder.as_deref(), syncs.due(&want)).await;
+    syncs.keep(&want, repo.as_deref(), &spawn);
     let routes = bots::profile_routes(&hermes_agents, &routed);
     let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
@@ -1870,7 +1886,9 @@ async fn boot_main() {
                 // and its teammates, as they are named and doing now
                 let (faces, folder);
                 (faces, team, folder) = team_of(&api, &agents, &home).await;
-                syncs.keep(&team_folders(&agents, folder.as_deref()), &spawn);
+                let want = team_folders(&agents, folder.as_deref());
+                let repo = team_repo(&api, &agents, folder.as_deref(), syncs.due(&want)).await;
+                syncs.keep(&want, repo.as_deref(), &spawn);
                 for (a, face) in agents.iter().zip(&faces).filter(|(a, _)| agents::of_hermes(a)) {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     write_config(&api, a, &dir, ids, &route, &credential_env, high_on, face, &team).await;

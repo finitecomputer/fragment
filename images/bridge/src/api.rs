@@ -889,6 +889,19 @@ impl Api {
 
     // ---- as an agent acting for a person (`for`: decision 36) ----
 
+    /// `GET /api/f/{name}?for=`: `fragment`'s code repo, as its status says
+    /// it to the agent acting for `person`: its life's (a name made again
+    /// has another), `""` before its first file makes one.
+    pub async fn repo_for(&self, agent: &str, person: &str, fragment: &str) -> Result<String, ApiError> {
+        #[derive(Deserialize)]
+        struct Status {
+            #[serde(default)]
+            repo: String,
+        }
+        let s: Status = self.json(Method::GET, &format!("/api/f/{}?for={}", name(fragment)?, encode(person)), Some(agent), None).await?;
+        Ok(s.repo)
+    }
+
     /// `GET /api/fragments?for=`: the fragments the agent reaches acting for
     /// `person`, each with its kind.
     pub async fn fragments_for(&self, agent: &str, person: &str) -> Result<Vec<FragmentEntry>, ApiError> {

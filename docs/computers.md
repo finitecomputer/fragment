@@ -1353,16 +1353,20 @@ skills fragment), one labelled `shared` first, else the first by name
   Hermes' own start, so a teammate's latest is coming in as Hermes boots.
   A sync that ended starts again at most once a minute
   (`shared::RESTART_MS`). An agent gone ends its sync; its folder stays.
-- **A team folder replaced** (another chosen while a sync runs, its
-  journal written or not yet, or found so at a boot: `~/shared`'s sync
-  journal names another fragment) keeps the old folder beside it, unsent
+- **A team folder replaced** keeps the old folder beside it, unsent
   edits and journal and all, as `~/shared-<that fragment>`, and the new
-  one's sync starts in a clean `~/shared` (`shared::prepare`): the CLI
-  refuses a folder bound to another fragment, so handing over files would
-  stop, and one it never bound it would send to the new one. The journal
-  is read as the CLI reads it (schema 3; another it rebuilds in place,
-  binding nothing), never waited on (a FIFO at its path is none) and at
-  most 64 MiB of it.
+  one's sync starts in a clean `~/shared` (`shared::prepare`). Replaced
+  means another chosen while a sync runs (its journal written or not
+  yet), or found so at a boot: `~/shared`'s sync journal names another
+  fragment, or names this one but binds it to an earlier life of the name
+  (deleted and made again: its repo another than the life's, or none yet)
+  or to another host than the syncs reach. The CLI refuses a folder bound
+  elsewhere, so handing over files would stop, and one it never bound it
+  would send to the new one. The folder's repo (its status's, read as the
+  first agent for its owner) is read only when a sync is about to start.
+  The journal is read as the CLI reads it (schema 3; another it rebuilds
+  in place, binding nothing), never waited on (a FIFO at its path is
+  none) and at most 64 MiB of it.
 - **A hold stops every sync** (SIGSTOP) before the boot answers it, as a
   round under way is waited for, and they go on after it: nothing under
   `/data` changes while a save is taken.

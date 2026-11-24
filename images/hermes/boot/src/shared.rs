@@ -22,6 +22,9 @@ use fragment_bridge::ev;
 
 /// The folder in an agent's work its team folder is kept in.
 pub const DIR: &str = "shared";
+/// The platform as each sync reaches it (its `FRAGMENT_API`): the host its
+/// journal binds the folder to.
+pub const SYNC_API: &str = "http://api.fragment.internal";
 /// A sync that ended (its fragment unread, a mass delete it refused) starts
 /// again at most this often: never a loop of starts.
 pub const RESTART_MS: u64 = 60_000;
@@ -51,25 +54,37 @@ const JOURNAL_READ_MAX: u64 = 64 << 20;
 
 /// Readies `dir` for a sync of `fragment`, before its process starts.
 /// `previous`, the fragment this boot synced it for until now (a team
-/// folder replaced while its sync ran). A folder of another team folder's
-/// (its journal, the CLI's `.fragment/state.json`, names another fragment,
-/// or it has none yet and `previous` is another) is kept beside it, unsent
-/// edits, journal and all, as `shared-<that fragment>` (`-2`, `-3`… when
-/// one has that name), and the chosen one starts in a clean folder: the
-/// CLI refuses a folder bound to another fragment (file handoff would
-/// stop), and one it never bound it would send to the new one. A journal
-/// naming it by its bare label (`shared` for `shared--z9z9`) is its own,
-/// as the CLI reads it; one the CLI would rebuild (another schema, or
-/// unreadable) binds nothing.
-pub fn prepare(dir: &std::path::Path, fragment: &str, previous: Option<&str>) -> std::io::Result<()> {
+/// folder replaced while its sync ran); `repo`, `fragment`'s code repo as
+/// its status says it now (its life's; `""` before its first file; none
+/// when unread). A folder of another team folder's is kept beside it,
+/// unsent edits, journal and all, as `shared-<that fragment>` (`-2`, `-3`…
+/// when one has that name), and the chosen one starts in a clean folder:
+/// - its journal (the CLI's `.fragment/state.json`) names another fragment;
+/// - or names this one, but binds it to another host than the syncs reach
+///   (`SYNC_API`), or to a repo other than its life's: an earlier life of
+///   the name (deleted and made again), whose journal the CLI refuses
+///   (`cli/src/sync/pass.rs`, the world binding);
+/// - or it has none yet and `previous` is another.
+///
+/// The CLI refuses a folder bound elsewhere (file handoff would stop), and
+/// one it never bound it would send to the new one. A journal naming it by
+/// its bare label (`shared` for `shared--z9z9`) is its own, as the CLI
+/// reads it; one the CLI would rebuild (another schema, or unreadable)
+/// binds nothing.
+pub fn prepare(dir: &std::path::Path, fragment: &str, previous: Option<&str>, repo: Option<&str>) -> std::io::Result<()> {
     let other = |b: &str| b != fragment && fragment.rsplit_once("--").is_none_or(|(label, _)| label != b);
+    let elsewhere = |j: &Journal| {
+        let host = j.host.as_deref().is_some_and(|h| h.trim_end_matches('/') != SYNC_API);
+        let life = j.repo.as_deref().zip(repo).is_some_and(|(was, now)| was != now);
+        other(&j.name) || host || life
+    };
     let bound = match bound_to(dir) {
-        Some(b) => Some(b),
+        Some(j) => elsewhere(&j).then_some(j.name),
         // none written yet (its first pass never ended), but what it held
         // was another's: kept too, never sent to the new one
-        None => previous.filter(|_| std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some())).map(str::to_string),
+        None => previous.filter(|p| other(p) && std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some())).map(str::to_string),
     };
-    if let Some(bound) = bound.filter(|b| other(b)) {
+    if let Some(bound) = bound {
         let parent = dir.parent().ok_or_else(|| std::io::Error::other("~/shared has a parent"))?;
         let base = format!("{DIR}-{}", bound.replace('/', "_"));
         // bounded: a name of its own among at most KEPT_MAX
@@ -83,12 +98,20 @@ pub fn prepare(dir: &std::path::Path, fragment: &str, previous: Option<&str>) ->
     std::fs::create_dir_all(dir)
 }
 
-/// The fragment `dir`'s sync journal binds it to, read as the CLI reads it
-/// (`cli/src/sync/journal.rs` `read_state`: schema 3, its `name` and its
-/// `files`; any other it rebuilds, binding nothing). Read without waiting
-/// (the agent may have left anything at that path: a FIFO is no journal)
-/// and at most `JOURNAL_READ_MAX` of it.
-fn bound_to(dir: &std::path::Path) -> Option<String> {
+/// What a sync journal binds its folder to, as the CLI reads it: its
+/// fragment, and (from its first pass) the host and repo it synced.
+struct Journal {
+    name: String,
+    host: Option<String>,
+    repo: Option<String>,
+}
+
+/// What `dir`'s sync journal binds it to, read as the CLI reads it
+/// (`cli/src/sync/journal.rs` `read_state`: schema 3, its `name`, `host`,
+/// `repo` and `files`; any other it rebuilds, binding nothing). Read
+/// without waiting (the agent may have left anything at that path: a FIFO
+/// is no journal) and at most `JOURNAL_READ_MAX` of it.
+fn bound_to(dir: &std::path::Path) -> Option<Journal> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(dir.join(".fragment").join("state.json")).ok()?;
@@ -102,12 +125,15 @@ fn bound_to(dir: &std::path::Path) -> Option<String> {
     }
     let journal: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let current = journal["schemaVersion"] == 3 && journal["files"].is_object();
-    journal["name"].as_str().filter(|n| current && !n.is_empty()).map(str::to_string)
+    let name = journal["name"].as_str().filter(|n| current && !n.is_empty())?.to_string();
+    let text = |k: &str| journal[k].as_str().map(str::to_string);
+    Some(Journal { name, host: text("host"), repo: text("repo") })
 }
 
 /// Starts an agent's sync of a team folder (agent, fragment), given the
-/// one this boot synced it for until now, if another (`prepare`).
-pub type Spawn<'a> = dyn Fn(&str, &str, Option<&str>) -> std::io::Result<Child> + 'a;
+/// one this boot synced it for until now, if another, and the folder's
+/// repo as its status says it (`prepare`).
+pub type Spawn<'a> = dyn Fn(&str, &str, Option<&str>, Option<&str>) -> std::io::Result<Child> + 'a;
 
 /// One agent's sync: of which fragment, its process, and when it started.
 struct Running {
@@ -129,7 +155,7 @@ impl Syncs {
     /// gone, or of another fragment, ends; one missing starts (`spawn`), as
     /// does one that ended, at most once a `RESTART_MS`. Started while held,
     /// it is stopped at once, as the others are.
-    pub fn keep(&mut self, want: &BTreeMap<String, String>, spawn: &Spawn) {
+    pub fn keep(&mut self, want: &BTreeMap<String, String>, repo: Option<&str>, spawn: &Spawn) {
         // the team folder each agent's sync had, where another is wanted
         // now (`prepare` keeps what it held)
         let switched: BTreeMap<String, String> = self.running.iter().filter(|(a, r)| want.get(*a).is_some_and(|f| *f != r.fragment)).map(|(a, r)| (a.clone(), r.fragment.clone())).collect();
@@ -147,7 +173,7 @@ impl Syncs {
             if !ended {
                 continue;
             }
-            let child = match spawn(agent, fragment, switched.get(agent).map(String::as_str)) {
+            let child = match spawn(agent, fragment, switched.get(agent).map(String::as_str), repo) {
                 Ok(c) => {
                     ev!("shared.started", { "agent": agent, "fragment": fragment, "pid": c.id() });
                     Some(c)
@@ -163,6 +189,16 @@ impl Syncs {
             self.running.insert(agent.clone(), Running { fragment: fragment.clone(), child, started: Instant::now() });
         }
         assert!(self.running.len() <= want.len(), "one sync an agent, and none of an agent gone");
+    }
+
+    /// Whether `keep(want)` would start a sync: one missing, of another
+    /// folder, or ended a `RESTART_MS` ago. The boot reads the folder's
+    /// repo then alone (`prepare`), not every round.
+    pub fn due(&mut self, want: &BTreeMap<String, String>) -> bool {
+        want.iter().any(|(agent, fragment)| match self.running.get_mut(agent) {
+            Some(r) if r.fragment == *fragment => r.child.as_mut().is_none_or(|c| !matches!(c.try_wait(), Ok(None))) && r.started.elapsed() >= Duration::from_millis(RESTART_MS),
+            _ => true,
+        })
     }
 
     /// Whether a hold stopped them.
@@ -226,21 +262,32 @@ mod tests {
         assert!(dir_of("juniper--k3x9").starts_with(crate::hermes::work_dir("juniper--k3x9")), "in its work, saved with it");
     }
 
-    /// The CLI's first pass as it binds `dir` to `fragment` (cli/src/sync/
-    /// journal.rs `read_state`): refused when its journal names another
-    /// fragment (its bare label is the same one's), else its journal
-    /// written, naming it.
-    fn bind(dir: &std::path::Path, fragment: &str) -> std::io::Result<()> {
+    /// The CLI's first pass as it binds `dir` to `fragment`, whose life's
+    /// repo is `repo`: refused when its journal names another fragment (its
+    /// bare label is the same one's: cli/src/sync/journal.rs `read_state`),
+    /// or another host or repo (cli/src/sync/pass.rs, the world binding);
+    /// else its journal written, naming it, the syncs' host and its repo.
+    fn bind(dir: &std::path::Path, fragment: &str, repo: &str) -> std::io::Result<()> {
         let journal = dir.join(".fragment").join("state.json");
-        if let Ok(bytes) = std::fs::read(&journal) {
-            let named = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v["name"].as_str().map(str::to_string)).unwrap_or_default();
+        if let Ok(v) = std::fs::read(&journal).map(|b| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default()) {
+            let named = v["name"].as_str().unwrap_or_default().to_string();
             let bare = fragment.rsplit_once("--").is_some_and(|(label, _)| label == named);
             if named != fragment && !bare {
                 return Err(std::io::Error::other(format!("directory is synced to fragment '{named}', not '{fragment}'")));
             }
+            if let (Some(h), Some(r)) = (v["host"].as_str(), v["repo"].as_str()) {
+                if h != SYNC_API || r != repo {
+                    return Err(std::io::Error::other(format!("this folder is bound to {h} repo {r}, but fragment '{fragment}' is {SYNC_API} repo {repo}")));
+                }
+            }
         }
         std::fs::create_dir_all(dir.join(".fragment"))?;
-        std::fs::write(&journal, serde_json::json!({ "schemaVersion": 3, "name": fragment, "files": {} }).to_string())
+        std::fs::write(&journal, serde_json::json!({ "schemaVersion": 3, "name": fragment, "host": SYNC_API, "repo": repo, "files": {} }).to_string())
+    }
+
+    /// A fragment's repo, as the tests name each life of one.
+    fn repo(fragment: &str, life: u32) -> String {
+        format!("e2e--{fragment}--life{life}")
     }
 
     /// A folder of its own for a test, under the temporary folder.
@@ -261,28 +308,28 @@ mod tests {
     fn a_replaced_team_folder_gets_a_clean_folder_and_the_old_is_kept() {
         let root = scratch("shared-switch");
         let dir = root.join(DIR);
-        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>| {
-            prepare(&dir, fragment, previous)?;
-            bind(&dir, fragment)?;
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>, now: Option<&str>| {
+            prepare(&dir, fragment, previous, now)?;
+            bind(&dir, fragment, now.unwrap_or_default())?;
             std::process::Command::new("sleep").arg("30").spawn()
         };
         let mut syncs = Syncs::default();
         let mut want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert!(syncs.running["juniper--k3x9"].child.is_some(), "the first started");
         std::fs::write(dir.join("handover.txt"), "unsent").unwrap();
         // the same folder again: nothing moves
-        prepare(&dir, "shared--z9z9", None).unwrap();
+        prepare(&dir, "shared--z9z9", None, None).unwrap();
         assert!(dir.join("handover.txt").exists());
         // replaced
         want.insert("juniper--k3x9".into(), "shared--w4w4".into());
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert!(syncs.running["juniper--k3x9"].child.is_some(), "the new one's sync started");
         assert!(!dir.join("handover.txt").exists(), "~/shared is the new folder's, clean");
         let kept = root.join("shared-shared--z9z9");
         assert_eq!(std::fs::read_to_string(kept.join("handover.txt")).ok().as_deref(), Some("unsent"), "the old folder kept, its edits in it");
         assert!(std::fs::read_to_string(kept.join(".fragment/state.json")).unwrap().contains("shared--z9z9"), "and its journal");
-        syncs.keep(&BTreeMap::new(), &spawn);
+        syncs.keep(&BTreeMap::new(), None, &spawn);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -295,25 +342,25 @@ mod tests {
     fn a_boot_with_the_old_journal_on_disk_starts_clean() {
         let root = scratch("shared-boot");
         let dir = root.join(DIR);
-        bind(&dir, "shared--z9z9").unwrap();
+        bind(&dir, "shared--z9z9", "").unwrap();
         std::fs::write(dir.join("draft.md"), "unsent").unwrap();
         std::fs::create_dir_all(root.join("shared-shared--z9z9")).unwrap();
-        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>| {
-            prepare(&dir, fragment, previous)?;
-            bind(&dir, fragment)?;
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>, now: Option<&str>| {
+            prepare(&dir, fragment, previous, now)?;
+            bind(&dir, fragment, now.unwrap_or_default())?;
             std::process::Command::new("sleep").arg("30").spawn()
         };
         let mut syncs = Syncs::default();
-        syncs.keep(&BTreeMap::from([("juniper--k3x9".to_string(), "team--w4w4".to_string())]), &spawn);
+        syncs.keep(&BTreeMap::from([("juniper--k3x9".to_string(), "team--w4w4".to_string())]), None, &spawn);
         assert!(syncs.running["juniper--k3x9"].child.is_some(), "the chosen folder's sync started");
         assert!(!dir.join("draft.md").exists(), "in a clean ~/shared");
         assert_eq!(std::fs::read_to_string(root.join("shared-shared--z9z9-2").join("draft.md")).ok().as_deref(), Some("unsent"), "the old kept, beside one of that name");
-        syncs.keep(&BTreeMap::new(), &spawn);
+        syncs.keep(&BTreeMap::new(), None, &spawn);
         // a journal naming the folder by its bare label is the same one's
         let bare = root.join("bare");
-        bind(&bare, "shared").unwrap();
+        bind(&bare, "shared", "").unwrap();
         std::fs::write(bare.join("draft.md"), "kept").unwrap();
-        prepare(&bare, "shared--z9z9", None).unwrap();
+        prepare(&bare, "shared--z9z9", None, None).unwrap();
         assert!(bare.join("draft.md").exists(), "its own folder, by its label");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -326,23 +373,23 @@ mod tests {
     fn a_folder_replaced_before_its_first_journal_is_kept_too() {
         let root = scratch("shared-early");
         let dir = root.join(DIR);
-        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>| {
-            prepare(&dir, fragment, previous)?;
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>, now: Option<&str>| {
+            prepare(&dir, fragment, previous, now)?;
             if fragment == "team--w4w4" {
-                bind(&dir, fragment)?;
+                bind(&dir, fragment, now.unwrap_or_default())?;
             }
             std::process::Command::new("sleep").arg("30").spawn()
         };
         let mut syncs = Syncs::default();
         let mut want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         std::fs::write(dir.join("notes.md"), "unsent").unwrap();
         want.insert("juniper--k3x9".into(), "team--w4w4".into());
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert!(syncs.running["juniper--k3x9"].child.is_some(), "the new one's sync started");
         assert!(!dir.join("notes.md").exists(), "nothing of the old one's for the new one to send");
         assert_eq!(std::fs::read_to_string(root.join("shared-shared--z9z9").join("notes.md")).ok().as_deref(), Some("unsent"), "kept beside it");
-        syncs.keep(&BTreeMap::new(), &spawn);
+        syncs.keep(&BTreeMap::new(), None, &spawn);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -362,14 +409,98 @@ mod tests {
         std::fs::write(dir.join("draft.md"), "kept").unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let at = dir.clone();
-        std::thread::spawn(move || tx.send(prepare(&at, "team--w4w4", None).is_ok()).unwrap());
+        std::thread::spawn(move || tx.send(prepare(&at, "team--w4w4", None, None).is_ok()).unwrap());
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "prepared at once, the FIFO no journal");
         assert!(dir.join("draft.md").exists(), "and nothing moved");
         std::fs::remove_file(&journal).unwrap();
         std::fs::write(&journal, serde_json::json!({ "schemaVersion": 2, "name": "shared--z9z9", "files": {} }).to_string()).unwrap();
-        prepare(&dir, "team--w4w4", None).unwrap();
+        prepare(&dir, "team--w4w4", None, None).unwrap();
         assert!(dir.join("draft.md").exists(), "another schema: the CLI rebuilds it in place");
-        assert_eq!(bound_to(&dir), None);
+        assert!(bound_to(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Alex on #1537): the team folder deleted and made again under
+    /// its full name while its sync runs (a new life: another repo, which
+    /// the CLI's world binding refuses, so that sync ends): the sync started
+    /// again finds `~/shared` bound to the earlier life, keeps it beside it,
+    /// unsent edits and all, and starts in a clean folder. Invalid: the same
+    /// life again moves nothing. Method: `bind` stands in for the CLI's
+    /// first pass, with the host and repo it checks.
+    #[test]
+    fn a_team_folder_made_again_under_its_name_gets_a_clean_folder() {
+        let root = scratch("shared-life");
+        let dir = root.join(DIR);
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>, now: Option<&str>| {
+            prepare(&dir, fragment, previous, now)?;
+            bind(&dir, fragment, now.unwrap_or_default())?;
+            std::process::Command::new("sleep").arg("30").spawn()
+        };
+        let mut syncs = Syncs::default();
+        let want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
+        let (first, second) = (repo("shared--z9z9", 1), repo("shared--z9z9", 2));
+        assert!(syncs.due(&want), "none running: due");
+        syncs.keep(&want, Some(&first), &spawn);
+        assert!(!syncs.due(&want), "running: not due");
+        std::fs::write(dir.join("handover.txt"), "unsent").unwrap();
+        // made again: its sync refused by the CLI, and ended
+        let r = syncs.running.get_mut("juniper--k3x9").expect("running");
+        if let Some(c) = r.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        r.started -= Duration::from_millis(RESTART_MS);
+        assert!(syncs.due(&want), "ended a RESTART_MS ago: due");
+        syncs.keep(&want, Some(&second), &spawn);
+        assert!(syncs.running["juniper--k3x9"].child.is_some(), "the new life's sync started");
+        assert!(!dir.join("handover.txt").exists(), "in a clean ~/shared");
+        let kept = root.join("shared-shared--z9z9");
+        assert_eq!(std::fs::read_to_string(kept.join("handover.txt")).ok().as_deref(), Some("unsent"), "the earlier life's folder kept, its edits in it");
+        assert!(std::fs::read_to_string(kept.join(".fragment/state.json")).unwrap().contains(&first), "and its journal, bound to it");
+        // the same life again: nothing moves
+        std::fs::write(dir.join("notes.md"), "mine").unwrap();
+        prepare(&dir, "shared--z9z9", None, Some(&second)).unwrap();
+        assert!(dir.join("notes.md").exists());
+        syncs.keep(&BTreeMap::new(), None, &spawn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Alex on #1537): a boot that finds `~/shared` bound to an
+    /// earlier life of its folder's name (its journal's repo another than
+    /// the life's, or none yet: its first file makes it), or to another
+    /// host than the syncs reach, keeps it beside it and starts clean.
+    /// Invalid: the folder's repo unread compares nothing, and moves
+    /// nothing.
+    #[test]
+    fn a_boot_with_an_earlier_lifes_journal_starts_clean() {
+        let root = scratch("shared-life-boot");
+        let dir = root.join(DIR);
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>, now: Option<&str>| {
+            prepare(&dir, fragment, previous, now)?;
+            bind(&dir, fragment, now.unwrap_or_default())?;
+            std::process::Command::new("sleep").arg("30").spawn()
+        };
+        let want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
+        // unread: nothing compared, nothing moved (the CLI says why it refuses)
+        bind(&dir, "shared--z9z9", &repo("shared--z9z9", 1)).unwrap();
+        std::fs::write(dir.join("draft.md"), "unsent").unwrap();
+        prepare(&dir, "shared--z9z9", None, None).unwrap();
+        assert!(dir.join("draft.md").exists(), "its repo unread: kept where it is");
+        // the life made again has no repo until its first file
+        let mut syncs = Syncs::default();
+        syncs.keep(&want, Some(""), &spawn);
+        assert!(syncs.running["juniper--k3x9"].child.is_some(), "the new life's sync started");
+        assert!(!dir.join("draft.md").exists(), "in a clean ~/shared");
+        assert_eq!(std::fs::read_to_string(root.join("shared-shared--z9z9").join("draft.md")).ok().as_deref(), Some("unsent"), "the earlier life's kept");
+        syncs.keep(&BTreeMap::new(), None, &spawn);
+        // a journal of another host's
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(".fragment")).unwrap();
+        let life = repo("shared--z9z9", 3);
+        std::fs::write(dir.join(".fragment/state.json"), serde_json::json!({ "schemaVersion": 3, "name": "shared--z9z9", "host": "https://elsewhere.test", "repo": life, "files": {} }).to_string()).unwrap();
+        std::fs::write(dir.join("other.md"), "unsent").unwrap();
+        prepare(&dir, "shared--z9z9", None, Some(&life)).unwrap();
+        assert!(!dir.join("other.md").exists() && root.join("shared-shared--z9z9-2").join("other.md").exists(), "another host's: kept beside it, under a name of its own");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -380,14 +511,14 @@ mod tests {
     #[test]
     fn one_sync_an_agent_and_a_hold_stops_them() {
         let spawned = std::cell::RefCell::new(vec![]);
-        let spawn = |agent: &str, fragment: &str, _previous: Option<&str>| {
+        let spawn = |agent: &str, fragment: &str, _previous: Option<&str>, _repo: Option<&str>| {
             spawned.borrow_mut().push((agent.to_string(), fragment.to_string()));
             std::process::Command::new("sleep").arg("30").spawn()
         };
         let mut syncs = Syncs::default();
         let mut want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string()), ("maple--p2m4".to_string(), "shared--z9z9".to_string())]);
-        syncs.keep(&want, &spawn);
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert_eq!(spawned.borrow().len(), 2, "one each, kept");
         let state = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default().split_whitespace().nth(2).unwrap_or("").to_string();
         let pids: Vec<u32> = syncs.running.values().filter_map(|r| r.child.as_ref().map(Child::id)).collect();
@@ -396,7 +527,7 @@ mod tests {
         assert!(pids.iter().all(|p| state(*p) == "T"), "stopped under the hold");
         // an agent made meanwhile starts stopped
         want.insert("rowan--q3q3".into(), "shared--z9z9".into());
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         let rowan = syncs.running["rowan--q3q3"].child.as_ref().map(Child::id).expect("started");
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(state(rowan), "T", "started under a hold, stopped at once");
@@ -406,7 +537,7 @@ mod tests {
         // maple leaves; juniper's folder changes
         want.remove("maple--p2m4");
         want.insert("juniper--k3x9".into(), "team--w4w4".into());
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert_eq!(syncs.running.len(), 2);
         assert_eq!(syncs.running["juniper--k3x9"].fragment, "team--w4w4");
         assert_eq!(spawned.borrow().last(), Some(&("juniper--k3x9".to_string(), "team--w4w4".to_string())));
@@ -416,12 +547,12 @@ mod tests {
             let _ = c.kill();
             let _ = c.wait();
         }
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert_eq!(spawned.borrow().len(), before, "not again at once");
         syncs.running.get_mut("rowan--q3q3").expect("kept").started -= Duration::from_millis(RESTART_MS);
-        syncs.keep(&want, &spawn);
+        syncs.keep(&want, None, &spawn);
         assert_eq!(spawned.borrow().len(), before + 1, "again after RESTART_MS");
-        syncs.keep(&BTreeMap::new(), &spawn);
+        syncs.keep(&BTreeMap::new(), None, &spawn);
         assert!(syncs.running.is_empty());
     }
 }
