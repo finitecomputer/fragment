@@ -1213,7 +1213,7 @@ pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<
         Err(e) => e.response()?,
     };
     let resp = if navigation { updating::answer(resp, env, platform).await? } else { resp };
-    framing_floor(resp, &cfg, &host)
+    framing_floor(resp, cfg, &host)
 }
 
 /// Who may frame an answer that names no one itself, by the host it
