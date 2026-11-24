@@ -979,9 +979,9 @@ fn team_folders(agents: &[Agent], folder: Option<&str>) -> BTreeMap<String, Stri
 /// CLI's own `fragment sync --watch`, as the agent, for its owner, as the
 /// agents' user, its progress lines (one a change, without end) left out
 /// of the computer's log.
-fn spawn_sync(agent: &str, owner: &str, fragment: &str) -> std::io::Result<Child> {
+fn spawn_sync(agent: &str, owner: &str, fragment: &str, previous: Option<&str>) -> std::io::Result<Child> {
     let dir = shared::dir_of(agent);
-    shared::prepare(&dir, fragment)?;
+    shared::prepare(&dir, fragment, previous)?;
     chown(&dir, hermes_ids());
     let mut c = Command::new("/command/s6-setuidgid");
     c.args(["hermes", FRAGMENT_CLI, "sync", fragment, "--watch", "--dir"]).arg(&dir);
@@ -1638,7 +1638,7 @@ async fn boot_main() {
     // (shared.rs): a teammate's latest is coming in as Hermes starts
     let mut syncs = shared::Syncs::default();
     let team_owner = computer.owner.clone();
-    let spawn = move |agent: &str, fragment: &str| spawn_sync(agent, &team_owner, fragment);
+    let spawn = move |agent: &str, fragment: &str, previous: Option<&str>| spawn_sync(agent, &team_owner, fragment, previous);
     syncs.keep(&team_folders(&agents, folder.as_deref()), &spawn);
     let routes = bots::profile_routes(&hermes_agents, &routed);
     let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;

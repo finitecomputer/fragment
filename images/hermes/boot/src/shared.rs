@@ -45,18 +45,31 @@ pub fn dir_of(agent_fragment: &str) -> PathBuf {
 
 /// The most folders kept beside `~/shared` under one name (`prepare`).
 const KEPT_MAX: u32 = 64;
+/// The most of a sync journal the boot reads for the fragment it names:
+/// larger, it is read as none (the CLI reads it on its own).
+const JOURNAL_READ_MAX: u64 = 64 << 20;
 
-/// Readies `dir` for a sync of `fragment`, before its process starts. A
-/// folder another team folder's sync bound (its journal, the CLI's
-/// `.fragment/state.json`, names another fragment: one replaced while it
-/// ran, or found so at a boot) is kept beside it, unsent edits, journal and
-/// all, as `shared-<that fragment>` (`-2`, `-3`… when one has that name),
-/// and the chosen one starts in a clean folder: the CLI refuses a folder
-/// bound to another fragment, so file handoff would stop. A journal naming
-/// it by its bare label (`shared` for `shared--z9z9`) is its own, as the
-/// CLI reads it; one unreadable the CLI rebuilds.
-pub fn prepare(dir: &std::path::Path, fragment: &str) -> std::io::Result<()> {
-    if let Some(bound) = bound_to(dir).filter(|b| b != fragment && fragment.rsplit_once("--").is_none_or(|(label, _)| label != b)) {
+/// Readies `dir` for a sync of `fragment`, before its process starts.
+/// `previous`, the fragment this boot synced it for until now (a team
+/// folder replaced while its sync ran). A folder of another team folder's
+/// (its journal, the CLI's `.fragment/state.json`, names another fragment,
+/// or it has none yet and `previous` is another) is kept beside it, unsent
+/// edits, journal and all, as `shared-<that fragment>` (`-2`, `-3`… when
+/// one has that name), and the chosen one starts in a clean folder: the
+/// CLI refuses a folder bound to another fragment (file handoff would
+/// stop), and one it never bound it would send to the new one. A journal
+/// naming it by its bare label (`shared` for `shared--z9z9`) is its own,
+/// as the CLI reads it; one the CLI would rebuild (another schema, or
+/// unreadable) binds nothing.
+pub fn prepare(dir: &std::path::Path, fragment: &str, previous: Option<&str>) -> std::io::Result<()> {
+    let other = |b: &str| b != fragment && fragment.rsplit_once("--").is_none_or(|(label, _)| label != b);
+    let bound = match bound_to(dir) {
+        Some(b) => Some(b),
+        // none written yet (its first pass never ended), but what it held
+        // was another's: kept too, never sent to the new one
+        None => previous.filter(|_| std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some())).map(str::to_string),
+    };
+    if let Some(bound) = bound.filter(|b| other(b)) {
         let parent = dir.parent().ok_or_else(|| std::io::Error::other("~/shared has a parent"))?;
         let base = format!("{DIR}-{}", bound.replace('/', "_"));
         // bounded: a name of its own among at most KEPT_MAX
@@ -70,12 +83,31 @@ pub fn prepare(dir: &std::path::Path, fragment: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
-/// The fragment `dir`'s sync journal names, if it has a readable one.
+/// The fragment `dir`'s sync journal binds it to, read as the CLI reads it
+/// (`cli/src/sync/journal.rs` `read_state`: schema 3, its `name` and its
+/// `files`; any other it rebuilds, binding nothing). Read without waiting
+/// (the agent may have left anything at that path: a FIFO is no journal)
+/// and at most `JOURNAL_READ_MAX` of it.
 fn bound_to(dir: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(dir.join(".fragment").join("state.json")).ok()?;
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(dir.join(".fragment").join("state.json")).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(JOURNAL_READ_MAX + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > JOURNAL_READ_MAX {
+        return None;
+    }
     let journal: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    journal["name"].as_str().filter(|n| !n.is_empty()).map(str::to_string)
+    let current = journal["schemaVersion"] == 3 && journal["files"].is_object();
+    journal["name"].as_str().filter(|n| current && !n.is_empty()).map(str::to_string)
 }
+
+/// Starts an agent's sync of a team folder (agent, fragment), given the
+/// one this boot synced it for until now, if another (`prepare`).
+pub type Spawn<'a> = dyn Fn(&str, &str, Option<&str>) -> std::io::Result<Child> + 'a;
 
 /// One agent's sync: of which fragment, its process, and when it started.
 struct Running {
@@ -97,7 +129,10 @@ impl Syncs {
     /// gone, or of another fragment, ends; one missing starts (`spawn`), as
     /// does one that ended, at most once a `RESTART_MS`. Started while held,
     /// it is stopped at once, as the others are.
-    pub fn keep(&mut self, want: &BTreeMap<String, String>, spawn: &dyn Fn(&str, &str) -> std::io::Result<Child>) {
+    pub fn keep(&mut self, want: &BTreeMap<String, String>, spawn: &Spawn) {
+        // the team folder each agent's sync had, where another is wanted
+        // now (`prepare` keeps what it held)
+        let switched: BTreeMap<String, String> = self.running.iter().filter(|(a, r)| want.get(*a).is_some_and(|f| *f != r.fragment)).map(|(a, r)| (a.clone(), r.fragment.clone())).collect();
         let gone: Vec<String> = self.running.iter().filter(|(a, r)| want.get(*a) != Some(&r.fragment)).map(|(a, _)| a.clone()).collect();
         for agent in gone {
             if let Some(mut r) = self.running.remove(&agent) {
@@ -112,7 +147,7 @@ impl Syncs {
             if !ended {
                 continue;
             }
-            let child = match spawn(agent, fragment) {
+            let child = match spawn(agent, fragment, switched.get(agent).map(String::as_str)) {
                 Ok(c) => {
                     ev!("shared.started", { "agent": agent, "fragment": fragment, "pid": c.id() });
                     Some(c)
@@ -226,8 +261,8 @@ mod tests {
     fn a_replaced_team_folder_gets_a_clean_folder_and_the_old_is_kept() {
         let root = scratch("shared-switch");
         let dir = root.join(DIR);
-        let spawn = |_agent: &str, fragment: &str| {
-            prepare(&dir, fragment)?;
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>| {
+            prepare(&dir, fragment, previous)?;
             bind(&dir, fragment)?;
             std::process::Command::new("sleep").arg("30").spawn()
         };
@@ -237,7 +272,7 @@ mod tests {
         assert!(syncs.running["juniper--k3x9"].child.is_some(), "the first started");
         std::fs::write(dir.join("handover.txt"), "unsent").unwrap();
         // the same folder again: nothing moves
-        prepare(&dir, "shared--z9z9").unwrap();
+        prepare(&dir, "shared--z9z9", None).unwrap();
         assert!(dir.join("handover.txt").exists());
         // replaced
         want.insert("juniper--k3x9".into(), "shared--w4w4".into());
@@ -263,8 +298,8 @@ mod tests {
         bind(&dir, "shared--z9z9").unwrap();
         std::fs::write(dir.join("draft.md"), "unsent").unwrap();
         std::fs::create_dir_all(root.join("shared-shared--z9z9")).unwrap();
-        let spawn = |_agent: &str, fragment: &str| {
-            prepare(&dir, fragment)?;
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>| {
+            prepare(&dir, fragment, previous)?;
             bind(&dir, fragment)?;
             std::process::Command::new("sleep").arg("30").spawn()
         };
@@ -278,8 +313,63 @@ mod tests {
         let bare = root.join("bare");
         bind(&bare, "shared").unwrap();
         std::fs::write(bare.join("draft.md"), "kept").unwrap();
-        prepare(&bare, "shared--z9z9").unwrap();
+        prepare(&bare, "shared--z9z9", None).unwrap();
         assert!(bare.join("draft.md").exists(), "its own folder, by its label");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Codex on #1537): a team folder replaced before its sync's
+    /// first pass wrote its journal keeps what `~/shared` held too (the
+    /// fragment this boot synced it for): never sent to the new one. Method:
+    /// the first sync never binds; then the folder is replaced.
+    #[test]
+    fn a_folder_replaced_before_its_first_journal_is_kept_too() {
+        let root = scratch("shared-early");
+        let dir = root.join(DIR);
+        let spawn = |_agent: &str, fragment: &str, previous: Option<&str>| {
+            prepare(&dir, fragment, previous)?;
+            if fragment == "team--w4w4" {
+                bind(&dir, fragment)?;
+            }
+            std::process::Command::new("sleep").arg("30").spawn()
+        };
+        let mut syncs = Syncs::default();
+        let mut want = BTreeMap::from([("juniper--k3x9".to_string(), "shared--z9z9".to_string())]);
+        syncs.keep(&want, &spawn);
+        std::fs::write(dir.join("notes.md"), "unsent").unwrap();
+        want.insert("juniper--k3x9".into(), "team--w4w4".into());
+        syncs.keep(&want, &spawn);
+        assert!(syncs.running["juniper--k3x9"].child.is_some(), "the new one's sync started");
+        assert!(!dir.join("notes.md").exists(), "nothing of the old one's for the new one to send");
+        assert_eq!(std::fs::read_to_string(root.join("shared-shared--z9z9").join("notes.md")).ok().as_deref(), Some("unsent"), "kept beside it");
+        syncs.keep(&BTreeMap::new(), &spawn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Codex on #1537): the journal is read as the CLI reads it, and
+    /// never waited on: a FIFO at its path is none (the boot goes on), and
+    /// one of another schema, which the CLI rebuilds in place, binds
+    /// nothing, so its folder stays.
+    #[test]
+    fn a_journal_the_cli_would_not_read_binds_nothing() {
+        let root = scratch("shared-odd");
+        let dir = root.join(DIR);
+        std::fs::create_dir_all(dir.join(".fragment")).unwrap();
+        let journal = dir.join(".fragment").join("state.json");
+        let path = std::ffi::CString::new(journal.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a path of the test's own folder
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "a FIFO where the journal goes");
+        std::fs::write(dir.join("draft.md"), "kept").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = dir.clone();
+        std::thread::spawn(move || tx.send(prepare(&at, "team--w4w4", None).is_ok()).unwrap());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "prepared at once, the FIFO no journal");
+        assert!(dir.join("draft.md").exists(), "and nothing moved");
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::write(&journal, serde_json::json!({ "schemaVersion": 2, "name": "shared--z9z9", "files": {} }).to_string()).unwrap();
+        prepare(&dir, "team--w4w4", None).unwrap();
+        assert!(dir.join("draft.md").exists(), "another schema: the CLI rebuilds it in place");
+        assert_eq!(bound_to(&dir), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -290,7 +380,7 @@ mod tests {
     #[test]
     fn one_sync_an_agent_and_a_hold_stops_them() {
         let spawned = std::cell::RefCell::new(vec![]);
-        let spawn = |agent: &str, fragment: &str| {
+        let spawn = |agent: &str, fragment: &str, _previous: Option<&str>| {
             spawned.borrow_mut().push((agent.to_string(), fragment.to_string()));
             std::process::Command::new("sleep").arg("30").spawn()
         };
