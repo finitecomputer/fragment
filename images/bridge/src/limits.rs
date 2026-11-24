@@ -382,6 +382,12 @@ pub const TASKS_BACKLOG_MS: u64 = 60 * 60 * 1000;
 pub const HOME_CHAT_WAIT_MS: u64 = 10 * 60 * 1000;
 const _: () = assert!(HOME_CHAT_WAIT_MS < TASKS_BACKLOG_MS);
 
+/// The chats whose members a routine's home reads, at most, to find the
+/// chat bound as its agent's SimpleX door (api.rs, `door_candidates`): one
+/// read each, those labelled as its SimpleX chat first, so one is the
+/// usual; as a routine fires, at most every 15 minutes a schedule.
+pub const HOME_DOORS_MAX: usize = 8;
+
 /// `GET /api/computer` is read again this often while awake, so an agent
 /// assigned to the computer meanwhile is followed within it.
 pub const COMPUTER_EVERY_MS: u64 = 60 * 1000;

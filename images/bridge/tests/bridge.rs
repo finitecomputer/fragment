@@ -1241,6 +1241,62 @@ async fn a_routine_with_no_chat_runs_at_home() {
     });
 }
 
+/// Goal (D3's review): an agent whose SimpleX is a door (a connector its
+/// owner bound from Settings, templates/simplex), its home SimpleX, runs a
+/// routine that names no chat in that door's chat, as it would in its
+/// computer's SimpleX chat. Valid: its connector bound as its `simplex`
+/// door. Invalid: a connector bound as another door (`telegram`), or one
+/// whose door is not open (its row says none): its own chat. A members
+/// read that fails loses no fire: read again, and run once. A restart runs
+/// none twice and finds the door again.
+#[tokio::test]
+async fn a_routine_with_no_chat_runs_in_its_simplex_doors_chat() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "maple"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let telegram = fake.connector("juniper-telegram", "juniper", Some("telegram"));
+    let shut = fake.connector("juniper-simplex-2", "juniper", None);
+    let door = fake.connector("juniper-simplex", "juniper", Some("simplex"));
+    let maples = fake.chat_named("maple-chat--m2n3", &["maple"]);
+    let maple_tg = fake.connector("maple-simplex", "maple", Some("telegram"));
+    let dir = support::dir("routine-door-home");
+    let config = || support::config(&fake.url(), &dir, support::settings());
+    fake.with(|w| {
+        for agent in ["juniper--k3x9", "maple--k3x9"] {
+            w.fragments.get_mut(agent).expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#));
+        }
+    });
+    let bridge = support::start(config(), support::script());
+    following(&fake, 4).await;
+    let home = |text: &str| json!({ "kind": "routine", "text": text });
+    let said = |w: &World, chat: &str| replies(w, chat).iter().filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("call mom")));
+    fake.until(WAIT, "the routine in its SimpleX door's chat", |w| said(w, &door).len() == 1).await;
+    // its members unread at first: read again, and run once
+    fake.with(|w| {
+        w.fail_members = 2;
+        w.append("juniper--k3x9", "tasks", "npub1paul", home("check the shelf"));
+    });
+    fake.until(WAIT * 2, "the routine whose door was read again", |w| said(w, &door).len() == 2).await;
+    // maple's only connector is a Telegram door: its own chat
+    fake.with(|w| w.append("maple--k3x9", "tasks", "npub1paul", home("water the plants")));
+    fake.until(WAIT, "maple's routine in its own chat", |w| said(w, &maples).len() == 1).await;
+    bridge.stop().await;
+    // a restart: the fires read again run nothing twice, and its door is found again
+    let bridge = support::start(config(), support::script());
+    following(&fake, 4).await;
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("feed the cat")));
+    fake.until(WAIT, "the routine in its door's chat after a restart", |w| said(w, &door).len() == 3).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &door), ["echo: [your routine] call mom", "echo: [your routine] check the shelf", "echo: [your routine] feed the cat"], "each once");
+        for chat in [&own, &telegram, &shut, &maple_tg] {
+            assert!(said(w, chat).is_empty(), "nothing in {chat}");
+        }
+        assert_eq!(said(w, &maples), ["echo: [your routine] water the plants"]);
+    });
+}
+
 /// Goal (FIN-463, FIN-488; Paul's order of 2026-11-10): a move's
 /// routine reaches the agent only once its stage's SimpleX files are set
 /// aside, so the import it starts cannot end the stage first. Here the

@@ -3,8 +3,10 @@
 // it (`loadHomes`), and Try again under a read that failed reads it afresh
 // whatever read is out. Only the newest read's answer applies, success or
 // failure, so a slow older read never puts back a home another device has
-// since changed, nor its error line (#1121's review). Run by
-// `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
+// since changed, nor its error line (#1121's review). Its SimpleX home is
+// its computer's SimpleX chat, else the chat bound as its SimpleX door, as
+// its bridge picks it. Run by `cargo xtask check` on the pinned Node
+// (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -28,8 +30,9 @@ const AGENT = { fragment: "maple--a1b2", identity: "npub1maple" };
 
 // Robin's one agent, its home pick drawn in Settings; each read of its
 // agent.json answered only when the test says (`reads[i].ok(json)` or
-// `.fail(status)`), then the page's work on that answer let run
-function world() {
+// `.fail(status)`), then the page's work on that answer let run;
+// `chats`, the person's list; `door`, the chat bound as its SimpleX door
+function world({ chats = [], door = null } = {}) {
   const reads = [];
   const picks = [];
   globalThis.document = { querySelectorAll: (sel) => (sel === "select[data-home-for]" ? picks : []) };
@@ -50,7 +53,7 @@ function world() {
     modelOption: (value, text) => Object.assign(new Node("option", null, text), { value }),
     savePick: async () => {},
     agents: () => new Map([[AGENT.identity, AGENT]]),
-    chats: () => [],
+    chats: () => chats,
     own: () => true,
     labelOf: (name) => name.split("--")[0],
     byName: () => ({}),
@@ -66,6 +69,7 @@ function world() {
       }),
     writeAgentJson: async () => {},
     renderChats: () => {},
+    simplexDoorOf: (agent) => (agent === AGENT.fragment ? door : null),
   });
   const [label, line] = homes.homePicker(AGENT, new Node("span"));
   const pick = label.children[1];
@@ -115,4 +119,24 @@ test("an older read's answer after a newer read's failure is let go too: the new
   again.onclick();
   await reads[3].ok({ home: "simplex" });
   assert.deepEqual([pick.value, line.hidden], ["simplex", true]);
+});
+
+// its SimpleX a door (a connector set up from Settings, its label whatever
+// Settings could take): SimpleX offered, and picked, its bell on that chat
+test("an agent whose SimpleX is a door is offered SimpleX, and its bell is on that door's chat", async () => {
+  const door = { name: "maple-simplex-2--q4w5", owner: "npub1robin", agents: [AGENT.identity] };
+  const w = world({ chats: [door], door: door.name });
+  await w.reads[0].ok({ home: "simplex" });
+  assert.deepEqual(w.pick.children.map((o) => o.value), ["", "simplex"]);
+  assert.equal(w.pick.value, "simplex");
+  assert.equal(w.homes.homeMark(door).length, 1, "its bell on the door's chat");
+  assert.equal(w.homes.homeMark({ name: "maple-chat--g7h8" }).length, 0);
+  // its home its own chat still: SimpleX offered to pick
+  const offered = world({ chats: [door], door: door.name });
+  await offered.reads[0].ok({});
+  assert.deepEqual([offered.pick.children.map((o) => o.value), offered.pick.value], [["", "simplex"], ""]);
+  // no door bound and no computer's SimpleX chat: its own chat alone
+  const none = world({ chats: [door] });
+  await none.reads[0].ok({});
+  assert.deepEqual(none.pick.children.map((o) => o.value), [""]);
 });

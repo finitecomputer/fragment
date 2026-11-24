@@ -1161,15 +1161,37 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
 }
 
 /// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
-/// its SimpleX chat while linked (the one its link mirrors: `simplex`),
-/// its owner's list and its own, read as a routine that names no chat
-/// fires (at most every 15 minutes a schedule); `waited`: the routine fired
-/// `limits::HOME_CHAT_WAIT_MS` ago or more.
+/// its SimpleX chat while linked (the one its computer's link mirrors:
+/// `simplex`), else, its home SimpleX, the chat bound as its SimpleX door
+/// (`simplex_door`), its owner's list and its own, read as a routine that
+/// names no chat fires (at most every 15 minutes a schedule); `waited`: the
+/// routine fired `limits::HOME_CHAT_WAIT_MS` ago or more. A read that fails
+/// fails it, so the routine is read again, never sent elsewhere.
 async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>, waited: bool) -> Result<HomeChat, ApiError> {
     let home = api.home(&agent.fragment).await?;
     let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
     let mine = api.fragments(&agent.fragment).await?;
-    Ok(api::home_chat(&agent.fragment, home, simplex, &owners, &mine, waited))
+    let linked = simplex.is_some_and(|c| mine.iter().any(|m| m.name == c));
+    let door = match home {
+        api::Home::Simplex if !linked => simplex_door(api, agent, &api::door_candidates(&agent.fragment, &owners, &mine)).await?,
+        _ => None,
+    };
+    Ok(api::home_chat(&agent.fragment, home, simplex, door.as_deref(), &owners, &mine, waited))
+}
+
+/// The chat bound as `agent`'s SimpleX door among `candidates`, as its own
+/// row of each one's members says (`door`: docs/api.md, "An agent's
+/// doors"), read in order until one does: the connector's binding, the one
+/// place it is kept.
+async fn simplex_door(api: &Api, agent: &Agent, candidates: &[String]) -> Result<Option<String>, ApiError> {
+    assert!(candidates.len() <= crate::limits::HOME_DOORS_MAX, "a home reads a bounded few chats' members");
+    for chat in candidates {
+        let members = api.members(&agent.fragment, chat).await?;
+        if members.iter().any(|m| m.principal == agent.identity && m.door.as_deref() == Some(crate::simplex::door::DOOR)) {
+            return Ok(Some(chat.clone()));
+        }
+    }
+    Ok(None)
 }
 
 /// The agent's wake subscription on the channel: made unless it has one.

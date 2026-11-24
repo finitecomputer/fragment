@@ -972,7 +972,7 @@ const { loadRuntimes, offers, markOffer } = createRuntimes({ agentJson: (agent) 
 const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
   agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
-  agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
+  agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats, simplexDoorOf: (agent) => simplexDoorOf(agent),
 });
 
 // Each time the middle column is given a view (a chat, settings, Apps,
@@ -1461,9 +1461,10 @@ const { computerRow, computerKey, nameSimplex } = createSimplex({
   api, el, actionLine, named, seg, computer: () => state.computer,
   titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh: () => refreshConnectors(),
 });
-const { telegramSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
+const { telegramSection, simplexSection, refreshConnectors, readConnectors, simplexDoorOf } = createConnectors({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
   connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow, computerKey,
+  doorsRead: () => (paintHomes(), renderChats()),
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): Settings' SimpleX follows it at once.

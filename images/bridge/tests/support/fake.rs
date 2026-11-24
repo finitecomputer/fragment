@@ -107,6 +107,8 @@ pub struct World {
     /// answer 503, as a platform that failed one read does.
     pub fail_computer_reads: u32,
     pub fail_lists: u32,
+    /// The next this many reads of any fragment's members answer 503.
+    pub fail_members: u32,
     /// The next this many reads of any agent's `agent.json` answer 503.
     pub fail_agent_json: u32,
     /// The next this many listings of a fragment's files (`GET files`),
@@ -823,6 +825,10 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 }
             }
             answer(StatusCode::OK, json!({ "principal": who, "role": added }))
+        }
+        (Method::GET, ["members"]) if w.fail_members > 0 => {
+            w.fail_members -= 1;
+            answer(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "unavailable", "message": "the fake's members, refused" }))
         }
         (Method::GET, ["members"]) => {
             let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul", "door": m.door })).collect();
