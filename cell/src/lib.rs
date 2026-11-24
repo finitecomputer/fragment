@@ -1056,7 +1056,7 @@ async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, res
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
-    fragment_origin(resp, &cfg.platform())
+    fragment_origin(resp)
 }
 
 /// The headers every answer on a fragment's origin carries, set over any
@@ -1064,29 +1064,19 @@ async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, res
 /// browser takes bytes as the type they name, never a page or a script
 /// guessed from them), and no referrer beyond the origin (a page's URL may
 /// hold its share link, `?view=`, and every fragment is another origin;
-/// a page's own `<meta name="referrer">` still governs its own links),
-/// and framing by its own pages and the platform's alone
-/// (`answer_headers::fragment_frame_ancestors`; appended unless one of
-/// the answer's policies already enforces that very directive, a frame's
-/// `bound` among them: `has_directive` reads only a directive's first
-/// occurrence in a policy, as a browser does, so an app's own
-/// `frame-ancestors` can narrow it and never widen it). No other policy:
-/// a fragment's scripts and styles are its app's to decide, and an app's
-/// own `X-Frame-Options` passes through (it can only narrow).
+/// a page's own `<meta name="referrer">` still governs its own links).
+/// No other policy here: a fragment's scripts and styles are its app's to
+/// decide (its framing floor is `route`'s, `framing_floor`).
 /// Scriptable media (an SVG, the XML types: `site::opened_as`) is sandboxed
 /// besides, so opened directly it runs no script and has an opaque origin,
 /// while a page's `<img>` of it is unaffected (a subresource's policy is
 /// ignored); appended, so an app's own policy still applies beside it. A
 /// Durable Object's or a fetch's answer has immutable headers: cloned, as
 /// `bound` does, which keeps a socket's 101 and its WebSocket.
-fn fragment_origin(resp: Response, platform: &str) -> CellResult<Response> {
+fn fragment_origin(resp: Response) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.set("x-content-type-options", "nosniff")?;
     h.set("referrer-policy", "same-origin")?;
-    let framing = fragment_core::answer_headers::fragment_frame_ancestors(platform);
-    if !fragment_core::answer_headers::has_directive(&h.get("content-security-policy")?.unwrap_or_default(), &framing) {
-        h.append("content-security-policy", &framing)?;
-    }
     let content_type = h.get("content-type")?.unwrap_or_default();
     if fragment_core::site::opened_as(&content_type) == fragment_core::site::Opened::ScriptableMedia {
         h.append("content-security-policy", "sandbox")?;
@@ -1215,12 +1205,53 @@ fn moved(to: &str) -> CellResult<Response> {
 
 pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let navigation = updating::navigation(&req)?;
-    let platform = Config::from_env(env).is_platform_host(req.url()?.host_str().unwrap_or_default());
+    let cfg = Config::from_env(env);
+    let host = req.url()?.host_str().unwrap_or_default().to_string();
+    let platform = cfg.is_platform_host(&host);
     let resp = match route_inner(req, env, ctx).await {
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
-    if navigation { updating::answer(resp, env, platform).await } else { Ok(resp) }
+    let resp = if navigation { updating::answer(resp, env, platform).await? } else { resp };
+    framing_floor(resp, &cfg, &host)
+}
+
+/// Who may frame an answer that names no one itself, by the host it
+/// answers on, told apart as `route_inner` tells them: a fragment's (its
+/// own host, a claimed address's) its own pages and the platform's
+/// (`answer_headers::fragment_frame_ancestors`: the shell shows every
+/// fragment in a frame); a computer's, nothing here (`computer::framed_by`
+/// frames its every answer); the platform's, and any other host, the
+/// platform's own pages (`PLATFORM_FRAME_ANCESTORS`, and
+/// `X-Frame-Options` where the answer sent none). Last, after the
+/// updating notice (`updating::answer`) has its own policy, so each
+/// answer carries one: the floor joins the answer's policy, and an answer
+/// whose policy names `frame-ancestors` (a frame's `bound`, a page any
+/// page may frame, an app's own) keeps it as it came
+/// (`answer_headers::with_frame_floor`). Cloned, as `platform_origin`
+/// does, which keeps a socket's 101 and its WebSocket.
+fn framing_floor(resp: Response, cfg: &Config, host: &str) -> CellResult<Response> {
+    use fragment_core::answer_headers::{fragment_frame_ancestors, with_frame_floor, PLATFORM_FRAME_ANCESTORS, PLATFORM_FRAME_OPTIONS};
+    let own = Some(host).filter(|h| !cfg.is_platform_host(h));
+    let (floor, options) = if own.is_some_and(|h| cfg.fragment_of_host(h).is_some()) {
+        (fragment_frame_ancestors(&cfg.platform()), None)
+    } else if own.is_some_and(|h| cfg.computer_of_host(h).is_some()) {
+        return Ok(resp);
+    } else if own.is_some_and(|h| cfg.address_of_host(h).is_some()) {
+        (fragment_frame_ancestors(&cfg.platform()), None)
+    } else {
+        (PLATFORM_FRAME_ANCESTORS.to_string(), Some(PLATFORM_FRAME_OPTIONS))
+    };
+    let h = resp.headers().clone();
+    if let Some(policy) = with_frame_floor(h.get("content-security-policy")?.as_deref(), &floor) {
+        h.set("content-security-policy", &policy)?;
+    }
+    if let Some(options) = options {
+        if !h.has("x-frame-options")? {
+            h.set("x-frame-options", options)?;
+        }
+    }
+    Ok(resp.with_headers(h))
 }
 
 async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
@@ -1256,7 +1287,7 @@ async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Respo
             // an unclaimed address, or a registry that did not answer, is
             // still a fragment's host: its answer gets the headers `serve`
             // gives every other one there
-            Err(e) => return fragment_origin(e.response()?, &cfg.platform()),
+            Err(e) => return fragment_origin(e.response()?),
         };
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &address.fragment, &rest, Some(&address.npub)).await;
@@ -1280,8 +1311,6 @@ const DEPLOY_HEADER: &str = "x-fragment-deploy";
 /// sign-in's and `/cli`'s, a callback's, the API's JSON, a refusal): no
 /// type sniffing, no referrer beyond the origin unless the answer chose
 /// its own (sign-in's hand-offs send none; the shell's pages say theirs),
-/// framing by the platform's own pages alone (`answer_headers`), unless
-/// the answer named its own `frame-ancestors`,
 /// and the release that answered (`DEPLOY_HEADER`: the shell compares it
 /// with its page's, to reload once the platform under it changed;
 /// docs/api.md, The shell). `x-fragment-cli`, when set, names a published
@@ -1291,15 +1320,6 @@ const DEPLOY_HEADER: &str = "x-fragment-deploy";
 fn platform_origin(resp: Response, release: &str, cli_version: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.set("x-content-type-options", "nosniff")?;
-    // framed only by the platform's own pages, unless the answer said who
-    // may frame it (the shell's pages say no one): every policy here is
-    // the platform's own, and appended it could only narrow
-    if !h.get("content-security-policy")?.is_some_and(|p| fragment_core::answer_headers::names_directive(&p, "frame-ancestors")) {
-        h.append("content-security-policy", fragment_core::answer_headers::PLATFORM_FRAME_ANCESTORS)?;
-    }
-    if !h.has("x-frame-options")? {
-        h.set("x-frame-options", fragment_core::answer_headers::PLATFORM_FRAME_OPTIONS)?;
-    }
     h.set(DEPLOY_HEADER, release)?;
     if let Some(version) = cli_version {
         h.set("x-fragment-cli", version)?;

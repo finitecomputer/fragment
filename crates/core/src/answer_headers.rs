@@ -2,12 +2,14 @@
 //! answers on (docs/security/http-headers.md, for the CASA assessment):
 //! HSTS on every host reached over HTTPS, and a `frame-ancestors` floor
 //! on the platform's host and on every fragment's. Pure: the cell sets
-//! them (cell/src/lib.rs `fetch`, `platform_origin`, `fragment_origin`).
+//! them (cell/src/lib.rs `fetch` and `route`'s `framing_floor`).
 //!
-//! The values here are the widest any answer gets. A page that needs a
-//! narrower policy sets its own (the shell's pages, sign-in's, a frame's
-//! answer: `frames::ancestors`); a second `frame-ancestors` only narrows,
-//! because a browser enforces every policy an answer carries.
+//! The floor goes only on an answer that names no `frame-ancestors` of
+//! its own, and into that answer's own policy (`with_frame_floor`): a
+//! page that says who may frame it (the shell's pages, sign-in's, the
+//! updating notice, a frame's answer: `frames::ancestors`, a page any
+//! page may frame) keeps its policy as it came, and no answer gets a
+//! second policy beside its own.
 
 use crate::frames::{self, Framed};
 
@@ -42,27 +44,35 @@ pub fn fragment_frame_ancestors(platform: &str) -> String {
     format!("frame-ancestors {}", frames::ancestors(Framed::Stranger, platform))
 }
 
-/// Whether a `Content-Security-Policy` header value (its policies joined
-/// by commas, as a browser and `Headers` join them) enforces `directive`
-/// exactly in one of its policies: so a policy already there is not sent
-/// twice, and a wider one is not taken for it. Only a directive's first
-/// occurrence in a policy counts, as a browser enforces only that one
-/// (CSP3 §2.2, a duplicate is ignored): `frame-ancestors *;
-/// frame-ancestors 'self' A` enforces `*`. And only exactly:
-/// `frame-ancestors 'self' A B` is not `frame-ancestors 'self' A`. A miss
-/// costs only a second policy, which can only narrow.
-pub fn has_directive(header: &str, directive: &str) -> bool {
-    let Some(name) = directive.split_ascii_whitespace().next() else { return false };
-    header
-        .split(',')
-        .filter_map(|policy| first_directive(policy, name))
-        .any(|d| d.split_ascii_whitespace().eq(directive.split_ascii_whitespace()))
+/// The `Content-Security-Policy` value an answer leaves with, given the
+/// one it carries (`existing`: its policies joined by commas, as a
+/// browser and `Headers` join them) and its host's `frame-ancestors`
+/// floor. `None` when one of its policies already names
+/// `frame-ancestors`: who may frame it is that answer's own decision (a
+/// page meant to be framed by any page says `*`; a frame's answer says
+/// `frames::ancestors`), kept as it came. Otherwise the floor goes into
+/// its last policy, so the answer still carries one header and as many
+/// policies as it had, never a second policy beside its own; with no
+/// policy at all, the floor alone.
+pub fn with_frame_floor(existing: Option<&str>, floor: &str) -> Option<String> {
+    assert!(
+        floor.split_ascii_whitespace().next() == Some("frame-ancestors") && !floor.contains([';', ',']),
+        "a floor is one frame-ancestors directive: {floor:?}"
+    );
+    let existing = existing.unwrap_or_default();
+    if names_directive(existing, "frame-ancestors") {
+        return None;
+    }
+    let own = existing.trim_end_matches(|c: char| c.is_ascii_whitespace() || c == ';' || c == ',');
+    Some(match own.is_empty() {
+        true => floor.to_string(),
+        false => format!("{own}; {floor}"),
+    })
 }
 
 /// Whether some policy in a `Content-Security-Policy` header value names
-/// the directive `name` at all (for the platform's own answers, whose
-/// every policy is the platform's).
-pub fn names_directive(header: &str, name: &str) -> bool {
+/// the directive `name` at all.
+fn names_directive(header: &str, name: &str) -> bool {
     header.split(',').any(|policy| first_directive(policy, name).is_some())
 }
 
@@ -76,37 +86,51 @@ fn first_directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
-    /// Goal: a policy is taken as present only when one directive is
-    /// exactly it, so a fragment's answer never skips the floor because
-    /// its app sent a wider one. Method: the floor alone, among others,
-    /// in a second policy, and the near misses that would widen it.
+    /// Goal: an answer that says who may frame it keeps its policy as it
+    /// came, so a page meant to be framed by any page stays framable and
+    /// no answer carries the directive twice. Method: `frame-ancestors`
+    /// named in each place a policy can name it, `*` among them.
     #[test]
-    fn a_directive_is_present_only_exactly() {
+    fn an_answers_own_frame_ancestors_is_kept() {
         let floor = "frame-ancestors 'self' https://finite.chat";
-        for present in [floor, "default-src 'self'; frame-ancestors 'self' https://finite.chat", "sandbox, frame-ancestors  'self' https://finite.chat ;"] {
-            assert!(has_directive(present, floor), "{present:?}");
-        }
-        for absent in ["", "sandbox", "frame-ancestors 'self' https://finite.chat https://evil.example", "frame-ancestors *", "frame-ancestors 'self'", "default-src 'self' frame-ancestors 'self' https://finite.chat"] {
-            assert!(!has_directive(absent, floor), "{absent:?}");
+        for own in [
+            "frame-ancestors *",
+            "frame-ancestors 'self' https://finite.chat",
+            "default-src 'none'; style-src 'self'; frame-ancestors 'self'",
+            "sandbox, FRAME-ANCESTORS 'none'",
+            "frame-ancestors 'self', frame-ancestors 'self' https://finite.chat",
+        ] {
+            assert_eq!(with_frame_floor(Some(own), floor), None, "{own:?}");
         }
     }
 
-    /// Goal: an app cannot make the floor be skipped by naming it after
-    /// a wider `frame-ancestors` in the same policy: a browser enforces
-    /// only a directive's first occurrence in each policy (CSP3 §2.2).
-    /// Method: the floor behind a wider one, in either case, in one
-    /// policy; the floor in a policy of its own still counts.
+    /// Goal: an answer that names no `frame-ancestors` gets the floor in
+    /// its own policy, never as a second one: one header, as many
+    /// policies as it had, its other directives untouched. Method: no
+    /// policy, an empty one, one policy, one with a trailing `;`, two.
     #[test]
-    fn only_a_policys_first_directive_counts() {
-        let floor = "frame-ancestors 'self' https://finite.chat";
-        for widened in [
-            "frame-ancestors *; frame-ancestors 'self' https://finite.chat",
-            "FRAME-ANCESTORS https://evil.example; frame-ancestors 'self' https://finite.chat",
-            "default-src 'self'; frame-ancestors *;frame-ancestors 'self' https://finite.chat",
+    fn the_floor_joins_an_answers_own_policy() {
+        let floor = "frame-ancestors 'self'";
+        for (existing, after) in [
+            (None, "frame-ancestors 'self'"),
+            (Some(""), "frame-ancestors 'self'"),
+            (Some("sandbox"), "sandbox; frame-ancestors 'self'"),
+            (Some("default-src 'none'; style-src 'self';"), "default-src 'none'; style-src 'self'; frame-ancestors 'self'"),
+            (Some("sandbox, default-src 'self' "), "sandbox, default-src 'self'; frame-ancestors 'self'"),
+            (Some("report-uri https://x.example/frame-ancestors"), "report-uri https://x.example/frame-ancestors; frame-ancestors 'self'"),
         ] {
-            assert!(!has_directive(widened, floor), "{widened:?}");
+            assert_eq!(with_frame_floor(existing, floor).as_deref(), Some(after), "{existing:?}");
+            let policies = |v: &str| v.split(',').count();
+            assert_eq!(policies(after), existing.map_or(1, policies), "{existing:?}");
         }
-        assert!(has_directive("frame-ancestors *, frame-ancestors 'self' https://finite.chat", floor));
+    }
+
+    /// Goal: a floor is one `frame-ancestors` directive alone, so joined
+    /// into a policy it adds nothing else. Method: a second directive.
+    #[test]
+    #[should_panic(expected = "a floor is one frame-ancestors directive")]
+    fn a_floor_is_one_directive() {
+        with_frame_floor(None, "frame-ancestors 'self'; script-src *");
     }
 
     /// Goal: the platform keeps an answer's own `frame-ancestors`, and

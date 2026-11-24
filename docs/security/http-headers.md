@@ -3,8 +3,8 @@
 What the cell (the Cloudflare Worker in `cell/`) sends on its answers, and
 why. Written for the CASA assessment (FIN-575, FIN-582). The header values
 are in `crates/core/src/answer_headers.rs` and `crates/core/src/frames.rs`.
-The cell sets them in `cell/src/lib.rs`, in `fetch`, `platform_origin` and
-`fragment_origin`, and in the page handlers named below.
+The cell sets them in `cell/src/lib.rs`, in `fetch`, `platform_origin`,
+`fragment_origin` and `framing_floor`, and in the page handlers named below.
 
 The cell answers three kinds of host:
 
@@ -40,7 +40,7 @@ reviewed, and so that it applies the same way on a self-hosted deployment.
 | `X-Content-Type-Options` | `nosniff` | On every answer. |
 | `Referrer-Policy` | `same-origin` by default; the shell's pages send `strict-origin-when-cross-origin`; sign-in redirects send `no-referrer` | URLs may carry share links or sign-in state. |
 | `Content-Security-Policy` | Shell pages: `default-src 'self'; script-src 'self'; style-src 'self'; …; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'` (`cell/src/shell.rs`). Sign-in, sharing and notice pages have their own strict policies (`auth.rs`, `share.rs`, `updating.rs`). | No inline script on the shell. Only the platform's own origin and fragment hosts may be framed (`frame-src`). |
-| `frame-ancestors` (CSP) | `'self'` on any answer that doesn't name its own | Anti-clickjacking for API JSON, errors, redirects and every other answer. The shell frames two of the platform's own pages, `/share` and `/auth/frame`, so `'self'` is needed there; no other origin may frame anything. |
+| `frame-ancestors` (CSP) | `'self'` on any answer that doesn't name its own | Anti-clickjacking for API JSON, errors, redirects and every other answer. The shell frames two of the platform's own pages, `/share` and `/auth/frame`, so `'self'` is needed there; no other origin may frame anything. It is added into the answer's own policy, not sent as a second one, and an answer whose policy already names `frame-ancestors` keeps it as it is (`answer_headers::with_frame_floor`). It is added last, after the updating notice (`updating.rs`) has set its policy. |
 | `X-Frame-Options` | `DENY` on shell and sign-in pages; `SAMEORIGIN` elsewhere | The same rule for browsers without CSP. |
 | `Cross-Origin-Opener-Policy` | `same-origin` on shell and sign-in pages | Another window can't keep a handle to the signed-in page. |
 
@@ -56,7 +56,7 @@ platform's headers are merged with it, so the app can't weaken them.
 |---|---|---|
 | `X-Content-Type-Options` | `nosniff` | Set over anything the app sends. |
 | `Referrer-Policy` | `same-origin` | Set over anything the app sends. A page's URL may hold its share link (`?view=`). |
-| `frame-ancestors` (CSP) | `'self' https://finite.chat` (the platform's origin) on every answer, an unclaimed address's or a failed registry lookup's included | Only the fragment's own pages and the shell may frame it, which the shell needs to show apps. A frame's navigation can get a narrower policy (`'self'` alone, for a page framing itself: `frames::ancestors`). The cell sends this as a policy of its own unless one of the answer's policies already enforces exactly it, judged by each policy's first `frame-ancestors`, the one a browser enforces (`answer_headers::has_directive`). So an app can narrow it with its own `frame-ancestors`, but can't widen it: a browser enforces every policy, and a duplicate later in a policy doesn't count. |
+| `frame-ancestors` (CSP) | `'self' https://finite.chat` (the platform's origin) on every answer that doesn't name its own, an unclaimed address's or a failed registry lookup's included | Only the fragment's own pages and the shell may frame it, which the shell needs to show apps. It is added into the answer's own policy (an SVG's `sandbox`, an app's CSP), never as a second policy. An answer that names `frame-ancestors` keeps it: a frame's navigation (`frames::ancestors`: `'self' https://finite.chat`, or `'self'` for a page framing itself), the page a framed `__signin` shows when it can't sign in (`frame-ancestors *`: it holds only a link, and any page may frame it), and an app's own. An app's answer to a frame's navigation gets the cell's frame policy beside the app's own (`bound`, judged by Fetch Metadata), so in a browser that sends it an app's wider `frame-ancestors` can't open the app to a stranger's frame. |
 | `Content-Security-Policy: sandbox` | On scriptable media (SVG, XML) and on HTML content files (`__file`) | Opened directly, user-uploaded content runs no script and gets an opaque origin. |
 | `X-Frame-Options` | not sent by the platform | It can't name a second origin (`ALLOW-FROM` is obsolete), and `SAMEORIGIN` would stop the shell from showing the app. An app's own `X-Frame-Options` passes through: it can only narrow, and CSP `frame-ancestors` takes precedence over it in every current browser. |
 

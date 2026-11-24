@@ -892,8 +892,10 @@ fn consent_page(session: &str, who: &Signed, email: Option<&str>, name: &str, ba
 /// (`/auth/frame`). A link to open the fragment in a tab of its own, and a
 /// word to the page around it (`{fragment: "signin-blocked", name, why:
 /// "cookies"}`; the platform's own notes say the other whys). It holds
-/// nothing but the link, so any page may frame it, and the word goes to
-/// whichever page that is: it names only the fragment that page framed.
+/// nothing but the link, so any page may frame it (`frame-ancestors *`,
+/// said so that the host's floor, `framing_floor`, leaves it framable),
+/// and the word goes to whichever page that is: it names only the
+/// fragment that page framed.
 fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Response> {
     let label = esc(share::label(name));
     let open = format!("{}__signin?return={}", cfg.canonical(url, name), enc(back));
@@ -906,6 +908,7 @@ fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Respon
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
+    h.set("content-security-policy", "frame-ancestors *")?;
     Ok(Response::ok(html(&format!("{} is signed out here", share::label(name)), &body))?.with_headers(h))
 }
 
