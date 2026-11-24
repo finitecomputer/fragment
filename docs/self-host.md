@@ -156,7 +156,8 @@ during a start.
   (a stub guest uses about 250 MB of its 6 GiB).
 - **Cleanup:** a node reaps its VMs when it stops and when it starts again
   on its project; a run killed outright has devstack destroy its node's by
-  celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
+  celld's naming, and celld's image builder when the celld that started it
+  is gone (`celld::Engine::remove`; docs/technical-debt-ledger.md).
 - **Skips on celld,** each a gap of celld's:
   - a turn's keepalive across a deploy: the e2e's reload of `celld dev`
     restarts its node, which reaps its VMs. A deploy to a running celld

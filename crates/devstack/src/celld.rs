@@ -161,7 +161,10 @@ impl Engine {
     /// run killed outright (a signal's `kill_started`) left its node no
     /// chance to, and the engine keeps a VM until it is told. Only this
     /// project's node's containers are touched (`container_prefix`): the
-    /// engine serves every stack and person on the machine.
+    /// engine serves every stack and person on the machine. So is celld's
+    /// image builder when the celld that started it is gone (`orphan_builder`):
+    /// a run killed while its node built images left it holding the
+    /// engine's memory.
     pub fn remove(&self, project: &Path) -> Result<u32> {
         let Engine::Krun(socket) = self else { return Ok(0) };
         let prefix = container_prefix(&dev_node(project)?);
@@ -175,8 +178,41 @@ impl Engine {
             anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {name}: {status} {}", String::from_utf8_lossy(&body));
             removed += 1;
         }
+        let (status, body) = engine_call(socket, "GET", &format!("/v1/containers/{BUILDER}"))?;
+        if status == 200 {
+            let builder: serde_json::Value = serde_json::from_slice(&body).context("the krun engine's builder is JSON")?;
+            if orphan_builder(&builder, proc_start) {
+                let (status, body) = engine_call(socket, "POST", &format!("/v1/containers/{BUILDER}/destroy"))?;
+                anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {BUILDER}: {status} {}", String::from_utf8_lossy(&body));
+                removed += 1;
+            }
+        }
         Ok(removed)
     }
+}
+
+/// celld's image builder on the krun engine (the fork's krun_build.rs):
+/// one VM by this name, its owner in the label of the same name as
+/// `<pid>-<start>`, the celld process and its start time (`/proc/<pid>/stat`
+/// field 22), so a reused pid is told apart.
+const BUILDER: &str = "celld-builder";
+
+/// Whether `builder` (the engine's view of it) belongs to a celld that is
+/// gone: its owner's pid runs no more, or runs a process started at
+/// another time (`start` reads a pid's start). One with no owner is left.
+fn orphan_builder(builder: &serde_json::Value, start: impl Fn(u32) -> Option<u64>) -> bool {
+    let Some((pid, at)) = builder["labels"][BUILDER].as_str().and_then(|o| o.split_once('-')) else { return false };
+    match (pid.parse::<u32>(), at.parse::<u64>()) {
+        (Ok(pid), Ok(at)) => start(pid) != Some(at),
+        _ => false,
+    }
+}
+
+/// A process's start time, in clock ticks since boot: `/proc/<pid>/stat`'s
+/// field 22, after its command's parenthesis.
+fn proc_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
 }
 
 /// The name `celld dev` gives its node on `project` (the fork's dev.rs):
@@ -452,6 +488,22 @@ mod tests {
     /// `write_local_config` with a secret bound.
     fn json(path: &Path) -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Goal: a builder whose celld is gone is told apart from a live one's,
+    /// as the fork labels it. Valid: a live owner's is kept; a dead pid's,
+    /// or a reused pid's (another start), goes. Invalid: no label, or one
+    /// not of the form, is kept: it is not known to be an orphan.
+    #[test]
+    fn an_orphan_builder_is_one_whose_celld_is_gone() {
+        let mine = std::process::id();
+        let started = super::proc_start(mine).expect("this process's start");
+        let builder = |owner: &str| serde_json::json!({ "name": super::BUILDER, "labels": { super::BUILDER: owner } });
+        assert!(!super::orphan_builder(&builder(&format!("{mine}-{started}")), super::proc_start), "a live celld's");
+        assert!(super::orphan_builder(&builder(&format!("{mine}-{}", started + 1)), super::proc_start), "a reused pid");
+        assert!(super::orphan_builder(&builder("4194305-1"), super::proc_start), "past pid_max: gone");
+        assert!(!super::orphan_builder(&serde_json::json!({ "labels": {} }), super::proc_start), "no owner");
+        assert!(!super::orphan_builder(&builder("x"), super::proc_start));
     }
 
     #[test]
