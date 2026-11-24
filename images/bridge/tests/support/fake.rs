@@ -118,6 +118,9 @@ pub struct World {
     pub lose_turn_opens: u32,
     /// A turn's close waits this long before the platform takes it.
     pub turn_close_delay_ms: u64,
+    /// A turn's open waits this long before the platform takes it (as the
+    /// cell's waits on the mandate keys).
+    pub turn_open_delay_ms: u64,
     /// Pages read over the API give an agent a mandate beside each record
     /// a person other than its owner wrote (`fm1.<principal>.<seq>`, the
     /// fake's), as the platform gives one; live frames carry none.
@@ -793,7 +796,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 w.turns.push((agent, "REFUSED".into(), v));
                 return refuse(StatusCode::SERVICE_UNAVAILABLE, "a close refused, as asked");
             }
-            if method == Method::DELETE && v["turn"].is_string() { w.turn_close_delay_ms } else { 0 }
+            match (method.clone(), v["turn"].is_string()) {
+                (Method::DELETE, true) => w.turn_close_delay_ms,
+                (Method::PUT, true) => w.turn_open_delay_ms,
+                _ => 0,
+            }
         };
         if delay > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;

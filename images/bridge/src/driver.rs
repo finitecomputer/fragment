@@ -23,7 +23,7 @@
 //! - SimpleX, when the image names its core (simplex/run.rs): told each
 //!   read of the computer, and waited for by the answer to a hold.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1378,6 +1378,9 @@ struct Turns {
     /// Ended by the engine, and not yet told so: (agent, turn) → a close
     /// in flight.
     ending: Arc<Mutex<BTreeMap<(String, String), bool>>>,
+    /// Being told open: no close of one is sent until its open's answer is
+    /// back, so a close never lands before the open it ends.
+    opening: Arc<Mutex<HashSet<String>>>,
 }
 
 /// The tries `Turns::settle` gives an agent's ended turns' closes before
@@ -1388,7 +1391,7 @@ const SETTLE_WAIT: Duration = Duration::from_millis(250);
 
 impl Turns {
     fn new(life: &str) -> Turns {
-        Turns { life: life.to_string(), open: Arc::default(), ending: Arc::default() }
+        Turns { life: life.to_string(), open: Arc::default(), ending: Arc::default(), opening: Arc::default() }
     }
 
     /// `agent`'s turns taken by this life (a bridge's start).
@@ -1396,10 +1399,14 @@ impl Turns {
         api.turn_close(agent, &self.life, None).await
     }
 
-    /// `turn` of `agent` told open, held as open from before it is sent.
+    /// `turn` of `agent` told open, held as open from before it is sent,
+    /// and closed only once this answer is back.
     async fn open(&self, api: &Api, agent: &str, turn: &str, told: &engine::Told) -> Result<(), ApiError> {
         self.open.lock().expect("turns").insert(turn.to_string(), agent.to_string());
-        api.turn_open(agent, &self.life, turn, told).await
+        self.opening.lock().expect("opening").insert(turn.to_string());
+        let opened = api.turn_open(agent, &self.life, turn, told).await;
+        self.opening.lock().expect("opening").remove(turn);
+        opened
     }
 
     /// The turns held open that `gone` says the engine runs no more, moved
@@ -1414,10 +1421,12 @@ impl Turns {
         }
     }
 
-    /// The ending turns with no close in flight, each now in flight.
+    /// The ending turns with no close in flight, nor an open, each now in
+    /// flight.
     fn due(&self) -> Vec<(String, String)> {
+        let opening = self.opening.lock().expect("opening");
         let mut ending = self.ending.lock().expect("ending");
-        ending.iter_mut().filter(|(_, flying)| !**flying).map(|(k, flying)| {
+        ending.iter_mut().filter(|((_, t), flying)| !**flying && !opening.contains(t)).map(|(k, flying)| {
             *flying = true;
             k.clone()
         }).collect()
@@ -1449,8 +1458,10 @@ impl Turns {
         let mut wait = SETTLE_WAIT;
         for attempt in 1..=SETTLE_TRIES {
             let due: Vec<String> = self.ending.lock().expect("ending").keys().filter(|(a, _)| a == agent).map(|(_, t)| t.clone()).collect();
-            let mut held = 0;
-            for turn in &due {
+            // one still being told open is closed once that answer is back
+            let opening = due.iter().filter(|t| self.opening.lock().expect("opening").contains(*t)).count();
+            let mut held = opening;
+            for turn in due.iter().filter(|t| !self.opening.lock().expect("opening").contains(*t)) {
                 if let Err(e) = self.close(api, agent, turn).await {
                     held += 1;
                     crate::ev!("turn.unended", { "turn": turn, "agent": agent, "attempt": attempt, "error": e.to_string() });
@@ -1951,9 +1962,6 @@ impl RuntimeLane {
                     _ => {}
                 }
                 if let Command::Start(ts) = &mut c {
-                    // no turn its agent ended still held open, whose mandate
-                    // would sign this one's calls
-                    turns.settle(&api, &ts.agent.fragment).await;
                     // what its runtime last took here: its marker, or one a
                     // hold keeps from its memory still (`Marks::seen`)
                     let memory = memory.as_ref().map(|m| m(&ts.agent.fragment));
@@ -1989,9 +1997,14 @@ impl RuntimeLane {
                     assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
-                if to_runtime.send(c).await.is_err() {
-                    return;
+                // room for it first, then no turn its agent ended still held
+                // open (whose mandate would sign this one's calls), then at
+                // once to its runtime: nothing waits between the two
+                let Ok(room) = to_runtime.reserve().await else { return };
+                if let Command::Start(ts) = &c {
+                    turns.settle(&api, &ts.agent.fragment).await;
                 }
+                room.send(c);
             }
         });
         RuntimeLane { tx }

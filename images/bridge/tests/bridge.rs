@@ -262,6 +262,32 @@ async fn an_open_whose_answer_was_lost_is_still_told_ended() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): a turn's close is sent only once its open's answer is
+/// back, so it never lands before the open it ends: Skyler's turn is
+/// stopped while its open is still on its way, and is closed after it,
+/// held open nowhere.
+#[tokio::test]
+async fn a_turn_stopped_while_told_open_is_closed_after_its_open() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("turn-stopped-opening");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.with(|w| w.turn_open_delay_ms = 800);
+    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
+    let skylers = turn_of("juniper", &chat, seq(&first));
+    fake.until(WAIT, "skyler's turn claimed", |w| w.bodies(&chat, "work", "turn.start").iter().any(|b| b["turn"] == skylers)).await;
+    fake.say(&chat, &person("skyler"), json!({ "kind": "stop", "turn": skylers }));
+    fake.until(WAIT, "its open taken", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == skylers)).await;
+    fake.until(WAIT * 2, "then its close", |w| !w.turns_open.contains_key(&skylers) && w.turns.iter().any(|(_, m, v)| m == "DELETE" && v["turn"] == skylers)).await;
+    fake.with(|w| {
+        let order: Vec<&str> = w.turns.iter().filter(|(_, _, v)| v["turn"] == skylers).map(|(_, m, _)| m.as_str()).collect();
+        assert_eq!(order.first(), Some(&"PUT"), "the open landed first: {order:?}");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (FIN-720): a new bridge life takes its agent's turns: one the last
 /// life left open (a crash) is forgotten at this life's first word, even
 /// when the start's own word was refused (which life speaks is the cell's:
