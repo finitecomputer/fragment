@@ -56,9 +56,34 @@ fn every_module_a_page_imports_is_its_own() {
 }
 
 /// A built name's own (`chat.3f9a2c1b4d5e.js` → `chat.js`): its hash out.
+/// A hash is as bundle.rs's `hashed_name` makes it: SHA-256's lowercase
+/// hex, 12 characters or more (longer until it holds a digit and a
+/// letter), so `shell.0499724193773a.css`'s 14 are a hash too.
 #[cfg(feature = "embed")]
 fn unhashed(name: &str) -> String {
-    name.split('.').filter(|p| !(p.len() == 12 && p.bytes().all(|b| b.is_ascii_hexdigit()))).collect::<Vec<_>>().join(".")
+    let hash = |p: &str| {
+        (12..=64).contains(&p.len())
+            && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && p.bytes().any(|b| b.is_ascii_digit())
+            && p.bytes().any(|b| b.is_ascii_alphabetic())
+    };
+    name.split('.').filter(|p| !hash(p)).collect::<Vec<_>>().join(".")
+}
+
+/// Goal: `unhashed` takes out every hash bundle.rs names, as long as it
+/// is. Valid: a 12-character hash, one made longer to hold a digit and a
+/// letter, and a whole SHA-256. Invalid: a name with no hash keeps every
+/// part, and a part too short, uppercase, or all digits is no hash.
+#[cfg(feature = "embed")]
+#[test]
+fn unhashed_takes_out_a_hash_of_any_length_the_bundler_names() {
+    assert_eq!(unhashed("chat.3f9a2c1b4d5e.js"), "chat.js");
+    assert_eq!(unhashed("shell.0499724193773a.css"), "shell.css");
+    assert_eq!(unhashed(&format!("shell.{}.css", "ab12".repeat(16))), "shell.css");
+    assert_eq!(unhashed("shell.css"), "shell.css");
+    assert_eq!(unhashed("a.3f9a2c1b4d5.js"), "a.3f9a2c1b4d5.js", "11 characters");
+    assert_eq!(unhashed("a.3F9A2C1B4D5E.js"), "a.3F9A2C1B4D5E.js", "uppercase");
+    assert_eq!(unhashed("a.049972419377.js"), "a.049972419377.js", "digits alone: the bundler goes on");
 }
 
 /// Goal: a built page (crates/templates/bundle.rs) comes in one wave and
