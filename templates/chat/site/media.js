@@ -20,6 +20,16 @@ function link(href, label, cls) {
   return node;
 }
 
+// Bytes the page holds, saved as `filename` (an object URL's download).
+function saveAs(url, filename) {
+  const a = el("a");
+  Object.assign(a, { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 // A file saved by the page itself. A link's own download is the browser's
 // request, which carries no cookie of a frame's: in the shell the page is
 // signed in by its frame's partitioned cookie alone, so a members-only
@@ -27,16 +37,56 @@ function link(href, label, cls) {
 // 2026-10-23), while a tab of its own signed in and saved it. The page
 // reads it as it reads everything else, with a fetch of its own origin,
 // and saves those bytes; no other way in is opened for it.
-async function save(href, filename) {
-  const r = await fetch(href);
-  if (!r.ok) throw new Error(`the file answered ${r.status}`);
-  const url = URL.createObjectURL(await r.blob());
-  const a = el("a");
-  Object.assign(a, { href: url, download: filename });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+//
+// Every press of the file's name or its Download saves it so, under its
+// own name: a plain press, and one with a modifier key or the middle
+// button, which the link would hand to the browser (a tab of the bare
+// hash, whose file has no name or extension, or a download without the
+// frame's cookie, refused). The bytes come after the press, and a browser
+// may refuse a download once the press's activation has lapsed (about
+// 5 s), so bytes read after that wait: Download says Save, and its next
+// press saves them at once.
+function saves(title, download, href, filename, name) {
+  let ready = null;
+  let reading = false;
+  const say = (text) => {
+    download.textContent = text;
+    download.setAttribute("aria-label", `${text} ${name}`);
+  };
+  const press = async (e) => {
+    if (e.button > 1) return;
+    e.preventDefault();
+    if (ready) {
+      saveAs(ready, filename);
+      ready = null;
+      return say("Download");
+    }
+    if (reading) return;
+    reading = true;
+    say("Downloading…");
+    try {
+      const r = await fetch(href);
+      if (!r.ok) throw new Error(`the file answered ${r.status}`);
+      const url = URL.createObjectURL(await r.blob());
+      if (navigator.userActivation?.isActive === false) {
+        ready = url;
+        say("Save");
+      } else {
+        saveAs(url, filename);
+        say("Download");
+      }
+    } catch {
+      say("Could not download");
+      setTimeout(() => ready || reading || say("Download"), 1500);
+    } finally {
+      reading = false;
+    }
+  };
+  for (const a of [title, download]) {
+    a.download = filename;
+    a.addEventListener("click", press);
+    a.addEventListener("auxclick", press);
+  }
 }
 
 // Only passive types the cell serves inline are embedded. All attachments
@@ -71,16 +121,11 @@ export function renderAttachments(list) {
       item.append(preview);
     }
     const actions = el("div", "attachment-actions");
-    actions.append(link(href, name, "attachment-name"));
+    const title = link(href, name, "attachment-name");
     const download = link(href, "Download", "attachment-download");
-    download.download = attachment.name || attachment.sha256.slice(0, 12);
     download.setAttribute("aria-label", `Download ${name}`);
-    // a plain click saves through the page (`save`); a modified one is the browser's
-    download.onclick = (e) => {
-      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      e.preventDefault();
-      feedback(download, () => save(href, download.download).then(() => null, () => "Could not download"));
-    };
+    saves(title, download, href, attachment.name || attachment.sha256.slice(0, 12), name);
+    actions.append(title);
     const button = el("button", "attachment-share", "Share");
     button.type = "button";
     button.setAttribute("aria-label", `Share ${name}`);
