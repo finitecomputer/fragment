@@ -66,6 +66,9 @@ const SECRET_HEADER = "x-door-secret";
 // (images/simplex-door `STOP_MS_MAX`, 8 s) and its last save taken (twice
 // that), with room.
 const HANDBACK_MS = 30_000;
+// Its stop's word once it handed its link back: no connect, lever or watch
+// starts it again (its computer runs that link now), until its end.
+const HANDED_BACK = "handed back";
 // Pages of its files (the bucket's, up to 1000 keys each) one end deletes;
 // asked again, it deletes the rest.
 const END_PAGES_MAX = 10;
@@ -264,6 +267,7 @@ export class SimplexDoor extends DurableObject {
     const d = this.#door();
     if (!d) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
     else if (d.door !== door) return refusal(409, "another_door", `this door is ${d.door}`);
+    else if (d.stopped === HANDED_BACK) return refusal(409, "handed_back", "this door handed its link back to its computer: it never starts again");
     else this.ctx.storage.sql.exec("UPDATE door SET stopped = NULL WHERE id = 1");
     // its watch first: a start that fails is tried again by it
     await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
@@ -337,13 +341,19 @@ export class SimplexDoor extends DurableObject {
   // places it. None (204) for a door that never held one; 410 for one none
   // of whose saves restores. Asked again, the same. A runner not ended
   // within `HANDBACK_MS` is ended, its last save not taken (its newest is
-  // then behind, and says so).
+  // then behind, and says so). Stopped, it never starts again (no connect
+  // nor lever does: `HANDED_BACK`), so no core of it runs beside its
+  // computer's. Its owner's messages it took and its connector's inbox has
+  // not are sent on first: while one waits, 409 `busy` (asked again, it
+  // tries again), never a save whose cursor is past a message no one has.
+  // `x-door-started`: whether it ever started (a save of a door that never
+  // ran is the one it was given).
   async #handback(body) {
     if (!nameOk(body.door)) throw Object.assign(new Error("a way back names its door"), { status: 400 });
     let d = this.#door();
     if (!d) return new Response(null, { status: 204 });
     if (d.door !== body.door) return refusal(409, "another_door", `this door is ${d.door}`);
-    if (!d.stopped) this.#stop("handed back");
+    if (d.stopped !== HANDED_BACK) this.#stop(HANDED_BACK);
     // a start under way sees the stop before it launches, or launched
     if (this.#starting) await this.#starting.catch(() => {});
     const c = this.ctx.container;
@@ -354,6 +364,11 @@ export class SimplexDoor extends DurableObject {
       while (c.running && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
       if (c.running) await c.destroy();
     }
+    await this.#drain();
+    // nor while a message its connector took still has a file to take from it
+    const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
+    const unkept = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM uses WHERE owner LIKE 'd:%'").one().n;
+    if (unsent + unkept > 0) return refusal(409, "busy", `its owner's messages still go to its connector (${unsent} to send, ${unkept} files to take): ask again in a moment`);
     // bounded: each pass marks one save unreadable, of at most the kept few
     for (;;) {
       d = this.#door();
@@ -363,7 +378,7 @@ export class SimplexDoor extends DurableObject {
       const obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
       if (obj) {
         this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks) });
-        return new Response(obj.body, { status: 200, headers: { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "content-type": "application/octet-stream" } });
+        return new Response(obj.body, { status: 200, headers: { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", "content-type": "application/octet-stream" } });
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
     }

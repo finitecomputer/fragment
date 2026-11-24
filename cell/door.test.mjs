@@ -880,6 +880,34 @@ test("the way back: a planned stop, its runner's last save, and that save handed
   // its state, as the operators' move reads it
   const s = await (await d.call("POST", "/door/state", {}, "{}")).json();
   assert.equal(s.door.stopped, "handed back");
+  assert.equal(r.headers.get("x-door-started"), "1", "a door that ran");
+  // never started again, whatever comes late: its computer runs that link now
+  const late = await d.connect();
+  assert.deepEqual([late.status, (await late.json()).error], [409, "handed_back"], "a connect after it");
+  assert.equal((await d.start()).status, 409, "nor the lever's start");
+  assert.equal(d.c.starts.length, 1, "never started again");
+});
+
+test("the way back waits while its owner's messages still go to its connector, never a save past a message no one has", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  d.inbox.status = 503;
+  await d.deliver("m1");
+  await d.save(life1, 1, "its save, past m1");
+  d.c.signal = async () => void (d.c.running = false);
+  const busy = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([busy.status, (await busy.json()).error], [409, "busy"], "m1 not yet its connector's");
+  assert.equal(d.row().stopped, "handed back", "stopped all the same: nothing new comes");
+  d.inbox.status = 200;
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, await r.text()], [200, "its save, past m1"], "asked again, m1 sent on first");
+  assert.equal(d.st.sql.exec("SELECT sent FROM deliveries WHERE id = 'm1'").one().sent, 1, "m1 its connector's");
+  // a door given a save and never started: its save is that one, and says so
+  const e = door();
+  await e.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("a link given") });
+  const given = await e.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([given.status, given.headers.get("x-door-save"), given.headers.get("x-door-started")], [200, "0-1", "0"]);
 });
 
 test("a door given its owner's chat with their old agent starts only at their word: kept, it restores it; let go, it begins anew", async () => {
