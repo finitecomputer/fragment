@@ -271,8 +271,9 @@ pub struct Run {
     wiped: Mutex<Vec<String>>,
     budget: Mutex<Budget>,
     /// The section running and whether it said it uses the runtime's
-    /// containers (`Suite::section_also`), for `made_unsaid`. None before
-    /// the first: what sets a run up is no section's.
+    /// containers (`Suite::section_also`), for `Api::send` to hold it to
+    /// (`made_computer`). None before the first: what sets a run up is no
+    /// section's.
     section: Mutex<Option<(String, bool)>>,
 }
 
