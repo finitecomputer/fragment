@@ -75,7 +75,7 @@ fn the_e2e_passes_with_a_broken_node_first_on_path() {
     let started = SystemTime::now();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     println!("PATH={}", path.to_string_lossy());
-    let status = Command::new(cargo).args(["xtask", "e2e", "--only", "deploy,site,shell"]).env("PATH", &path).current_dir(&root).status().expect("run the e2e");
+    let status = fragment_devstack::outside_cargo(cargo).args(["xtask", "e2e", "--only", "deploy,site,shell"]).env("PATH", &path).current_dir(&root).status().expect("run the e2e");
     assert!(status.success(), "the e2e passed with a broken node first on PATH: {status}");
     assert!(!ran.exists(), "nothing ran the node on PATH: {}", fs::read_to_string(&ran).unwrap_or_default());
 

@@ -51,7 +51,8 @@ fn person(workos_id: &str, olds: &[&str]) -> RosterPerson {
 }
 
 pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Move]) {
+    // its wipes reach each person's computer (the wipe's computer step)
+    if !s.section_using("move", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Move], &[Need::Computers]) {
         return Ok(());
     }
     let mover = Mover::new(&api.base, s.mover.clone());
