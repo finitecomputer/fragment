@@ -653,6 +653,45 @@ test("a reply's file is used until its reply is done, whatever its runner reads;
   assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"]);
 });
 
+const replyFileOf = (d, n, key) => d.call("PUT", `/job/file/${sha(n)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF");
+const replyFiles1 = (n) => [{ sha256: sha(n), name: "plan.pdf", type: "application/pdf", size: 4 }];
+
+test("a reply sent as its text alone (a runner that carries no files) lets go of its files once done: a full door takes a new file after (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  // as many replies' files as it holds, each refused by a runner that
+  // carries none, then sent as its text alone under the same key, done
+  for (let n = 1; n <= 64; n += 1) {
+    assert.equal((await replyFileOf(d, n, `chat:${n}`)).status, 200, `file ${n}`);
+    d.c.answers.push([200, { phase: "linked" }]);
+    assert.equal((await d.job("reply", { key: `chat:${n}`, text: "here", files: replyFiles1(n) })).status, 409, "its runner carries no files");
+    d.c.answers.push([200, { done: true }]);
+    assert.equal((await d.job("reply", { key: `chat:${n}`, text: "here", files: [] })).status, 200);
+  }
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM uses").one().n, 0, "no done reply's use left");
+  const taken = await replyFileOf(d, 99, "chat:99");
+  assert.equal(taken.status, 200, `a full door makes room of files nothing uses: ${await taken.clone().text()}`);
+});
+
+test("a reply its runner says ended (410: its link ended first) lets go of its files, as its text alone or with them; one pending, or another reply's, keeps its own (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  await replyFileOf(d, 1, "chat:1");
+  d.c.answers.push([200, { phase: "linked" }]);
+  await d.job("reply", { key: "chat:1", text: "here", files: replyFiles1(1) });
+  d.c.answers.push([410, { done: false, ended: true }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "here", files: [] })).status, 410);
+  assert.deepEqual(uses(d, 1), [], "ended as its text alone: let go");
+  await replyFileOf(d, 2, "chat:2");
+  await replyFileOf(d, 2, "chat:3");
+  d.c.answers.push([200, { files: true }], [202, { done: false }]);
+  await d.job("reply", { key: "chat:2", text: "", files: replyFiles1(2) });
+  assert.deepEqual(uses(d, 2), ["r:chat:2", "r:chat:3"], "pending: kept");
+  d.c.answers.push([200, { files: true }], [410, { done: false, ended: true }]);
+  assert.equal((await d.job("reply", { key: "chat:2", text: "", files: replyFiles1(2) })).status, 410);
+  assert.deepEqual(uses(d, 2), ["r:chat:3"], "ended with its files: its own use let go, the other reply's kept");
+});
+
 test("an old file a waiting delivery keeps counts toward the door's bounds (the review of #1538)", async () => {
   const d = door();
   await d.connect();
