@@ -58,7 +58,14 @@ function storage() {
       throw e;
     }
   };
-  return { sql, transactionSync, alarms, setAlarm: async (t) => void alarms.push(t) };
+  const st = { sql, transactionSync, alarms, setAlarm: async (t) => void alarms.push(t) };
+  st.deleteAlarm = async () => void (alarms.length = 0);
+  // its storage gone whole: every table, as a Durable Object's SQLite's
+  st.deleteAll = async () => {
+    for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()) db.exec(`DROP TABLE ${name}`);
+  };
+  st.tables = () => db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((t) => t.name);
+  return st;
 }
 
 // The bucket: `uploading`, when set, is awaited in the middle of each put.
@@ -72,6 +79,11 @@ function bucket() {
     return { size: bytes.length };
   };
   b.delete = async (ks) => [].concat(ks).forEach((k) => b.files.delete(k));
+  // a page of the keys under `prefix` (R2's list, at most `limit`)
+  b.list = async ({ prefix, limit = 1000 }) => {
+    const keys = [...b.files.keys()].filter((k) => k.startsWith(prefix)).sort();
+    return { objects: keys.slice(0, limit).map((key) => ({ key })), truncated: keys.length > limit };
+  };
   return b;
 }
 
@@ -85,6 +97,11 @@ function container() {
   };
   c.monitor = () => new Promise(() => {});
   c.signal = async (n) => void c.signals.push(n);
+  c.destroyed = 0;
+  c.destroy = async () => {
+    c.running = false;
+    c.destroyed += 1;
+  };
   // its runner: `answers`, each ask's (status, body) in turn, then 202
   c.asked = [];
   c.answers = [];
@@ -130,6 +147,12 @@ function door({ noDoors = false } = {}) {
   d.restore = (started) => call("GET", "/egress/save", { "x-door-generation": String(started) });
   d.save = (life, seq, bytes = `save ${life}-${seq}`) => call("PUT", `/egress/save?seq=${seq}`, { "x-door-generation": String(life), "x-door-mark": "0", "content-length": String(bytes.length) }, bytes);
   d.unreadable = (life, save) => call("POST", "/egress/unreadable", { "x-door-generation": String(life) }, JSON.stringify({ save, why: "a test's" }));
+  // its end, as the platform asks it: its connector unbound, or (`last`)
+  // its connector's life over (deleted, wiped, other code)
+  d.end = (name = DOOR, last = false) => call("POST", "/door/end", {}, JSON.stringify({ door: name, final: last }));
+  // the same object started again over its storage (an eviction)
+  d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
+  d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
   return d;
 }
 
@@ -389,4 +412,117 @@ test("a link asked again after its unlink (a job's retry, a request of its own) 
   assert.equal((await again.json()).error, "overtaken");
   assert.deepEqual(d.c.asked.filter((a) => a.method === "POST").map((a) => a.path), ["/link", "/unlink"], "never a link after the unlink");
   assert.equal((await d.job("link", { n: 3 })).status, 202, "a newer link goes");
+});
+
+// ---- its end (its connector deleted, unbound, or running other code) ----
+
+// a connected door that saved: its connector's door, one save and a file
+// of its own beside (the end deletes its whole prefix)
+async function saved() {
+  const d = door();
+  assert.equal((await d.connect()).status, 200);
+  const l = life(await d.restore(1));
+  assert.equal((await d.save(l, 1)).status, 200);
+  d.blobs.files.set(`doors/${DOOR}/saves/stray`, "a file a crash left");
+  d.blobs.files.set(`doors/${NAME}--fedcba987654/saves/1-1`, "another life's door");
+  return { d, l };
+}
+
+test("its end ends it: no last save, every file under its prefix gone, its storage whole gone, its watch let go; asked again, the same", async () => {
+  const { d } = await saved();
+  assert.equal(d.prefixed().length, 2);
+  const r = await d.end();
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { ended: DOOR, files: 2 });
+  assert.equal(d.c.destroyed, 1, "its container ended at once");
+  assert.deepEqual(d.c.signals, [], "never asked to save last");
+  assert.deepEqual(d.prefixed(), [], "every file of its own gone");
+  assert.ok(d.blobs.files.has(`doors/${NAME}--fedcba987654/saves/1-1`), "another life's door's files untouched");
+  assert.deepEqual(d.st.tables(), [], "its storage gone whole");
+  assert.deepEqual(d.st.alarms, [], "its watch let go");
+  assert.equal((await d.job("state")).status, 410, "ended, it answers its connector's asks no more");
+  assert.deepEqual(d.st.tables(), [], "and keeps nothing for them");
+  const again = await d.end();
+  assert.deepEqual(await again.json(), { ended: DOOR, files: 0 }, "asked again, the same");
+});
+
+test("an upload under way across its end lets go of its own file, which nothing names", async () => {
+  const d = door();
+  await d.connect();
+  const l = life(await d.restore(1));
+  let holding, release;
+  const held = new Promise((r) => (holding = r));
+  const gate = new Promise((r) => (release = r));
+  d.blobs.uploading = async () => {
+    d.blobs.uploading = null;
+    holding();
+    await gate;
+  };
+  const upload = d.save(l, 1);
+  await held;
+  assert.equal((await d.end()).status, 200, "ended while its save uploads");
+  release();
+  assert.equal((await upload).status, 410, "the save is refused: its door ended");
+  assert.deepEqual(d.prefixed(), [], "its file, landed after the end's deletion, gone too");
+  assert.deepEqual(d.st.tables(), []);
+});
+
+test("a door already stopped ends the same: its saves and storage gone", async () => {
+  const { d } = await saved();
+  assert.equal((await d.lever("stop")).status, 200);
+  assert.ok(d.row().stopped);
+  assert.equal((await d.end()).status, 200);
+  assert.deepEqual(d.prefixed(), []);
+  assert.deepEqual(d.st.tables(), []);
+});
+
+test("a door never started keeps nothing at its end (a connector that never connected)", async () => {
+  const d = door();
+  assert.equal((await d.end()).status, 200);
+  assert.deepEqual(d.st.tables(), [], "its schema, made as it began, gone too");
+  assert.deepEqual(d.prefixed(), []);
+});
+
+test("ended, its connector's connect starts a new door, nothing of the old", async () => {
+  const { d } = await saved();
+  await d.end();
+  const r = await d.connect();
+  assert.equal(r.status, 200, "a new door, never refused for the old one's saves");
+  assert.equal(d.row().saved, 0);
+  assert.equal(d.row().stopped, null);
+  assert.equal(life(await d.restore(d.row().started)), d.row().started + 1);
+  assert.equal((await d.restore(d.row().started)).status, 204, "none to restore: a new door");
+});
+
+test("its last end (its connector's life over) is for good: a connect delivered late starts nothing, then or after a restart", async () => {
+  const { d } = await saved();
+  assert.equal((await d.end(DOOR, true)).status, 200);
+  assert.deepEqual(d.prefixed(), []);
+  const late = await d.connect();
+  assert.equal(late.status, 410, "a connect sent before its end, come after it");
+  assert.equal((await late.json()).error, "over");
+  assert.equal((await d.start()).status, 410, "nor the lever's start");
+  assert.equal(d.c.starts.length, 1, "no container started again");
+  assert.deepEqual(d.st.tables(), ["over"], "its one row, all it keeps");
+  // started again over its storage, as an eviction does
+  const o = d.again();
+  const call = (path, headers, body) => o.fetch(new Request(`http://door${path}`, { method: "POST", headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
+  const r = await call("/job/connect", { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "x-door-secret": "s3cret-of-the-inbox" }, JSON.stringify({ name: "Juniper" }));
+  assert.equal(r.status, 410);
+  assert.equal((await call("/door/end", {}, JSON.stringify({ door: DOOR, final: true }))).status, 200, "ended again, the same");
+  assert.deepEqual(d.st.tables(), ["over"]);
+  await o.alarm();
+  assert.equal(d.c.starts.length, 1, "its alarm starts nothing");
+  // an unbound connector's end is not its last: bound again, it connects
+  const { d: e } = await saved();
+  await e.end();
+  assert.equal((await e.connect()).status, 200);
+});
+
+test("its end names its own door alone", async () => {
+  const { d } = await saved();
+  assert.equal((await d.end(`${NAME}--fedcba987654`)).status, 409, "another life's door is not this one");
+  assert.equal((await d.end("not a door name!")).status, 400);
+  assert.equal(d.prefixed().length, 2, "nothing ended");
+  assert.ok(d.st.tables().includes("door"));
 });

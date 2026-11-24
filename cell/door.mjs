@@ -16,6 +16,12 @@
 //   connector's inbox takes it;
 // - its connector's inbox secret, as the connector's `connect` gave it.
 //
+// It ends with its connector (`/door/end`: the connector deleted, its
+// owner's unlink, or other code installed in it; cell/src/ended.rs and
+// doors.rs): its container ended with no last save, every file under its
+// prefix deleted, and its storage gone whole, so nothing of it outlives its
+// connector, and a connect after it starts a new door.
+//
 // Who reaches it: the platform, as any object, through `routed::send`
 // (cell/src/levers.rs, the e2e's lever: `door/lever`; a deploy's probe;
 // its connector's jobs, `job/…`: cell/src/jobs.rs, templates/simplex),
@@ -31,7 +37,7 @@
 // did not take at once.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { settled, startIntercepted } from "./intercepts.mjs";
-import { DELIVERIES_KEPT, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, doorOf, fenced, inboxUrl, nameOk, parseSaveId, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
+import { DELIVERIES_KEPT, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, doorOf, doorPrefix, fenced, inboxUrl, nameOk, parseSaveId, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
 
 const HOST = "door.fragment.internal";
 const PORT = 8080;
@@ -53,6 +59,9 @@ const CONNECTOR_HEADER = "x-fragment-connector";
 // The inbox secret its connector's `connect` gives, filled at the
 // platform's egress (never the connector's code's to read).
 const SECRET_HEADER = "x-door-secret";
+// Pages of its files (the bucket's, up to 1000 keys each) one end deletes;
+// asked again, it deletes the rest.
+const END_PAGES_MAX = 10;
 
 const json = (v, status = 200, headers = {}) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
 const refusal = (status, error, message) => json({ error, message }, status);
@@ -72,10 +81,23 @@ export class SimplexDoor extends DurableObject {
   // its deliveries going on to its connector's inbox, one drain at a time
   #draining = null;
   #again = false;
+  // its storage gone whole by its end, until a connect starts it again;
+  // `#ends` counts its ends, so an upload under way across one lets go of
+  // its own file
+  #ended = false;
+  #ends = 0;
+  // its connector's life over (deleted, wiped, or other code: its end
+  // `final`): it never starts again, whatever comes late (a connect sent
+  // before that end and delivered after it). One row says so (`over`),
+  // all its storage keeps once it is released
+  #over = false;
 
   constructor(ctx, env) {
     super(ctx, env);
-    ctx.blockConcurrencyWhile(async () => this.#migrate());
+    ctx.blockConcurrencyWhile(async () => {
+      this.#over = ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'over'").toArray().length > 0;
+      if (!this.#over) this.#migrate();
+    });
   }
 
   #migrate() {
@@ -92,10 +114,12 @@ export class SimplexDoor extends DurableObject {
   }
 
   #door() {
+    if (this.#ended || this.#over) return null;
     return this.ctx.storage.sql.exec("SELECT door, agent, started, generation, marks, saved, stopped FROM door WHERE id = 1").toArray()[0] ?? null;
   }
 
   #saves() {
+    if (this.#ended || this.#over) return [];
     return this.ctx.storage.sql.exec("SELECT generation, seq, mark, bytes, at, unreadable FROM saves").toArray();
   }
 
@@ -121,7 +145,20 @@ export class SimplexDoor extends DurableObject {
       // a deploy's probe: the release checked, the schema taken (in the
       // constructor), nothing else (cell/src/routed.rs `PROBED`)
       if (url.pathname === "/__probe" && request.headers.has("x-fragment-probe")) return json({ ready: true });
-      if (url.pathname === "/door/lever" && request.method === "POST") return await this.#lever(await bounded(request));
+      if (url.pathname === "/door/end" && request.method === "POST") return await this.#end(await bounded(request));
+      const lever = url.pathname === "/door/lever" && request.method === "POST" ? await bounded(request) : null;
+      // the e2e's look at its files, whatever it is
+      if (lever?.op === "files") return json(await this.#files(lever.door));
+      if (this.#over) return refusal(410, "over", "this door's connector is gone: it never starts again");
+      // ended, only a start makes it again (its connector's connect, the
+      // lever's start); anything else is refused, its storage left empty
+      const starts = (url.pathname === "/job/connect" && request.method === "POST") || lever?.op === "start";
+      if (this.#ended && !starts) return refusal(410, "ended", "this door has ended: its connector's connect starts it again");
+      if (this.#ended) {
+        this.#migrate();
+        this.#ended = false;
+      }
+      if (lever) return await this.#lever(lever);
       if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore(request);
       if (url.pathname === "/egress/save" && request.method === "PUT") return await this.#save(request, url);
       if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await bounded(request));
@@ -135,6 +172,7 @@ export class SimplexDoor extends DurableObject {
   }
 
   async alarm() {
+    if (this.#over) return;
     try {
       await this.#ensure("alarm");
     } catch (e) {
@@ -142,6 +180,48 @@ export class SimplexDoor extends DurableObject {
     }
     await this.#drain();
     if (this.#door() && !this.#door().stopped) await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
+  }
+
+  // Its end: its container ended with no last save (a start under way
+  // finds its row gone and starts nothing), its watch let go, its storage
+  // gone whole and every file under its prefix deleted. Asked again, the
+  // same, the files' rest deleted; asked of a door never started, nothing
+  // is kept. `final` (its connector's life over): it never starts again,
+  // its one row (`over`) saying so; else (its connector unbound, which may
+  // be bound again) its connector's next connect starts a new door.
+  async #end(body) {
+    const door = body.door;
+    if (!nameOk(door)) throw Object.assign(new Error("an end names its door"), { status: 400 });
+    const d = this.#door();
+    if (d && d.door !== door) return refusal(409, "another_door", `this door is ${d.door}`);
+    this.#ends += 1;
+    if (!this.#ended && !this.#over) {
+      this.#ended = true;
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+    }
+    if (body.final === true && !this.#over) {
+      this.ctx.storage.sql.exec("CREATE TABLE over (at INTEGER NOT NULL)");
+      this.ctx.storage.sql.exec("INSERT INTO over (at) VALUES (?)", Date.now());
+      this.#over = true;
+    }
+    if (this.ctx.container?.running) await this.ctx.container.destroy();
+    let files = 0;
+    for (let page = 0; page < END_PAGES_MAX; page += 1) {
+      const listed = await this.env.BLOBS.list({ prefix: doorPrefix(door) });
+      if (!listed.objects.length) break;
+      await this.env.BLOBS.delete(listed.objects.map((o) => o.key));
+      files += listed.objects.length;
+    }
+    console.log(JSON.stringify({ event: "door.ended", door, files }));
+    return json({ ended: door, files });
+  }
+
+  // The keys of its files in the bucket (at most a page): the e2e's look.
+  async #files(door) {
+    if (!nameOk(door)) throw Object.assign(new Error("a look names its door"), { status: 400 });
+    const listed = await this.env.BLOBS.list({ prefix: doorPrefix(door) });
+    return { files: listed.objects.map((o) => o.key) };
   }
 
   // Started, or started again (unstopped): its row made the first time,
@@ -258,8 +338,9 @@ export class SimplexDoor extends DurableObject {
 
   async #forward() {
     const d = this.#door();
+    if (!d) return;
     const inbox = this.ctx.storage.sql.exec("SELECT fragment, secret FROM inbox WHERE id = 1").toArray()[0];
-    if (!d || !inbox) return;
+    if (!inbox) return;
     const to = inboxUrl(this.env.FRAGMENT_PLATFORM_URL, inbox.fragment);
     for (let n = 0; n <= DELIVERIES_KEPT; n += 1) {
       const next = this.ctx.storage.sql.exec("SELECT id, body FROM deliveries WHERE sent = 0 ORDER BY mark LIMIT 1").toArray()[0];
@@ -401,9 +482,16 @@ export class SimplexDoor extends DurableObject {
     const key = saveKey(d.door, generation, seq);
     if (this.#uploading.has(key) || this.ctx.storage.sql.exec("SELECT 1 FROM saves WHERE generation = ? AND seq = ?", generation, seq).toArray().length) return refusal(409, "taken", `save ${generation}-${seq} is taken`);
     this.#uploading.add(key);
+    const ends = this.#ends;
     try {
       const { readable, writable } = new FixedLengthStream(length);
       const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      // the door ended during its upload: its file, which that end's
+      // deletion may have missed, goes too, and nothing names it
+      if (this.#ends !== ends) {
+        await this.env.BLOBS.delete(key);
+        return refusal(410, "ended", "this door ended during its save");
+      }
       d = this.#door();
       if (fenced(generation, d.generation)) {
         await this.env.BLOBS.delete(key);

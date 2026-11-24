@@ -697,18 +697,11 @@ unfinished design, not debt.
   posted as the agent into its `<label>-simplex` chat), and the
   connector's (templates/simplex on the platform's door, cell/door.mjs:
   no key, records the platform checks through `job.door`). The
-  connector is made only by a test or the e2e so far, and a connector
-  deleted or unbound leaves its door running, its saves in the bucket,
-  until it is stopped (its life's own: a name made again reaches another
-  door, never its link).
-- **Risk:** two paths to keep proven for one messenger; a door no one
-  stops costs its container (about $2 a month), and a deleted
-  connector's SimpleX state outlives it.
+  connector is made only by a test or the e2e so far.
+- **Risk:** two paths to keep proven for one messenger.
 - **Delete when:** Settings links through the connector (D3), existing
   links move to doors (D4), and the bridge's SimpleX module, its door key
-  and the signed-record route are deleted (D5); the connector's deletion
-  stops its door and deletes its saves (`ended.rs`), and its unlinking
-  stops it, with tests.
+  and the signed-record route are deleted (D5).
 
 ## SimpleX retains the computer's root trust and rewindable state
 
