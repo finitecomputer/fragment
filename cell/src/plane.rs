@@ -682,6 +682,11 @@ impl FragmentCell {
         // not the new code's, nor its editors', to send
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
             if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
+                // its door, if a SimpleX one, ends by the alarm (ended.rs)
+                if let Some(own) = self.own_door()? {
+                    let life: i64 = self.must(MetaKey::CreatedAt)?.parse().map_err(|_| CellError::host("its life's CreatedAt is a number"))?;
+                    self.door_ends(life, &own)?;
+                }
                 self.del_meta(MetaKey::DoorTemplate)?;
                 self.unbind_door("its code is no longer its connector's")?;
                 let secrets = self.drop_secrets()?;

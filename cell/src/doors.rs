@@ -26,11 +26,19 @@
 //! its own and several may each be a door of the same agent. Each publish
 //! and each fetch asks the deployment's connector policy again, and a job
 //! is told its binding (`job.door`).
+//!
+//! **A SimpleX connector's door ends with it** (cell/door.mjs `/door/end`:
+//! its container, its saves, its storage): its owner's unlink ends it
+//! before the binding goes (and fails, bound still, while it cannot); its
+//! deletion, or other code installed, records it for the alarm to end
+//! (ended.rs). Bound to another of its owner's agents, it stays: its link
+//! is its owner's, whichever agent it reaches.
 
 use std::borrow::Cow;
 
 use fragment_core::connectors::{Action, Policy};
 use fragment_core::door::{self, Hosted};
+use fragment_core::ended::{self as rules, Failure};
 use fragment_core::npub;
 use fragment_proto::{ErrorCode, IdentityKind, Role, SetRole};
 use serde_json::{json, Value};
@@ -39,6 +47,29 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::calls::DoorActor;
 use crate::fragment::{Caller, FragmentCell, MetaKey};
 use crate::routed::Signed;
+
+/// Ends a SimpleX connector's door (cell/door.mjs `/door/end`): its
+/// container with no last save, its files under its prefix and its
+/// object's storage. Ended already, it ends again: so a try is safe to
+/// repeat. `last`: its connector's life is over (deleted, wiped, other
+/// code), and the door never starts again, whatever connect comes late;
+/// else (unbound) a connect starts a new one. Its answer told apart
+/// (`fragment_core::ended::door_ended`).
+pub(crate) async fn end_door(env: &worker::Env, door: &str, last: bool) -> Result<(), Failure> {
+    // `door_id` makes it: a name and hex digits, nothing to escape
+    assert!(door::door_of(door).is_some(), "a door's end names a connector's door: {door}");
+    let body = format!(r#"{{"door":"{door}","final":{last}}}"#);
+    let asked = crate::routed::internal_request("door/end", &body).map_err(|e| Failure::Transient(rules::kept_error(&e.message)))?;
+    match crate::routed::send(env, "SIMPLEX_DOOR", door, asked).await {
+        Ok(mut answer) => {
+            let status = answer.status_code();
+            let said = answer.text().await.unwrap_or_default();
+            rules::door_ended(status, &said)
+        }
+        // its object deploying (another release's), or not reached
+        Err(e) => Err(Failure::Transient(rules::kept_error(&format!("{:?}: {}", e.code, e.message)))),
+    }
+}
 
 /// A connector's binding as its `door_actor` holds it.
 struct Binding {
@@ -167,6 +198,15 @@ impl FragmentCell {
         Ok(json!({ "bound": bound }))
     }
 
+    /// This life's SimpleX door, if it is a SimpleX connector's
+    /// (`door_template`): its name and its life's digits (`door::door_id`).
+    pub(crate) fn own_door(&self) -> CellResult<Option<String>> {
+        if self.meta(MetaKey::DoorTemplate)?.as_deref() != Some(door::SIMPLEX) {
+            return Ok(None);
+        }
+        Ok(door::door_id(&self.name()?, &self.must(MetaKey::Npub)?))
+    }
+
     /// Why a fetch of this fragment's job is not made: it is bound as a door
     /// that is shut now (the deployment no longer allows it, or its code is
     /// no longer the connector's), so it sends nothing on its owner's behalf.
@@ -202,6 +242,17 @@ impl FragmentCell {
         match text("act") {
             "link" => {}
             "unlink" => {
+                // its door ends first: an unlink that cannot end it leaves
+                // it bound, to be asked again. Bound again, it may connect
+                // again: not its last end. Its life is read again after:
+                // one made since under its name is another's, unbound by
+                // no one but its owner
+                if let Some(own) = self.own_door()? {
+                    end_door(&self.env, &own, false).await.map_err(|f| CellError::new(ErrorCode::UpstreamFailed, format!("its SimpleX door did not end, so it is still linked: {}", f.message())))?;
+                    if self.meta(MetaKey::DoorTemplate)?.as_deref() != Some(door::SIMPLEX) || self.meta(MetaKey::Npub)?.and_then(|npub| door::door_id(&self.name().ok()?, &npub)).as_deref() != Some(own.as_str()) {
+                        return Err(CellError::new(ErrorCode::Conflict, "this connector was deleted or made again while its door ended: nothing unlinked"));
+                    }
+                }
                 self.unbind_door("no longer its owner's agent's door")?;
                 return Ok(json!({ "ok": true }));
             }
