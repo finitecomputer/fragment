@@ -4214,8 +4214,8 @@ impl ComputerCell {
             }
             "set" => {
                 let rec = moves.entry(agent.to_string()).or_insert_with(|| json!({ "moved": false }));
-                for k in ["connector", "door", "step", "chat"] {
-                    if let Some(v) = b["record"].get(k).filter(|v| v.is_string()) {
+                for k in ["connector", "door", "step", "chat", "staged"] {
+                    if let Some(v) = b["record"].get(k).filter(|v| v.is_string() || v.is_boolean()) {
                         rec[k] = v.clone();
                     }
                 }
@@ -4253,8 +4253,7 @@ impl ComputerCell {
             self.wake(Wake::Tab).await?;
             return Err(CellError::new(ErrorCode::Conflict, "its computer is waking: ask again in a moment").retry_after(PORT_RETRY_MS));
         }
-        let mut moves = self.simplex_moves()?;
-        let mut rec = moves.get(&agent).cloned().ok_or_else(|| CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {agent:?} begun here")))?;
+        let rec = self.simplex_moves()?.get(&agent).cloned().ok_or_else(|| CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {agent:?} begun here")))?;
         let computer = self.must(MetaKey::Id)?;
         let handover = match act.as_str() {
             "handover" => true,
@@ -4270,10 +4269,10 @@ impl ComputerCell {
         // is the way back again, never a connector deleted beside a link
         // still moved)
         if handover {
-            rec["moved"] = json!(true);
-            rec["ticket"] = ticket.clone();
-            moves.insert(agent.clone(), rec.clone());
-            self.set_simplex_moves(&moves)?;
+            self.simplex_move_update(&agent, |r| {
+                r["moved"] = json!(true);
+                r["ticket"] = ticket.clone();
+            })?;
         }
         let headers = worker_sys::web_sys::Headers::new().map_err(|_| CellError::host("headers"))?;
         let init = worker_sys::web_sys::RequestInit::new();
@@ -4293,28 +4292,36 @@ impl ComputerCell {
         let asked = worker_sys::web_sys::Request::new_with_str_and_init(&format!("http://computer/simplex/{path}?agent={agent}"), &init).map_err(|_| CellError::host("a request"))?;
         let mut answer = self.simplex_call(asked).await?;
         let status = answer.status_code();
+        let unmark = |r: &mut Value| {
+            r["moved"] = json!(false);
+            r["ticket"] = Value::Null;
+        };
         if !handover && status == 200 {
-            rec["moved"] = json!(false);
-            rec["ticket"] = Value::Null;
-            moves.insert(agent.clone(), rec);
-            self.set_simplex_moves(&moves)?;
+            self.simplex_move_update(&agent, unmark)?;
         } else if handover && status == 200 {
             if let Some(chat) = answer.headers().get("x-simplex-chat")?.filter(|c| fragment_proto::valid_fragment_name(c)) {
-                rec["chat"] = json!(chat);
-                moves.insert(agent.clone(), rec);
-                self.set_simplex_moves(&moves)?;
+                self.simplex_move_update(&agent, |r| r["chat"] = json!(chat))?;
             }
         } else if handover && (400..500).contains(&status) {
             let said: Value = answer.read_json().await.unwrap_or(Value::Null);
             if said["error"] != "moved" {
-                rec["moved"] = json!(false);
-                rec["ticket"] = Value::Null;
-                moves.insert(agent.clone(), rec);
-                self.set_simplex_moves(&moves)?;
+                self.simplex_move_update(&agent, unmark)?;
             }
             return Ok(json_response(&said)?.with_status(status));
         }
         Ok(answer)
+    }
+
+    /// One agent's move record changed as it stands now: read again with
+    /// nothing awaited before its write, so another agent's move written
+    /// meanwhile (its own request's turn) is never put back as it was.
+    fn simplex_move_update(&self, agent: &str, change: impl FnOnce(&mut Value)) -> CellResult<()> {
+        let mut moves = self.simplex_moves()?;
+        if let Some(rec) = moves.get_mut(agent) {
+            change(rec);
+            self.set_simplex_moves(&moves)?;
+        }
+        Ok(())
     }
 
     async fn port(&self, req: Request) -> CellResult<Response> {

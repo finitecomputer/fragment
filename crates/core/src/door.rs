@@ -132,6 +132,16 @@ pub fn door_route(raw: &str, blessed: Option<&str>) -> Result<Option<url::Url>, 
     Ok(Some(url))
 }
 
+/// The label of a connector made for an agent labelled `agent_label`, its
+/// door `door`, within `room` bytes (`fragment_proto::label_room`): the
+/// agent's label cut so it, `-<door>` and a taken label's `-<n>` fit, as
+/// Settings' `connectorLabel` cuts it (cell/shell/shell.js).
+pub fn connector_label(agent_label: &str, door: &str, room: usize) -> String {
+    let keep = room.saturating_sub(format!("-{door}-9999").len()).min(agent_label.len());
+    let cut = agent_label.get(..keep).unwrap_or(agent_label).trim_end_matches('-');
+    format!("{cut}-{door}")
+}
+
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
 pub const TICKET_MS: i64 = 10 * 60_000;
@@ -412,6 +422,24 @@ mod tests {
         assert_eq!(hex::encode(other.digest()), ADOPT_DIGEST, "an adoption's, the bridge's too");
         assert!(!fragment_nip98::verify_digest(agent.pubkey_hex(), &other.digest(), &sig), "nor an adoption's");
         assert!(Act::Link.opens() && Act::Adopt.opens() && Act::Back.opens() && !Act::Unlink.opens() && !Act::Handover.opens());
+    }
+
+    /// Goal (the review of #1541): a connector's label for an agent of any
+    /// label fits the deployment's room, as Settings' does: short, whole;
+    /// at the limit, cut, never ending in a dash, room left for `-<n>`.
+    #[test]
+    fn a_connector_label_fits_its_room() {
+        let room = fragment_proto::label_room("--k3x9");
+        assert_eq!(connector_label("juniper", SIMPLEX, room), "juniper-simplex");
+        // its cut lands just past a dash
+        let keep = room - "-simplex-9999".len();
+        let long = "a".repeat(keep - 1) + "-" + &"b".repeat(room - keep);
+        assert_eq!(long.len(), room);
+        for agent in [long.as_str(), &"c".repeat(room)] {
+            let label = connector_label(agent, SIMPLEX, room);
+            assert!(label.len() + "-9999".len() <= room && fragment_proto::valid_label(&label), "{label}");
+        }
+        assert_eq!(connector_label(&long, SIMPLEX, room), format!("{}-simplex", "a".repeat(keep - 1)), "cut at a dash, the dash let go");
     }
 
     /// images/bridge/src/simplex/door.rs holds the same.

@@ -202,7 +202,7 @@ impl Move<'_> {
     /// on a deployment whose doors run, recorded as it is made, so no `go`
     /// again makes a second; then bound (`bind`).
     async fn make(&self) -> CellResult<Value> {
-        let label = format!("{}-simplex", label_of(&self.agent));
+        let label = fragment_core::door::connector_label(label_of(&self.agent), TEMPLATE, fragment_proto::label_room(self.cfg.host_label_suffix()));
         let create = CreateFragment { name: String::new(), label: Some(label), visibility: None, template: Some(TEMPLATE.into()), title: None, agent: None };
         let mut made = crate::create_fragment(self.env, self.cfg, self.url, create, self.person.clone()).await?;
         let made: Created = answered(&mut made, "its connector's making").await?;
@@ -241,7 +241,7 @@ impl Move<'_> {
         crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
         self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
         // a staged chat waits for its person's word, never connected for them
-        self.set(json!({ "step": if staged { "offered" } else { "imported" } })).await
+        self.set(json!({ "step": if staged { "offered" } else { "imported" }, "staged": staged })).await
     }
 
     /// Its computer's half (`computer/simplex-hand`): a handover, or the
@@ -273,12 +273,13 @@ impl Move<'_> {
                 200 => {
                     let raw: worker::worker_sys::web_sys::Response = held.into();
                     let head = |k: &str| raw.headers().get(k).ok().flatten().unwrap_or_default();
-                    // the save it was given is its newest (it never saved one
-                    // of its own): its computer's own databases are that link's
-                    // still, untouched, and nothing is placed
-                    match head("x-door-save").as_str() {
-                        "0-1" => (None, false),
-                        _ => (raw.body().map(Into::into), head("x-door-behind") == "1"),
+                    // a staged chat its door never ran (never kept, nor let go):
+                    // its computer keeps it staged as it was, nothing placed;
+                    // any other is placed, the save it was given too (its
+                    // computer may have gone back to an older save since)
+                    match rec["staged"] == true && head("x-door-started") == "0" {
+                        true => (None, false),
+                        false => (raw.body().map(Into::into), head("x-door-behind") == "1"),
                     }
                 }
                 204 => (None, false),
