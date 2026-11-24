@@ -257,12 +257,16 @@ turn it names never runs.
 
 ```json
 { "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>",
-  "agent": "npub1…", "turn": "<turn>", "text": "purple" }
+  "agent": "npub1…", "turn": "<turn>", "text": "purple",
+  "answers": { "channel": "work", "seq": 12 } }
 ```
 
 Only the agent's owner answers (decision 42), and the first answer wins.
-`agent` and `turn` name the card, both or neither: prompt ids are each
-agent's own. An answer naming neither is matched by its prompt alone. A
+`answers` names the card's own record on `work`, and the platform appends
+the answer only from whom the card asks, in their own post (docs/api.md,
+"Questions and answers"). `agent` and `turn` name the card, both or
+neither: prompt ids are each agent's own. An answer naming neither is
+matched by its prompt alone. A
 page's id is `pr:<first 32 hex digits of SHA-256 of "<agent>
 <turn>:<prompt>">`, so a second tap is the same record (or a 409).
 `text` is only for an option answered in words: what was typed, at most

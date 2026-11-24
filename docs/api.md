@@ -66,7 +66,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -169,6 +169,26 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 /api/migrations/stages/{stage}/copy` (the fragment it copies into decides
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
+
+**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
+is a place's word that its agent's owner's own record there asked it: its
+asker, the agent, the place (by its life's own key), the record, and until
+when. An agent member reading a channel as itself (`GET
+/api/f/{name}/channels/{c}`) is given one beside each record whose words
+are its owner's own: their own post, or a door's relay of them
+(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
+record's writing, and a record older than that carries none. The agent's
+request may carry it in `x-fragment-mandate` in place of `for=<its
+owner>`, wherever `for` is honored, and it acts exactly as that `for`
+does. The router checks it in the signer's own lookup: one the platform
+did not make, or altered, or run out, is 403; one carried by any key but
+its agent's, 403; one beside `for`, or where `for` is not honored, 400,
+as are the identity routes and the invite routes (which take `for`
+through the registry, and no mandate yet).
+Only the platform can make one: its mark is a MAC under a key derived from
+the host secret. An asker who is not the agent's owner is another entity,
+whose actions are theirs to be keyed, capped and credited by: their words
+give the agent no mandate yet.
 
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -797,7 +817,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
-| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed` 403; past the overdraft 402 |
+| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed`, or that answers a question, 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
@@ -858,6 +878,30 @@ chose its words:
 
 A record stored before the stamp has no `author`, and reads as it did. A
 reader meets an author it does not know as `other`.
+
+### Questions and answers
+
+A question is answered only by whom it asks (FIN-615,
+`fragment_core::permit::may_answer`), in any fragment:
+
+- **A question** is a record whose body names whom it asks: `asks`, an
+  identity (a chat's card asks its agent's owner).
+- **An answer** is a record whose body names the question's record in the
+  same fragment: `"answers": {"channel": "work", "seq": 12}`, exactly
+  those two fields. An `answers` naming no `seq` is the app's own field.
+- **Who answers.** An answer comes only as a post: the asked identity's
+  own, written as itself (`author` `person` or `agent`, acting for no
+  one). Anyone else's is 403 and appends nothing: another person, an
+  agent acting for whom it asks (an agent never answers its own card), an
+  agent answering for someone. App code answers nothing (a mutation's
+  effect or a job step that answers is refused), nor does a scheduled
+  record (403 at its add) or a door. So is an answer to a record that asks
+  no one, is not kept, or is on a channel its poster may not read: one
+  refusal for all three. A malformed `answers` is 400. The same post again
+  is the record it appended, whatever became of its question.
+
+A reader still attributes an answer by its `principal`, as any record: a
+record stored before this rule promises nothing.
 
 ### Listed records
 
@@ -1816,8 +1860,9 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   `RECORD_SCHEDULE_EVERY_MIN_MINUTES` (each fire wakes and costs its owner;
   more often belongs in a cron trigger), else `invalid_request`; `record`
   any JSON of at most `RECORD_SCHEDULE_BODY_MAX_BYTES` as canonical JSON,
-  else `too_large`, and relaying no one (no `relayed`: the fragment's own
-  key is no door), else 403; `channel` declared, taking posts, and not
+  else `too_large`, relaying no one (no `relayed`: the fragment's own
+  key is no door) and answering no question (no `answers` naming a seq:
+  Questions and answers), else 403; `channel` declared, taking posts, and not
   only from one kind of member (`from`), else `invalid_request`, and the
   caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
 - The same schedule again answers the one there (`replayed: true`).
@@ -2327,6 +2372,21 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  While it invites, the door's `state` has the invitation's QR code
+  (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of
+  its short link where there is one), for its owner's setup page to draw
+  (templates/simplex `site/setup.html`, which Settings opens).
+  **Its door ends with it** (`/door/end`): its container with no last
+  save, every file under its prefix in the bucket, and its object's
+  storage. Its owner's unlink ends it before the binding goes (502, still
+  bound, while it cannot); its deletion, a wipe's end of it, or other
+  code installed records it for its alarm to end, retried as a delete's
+  other parts are. Bound to another of its owner's agents, it stays.
+  Unbound, its connector bound again connects a new door; deleted, wiped
+  or running other code, its door never starts again, whatever connect
+  comes late (one row of its object says so). An unlink re-reads its
+  connector after the door ends, and one deleted or made again meanwhile
+  is 409, nothing unlinked.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.
@@ -2341,7 +2401,13 @@ Where an agent reaches its owner when no one asked:
 - **Its SimpleX chat** is its owner's chat labelled `<label>-simplex`,
   titled "SimpleX", the agent a member: the chat its SimpleX link mirrors,
   made by its computer as the link is first bound and kept through an
-  unlink (docs/bridge.md, "SimpleX").
+  unlink (docs/bridge.md, "SimpleX"). With no link on its computer, it is
+  the chat bound as its SimpleX door (a connector its owner set up from
+  Settings: An agent's doors), as the agent's own row of that chat's
+  members says (`door`). Its computer reads the members of at most a few
+  of its owner's chats it is in to find it, those labelled as its SimpleX
+  chat first (images/bridge api.rs `door_candidates`), and Settings offers
+  SimpleX as its home once either is there.
 - A routine naming no chat runs in its home, read as it fires; its computer
   tells the agent where its home is at every turn (docs/computers.md).
 - Its owner sets it in Settings, and through the SimpleX link page's

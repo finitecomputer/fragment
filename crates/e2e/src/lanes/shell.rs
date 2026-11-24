@@ -198,10 +198,12 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let row = |p: &str| rows.iter().find(|x| x["provider"] == p).cloned().unwrap_or(Value::Null);
     let keys = crate::SWAP_KEYS.iter().all(|(name, _, env)| {
         let k = row(name);
-        k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
+        // offered, with nothing to set; what a call costs is the price
+        // book's, by the vendor's own number (FIN-616), not a row's
+        k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env])
     });
     s.ok(
-        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, own keys not set (one signed in to, with its models)",
+        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered, own keys not set (one signed in to, with its models)",
         status(&r) == Some(json!("not_connected"))
             && row(crate::SWAP_CONNECTION)["kind"] == "connection"
             && keys
@@ -1472,6 +1474,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_late_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    send_press_ui(s, &mut b, &page)?;
     knowledge_ui(s, api, &mut b, &page, &me, &shots)?;
     launch_geometry_ui(s, api, &mut b, &page, &me, &shots)?;
 
@@ -1559,61 +1562,58 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
-    // SimpleX only on an image that does it: the stub's bridge never says so
+    // SimpleX: its connector's on any seat (D3), and its computer's where an
+    // always-on computer whose image does it keeps it (its links, and a
+    // moved chat to keep there, until they move to doors: D4); the stub's
+    // bridge never says its image does
+    const CONNECTOR_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for]:not([data-simplex-computer])";
+    const COMPUTER_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for][data-simplex-computer]";
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let said = computers.body["computers"][0].get("simplex").cloned();
     let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     s.ok(
-        "settings offer no SimpleX on a computer whose image does not do it (the stub's, as production's before SimpleX): the section and its link hidden, no Set up, and its view says nothing of it",
-        computers.status == 200 && said.is_none() && !has("#settings-simplex:not([hidden])") && !has(".settings-nav-link[data-section=settings-simplex]:not([hidden])") && !text.contains("SimpleX"),
+        "settings offer SimpleX's connector on a computer whose image does not do it (the stub's, as every agent's own computer's): its section and nav link shown, each agent's Set up its connector's, and the computer's view says nothing of SimpleX",
+        computers.status == 200 && said.is_none() && has(CONNECTOR_ROW) && !has(COMPUTER_ROW) && has(".settings-nav-link[data-section=settings-simplex]:not([hidden])"),
         json!({ "simplex": said, "settings": &text[..text.len().min(600)] }),
     );
-    // its bridge says its image does (the lever, as `?simplex=1` would), and
-    // then no more: the open settings follow each, through the list's
-    // socket, with what was typed elsewhere on them kept (Alex's review)
-    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
-    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
-    let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
     // marked what it is, a word each (Paul, 2026-10-31), its nav link still
     // its name alone
     let tags = b.eval(&page, "[[...document.querySelectorAll('#settings-simplex .connector-tag')].map((t) => [t.textContent, t.title]), document.querySelector('.settings-nav-link[data-section=settings-simplex]')?.textContent]")?;
     s.ok(
-        "settings mark SimpleX experimental and secure (end to end), a word each, its nav link still \"SimpleX\"",
-        tags == json!([[["Experimental", ""], ["Secure", "End-to-end encrypted to your computer"]], "SimpleX"]),
+        "settings mark SimpleX experimental and secure (SimpleX's servers can't read it), a word each, its nav link still \"SimpleX\"",
+        tags == json!([[["Experimental", ""], ["Secure", "SimpleX's servers can't read these messages"]], "SimpleX"]),
         &tags,
     );
-    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
-    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
-    let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
-    s.ok(
-        "settings left open follow the computer's SimpleX: shown once its bridge says its image does it (not always on: it says the plan does), hidden once it no longer does, with nothing else redrawn",
-        on.status == 200 && on.body["simplex"] == true && shown && kept == json!(true) && off.status == 200 && off.body["simplex"] == false && hidden,
-        json!({ "on": on.body, "off": off.body, "shown": shown, "kept": kept, "hidden": hidden }),
-    );
-    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
-    // a $200 seat's holder who lets their computer sleep is told how to take
-    // it back, as they tick Billing's box, with Settings left open (#609's
-    // review: the line read the seat as Settings first did)
+    // its bridge says its image does (the lever, as `?simplex=1` would) on a
+    // $200 seat, its computer kept on: its computer's row; its holder lets it
+    // sleep (Billing's box, Settings left open): its connector's; kept on
+    // again, its computer's; its image no longer doing it, its connector's,
+    // through the list's socket, with what was typed elsewhere on them kept
+    // (Alex's review), and nothing else redrawn
     let op_session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&op_session, &s.operator);
-    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
     b.eval(&page, "(document.getElementById('settings').click(), true)")?;
     let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
-    let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
-    let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
+    let row_is = |which: &str| format!("!!document.querySelector({which:?}) && !document.querySelector({other:?})", other = if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW });
+    let kept_on = b.until(&page, &format!("!!({box_}) && !({box_}).checked && {}", row_is(COMPUTER_ROW)), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Turn off') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    let sleeps = b.until(&page, &row_is(CONNECTOR_ROW), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
+    let back = b.until(&page, &row_is(COMPUTER_ROW), std::time::Duration::from_secs(30));
+    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
+    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
+    let followed = b.until(&page, &row_is(CONNECTOR_ROW), wait);
+    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
+    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
     s.ok(
-        "a $200 seat's holder who ticks Billing's sleep box, Settings left open, is told in SimpleX to untick it; unticked, SimpleX offers Set up again",
-        comped.status == 200 && ready && told && back,
-        json!({ "comped": comped.status, "ready": ready, "told": told, "back": back, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
+        "an always-on computer whose image does SimpleX keeps each agent's SimpleX (its computer's Set up); let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
+        on.status == 200 && comped.status == 200 && kept_on && sleeps && back && off.status == 200 && off.body["simplex"] == false && followed && kept == json!(true),
+        json!({ "on": on.body, "comped": comped.status, "keptOn": kept_on, "sleeps": sleeps, "back": back, "off": off.body, "followed": followed, "kept": kept, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
     );
     // as it was for what follows: its computer let sleep, no SimpleX
     shell(api, &session, "PUT", "/api/seat", Some(&json!({ "sleeps": true })), &[])?;
-    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",
@@ -2257,11 +2257,18 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     // (a deploy's old side, answering again), reload nothing
     b.eval(page, "(window.__release = 3, true)")?;
     b.set_cookie(&platform, RELEASE_COOKIE, &next)?;
-    // the launcher's search: an answer the shell reads, naming the old release
+    // the launcher's search: an answer the shell reads, naming the old
+    // release. It asks for the other chat by its title, so that chat's row
+    // drawn is the answer read (a new chat is the arrow's, with no row of
+    // its own: launcher.js `renderFound`).
+    let other_title = shell(api, session, "GET", "/api/fragments", None, &[])?.body["fragments"]
+        .as_array()
+        .and_then(|l| l.iter().find(|f| f["name"] == other).and_then(|f| f["title"].as_str().map(str::to_string)))
+        .unwrap_or_default();
     press(b, "#sidebar-new-chat")?;
     b.until(page, "document.getElementById('search-dialog').open", wait);
-    b.eval(page, &fill("#workspace-search", "thought"))?;
-    let read = b.until(page, "document.getElementById('search-results').children.length > 0 || document.getElementById('search-status').textContent !== ''", wait);
+    b.eval(page, &fill("#workspace-search", &other_title))?;
+    let read = !other_title.is_empty() && b.until(page, &format!("!!document.querySelector({})", js(&format!("#search-results [data-fragment=\"{other}\"]"))), wait);
     b.press(page, "Escape", false)?;
     b.until(page, "!document.getElementById('search-dialog').open", wait);
     press(b, &row(other))?;
@@ -5493,9 +5500,14 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // Alex's review of #619: one home a page, whatever comes in what order.
     // A pane of its link page stands in a frame (`data-simplex`), and its
     // asks are its messages (the shell takes a message only from such a
-    // frame, of its origin); the computer says its image does SimpleX
+    // frame, of its origin); the computer says its image does SimpleX, and
+    // it is kept on: Settings' SimpleX row is then the computer's own
+    // (`data-simplex-computer`), shown once the shell's view of it says so
+    // (every seat's Settings shows SimpleX, its connector's elsewhere)
     let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": true }))?;
+    const ITS_OWN: &str = "!!document.querySelector('#settings-simplex:not([hidden]) [data-simplex-computer]')";
     let write_home = |home: Option<&str>| {
         let text = match home {
             Some(h) => format!("{{\n  \"tier\": \"cheap\",\n  \"home\": {h:?}\n}}\n"),
@@ -5518,7 +5530,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         ok && shows(b, p, home)
     };
     // a link's ticked box, then an unlink, with Settings open: the home, the bell and the pick follow
-    b.until(page, "!!document.querySelector('#settings-simplex:not([hidden])')", wait);
+    b.until(page, ITS_OWN, wait);
     ask(b, page, "link", Some(true))?;
     let linked = shows(b, page, "simplex") && home_now() == Some(json!("simplex"));
     ask(b, page, "unlink", None)?;
@@ -5543,7 +5555,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     for (as404, before, want, after) in [(false, None, Some(true), "simplex"), (true, None, Some(true), "simplex"), (false, Some("simplex"), None, "")] {
         anyhow::ensure!(write_home(before)? == 200, "agent.json as the case starts");
         let p = b.open_with_script(&format!("{}/settings", api.base), &hold(as404))?;
-        let read = b.until(&p, "typeof window.__read === 'function' && !!document.querySelector('#settings-simplex:not([hidden])')", wait);
+        let read = b.until(&p, &format!("typeof window.__read === 'function' && {ITS_OWN}"), wait);
         ask(b, &p, if want.is_some() { "link" } else { "unlink" }, want)?;
         let written = shows(b, &p, after);
         b.eval(&p, "(window.__read(), true)")?;
@@ -5615,6 +5627,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{refresh}"), None, &[])?;
     anyhow::ensure!(deleted.status == 200, "the fragment made for a refresh deleted: {deleted}");
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;
@@ -7129,17 +7142,28 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     std::thread::sleep(std::time::Duration::from_secs(1));
     let nothing = chats_with(&own_chat) == before && b.eval(page, "document.getElementById('search-dialog').open")? == true;
     s.ok("the launcher opens on its input, and with nothing typed, Enter starts nothing", open && nothing, json!({ "before": before, "now": chats_with(&own_chat) }));
-    // words: the first row starts a chat with the agent New chat names (from
-    // the Reader's chat, the Reader), and beside it their agents (the main
-    // one first) to pick another for this launch: here, their main agent
+    // words: the arrow starts a chat with the agent New chat names (from the
+    // Reader's chat, the Reader; its label says so), and under the input
+    // their agents' faces (the main one first, launcher.js `renderPick`) to
+    // pick another for this launch: each named, the one picked pressed and
+    // the row's one tab stop. Here their main agent, from the keyboard: Left
+    // from the Reader's face to theirs, then Enter.
     let said = "Plan my reading for October: three novels and one history of maps";
     b.eval(page, &fill("#workspace-search", said))?;
-    let start_says = |b: &mut Browser, name: &str| b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Start a new chat with {name}"))), wait);
+    let start_says = |b: &mut Browser, name: &str| b.until(page, &format!("document.getElementById('search-send').getAttribute('aria-label') === {}", js(&format!("Start a new chat with {name}"))), wait);
     let readers = start_says(b, "Reader");
-    let picks = b.eval(page, "[...document.querySelectorAll('#search-results .search-agent option')].map((o) => o.textContent)")?;
+    let faces = "[...document.querySelectorAll('#search-agents .search-agent-face')]";
+    let picks = b.eval(page, &format!("{faces}.map((f) => f.getAttribute('aria-label'))"))?;
+    let pressed = b.eval(page, &format!("{faces}.map((f) => [f.getAttribute('aria-pressed'), f.tabIndex])"))?;
     let _ = b.screenshot(page, &shots.join("desktop-launcher.png"));
-    b.eval(page, &format!("(() => {{ const p = document.querySelector('#search-results .search-agent'); p.value = {}; p.dispatchEvent(new Event('change')); return true; }})()", js(&first_id)))?;
-    let offered = readers && picks == json!([me.first_title, "Reader"]) && start_says(b, me.first_title);
+    let keyed = b.eval(
+        page,
+        &format!(
+            "(() => {{ const on = document.querySelector('#search-agents .search-agent-face.on'); on.focus(); on.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'ArrowLeft', bubbles: true }})); const f = document.activeElement; const moved = f?.dataset.identity === {} && f.tabIndex === 0 && on.tabIndex === -1; f.click(); return moved && f.getAttribute('aria-pressed') === 'true' && on.getAttribute('aria-pressed') === 'false'; }})()",
+            js(&first_id)
+        ),
+    )?;
+    let offered = readers && picks == json!([me.first_title, "Reader"]) && pressed == json!([["false", -1], ["true", 0]]) && keyed == true && start_says(b, me.first_title);
     // its first answer lost: the platform has the record, the page is told it failed
     b.eval(
         page,
@@ -7160,7 +7184,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     s.ok(
         "from the Reader's chat the launcher offers a new chat with the Reader, or another of their agents; their main agent picked, Enter makes a chat with it, labelled beside its own, and posts the words once, though the first answer was lost and it was sent again",
         offered && lost && opened && shows == fresh && agents == vec![(json!(first_id), json!("editor"))] && sent == 1,
-        json!({ "status": status, "shows": shows, "fresh": fresh, "agents": agents, "sent": sent }),
+        json!({ "picks": picks, "pressed": pressed, "keyed": keyed, "status": status, "shows": shows, "fresh": fresh, "agents": agents, "sent": sent }),
     );
     let title: String = format!("{}…", said.chars().take(47).collect::<String>().trim_end());
     let answered = s.eventually(agent_wait, || replies(api, me.session, &fresh, &first_id, said) == 1);
@@ -7748,6 +7772,57 @@ fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String
     (!shown.is_empty() && !before.contains(&shown)).then_some(shown)
 }
 
+/// The launcher's Send pressed as a hand presses it (shell.css: its bead
+/// grows under the pointer and gives under a press): pressed near its rim,
+/// held until its glass has given all it gives, and let go there. Only the
+/// bead moves: the button, what the press hits, keeps its box, so the
+/// click is Send's. A button that shrank under such a press lost it to
+/// what was beside it, and nothing was sent. Clicks on it are counted and
+/// stopped before the form hears them, so no chat is made.
+fn send_press_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    anyhow::ensure!(b.until(page, "!document.getElementById('search-dialog').open", wait), "the launcher closed before Send's press");
+    b.click(page, "#sidebar-new-chat")?;
+    b.eval(page, &fill("#workspace-search", "Press Send near its rim"))?;
+    // open, its words sendable, and done opening: its panel's way in
+    // finished (it fills both ways, so it stays among its animations)
+    let ready = b.until(
+        page,
+        "document.getElementById('search-dialog').open && !document.getElementById('search-send').disabled && document.querySelector('.search-panel').getAnimations().every((a) => a.playState === 'finished')",
+        wait,
+    );
+    b.eval(
+        page,
+        "(() => { window.sendClicks = []; window.countSend = (e) => { const on = document.getElementById('search-send').contains(e.target); window.sendClicks.push(on); if (on) { e.preventDefault(); e.stopImmediatePropagation(); } }; addEventListener('click', window.countSend, true); return true; })()",
+    )?;
+    let boxed = "(() => { const r = document.getElementById('search-send').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })()";
+    // hovered (or pressed), every transition of its glass done, its box kept
+    let still = |state: &str| {
+        format!("(() => {{ const s = document.getElementById('search-send'); const done = s.matches(':{state}') && s.getAnimations({{ subtree: true }}).length === 0; if (done) window.sendBox = {boxed}; return done; }})()")
+    };
+    let rest = b.eval(page, boxed)?;
+    let px = |v: &Value, i: usize| v[i].as_f64().unwrap_or(0.0);
+    // near its rim: 97% of the way from its middle to its right edge
+    let at = (px(&rest, 0) + px(&rest, 2) * (0.5 + 0.97 / 2.0), px(&rest, 1) + px(&rest, 3) / 2.0);
+    b.pointer_at(page, at)?;
+    let hovered = b.until(page, &still("hover"), wait);
+    let held = b.press_held(page, at, &still("active"), wait)?;
+    let pressed = b.eval(page, "window.sendBox")?;
+    let clicks = b.eval(page, "window.sendClicks")?;
+    b.eval(page, "(removeEventListener('click', window.countSend, true), true)")?;
+    b.pointer_at(page, (1.0, 1.0))?;
+    b.eval(page, &fill("#workspace-search", ""))?;
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let closed = b.until(page, "!document.getElementById('search-dialog').open", wait);
+    let kept = (0..4).all(|i| (px(&rest, i) - px(&pressed, i)).abs() < 0.01);
+    s.ok(
+        "a press on Send near its rim, held while its glass gives, still sends: the button keeps its box under the pointer as its bead gives",
+        ready && hovered && held && kept && clicks == json!([true]) && closed,
+        json!({ "at": [at.0, at.1], "rest": rest, "pressed": pressed, "hovered": hovered, "held": held, "clicks": clicks }),
+    );
+    Ok(())
+}
+
 /// The launcher as a person uses it. Its input
 /// is one line at rest and as words are typed; Shift+Enter is a new line,
 /// which it grows to, and a long prompt grows it to 200 px, then it
@@ -7960,7 +8035,8 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     b.eval(page, &refuse_once("POST", "^/api/search$"))?;
     launch(b, "ferry crossings")?;
     let failed = b.until(page, "document.querySelector('.search-known-failed')?.textContent.startsWith('Not searched')", wait);
-    let rest = b.eval(page, "!!document.querySelector('#search-results .search-start') && document.getElementById('search-status').textContent === ''")?;
+    // a new chat is still the arrow's (launcher.js `sayWhom`)
+    let rest = b.eval(page, "!document.getElementById('search-send').disabled && document.getElementById('search-send').getAttribute('aria-label').startsWith('Start a new chat with') && document.getElementById('search-status').textContent === ''")?;
     s.ok("the knowledge question refused, Knowledge says it was not searched and the rest stands", failed && rest == true, b.eval(page, "document.getElementById('search-results').innerText")?);
     // the answer came, a fragment of it failed: the hits, and that one named
     b.eval(page, &doctor_once(&format!("(a) => a.fragments.push({{ name: {}, state: 'failed', message: 'the index did not answer' }})", js(&old))))?;

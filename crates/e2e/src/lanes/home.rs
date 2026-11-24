@@ -21,9 +21,9 @@ pub fn home(s: &mut Suite, api: &Api) -> Result<()> {
     let zip = s.dir("home-stage").join("stage.zip");
     // a photo of 2 MiB: a blob, among the media brought first
     let photo: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
-    fragment_fakes::old_home::stage(&zip, &[("workspace/photos/garden.jpg", photo.clone())])?;
+    fragment_fakes::old_home::stage(&crate::devstack::repo_root(), &zip, &[("workspace/photos/garden.jpg", photo.clone())])?;
     let zip = zip.to_str().expect("a utf-8 path").to_string();
-    let layout = fragment_fakes::old_home::layout().to_str().expect("a utf-8 path").to_string();
+    let layout = fragment_fakes::old_home::layout(&crate::devstack::repo_root()).to_str().expect("a utf-8 path").to_string();
 
     // valid: the survey of the stage's zip
     let survey = s.cli_json(api, &home, &["home", "survey", &zip, "--layout", &layout, "--json"])?;
@@ -71,7 +71,7 @@ pub fn home(s: &mut Suite, api: &Api) -> Result<()> {
     // a name) reads whole less those: skipped unread, and named; the
     // fixture's own 7 files brought (no photo in this zip)
     let secret = s.dir("home-secret").join("stage.zip");
-    fragment_fakes::old_home::stage(&secret, &[("agent/identity/identity.json", b"{}".to_vec()), ("workspace/projects/app/.npmrc", b"//r/:_authToken=x".to_vec())])?;
+    fragment_fakes::old_home::stage(&crate::devstack::repo_root(), &secret, &[("agent/identity/identity.json", b"{}".to_vec()), ("workspace/projects/app/.npmrc", b"//r/:_authToken=x".to_vec())])?;
     let skipped = s.cli_json(api, &home, &["home", "survey", secret.to_str().expect("a utf-8 path"), "--layout", &layout, "--json"])?;
     s.ok(
         "a zip holding files that may hold secrets surveys the rest, and names them skipped",

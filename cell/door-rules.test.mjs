@@ -5,7 +5,7 @@
 // and its schema's steps held to their released text.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEPS, SAVES_KEPT, behind, doorOf, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
+import { STEPS, SAVES_KEPT, behind, doorOf, doorPrefix, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
 
 const save = (generation, seq, mark, unreadable = 0) => ({ generation, seq, mark, unreadable });
 
@@ -55,6 +55,12 @@ test("a door's name is a fragment's, and its saves are under its own prefix", ()
     assert.equal(nameOk(bad), false, String(bad));
   }
   assert.throws(() => saveKey("../x", 1, 1));
+  // its end deletes its prefix whole: every save's key is under it, and
+  // no other door's (a name that begins another's) is
+  assert.equal(doorPrefix("pat-simplex--k3x9"), "doors/pat-simplex--k3x9/");
+  assert.ok(saveKey("pat-simplex--k3x9", 2, 5).startsWith(doorPrefix("pat-simplex--k3x9")));
+  assert.ok(!saveKey("pat-simplex--k3x9a", 1, 1).startsWith(doorPrefix("pat-simplex--k3x9")), "a longer name is another prefix");
+  assert.throws(() => doorPrefix("../x"));
 });
 
 // Each released step's text, as it was released: a step is never edited or

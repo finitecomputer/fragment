@@ -45,6 +45,10 @@ pub enum Refusal {
     /// scheduled record is the fragment's own, and only a door its agent's
     /// owner opened carries their words (docs/chat-records.md).
     Relays,
+    /// Its record answers a question (`answers`, `permit::answers`): a
+    /// scheduled record is the fragment's own, and only whom a question
+    /// asks answers it, in their own post.
+    Answers,
 }
 
 impl Refusal {
@@ -52,7 +56,7 @@ impl Refusal {
     pub fn code(&self) -> ErrorCode {
         match self {
             Refusal::RecordTooLarge(_) => ErrorCode::TooLarge,
-            Refusal::BelowPostRole { .. } | Refusal::Relays => ErrorCode::Forbidden,
+            Refusal::BelowPostRole { .. } | Refusal::Relays | Refusal::Answers => ErrorCode::Forbidden,
             Refusal::Cron(_) | Refusal::TooOften(_) | Refusal::NoChannel(_) | Refusal::TakesNoPosts(_) | Refusal::FromMembers(_) => ErrorCode::InvalidRequest,
         }
     }
@@ -74,6 +78,7 @@ impl fmt::Display for Refusal {
             Refusal::FromMembers(c) => write!(f, "only its members of one kind post on channel {c}, and a scheduled record is the fragment's own"),
             Refusal::BelowPostRole { channel, post } => write!(f, "posting on channel {channel} needs the {} role, so scheduling a record there does too", post.as_str()),
             Refusal::Relays => write!(f, "a scheduled record is the fragment's own, and relays no one (`relayed`): an agent's owner's words come only through a door its owner opened"),
+            Refusal::Answers => write!(f, "a scheduled record is the fragment's own, and answers no question (`answers`): only whom a question asks answers it, in their own post"),
         }
     }
 }
@@ -115,10 +120,13 @@ pub fn check(add: &AddSchedule) -> Result<Checked, Refusal> {
 /// record at its add; a release before that kept some, and stored rows stay
 /// readable (docs/MODEL.md), so its fire is refused too.
 pub fn fires(record: &Value) -> Result<(), Refusal> {
-    match crate::door::relays(record) {
-        true => Err(Refusal::Relays),
-        false => Ok(()),
+    if crate::door::relays(record) {
+        return Err(Refusal::Relays);
     }
+    if crate::permit::answers(record).is_some() {
+        return Err(Refusal::Answers);
+    }
+    Ok(())
 }
 
 /// Whether a record may be scheduled on `channel` (its fragment's
@@ -315,6 +323,14 @@ mod tests {
         }
         assert_eq!(Refusal::Relays.code(), ErrorCode::Forbidden);
         assert!(Refusal::Relays.to_string().contains("relays no one"), "{}", Refusal::Relays);
+        // nor answers a question (permit.rs `may_answer`): refused at its
+        // add, and a stored one at its fire, which moves on, never failing
+        // the pass; an `answers` naming no seq is its record's own field
+        for record in [json!({ "kind": "prompt_response", "option": "yes", "answers": { "channel": "work", "seq": 1 } }), json!({ "answers": { "seq": "1" } })] {
+            assert_eq!(check(&add("0 * * * *", record.clone())), Err(Refusal::Answers), "{record}");
+            assert_eq!(fires(&record), Err(Refusal::Answers), "stored: {record}");
+        }
+        assert_eq!((Refusal::Answers.code(), fires(&json!({ "answers": ["a"] }))), (ErrorCode::Forbidden, Ok(())));
         let passing = [
             json!({ "kind": "routine", "text": "check the shelf", "chat": "none" }),
             json!({ "source": "schedule", "payload": "water the plants" }),

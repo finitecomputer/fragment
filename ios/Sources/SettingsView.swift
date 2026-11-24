@@ -24,6 +24,8 @@ struct SettingsView: View {
     let api: FragmentAPI
     var connect: () -> Void = {}
     let open: (FragmentSummary) -> Void
+    /// Opens the notices (Home has them in its band; here, a row).
+    var showNotices: () -> Void = {}
     var body: some View {
         List {
             Section {
@@ -31,6 +33,28 @@ struct SettingsView: View {
                     Image(systemName: "circle.hexagongrid.fill").font(.title).foregroundStyle(FragmentStyle.lilac)
                     VStack(alignment: .leading, spacing: 4) { Text("Finite.Computer").font(.headline); Text("A computer of your own.").font(.subheadline).foregroundStyle(.secondary) }
                 }.padding(.vertical, 8)
+            }
+            // the notices, while there are any: how many, on a red badge, as
+            // iOS Settings has a waiting update; a tap opens them all
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                let count = library.noticeCount(at: Int64(context.date.timeIntervalSince1970 * 1000))
+                if count > 0 {
+                    Section {
+                        Button(action: showNotices) {
+                            HStack {
+                                Label("Notices", systemImage: "bell").padding(.vertical, 4)
+                                Spacer()
+                                Text("\(count)").font(.subheadline.weight(.semibold)).monospacedDigit().foregroundStyle(.white)
+                                    .padding(.horizontal, 7).frame(minWidth: 24, minHeight: 24)
+                                    .background(Capsule().fill(.red))
+                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityValue("\(count)").accessibilityIdentifier("noticesRow")
+                    }
+                }
             }
             Section {
                 NavigationLink { AppManagementList(library: library, api: api) } label: {

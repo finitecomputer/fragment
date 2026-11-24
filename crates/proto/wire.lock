@@ -10,6 +10,7 @@ bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.at range i64
 bound ChannelRecord.author default null
+bound ChannelRecord.mandate default null
 bound ChannelRecord.seq range i64
 bound Command.as default null
 bound Command.attempt range u32
@@ -170,6 +171,7 @@ field ChannelRecord.author optional Author|null
 field ChannelRecord.body required any
 field ChannelRecord.channel required string
 field ChannelRecord.kind required string
+field ChannelRecord.mandate optional string|null
 field ChannelRecord.principal required string
 field ChannelRecord.seq required integer
 field CodeStatus.error required string|null
