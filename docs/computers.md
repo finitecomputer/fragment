@@ -840,7 +840,10 @@ sleep answers within 14 minutes.
   sign its hash, at most 32 MiB, but a blob's upload (`PUT
   /api/f/{name}/blobs/{sha256}`): that streams through with its declared
   length and no payload hash, as from the internet (the signature binds
-  the URL, which names the hash), at most `BLOB_MAX_BYTES`.
+  the URL, which names the hash), at most `BLOB_MAX_BYTES`. A request
+  `for` its owner is signed as whose ask the agent's open turns prove
+  (below; docs/api.md, "An agent's computer proves who asked"): its `for`
+  traded for their mandate, or for none where it acts as itself, or 403.
 - Without the header only the computer's own routes answer:
   - `GET /api/computer`: its own view, proto's `ComputerView` without
     `notices` and with what only the guest is given: each agent's
@@ -863,6 +866,16 @@ sleep answers within 14 minutes.
     redeemed with its door's public key (docs/api.md, "An agent's
     doors").
   - `GET /api/computer/relay?host=&port=`: the XFTP relay, below.
+  - `PUT /api/computer/turns {turn, place, asker?, mandate?}`, as the
+    agent its header names: a turn it runs, before its runtime hears of
+    it: whose ask it is (none, app code's words) and the mandate its
+    record carried. `DELETE /api/computer/turns {turn}` as it ends, and
+    `{}` at the bridge's start (a new life runs none of the old). The
+    agent's fragment holds at most `TURNS_HELD_MAX`, each for at most
+    `TURN_HELD_MS`; a mandate that does not check holds that turn
+    unproven, never refused. A platform from before sends it on to its
+    API, which has no such route (404): a bridge takes that as nothing to
+    tell.
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.
@@ -1082,6 +1095,12 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
+- **Someone else's ask** (FIN-720). While a turn of anyone but its owner
+  is open, the agent uses what its owner lends that place (docs/api.md,
+  "An agent's lend"), read with its grants at each request: an operator
+  key by `spend`, a connection or a Vault secret by `accounts`. One not
+  lent is refused before any provider (403, saying the owner hasn't lent
+  it), and a Vault's fill is never asked for.
 - Each call a provider answered is counted as its agent's in the owner's
   ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
   is charged to its agent's owner too. A computer from before kept its

@@ -94,6 +94,16 @@ pub struct World {
     pub log: Vec<String>,
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
+    /// What each agent's fragment was told of its turns (`/api/computer/turns`):
+    /// (agent, `PUT` or `DELETE`, body), in order.
+    pub turns: Vec<(String, String, Value)>,
+    /// A platform from before the turns route: it sends the call on to
+    /// its API, which has no such route (404).
+    pub no_turns: bool,
+    /// Pages read over the API give an agent a mandate beside each record
+    /// a person other than its owner wrote (`fm1.<principal>.<seq>`, the
+    /// fake's), as the platform gives one; live frames carry none.
+    pub mandates: bool,
     pub fail_posts: u32,
     /// A blob upload past this many bytes is refused 413, as a computer's
     /// egress that reads a body whole refuses one past 32 MiB.
@@ -742,6 +752,17 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         };
     }
 
+    // its agent's turns, as the agent (the platform's `computer/turns`)
+    if p.as_slice() == ["api", "computer", "turns"] && matches!(method, Method::PUT | Method::DELETE) {
+        let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let mut w = world.lock().unwrap();
+        if w.no_turns {
+            return refuse(StatusCode::NOT_FOUND, "no route /api/computer/turns");
+        }
+        w.turns.push((agent, method.to_string(), v));
+        return answer(StatusCode::OK, json!({ "ok": true }));
+    }
     // a chat an agent makes for its owner, as the platform makes one: theirs,
     // the agent its maker and an editor, told so on its own `tasks`
     if p.as_slice() == ["api", "fragments"] && method == Method::POST {
@@ -863,7 +884,13 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             let Some(c) = f.channels.get(*channel) else { return refuse(StatusCode::NOT_FOUND, "no such channel") };
             let after: u64 = query(&q, "after").first().and_then(|a| a.parse().ok()).unwrap_or(0);
             let limit: usize = query(&q, "limit").first().and_then(|a| a.parse().ok()).unwrap_or(1000).min(1000);
-            let page: Vec<Value> = c.records.iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > after).take(limit).cloned().collect();
+            let mut page: Vec<Value> = c.records.iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > after).take(limit).cloned().collect();
+            if w.mandates {
+                let owner = w.agent_owner(&agent);
+                for r in page.iter_mut().filter(|r| r["principal"] != me.as_str() && r["principal"].as_str() != owner.as_deref() && r["author"].is_null()) {
+                    r["mandate"] = json!(format!("fm1.{}.{}", r["principal"].as_str().unwrap_or(""), r["seq"]));
+                }
+            }
             let next = page.last().and_then(|r| r["seq"].as_u64()).unwrap_or(after);
             answer(StatusCode::OK, json!({ "channel": channel, "records": page, "next": next }))
         }

@@ -45,6 +45,16 @@ pub enum ApiError {
     TooLarge,
 }
 
+/// A call a platform from before has no route for (404) did nothing, and
+/// owes nothing: the turns it is told, which it does not take.
+fn unknown_ok(answered: Result<Value, ApiError>) -> Result<(), ApiError> {
+    match answered {
+        Ok(_) => Ok(()),
+        Err(e) if e.status() == Some(404) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 impl ApiError {
     /// The agent is not (or no longer) in that fragment, or it is gone.
     pub fn gone(&self) -> bool {
@@ -629,6 +639,25 @@ impl Api {
             }
         }
         Ok(c)
+    }
+
+    /// `PUT /api/computer/turns {turn, place, asker?, mandate?}`, as the
+    /// agent (docs/computers.md, "The fragment API"): a turn its agent's
+    /// fragment is told it runs, so the agent's calls for its owner carry
+    /// whose ask they are. A platform from before has no such route (404:
+    /// as the agent, it goes on to the platform's API, which has none), and
+    /// is told nothing.
+    pub async fn turn_open(&self, agent: &str, turn: &str, told: &crate::engine::Told) -> Result<(), ApiError> {
+        let body = json!({ "turn": turn, "place": told.place, "asker": told.asker, "mandate": told.mandate });
+        unknown_ok(self.json::<Value>(Method::PUT, "/api/computer/turns", Some(name(agent)?), Some(body)).await)
+    }
+
+    /// `DELETE /api/computer/turns {turn?}`, as the agent: a turn ended,
+    /// or, with none named, every turn its agent's fragment holds (a
+    /// bridge's start).
+    pub async fn turn_close(&self, agent: &str, turn: Option<&str>) -> Result<(), ApiError> {
+        let body = json!({ "turn": turn });
+        unknown_ok(self.json::<Value>(Method::DELETE, "/api/computer/turns", Some(name(agent)?), Some(body)).await)
     }
 
     /// `POST /api/computer/door {agent, door, nonce, key}`: a link's ticket

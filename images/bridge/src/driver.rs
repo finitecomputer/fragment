@@ -362,7 +362,16 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     }
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
-    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
+    // what the last life told its agents' fragments ran, forgotten: its
+    // turns ended with it (a restart ends a turn); a failure leaves them to
+    // lapse there (`TURN_HELD_MS`), narrower meanwhile, never wider
+    for a in &computer.agents {
+        if let Err(e) = api.turn_close(&a.fragment, None).await {
+            crate::ev!("turns.unforgotten", { "agent": a.fragment, "error": e.to_string() });
+        }
+    }
+    let told: Told = Arc::new(Mutex::new(HashMap::new()));
+    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone(), told: told.clone() });
     let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves, RuntimeLane::spawn(api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     tokio::spawn(crate::load::watch(inbox_tx.clone(), Msg::Input, Duration::from_millis(limits::LOAD_SLICE_MS), held_rx.clone(), stop.clone()));
@@ -388,6 +397,24 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             }
         }
         if step.dirty {
+            // a turn told as running that the engine runs no more is told
+            // ended (in a task of its own: no lane waits on it); one not
+            // told is kept to be told at the next step, so none is left
+            // holding a place among its agent's open turns
+            let ended: Vec<(String, String)> = {
+                let mut told = told.lock().expect("told");
+                let gone: Vec<String> = told.keys().filter(|t| engine.state().turns.get(*t).is_none_or(|t| t.phase == engine::Phase::Ended)).cloned().collect();
+                gone.into_iter().filter_map(|t| told.remove(&t).map(|a| (a, t))).collect()
+            };
+            for (agent, turn) in ended {
+                let (api, told) = (api.clone(), told.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = api.turn_close(&agent, Some(&turn)).await {
+                        crate::ev!("turn.unended", { "turn": turn, "agent": agent, "error": e.to_string() });
+                        told.lock().expect("told").insert(turn, agent);
+                    }
+                });
+            }
             store.lock().expect("store").write(engine.state())?;
             // a turn over lets its files go (bounded: the turns open)
             turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
@@ -405,7 +432,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
                 }
-                Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
+                Effect::Claim { agent, fragment, turn, id, body, told } => lanes.push(&fragment, Job::Claim { agent, turn, id, body, told }),
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
                 Effect::Owed { agent, fragment, channel, turn, id, body } => match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
                     // an answer goes from its question's chat's lane, after
@@ -1188,7 +1215,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         if let Err(Unavailable::Read) = history {
             return Some(Ended::Again(format!("a late card answer's journal did not read (seq {})", record.seq)));
         }
-        Input::CardRecord { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since, history }
+        Input::CardRecord { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since, history: Box::new(history) }
     } else {
         Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since }
     };
@@ -1291,8 +1318,9 @@ enum Job {
     /// `answers`: its turn answers an ask, and its files go with that
     /// answer (`Answer`).
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
-    /// A turn's `turn.start` on `work`, whose answer the engine waits for.
-    Claim { agent: String, turn: String, id: String, body: Value },
+    /// A turn's `turn.start` on `work`, whose answer the engine waits for;
+    /// told to its agent's fragment (`told`) before that answer.
+    Claim { agent: String, turn: String, id: String, body: Value, told: engine::Told },
     /// A live card answer's closure on `work`, whose answer the engine
     /// waits for before the runtime has the answer.
     Fence { agent: String, turn: String, prompt: String, id: String, body: Value },
@@ -1333,6 +1361,23 @@ struct Claims {
     in_flight: Arc<AtomicUsize>,
     /// Where a SimpleX turn's posted reply goes (none without SimpleX).
     simplex: Option<crate::simplex::run::Handle>,
+    /// The turns its agents' fragments were told run, by turn: each told
+    /// again as ended once the engine no longer runs it (`act`).
+    told: Told,
+}
+
+/// The turns told to their agents' fragments as running: turn → agent.
+type Told = Arc<Mutex<HashMap<String, String>>>;
+
+/// A turn's `Told` with its proof: someone else's ask heard live carries
+/// none (the platform gives a mandate only beside a record its agent reads
+/// over the API), so its record is read once for it. One the platform
+/// gives none (past a mandate's life) is told unproven: held to less.
+async fn proven(api: &Api, agent: &str, mut told: engine::Told) -> Result<engine::Told, ApiError> {
+    let Some(cause) = told.unproven.take() else { return Ok(told) };
+    let page = api.records(agent, &cause.fragment, &cause.channel, cause.seq.saturating_sub(1), 1).await?;
+    told.mandate = page.records.into_iter().find(|r| r.seq == cause.seq).and_then(|r| r.mandate);
+    Ok(told)
 }
 
 /// One claim's try in flight, counted while it lives.
@@ -1499,8 +1544,23 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id, kept: sent == Sent::Posted })).await;
                 }
             }
-            Job::Claim { agent, turn, id, body } => {
-                let answer = claim(&api, &fragment, &agent, &id, &body, Some(&claims), stop.clone()).await;
+            Job::Claim { agent, turn, id, body, told } => {
+                let mut answer = claim(&api, &fragment, &agent, &id, &body, Some(&claims), stop.clone()).await;
+                // the turn told to its agent's fragment before its runtime has
+                // it: its calls for its owner then carry whose ask it is. Not
+                // told, it is not this life's yet: its claim is asked again
+                if matches!(answer, ClaimAnswer::Ours { .. }) {
+                    let told = proven(&api, &agent, told).await;
+                    match async { api.turn_open(&agent, &turn, &told?).await }.await {
+                        Ok(()) => {
+                            claims.told.lock().expect("told").insert(turn.clone(), agent.clone());
+                        }
+                        Err(e) => {
+                            crate::ev!("turn.untold", { "turn": turn, "agent": agent, "error": e.to_string() });
+                            answer = ClaimAnswer::Unanswered;
+                        }
+                    }
+                }
                 // A closed inbox is an engine that has stopped.
                 let _ = claims.inbox.send(Msg::Input(Input::Claimed { turn, answer })).await;
             }

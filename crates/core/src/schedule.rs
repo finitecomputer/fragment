@@ -49,6 +49,9 @@ pub enum Refusal {
     /// scheduled record is the fragment's own, and only whom a question
     /// asks answers it, in their own post.
     Answers,
+    /// Whose ask it is (FIN-720) is no longer in the fragment: as if they
+    /// asked now, they could not post there.
+    AskerGone,
 }
 
 impl Refusal {
@@ -56,7 +59,7 @@ impl Refusal {
     pub fn code(&self) -> ErrorCode {
         match self {
             Refusal::RecordTooLarge(_) => ErrorCode::TooLarge,
-            Refusal::BelowPostRole { .. } | Refusal::Relays | Refusal::Answers => ErrorCode::Forbidden,
+            Refusal::BelowPostRole { .. } | Refusal::Relays | Refusal::Answers | Refusal::AskerGone => ErrorCode::Forbidden,
             Refusal::Cron(_) | Refusal::TooOften(_) | Refusal::NoChannel(_) | Refusal::TakesNoPosts(_) | Refusal::FromMembers(_) => ErrorCode::InvalidRequest,
         }
     }
@@ -79,6 +82,7 @@ impl fmt::Display for Refusal {
             Refusal::BelowPostRole { channel, post } => write!(f, "posting on channel {channel} needs the {} role, so scheduling a record there does too", post.as_str()),
             Refusal::Relays => write!(f, "a scheduled record is the fragment's own, and relays no one (`relayed`): an agent's owner's words come only through a door its owner opened"),
             Refusal::Answers => write!(f, "a scheduled record is the fragment's own, and answers no question (`answers`): only whom a question asks answers it, in their own post"),
+            Refusal::AskerGone => write!(f, "whoever asked for this schedule is no longer in this fragment, so it fires no more for them"),
         }
     }
 }

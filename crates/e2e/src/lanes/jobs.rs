@@ -1222,6 +1222,35 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         json!({ "viewer": by_viewer.body, "removed": rm.body, "again": gone.status }),
     );
 
+    // whose ask it is (FIN-720): its maker's, checked again at each fire
+    let theirs = json!({ "source": "schedule", "payload": "the editor's" });
+    let r = add(&editor, "0 0 1 1 *", "pings", theirs.clone())?;
+    let sid = r.body["schedule"]["id"].as_i64().unwrap_or(0);
+    let before = pinged().len();
+    cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    let rec = pinged().last().cloned().unwrap_or_default();
+    s.ok(
+        "a schedule is its maker's ask: due, its record is the fragment's, written for them (its asker)",
+        r.status == 200 && fired && rec["principal"] == own.as_str() && rec["author"] == "platform" && rec["asker"] == editor_id.as_str() && rec["body"] == theirs,
+        &rec,
+    );
+    let out = api.signed(&owner, "DELETE", &format!("/api/f/{name}/members/{editor_id}"), None)?;
+    let before = pinged().len();
+    let lever = cron_now(api, &name)?;
+    std::thread::sleep(Duration::from_secs(3));
+    let unfired = events(api, &owner, &name).into_iter().rev().find(|e| e["kind"] == "schedule.unfired").unwrap_or_default();
+    s.ok(
+        "its maker gone from the fragment, it fires no more for them, saying why; it is kept, for its owner to remove",
+        out.status == 200 && lever.body["records"] == 0 && pinged().len() == before && unfired.to_string().contains("no longer in this fragment") && list().iter().any(|x| x["id"] == sid),
+        json!({ "removed": out.status, "lever": lever.body, "event": unfired }),
+    );
+    api.share(&name, editor.pubkey_hex(), "editor")?;
+    cron_now(api, &name)?;
+    let back = s.eventually(long, || pinged().len() == before + 1);
+    let gone = api.signed(&owner, "DELETE", &format!("{path}/{sid}"), None)?;
+    s.ok("back in, it fires for them again; its owner removes it", back && gone.status == 200 && list().is_empty(), json!({ "removed": gone.body }));
+
     // at most 32 a fragment; the same one again at the bound is still that one
     let filled: Vec<i64> = (1..=limits::RECORD_SCHEDULES_MAX).filter_map(|n| add(&editor, "0 0 1 1 *", "pings", json!({ "n": n })).ok().and_then(|r| r.body["schedule"]["id"].as_i64())).collect();
     let (over, still) = (add(&editor, "0 0 1 1 *", "pings", json!({ "n": 0 }))?, add(&editor, "0 0 1 1 *", "pings", json!({ "n": 1 }))?);

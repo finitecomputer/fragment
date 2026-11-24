@@ -127,6 +127,17 @@ mid-append leaves a torn last line, and the log is read up to it.
   once; one whose life ended first is lost, and the chat is told.
 - **A claim waits** for the runtime (`Connected`) and for no hold, so a
   turn waits unclaimed, for whichever life comes next.
+- **A turn is told before it runs** (FIN-720; docs/computers.md, "The
+  fragment API"): its claim answered, its agent's fragment is told whose
+  ask it is and the mandate its record carried (`engine::Told`; someone
+  else's heard live carries none, so its record is read once over the
+  API for it, `driver::proven`): its
+  owner's for theirs and for what is one entity's with them (a routine,
+  another agent of this computer's answer), no one's for app code's
+  words, and anyone else's as them. Not told, it is not this life's yet,
+  and is claimed again; a platform from before (404) is told nothing. Its
+  end is told as the engine ends it, a failure told again at the next
+  step, and a new life forgets the last life's first.
 - **In the journal's order.** A chat's turns are claimed in the order
   their causes were said (`Turn::said_at`, the platform's time, the same
   in every life), admission breaking ties. A new life that reads an

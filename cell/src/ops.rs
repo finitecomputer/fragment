@@ -68,6 +68,11 @@ pub(crate) struct Invocation<'a> {
     /// `call.principal`, so what it does for someone is theirs, while the
     /// ledger and the records name the agent (`call.agent`).
     pub asker: Option<&'a str>,
+    /// That asker when it is someone else than the agent's owner (a
+    /// mandate's: FIN-720), another entity than the agent's own: its own
+    /// replays (`ledger_id`, a run's `call_id`), and what its run is
+    /// charged under (`runs.asker`).
+    pub other: Option<&'a str>,
     pub role: Role,
     pub op: &'a str,
     pub decl: OpDecl,
@@ -267,7 +272,8 @@ impl FragmentCell {
             return Err(CellError::invalid("operation id must match ^[A-Za-z0-9._:-]{1,128}$ and not start with job:"));
         }
         let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
-        let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
+        let other = caller.signed.as_ref().and_then(|s| s.other_asker());
+        let inv = Invocation { principal, asker, other, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
         // a job's run, queued, starts after the answer; a query queues nothing
         if writes {
@@ -295,6 +301,7 @@ impl FragmentCell {
                 via: inv.via,
                 trigger: inv.trigger,
                 principal: inv.principal,
+                asker: inv.other,
                 role: inv.role,
                 depth: inv.depth,
                 call: Some((&inv.id, &input_sha)),
@@ -333,8 +340,12 @@ impl FragmentCell {
     /// ledger row commit together), then settled (channels.rs).
     async fn mutate(&self, facet: &js::Facet, inv: &Invocation<'_>, input_sha: &str, input_text: &str, mut meta: Value) -> CellResult<Answered> {
         // Ids are the caller's: the ledger keys them by principal, so one
-        // caller can neither replay nor block another's id.
-        let ledger_id = format!("{}/{}", inv.principal, inv.id);
+        // caller can neither replay nor block another's id; and by the asker
+        // an agent acts for when that is not its owner, another entity
+        let ledger_id = match inv.other {
+            None => format!("{}/{}", inv.principal, inv.id),
+            Some(asker) => format!("{}~{}/{}", inv.principal, npub::display(asker), inv.id),
+        };
         if inv.decl.ephemeral {
             return self.mutate_ephemeral(facet, inv, &ledger_id, input_sha, input_text, meta).await;
         }

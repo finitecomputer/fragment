@@ -25,8 +25,9 @@
 //!   nothing.
 
 use fragment_core::grants::Grants;
+use fragment_core::mandate::{self, Proof};
 use fragment_core::{connectors::Action, door, npub};
-use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
+use fragment_proto::{limits, valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Lend, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -77,6 +78,39 @@ struct Sign {
     method: String,
     url: String,
     payload: Option<String>,
+    /// The fragment it goes to, when it goes to one (its `/api/f/…` or
+    /// `/f/…`): where an agent asked by no one proven still works.
+    fragment: Option<String>,
+}
+
+/// An open turn as its row holds it (`turns`, Fragment step 14).
+#[derive(Deserialize)]
+struct TurnRow {
+    place: String,
+    asker: String,
+    mandate: Option<String>,
+    until: i64,
+    lend: i64,
+}
+
+/// A turn's row read as `mandate::proof` reads one: its mandate only while
+/// it holds.
+fn turn_of(r: &TurnRow, now: i64) -> mandate::Turn<'_> {
+    let lend = u8::try_from(r.lend).ok().and_then(Lend::from_bits).unwrap_or(Lend::NONE);
+    let mandate = r.mandate.as_deref().filter(|_| r.until >= now).map(|text| mandate::Held { text, until: r.until, lend });
+    mandate::Turn { place: &r.place, asker: &r.asker, mandate }
+}
+
+/// `url` without its `for`.
+fn without_for(url: &url::Url) -> String {
+    let mut out = url.clone();
+    let kept: Vec<(String, String)> = url.query_pairs().filter(|(k, _)| k != "for").map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    if kept.is_empty() {
+        out.set_query(None);
+    } else {
+        out.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    out.to_string()
 }
 
 #[derive(Deserialize)]
@@ -171,7 +205,110 @@ impl FragmentCell {
             let by = if changed { "changed by its owner" } else { "taken from its computer's row" };
             self.event("agent.grants", &format!("what it may use of its owner's, {by}"), json!({ "grants": grants, "moved": !changed }));
         }
-        Ok(grants)
+        // narrowed, at this use, by someone else's open ask (FIN-720)
+        Ok(Grants { lend: self.lent_now()?, ..grants })
+    }
+
+    /// Its open turns' rows, as its bridge told them and not yet forgotten
+    /// (`limits::TURN_HELD_MS`).
+    fn turn_rows(&self, now: i64) -> CellResult<Vec<TurnRow>> {
+        self.typed(
+            "SELECT place, asker, mandate, until, lend FROM turns WHERE at >= ? ORDER BY turn LIMIT ?",
+            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
+        )
+    }
+
+    /// `computer/turns`: its bridge tells which turns it runs, so the
+    /// agent's calls for its owner carry the proof of whose ask they are
+    /// (`mandate::proof`): `open` one (`{turn, place, asker?, mandate?}`: no
+    /// asker is no one's, app code's words), `close` one, or `clear` them
+    /// all (a bridge's start). Its mandate is checked as the router checks
+    /// one (the platform's, for this agent, of that asker, unexpired); one
+    /// that is not proves nothing, and the turn is held unproven: narrower,
+    /// never refused. Read field by field (the cell's Wasm budget).
+    async fn turns(&self, body: &Value) -> CellResult<Value> {
+        let text = |k: &str| body[k].as_str().unwrap_or("");
+        let now = js::now_ms();
+        match text("op") {
+            "clear" => {
+                self.exec("DELETE FROM turns", vec![])?;
+                Ok(json!({ "ok": true }))
+            }
+            "close" => {
+                self.exec("DELETE FROM turns WHERE turn = ?", vec![text("turn").into()])?;
+                Ok(json!({ "ok": true }))
+            }
+            "open" => {
+                let (turn, place, asker) = (text("turn"), text("place"), text("asker"));
+                if !fragment_proto::valid_op_id(turn) || !valid_fragment_name(place) || !(asker.is_empty() || npub::is_identity(asker)) {
+                    return Err(CellError::invalid("a turn is its id, the fragment it runs in, and who asked (an identity, or no one)"));
+                }
+                let unproven = (None, now + limits::MANDATE_LIFE_MS, Lend::NONE);
+                let (mandate, until, lend) = match body["mandate"].as_str().filter(|_| !asker.is_empty()) {
+                    None => unproven,
+                    Some(m) => match mandate::open(&crate::keys::mandate_keys(&self.env).await?, m, js::now_ms()) {
+                        Ok(o) if Some(o.agent.as_str()) == self.meta(MetaKey::AgentIdentity)?.as_deref() && o.asker == asker => (Some(m.to_string()), o.until, o.lend),
+                        _ => unproven,
+                    },
+                };
+                self.exec("DELETE FROM turns WHERE at < ?", vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS)])?;
+                let held = self.count_of("SELECT COUNT(*) AS n FROM turns WHERE turn != ?", vec![turn.into()])?;
+                if held >= limits::TURNS_HELD_MAX as u64 {
+                    return Err(CellError::new(ErrorCode::RateLimited, format!("this agent holds {held} open turns, the most it may: end one first")));
+                }
+                self.exec(
+                    "INSERT INTO turns (turn, place, asker, mandate, until, lend, at) VALUES (?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, lend = excluded.lend, at = excluded.at",
+                    vec![
+                        turn.into(),
+                        place.into(),
+                        asker.into(),
+                        mandate.map_or(SqlStorageValue::Null, Into::into),
+                        SqlStorageValue::Integer(until),
+                        SqlStorageValue::Integer(i64::from(lend.bits())),
+                        SqlStorageValue::Integer(now),
+                    ],
+                )?;
+                Ok(json!({ "ok": true }))
+            }
+            _ => Err(CellError::invalid("a turn is opened, closed, or all cleared")),
+        }
+    }
+
+    /// The request its computer's egress signs for this agent: as it came,
+    /// unless it acts for its owner (`for=<its owner>`), whose proof the
+    /// open turns name in its place (`mandate::proof`): its owner's own
+    /// mandate, or the one other person's whose turn is open; with no one
+    /// proven, the agent itself in those turns' places alone, and nowhere
+    /// else. Answers its URL and the mandate it carries.
+    fn asked(&self, at: &str, fragment: Option<&str>) -> CellResult<(String, Option<String>)> {
+        let url = url::Url::parse(at).map_err(|e| CellError::invalid(format!("url: {e}")))?;
+        let owner = self.must(MetaKey::Owner)?;
+        if !url.query_pairs().any(|(k, v)| k == "for" && npub::display(&v) == npub::display(&owner)) {
+            return Ok((at.to_string(), None));
+        }
+        let now = js::now_ms();
+        let rows = self.turn_rows(now)?;
+        let turns: Vec<mandate::Turn> = rows.iter().map(|r| turn_of(r, now)).collect();
+        match mandate::proof(&npub::display(&owner), &turns) {
+            Proof::Bare => Ok((at.to_string(), None)),
+            Proof::Owner(m) | Proof::Asker(m) => Ok((without_for(&url), Some(m.text.to_string()))),
+            Proof::Itself(places) if fragment.is_some_and(|f| places.contains(&f)) => Ok((without_for(&url), None)),
+            Proof::Itself(_) => Err(CellError::new(
+                ErrorCode::Forbidden,
+                "more than one other person has asked this agent, or one without proof: it acts only in their chats, as itself, until those turns end",
+            )),
+        }
+    }
+
+    /// What of its owner's its open turns lend it now: `None` while only
+    /// its owner's own ask is open (or none is), everything of theirs.
+    fn lent_now(&self) -> CellResult<Option<Lend>> {
+        let now = js::now_ms();
+        let rows = self.turn_rows(now)?;
+        let turns: Vec<mandate::Turn> = rows.iter().map(|r| turn_of(r, now)).collect();
+        let owner = npub::display(&self.must(MetaKey::Owner)?);
+        Ok(Some(mandate::proof(&owner, &turns).lend()).filter(|l| *l != Lend::OWNER))
     }
 
     /// `computer/…`: the internal calls a computer's routes and egress make.
@@ -230,8 +367,14 @@ impl FragmentCell {
             "sign" => {
                 let b: Sign = crate::json_body(body)?;
                 self.assigned_to(&b.computer)?;
-                let header = self.own_keys().await?.header_for_payload(&b.method, &b.url, b.payload.as_deref(), crate::js::now_ms() / 1000);
-                Ok(json!({ "header": header }))
+                let (url, mandate) = self.asked(&b.url, b.fragment.as_deref())?;
+                let header = self.own_keys().await?.header_for_payload(&b.method, &url, b.payload.as_deref(), crate::js::now_ms() / 1000);
+                Ok(json!({ "header": header, "url": url, "mandate": mandate }))
+            }
+            "turns" => {
+                let body: Value = crate::json_body(body)?;
+                self.assigned_to(body["computer"].as_str().unwrap_or(""))?;
+                self.turns(&body).await
             }
             // an agent's door (fragment_core::door): its owner's ticket, and
             // the guest's redeeming of a link's (a relayed record's check is
@@ -376,7 +519,9 @@ impl FragmentCell {
             return Ok(());
         }
         let routine = json!({ "kind": "routine", "text": r.text });
-        self.append_own(TASKS, &routine, &r.key).await?;
+        // its owner's ask: they said yes to the move's offer
+        let owner = self.must(MetaKey::Owner)?;
+        self.append_own(TASKS, &routine, &r.key, Some(&owner)).await?;
         Ok(())
     }
 
@@ -404,7 +549,7 @@ impl FragmentCell {
             return Ok(JoinedAnswer { computer: Some(computer), posted: false });
         }
         let notice = json!({ "kind": "joined", "fragment": j.fragment });
-        let (record, _) = self.append_own(TASKS, &notice, &format!("joined:{}:{}", j.fragment, j.at)).await?;
+        let (record, _) = self.append_own(TASKS, &notice, &format!("joined:{}:{}", j.fragment, j.at), None).await?;
         assert_eq!(record.channel, TASKS, "the notice is on tasks");
         Ok(JoinedAnswer { computer: Some(computer), posted: true })
     }

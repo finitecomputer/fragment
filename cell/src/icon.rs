@@ -45,10 +45,12 @@ fn refused(r: Refusal) -> CellError {
 }
 
 /// Whether the caller spends here as the fragment's owner: they, or an
-/// agent of theirs. Anyone else's making is held to the fragment's cap,
-/// as a job's AI step is (ai.rs `paying`; docs/ledger.md, Caps).
+/// agent of theirs asked by no one else (FIN-720). Anyone else's making is
+/// held to the fragment's cap, as a job's AI step is (ai.rs `paying`;
+/// docs/ledger.md, Caps).
 fn spends_as_owner(caller: &Caller, owner: &str) -> bool {
-    caller.principal() == Some(owner) || (caller.kind() == Some(IdentityKind::Agent) && caller.owner() == Some(owner))
+    let theirs = caller.signed.as_ref().is_none_or(|s| s.other_asker().is_none());
+    theirs && (caller.principal() == Some(owner) || (caller.kind() == Some(IdentityKind::Agent) && caller.owner() == Some(owner)))
 }
 
 /// A making's or an upload's own name in its meter rows: when it started

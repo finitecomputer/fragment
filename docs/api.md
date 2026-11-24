@@ -175,25 +175,57 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
-**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
-is a place's word that its agent's owner's own record there asked it: its
-asker, the agent, the place (by its life's own key), the record, and until
-when. An agent member reading a channel as itself (`GET
+**Who asked: mandates** (FIN-615, FIN-720, `fragment_core::mandate`). A
+mandate is a place's word that a person's own record there asked its
+agent: its asker, the agent, the place (by its life's own key), the
+record, until when, and what the agent's owner lends that ask (`Lend`).
+An agent member reading a channel as itself (`GET
 /api/f/{name}/channels/{c}`) is given one beside each record whose words
-are its owner's own: their own post, or a door's relay of them
-(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
-record's writing, and a record older than that carries none. The agent's
-request may carry it in `x-fragment-mandate` in place of `for=<its
-owner>`, wherever `for` is honored, and it acts exactly as that `for`
-does. The router checks it in the signer's own lookup: one the platform
-did not make, or altered, or run out, is 403; one carried by any key but
-its agent's, 403; one beside `for`, or where `for` is not honored, 400,
-as are the identity routes and the invite routes (which take `for`
-through the registry, and no mandate yet).
-Only the platform can make one: its mark is a MAC under a key derived from
-the host secret. An asker who is not the agent's owner is another entity,
-whose actions are theirs to be keyed, capped and credited by: their words
-give the agent no mandate yet.
+are a person's own (their post, a door's relay of them, or the
+platform's record of a schedule's fire for its maker:
+`mandate::asker_of`) and to it (its body's `to` names it, or names no
+one: `mandate::addressed`) (`ChannelRecord.mandate`); a live frame
+carries none. Its owner's own
+lends everything of theirs; anyone else's, the agent's lend there (An
+agent's lend). It holds for `MANDATE_LIFE_MS` from its record's writing,
+and a record older than that carries none. The agent's request may carry
+it in `x-fragment-mandate` in place of `for`, wherever `for` is honored:
+it acts for its asker as `for` does for its owner, held to the lower of
+the asker's role there and the agent's cap. An asker who is not its
+owner is someone else acting through it (`Signed::other_asker`): a run
+and its ledger key are theirs (`runs.asker`), `members/me` is refused (an
+agent never leaves, nor is removed, for them), `POST /api/fragments` is
+403 (it makes nothing for them), and an icon is never drawn on its
+owner's credit for them. The router checks it in the signer's own
+lookup: one the platform did not make, or altered, or run out, is 403;
+one carried by any key but its agent's, 403; one beside `for`, or where
+`for` is not honored, 400, as are the identity routes and the invite
+routes (which take `for` through the registry, and no mandate). Only the
+platform can make one: its mark is a MAC under a key derived from the
+host secret.
+
+**An agent's computer proves who asked** (FIN-720). Its bridge tells the
+agent's fragment each turn it runs, before its runtime hears of it
+(`/api/computer/turns`: docs/computers.md). The egress then signs each
+call the agent makes `for` its owner with the proof the open turns hold
+(`mandate::proof`): only its owner's turns open, its owner's mandate (or
+the bare `for`, with none); one other person's turns open, each proven,
+their newest mandate; turns of more than one other person, or of one
+unproven, the agent as itself, with no `for`, in those turns' places
+alone, and 403 anywhere else. Since decision 64 an agent's own
+memberships mirror its owner's, so acting as itself elsewhere would reach
+what is its owner's for someone it cannot name. While someone else's turn
+is open, the agent's grants carry `lend`, what of its owner's it uses
+then: paid tools (an operator key) by `spend`, their accounts and keys (a
+connection, a Vault secret) by `accounts`. A paid tool used on someone
+else's turn is billed to the owner only while lent.
+
+**An agent's lend** (the share sheet's card for an owner's own agent in
+a chat): `PUT /api/f/{name}/members/{agent}/lend` `{spend, accounts}` →
+the lend, kept on the agent's member row; its owner's alone, in person
+(the agent itself 403; anyone else refused as on any route). A member list says it to its owner,
+on their own agents' rows (`Member.lend`), and to no one else. One never
+set is `Lend::DEFAULT`: spend on, accounts off.
 
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -698,10 +730,11 @@ it. Narrowing is never refused, and one shared before the rule keeps what
 it had (debt ledger, "Agent fragments shared before FIN-544"). Its sheet
 offers no invite, and no switch but one to close a link from before.
 
-On a chat one of the owner's agents is in, the sheet, and `fragment
-members add`, say "People in this chat can talk to your agent."
-(`fragment_core::permit::TRUST_WARNING`): whoever is in a chat may talk to
-its agents, which act for their owner.
+On a chat one of the owner's agents is in, `fragment members add` says
+"People here can ask your agent for things. It does them as that person,
+and anyone here can see what it finds." (`fragment_core::permit::
+asked_here`), and the sheet shows the agent's lend card: whoever is in a
+chat may ask its agents, which act as them (Who asked: mandates).
 
 ### Invites by email
 
@@ -1873,6 +1906,13 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   skipped. Past the owner's overdraft none fires (`schedules.blocked`); a
   channel no longer taking its records, or a record that relays someone
   (kept before that was refused), skips it (`schedule.unfired`).
+- **Its asker** (FIN-720): whom its maker acted for, else its maker
+  (`record_schedules.asker`). Each fire is checked again as them, at
+  their role now: one no longer in the fragment fires no more
+  (`schedule::Refusal::AskerGone`, 403), and the record it appends is
+  the platform's, for them (`records.asker`), so an agent asked by it
+  acts for them (Who asked: mandates). One made before has none, and
+  fires as before.
 - Viewers list them; editors add, pause, resume and remove them (an agent
   on its own fragment is its editor: no special case).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five

@@ -67,7 +67,7 @@ use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::{ErrorCode, IdentityKind, Lend};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -3949,10 +3949,10 @@ impl ComputerCell {
         let row = rows.iter().find(|r| r["fragment"] == agent).expect("the agent named is one of the rows read");
         let owner = row["owner"].as_str().unwrap_or_default().to_string();
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
-        // asked of its fragment at each use, when a catalog's provider is
-        // asked for: one its owner took away is refused from their next
-        // request on (its time logged)
-        let catalogued = b.placeholders.iter().any(|p| self.cfg.providers.named(&p.provider, p.connection).is_some());
+        // asked of its fragment at each use: one its owner took away is
+        // refused from their next request on (its time logged), and what
+        // someone else's open ask is lent of them (FIN-720), a Vault's
+        // secrets among them
         // its owner's own keys asked for are their Vault's (M16), asked
         // beside its fragment's grants, so the swap waits on no hop more;
         // one this computer kept before the move goes to the Vault first (a
@@ -3962,8 +3962,8 @@ impl ComputerCell {
         own.dedup();
         let asked_at = js::now_ms();
         let grants = async {
-            let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
-            Ok::<_, CellError>((grants, catalogued.then(|| js::now_ms() - asked_at)))
+            let grants = self.grants_of(agent, &identity, None).await?;
+            Ok::<_, CellError>((grants, Some(js::now_ms() - asked_at)))
         };
         // each wait timed from one start (`grantsMs`, `ownMs`): asked side by
         // side, the request waits the longer, never the two added
@@ -3983,6 +3983,12 @@ impl ComputerCell {
         // the agent's person's Vault for, this agent's now that its tag says so
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
             let provider = self.cfg.providers.named(&p.provider, p.connection).expect("a catalog's, filtered so");
+            // someone else's ask uses the owner's paid tools when the place
+            // lends their credit, and their accounts and keys when it lends those
+            let lent = grants.lend.unwrap_or(Lend::OWNER);
+            if !(if provider.kind == Kind::Operator { lent.spend } else { lent.accounts }) {
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{agent}'s owner hasn't lent it {} for someone else's ask here", if provider.kind == Kind::Operator { "their credit" } else { "their accounts and keys" })));
+            }
             if !grants.may_use(&provider.name) {
                 let list = grants.connections.as_deref().unwrap_or_default();
                 return Err(CellError::new(
@@ -4023,7 +4029,8 @@ impl ComputerCell {
             }
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
-        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms, "ownMs": own_ms }))
+        let accounts = grants.lend.is_none_or(|l| l.accounts);
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "accounts": accounts, "grantsMs": grants_ms, "ownMs": own_ms }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
@@ -4470,6 +4477,24 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
         }
+        // its bridge tells an agent's fragment which turns it runs, and whose
+        // ask each is (`computer/turns`, FIN-720): `PUT` one open, `DELETE`
+        // one ended, `DELETE` with no turn all of them (a bridge's start)
+        // As the agent (its header): a platform from before sends it on to
+        // its API, which has no such route (404), so a bridge tells it
+        // nothing.
+        "/api/computer/turns" => {
+            let agent = req.headers().get(AGENT_HEADER)?.filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name the agent this acts as (x-fragment-agent)"))?;
+            let v: Value = serde_json::from_slice(&crate::read_body(&mut req, 4_096).await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let op = match (req.method(), v["turn"].is_string()) {
+                (Method::Put, true) => "open",
+                (Method::Delete, true) => "close",
+                (Method::Delete, false) => "clear",
+                _ => return Err(CellError::invalid("PUT a turn open, DELETE one ended, or DELETE them all")),
+            };
+            let asked = json!({ "computer": computer, "op": op, "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
+            return json_response(&crate::fragment::ask(env, &agent, "computer/turns", &asked).await?);
+        }
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
         "/api/computer/door" if req.method() == Method::Post => {
@@ -4567,7 +4592,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         env,
         &agent,
         "computer/sign",
-        &json!({ "computer": computer, "method": method.as_ref(), "url": target, "payload": payload }),
+        &json!({ "computer": computer, "method": method.as_ref(), "url": target, "payload": payload, "fragment": target_fragment(&path) }),
     )
     .await {
         // Only the model's signing preflight, before route() can dispatch
@@ -4581,7 +4606,13 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         other => other?,
     };
     let authorization = signed["header"].as_str().ok_or_else(|| CellError::host("the agent fragment signed nothing"))?;
+    // what it signed: for its owner, the proof of whose ask this is in
+    // place of `for` (runs_on.rs `asked`), which no guest's header names
+    let target = signed["url"].as_str().map_or(target, str::to_string);
     let headers = Headers::new();
+    if let Some(m) = signed["mandate"].as_str() {
+        headers.set(fragment_core::mandate::HEADER, m)?;
+    }
     // the caller's tier, which the model route reads (`Models::named`), and no other of ours
     for k in ["content-type", "accept", "if-none-match", "range", fragment_core::models::TIER_HEADER] {
         if let Some(v) = req.headers().get(k)? {
@@ -4786,6 +4817,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         // to this agent, toward this host; a signature over the request as
         // it goes, over https
         let vaulted: Vec<&Placeholder> = found.iter().filter(|p| vault_s(cfg, p)).collect();
+        if !vaulted.is_empty() && answer["accounts"] == false {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{agent}'s owner hasn't lent it their accounts and keys for someone else's ask here")));
+        }
         if !vaulted.is_empty() {
             let ask = crate::vault::FillAsk {
                 agent: agent.clone(),

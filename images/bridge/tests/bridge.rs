@@ -102,6 +102,67 @@ async fn a_reply() {
         assert_eq!(w.bodies(&chat, "work", "turn.end")[0]["outcome"], "idle");
     });
     fake.until(WAIT, "the keepalive held, then let go", |w| w.keepalive_log.first() == Some(&true) && w.keepalive_open == 0).await;
+    // its agent's fragment was told the turn ran, whose ask it was, and that
+    // it ended: what the last life told forgotten first (FIN-720)
+    fake.until(WAIT, "the turn told ended", |w| w.turns.len() == 3).await;
+    fake.with(|w| {
+        let told: Vec<(&str, &str, &Value)> = w.turns.iter().map(|(a, m, v)| (a.as_str(), m.as_str(), v)).collect();
+        assert_eq!(
+            told,
+            vec![
+                ("juniper--k3x9", "DELETE", &json!({ "turn": null })),
+                ("juniper--k3x9", "PUT", &json!({ "turn": turn, "place": chat, "asker": "npub1paul", "mandate": null })),
+                ("juniper--k3x9", "DELETE", &json!({ "turn": turn })),
+            ]
+        );
+    });
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): someone else's ask heard live carries no proof (the
+/// platform gives a mandate only beside a record read over its API), so
+/// its turn's record is read once for it, and its agent's fragment is told
+/// the turn as theirs with that proof; its owner's own needs none.
+#[tokio::test]
+async fn someone_elses_ask_is_told_with_its_proof() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| w.mandates = true);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("proof-read");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("skyler"), json!({ "text": "hello juniper" }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "skyler's turn told", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == turn)).await;
+    fake.with(|w| {
+        let opened = w.turns.iter().find(|(_, m, v)| m == "PUT" && v["turn"] == turn).map(|(_, _, v)| v.clone()).unwrap_or_default();
+        assert_eq!(opened, json!({ "turn": turn, "place": chat, "asker": "npub1skyler", "mandate": format!("fm1.npub1skyler.{}", seq(&said)) }));
+    });
+    let mine = fake.say(&chat, &person("paul"), json!({ "text": "and mine" }));
+    let mine = turn_of("juniper", &chat, seq(&mine));
+    fake.until(WAIT, "paul's turn told", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == mine)).await;
+    fake.with(|w| {
+        let opened = w.turns.iter().find(|(_, m, v)| m == "PUT" && v["turn"] == mine).map(|(_, _, v)| v.clone()).unwrap_or_default();
+        assert_eq!(opened["mandate"], Value::Null, "its owner's: `for` is theirs, no proof read");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): on a platform from before the turns route (404), a
+/// turn is told nothing and runs as ever: a new image never stalls on an
+/// older cell.
+#[tokio::test]
+async fn a_platform_from_before_is_told_no_turns() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| w.no_turns = true);
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("no-turns");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "hi" }));
+    fake.until(WAIT, "a reply", |w| !replies(w, &chat).is_empty() && !w.bodies(&chat, "work", "turn.end").is_empty()).await;
+    fake.with(|w| assert!(w.turns.is_empty(), "told nothing: {:?}", w.turns));
     bridge.stop().await;
 }
 

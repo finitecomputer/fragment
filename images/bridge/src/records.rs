@@ -39,6 +39,12 @@ pub struct Record {
     pub kind: String,
     #[serde(default)]
     pub body: Value,
+    /// Proof of whose ask it is, for the agent that read it (docs/api.md,
+    /// "Who asked: mandates"): its turn's, told to its agent's fragment as
+    /// the turn starts (`TurnTold`). None from a platform before it, and
+    /// on a record that is no one's ask of this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate: Option<String>,
 }
 
 /// The author the platform stamps on what app code wrote: a mutation's

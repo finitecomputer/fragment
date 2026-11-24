@@ -963,9 +963,10 @@ impl FragmentCell {
     /// holds one is its own (`permit::acts_as_itself`): from here it reads,
     /// acts and is named as the agent alone, as if it had signed without
     /// `for`, so an app is never told its owner with the agent's role.
+    /// Anyone else who asked it is themselves here, never the agent (FIN-720).
     fn as_whom(&self, signed: Option<Signed>) -> CellResult<Option<Signed>> {
         let Some(mut signed) = signed else { return Ok(None) };
-        let Some(owner) = signed.acting_for.as_deref() else { return Ok(Some(signed)) };
+        let Some(owner) = signed.acting_for.as_deref().filter(|_| signed.other_asker().is_none()) else { return Ok(Some(signed)) };
         #[derive(serde::Deserialize)]
         struct Row {
             owner: Option<String>,
@@ -1218,6 +1219,10 @@ impl FragmentCell {
                 self.set_member(&caller, who, body).await
             }
             (Method::Delete, ["api", "members", who]) => self.remove_member(&caller, who).await,
+            (Method::Put, ["api", "members", agent, "lend"]) => {
+                let lend: fragment_proto::Lend = body_json(&mut req).await?;
+                self.set_lend(&caller, agent, lend).await
+            }
             (Method::Post, ["api", "invites"]) => {
                 let body = body_json(&mut req).await?;
                 self.create_invite(&caller, body).await

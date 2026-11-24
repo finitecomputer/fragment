@@ -44,10 +44,12 @@ use fragment_core::permit;
 use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
+    Lend,
     limits, CreateInvite, ErrorCode, FaceChange, FragmentKind, Identity, IdentityKind, Invite, InviteList, Member, MemberList, PutSecret, Role, Rotated, SecretInfo,
     SecretList, SetRole, SetVisibility, Shared, Sharing, Visibility,
 };
 use futures_util::future::join_all;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
@@ -125,6 +127,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         owner: r["owner"].as_str().map(str::to_string),
         email: None,
         door: None,
+        lend: None,
     })
 }
 
@@ -648,7 +651,51 @@ impl FragmentCell {
                 m.email = profiles.get(&m.principal).and_then(|p| p.email.clone());
             }
         }
+        // each agent's lend here, to its owner alone (the lend card)
+        if let Some(me) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Person) {
+            for m in list.members.iter_mut().filter(|m| m.owner.as_deref() == Some(me.id.as_str())) {
+                m.lend = Some(self.lend_of(&m.principal)?);
+            }
+        }
         json_response(&list)
+    }
+
+    /// What `agent`'s owner lends it here for someone else's ask (its row's
+    /// `lend`; one never set, `Lend::DEFAULT`).
+    pub(crate) fn lend_of(&self, agent: &str) -> CellResult<Lend> {
+        let rows = self.rows("SELECT lend FROM members WHERE principal = ?", vec![agent.into()])?;
+        match rows.first().map(|r| r["lend"].as_i64()) {
+            None | Some(None) => Ok(Lend::DEFAULT),
+            Some(Some(bits)) => u8::try_from(bits).ok().and_then(Lend::from_bits).ok_or_else(|| CellError::host(format!("member {agent}'s stored lend {bits} does not decode"))),
+        }
+    }
+
+    /// `PUT /api/f/<name>/members/<agent>/lend` (the lend card): what of
+    /// theirs an agent member's owner lets it use here for someone else's
+    /// ask. Its owner's alone, in person: an agent never sets its own (its
+    /// grants are its owner's). Answers the lend, as kept.
+    pub(crate) async fn set_lend(&self, caller: &Caller, agent: &str, lend: Lend) -> CellResult<Response> {
+        self.require(caller, false, Role::Viewer)?;
+        let Some(me) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Person && s.acting_for.is_none()) else {
+            return Err(CellError::new(ErrorCode::Forbidden, "an agent's lend is its owner's to set, in person"));
+        };
+        let agent = npub::parse(agent).map(|k| npub::identity_of(&k)).ok_or_else(|| CellError::invalid(format!("{agent:?} names no agent (an npub)")))?;
+        #[derive(Deserialize)]
+        struct Row {
+            kind: Option<String>,
+            owner: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed("SELECT kind, owner FROM members WHERE principal = ?", vec![agent.as_str().into()])?;
+        let Some(row) = rows.into_iter().next().filter(|r| r.kind.as_deref() == Some(IdentityKind::Agent.as_str())) else {
+            return Err(CellError::new(ErrorCode::NotFound, "that agent is not in here"));
+        };
+        if row.owner.as_deref() != Some(me.id.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "an agent's lend is its owner's to set"));
+        }
+        self.writable().await?;
+        self.exec("UPDATE members SET lend = ? WHERE principal = ?", vec![SqlStorageValue::Integer(i64::from(lend.bits())), agent.as_str().into()])?;
+        self.event("member.lend", &format!("{agent} lent spend {}, accounts {}", lend.spend, lend.accounts), json!({ "agent": agent, "spend": lend.spend, "accounts": lend.accounts }));
+        json_response(&lend)
     }
 
     /// Every member, the first added first (a chat's lead is its first
@@ -859,6 +906,11 @@ impl FragmentCell {
             None => return Err(CellError::invalid(format!("{who:?} is not an email, an npub, or a 64-hex key"))),
         };
         let is_self = me == target;
+        // an agent leaves on its owner's word alone: someone else who asked
+        // it is not its owner (FIN-720)
+        if is_self && caller.signed.as_ref().is_some_and(|s| s.other_asker().is_some()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "an agent leaves only on its owner's word, never on someone else's ask"));
+        }
         // leaving is any member's own; removing anyone else is sharing
         let actor = match is_self {
             true => Actor { role: self.member_role(&me)?, by: me.clone(), for_owner: None },
