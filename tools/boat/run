@@ -1,37 +1,34 @@
 #!/usr/bin/env bash
-# tools/boat/run: run a command from this checkout on its Boat sandbox
+# tools/boat/run: run a command from this checkout on a Boat sandbox
 # (boat.dev) instead of on this computer. Optional; AGENTS.md, "Building on
 # Boat".
 #
 #   tools/boat/run COMMAND...   e.g. tools/boat/run cargo xtask check
-#   tools/boat/run --refresh    bring the warm snapshot to master
-#   tools/boat/run --rebuild    make the snapshot from nothing (the first time)
+#   tools/boat/run --refresh    make the warm snapshot, or bring it to master
 #
 # A checkout has one sandbox, started from the snapshot at its first run and
-# stopped by Boat 15 minutes after its last; the next run resumes it. Each run
-# sends the checkout as it stands (HEAD and every changed, new and deleted
-# file that git does not ignore) as one git commit, and inside.sh checks it
-# out there and runs the command in it. One argument is a shell command
-# line; several are one command and its arguments. The run's first line
-# names the sandbox, for `boat scp` of what it left (~/Projects/fragment).
+# stopped by Boat 15 minutes after its last; the next run resumes it. Each
+# run sends the checkout as it stands (HEAD and every changed, new and
+# deleted file that git does not ignore) as one git commit; inside.sh checks
+# it out there and runs the command in it. The run's first line names the
+# sandbox, for `boat scp` of what it left (~/Projects/fragment).
 #
 # Needs the boat CLI (`boat login`) and jq. Shell, not xtask: it runs where
 # nothing is built, which is its point.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-B=${BOAT_BIN:-$(command -v boat || echo "$HOME/.ascii/bin/boat")}
-SNAPSHOT=${FRAGMENT_BOAT_SNAPSHOT:-fragment-warm}
-UNCHANGED=86 # inside.sh's exit when the snapshot is at master already
+B=$(command -v boat || echo "$HOME/.ascii/bin/boat")
+SNAPSHOT=fragment-warm
 # Seconds until Boat stops a sandbox: room for a run, then little to idle on.
 RUNNING=7200 IDLE=900
 die() { echo "tools/boat/run: $*" >&2; exit 1; }
 command -v jq >/dev/null || die "jq is not installed"
-[ -x "$B" ] || die "no boat CLI (https://boat.dev/install), or set BOAT_BIN"
+[ -x "$B" ] || die "no boat CLI (https://boat.dev/install)"
 
 # new [boat new's options]: a sandbox, its id printed.
 new() {
   local out
-  out=$("$B" new "$@" --type "${FRAGMENT_BOAT_TYPE:-large}" --no-env --ttl "$RUNNING" --json) || die "boat new: $out"
+  out=$("$B" new "$@" --type large --no-env --ttl "$RUNNING" --json) || die "boat new: $out"
   jq -rs '[.[] | (.id?, .sandbox.id?) | strings | select(startswith("bx_"))] | first // empty' <<< "$out"
 }
 
@@ -44,23 +41,20 @@ $(cat "$here/inside.sh")" | jq -Rrj --unbuffered '(fromjson? // {type: "stdout",
 }
 
 case ${1:-} in
-  --refresh | --rebuild)
-    [ $# -eq 1 ] || die "$1 takes nothing after it"
-    from="--from $SNAPSHOT"
-    [ "$1" = --refresh ] || from=
+  --refresh)
+    # from the snapshot when there is one, else from nothing
+    saved=$("$B" snapshots --json) || die "boat snapshots: $saved"
+    from=$(jq -r --arg n "$SNAPSHOT" '.named[]? | select(.name == $n) | "--from " + .name' <<< "$saved")
     # shellcheck disable=SC2086 # two words, or none
     id=$(new $from --name "$SNAPSHOT-builder")
     [ -n "$id" ] || die "boat new named no sandbox"
     trap '"$B" delete "$id" --yes >/dev/null' EXIT
-    echo "tools/boat/run: building on $id" >&2
-    rc=0
-    on "$id" master "" || rc=$?
-    [ "$rc" != "$UNCHANGED" ] || exit 0
-    [ "$rc" = 0 ] || die "the build failed ($rc): $SNAPSHOT is as it was"
+    echo "tools/boat/run: building on $id (${from:-from nothing})" >&2
+    on "$id" master "" || die "the build failed: $SNAPSHOT is as it was"
     "$B" snapshot "$id" "$SNAPSHOT" >/dev/null
     echo "tools/boat/run: $SNAPSHOT saved" >&2
     exit 0 ;;
-  "" | -h | --help) sed -n '6,8p' "$0" | cut -c3- >&2; exit 2 ;;
+  "" | -h | --help) sed -n '6,7p' "$0" | cut -c3- >&2; exit 2 ;;
 esac
 
 cd "$(git rev-parse --show-toplevel)"

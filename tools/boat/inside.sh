@@ -35,26 +35,17 @@ rm -rf ~/.cache/worker-build && ln -s ~/.boat-keep/worker-build ~/.cache/worker-
 export FRAGMENT_IMAGE_CACHE="type=local,src=$HOME/.buildcache,dest=$HOME/.buildcache"
 export CC_wasm32_unknown_unknown=clang AR_wasm32_unknown_unknown=llvm-ar CHROME_BIN=/usr/bin/google-chrome
 
+[ -d "$repo/.git" ] || git clone -q https://github.com/finitecomputer/fragment "$repo"
+git -C "$repo" fetch -q origin master
 if [ "$commit" = master ]; then
-  if [ -d "$repo/.git" ]; then
-    git -C "$repo" fetch -q origin master
-    if [ -e "$repo/target/built-tree" ] && [ "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse origin/master)" ]; then
-      echo "the snapshot is at master $(git -C "$repo" rev-parse --short HEAD): nothing to do"
-      exit 86
-    fi
-  else
-    git clone -q https://github.com/finitecomputer/fragment "$repo"
-  fi
-  # a machine's setup (AGENTS.md, Commands), and the builds copies start from
+  # a machine's setup (AGENTS.md, Commands), then the builds copies start from
   rustup update stable --no-self-update
   rustup target add wasm32-unknown-unknown
   rustup component add clippy
   commit=origin/master
   command=$(cat <<'BUILDS'
 set -e
-v=$(sed -n 's/^pub const WORKER_BUILD_VERSION: &str = "\(.*\)";/\1/p' xtask/src/build.rs)
-[ -n "$v" ] || { echo "no WORKER_BUILD_VERSION in xtask/src/build.rs"; exit 1; }
-worker-build --version 2> /dev/null | grep -qF "$v" || cargo install worker-build --version "$v" --locked
+cargo install --locked worker-build --version "$(sed -n 's/^pub const WORKER_BUILD_VERSION: &str = "\(.*\)";/\1/p' xtask/src/build.rs)"
 FRAGMENT_IMAGE_CACHE_SAVE=true cargo xtask e2e --build-only
 cargo xtask check || echo "check fails on this master: the snapshot is saved all the same"
 # last, so that a copy's first xtask build finds target/debug as xtask left it
@@ -62,7 +53,6 @@ cargo xtask e2e --build-only
 BUILDS
   )
 else
-  git -C "$repo" fetch -q origin master
   bundle=$HOME/checkout-$commit.bundle
   [ ! -f "$bundle" ] || { git -C "$repo" fetch -q "$bundle" refs/worktree/boat && rm "$bundle"; }
 fi

@@ -119,8 +119,8 @@ local.
   command, and seconds after that.
 - The run's first line names the sandbox, for `boat scp` of logs or
   screenshots.
-- `tools/boat/run --rebuild` makes the snapshot on your own account, once;
-  `--refresh` brings it to master, and does nothing when it is there.
+- `tools/boat/run --refresh` makes the snapshot on your own account, and
+  brings it to master again when builds there have grown slow.
 - A large sandbox bills at twice the default rate, and each start counts
   against the plan's daily limit. Check them with `boat limits --all`, not
   from memory.
