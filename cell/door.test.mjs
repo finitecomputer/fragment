@@ -634,7 +634,7 @@ test("a reply's file is used until its reply is done, whatever its runner reads;
   const files = [{ sha256: sha(5), name: "plan.pdf", type: "application/pdf", size: 4 }];
   d.c.answers.push([200, { files: true }], [202, { done: false }]);
   await d.job("reply", { key: "chat:9", text: "", files });
-  assert.deepEqual(uses(d, 5), ["r:chat:10", "r:chat:9"], "not yet done");
+  assert.deepEqual(uses(d, 5), ["R:chat:9", "r:chat:10"], "not yet done: taken by its runner, its use its runner's");
   for (let n = 0; n < 2; n += 1) {
     d.c.answers.push([200, { files: true }], [200, { done: true }]);
     await d.job("reply", { key: "chat:9", text: "", files });
@@ -680,7 +680,7 @@ test("a reply its runner says ended (410: its link ended first) lets go of its f
   await replyFileOf(d, 2, "chat:3");
   d.c.answers.push([200, { files: true }], [202, { done: false }]);
   await d.job("reply", { key: "chat:2", text: "", files: replyFiles1(2) });
-  assert.deepEqual(uses(d, 2), ["r:chat:2", "r:chat:3"], "pending: kept");
+  assert.deepEqual(uses(d, 2), ["R:chat:2", "r:chat:3"], "pending: kept, its runner's");
   d.c.answers.push([200, { files: true }], [410, { done: false, ended: true }]);
   assert.equal((await d.job("reply", { key: "chat:2", text: "", files: replyFiles1(2) })).status, 410);
   assert.deepEqual(uses(d, 2), ["r:chat:3"], "ended with its files: its own use let go, the other reply's kept");
@@ -701,6 +701,28 @@ test("a reply its runner refuses for good (not linked, or not there to ask) lets
   assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM uses").one().n, 0, "no refused reply's use left");
   const taken = await replyFileOf(d, 99, "chat:99");
   assert.equal(taken.status, 200, `a full door makes room of files nothing uses: ${await taken.clone().text()}`);
+});
+
+test("a reply its runner took (202) keeps its files across an answer that says nothing (its state unread, 503), however full the door, until its runner says it is done (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  assert.equal((await replyFileOf(d, 1, "chat:1")).status, 200);
+  d.c.answers.push([200, { phase: "linked", files: true }], [202, { done: false }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "", files: replyFiles1(1) })).status, 202, "taken by its runner");
+  // its runner restarting: its state unread on the next poll
+  d.c.answers.push([503, { error: "starting" }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "", files: replyFiles1(1) })).status, 503);
+  // a full door makes room of files nothing uses: never that one
+  for (let n = 2; n <= 70; n += 1) {
+    await replyFileOf(d, n, `chat:${n}`);
+    d.c.answers.push([200, { phase: "off", files: true }], [409, { error: "not_linked" }]);
+    await d.job("reply", { key: `chat:${n}`, text: "", files: replyFiles1(n) });
+  }
+  const read = await d.call("GET", `/egress/file/${sha(1)}`);
+  assert.deepEqual([read.status, await read.text()], [200, "%PDF"], "its runner, started again, reads its bytes");
+  d.c.answers.push([200, { phase: "linked", files: true }], [200, { done: true }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "", files: replyFiles1(1) })).status, 200);
+  assert.deepEqual(uses(d, 1), [], "done: let go");
 });
 
 test("an old file a waiting delivery keeps counts toward the door's bounds (the review of #1538)", async () => {
