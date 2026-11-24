@@ -953,6 +953,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
     s.ok("the sheet fits a popup's width and a phone's, with no sideways scroll", fits.iter().all(|(_, fit)| *fit), format!("{fits:?}"));
+    // the lend card, on the sheet of a chat the owner's agent is in, in a
+    // window of its own and at a phone's width, light and dark: no
+    // sideways scroll, and its switches armed
+    let lent = chrome.open(&format!("{platform}{talk_sheet}"))?;
+    let mut fits = vec![];
+    for (width, mobile, scheme) in [(1280, false, "light"), (1280, false, "dark"), (390, true, "light"), (390, true, "dark")] {
+        chrome.viewport(&lent, width, 900, mobile)?;
+        chrome.color_scheme(&lent, scheme)?;
+        let ready = chrome.until(&lent, "document.readyState === 'complete' && !!document.querySelector('main.share form.lend') && ![...document.querySelectorAll('form.lend [data-arm]')].some(b => b.disabled)", wait);
+        fits.push((width, scheme, ready && chrome.eval(&lent, "document.documentElement.scrollWidth <= innerWidth")? == json!(true)));
+        chrome.screenshot(&lent, &s.scratch.join(format!("share-lend-{width}-{scheme}.png")))?;
+    }
+    s.ok("the lend card fits a window's width and a phone's, light and dark, with no sideways scroll", fits.iter().all(|(_, _, fit)| *fit), format!("{fits:?}"));
+    // a switch sends its card at once: accounts on, then off again, as the owner clicks
+    let click = |chrome: &mut crate::browser::Browser, field: &str| chrome.eval(&lent, &format!("(document.querySelector('form.lend input[name={field}]').click(), true)"));
+    click(&mut chrome, "accounts")?;
+    let on = s.eventually(wait, || lend_of(&owner).is_ok_and(|l| l == json!({ "spend": true, "accounts": true })));
+    let rearmed = chrome.until(&lent, "!!document.querySelector('form.lend input[name=accounts]:checked') && ![...document.querySelectorAll('form.lend [data-arm]')].some(b => b.disabled)", wait);
+    click(&mut chrome, "accounts")?;
+    let off = s.eventually(wait, || lend_of(&owner).is_ok_and(|l| l == json!({ "spend": true, "accounts": false })));
+    s.ok("a switch sends its card as it is clicked: the sheet comes back saying so, and the lend is kept; clicked again, as it was", on && rearmed && off, lend_of(&owner)?);
+    chrome.close(lent)?;
 
     // ---- a keyboard: arrow keys over its choices send nothing (a closed
     // select's did, on Linux and Windows: an ArrowDown on a member's role
