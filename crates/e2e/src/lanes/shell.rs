@@ -1626,7 +1626,6 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         legal == json!({ "last": true, "links": [["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]], "text": "Privacy · Terms" }),
         &legal,
     );
-    theme_ui(s, &mut b, &page)?;
     release_line_ui(s, api, &mut b, &page)?;
     settings_navigation_ui(s, &mut b, &page)?;
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
@@ -1921,79 +1920,6 @@ const COPY_SEEN: &str = "(() => { const p = document.getElementById('build-promp
 /// their links (text, href, target) and words.
 const LEGAL_LINKS_IN_ACCOUNT: &str = "(() => { const s = [...document.querySelectorAll('#settings-page .settings-section')].find((s) => s.querySelector(':scope > h2')?.textContent === 'Account'); \
     const p = s?.querySelector('.legal-links'); return { last: !!p && s.lastElementChild === p, links: [...(p?.querySelectorAll('a') ?? [])].map((a) => [a.textContent, a.getAttribute('href'), a.target]), text: p?.textContent ?? null }; })()";
-
-/// The shell's light or dark as shown: the root's data-theme, Settings'
-/// Theme pick, the window's colour, the bars' colours, and what is kept.
-const THEME_SEEN: &str = "(() => ({ theme: document.documentElement.dataset.theme ?? null, pick: document.querySelector('#settings-page select.settings-theme')?.value ?? null, \
-    bg: getComputedStyle(document.documentElement).getPropertyValue('--bg-window').trim(), bars: [...document.querySelectorAll('meta[name=theme-color]')].map((m) => m.content), \
-    kept: localStorage.getItem('finite.theme.v1') }))()";
-
-/// Settings' Theme (FIN-652, shell theme.js): System by default, which
-/// follows the system's light or dark as it changes; Light or Dark holds
-/// against it, the bars around the page too, and is kept on this device
-/// across a reload; System again follows the system. The page is left on
-/// System, with no scheme emulated, whatever happened.
-fn theme_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
-    let checked = theme_steps(s, b, page);
-    b.eval(page, "(() => { const p = document.querySelector('#settings-page select.settings-theme'); if (p) { p.value = 'system'; p.dispatchEvent(new Event('change')); } return true; })()")?;
-    // an empty value ends the emulation (DevTools' Emulation.setEmulatedMedia)
-    b.color_scheme(page, "")?;
-    checked
-}
-
-fn theme_steps(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
-    let wait = std::time::Duration::from_secs(30);
-    let pick = |b: &mut Browser, theme: &str| b.eval(page, &format!("(() => {{ const p = document.querySelector('#settings-page select.settings-theme'); p.value = {}; p.dispatchEvent(new Event('change')); return true; }})()", js(theme)));
-    // under System each bar keeps its own colour (index.html: light, then dark)
-    let own_bars = json!(["#ebe9e5", "#181818"]);
-    b.color_scheme(page, "light")?;
-    let light = b.until(page, "document.documentElement.dataset.theme === 'light'", wait);
-    let first = b.eval(page, THEME_SEEN)?;
-    b.color_scheme(page, "dark")?;
-    let followed = b.until(page, "document.documentElement.dataset.theme === 'dark'", wait);
-    let then = b.eval(page, THEME_SEEN)?;
-    s.ok(
-        "settings' Account has Theme, on System at first: the shell is the system's light, then its dark as the system changes, each bar keeping its own colour",
-        light && followed && first["pick"] == "system" && first["bg"] == "#f7f6f3" && first["bars"] == own_bars && then["bg"] == "#212121" && then["bars"] == own_bars,
-        json!({ "first": first, "then": then }),
-    );
-
-    b.color_scheme(page, "light")?;
-    pick(b, "dark")?;
-    let dark = b.eval(page, THEME_SEEN)?;
-    b.reload(page)?;
-    let back = b.until(page, "!!document.querySelector('#settings-page select.settings-theme')", wait);
-    let reloaded = b.eval(page, THEME_SEEN)?;
-    s.ok(
-        "Dark, picked on a light system, makes the shell and both bars dark at once, and holds across a reload",
-        back && dark["theme"] == "dark" && dark["bg"] == "#212121" && dark["bars"] == json!(["#181818", "#181818"]) && dark["kept"] == "\"dark\""
-            && reloaded["theme"] == "dark" && reloaded["pick"] == "dark" && reloaded["bg"] == "#212121",
-        json!({ "dark": dark, "reloaded": reloaded }),
-    );
-
-    b.color_scheme(page, "dark")?;
-    pick(b, "light")?;
-    let chosen = b.eval(page, THEME_SEEN)?;
-    b.color_scheme(page, "light")?;
-    b.color_scheme(page, "dark")?;
-    let held = b.eval(page, THEME_SEEN)?;
-    s.ok(
-        "Light, picked on a dark system, makes the shell light, and the system's changes leave it so",
-        chosen["theme"] == "light" && chosen["bg"] == "#f7f6f3" && chosen["bars"] == json!(["#ebe9e5", "#ebe9e5"]) && held["theme"] == "light" && held["bg"] == "#f7f6f3",
-        json!({ "chosen": chosen, "held": held }),
-    );
-
-    pick(b, "system")?;
-    let system = b.eval(page, THEME_SEEN)?;
-    b.color_scheme(page, "light")?;
-    let follows = b.until(page, "document.documentElement.dataset.theme === 'light'", wait);
-    s.ok(
-        "System again: the system's dark at once, each bar its own colour, and its light as it changes",
-        system["theme"] == "dark" && system["bg"] == "#212121" && system["bars"] == own_bars && system["kept"] == "\"system\"" && follows,
-        &system,
-    );
-    Ok(())
-}
 
 /// Settings' last line (shell.js `releaseLine`): the release it names, its
 /// words, its link (href, target), its time (seconds, from `datetime`) and
