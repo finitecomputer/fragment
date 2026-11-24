@@ -49,7 +49,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
   const { computerSection, connectionsSection, simplexSection, telegramSection, readConnectors } = sections;
-  const { getComputer, computerFor, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
+  const { getComputer, computerFor, getAgents, computerFailed = () => false, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
   // The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
@@ -353,7 +353,9 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   // roster that changes while settings are shown is drawn again in place
   // (`agentsChanged`)
   let drawnAgents = null;
-  const rosterOf = () => [...getAgents().values()].map((a) => a.fragment).join(" ");
+  // its agents, and whether their computers' read failed (they are read
+  // from it: a computer per agent)
+  const rosterOf = () => [...getAgents().values()].map((a) => a.fragment).concat(computerFailed() ? ["(unread)"] : []).join(" ");
   // An agent's card in Settings' Agents (its summary a box of one size:
   // agent-settings.js `SETTINGS_READ_MS`), and the line its picture and
   // name say what came of a change on: [card, said].
@@ -395,7 +397,10 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     const cards = cardsFor(mine, kept, (a) => cardOf(a, modeled));
     const out = [];
     if (mine.length && modeled.length) out.push(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
-    out.push(...(mine.length ? mine.flatMap((a) => cards.get(a.fragment)) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
+    // none read while their computers' read failed is not "none" (shown
+    // again once one answers: `agentsChanged`)
+    const none = computerFailed() ? "Couldn't load your agents." : "None yet.";
+    out.push(...(mine.length ? mine.flatMap((a) => cards.get(a.fragment)) : [el("p", "muted", none)]), ...(mine.length ? addAgentForm() : []));
     return { out, cards };
   }
   // The roster changed (shell.js `load`): settings shown draw their Agents

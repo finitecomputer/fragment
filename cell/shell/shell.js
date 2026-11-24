@@ -2118,7 +2118,7 @@ const settings = createSettings({
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readConnectors },
-  agents: { getComputer: () => state.computer, computerFor, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
+  agents: { getComputer: () => state.computer, computerFor, getAgents: () => state.agents, computerFailed: () => state.computerFailed, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
 });

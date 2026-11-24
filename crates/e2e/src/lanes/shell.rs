@@ -2728,7 +2728,8 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     for (width, height, mobile, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
         b.viewport(page, width, height, mobile)?;
         b.color_scheme(page, scheme)?;
-        b.eval(page, &format!("(document.querySelector({own})?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        // its heading in view, under the phone's sticky tabs too
+        b.eval(page, &format!("(document.querySelector({own})?.querySelector('h3')?.scrollIntoView({{ block: 'center' }}), true)"))?;
         std::thread::sleep(std::time::Duration::from_millis(400));
         let _ = b.screenshot(page, &shots.join(format!("agent-computer-{width}-{scheme}.png")));
     }
@@ -4071,6 +4072,9 @@ const MADE: &str = "({ path: location.pathname, notice: document.getElementById(
 /// Settings' Computer card of their (first) agent, as shown (null before
 /// it is): a computer per agent, each agent's on its page.
 const COMPUTER_SECTION: &str = "document.querySelector('#settings-page .agent-computer')?.innerText ?? null";
+/// Settings' Agents, as shown (null before it is): their agents are read
+/// from their computers, so a failed read says so there.
+const AGENTS_SECTION: &str = "[...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Agents')?.parentElement.innerText ?? null";
 
 /// The shell at `path` under `FAIL_COMPUTERS` from its first document,
 /// its first run's makes held, after `before` (a script setting it).
@@ -4451,12 +4455,12 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
 
     // at Settings: what is true of their computer, then the computer itself
     let page = open_failing(b, api, "/settings", "")?;
-    let loaded = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
-    let said = b.eval(&page, COMPUTER_SECTION)?;
+    let loaded = b.until(&page, &format!("location.pathname === '/settings' && /Couldn't load/.test({AGENTS_SECTION}) && {REFRESH_LINE}"), wait);
+    let said = b.eval(&page, AGENTS_SECTION)?;
     let _ = b.screenshot(&page, &shots.join("settings-refresh-failed.png"));
     s.ok(
-        "their computer unread, their agent's Computer card in Settings says it couldn't be loaded, never that it starts with its first message, under the line",
-        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load its computer") && !t.contains("starts with its first message")),
+        "their computers unread, Settings' Agents says their agents couldn't be loaded (they are read from their computers), never that they have none, under the line",
+        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load your agents") && !t.contains("None yet")),
         &said,
     );
     b.eval(&page, READ_AGAIN)?;
@@ -4546,7 +4550,7 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     let page = open_failing(b, api, "/", "")?;
     let shown = b.until(&page, &chat_open, wait);
     b.eval(&page, TO_SETTINGS)?;
-    let settings = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
+    let settings = b.until(&page, &format!("location.pathname === '/settings' && ({AGENTS_SECTION}) !== null && {REFRESH_LINE}"), wait);
     b.eval(&page, READ_AGAIN)?;
     let read = b.until(&page, &format!("{NO_REFRESH_LINE} && location.pathname === '/settings'"), wait);
     std::thread::sleep(settle);
