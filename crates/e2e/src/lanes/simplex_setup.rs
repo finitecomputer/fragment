@@ -319,7 +319,7 @@ fn read_qr(png: &Path) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn tag(v: &Value) -> String {
+pub(super) fn tag(v: &Value) -> String {
     v["type"].as_str().unwrap_or("?").to_string()
 }
 
@@ -333,7 +333,7 @@ fn docker(args: &[&str]) -> Result<String> {
 /// SimpleX's preset servers, its database in the run's scratch, its bot
 /// API on loopback (`{"corrId", "cmd"}` out; `{"corrId", "resp"}` its
 /// answer, `{"resp"}` what it says on its own).
-struct Phone {
+pub(super) struct Phone {
     ctr: String,
     ws: tungstenite::WebSocket<TcpStream>,
     next: u64,
@@ -341,7 +341,7 @@ struct Phone {
 }
 
 impl Phone {
-    fn start(dir: &Path, name: &str) -> Result<Phone> {
+    pub(super) fn start(dir: &Path, name: &str) -> Result<Phone> {
         if docker(&["image", "inspect", "--format", "{{.Id}}", LAB_IMAGE]).is_err() {
             let context: PathBuf = fragment_devstack::repo_root().join("images/bridge/tests/simplex");
             docker(&["build", "--platform", "linux/amd64", "-q", "-f", &context.join("lab.Dockerfile").to_string_lossy(), "-t", LAB_IMAGE, &context.to_string_lossy()])?;
@@ -381,7 +381,7 @@ impl Phone {
     }
 
     /// Sends `cmd`; its answer, what it said meanwhile kept.
-    fn cmd(&mut self, cmd: &str) -> Result<Value> {
+    pub(super) fn cmd(&mut self, cmd: &str) -> Result<Value> {
         let id = self.next.to_string();
         self.next += 1;
         self.ws.send(tungstenite::Message::text(json!({ "corrId": id, "cmd": cmd }).to_string()))?;
@@ -399,7 +399,7 @@ impl Phone {
     }
 
     /// The first thing it said that `pred` takes, within `within`.
-    fn wait(&mut self, within: Duration, pred: impl Fn(&Value) -> bool) -> Result<Value> {
+    pub(super) fn wait(&mut self, within: Duration, pred: impl Fn(&Value) -> bool) -> Result<Value> {
         let t0 = Instant::now();
         // bounded by `within`
         loop {
@@ -447,7 +447,7 @@ impl Phone {
         }
     }
 
-    fn logs(&self) -> String {
+    pub(super) fn logs(&self) -> String {
         Command::new("docker").args(["logs", "--tail", "40", &self.ctr]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default()
     }
 

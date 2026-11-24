@@ -103,7 +103,8 @@ impl FragmentCell {
     }
 
     async fn store_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
-        crate::fragment::decide(self.visibility()?, self.standing(caller, false)?, fragment_core::permit::Action::Upload)?;
+        // its facts first: a fragment never made is not found (404)
+        crate::fragment::decide(self.facts()?.visibility, self.standing(caller, false)?, fragment_core::permit::Action::Upload)?;
         self.writable().await?;
 
         check_sha(sha)?;
