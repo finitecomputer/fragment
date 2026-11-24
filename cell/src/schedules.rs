@@ -101,11 +101,12 @@ impl FragmentCell {
         rows.into_iter().next().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no schedule #{id}")))
     }
 
-    /// The schedule the same as `c` (its cron, channel and record), if one is kept.
-    fn same_schedule(&self, c: &schedule::Checked) -> CellResult<Option<Row>> {
+    /// The schedule the same as `c` asked by `asker`, added by `by`, if one
+    /// is kept (`schedule::SAME_SCHEDULE`).
+    fn same_schedule(&self, c: &schedule::Checked, asker: &str, by: &str) -> CellResult<Option<Row>> {
         let rows: Vec<Row> = self.typed(
-            &format!("SELECT {COLUMNS} FROM record_schedules WHERE cron = ? AND channel = ? AND body = ? ORDER BY id LIMIT 1"),
-            vec![c.expr.as_str().into(), c.channel.as_str().into(), c.body.as_str().into()],
+            &format!("SELECT {COLUMNS} FROM record_schedules WHERE {} ORDER BY id LIMIT 1", schedule::SAME_SCHEDULE),
+            vec![c.expr.as_str().into(), c.channel.as_str().into(), c.body.as_str().into(), asker.into(), by.into()],
         )?;
         Ok(rows.into_iter().next())
     }
@@ -137,7 +138,7 @@ impl FragmentCell {
         let builtin = BUILTIN_CHANNELS.contains(&checked.channel.as_str());
         let decl = if builtin { None } else { self.declared_channel(&checked.channel)? };
         schedule::admit_channel(&checked.channel, decl.as_ref(), builtin, role)?;
-        if let Some(same) = self.same_schedule(&checked)? {
+        if let Some(same) = self.same_schedule(&checked, &asker, &by)? {
             return json_response(&ScheduleAdded { schedule: same.view(), replayed: true });
         }
         let kept = self.count_of("SELECT COUNT(*) AS n FROM record_schedules", vec![])?;

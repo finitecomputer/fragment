@@ -136,8 +136,12 @@ mid-append leaves a torn last line, and the log is read up to it.
   another agent of this computer's answer), no one's for app code's
   words, and anyone else's as them. Not told, it is not this life's yet,
   and is claimed again; a platform from before (404) is told nothing. Its
-  end is told as the engine ends it, a failure told again at the next
-  step, and a new life forgets the last life's first.
+  end is told as the engine ends it. No turn is told open while one its
+  agent ended may still be held open (whose mandate would sign its calls):
+  first the agent's fragment forgets the last life's turns (once a life),
+  and each ended turn whose close was slow or failed is told ended again
+  (`driver::Turns::settle`). One that can't be leaves the turn untold,
+  and its claim is asked again at the next tick.
 - **In the journal's order.** A chat's turns are claimed in the order
   their causes were said (`Turn::said_at`, the platform's time, the same
   in every life), admission breaking ties. A new life that reads an

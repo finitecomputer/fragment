@@ -149,6 +149,86 @@ async fn someone_elses_ask_is_told_with_its_proof() {
     bridge.stop().await;
 }
 
+/// The agent's other turns its fragment held open as `turn` was told open.
+fn beside(w: &World, turn: &str) -> Option<Vec<String>> {
+    w.opened_beside.iter().find(|(t, _)| t == turn).map(|(_, b)| b.clone())
+}
+
+/// Goal (FIN-720): no turn is told open while one its agent ended may still
+/// be held open, whose mandate would sign the new turn's calls. Skyler's
+/// turn ends and its close is slow to land; Paul's turn, asked right after,
+/// is told open only once Skyler's is closed.
+#[tokio::test]
+async fn an_ended_turn_is_closed_before_the_next_is_told_open() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("turn-closed-first");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.with(|w| w.turn_close_delay_ms = 600);
+    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
+    let skylers = turn_of("juniper", &chat, seq(&first));
+    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
+    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
+    let pauls = turn_of("juniper", &chat, seq(&next));
+    fake.until(WAIT, "paul's turn told open", |w| beside(w, &pauls).is_some()).await;
+    fake.with(|w| assert_eq!(beside(w, &pauls), Some(vec![]), "skyler's turn was closed first: {:?}", w.turns));
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): a close the platform refused is told again before the
+/// agent's next turn is told open, and that turn waits for it: Skyler's
+/// close fails, and so does its next try, and Paul's turn is told open
+/// (and runs) only once it lands.
+#[tokio::test]
+async fn a_failed_close_is_told_again_before_the_next_turn() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("turn-close-retried");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.with(|w| w.fail_turn_closes = 2);
+    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
+    let skylers = turn_of("juniper", &chat, seq(&first));
+    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
+    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
+    let pauls = turn_of("juniper", &chat, seq(&next));
+    fake.until(WAIT * 4, "paul's turn answered", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == pauls)).await;
+    fake.with(|w| {
+        let refused = w.turns.iter().filter(|(_, m, _)| m == "REFUSED").count();
+        assert_eq!(refused, 2, "both closes refused: {:?}", w.turns);
+        assert_eq!(beside(w, &pauls), Some(vec![]), "paul's turn told open only once skyler's closed: {:?}", w.turns);
+    });
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): a restart forgets the last life's turns before any of
+/// this life's is told open, even when its first try fails: a turn of
+/// Skyler's left open by a crash, the start's forgetting refused, and
+/// Paul's turn told open only once it is forgotten.
+#[tokio::test]
+async fn a_restart_forgets_the_last_lifes_turns_first() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.with(|w| {
+        w.turns_open.insert("stale0000000000000000000".into(), "juniper--k3x9".into());
+        w.fail_turn_closes = 1;
+    });
+    let dir = support::dir("turns-forgotten-first");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "hi" }));
+    let pauls = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT * 4, "paul's turn answered", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == pauls)).await;
+    fake.with(|w| {
+        assert_eq!(w.turns.first().map(|(_, m, _)| m.as_str()), Some("REFUSED"), "the start's forgetting refused: {:?}", w.turns);
+        assert_eq!(beside(w, &pauls), Some(vec![]), "the last life's turn forgotten before paul's was told open: {:?}", w.turns);
+    });
+    bridge.stop().await;
+}
+
 /// Goal (FIN-720): on a platform from before the turns route (404), a
 /// turn is told nothing and runs as ever: a new image never stalls on an
 /// older cell.

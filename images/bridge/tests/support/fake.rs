@@ -100,6 +100,16 @@ pub struct World {
     /// A platform from before the turns route: it sends the call on to
     /// its API, which has no such route (404).
     pub no_turns: bool,
+    /// The turns each agent's fragment holds open, as told: turn → agent.
+    pub turns_open: BTreeMap<String, String>,
+    /// Each turn told open, with the agent's other turns its fragment held
+    /// open at that moment (whose mandates its calls would carry).
+    pub opened_beside: Vec<(String, Vec<String>)>,
+    /// The next this many turn closes (one turn, or all of an agent's) are
+    /// refused 503, as a platform that failed one.
+    pub fail_turn_closes: u32,
+    /// A turn's close waits this long before the platform takes it.
+    pub turn_close_delay_ms: u64,
     /// Pages read over the API give an agent a mandate beside each record
     /// a person other than its owner wrote (`fm1.<principal>.<seq>`, the
     /// fake's), as the platform gives one; live frames carry none.
@@ -756,9 +766,33 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     if p.as_slice() == ["api", "computer", "turns"] && matches!(method, Method::PUT | Method::DELETE) {
         let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
         let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let delay = {
+            let mut w = world.lock().unwrap();
+            if w.no_turns {
+                return refuse(StatusCode::NOT_FOUND, "no route /api/computer/turns");
+            }
+            if method == Method::DELETE && w.fail_turn_closes > 0 {
+                w.fail_turn_closes -= 1;
+                w.turns.push((agent, "REFUSED".into(), v));
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "a close refused, as asked");
+            }
+            if method == Method::DELETE && v["turn"].is_string() { w.turn_close_delay_ms } else { 0 }
+        };
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
         let mut w = world.lock().unwrap();
-        if w.no_turns {
-            return refuse(StatusCode::NOT_FOUND, "no route /api/computer/turns");
+        match (method.clone(), v["turn"].as_str()) {
+            (Method::PUT, Some(turn)) => {
+                let beside: Vec<String> = w.turns_open.iter().filter(|(t, a)| **a == agent && t.as_str() != turn).map(|(t, _)| t.clone()).collect();
+                w.opened_beside.push((turn.to_string(), beside));
+                w.turns_open.insert(turn.to_string(), agent.clone());
+            }
+            (Method::DELETE, Some(turn)) => {
+                w.turns_open.remove(turn);
+            }
+            (Method::DELETE, None) => w.turns_open.retain(|_, a| *a != agent),
+            _ => {}
         }
         w.turns.push((agent, method.to_string(), v));
         return answer(StatusCode::OK, json!({ "ok": true }));

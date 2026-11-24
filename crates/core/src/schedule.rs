@@ -154,6 +154,15 @@ pub fn admit_channel(channel: &str, decl: Option<&ChannelDecl>, builtin: bool, r
     Ok(())
 }
 
+/// Which kept schedule an add is the same as, its replay (FIN-720): the
+/// same cron, channel and record, asked by the same one. A schedule fires
+/// as its asker, so another's identical one is theirs, never this one: a
+/// replacement after its maker left fires. One kept before askers (Fragment
+/// step 14, `asker` NULL) is its maker's (`created_by`, the add's signer).
+/// `record_schedules`' WHERE clause; binds cron, channel, record, asker,
+/// signer.
+pub const SAME_SCHEDULE: &str = "cron = ? AND channel = ? AND body = ? AND (asker = ? OR (asker IS NULL AND created_by = ?))";
+
 /// The key a fire appends under: the schedule and the minute it was due,
 /// so an alarm that fires it again (a retry, a pass cut short) appends
 /// nothing twice (docs/cloudflare-v1.md, lesson 2).

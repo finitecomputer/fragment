@@ -1929,7 +1929,10 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   Questions and answers), else 403; `channel` declared, taking posts, and not
   only from one kind of member (`from`), else `invalid_request`, and the
   caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
-- The same schedule again answers the one there (`replayed: true`).
+- The same schedule again, asked by the same one, answers the one there
+  (`replayed: true`; `schedule::SAME_SCHEDULE`). Someone else's identical
+  one is theirs, kept beside it, since a schedule fires as its asker: one
+  added after its maker left fires. One kept before askers is its maker's.
   Paused, it fires nothing and has no `nextAt`; resumed, it fires from its
   next minute. Events: `schedule.added`, `.paused`, `.resumed`,
   `.removed`.

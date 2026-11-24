@@ -1109,7 +1109,7 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     for (who, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         api.share(&name, who.pubkey_hex(), role)?;
     }
-    let (own, editor_id) = (api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string(), api.identity(&editor)?);
+    let (own, editor_id, own_owner) = (api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string(), api.identity(&editor)?, api.identity(&owner)?);
     let path = format!("/api/f/{name}/schedules");
     let list = || api.signed(&owner, "GET", &path, None).ok().and_then(|r| r.body["schedules"].as_array().cloned()).unwrap_or_default();
     let add = |who: &Keys, cron: &str, channel: &str, record: Value| api.signed(who, "POST", &path, Some(&json!({ "cron": cron, "channel": channel, "record": record })));
@@ -1168,9 +1168,9 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
             && first["nextAt"].as_i64().is_some_and(|n| n > now_ms()),
         &r,
     );
-    let again = add(&owner, " 0 0 1 1  * ", "pings", json!({ "payload": "water the plants", "source": "schedule" }))?;
+    let again = add(&editor, " 0 0 1 1  * ", "pings", json!({ "payload": "water the plants", "source": "schedule" }))?;
     s.ok(
-        "the same schedule added again is that one, added once (its cron's spacing and its record's key order aside)",
+        "the same schedule added again by its asker is that one, added once (its cron's spacing and its record's key order aside)",
         again.status == 200 && again.body["replayed"] == true && again.body["schedule"]["id"] == id && list().len() == 1,
         &again,
     );
@@ -1245,11 +1245,22 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         out.status == 200 && pinged().len() == before && unfired["data"]["schedule"] == sid && unfired.to_string().contains("no longer in this fragment") && list().iter().any(|x| x["id"] == sid),
         json!({ "removed": out.status, "lever": lever.body, "pinged": pinged().len() - before, "event": unfired }),
     );
+    // the owner's identical one is theirs: it fires, for them
+    let mine = add(&owner, "0 0 1 1 *", "pings", theirs.clone())?;
+    let oid = mine.body["schedule"]["id"].as_i64().unwrap_or(0);
+    cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    let rec = pinged().last().cloned().unwrap_or_default();
+    s.ok(
+        "its owner's identical one, added after its maker left, is theirs and not a replay of the departed maker's: it fires, for them",
+        mine.status == 200 && mine.body["replayed"] == false && oid != sid && fired && rec["asker"] == own_owner.as_str() && list().len() == 2,
+        json!({ "added": mine.body, "record": rec }),
+    );
     api.share(&name, editor.pubkey_hex(), "editor")?;
     cron_now(api, &name)?;
-    let back = s.eventually(long, || pinged().len() == before + 1);
-    let gone = api.signed(&owner, "DELETE", &format!("{path}/{sid}"), None)?;
-    s.ok("back in, it fires for them again; its owner removes it", back && gone.status == 200 && list().is_empty(), json!({ "removed": gone.body }));
+    let back = s.eventually(long, || pinged().len() == before + 3);
+    let gone = [sid, oid].map(|id| api.signed(&owner, "DELETE", &format!("{path}/{id}"), None).map(|r| r.status).unwrap_or(0));
+    s.ok("back in, the maker's fires for them again, beside the owner's; its owner removes both", back && gone == [200, 200] && list().is_empty(), json!({ "removed": gone }));
 
     // at most 32 a fragment; the same one again at the bound is still that one
     let filled: Vec<i64> = (1..=limits::RECORD_SCHEDULES_MAX).filter_map(|n| add(&editor, "0 0 1 1 *", "pings", json!({ "n": n })).ok().and_then(|r| r.body["schedule"]["id"].as_i64())).collect();
