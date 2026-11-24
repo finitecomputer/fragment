@@ -448,6 +448,28 @@ struct ShellTests {
         #expect(try route("mailto:someone@example.com", clicked: true) == .leave)
     }
 
+    /// An address leaving the sheet goes to the system only by a scheme the
+    /// app has a use for: the web to the browser (a script's navigation too,
+    /// as a checkout's redirect), `mailto:` only from a tapped link, and no
+    /// other app's scheme at all, tapped or not.
+    @Test func aSheetHandsOnlyTheWebAndATappedMailtoToTheSystem() throws {
+        func handed(_ raw: String, tapped: Bool) throws -> Bool {
+            WebLinks.handsToSystem(try #require(URL(string: raw)), tapped: tapped)
+        }
+        for tapped in [true, false] {
+            #expect(try handed("https://example.com/", tapped: tapped))
+            #expect(try handed("http://example.com/", tapped: tapped))
+            #expect(try handed("HTTPS://example.com/", tapped: tapped), "a scheme is case-insensitive")
+        }
+        #expect(try handed("mailto:someone@example.com", tapped: true))
+        #expect(try !handed("mailto:someone@example.com", tapped: false), "a page alone opens no mail")
+        for raw in ["tel:+15555550100", "sms:+15555550100", "facetime:someone@example.com", "itms-apps://apps.apple.com/app/id1",
+                    "maps://?q=x", "someapp://do/thing", "file:///etc/hosts", "javascript:alert(1)", "data:text/html,x"] {
+            #expect(try !handed(raw, tapped: true), "\(raw)")
+            #expect(try !handed(raw, tapped: false), "\(raw)")
+        }
+    }
+
     /// A message's links are the URLs its words link, as drawn: Markdown
     /// targets whole (parentheses, a final `!`), `<autolinks>`, and bare
     /// URLs, which end before trailing punctuation.
