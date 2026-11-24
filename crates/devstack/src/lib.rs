@@ -242,25 +242,26 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
     Ok(())
 }
 
+/// The computers' container class (cell/src/computer.rs): in a local
+/// node's config only when it runs computers (`Fleet::computers`).
+/// `wrangler dev` builds every image its config names as it starts (the
+/// stub's two, 7 to 20 s of every boot when all of it is cached), which a
+/// node whose run makes no computer needs none of.
+pub const COMPUTER_CLASS: &str = "Computer";
+
 /// The SimpleX door's container class (cell/door.mjs): in a local node's
-/// config only when it runs doors (`Fleet::doors`). `wrangler dev` builds
-/// every image its config names as it starts, and the door's (SimpleX's
+/// config only when it runs doors (`Fleet::doors`). Its image (SimpleX's
 /// core and its runner, built from source) would be every stack's cost; a
 /// node without it still has the door's object, which says it runs none.
 pub const DOOR_CLASS: &str = "SimplexDoor";
 
-/// The e2e's SimpleX door lane, run by name alone (`--only simplex-door`):
-/// only its run's node runs doors (`Fleet::doors`), and only its build
-/// builds the door's image ahead of the node (xtask's `build_e2e`).
-pub const DOOR_LANE: &str = "simplex-door";
-
-/// `config` less the door's container class (`DOOR_CLASS`): a node's that
-/// runs no doors, and the images built ahead of one (xtask's `build::images`).
-pub fn without_doors(config: &mut serde_json::Value) -> Result<()> {
+/// `config` less the container class `class`: a node's that runs none of
+/// its containers (`COMPUTER_CLASS`, `DOOR_CLASS`) builds none of its images.
+fn without_class(config: &mut serde_json::Value, class: &str) -> Result<()> {
     let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) else { return Ok(()) };
     let before = containers.len();
-    containers.retain(|c| c["class_name"] != DOOR_CLASS);
-    anyhow::ensure!(containers.len() + 1 >= before, "one door container class at most");
+    containers.retain(|c| c["class_name"] != class);
+    anyhow::ensure!(containers.len() + 1 >= before, "one {class} container class at most");
     Ok(())
 }
 
@@ -290,11 +291,14 @@ pub fn admin_local_config(project: &Path) -> PathBuf {
 /// beside its own computer images, and every one built from a Dockerfile
 /// of its own (`containers::scope_images`), so that no other stack's
 /// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], doors: bool) -> Result<PathBuf> {
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], computers: bool, doors: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
-    if !doors {
-        without_doors(&mut config)?;
+    for (runs, class) in [(computers, COMPUTER_CLASS), (doors, DOOR_CLASS)] {
+        if !runs {
+            without_class(&mut config, class)?;
+        }
     }
+    anyhow::ensure!(computers || images.is_empty(), "computer images beside the config's own are for a node that runs computers");
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
         for (name, image) in images {
@@ -516,6 +520,10 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether it runs computers (`COMPUTER_CLASS`'s container, and its
+    /// images built as the node starts): dev's always, an e2e run's when a
+    /// section it runs makes them.
+    pub computers: bool,
     /// Whether it runs SimpleX doors (`DOOR_CLASS`'s container, and its
     /// image built as the node starts): the e2e's door lane's alone.
     pub doors: bool,
@@ -654,7 +662,7 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.doors)?;
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.computers, self.doors)?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -1239,6 +1247,34 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a local node's config holds the container classes it runs,
+    /// and no other: wrangler builds every image its config names as it
+    /// boots. Valid: computers and doors, either, or neither (no image at
+    /// all). Invalid: computer images beside the config's own (dev's
+    /// Hermes) for a node that runs no computers. Method: the checked-in
+    /// config, written as a staged copy is.
+    #[test]
+    fn a_node_config_holds_only_the_containers_it_runs() {
+        let dir = std::env::temp_dir().join(format!("devstack-classes-{}", super::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = super::read_config(&super::cell_dir()).unwrap();
+        super::absolute_images(&mut config, &super::cell_dir()).unwrap();
+        std::fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        std::fs::copy(super::cell_dir().join(super::ADMIN_CONFIG), dir.join(super::ADMIN_CONFIG)).unwrap();
+        let classes = |computers, doors| {
+            let path = super::write_local_config(&dir, &[], &[], &[], computers, doors).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            config["containers"].as_array().unwrap().iter().map(|c| c["class_name"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(classes(true, true), [super::COMPUTER_CLASS, super::DOOR_CLASS]);
+        assert_eq!(classes(true, false), [super::COMPUTER_CLASS]);
+        assert_eq!(classes(false, true), [super::DOOR_CLASS]);
+        assert!(classes(false, false).is_empty(), "no container, so no image built at boot");
+        let hermes = [("hermes".to_string(), serde_json::json!({ "dockerfile": "/x/Dockerfile", "build_context": "/x" }))];
+        assert!(super::write_local_config(&dir, &[], &[], &hermes, false, false).is_err(), "a computer image for a node with no computers");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Goal: a staged cell (dev's, the e2e's) holds every module its shim
     /// imports from beside it, as the source tree a deploy runs from does
     /// (a module left out failed the e2e's build: "Could not resolve
