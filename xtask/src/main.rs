@@ -211,9 +211,26 @@ fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
 
-/// `program`, to be started by xtask.
+/// `program` (cargo, or worker-build, which runs cargo), started as a
+/// shell would start it: without what cargo told this process about
+/// xtask's own package. `cargo xtask` is a `cargo run`, which sets
+/// `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*` for
+/// xtask, and a cargo started with them takes them for its own
+/// environment. A build script that reads one is rerun when it changes
+/// (ring's reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`), so every
+/// build by hand after one of xtask's, and the other way round, built ring
+/// again, and reqwest and every crate of ours above them; and since
+/// `CARGO_MANIFEST_DIR` names the checkout, no build of them was good in
+/// another checkout.
 fn outside_cargo(program: &str) -> Command {
-    Command::new(program)
+    let mut cmd = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        let own_package = name.to_str().is_some_and(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_"));
+        if own_package {
+            cmd.env_remove(name);
+        }
+    }
+    cmd
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
@@ -614,7 +631,7 @@ fn try_template(args: &[String]) -> Result<()> {
         bail!("nothing answers on :{DEV_PORT}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
     }
     let root = devstack::repo_root();
-    run(Command::new("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
+    run(outside_cargo("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
     let cli = root.join("target/debug/fragment");
     let host = format!("http://127.0.0.1:{DEV_PORT}");
     let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
@@ -688,7 +705,7 @@ fn e2e(args: &[String]) -> Result<()> {
 /// The suite alone, for this machine.
 fn build_suite() -> Result<()> {
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
+    run(outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
 }
 
 /// The suite, as `build_e2e` leaves it.
@@ -716,7 +733,7 @@ fn build_e2e() -> Result<()> {
 fn build_native() -> Result<()> {
     let t0 = std::time::Instant::now();
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    run(outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
     build_suite()?;
     println!("built the CLI and the suite in {:.1?}", t0.elapsed());
     Ok(())
@@ -812,14 +829,14 @@ fn check() -> Result<()> {
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     javascript_parses(&root)?;
     javascript_tests(&root)?;
-    run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
-    run(Command::new("cargo")
+    run(outside_cargo("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
+    run(outside_cargo("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
         .current_dir(&root))?;
     // the cell's build, then the admin Worker's (cell/src/lib.rs, "Two
     // Workers, one crate"): each its own exports
     for features in [&[][..], &["--features", "admin"]] {
-        run(Command::new("cargo")
+        run(outside_cargo("cargo")
             .args(["clippy", "--target", "wasm32-unknown-unknown"])
             .args(features)
             .args(["--", "-D", "warnings"])
