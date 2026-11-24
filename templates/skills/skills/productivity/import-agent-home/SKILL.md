@@ -328,10 +328,11 @@ survey:
 - Your home needs the bytes of the `parts` free (each brain and site is
   copied out to be made), plus a fifth more.
 
-If there isn't room, tell your owner how much is needed, and stop. In a
-move, don't stop: everything is kept in storage (step 3) whatever you
-bring here, so bring what fits, a brain or the chats at a time, and say
-in the report what stayed in storage for lack of room.
+In a move, don't stop or reply if there isn't room: everything is kept in
+storage (step 3) whatever you bring here, so bring what fits, a brain or
+the chats at a time, and say in the report (step 8) what stayed in
+storage for lack of room. Outside a move, if there isn't room, tell your
+owner how much is needed, and stop.
 
 **Files left out unread.** `source.skipped` names each file whose name
 says it may hold a password or key (an `.env`, a private key). The
@@ -399,11 +400,11 @@ whole in your storage: the one members-only fragment of your owner's
 that holds what you move off your disk (`disk-space-finite`). Use yours
 if `fragment list` has it, else make it once, named for you
 (`fragment create <your name>-storage --visibility members`), and write
-its full name in `progress.md`. A big home takes a while: when the
-survey's files are more than 5 GB, first tell your owner in one short
-sentence that your upgrade is under way and will take a while, and that
-you'll tell them when it's done. Then run this in the background,
-without `notify`, and wait for it with your `process` tool:
+its full name in `progress.md`. A big home takes a while: run this in
+the background, without `notify`, and wait for it with your `process`
+tool (`action: wait`; wait again while it still runs). Don't reply to
+your owner until step 8 — sending a message ends your turn and stops the
+import before it finishes:
 
 ```sh
 fragment home files <source> --layout <L> --into <its name> --store <your storage> --notes "$HOME/old-agent/home" --json
@@ -543,7 +544,7 @@ times as they are; don't convert them yourself.
 | `too_frequent`, `no_agent` | No routine: offer in the report to make an app with a cron trigger for it |
 | `too_many` | No routine: an agent keeps at most 32. Name the ones left |
 | `paused`, `once_past` | Skip it |
-| `once_future` | Tell your owner when it was due, so they ask you then |
+| `once_future` | Note in the report (step 8) when it was due, so they can ask you then |
 | `convert_by_hand` | Read `why`, and set it by hand only if it is clear |
 
 - **What it says.** Rewrite its `prompt` for here, in a few sentences. A

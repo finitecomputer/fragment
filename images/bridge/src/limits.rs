@@ -389,7 +389,9 @@ const _: () = assert!(HOME_CHAT_WAIT_MS < TASKS_BACKLOG_MS);
 pub const HOME_DOORS_MAX: usize = 8;
 
 /// `GET /api/computer` is read again this often while awake, so an agent
-/// assigned to the computer meanwhile is followed within it.
+/// assigned to the computer meanwhile is followed within it
+/// (`BRIDGE_COMPUTER_EVERY_MS`: the stub image's is shorter, for the
+/// platform's lanes that wait on a read; images/stub/Dockerfile).
 pub const COMPUTER_EVERY_MS: u64 = 60 * 1000;
 
 /// The agent's fragments are listed again this often while awake (a new

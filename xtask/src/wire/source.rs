@@ -365,9 +365,9 @@ const RENAME_RULES: [&str; 8] = ["lowercase", "UPPERCASE", "PascalCase", "camelC
 /// and the validators schemars turns into bounds (`validate`, `garde`).
 const NAMESPACES: [&str; 5] = ["serde", "schemars", "derive", "validate", "garde"];
 
-/// Where crates/proto's source is: the files this binary was built from.
+/// Where crates/proto's source is, in the checkout this binary runs in.
 pub fn proto_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/proto/src")
+    crate::devstack::repo_root().join("crates/proto/src")
 }
 
 /// A field, a variant's or a struct's.

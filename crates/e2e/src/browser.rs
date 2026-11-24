@@ -1304,10 +1304,28 @@ impl Browser {
     /// The mouse moved to the middle of the first element `selector`
     /// matches, and no click: the page hears `pointermove`, as a hand's.
     pub fn hover(&mut self, page: &Page, selector: &str) -> Result<()> {
-        let (x, y) = self.middle_of(page, selector)?;
+        let at = self.middle_of(page, selector)?;
+        self.pointer_at(page, at)
+    }
+
+    /// The pointer moved to a point, nothing pressed: what is under it is
+    /// hovered.
+    pub fn pointer_at(&mut self, page: &Page, (x, y): (f64, f64)) -> Result<()> {
         let moved = json!({ "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0 });
         self.send("Input.dispatchMouseEvent", moved, Some(&page.session))?;
         Ok(())
+    }
+
+    /// A press at a point held until `held` (a page expression) is true or
+    /// `timeout` passes, then let go at the same point, as a hand rests on
+    /// a button while the page draws it pressed: the click goes to what
+    /// holds both the press and the release. Whether `held` came true.
+    pub fn press_held(&mut self, page: &Page, (x, y): (f64, f64), held: &str, timeout: Duration) -> Result<bool> {
+        let mouse = |kind: &str, buttons: u8| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 });
+        self.send("Input.dispatchMouseEvent", mouse("mousePressed", 1), Some(&page.session))?;
+        let came = self.until(page, held, timeout);
+        self.send("Input.dispatchMouseEvent", mouse("mouseReleased", 0), Some(&page.session))?;
+        Ok(came)
     }
 
     /// The middle of the first element `selector` matches, in the

@@ -1001,6 +1001,11 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
 /// registry decides: invites.rs `invitee_by`).
 pub(crate) async fn invites(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    // the registry takes `for` here (its owner's agent answers for them),
+    // and no mandate yet: one is refused, never dropped
+    if req.headers().get(fragment_core::mandate::HEADER)?.is_some() {
+        return Err(CellError::invalid("invites take `for=<the agent's owner>`, not a mandate"));
+    }
     let (by, acting_for) = (crate::orgs::signed_by(env, &req, url, &bytes)?, crate::acting_for(url)?);
     let empty = bytes.is_empty() || serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).is_ok_and(|m| m.is_empty());
     match (req.method(), rest) {

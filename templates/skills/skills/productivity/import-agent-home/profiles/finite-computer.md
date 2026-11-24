@@ -169,9 +169,11 @@ assets with the copy's, and read a few of each.
   rm -rf -- "$HOME/old-finite-brains/<id>"
   ```
 - **Some pages or assets are missing, or differ:** keep only those in
-  the copy. Tell your owner which, and suggest someone on the team adds
-  them to the real one. Say in the README line what is left, and why.
-- **You can't tell:** keep the copy, and ask your owner.
+  the copy. Note which in the report (step 8), and suggest someone on the
+  team adds them to the real one. Say in the README line what is left,
+  and why.
+- **You can't tell:** keep the copy, and ask your owner in the report
+  (step 8).
 
 **If no one brings it over**, and your owner runs that team, they may
 ask you to set it up. Make it as above, from the copy: the same steps,

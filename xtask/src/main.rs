@@ -53,6 +53,12 @@
 //!                    crates/proto makes and its lock breaks nothing
 //!                    master's holds (xtask/src/wire/), then host tests and
 //!                    clippy, warnings denied
+//!   audit            every Cargo.lock and package-lock.json against the
+//!                    advisory databases: cargo-deny (RustSec) with each
+//!                    workspace's deny.toml, npm audit on the pinned Node,
+//!                    each ignore with its reason (xtask/src/audit.rs,
+//!                    docs/security/dependency-scanning.md); CI's audit.yml
+//!                    runs it, never `check`
 //!   schema-lock      appends the Durable Objects' new schema steps to
 //!                    crates/core/migrations/schema.lock, refusing to change
 //!                    or drop a locked one (crates/core/src/migrate.rs)
@@ -126,7 +132,9 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
+mod audit;
 mod build;
+mod built_paths;
 #[cfg(test)]
 mod ci_caches;
 #[cfg(test)]
@@ -402,6 +410,7 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        computers: true,
         // a door's image is built only for a stack that runs them (the e2e's door lane)
         doors: false,
         computer_internet: true,
@@ -610,7 +619,7 @@ fn try_template(args: &[String]) -> Result<()> {
         bail!("nothing answers on :{DEV_PORT}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
     }
     let root = devstack::repo_root();
-    run(Command::new("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
+    run(devstack::outside_cargo("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
     let cli = root.join("target/debug/fragment");
     let host = format!("http://127.0.0.1:{DEV_PORT}");
     let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
@@ -658,24 +667,33 @@ fn e2e(args: &[String]) -> Result<()> {
         }
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
-    // CI's split: `--build-only` builds (and the cache is saved after it,
-    // so a red run still saves), then `--no-build` runs what it left
-    let build_only = args.iter().any(|a| a == "--build-only");
-    let no_build = args.iter().any(|a| a == "--no-build");
-    if build_only && no_build {
-        bail!("--build-only and --no-build are two steps of one run, not one");
+    // CI's split (ci.yml): `--build-only` builds once, in a job of its own
+    // (and the cache is saved after it, so a red run still saves); each
+    // shard's runner, given what it built, builds the images its node runs
+    // ahead (`--images-only`, from the Actions cache), then `--no-build`
+    // runs the shard. Given the run's selection (`selection_only`), the
+    // first two build the images that run's node builds; given none, a
+    // whole run's
+    const STEPS: [&str; 3] = ["--build-only", "--images-only", "--no-build"];
+    let steps: Vec<&String> = args.iter().filter(|a| STEPS.contains(&a.as_str())).collect();
+    if steps.len() > 1 {
+        bail!("{} are steps of one run, one at a time", STEPS.join(", "));
     }
-    let suite_args: Vec<&String> = args.iter().filter(|a| *a != "--build-only" && *a != "--no-build").collect();
-    if build_only && !suite_args.is_empty() {
-        bail!("--build-only builds what every run needs, and takes no suite arguments");
+    let step = steps.first().map(|s| s.as_str());
+    let suite_args: Vec<&String> = args.iter().filter(|a| !STEPS.contains(&a.as_str())).collect();
+    if matches!(step, Some("--build-only" | "--images-only")) && !selection_only(&suite_args) {
+        bail!("{} takes a run's selection alone (--only, --except, --shard and their values), the images its node builds", step.unwrap_or_default());
+    }
+    if step == Some("--images-only") {
+        return build_images(&suite_args);
     }
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
-    if !no_build {
-        build_e2e()?;
+    if step != Some("--no-build") {
+        build_e2e(&suite_args)?;
     }
-    if build_only {
+    if step == Some("--build-only") {
         return Ok(());
     }
     run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
@@ -684,37 +702,81 @@ fn e2e(args: &[String]) -> Result<()> {
 /// The suite alone, for this machine.
 fn build_suite() -> Result<()> {
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
+    run(devstack::outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
 }
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
+/// Whether `args` are a run's selection alone: nothing, or one of `--only`,
+/// `--except` or `--shard` with its value (the suite refuses two; its
+/// values are the suite's to check, as the run starts).
+fn selection_only(args: &[&String]) -> bool {
+    match args {
+        [] => true,
+        [flag, _] => ["--only", "--except", "--shard"].contains(&flag.as_str()),
+        _ => false,
+    }
+}
+
 /// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
-/// suite beside it, and the computer images the node's boot builds, built
-/// ahead beside them all so its build finds every layer cached.
-fn build_e2e() -> Result<()> {
+/// suite beside it, and the images the node's boot builds, built ahead
+/// beside the cell so its build finds every layer cached: those of the
+/// container classes the run's node runs, as the suite plans them for the
+/// run's `selection` (`--containers`: a run whose sections use no computer
+/// builds none).
+fn build_e2e(selection: &[&String]) -> Result<()> {
     let t0 = std::time::Instant::now();
-    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
-    // no images (docs/self-host.md, seam 2)
-    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
+    // the suite first, which plans the images, then the CLI beside them
+    // (the two cargo builds share one target, so one at a time)
     let built = std::thread::scope(|s| {
-        let built_images = images.then(|| s.spawn(build::images));
-        let native = s.spawn(build_native);
-        let cell = build::cell();
-        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
-        cell.and(native.join().expect("the native build does not panic")).and(built_images)
+        let cell = s.spawn(build::cell);
+        let rest = build_suite().and_then(|()| {
+            let images = s.spawn(|| build_images(selection));
+            build_cli().and(images.join().expect("the images' build does not panic"))
+        });
+        cell.join().expect("the cell's build does not panic").and(rest)
     });
-    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
+    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
     built
+}
+
+/// The images the run's node builds as it boots, built ahead: those of the
+/// container classes it runs, as the suite (built) plans them for the
+/// run's `selection`. None for a run on celld (FRAGMENT_E2E_RUNTIME=celld),
+/// which makes no computers here (docs/self-host.md, seam 2).
+fn build_images(selection: &[&String]) -> Result<()> {
+    if std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() == Ok("celld") {
+        return Ok(());
+    }
+    build::images(&node_classes(selection)?)
+}
+
+/// The container classes the run's node runs (`selection`: its `--only`,
+/// `--except` or `--shard`), as the suite plans them (`--containers`).
+fn node_classes(selection: &[&String]) -> Result<Vec<String>> {
+    let suite = devstack::repo_root().join(E2E_BIN);
+    let out = Command::new(&suite).args(selection).arg("--containers").output().with_context(|| format!("run {}", suite.display()))?;
+    anyhow::ensure!(out.status.success(), "{} --containers: {}{}", suite.display(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let classes: Vec<String> = String::from_utf8(out.stdout)?.lines().map(str::to_string).collect();
+    println!("the run's node runs {}", if classes.is_empty() { "no container".to_string() } else { classes.join(" and ") });
+    Ok(classes)
 }
 
 /// The CLI and the suite, for this machine.
 fn build_native() -> Result<()> {
     let t0 = std::time::Instant::now();
-    let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    build_cli()?;
     build_suite()?;
     println!("built the CLI and the suite in {:.1?}", t0.elapsed());
+    Ok(())
+}
+
+/// The CLI, for this machine (the e2e drives it).
+fn build_cli() -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let manifest = devstack::repo_root().join("Cargo.toml");
+    run(devstack::outside_cargo("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    println!("built the CLI in {:.1?}", t0.elapsed());
     Ok(())
 }
 
@@ -794,12 +856,23 @@ fn no_remote_loads(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No crate of the workspace compiles in where its checkout is
+/// (xtask/src/built_paths.rs): cargo takes a build kept from another
+/// checkout as built, and such a path would still name that one.
+fn no_built_paths(root: &Path) -> Result<()> {
+    let sources = built_paths::sources(root)?;
+    built_paths::check(&sources, built_paths::ALLOWED)?;
+    println!("built paths: no checkout's path compiled into {} Rust files (1 allowed, with why)", sources.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
     no_remote_loads(&root)?;
+    no_built_paths(&root)?;
     schema_lock::holds(&root)?;
     wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
@@ -808,14 +881,14 @@ fn check() -> Result<()> {
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     javascript_parses(&root)?;
     javascript_tests(&root)?;
-    run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
-    run(Command::new("cargo")
+    run(devstack::outside_cargo("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
+    run(devstack::outside_cargo("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
         .current_dir(&root))?;
     // the cell's build, then the admin Worker's (cell/src/lib.rs, "Two
     // Workers, one crate"): each its own exports
     for features in [&[][..], &["--features", "admin"]] {
-        run(Command::new("cargo")
+        run(devstack::outside_cargo("cargo")
             .args(["clippy", "--target", "wasm32-unknown-unknown"])
             .args(features)
             .args(["--", "-D", "warnings"])
@@ -869,6 +942,7 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
+        Some("audit") => audit::run(&args[1..]),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("wire") => wire::write(&devstack::repo_root()),
         Some("skills-catalog") => skills_catalog::run(&args[1..]),
@@ -878,7 +952,7 @@ fn main() -> Result<()> {
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> | disk <reference> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | audit | schema-lock | wire | skills-catalog | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> | disk <reference> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 
@@ -941,6 +1015,26 @@ mod tests {
         assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
         assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
         assert!(super::skill_installs_release(&skill, &workflow.replace("pattern: fragment-*", "pattern: '*'"), &copies).is_err());
+    }
+
+    /// Goal: `--build-only` takes a run's selection, which picks the
+    /// images it builds ahead (so a build for `--no-build --only
+    /// simplex-door` builds the door's too), and nothing else it would
+    /// ignore. Valid: none (CI's), `--only`, `--except` or `--shard` with
+    /// its value. Invalid: a flag with no value, two of them (the suite
+    /// refuses that run), any other argument.
+    #[test]
+    fn a_build_alone_takes_a_runs_selection_alone() {
+        let selection = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            super::selection_only(&args.iter().collect::<Vec<_>>())
+        };
+        for valid in [&[][..], &["--only", "simplex-door"], &["--except", "computers"], &["--shard", "1/5"]] {
+            assert!(selection(valid), "{valid:?}");
+        }
+        for invalid in [&["--only"][..], &["--rehearse"], &["--only", "auth", "--rehearse"], &["--only", "simplex-door", "--except", "computers"], &["simplex-door"], &["--hosted", "x"]] {
+            assert!(!selection(invalid), "{invalid:?}");
+        }
     }
 
     #[test]

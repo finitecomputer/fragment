@@ -19,7 +19,7 @@ use crate::registry::content::{AnswerOffer, ContentOf, OfferAdmin, OffersToMe, S
 use crate::registry::orgs::{Mine, Mined, OrgOf, Sleeps, SyncSeat};
 use crate::registry::offers::{AcceptOffer, DeclineOffer, LeaveOrg};
 use crate::registry::seats::{AddAdmin, AddSeat, Added, RemoveAdmin, RemoveSeat};
-use crate::{acting_for, ask_registry, caller, json_answer, read_body, Caller};
+use crate::{ask_registry, caller, json_answer, read_body, Caller};
 use fragment_nip98::Payload;
 
 pub(crate) fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
@@ -28,7 +28,7 @@ pub(crate) fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CellResult<T
 
 /// Who asks, for the registry to resolve in the same turn as what it asks.
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
-    if acting_for(url)?.is_some() {
+    if crate::names_for(req, url)? {
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
     signed_by(env, req, url, bytes)
@@ -197,7 +197,7 @@ pub(crate) async fn named(mut req: Request, env: &Env, url: &Url, org: &str, res
 /// Answers the operator's name (their identity, or a key no one holds),
 /// for the log and a grant's `by`.
 pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<String> {
-    if acting_for(url)?.is_some() {
+    if crate::names_for(req, url)? {
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
     let refused = || CellError::new(ErrorCode::Forbidden, "only the deployment's operators do this");

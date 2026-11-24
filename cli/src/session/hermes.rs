@@ -1304,6 +1304,6 @@ for table in ("sessions", "messages"):
             .output()
             .expect("docker runs");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/session/hermes-v0.21.7.sql"), out.stdout).unwrap();
+        std::fs::write("src/session/hermes-v0.21.7.sql", out.stdout).unwrap();
     }
 }
