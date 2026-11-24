@@ -289,9 +289,10 @@ impl FragmentCell {
             )?;
         }
         // an agent fragment's agent, whose key was this life's alone: it
-        // ran on its owner's one computer (decision 13), named while it is
-        // assigned. Unassigned since, that computer is asked all the same
-        // (a no-op): nothing else reaches its row once this life is gone
+        // ran on the computer its fragment names while it is assigned, its
+        // own or its owner's from before. Unassigned since, its owner's is
+        // asked all the same (a no-op): nothing else reaches its row once
+        // this life is gone
         if let (End::Delete, Some(identity)) = (by, identity) {
             let computer = computer.unwrap_or_else(|| fragment_core::computer::default_computer_of(&owner));
             self.exec(
@@ -629,6 +630,17 @@ impl FragmentCell {
             let asked = json!({ "fragment": a.name, "identity": a.identity });
             if let Err(e) = crate::computer::ask(&self.env, computer, "computer/unassign", &asked).await {
                 rules::agent_left(e.code, &format!("its computer {computer}: {}", e.message))?;
+            }
+            // its own computer ends with it (a computer per agent; Paul,
+            // 2026-11-23: a delete deletes its computer and its files at
+            // once): its container, its saves and its storage, as a wipe
+            // ends one, a call's pages at a time, the rest the next pass's
+            if *computer == fragment_core::computer::default_computer_of(&a.identity) {
+                match crate::computer::ask(&self.env, computer, "computer/wipe", &json!({})).await {
+                    Ok(w) if w["more"] == true => return Err(Failure::Transient(format!("its computer {computer}'s saves hold more: the next pass deletes on"))),
+                    Ok(_) => {}
+                    Err(e) => rules::agent_left(e.code, &format!("its computer {computer}'s end: {}", e.message))?,
+                }
             }
             self.exec("UPDATE ended_agents SET computer = NULL WHERE incarnation = ?", vec![SqlStorageValue::Integer(a.incarnation)]).map_err(here)?;
         }

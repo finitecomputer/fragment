@@ -893,6 +893,26 @@ struct ShellTests {
         #expect(Library.title(from: String(repeating: "a", count: 49)) == String(repeating: "a", count: 47) + "…")
     }
 
+    /// A computer per agent: the person's agents in their computers' order
+    /// (theirs from before first, then each agent's own), as the web's
+    /// sidebar takes them, and each agent's chat told its own computer's
+    /// phase, never another's.
+    @Test func agentsOnComputersOfTheirOwn() async throws {
+        let stub = Stub { seen, before in
+            if seen.route == "GET /api/computers" {
+                return (200, #"{"computers":[{"computer":"c1","phase":"awake","agents":[{"fragment":"juniper--a2","identity":"npub1juniper","label":"juniper"}]},{"computer":"c2","phase":"asleep","agents":[{"fragment":"moss--a1","identity":"npub1moss","label":"moss"}]}],"support":null}"#)
+            }
+            return Self.platform(seen, before)
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        #expect(library.agents.map(\.name) == ["juniper--a2", "moss--a1"], "every computer's agents, in order")
+        #expect(library.agent?.name == "juniper--a2", "new chats are with the main agent")
+        #expect(library.agentsByIdentity["npub1moss"]?.name == "moss--a1", "an agent on its own computer is known by its identity")
+        #expect(library.phase(of: "npub1juniper") == "awake" && library.phase(of: "npub1moss") == "asleep", "each agent's own computer's phase")
+    }
+
     /// The person's agents in their computer's order, as the web's sidebar
     /// takes them: its first is their main agent, first everywhere here, and
     /// its identities need no agent's status asked.

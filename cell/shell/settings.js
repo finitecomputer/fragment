@@ -49,7 +49,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
   const { computerSection, connectionsSection, simplexSection, telegramSection, readTelegram } = sections;
-  const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
+  const { getComputer, computerFor, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
   // The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
@@ -108,7 +108,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     nav.append(el("span", "settings-nav-title", "Settings"));
     const content = el("div", "settings-content");
     const intro = el("header", "settings-intro");
-    intro.append(el("h1", null, "Settings"), el("p", null, isGuest() ? "Manage your account and billing." : "Manage your account, your computer, and the tools your agents use."));
+    intro.append(el("h1", null, "Settings"), el("p", null, isGuest() ? "Manage your account and billing." : "Manage your account, your agents and their computers, and the tools they use."));
     content.append(intro);
     const links = [];
     sections.forEach((section, index) => {
@@ -333,7 +333,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
       return tell();
     }
     const c = getComputer();
-    const computer = computerSection(c);
+    // each agent's computer is on its card (a computer per agent)
     const drawn = agentsDrawn(linked);
     const agents = section("Agents", ...drawn.out);
     const connections = connectionsSection(linked, uses);
@@ -341,7 +341,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     if (lost()) return;
     drawnAgents = { section: agents, linked, roster: rosterOf(), cards: drawn.cards };
     returnSaid(back);
-    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), telegramSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
+    renderSettingsPage(page, [account, ...billing, agents, skills, connections, simplexSection(), telegramSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
     renderAgentFaces();
     // a home read that answered while these were built shown now they are in
     paintHomes();
@@ -379,7 +379,11 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     face.append(name, picture);
     const title = el("span", "settings-agent-title");
     title.append(face, renameIt, pictures);
-    return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
+    const card = agentSettings(a, actionLine(title, actions, skills, row), modeled);
+    // its computer: its own (a computer per agent), or the one from before
+    // it shares with others of theirs
+    card.append(computerSection(computerFor(a.fragment), a.fragment));
+    return [card, said];
   }
   // What Settings' Agents holds under its heading (`out`): each agent's
   // card, the one `kept` for it when there is one (`cardsFor`), and New
@@ -528,30 +532,42 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   // fragment's skills/, opened from its item in Agents. ----
   // one labelled `skills` first, else the first by name, as the computers
   // pick (hermes-boot's skills.rs `pick`)
-  const skillsFragmentOf = () => {
-    const theirs = allFragments().filter((f) => f.kind === "skills" && own(f)).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
-    return theirs.find((f) => f.name.slice(0, f.name.lastIndexOf("--")) === "skills") ?? theirs[0];
+  // The person's own fragment of a blessed template's `kind` (its label
+  // the kind's: `skills`, `shared`), as their computers pick it: one so
+  // labelled first, else the first by name.
+  const ownOf = (kind) => {
+    const theirs = allFragments().filter((f) => f.kind === kind && own(f)).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+    return theirs.find((f) => f.name.slice(0, f.name.lastIndexOf("--")) === kind) ?? theirs[0];
   };
-  // The person's skills fragment, made from the blessed template when they
-  // have none: at setup, as their default agent is, or from settings' Skills
-  // for a person without one (deleted, or set up before 2026-10-03).
-  // One made at a time, whoever asks meanwhile waiting for it; and then
-  // the one the computers pick, should there be two.
-  let makingSkills = null;
-  async function skillsFragment() {
-    const have = skillsFragmentOf();
+  const skillsFragmentOf = () => ownOf("skills");
+  // The person's own fragment of `kind`, made from its blessed template when
+  // they have none. One made at a time, whoever asks meanwhile waiting for
+  // it; and then the one the computers pick, should there be two.
+  const makingOwn = new Map();
+  async function ownFragment(kind) {
+    const have = ownOf(kind);
     if (have) return have.name;
-    makingSkills ??= (async () => {
-      try {
-        const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
-        await load();
-        return skillsFragmentOf()?.name ?? made.name;
-      } finally {
-        makingSkills = null;
-      }
-    })();
-    return makingSkills;
+    if (!makingOwn.has(kind)) {
+      makingOwn.set(kind, (async () => {
+        try {
+          const made = await api("POST", "/api/fragments", { label: freeLabel(kind), template: kind });
+          await load();
+          return ownOf(kind)?.name ?? made.name;
+        } finally {
+          makingOwn.delete(kind);
+        }
+      })());
+    }
+    return makingOwn.get(kind);
   }
+  // Their skills fragment: at setup, as their default agent is, or from
+  // settings' Skills for a person without one (deleted, or set up before
+  // 2026-10-03).
+  const skillsFragment = () => ownFragment("skills");
+  // Their team folder (a computer per agent): the files all their agents
+  // share, kept in step as ~/shared on each agent's own computer; made with
+  // an agent, as their skills are.
+  const sharedFragment = () => ownFragment("shared");
   // Skills: one row as Computer's are (its label, a short line under it,
   // Open with an icon). Open is the Skills page (skills-page.js), which
   // makes the person's skills fragment from the blessed template when they
@@ -578,5 +594,5 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     s.append(row);
     return s;
   }
-  return { openSettings, reopenSettings, agentsChanged, skillsFragment };
+  return { openSettings, reopenSettings, agentsChanged, skillsFragment, sharedFragment };
 }

@@ -79,8 +79,10 @@ fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan, coun
         Err((priced_as, why)) => return unknown(priced_as, why),
     };
     let priced_as = Some(name_of(&usage));
-    match row_charge(&usage, book, plan) {
-        Ok((_, each)) => {
+    // a quote reads the seat's month as unspent: an hour of a $200 seat's
+    // awake time is included, whatever its ledger let off so far
+    match row_charge(&usage, book, plan, super::SEAT_AWAKE_INCLUDED_MS) {
+        Ok((_, each, _)) => {
             let charge = i64::try_from(calls).ok().and_then(|c| each.checked_mul(c)).expect("QUOTE_CALLS_MAX × CHARGE_MAX fits an i64");
             Quoted { priced_as, each_micros: Some(each), calls, charge_micros: Some(charge), unknown: None }
         }

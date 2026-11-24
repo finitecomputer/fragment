@@ -58,7 +58,7 @@ mod signin;
 mod connection_signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
+    Active, AddKey, AgentForgotten, Agents, AgentsOf, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeBilling, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
@@ -266,6 +266,11 @@ struct KeyViewRow {
 #[derive(Deserialize)]
 struct IdRow {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct OwnerRow {
+    owner: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -588,7 +593,24 @@ impl RegistryCell {
         )?;
         assert!(gone.len() <= 1, "an agent names one fragment");
         assert!(self.agent_fragment(&b.identity)?.as_deref() != Some(b.fragment.as_str()), "a forgotten agent is named by its fragment no more");
+        // its owner's seat is pushed again: an always-on seat's computer was
+        // its first agent's own, and is the next one's now
+        if let Some(owner) = self.row::<OwnerRow>("SELECT owner FROM identities WHERE id = ?", vec![b.identity.as_str().into()])?.and_then(|r| r.owner).filter(|_| !gone.is_empty()) {
+            self.sync_seat(orgs::SyncSeat { person: owner })?;
+        }
         Ok(AgentForgotten { forgot: !gone.is_empty() })
+    }
+
+    /// A person's agents whose fragments live (`agent_fragments`), the
+    /// first made first: a deleted agent's identity stays, its fragment's
+    /// row does not. Bounded by what an owner may hold.
+    fn live_agents_of(&self, b: AgentsOf) -> CellResult<Agents> {
+        let rows = self.rows::<IdRow>(
+            "SELECT i.id FROM identities i JOIN agent_fragments a ON a.identity = i.id WHERE i.owner = ? AND i.kind = 'agent' ORDER BY i.created_at, i.id LIMIT ?",
+            vec![b.person.as_str().into(), SqlStorageValue::Integer(limits::AGENTS_PER_OWNER_MAX as i64)],
+        )?;
+        assert!(rows.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person's agents are bounded");
+        Ok(Agents { agents: rows.into_iter().map(|r| r.id).collect() })
     }
 
     /// Holds an agent below its owner (`held`: the most it acts with), or
@@ -859,7 +881,8 @@ impl RegistryCell {
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
-            ForgetAgent::PATH => reply::<ForgetAgent>(self.forget_agent(body(&bytes)?)),
+            ForgetAgent::PATH => reply::<ForgetAgent>(self.armed(|| self.forget_agent(body(&bytes)?)).await),
+            AgentsOf::PATH => reply::<AgentsOf>(self.live_agents_of(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
             SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),

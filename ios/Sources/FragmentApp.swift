@@ -50,8 +50,13 @@ final class Library {
     /// theirs' canonical URL, read once (`loadPages`): until it is, no link
     /// is one of theirs, and every link opens in Safari.
     var pages: FragmentPages?
-    /// Their computer's `phase` as last read (`ComputerView`), or nil.
+    /// Their first computer's `phase` as last read (`ComputerView`), or nil;
+    /// and each agent's own computer's, by its identity (a computer per
+    /// agent): what a chat with it says while it wakes.
     var computerPhase: String?
+    var agentPhases: [String: String] = [:]
+    /// The phase of the computer `agent` (an identity) runs on.
+    func phase(of agent: String) -> String? { agentPhases[agent] ?? computerPhase }
     /// What they are told (`GET /api/notices`, `NoticesBand`), as last read;
     /// whether that read failed (what it said before stays); the notices
     /// whose last action failed, by id (`NoticeFailure`), until one is acted
@@ -297,12 +302,14 @@ final class Library {
         held = nil
         if let list { answered = fragment(linkedBy: page.page, in: list) }
     }
-    /// The person's agents in their computer's order (`ComputerView.agents`,
-    /// docs/api.md), as the web's sidebar takes them (cell/shell/chat-list.js
-    /// `ownAgents`): its first is their main agent, first in every list of
-    /// agents here, and new chats are with it. Its identities too, so only
-    /// an agent not on it is asked its status. A computer that cannot be
-    /// read leaves the order as it was, the list's before it was ever read.
+    /// The person's agents in their computers' order (`ComputerView.agents`,
+    /// docs/api.md: theirs from before first, then each agent's own, the
+    /// first made first), as the web's sidebar takes them
+    /// (cell/shell/chat-list.js `ownAgents`): its first is their main agent,
+    /// first in every list of agents here, and new chats are with it. Its
+    /// identities too, so only an agent on none is asked its status. Computers
+    /// that cannot be read leave the order as it was, the list's before it
+    /// was ever read.
     private func loadComputer(_ api: FragmentAPI, _ requestID: UUID) async {
         struct Computers: Decodable {
             struct Computer: Decodable { struct Agent: Decodable { let fragment: String; let identity: String }; let agents: [Agent]; let phase: String? }
@@ -310,11 +317,14 @@ final class Library {
         }
         let read: Computers? = try? await api.request("api/computers")
         guard let read, loadID == requestID, !Task.isCancelled else { return }
-        let taken = Array((read.computers.first?.agents ?? []).prefix(256))
+        let taken = Array(read.computers.flatMap(\.agents).prefix(256))
         let order = taken.map(\.fragment)
         if agentOrder != order { agentOrder = order }
         let phase = read.computers.first?.phase
         if computerPhase != phase { computerPhase = phase }
+        var phases: [String: String] = [:]
+        for c in read.computers { for a in c.agents { if let p = c.phase, phases[a.identity] == nil { phases[a.identity] = p } } }
+        if agentPhases != phases { agentPhases = phases }
         for agent in taken where identities[agent.fragment] != agent.identity { identities[agent.fragment] = agent.identity }
     }
     /// What they are told now, each owner's notices in its own words. A

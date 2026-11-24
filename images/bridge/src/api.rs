@@ -278,6 +278,13 @@ pub struct FragmentEntry {
     /// titles an agent fragment so); empty when it has none.
     #[serde(default)]
     pub title: String,
+    /// An agent fragment's agent (its identity), which a teammate on
+    /// another computer asks; none from a row kept before it.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// An agent fragment's role, as its face says it.
+    #[serde(default, rename = "agentRole")]
+    pub agent_role: Option<String>,
 }
 
 /// A fragment name's label: `todo` of `todo--k3x9` (decision 47).
@@ -678,13 +685,20 @@ impl Api {
     /// an agent by its name, its agent fragment's title, else its label
     /// (docs/api.md, "An agent's name and picture").
     pub async fn people(&self, agent: &str, fragment: &str, ids: &[String]) -> Result<BTreeMap<String, String>, ApiError> {
+        Ok(self.profiles(agent, fragment, ids).await?.0)
+    }
+
+    /// `people`'s names, and each agent's own fragment by its identity (the
+    /// fragment `__people` names it by): where an answer to a teammate on
+    /// another computer goes (engine.rs, `Return`).
+    pub async fn profiles(&self, agent: &str, fragment: &str, ids: &[String]) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), ApiError> {
         let ids: Vec<&String> = ids.iter().take(PEOPLE_MAX).collect();
         if ids.is_empty() {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), BTreeMap::new()));
         }
         let query: Vec<String> = ids.iter().map(|i| format!("id={}", encode(i))).collect();
         let v: Value = self.json(Method::GET, &format!("/f/{}/__people?{}", name(fragment)?, query.join("&")), Some(agent), None).await?;
-        let mut out = BTreeMap::new();
+        let (mut out, mut fragments) = (BTreeMap::new(), BTreeMap::new());
         if let Some(profiles) = v["profiles"].as_object() {
             for (id, p) in profiles {
                 let title = p["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
@@ -695,9 +709,12 @@ impl Api {
                 if let Some(n) = named {
                     out.insert(id.clone(), n.to_string());
                 }
+                if let Some(f) = p["fragment"].as_str().filter(|f| p["kind"] == "agent" && crate::records::fragment_name_ok(f)) {
+                    fragments.insert(id.clone(), f.to_string());
+                }
             }
         }
-        Ok(out)
+        Ok((out, fragments))
     }
 
     /// `GET /api/f/{name}/subscriptions`: the agent's own.
@@ -734,7 +751,19 @@ impl Api {
     /// replayed}`: `replayed` when the id was posted before (with this
     /// body), and the record's seq (the first post's, for a replay).
     pub async fn post(&self, agent: &str, fragment: &str, channel: &str, id: &str, body: &Value) -> Result<Posted, ApiError> {
-        let v: Value = self.json(Method::POST, &format!("/api/f/{}/channels/{}", name(fragment)?, encode(channel)), Some(agent), Some(json!({ "id": id, "body": body }))).await?;
+        self.post_for(agent, None, fragment, channel, id, body).await
+    }
+
+    /// `post`, acting for `person` (`?for=`) when named: an answer on a
+    /// teammate's own `tasks` (a computer per agent), where an agent of
+    /// their owner's reaches as an editor acting for them (permit rule 3),
+    /// recorded as the agent itself.
+    pub async fn post_for(&self, agent: &str, person: Option<&str>, fragment: &str, channel: &str, id: &str, body: &Value) -> Result<Posted, ApiError> {
+        let mut path = format!("/api/f/{}/channels/{}", name(fragment)?, encode(channel));
+        if let Some(p) = person {
+            path.push_str(&format!("?for={}", encode(p)));
+        }
+        let v: Value = self.json(Method::POST, &path, Some(agent), Some(json!({ "id": id, "body": body }))).await?;
         Ok(Posted { replayed: v["replayed"].as_bool().unwrap_or(false), seq: v["record"]["seq"].as_u64().filter(|s| *s > 0) })
     }
 
@@ -961,7 +990,7 @@ mod tests {
     use super::*;
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
-        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new(), identity: None, agent_role: None }
     }
 
     /// Valid: the chat its owner owns labelled `<label>-chat`, whatever its

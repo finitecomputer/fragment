@@ -178,10 +178,25 @@ impl FragmentCell {
     pub(crate) async fn runs_on(&self, route: &str, body: &[u8]) -> CellResult<Value> {
         self.created()?;
         match route {
+            // its own computer's making (a computer per agent): its owner's
+            // alone, named by its key, which its agent is named by
+            "own" => {
+                let body: Value = crate::json_body(body)?;
+                if self.must(MetaKey::Owner)? != body["owner"].as_str().unwrap_or("") {
+                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner makes its computer"));
+                }
+                Ok(json!({ "identity": self.must(MetaKey::Npub)? }))
+            }
             "assign" => {
                 let b: Assign = crate::json_body(body)?;
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
+                }
+                // their computer from before, or its own: never another's,
+                // nor another agent's own (fragment_core::computer::may_run)
+                let npub = self.must(MetaKey::Npub)?;
+                if fragment_core::computer::may_run(&b.computer, &b.owner, &npub) == fragment_core::computer::Runs::Neither {
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{} runs on its owner's computer or its own, never {}", self.name()?, b.computer)));
                 }
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
                     Some(id) => id,

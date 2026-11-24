@@ -120,7 +120,7 @@ mod tests {
     }
 
     fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
-        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new(), identity: None, agent_role: None }
     }
 
     /// Valid: the job's first line that says anything; invalid: none, or

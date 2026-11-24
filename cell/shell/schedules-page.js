@@ -25,7 +25,7 @@ export const READS_AT_ONCE = 4;
 // a routine's name: its text's first line, at most this many characters
 const NAME_MAX = 80;
 
-export const asked = (f) => f.role === "owner" && f.kind !== "chat" && f.kind !== "skills" && f.kind !== "sessions";
+export const asked = (f) => f.role === "owner" && f.kind !== "chat" && f.kind !== "skills" && f.kind !== "sessions" && f.kind !== "shared";
 
 const firstLine = (text) => (typeof text === "string" ? text.split("\n").map((l) => l.trim()).find(Boolean) ?? "" : "");
 const cut = (s) => (s.length > NAME_MAX ? `${s.slice(0, NAME_MAX - 1).trimEnd()}…` : s);

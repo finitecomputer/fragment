@@ -945,6 +945,10 @@ pub enum FragmentKind {
     /// conversations they had with an agent elsewhere, which `fragment
     /// session import` brings in (templates/sessions/README.md).
     Sessions,
+    /// A person's team folder (the blessed `shared` template): files all
+    /// their agents share, kept in step as `~/shared` on each agent's own
+    /// computer (docs/computers.md, "The team folder in our Hermes image").
+    Shared,
     /// A kind this build does not know: one a newer platform's list,
     /// status or access view names (#587's), read as this so that one new
     /// kind breaks no shipped CLI or pinned image. It is only ever read:
@@ -965,6 +969,7 @@ impl FragmentKind {
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
             FragmentKind::Sessions => "sessions",
+            FragmentKind::Shared => "shared",
             FragmentKind::Other => "other",
         }
     }
@@ -979,6 +984,7 @@ impl FragmentKind {
             "brain" => Some(FragmentKind::Brain),
             "skills" => Some(FragmentKind::Skills),
             "sessions" => Some(FragmentKind::Sessions),
+            "shared" => Some(FragmentKind::Shared),
             _ => None,
         }
     }
@@ -1257,6 +1263,13 @@ pub struct ListedFragment {
     #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
+    /// An agent fragment's agent: its identity (an npub), which a message's
+    /// `to` names, so its owner's other agents ask it on any computer.
+    /// Never any other fragment's; none from a row kept before it, until
+    /// its fragment's next change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub identity: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2922,7 +2935,7 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }], limits: None };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, identity: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }], limits: None };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         // the limits a person's client checks its files against, when the platform names them
         let limited = FragmentList { fragments: vec![], limits: Some(UploadLimits { upload_max_bytes: limits::UPLOAD_MAX_BYTES_DEFAULT, files_per_message: limits::FILES_PER_MESSAGE }) };
@@ -2930,7 +2943,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<FragmentList>(value(&limited)).unwrap(), limited);
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, identity: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
             limits: None,
         };
         assert_eq!(

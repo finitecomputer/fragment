@@ -182,20 +182,26 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
     let person = facts.identity.as_str();
     match step {
         Step::Computer => {
-            let computer = fragment_core::computer::default_computer_of(person);
+            // theirs from before and each of their agents' own (a computer
+            // per agent), one after another; a call cut short goes on at
+            // the next, where a computer wiped already is quick to wipe again
             let mut deleted = 0u64;
-            // bounded: COMPUTER_CALLS_MAX calls, each its own pages
-            for _ in 0..COMPUTER_CALLS_MAX {
-                let w = crate::computer::ask(env, &computer, "computer/wipe", &json!({})).await?;
-                deleted += w["records"].as_u64().unwrap_or(0) + w["objects"].as_u64().unwrap_or(0);
-                if w["more"] != true {
-                    return Ok(Did::finished(deleted));
+            // bounded: their agents are, and COMPUTER_CALLS_MAX calls a computer
+            for computer in fragment_core::computer::computers_of(person, &facts.agents) {
+                let mut more = true;
+                for _ in 0..COMPUTER_CALLS_MAX {
+                    let w = crate::computer::ask(env, &computer, "computer/wipe", &json!({})).await?;
+                    deleted += w["records"].as_u64().unwrap_or(0) + w["objects"].as_u64().unwrap_or(0);
+                    more = w["more"] == true;
+                    if !more || js::now_ms() > deadline {
+                        break;
+                    }
                 }
-                if js::now_ms() > deadline {
-                    break;
+                if more || js::now_ms() > deadline {
+                    return Ok(Did::going(deleted, format!("{computer}'s saves hold more, or the call's time ran out: the next call deletes on")));
                 }
             }
-            Ok(Did::going(deleted, "its saves' prefix holds more: the next call deletes on".into()))
+            Ok(Did::finished(deleted))
         }
         Step::Fragments => {
             let names = theirs(env, facts, true).await?;
@@ -393,6 +399,21 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
             }
         }
     }
+    let found = |computer: String, c: Value| ComputerFound {
+        computer,
+        phase: c["phase"].as_str().map(str::to_string),
+        saves: c["saves"].as_u64().unwrap_or(0),
+        backups: c["backups"].as_u64().unwrap_or(0),
+        more: c["more"] == true,
+        snapshot: c["snapshot"] == true,
+    };
+    // their agents' own computers (a computer per agent), each as found
+    let mut computers = vec![];
+    // bounded: their agents are
+    for computer in fragment_core::computer::computers_of(&facts.identity, &facts.agents).into_iter().skip(1) {
+        let c = crate::computer::ask(env, &computer, "computer/wipe-view", &json!({})).await?;
+        computers.push(found(computer, c));
+    }
     let computer = fragment_core::computer::default_computer_of(&facts.identity);
     let c = crate::computer::ask(env, &computer, "computer/wipe-view", &json!({})).await?;
     let ledger: Value = routed::ask_object(env, "LEDGER", &facts.identity, "wipe/view", &json!({})).await?;
@@ -406,14 +427,8 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
         agents: if state == WipeState::Wiped { vec![] } else { facts.agents.clone() },
         fragments: rules::listed(fragments),
         memberships: rules::listed(memberships),
-        computer: Some(ComputerFound {
-            computer,
-            phase: c["phase"].as_str().map(str::to_string),
-            saves: c["saves"].as_u64().unwrap_or(0),
-            backups: c["backups"].as_u64().unwrap_or(0),
-            more: c["more"] == true,
-            snapshot: c["snapshot"] == true,
-        }),
+        computer: Some(found(computer, c)),
+        computers,
         ledger: ledger["held"] == true,
         vault: vault["held"] == true,
         lists,

@@ -29,6 +29,17 @@ const price = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style
 const CLOSED = "Finite isn't open for new seats yet.";
 
 /** What a seat gives a guest, at its price (`offer`: `GET /api/seat`'s; null, nothing sold). */
+// A seat's included awake time this month, in words (`LedgerStatus.awake`:
+// used and included, in ms): whole hours, never more used than included;
+// none without one (another plan, or a platform before the bound).
+export function awakeSaid(a) {
+  if (!a || !Number.isFinite(a.usedMs) || !Number.isFinite(a.includedMs) || a.includedMs <= 0) return null;
+  const hour = 3_600_000;
+  const included = Math.round(a.includedMs / hour);
+  const used = Math.min(included, Math.floor(Math.max(0, a.usedMs) / hour));
+  return used >= included ? `All ${included} included hours used this month: more awake time comes from your credit.` : `${used} of ${included} hours included this month.`;
+}
+
 export function seatGives(offer) {
   if (!offer) return CLOSED;
   return `A seat, ${price(offer.seatMicros)} a month, gives you agents of your own, the always-on computer they run on, apps of your own, and ${price(offer.includedMicros)} of credit a month.`;
@@ -466,6 +477,15 @@ export async function billingSections(helpers, ledger, mine, back) {
       (credit.querySelector(".settings-info") ?? credit).append(bar, el("span", "credit-said muted", said));
     }
     billing.append(credit);
+    // a $200 seat's awake time included this month, all their computers
+    // together (a computer per agent): past it, awake time is charged from
+    // credit (docs/ledger.md, "Who pays"); the ledger's own count
+    const awake = awakeSaid(ledger.awake);
+    if (awake) {
+      const hours = line("Computers awake", awake);
+      hours.dataset.awake = "";
+      billing.append(hours);
+    }
   }
   // a trial is for a seat of one (docs/billing.md, "Trials"): no seat is added while it runs
   const trial = !!seat?.trialEnds;

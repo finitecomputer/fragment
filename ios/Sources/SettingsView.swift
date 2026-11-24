@@ -2,13 +2,12 @@ import SwiftUI
 import UserNotifications
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case account = "Account", billing = "Billing", computer = "Computer", agents = "Agents", skills = "Skills", connections = "Connections", developer = "Build with Claude Code or Codex", data = "Your data", device = "This iPhone"
+    case account = "Account", billing = "Billing", agents = "Agents", skills = "Skills", connections = "Connections", developer = "Build with Claude Code or Codex", data = "Your data", device = "This iPhone"
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .account: "person.crop.circle"
         case .billing: "creditcard"
-        case .computer: "desktopcomputer"
         case .agents: "person.2"
         case .skills: "sparkles"
         case .connections: "point.3.connected.trianglepath.dotted"
@@ -93,7 +92,9 @@ private struct SettingsDetail: View {
     @State private var value: JSONValue = .null
     @State private var loading = false
     @State private var error: String?
-    @State private var confirmRestart = false
+    /// The computer a Restart asked about (an agent's own, since a computer
+    /// per agent, or the one from before its agents share), until answered.
+    @State private var restarting: JSONValue?
     @State private var notificationStatus = "Not enabled"
     @State private var exports: ExportModel
     init(section: SettingsSection, library: Library, api: FragmentAPI, open: @escaping (FragmentSummary) -> Void) {
@@ -109,9 +110,9 @@ private struct SettingsDetail: View {
         .navigationTitle(section == .developer ? "Build with an agent" : section.rawValue).navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .refreshable { await load() }
-        .confirmationDialog("Restart your computer?", isPresented: $confirmRestart, titleVisibility: .visible) {
+        .confirmationDialog("Restart this computer?", isPresented: Binding(get: { restarting != nil }, set: { if !$0 { restarting = nil } }), titleVisibility: .visible) {
             Button("Restart computer", role: .destructive) { Task { await restart() } }
-        } message: { Text("Saves your computer if it can, then starts it fresh. Anything its agents are doing stops.") }
+        } message: { Text("Saves its computer if it can, then starts it fresh. Anything it is doing stops.") }
     }
     @ViewBuilder private var fields: some View {
         switch section {
@@ -130,20 +131,22 @@ private struct SettingsDetail: View {
                 LabeledContent("Organization", value: value["seat"]["org"]["name"].string ?? "—")
                 Text("Manage purchases and subscriptions on your Finite website.").font(.footnote).foregroundStyle(.secondary)
             }
-        case .computer:
-            if let computer = computer {
-                Section("Your computer") {
-                    LabeledContent("State", value: ComputerPhase.said(computer["phase"].string))
-                    LabeledContent("Version", value: computer["version"].string ?? "—")
-                    Button("Restart computer", systemImage: "arrow.clockwise") { confirmRestart = true }
-                }
-            } else if !loading { ContentUnavailableView("No computer", systemImage: "desktopcomputer", description: Text("Your computer will appear here when connected.")) }
         case .agents:
             ForEach(library.agents) { agent in
                 Section {
                     HStack { AgentAvatar(agent: agent); Text(agent.displayTitle).font(.headline) }
                     Button("Start a new chat", systemImage: "square.and.pencil") { library.selectedAgent = agent.name; openLauncher() }
                     LabeledContent("Chats", value: String(library.chats.filter { ($0.agents ?? []).contains(library.identities[agent.name] ?? "") }.count))
+                }
+                // its computer (a computer per agent: its own, or the one
+                // from before it shares), as the web's agent card shows it
+                if let computer = computer(of: agent.name) {
+                    Section("Computer") {
+                        LabeledContent("State", value: ComputerPhase.said(computer["phase"].string))
+                        LabeledContent("Version", value: computer["version"].string ?? "—")
+                        Button("Restart computer", systemImage: "arrow.clockwise") { restarting = computer }
+                            .accessibilityIdentifier("restart-\(agent.name)")
+                    }
                 }
             }
         case .skills:
@@ -178,7 +181,11 @@ private struct SettingsDetail: View {
             }
         }
     }
-    private var computer: JSONValue? { value["computer"].string == nil ? value["computers"].array.first : value }
+    /// The computer an agent (its fragment) runs on, as `GET /api/computers`
+    /// last answered here.
+    private func computer(of agent: String) -> JSONValue? {
+        value["computers"].array.first { c in c["agents"].array.contains { $0["fragment"].string == agent } }
+    }
     private var prompt: String { "Read \(api.url("llms.txt").absoluteString) and help me build: " }
     private func openLauncher() { open(FragmentSummary(name: "__launcher", kind: "launcher")) }
     private func load() async {
@@ -187,7 +194,7 @@ private struct SettingsDetail: View {
         switch section {
         case .account: path = "api/identities/me"
         case .billing: path = "api/seat"
-        case .computer: path = "api/computers"
+        case .agents: path = "api/computers"
         case .connections: path = "api/connections"
         // the Form's pull to refresh asks the export again too
         case .data: return await exports.refresh()
@@ -196,9 +203,12 @@ private struct SettingsDetail: View {
         do { value = try await api.request(path) } catch { self.error = error.localizedDescription }
     }
     private func restart() async {
-        guard let computer, let id = computer["computer"].string else { return }
-        do { value = try await api.request("api/computers/\(id)/restart", method: "POST", body: .object(["generation": computer["generation"]])) }
-        catch { self.error = error.localizedDescription }
+        guard let computer = restarting, let id = computer["computer"].string else { return }
+        restarting = nil
+        do {
+            let _: JSONValue = try await api.request("api/computers/\(id)/restart", method: "POST", body: .object(["generation": computer["generation"]]))
+            value = try await api.request("api/computers")
+        } catch { self.error = error.localizedDescription }
     }
     private func notifications() async {
         do { let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]); notificationStatus = granted ? "Allowed" : "Disabled in iOS Settings" }

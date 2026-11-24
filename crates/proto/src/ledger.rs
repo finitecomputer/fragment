@@ -101,6 +101,20 @@ pub struct LedgerStatus {
     pub price_book: u32,
     /// This month's spend by fragment, the largest first (a bounded list).
     pub fragments: Vec<FragmentSpend>,
+    /// A $200 seat's awake time included this month, pooled across its
+    /// person's computers (docs/ledger.md, "Who pays"): none on any other
+    /// plan, and none from a platform before the bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awake: Option<AwakeIncluded>,
+}
+
+/// How much of a seat's included awake time this month has used, and how
+/// much it includes: past it, awake time is charged from credit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwakeIncluded {
+    pub used_ms: i64,
+    pub included_ms: i64,
 }
 
 /// Credit granted: bought (Stripe's hook), or given by an operator. Once

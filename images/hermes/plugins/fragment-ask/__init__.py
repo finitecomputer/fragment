@@ -11,6 +11,13 @@ Who asks and from where is the turn's own session (its relay chat id,
 `<chat>/<agent fragment>`), checked against the profile's `.env`, never
 what the model says. Its post id is the tool call's, so a retry of one
 call posts once and two calls of one turn post twice.
+
+The ask says the turn it is made in and how deep it is, one past that
+turn as the bridge counts it (its Relay's `/relay/turns/<turn>`), so a
+teammate on another computer, whose bridge cannot see this turn, counts
+it (docs/bridge.md, "Agents asking each other"). A depth not read leaves
+both out: that bridge then counts the ask one deep, and the chat's budget
+still holds it.
 """
 import hashlib
 import json
@@ -69,6 +76,28 @@ def post_id(agent, session, turn, call):
     return 'ask-' + hashlib.sha256('\0'.join([agent, session or '', turn or '', call]).encode()).hexdigest()[:32]
 
 
+def turn_depth(turn):
+    """`(turn, hop)`: the turn the ask is made in and one past its depth, as
+    the bridge's Relay answers for it, else None."""
+    if not turn:
+        return None
+    try:
+        from urllib.parse import quote
+        from urllib.request import Request, build_opener, ProxyHandler
+        from gateway.relay.auth import make_token
+        url = os.environ['GATEWAY_RELAY_URL'].rstrip('/') + '/relay/turns/' + quote(turn, safe='')
+        token = make_token(os.environ['GATEWAY_RELAY_ID'], os.environ['GATEWAY_RELAY_SECRET'], ttl_seconds=60)
+        req = Request(url, headers={'Authorization': 'Bearer ' + token})
+        # the bridge is local: no proxy between them
+        with build_opener(ProxyHandler({})).open(req, timeout=5) as r:
+            hop = json.loads(r.read().decode('utf-8')).get('hop')
+    except Exception:
+        return None
+    if not isinstance(hop, int) or hop < 0:
+        return None
+    return turn, hop + 1
+
+
 def error(message):
     from tools.registry import tool_error
     return tool_error(message)
@@ -91,7 +120,11 @@ def ask(args, session_id=None, **_):
     if not chat or not agent or not env.get('FRAGMENT_FOR'):
         return error('fragment_ask asks from a fragment chat of yours; this turn is in none')
     pid = post_id(agent, session_id or get_session_env('HERMES_SESSION_ID', ''), _approval_turn_id.get(), _approval_tool_call_id.get())
-    cmd = [CLI, '--json', 'ask', '--return-to', chat, '--id', pid, '--', target, question]
+    cmd = [CLI, '--json', 'ask', '--return-to', chat, '--id', pid]
+    within = turn_depth(get_session_env('HERMES_SESSION_MESSAGE_ID', ''))
+    if within:
+        cmd += ['--turn', within[0], '--hop', str(within[1])]
+    cmd += ['--', target, question]
     run_env = dict(os.environ, FRAGMENT_AS_AGENT=agent, FRAGMENT_FOR=env['FRAGMENT_FOR'])
     run_env.setdefault('FRAGMENT_API', API)
     try:

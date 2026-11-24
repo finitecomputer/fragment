@@ -405,6 +405,25 @@ pub fn homed(body: &Value, chat: &str) -> Value {
     named
 }
 
+/// The question an answer on `tasks` says it answers (its `asked`): the
+/// chat it was asked in, and its record there.
+pub fn answers(body: &Value) -> Option<(String, u64)> {
+    let asked = body.get("asked")?;
+    let fragment = asked.get("fragment").and_then(Value::as_str).filter(|f| fragment_name_ok(f))?;
+    Some((fragment.to_string(), asked.get("seq").and_then(Value::as_u64)?))
+}
+
+/// Whether `question` vouches for an answer by `by` coming back to `chat`
+/// (a computer per agent: the asked agent signs its answer, and the asking
+/// agent's bridge takes it only so): the asking agent `asker` posted it
+/// itself, as words of its own (no app code's), naming `by` in `to`, with
+/// `chat` as its `return_to`.
+pub fn vouches(question: &Record, asker: &str, by: &str, chat: &str) -> bool {
+    let named = question.body.get("to").and_then(Value::as_array).is_some_and(|to| to.iter().any(|t| t.as_str() == Some(by)));
+    let back_here = question.body.get("return_to").and_then(Value::as_str) == Some(chat);
+    question.channel == CHAT && question.principal == asker && !question.by_code() && named && back_here
+}
+
 /// Reads a `tasks` record's body.
 pub fn task(body: &Value) -> Task {
     let Value::Object(o) = body else { return Task::Other };
@@ -1142,6 +1161,25 @@ mod tests {
         for bad in [json!({ "kind": "prompt_response", "prompt": "ab" }), json!({ "kind": "prompt_response", "prompt": "a b", "option": "x" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "" }), json!({ "kind": "prompt_response", "prompt": "a", "option": "x", "text": 3 })] {
             assert_eq!(said(&bad), Said::Other, "{bad}");
         }
+    }
+
+    /// Goal (a computer per agent): the question an answer names vouches
+    /// for it only when the asking agent posted it itself, naming the agent
+    /// that signed the answer, asking it back to the answer's chat. Invalid:
+    /// another poster, app code's words, another agent named, another chat
+    /// to return to, or no question named at all.
+    #[test]
+    fn a_question_vouches_for_its_answer() {
+        let q = Record { channel: CHAT.into(), seq: 7, at: 1, principal: "npub1juniper".into(), author: None, kind: "message".into(), body: json!({ "text": "Weather?", "to": ["npub1rowan"], "return_to": "home--k3x9" }) };
+        assert!(vouches(&q, "npub1juniper", "npub1rowan", "home--k3x9"));
+        assert!(!vouches(&q, "npub1maple", "npub1rowan", "home--k3x9"), "another asker's question");
+        assert!(!vouches(&q, "npub1juniper", "npub1fern", "home--k3x9"), "another agent asked");
+        assert!(!vouches(&q, "npub1juniper", "npub1rowan", "talk--k3x9"), "another chat to go back to");
+        assert!(!vouches(&Record { author: Some(CODE.into()), ..q.clone() }, "npub1juniper", "npub1rowan", "home--k3x9"), "app code's words");
+        assert!(!vouches(&Record { channel: "work".into(), ..q.clone() }, "npub1juniper", "npub1rowan", "home--k3x9"));
+        assert_eq!(answers(&json!({ "asked": { "fragment": "talk--k3x9", "seq": 7 } })), Some(("talk--k3x9".into(), 7)));
+        assert_eq!(answers(&json!({ "asked": { "fragment": "../x", "seq": 7 } })), None);
+        assert_eq!(answers(&json!({ "kind": "answer" })), None);
     }
 
     #[test]

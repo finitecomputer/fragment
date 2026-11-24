@@ -266,6 +266,7 @@ mod tests {
             standing,
             price_book: 9,
             fragments: vec![],
+            awake: None,
         }
     }
 

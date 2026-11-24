@@ -1229,13 +1229,18 @@ impl PrincipalCell {
         if shared.len() > limits::SHARED_MAX {
             return Err(fail(ExportFailure::TooMany, format!("{} fragments are shared with them; an export names at most {}", shared.len(), limits::SHARED_MAX)));
         }
-        let computer = fragment_core::computer::default_computer_of(&person);
-        let computers = match crate::computer::ask(&self.env, &computer, "computer/view", &json!({})).await {
-            Ok(v) if v["owner"] == person.as_str() => vec![computer],
-            Ok(_) => vec![],
-            Err(e) if e.code == ErrorCode::NotFound => vec![],
-            Err(e) => return Err(e.into()),
-        };
+        // theirs from before and each of their agents' own (a computer per
+        // agent): those made and theirs
+        let mut computers = vec![];
+        // bounded: their agents are
+        for computer in fragment_core::computer::computers_of(&person, &me.agents) {
+            match crate::computer::ask(&self.env, &computer, "computer/view", &json!({})).await {
+                Ok(v) if v["owner"] == person.as_str() => computers.push(computer),
+                Ok(_) => {}
+                Err(e) if e.code == ErrorCode::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         run.job.total = 1 + fragments.len() as u32 + computers.len() as u32;
         run.job.at = if shared.is_empty() { At::Readme } else { At::Owners { next: 0 } };
         run.job.plan = Some(Plan { email: me.email, agents: me.agents, fragments, shared, computers });
@@ -1256,6 +1261,7 @@ impl PrincipalCell {
                     title: face["title"].as_str().map(str::to_string),
                     picture: face["picture"].as_str().map(str::to_string),
                     agent_role: face["role"].as_str().map(str::to_string),
+                    identity: None,
                     agents: vec![],
                     preview: None,
                     preview_at: None,

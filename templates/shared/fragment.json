@@ -1,0 +1,10 @@
+{
+  "kind": "shared",
+  "files": {
+    "page": true
+  },
+  "meta": {
+    "title": "Shared",
+    "description": "Files all your agents share: each keeps them in step as ~/shared on its own computer."
+  }
+}

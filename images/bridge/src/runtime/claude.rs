@@ -1650,6 +1650,7 @@ mod tests {
             claim_seq: None,
             note: Some("the turn before was cut".into()),
             command: false,
+            hop: 0,
             reply_to: None,
             quote: Some(super::super::Quote { id: "q".into(), text: "earlier".into(), own: true }),
             simplex: false,

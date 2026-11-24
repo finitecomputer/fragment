@@ -17,9 +17,12 @@
 //! the answer, as a turn of its own, whether or not it still runs
 //! (docs/chat-records.md, "An ask").
 //!
-//! Who may be asked is the computer's own list: an agent's `GET
-//! /api/computer` (its computer's agents, all its owner's), a person's
-//! `GET /api/computers`.
+//! Who may be asked is the owner's agents: an agent's computer's (`GET
+//! /api/computer`), and its owner's others on computers of their own (a
+//! computer per agent), from its owner's list, whose agent rows name their
+//! agents; a person's, every computer's (`GET /api/computers`). An agent
+//! asking inside a turn says which (`--turn`) and how deep (`--hop`), so a
+//! bridge on another computer, which cannot see that turn, counts it.
 
 use std::time::{Duration, Instant};
 
@@ -212,6 +215,37 @@ struct Computers {
     computers: Vec<Roster>,
 }
 
+/// One row of an owner's list, as a roster reads it.
+#[derive(Deserialize)]
+struct Row {
+    name: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    owned: bool,
+}
+
+#[derive(Deserialize)]
+struct Rows {
+    fragments: Vec<Row>,
+}
+
+/// The owner's other agents on computers of their own: their list's agent
+/// rows that name their agent (a row kept before it names none, until its
+/// fragment's next change), each theirs, none already on this computer.
+fn elsewhere(rows: &[Row], here: &[Agent], owner: &str) -> Vec<Agent> {
+    rows.iter()
+        .filter(|r| r.kind == "agent" && r.owned)
+        .filter_map(|r| Some((r, r.identity.as_ref().filter(|i| i.starts_with("npub1"))?)))
+        .filter(|(r, identity)| !here.iter().any(|a| &a.identity == *identity || a.fragment == r.name))
+        .map(|(r, identity)| Agent { fragment: r.name.clone(), identity: identity.clone(), name: label(&r.name).to_string(), title: r.title.clone(), owner: owner.to_string() })
+        .collect()
+}
+
 /// The asker (an agent; none for a person) and the agents it may ask.
 fn roster(c: &Client) -> Result<(Option<Agent>, Vec<Agent>)> {
     match c.agent() {
@@ -219,7 +253,15 @@ fn roster(c: &Client) -> Result<(Option<Agent>, Vec<Agent>)> {
             // the computer's own route: every agent it runs, all its owner's
             let r: Roster = c.call_as(c.get("/api/computer")?).context("reading this computer's agents")?;
             let me = r.agents.iter().find(|a| a.fragment == mode.agent).cloned().ok_or_else(|| coded(Code::Forbidden, format!("{} does not run on this computer", mode.agent)))?;
-            Ok((Some(me), r.agents))
+            // and its owner's others, on computers of their own, each named
+            // as its owner's list says it now (one read for both)
+            let mut agents = r.agents;
+            let rows: Rows = c.call_as(c.get(&names_path(&c.signer, Some(&me)))?).context("reading your owner's agents")?;
+            agents.extend(elsewhere(&rows.fragments, &agents, &me.owner));
+            for a in agents.iter_mut() {
+                a.title = rows.fragments.iter().find(|r| r.name == a.fragment).and_then(|r| r.title.clone());
+            }
+            Ok((Some(me), agents))
         }
         None => {
             let r: Computers = c.call_as(c.get("/api/computers")?).context("reading your computer's agents")?;
@@ -269,7 +311,8 @@ fn names_path(signer: &crate::api::Signer, asker: Option<&Agent>) -> String {
 /// whoever of the two is missing, posts, and with `wait` follows the
 /// asked agent's turn to its end; with `return_to` (an agent's), its
 /// answer comes back to that chat as the asking agent's turn instead.
-pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u64>, return_to: Option<&str>, id: String) -> Result<Asked> {
+#[allow(clippy::too_many_arguments)]
+pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u64>, return_to: Option<&str>, id: String, within: Option<(&str, u32)>) -> Result<Asked> {
     let text = text.trim();
     if text.is_empty() {
         return Err(coded(Code::InvalidUsage, "ask something: the text is empty"));
@@ -283,7 +326,9 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
         return Err(coded(Code::InvalidUsage, "--wait prints the answer; --return-to has it come back as a turn: one of the two"));
     }
     let (asker, mut agents) = roster(c)?;
-    named(c, asker.as_ref(), &mut agents);
+    if asker.is_none() {
+        named(c, None, &mut agents);
+    }
     // the chat the answer comes back to: one the asking agent answers in
     let return_to = match (return_to, &asker) {
         (None, _) => None,
@@ -392,6 +437,15 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     if let Some(r) = &return_to {
         body["return_to"] = json!(r);
     }
+    // the turn it is asked from and its depth: an agent's alone (a person's
+    // question starts at none); the asked bridge refuses one too deep
+    if let (Some((turn, hop)), Some(_)) = (within, &asker) {
+        if !(1..=64).contains(&turn.len()) || !turn.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) || hop == 0 {
+            return Err(coded(Code::InvalidUsage, "--turn is the id of the turn you ask from, and --hop at least 1"));
+        }
+        body["turn"] = json!(turn);
+        body["hop"] = json!(hop);
+    }
     let posted: Posted = c
         .post_json_by_id(&format!("/api/f/{full}/channels/chat"), &fragment_proto::PostRecord { id: id.clone(), body })
         .and_then(|r| c.call_as(r))
@@ -496,6 +550,26 @@ mod tests {
         assert_eq!(pick(&titled, "fernanda").map(|a| a.fragment.as_str()), Ok("maple--k3x9"));
         assert_eq!(pick(&titled, "Maple").map_err(|m| m.len()), Err(2), "maple's label and fred's name: never a guess");
         assert_eq!(pick(&titled, "maple--k3x9").map(|a| a.identity.as_str()), Ok("npub1maple"));
+    }
+
+    /// Goal (a computer per agent): an agent may ask its owner's agents on
+    /// computers of their own, as its owner's list names them, beside its
+    /// own computer's. Invalid: a row naming no agent (kept before it
+    /// did), one its owner does not own, another kind, one already here.
+    #[test]
+    fn the_owners_agents_elsewhere_may_be_asked() {
+        let row = |name: &str, kind: &str, identity: Option<&str>, owned: bool| Row { name: name.into(), kind: kind.into(), title: Some("Rowan".into()), identity: identity.map(str::to_string), owned };
+        let here = [agent("juniper")];
+        let rows = [
+            row("rowan--k3x9", "agent", Some("npub1rowan"), true),
+            row("maple--k3x9", "agent", None, true),
+            row("fern--k3x9", "agent", Some("npub1fern"), false),
+            row("todo--k3x9", "app", Some("npub1todo"), true),
+            row("juniper--k3x9", "agent", Some("npub1juniper"), true),
+        ];
+        let found = elsewhere(&rows, &here, "npub1paul");
+        assert_eq!(found.iter().map(|a| (a.fragment.as_str(), a.identity.as_str(), a.name.as_str(), a.owner.as_str())).collect::<Vec<_>>(), [("rowan--k3x9", "npub1rowan", "rowan", "npub1paul")]);
+        assert_eq!(found[0].shown(), "Rowan", "called by its name");
     }
 
     /// Goal (Alex's review of #630): the list that names an agent's fellow

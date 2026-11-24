@@ -727,7 +727,7 @@ mod tests {
     }
 
     fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
-        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new(), identity: None, agent_role: None }
     }
 
     fn file(path: &str, size: u64, version: &str) -> FileEntry {

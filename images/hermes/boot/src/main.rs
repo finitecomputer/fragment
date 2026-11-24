@@ -23,6 +23,7 @@ mod desktop;
 mod held;
 mod hermes;
 mod python;
+mod shared;
 mod skills;
 mod skill_references;
 mod sync;
@@ -929,19 +930,63 @@ fn write_identity(a: &Agent, dir: &Path, ids: Option<(u32, u32)>, face: &Result<
 /// sync left it). Read again with each agent's model, every
 /// `HERMES_BOOT_MODEL_MS`, so a rename, a new role or a new job reaches its
 /// teammates' next turns.
-async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragment_bridge::api::Face, ()>>, Vec<hermes::Teammate>) {
-    let faces = futures_util::future::join_all(agents.iter().map(|a| read_face(api, a))).await;
-    let team = agents
+async fn team_of(api: &Api, agents: &[Agent], home: &Path) -> (Vec<Result<fragment_bridge::api::Face, ()>>, Vec<hermes::Teammate>, Option<String>) {
+    // and the owner's list, read as the first agent for them: their agents
+    // on computers of their own (a computer per agent), named and doing
+    // as their rows say, and their team folder (shared.rs)
+    let owners = async {
+        let a = agents.first()?;
+        match api.fragments_for(&a.fragment, &a.owner).await {
+            Ok(list) => Some(list),
+            Err(e) => {
+                ev!("team.unread", { "error": e.to_string() });
+                None
+            }
+        }
+    };
+    let (faces, list) = tokio::join!(futures_util::future::join_all(agents.iter().map(|a| read_face(api, a))), owners);
+    let folder = list.as_deref().and_then(shared::pick);
+    let mut team: Vec<hermes::Teammate> = agents
         .iter()
         .zip(&faces)
         .map(|(a, f)| {
             let soul = std::fs::read_to_string(hermes::profile_dir(home, &a.fragment).join("SOUL.md")).ok();
             let f = f.as_ref().ok();
             let name = bots::name(a, f.and_then(|f| f.title.as_deref())).to_string();
-            hermes::Teammate { name, fragment: a.fragment.clone(), role: bots::about(f.and_then(|f| f.role.as_deref()), soul.as_deref()) }
+            hermes::Teammate { name, fragment: a.fragment.clone(), role: bots::about(f.and_then(|f| f.role.as_deref()), soul.as_deref()), shared: folder.is_some() }
         })
         .collect();
-    (faces, team)
+    // its owner's agents elsewhere, each one its row names the agent of
+    // (one kept before names none until its next change, and is not told:
+    // nothing could ask it), bounded by what an owner holds
+    for row in list.iter().flatten().filter(|r| r.kind == "agent" && r.owned && r.identity.is_some() && !agents.iter().any(|a| a.fragment == r.name)) {
+        let label = fragment_bridge::api::label(&row.name);
+        let name = if row.title.trim().is_empty() { label.to_string() } else { row.title.clone() };
+        team.push(hermes::Teammate { name, fragment: row.name.clone(), role: bots::about(row.agent_role.as_deref(), None), shared: folder.is_some() });
+    }
+    (faces, team, folder)
+}
+
+/// Each agent's team folder (shared.rs), its owner's `folder`: none
+/// without one.
+fn team_folders(agents: &[Agent], folder: Option<&str>) -> BTreeMap<String, String> {
+    let Some(folder) = folder else { return BTreeMap::new() };
+    agents.iter().map(|a| (a.fragment.clone(), folder.to_string())).collect()
+}
+
+/// An agent's sync of its team folder `fragment` into its `~/shared`: the
+/// CLI's own `fragment sync --watch`, as the agent, for its owner, as the
+/// agents' user, its progress lines (one a change, without end) left out
+/// of the computer's log.
+fn spawn_sync(agent: &str, owner: &str, fragment: &str) -> std::io::Result<Child> {
+    let dir = shared::dir_of(agent);
+    std::fs::create_dir_all(&dir)?;
+    chown(&dir, hermes_ids());
+    let mut c = Command::new("/command/s6-setuidgid");
+    c.args(["hermes", FRAGMENT_CLI, "sync", fragment, "--watch", "--dir"]).arg(&dir);
+    c.env("FRAGMENT_AS_AGENT", agent).env("FRAGMENT_FOR", owner).env("FRAGMENT_API", "http://api.fragment.internal").env("HOME", hermes::work_dir(agent)).current_dir(&dir);
+    c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    c.spawn()
 }
 
 /// Each agent's profile at a boot, all at once (each is a directory of its
@@ -1587,7 +1632,13 @@ async fn boot_main() {
     let (screen_idle_ms, screen_idle_every_ms) = desktop::idle_bounds(env("HERMES_BOOT_SCREEN_IDLE_MS").as_deref());
     // each agent's route, in the gateway's config (bots.rs, `profile_routes`),
     // and every agent as its teammates' (whatever runs it), read together
-    let (routed, (_, mut team)) = tokio::join!(route_chats(&api, &hermes_agents), team_of(&api, &agents, &home));
+    let (routed, (_, mut team, folder)) = tokio::join!(route_chats(&api, &hermes_agents), team_of(&api, &agents, &home));
+    // each agent's ~/shared kept in step from now, off the boot's path
+    // (shared.rs): a teammate's latest is coming in as Hermes starts
+    let mut syncs = shared::Syncs::default();
+    let team_owner = computer.owner.clone();
+    let spawn = move |agent: &str, fragment: &str| spawn_sync(agent, &team_owner, fragment);
+    syncs.keep(&team_folders(&agents, folder.as_deref()), &spawn);
     let routes = bots::profile_routes(&hermes_agents, &routed);
     let managed = hermes::managed_config(&lean, card_timeout_s) + &routes;
     std::fs::write("/etc/hermes/config.yaml", managed).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
@@ -1640,6 +1691,9 @@ async fn boot_main() {
     // what a hold waits for, for its whole life (answered from the
     // gateway's start, below): the restores are rounds of it
     let quiet = std::sync::Arc::new(Quiet::default());
+    // the team folder's syncs run until a hold stops them: a hold waits for
+    // them as for a round under way (the loop's tick, below)
+    quiet.busy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let restoring = Restoring::default();
     futures_util::future::join_all(restore(&api, &agents, &home, ids, &quiet, &restoring)).await;
     // each Hermes agent's profile is written before the gateway starts,
@@ -1689,6 +1743,15 @@ async fn boot_main() {
             biased;
             _ = term.recv() => break,
             _ = tick.tick() => {}
+        }
+        // a hold stops the team folder's syncs before it is answered, and
+        // they go on after it (shared.rs)
+        if quiet.paused() != syncs.held() {
+            syncs.hold(quiet.paused());
+            match syncs.held() {
+                true => quiet.busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst),
+                false => quiet.busy.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            };
         }
         if !alive(gateway) {
             ev!("boot.gateway_exited");
@@ -1804,8 +1867,9 @@ async fn boot_main() {
             if last_models.elapsed() >= Duration::from_millis(models_every) {
                 last_models = Instant::now();
                 // and its teammates, as they are named and doing now
-                let faces;
-                (faces, team) = team_of(&api, &agents, &home).await;
+                let (faces, folder);
+                (faces, team, folder) = team_of(&api, &agents, &home).await;
+                syncs.keep(&team_folders(&agents, folder.as_deref()), &spawn);
                 for (a, face) in agents.iter().zip(&faces).filter(|(a, _)| agents::of_hermes(a)) {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     write_config(&api, a, &dir, ids, &route, &credential_env, high_on, face, &team).await;

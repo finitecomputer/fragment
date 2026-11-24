@@ -105,6 +105,8 @@ async function openPerson(npub) {
   fact("standing", v.ledger.standing?.why ? `${v.ledger.standing.standing}: ${v.ledger.standing.why}` : v.ledger.standing?.standing);
   fact("balance", `$${(v.ledger.balanceMicros / 1e6).toFixed(2)}`);
   fact("computer", v.computer ? `${v.computer.phase}${v.computer.alwaysOn ? ", always on" : ""}` : "none");
+  // each agent's own computer, by its agent's npub (the computer routes take it in place of the person's)
+  for (const a of v.agentComputers ?? []) fact(`${a.computer.agents?.[0]?.fragment ?? a.agent}'s computer`, `${a.computer.phase}${a.computer.alwaysOn ? ", always on" : ""} · ${a.agent}`);
   box.append(facts);
   if (v.person.seat?.comped) {
     const end = el("button", "End this comp");

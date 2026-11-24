@@ -42,7 +42,7 @@ impl Skip {
 pub fn is_app(kind: FragmentKind) -> Result<(), Skip> {
     match kind {
         // a kind this build does not know (a newer platform's) has none
-        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Sessions | FragmentKind::Other => Err(Skip::NotAnApp),
+        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Sessions | FragmentKind::Shared | FragmentKind::Other => Err(Skip::NotAnApp),
         FragmentKind::App | FragmentKind::Brain => Ok(()),
     }
 }

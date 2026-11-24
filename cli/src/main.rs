@@ -427,6 +427,14 @@ enum Cmd {
         /// The question's post id (a retry with the same --id posts nothing again)
         #[arg(long)]
         id: Option<String>,
+        /// An agent's, asking inside a turn: that turn's id and how many
+        /// hand-offs deep the question is (one past the turn), so a teammate
+        /// on another computer counts it (the bridge's `FRAGMENT_TURN` and
+        /// `FRAGMENT_HOP` say them)
+        #[arg(long, env = "FRAGMENT_TURN", requires = "hop")]
+        turn: Option<String>,
+        #[arg(long, env = "FRAGMENT_HOP", requires = "turn")]
+        hop: Option<u32>,
     },
     /// List a fragment's channels, or read one (--follow keeps streaming)
     Channel {
@@ -2879,9 +2887,10 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: post {id} had already appended this record)");
             }
         }
-        Cmd::Ask { agent, text, chat, wait, return_to, id } => {
+        Cmd::Ask { agent, text, chat, wait, return_to, id, turn, hop } => {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
-            let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, return_to.as_deref(), id)?;
+            let within = turn.zip(hop);
+            let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, return_to.as_deref(), id, within.as_ref().map(|(t, h)| (t.as_str(), *h)))?;
             json_exit(j, &v);
             println!("asked {} in {} (record {})", v.asked.shown(), v.chat, v.record["seq"]);
             for who in &v.added {

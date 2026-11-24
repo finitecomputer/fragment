@@ -541,7 +541,7 @@ impl RegistryCell {
         Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer })
     }
 
-    fn sync_seat(&self, b: SyncSeat) -> CellResult<()> {
+    pub(super) fn sync_seat(&self, b: SyncSeat) -> CellResult<()> {
         if self.member_of(&b.person)?.is_some_and(|m| m.seat.is_some()) {
             self.queue_sync(&b.person)?;
         }
@@ -592,13 +592,20 @@ impl RegistryCell {
                 told.map_err(refused)?;
             }
         }
-        let computer = fragment_core::computer::default_computer_of(person);
-        match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": d.always_on })).await {
-            // no computer yet: its making asks for a push, and fails (to be
-            // made again) when it cannot (cell/src/orgs.rs, `computer_made`)
-            Err(e) if e.code == ErrorCode::NotFound => Ok(()),
-            answered => answered.map(|_| ()),
+        // the seat's computer: theirs from before, else their first agent's
+        // own (a computer per agent: the seat keeps one computer always on,
+        // as before, and its other agents' sleep when idle)
+        let first = self.live_agents_of(super::calls::AgentsOf { person: person.to_string() })?.agents.into_iter().next();
+        for computer in fragment_core::computer::computers_of(person, first.as_slice()) {
+            match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": d.always_on })).await {
+                // none made: the next, or no computer yet, whose making (or
+                // its agent's assigning) asks for a push, and fails (to be
+                // made again) when it cannot (cell/src/orgs.rs, `computer_made`)
+                Err(e) if e.code == ErrorCode::NotFound => continue,
+                answered => return answered.map(|_| ()),
+            }
         }
+        Ok(())
     }
 
     /// The alarm's pushes: a batch of the queued ones that are due, each
@@ -665,7 +672,7 @@ impl RegistryCell {
 
     /// A change in one turn, then the alarm armed for what it queued: its
     /// plan pushes, and its seats' counts (a comp ended may empty an org).
-    async fn armed<T>(&self, change: impl FnOnce() -> CellResult<T>) -> CellResult<T> {
+    pub(super) async fn armed<T>(&self, change: impl FnOnce() -> CellResult<T>) -> CellResult<T> {
         let answer = change()?;
         self.arm_syncs().await?;
         self.arm_quantities().await?;

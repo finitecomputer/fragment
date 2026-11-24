@@ -366,6 +366,11 @@ pub struct TurnStart {
     /// Its text is a command of the runtime's menu (`/<name> <args>`), said
     /// to it as it is; a message's never is.
     pub command: bool,
+    /// How many hand-offs deep it is (the engine's count, `hop_of`): an ask
+    /// the agent makes inside it is one past it, which a bridge on another
+    /// computer, which cannot see this turn, is told (docs/bridge.md,
+    /// "Agents asking each other").
+    pub hop: u32,
     /// The seq on `chat` of the message the turn's message quotes, and that
     /// message (`quote`, read by the driver before the turn is handed;
     /// `None` when it could not be read, or is no message).

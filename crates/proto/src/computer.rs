@@ -762,6 +762,16 @@ pub enum ComputerNotice {
     },
 }
 
+/// `POST /api/computers`: the computer made. `agent` (an agent fragment of
+/// theirs, by its name) makes that agent's own; none, their own from
+/// before a computer per agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MakeComputer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as
 /// their view named it (`generation`); none, or 0, restarts whatever runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
