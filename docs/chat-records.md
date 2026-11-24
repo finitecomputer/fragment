@@ -161,6 +161,10 @@ mirrors:
 - A hosted door's (a connector chat) is published by the connector's
   own app, as its own key, in its own `chat`, its `relayed` exactly
   `{via, for, agent}`.
+- Its `text` is its owner's own words. What they pass on of someone
+  else's (Telegram's forwards, inline bots' messages, another chat's
+  quoted message) is marked so in it, by its connector, every line of
+  it quoted (templates/telegram/README.md).
 - Only that agent's own bridge honors it, and only when its door carried
   it: the agent itself (SimpleX's), or a key that is none of the chat's
   members in a chat whose members list marks that agent's row as that
