@@ -157,10 +157,6 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
     chrome.release(&frame, false)?;
     let says_save = s.eventually(wait, || chrome.eval(&frame, &format!("{}?.textContent === 'Save'", find(docx_download))).ok() == Some(Value::Bool(true)));
     chrome.screenshot(&page, &shots.join("docx-save-after-a-slow-read.png"))?;
-    chrome.viewport(&page, 390, 844, true)?;
-    let _ = point(chrome, docx_download)?;
-    chrome.screenshot(&page, &shots.join("docx-save-after-a-slow-read-390.png"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
     let before = files(&dir);
     // ("Save" is narrower than "Download": aimed again)
     let at = point(chrome, docx_download)?;
@@ -174,6 +170,24 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
         held_well && saved && after == "Download",
         json!({ "reading": reading, "lapsed": lapsed, "while reading": while_reading, "says Save": says_save, "saved before the press": before, "saved": files(&dir), "after": after }),
     );
+
+    // the Save state again, shot at a phone's width: last, with no press
+    // after the resize (a frame of another site takes presses where it was
+    // last drawn, so one aimed just after a resize can miss it)
+    let frame = chrome.frame(name)?;
+    chrome.hold(&frame, &["*__blob/*"])?;
+    let at = point(chrome, docx_download)?;
+    chrome.click_at(&page, at)?;
+    let lapsed = s.eventually(wait, || chrome.held(&frame).is_ok_and(|h| h.iter().any(|u| u.contains(&docx_sha))))
+        && s.eventually(wait, || chrome.eval(&frame, "navigator.userActivation.isActive").ok() == Some(Value::Bool(false)));
+    chrome.release(&frame, false)?;
+    let says_save = s.eventually(wait, || chrome.eval(&frame, &format!("{}?.textContent === 'Save'", find(docx_download))).ok() == Some(Value::Bool(true)));
+    chrome.viewport(&page, 390, 844, false)?;
+    let narrow = s.eventually(wait, || chrome.eval(&frame, "innerWidth === 390").ok() == Some(Value::Bool(true)));
+    let _ = point(chrome, docx_download)?;
+    chrome.screenshot(&page, &shots.join("docx-save-after-a-slow-read-390.png"))?;
+    chrome.detach(frame)?;
+    s.ok("in the platform's frame at 390 px, a Word file's late bytes wait on Save", lapsed && says_save && narrow, json!({ "lapsed": lapsed, "says Save": says_save, "390 px": narrow }));
     chrome.close(page)?;
     Ok(())
 }
