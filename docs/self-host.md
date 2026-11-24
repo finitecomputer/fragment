@@ -21,7 +21,7 @@ self-hosted runtime's. Each binding has workerd's class (`R2Bucket`,
 `Fetcher`, `SendEmail`, …, as workers-rs checks them); the Secrets Store's
 secrets are read from the node's secrets backend; and the services a node
 does not run are bound with workerd's classes, every call rejecting,
-saying so. A gap is closed in celld (github.com/futurepaul/celld), never
+saying so. A gap is closed in celld (github.com/finitecomputer/celld), never
 in the cell: a self-host change to master does not touch `cell/`,
 `crates/core` or `crates/proto`.
 
@@ -43,7 +43,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 
 ## 1. The runtime: celld
 
-celld (github.com/futurepaul/celld, its `selfhost` line: upstream's
+celld (github.com/finitecomputer/celld, its `selfhost` line: upstream's
 v0.6.3, still its latest, and the fork's parity fixes, among them V8
 15.2.124.45, far alarms, a forwarded body's length, facet aborts and
 Cloudflare's binding surface) runs the cell from the config a local
@@ -113,7 +113,7 @@ runs them on the box's krun engine (sandcastle's `sandcastle-engine`,
 root, a jailed microVM per container), which speaks Cloudflare's container
 API. `CELLD_CONTAINER_ENGINE=krun:<the engine's socket>` names it; the
 cell, the core and the wire know nothing of it, and nothing sits between
-celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #21,
+celld and the engine. The fork's fixes for it (finitecomputer/celld#14 to #21,
 a stack) are each a gap the e2e's computer lanes found: a dev node's images,
 the intercept socket's path, intercepts set during a start or set again, a
 WebSocket and a large body through one, a `monitor()` whose event had
