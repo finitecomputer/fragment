@@ -578,3 +578,27 @@ pub fn build_bridge_image() {
     let status = Command::new("docker").args(["build", "--load", "--platform", "linux/amd64", "-q", "-f", "bridge/tests/simplex/bridge.Dockerfile", "-t", BRIDGE_IMAGE, "."]).current_dir(images).status().expect("docker runs");
     assert!(status.success(), "the lab's computer builds");
 }
+
+/// The finite.computer move's routine for agent `label`, naming its stage.
+pub fn move_routine(fake: &super::fake::Fake, label: &str, stage: &str) {
+    let text = format!("Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage {stage}.");
+    fake.with(|w| w.append(&format!("{label}--k3x9"), "tasks", &format!("npub1{label}"), json!({ "kind": "routine", "text": text })));
+}
+
+/// A stage's zip as the mover writes one (Python's `zipfile`: deflated,
+/// zip64), holding a bit of home and `files` (its path in the zip, from).
+pub fn stage_zip(dir: &Path, files: &[(&str, &Path)]) -> bytes::Bytes {
+    let notes = dir.join("notes.md");
+    std::fs::write(&notes, "# my notes\n").expect("written");
+    let mut args: Vec<String> = vec![format!("{}=workspace/notes.md", notes.display())];
+    args.extend(files.iter().map(|(name, from)| format!("{}={name}", from.display())));
+    let out = dir.join("stage.zip");
+    let script = "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:\n    for a in sys.argv[2:]:\n        src, name = a.split('=', 1)\n        with open(src, 'rb') as f, z.open(name, 'w', force_zip64=True) as w:\n            w.write(f.read())\n";
+    assert!(Command::new("python3").arg("-I").arg("-c").arg(script).arg(&out).args(&args).status().expect("python3 runs").success());
+    bytes::Bytes::from(std::fs::read(&out).expect("its zip"))
+}
+
+/// What the person's app received from the agent, by text.
+pub async fn phone_got(person: &mut Api, text: &str, within: Duration) {
+    received(person, within, |got| got.iter().any(|t| t == text)).await;
+}

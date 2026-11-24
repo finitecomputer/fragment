@@ -47,7 +47,7 @@ use crate::{Keys, Need, Suite};
 
 pub const NAME: &str = "simplex-door";
 
-fn lever(api: &Api, door: &str, op: &str, more: Value) -> Result<Value> {
+pub(super) fn lever(api: &Api, door: &str, op: &str, more: Value) -> Result<Value> {
     let mut body = json!({ "door": door, "op": op });
     body.as_object_mut().expect("an object").extend(more.as_object().cloned().unwrap_or_default());
     let r = api.unsigned("POST", "/api/test/door", Some(&body))?;

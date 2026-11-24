@@ -1064,29 +1064,6 @@ async fn a_rename_reaches_the_owners_app() {
 
 /// The move's routine, as the platform appends it to an agent's own
 /// `tasks` (fragment_core::migrations::routine_text), naming `stage`.
-fn move_routine(fake: &support::fake::Fake, label: &str, stage: &str) {
-    let text = format!("Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage {stage}.");
-    fake.with(|w| w.append(&format!("{label}--k3x9"), "tasks", &format!("npub1{label}"), json!({ "kind": "routine", "text": text })));
-}
-
-/// A stage's zip as the mover writes one (Python's `zipfile`: deflated,
-/// zip64), holding a bit of home and `files` (its path in the zip, from).
-fn stage_zip(dir: &Path, files: &[(&str, &Path)]) -> bytes::Bytes {
-    let notes = dir.join("notes.md");
-    std::fs::write(&notes, "# my notes\n").expect("written");
-    let mut args: Vec<String> = vec![format!("{}=workspace/notes.md", notes.display())];
-    args.extend(files.iter().map(|(name, from)| format!("{}={name}", from.display())));
-    let out = dir.join("stage.zip");
-    let script = "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:\n    for a in sys.argv[2:]:\n        src, name = a.split('=', 1)\n        with open(src, 'rb') as f, z.open(name, 'w', force_zip64=True) as w:\n            w.write(f.read())\n";
-    assert!(Command::new("python3").arg("-I").arg("-c").arg(script).arg(&out).args(&args).status().expect("python3 runs").success());
-    bytes::Bytes::from(std::fs::read(&out).expect("its zip"))
-}
-
-/// What the person's app received from the agent, by text.
-async fn phone_got(person: &mut Api, text: &str, within: Duration) {
-    received(person, within, |got| got.iter().any(|t| t == text)).await;
-}
-
 /// Goal (FIN-463): an owner's SimpleX conversation with their old
 /// finite.computer agent (simplex-chat v7.0.2: its contact address, the
 /// owner and a friend connected, a group joined) goes on with their new

@@ -4430,6 +4430,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Goal (D4, Paul's answer of 11-24: offered, never kept for them): an
+    /// owner's chat with their old agent, staged here and never kept, is
+    /// handed over as staged. Invalid: one its core cannot read (here, no
+    /// core at all) is refused and changes nothing. Valid (its read kept in
+    /// its mark, as a first ask leaves it): the same ticket again packs the
+    /// staged databases, their state that read and an unbound link, the
+    /// owner's contact in them; this computer offers it no more.
+    #[tokio::test]
+    async fn a_staged_chat_is_handed_over_as_staged() {
+        let dir = std::env::temp_dir().join(format!("simplex-handover-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&dir, &key, Phase::Off);
+        let link_dir = m.slots[f].dir.clone();
+        core_dbs(&link_dir.join(stage::STAGED_DIR), 3);
+        std::fs::write(link_dir.join(stage::STAGED_DIR).join("ready.json"), r#"{"stage":"old1.p1.1","owner":3}"#).expect("written");
+        m.slots.get_mut(f).expect("its slot").staged = stage::ready(&link_dir);
+        assert!(m.slots[f].view(true, None).staged, "offered here");
+        let r = m.handover(f, &signed("handover", &"01".repeat(16))).await.err().expect("its core does not run here");
+        assert_eq!(r.status, 502, "{}", r.why);
+        assert!(!m.moved(f) && load(&link_dir, &agent()).is_none_or(|s| s.moved.is_none()), "nothing marked");
+        let nonce = "0a".repeat(16);
+        let read = Adoption { owner: 3, name: "paul".into(), newest: 40, leftovers: vec![Leftover::Contact(4), Leftover::Address] };
+        let s = m.slots.get_mut(f).expect("its slot");
+        s.saved.moved = Some(Moved { nonce: nonce.clone(), at: 1, staged: Some(read.clone()) });
+        store(&link_dir, &s.saved).expect("written");
+        let h = m.handover(f, &signed("handover", &nonce)).await.expect("the same ticket again");
+        assert!(h.staged && h.chat.is_none());
+        let packed = pack_handover(&h).expect("packed");
+        m.packed(f, false);
+        let at_door = dir.join("door");
+        let state = super::super::save::stage(&packed, &at_door).expect("staged as its door stages it");
+        assert!(super::super::save::staged_contact(&at_door, 3).expect("read"));
+        let kept: serde_json::Value = serde_json::from_slice(&state).expect("its state");
+        assert_eq!(kept["link"]["phase"], "off");
+        assert_eq!(serde_json::from_value::<Adoption>(kept["adopt"].clone()).expect("its read"), read);
+        assert!(!m.slots[f].view(true, None).staged, "offered here no more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Goal (D4): the way back from a door that never held a save (so never
     /// ran): nothing placed, its own databases and link its link's still,
     /// moved no more.

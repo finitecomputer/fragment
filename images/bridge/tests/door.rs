@@ -987,3 +987,99 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     assert_eq!(relayed_on(&fake, &chat).len(), 2, "on the computer's chat again");
     println!("moved and back: the door's save {} bytes, behind {behind}", bytes.len());
 }
+
+/// Goal (D4, Paul's FIN-731 and his answer of 11-24: offered, never kept
+/// for them): an owner's SimpleX chat with their old finite.computer agent,
+/// staged on their computer by that move and never kept there, moves into a
+/// door as staged. Its handover is the computer's read of it (as its own
+/// adoption reads one, the old agent's core alone on it), its answer a save
+/// whose state holds that read and an unbound link; the computer offers it
+/// no more. Kept at its owner's word (its connector's connect `keep`), the
+/// door adopts it as it restores: their contact bound, no code to scan, and
+/// their app told it moved; what the phone sent while it moved arrives
+/// once, nothing from before it; and the door's reply reaches the phone.
+/// Method: the old core (v7.0.2) as finite.computer ran it, the lab's
+/// computer, the door's real image, fakes for the platform and the door's
+/// object.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker and python3; run by hand"]
+async fn a_staged_chat_moves_into_a_door_and_is_kept() {
+    use fragment_bridge::simplex::stage;
+    build_image();
+    build_bridge_image();
+    let mut lab = Lab::up("door-staged");
+    let mut person = lab.start("phone", false).await;
+    let mut friend = lab.start("friend", false).await;
+    let mut old = lab.start_old("old").await;
+    let a = old.cmd("/address").await;
+    let address = a["connLinkContact"]["connShortLink"].as_str().or(a["connLinkContact"]["connFullLink"].as_str()).expect("its address").to_string();
+    assert_eq!(tag(&old.cmd("/auto_accept on").await), "userContactLinkUpdated");
+    let mut at = vec![];
+    for c in [&mut person, &mut friend] {
+        c.cmd(&format!("/c {address}")).await;
+        at.push(c.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the old agent, at theirs"));
+    }
+    let at_person = at[0];
+    let owner = old.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected" && e["contact"]["profile"]["displayName"] == "phone").await["contact"]["contactId"].as_i64().expect("the owner, at the old agent's");
+    say(&mut person, at_person, "before the move").await;
+    old.wait(Duration::from_secs(30), |e| tag(e) == "newChatItems" && e.to_string().contains("before the move")).await;
+    drop(old);
+    lab.stop("old");
+    let olddir = lab.db_dir("old");
+    say(&mut person, at_person, "while moving").await;
+    let owner_json = lab.dir.join("owner.json");
+    std::fs::write(&owner_json, format!("{{\"contact\":{owner}}}")).expect("written");
+    let zip = stage_zip(&lab.dir, &[(stage::CHAT, &olddir.join("identity_chat.db")), (stage::AGENT, &olddir.join("identity_agent.db")), (stage::OWNER, &owner_json)]);
+
+    // staged on its new agent's computer, as finite.computer's move left it
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+        w.stages.insert("old1.p1.1".into(), ("juniper--k3x9".into(), zip.clone()));
+    });
+    let data = lab.dir.join("computer-data");
+    let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
+    let c = Computer::start_with(&lab, &fake, &data, &["-e", &smp]);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    move_routine(&fake, "juniper", "old1.p1.1");
+    c.state_until(Duration::from_secs(60), "staged", |v| v["staged"] == true).await;
+
+    // handed over as staged: its read in its save, its link unbound
+    fake.with(|w| w.computer["simplexMoved"] = json!(["juniper--k3x9"]));
+    let (code, bytes, sha) = hand_over(&c, &fake.ticket("juniper", "handover"), &lab.dir.join("staged.sxd"));
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(sha256_hex(&bytes), sha);
+    let kept = kept_of(&bytes);
+    assert_eq!((kept["link"]["phase"].as_str(), kept["adopt"]["owner"].as_i64()), (Some("off"), Some(owner)), "{kept}");
+    assert!(kept["adopt"]["leftovers"].as_array().is_some_and(|l| l.iter().any(|x| x["contact"].is_i64())), "the friend, to let go: {kept}");
+    c.state_until(Duration::from_secs(10), "offered here no more", |v| v["staged"] != true).await;
+    assert_eq!(c.cores(), 0);
+
+    // kept at its owner's word: the door adopts it as it restores
+    let door = FakeDoor::start().await;
+    door.with(|s| {
+        s.keep = Some(lab.dir.clone());
+        s.saves.push(Kept { start: 0, life: 0, seq: 1, mark: 0, bytes: Bytes::from(bytes.clone()) });
+    });
+    let g1 = start(&lab, &door, 1);
+    let s = g1.until(Duration::from_secs(120), |s| s["ready"] == true && s["phase"] == "linked").await;
+    assert_eq!(s["name"], "phone", "its owner's contact, with no code to scan: {s}");
+    phone_got(&mut person, "Hi, it's Juniper. I've moved to my new home: write to me here, as before.", Duration::from_secs(90)).await;
+    let t0 = Instant::now();
+    while !door.texts().contains(&"while moving".to_string()) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "what the phone sent while it moved: {:?}", door.texts());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    say(&mut person, at_person, "after the move").await;
+    let t0 = Instant::now();
+    while door.texts() != ["while moving", "after the move"] {
+        assert!(t0.elapsed() < Duration::from_secs(60), "each once, nothing from before the move: {:?}", door.texts());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let mut got = vec![];
+    g1.reply(&door, "chat:1", "from the door").await;
+    person_got(&mut person, &mut got, &["from the door"]).await;
+    println!("a staged chat moved and kept: its save {} bytes", bytes.len());
+}

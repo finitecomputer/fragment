@@ -294,6 +294,27 @@ pub(super) fn checks(s: &mut Suite, api: &Api, c: &Agent<'_>, fetched: &dyn Fn(&
     b.eval(&page, &format!("(document.querySelector('#settings-simplex [data-simplex-open={}]')?.click(), true)", json!(sx)))?;
     let at = b.until(&page, &format!("location.pathname !== '/settings' && !!document.querySelector('iframe[data-fragment={}]')", json!(sx)), WAIT);
     s.ok("Done closes it, and Open is its SimpleX chat", done && at, b.eval(&page, "location.pathname")?);
+
+    // its SimpleX moved into a connector of its own (the operators' move,
+    // D4): bound as the agent's door, Settings' row is that connector's,
+    // never its computer's, though its computer still does SimpleX
+    let moved = api.create_with(c.owner, json!({ "label": format!("{label}-simplex"), "template": "simplex" }))?;
+    anyhow::ensure!(moved.status == 200, "a SimpleX connector: {moved}");
+    s.owned(&moved.body, c.owner);
+    let connector = moved.body["name"].as_str().unwrap_or("").to_string();
+    let bound = api.signed(c.owner, "POST", &format!("/api/f/{connector}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+    anyhow::ensure!(bound.status == 200, "bound as its door: {bound}");
+    b.eval(&page, &format!("(location.assign({:?}), true)", format!("{}/settings", api.base)))?;
+    let line = format!("(() => {{ const go = document.querySelector('#settings-simplex [data-simplex-for={a}]'); const l = go?.closest('.settings-line'); return go && l && {{ computer: 'simplexComputer' in go.dataset, open: l.querySelector('[data-simplex-open]')?.dataset.simplexOpen ?? null }}; }})()", a = json!(c.agent));
+    let mut seen = Value::Null;
+    s.eventually(WAIT, || {
+        seen = b.eval(&page, &line).unwrap_or(Value::Null);
+        seen["open"] == connector.as_str()
+    });
+    s.ok("its SimpleX moved into a connector bound as its door, Settings' row is that connector's (Open, its chat), not its computer's", seen["computer"] == false && seen["open"] == connector.as_str(), &seen);
+    shoot_both(&mut b, &page, &shots, "a7-moved-row", Some("#settings-simplex"))?;
+    let gone = api.signed(c.owner, "DELETE", &format!("/api/f/{connector}"), None)?;
+    anyhow::ensure!(gone.status == 200, "that connector deleted: {gone}");
     b.close(page)?;
 
     // as the lane goes on: its door closed, no SimpleX chat, no SimpleX, its computer let sleep

@@ -705,9 +705,10 @@ unfinished design, not debt.
   door's runner shares the bridge's file rules (its bounds, notes and
   kinds, `simplex::run`) but keeps its own receiving and sending state
   (images/simplex-door/src/files.rs, main.rs), as its link is its own.
-- **Delete when:** existing links move to doors (D4), and the bridge's
-  SimpleX module, its door key and the signed-record route are deleted
-  (D5).
+- **Delete when:** existing links move to doors (D4: `fragment operator
+  simplex-move`, which moves each, its staged chats too), and the bridge's
+  SimpleX module, its door key, its handover and the signed-record route
+  are deleted (D5), 30 days after the last move.
 
 ## SimpleX retains the computer's root trust and rewindable state
 

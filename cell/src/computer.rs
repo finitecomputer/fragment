@@ -4204,8 +4204,11 @@ impl ComputerCell {
                 let mut link = Value::Null;
                 if awake {
                     let asked = worker_sys::web_sys::Request::new_with_str(&format!("http://computer/simplex/state?agent={agent}")).map_err(|_| CellError::host("a request"))?;
-                    let mut r = self.simplex_call(asked).await?;
-                    link = json!({ "status": r.status_code(), "said": r.read_json::<Value>().await.unwrap_or(Value::Null) });
+                    // its bridge still starting answers nothing yet: said so
+                    link = match self.simplex_call(asked).await {
+                        Ok(mut r) => json!({ "status": r.status_code(), "said": r.read_json::<Value>().await.unwrap_or(Value::Null) }),
+                        Err(e) => json!({ "status": 0, "said": e.message }),
+                    };
                 }
                 Ok(json!({ "record": moves.get(agent), "awake": awake, "link": link }))
             }
