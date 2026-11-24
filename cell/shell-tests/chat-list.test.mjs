@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pinnedAgentsFirst, rowStatus, sectionOrder, sectionShown } from "../shell/chat-list.js";
+import { FOLDS_MAX, foldsOf, pinnedAgentsFirst, rowStatus, sectionOrder, sectionShown } from "../shell/chat-list.js";
 
 const chat = (name, previewAt, pinned = false, title = name) => ({ name, previewAt, pinned, title });
 const names = (list) => list.map((f) => f.name);
@@ -86,4 +86,14 @@ test("the sidebar's agents: the pinned ones first, then the rest, each in their 
   assert.deepEqual(order(["main", "b", "c", "d"]), ["main", "b", "c", "d"]);
   assert.deepEqual(order(["gone"]), ["main", "b", "c", "d"], "a pin of an agent no longer theirs moves none");
   assert.deepEqual(mine.map((a) => a.fragment), ["main", "b", "c", "d"], "their computer's order itself is untouched");
+});
+
+test("the sections a device keeps unfolded: its stored keys, the newest FOLDS_MAX; anything else none (FIN-722)", () => {
+  assert.deepEqual([...foldsOf(["npub1a", "own"])], ["npub1a", "own"]);
+  assert.deepEqual([...foldsOf(null)], [], "nothing stored");
+  assert.deepEqual([...foldsOf("npub1a")], [], "not a list");
+  assert.deepEqual([...foldsOf({ 0: "npub1a" })], [], "not a list");
+  assert.deepEqual([...foldsOf(["own", 3, null, "x".repeat(257), "shared"])], ["own", "shared"], "only keys");
+  const many = Array.from({ length: FOLDS_MAX + 5 }, (_, i) => `k${i}`);
+  assert.deepEqual([...foldsOf(many)], many.slice(5), "the newest FOLDS_MAX");
 });

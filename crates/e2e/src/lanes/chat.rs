@@ -1577,8 +1577,7 @@ fn claude_offers(s: &mut Suite, chrome: &mut Browser, shell: &Page, agent: &str,
         chrome.until(shell, "document.getElementById('menu').hidden", TURN);
         Ok(said)
     };
-    // a hero's menu is its ⋯'s
-    let hero = |a: &str| format!("#chats [data-key={}] .row-more", js(&format!("agent:{a}")));
+    let hero = |a: &str| format!("#chats [data-key={}]", js(&format!("agent:{a}")));
     let hermes = chrome.eval(shell, &format!("[...document.querySelectorAll('#chats .agent-hero')].map((h) => h.dataset.key.slice('agent:'.length)).find((a) => a !== {}) ?? ''", js(agent)))?.as_str().unwrap_or("").to_string();
     let lacks = |v: &Value| v.as_array().is_some_and(|l| !l.is_empty() && !l.iter().any(|i| i.as_str().is_some_and(|t| t.contains("profile") || t.contains("screen"))));
     let has = |v: &Value| ["Its profile", "Its screen"].iter().all(|t| v.as_array().is_some_and(|l| l.iter().any(|i| i == t)));

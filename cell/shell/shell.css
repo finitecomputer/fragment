@@ -1342,12 +1342,12 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 #chats { flex: 1 1 auto; min-height: 0; max-height: none; overflow-x: hidden; padding-inline: 2px; }
 /* its rows keep their height: past the room, the list scrolls, never squeezes them */
 #chats > * { flex-shrink: 0; }
-#chats .agent-hero { --edge-light: 0; flex: none; height: 48px; margin: 10px 0 2px; padding: 0; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
-/* its face and name: pressed, its chats all shown or folded again (chat-list.js `hero`);
-   room on the right for its ⋯, always shown: its menu (New chat among it) is there */
-.agent-hero-open { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 8px 40px 8px 13px; border: 0; border-radius: inherit; background: none; color: inherit; font: inherit; text-align: left; }
-button.agent-hero-open { cursor: pointer; }
-#chats .agent-hero .row-more { top: 12px; right: 10px; display: grid; }
+#chats .agent-hero { --edge-light: 0; flex: none; gap: 0; height: 48px; margin: 10px 0 2px; padding: 0; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
+/* its face and name, which open its menu, then its New chat (chat-list.js `hero`) */
+.agent-hero-open { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 8px 6px 8px 13px; border: 0; border-radius: inherit; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.agent-new-chat { display: grid; flex: none; place-items: center; width: 32px; height: 32px; margin-right: 8px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-secondary); cursor: pointer; }
+.agent-new-chat:hover { background: var(--bg-hover); color: var(--text-primary); }
+.agent-new-chat svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #chats .agent-hero:first-child { margin-top: 2px; }
 #chats .agent-hero:hover { background: var(--bg-active); }
 .agent-hero-face { display: flex; flex: none; }
@@ -1382,7 +1382,7 @@ button.agent-hero-open { cursor: pointer; }
 .launcher-key { color: var(--text-tertiary); font: 500 12px/1 var(--font-sans); white-space: nowrap; }
 @media (pointer: coarse) and (not (any-pointer: fine)) { .launcher-key { display: none; } .sidebar-new-chat { padding: 0; } }
 .sidebar-new-chat, #chats .agent-hero { position: relative; border-color: transparent; }
-#chats .agent-hero-open:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
+#chats .agent-hero-open:focus-visible, .agent-new-chat:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
 /* The composer's pointer-following reflection, with no resting outline. */
 .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-hero::before, .agent-hero::after, .agent-menu-edge::before, .agent-menu-edge::after {
   content: ""; position: absolute; inset: -1px; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
@@ -1395,8 +1395,8 @@ button.agent-hero-open { cursor: pointer; }
 .sidebar-new-chat::after, .agent-hero::after, .agent-menu-edge::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
 /* an agent's hero, open: its menu hangs from it, one surface with it, and
    the menu's edge (shell.js `menuEdge`) is lit in the hero's place */
-#chats .agent-hero:has(> .row-more[aria-expanded="true"]) { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
-.agent-hero:has(> .row-more[aria-expanded="true"])::before, .agent-hero:has(> .row-more[aria-expanded="true"])::after { opacity: 0; }
+#chats .agent-hero:has(> .agent-hero-open[aria-expanded="true"]) { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
+.agent-hero:has(> .agent-hero-open[aria-expanded="true"])::before, .agent-hero:has(> .agent-hero-open[aria-expanded="true"])::after { opacity: 0; }
 .menu.agent-menu { --edge-light: 0; min-width: 0; padding: 4px 8px 10px; border: 0; border-radius: 0 0 24px 24px; background: var(--bg-sidebar); box-shadow: none; overflow-y: auto; }
 .menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
 .agent-menu-edge { --edge-light: 0; position: fixed; z-index: 21; border-radius: 24px; pointer-events: none; }

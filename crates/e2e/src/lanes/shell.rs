@@ -6409,7 +6409,7 @@ fn agent_share_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     b.reload(page)?;
     b.until(page, &format!("!document.getElementById('layout').hidden && document.querySelector({})?.getClientRects().length > 0", js(&hero)), wait);
     // its profile, from its hero's menu, and the window's Share…
-    b.click(page, &format!("{hero} .row-more"))?;
+    b.click(page, &hero)?;
     let profile = menu_item(b, page, "Its profile")?;
     let pane = format!("#stack .pane[data-key={}]", js(&format!("app:{agent}")));
     let share = js(&format!("{pane} button[aria-label=\"Share…\"]"));
@@ -6582,8 +6582,10 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 ///   never saves it closed, so widened, both are back. On a phone and a
 ///   laptop at a high zoom (731 px), Show sidebar is in the top bar, one
 ///   press from the list.
-/// - Its agent: pressing the main agent's hero shows all its chats, never a
-///   new chat; pressed again, its first five.
+/// - More: a section's More, pressed, shows all its chats and stays so
+///   after a reload (kept on this device); Less folds it, kept so too.
+/// - Its agent: the pill opens its menu as before; the New chat at its end
+///   opens a new chat with that agent alone.
 /// - Pins: Pin from the open chat's ⋯ and from a row's; pinned chats head
 ///   their section by title, each shown, and hold their places as a
 ///   message comes; the main agent, first already, offers no Pin to top.
@@ -6656,7 +6658,7 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         &one_press,
     );
 
-    // ---- its agent: its hero shows its chats, never a new chat ----
+    // ---- its section's More, kept; its pill's menu, and its New chat ----
     let first_id = agent_ids(api, me.session, &[me.first])?.remove(0);
     let made = |label: &str, title: &str| -> Result<String> {
         let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "chat", "title": title })), &[])?;
@@ -6664,6 +6666,9 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         let joined = shell(api, me.session, "PUT", &format!("/api/f/{name}/members/{first_id}"), Some(&json!({ "role": "editor" })), &[])?;
         anyhow::ensure!(r.status == 200 && joined.status == 200, "{title} made with their agent: {r} {joined}");
         Ok(name)
+    };
+    let chat_names = || -> Result<Vec<String>> {
+        Ok(shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
     };
     let titles = ["Zinnia", "Tulip", "Rose", "Peony", "Lily", "Iris"];
     let mut names = vec![];
@@ -6673,32 +6678,55 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     let [zinnia, tulip, rose, _, _, iris] = [0, 1, 2, 3, 4, 5].map(|i| names[i].clone());
     let main = own_named(api, me.session, me.first)?;
     let hero = format!("#chats [data-key={}]", js(&format!("agent:{main}")));
-    let fold = js(&format!("{hero} .agent-hero-open"));
     let main_chats = format!("(({HEROES}).find((h) => h.fragment === {})?.chats ?? [])", js(&main));
     let row = |name: &str| format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{name}")))));
+    // its section's More (keyed by its agent's identity), and whether it is unfolded
+    let more = js(&format!("#chats [data-key={}]", js(&format!("more:{first_id}"))));
+    let unfolded = |open: bool| format!("document.querySelector({more})?.getAttribute('aria-expanded') === '{open}'");
+    let kept = "(() => { try { return JSON.parse(localStorage.getItem('finite.sidebar.unfolded.v1')) ?? []; } catch { return 'unreadable'; } })()";
+    // folded to start with (a More an earlier check pressed is kept too)
+    b.until(page, &format!("!!document.querySelector({more})"), wait);
+    b.eval(page, &format!("({} && document.querySelector({more}).click(), true)", unfolded(true)))?;
     // (made now, nothing said in them: the newest, by name; the sixth folded)
-    let listed = b.until(page, &format!("{main_chats}.includes({}) && document.querySelector({fold})?.getAttribute('aria-expanded') === 'false' && {settled}", js(&iris)), wait);
-    let chats_before = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().map(|l| l.iter().filter(|f| f["kind"] == "chat").count()).unwrap_or(0);
+    let listed = b.until(page, &format!("{main_chats}.includes({}) && {} && {settled}", js(&iris), unfolded(false)), wait);
     let folded = b.eval(page, &format!("{main_chats}.length"))?;
-    let title_before = b.eval(page, "document.getElementById('chat-title').textContent")?;
-    b.click(page, &format!("{hero} .agent-hero-open"))?;
-    let unfolded = b.until(page, &format!("document.querySelector({fold})?.getAttribute('aria-expanded') === 'true' && {main_chats}.length > {folded} && {} && {settled}", names.iter().map(|n| format!("{main_chats}.includes({})", js(n))).collect::<Vec<_>>().join(" && ")), wait);
-    let no_menu = b.eval(page, "document.getElementById('menu').hidden")?;
-    let _ = b.screenshot(page, &shots.join("desktop-agent-shows-its-chats.png"));
-    let chats_after = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().map(|l| l.iter().filter(|f| f["kind"] == "chat").count()).unwrap_or(0);
-    let title_after = b.eval(page, "document.getElementById('chat-title').textContent")?;
-    b.click(page, &format!("{hero} .agent-hero-open"))?;
-    let refolded = b.until(page, &format!("document.querySelector({fold})?.getAttribute('aria-expanded') === 'false' && {main_chats}.length === {folded}"), wait);
+    let all = names.iter().map(|n| format!("{main_chats}.includes({})", js(n))).collect::<Vec<_>>().join(" && ");
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
+    let opened = b.until(page, &format!("{} && {main_chats}.length > {folded} && {all} && {settled}", unfolded(true)), wait);
+    b.reload(page)?;
+    let still_open = b.until(page, &format!("!document.getElementById('layout').hidden && {} && {all} && {settled}", unfolded(true)), wait);
+    let stored_open = b.eval(page, kept)?;
+    let _ = b.screenshot(page, &shots.join("desktop-more-kept-after-reload.png"));
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
+    b.until(page, &unfolded(false), wait);
+    b.reload(page)?;
+    let still_folded = b.until(page, &format!("!document.getElementById('layout').hidden && {} && {main_chats}.length === {folded} && {settled}", unfolded(false)), wait);
+    let stored_folded = b.eval(page, kept)?;
     s.ok(
-        "FIN-722: pressing their agent shows all its chats (no menu, no new chat, the open chat still open); pressed again, its first five",
-        listed && unfolded && no_menu == true && chats_after == chats_before && title_after == title_before && refolded,
-        json!({ "folded": folded, "unfolded": b.eval(page, &main_chats)?, "menu hidden": no_menu, "chats": [chats_before, chats_after], "title": [title_before, title_after], "refolded": refolded }),
+        "FIN-722: a section's More, pressed, shows all its chats and stays so after a reload (kept on this device); its Less, pressed, folds it again, and a reload keeps it folded",
+        listed && opened && still_open && stored_open.as_array().is_some_and(|l| l.contains(&json!(first_id))) && still_folded && stored_folded.as_array().is_some_and(|l| !l.contains(&json!(first_id))),
+        json!({ "opened": opened, "after reload": still_open, "stored": stored_open, "folded after reload": still_folded, "stored folded": stored_folded }),
     );
+    // the pill opens its agent's menu, as before; its New chat makes a chat with it
+    let pill_menu = hero_menu(b, page, &hero)?;
+    let before = chat_names()?;
+    b.click(page, &format!("{hero} .agent-new-chat"))?;
+    let started = b.until(page, &format!("document.getElementById('menu').hidden && document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden) && {settled}"), wait);
+    let fresh = open_chat(b, page);
+    let fresh_row = own_row_of(api, me.session, &fresh);
+    let _ = b.screenshot(page, &shots.join("desktop-agent-new-chat.png"));
+    s.ok(
+        "FIN-722: pressing their agent's pill opens its menu as before (New chat first); the New chat at the pill's end opens a new chat with that agent alone",
+        pill_menu.first().map(String::as_str) == Some("New chat") && started && fresh_row["agents"] == json!([first_id]) && fresh_row["title"] == "New chat",
+        json!({ "menu": pill_menu, "opened": fresh, "row": fresh_row }),
+    );
+    // made by it (not a blank chat it opened again): gone at the end
+    let made_here = (!before.contains(&fresh)).then_some(fresh);
 
     // ---- pins: from the open chat's ⋯ and a row's; by title, held ----
     // (unfolded, so each row and its newest words are drawn; folded again at the end)
-    b.click(page, &format!("{hero} .agent-hero-open"))?;
-    anyhow::ensure!(b.until(page, &format!("document.querySelector({fold})?.getAttribute('aria-expanded') === 'true'"), wait), "their agent's chats unfolded");
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
+    anyhow::ensure!(b.until(page, &unfolded(true), wait), "their agent's chats unfolded");
     // a row's ⋯, pressed by script: shown on hover alone where a pointer hovers
     let row_menu = |b: &mut Browser, name: &str| -> Result<bool> {
         let more = js(&format!("#chats [data-key={}] .row-more", js(&format!("chat:{name}"))));
@@ -6723,8 +6751,8 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         && b.until(page, &format!("{}?.textContent.includes('pins hold tulip') && {}?.textContent.includes('pins hold rose') && {by_title} && {main_chats}.indexOf({}) > 1", row(&tulip), row(&rose), js(&rose)), agent_wait);
     let main_menu = hero_menu(b, page, &hero)?;
     // folded again: both pinned still shown, first
-    b.click(page, &format!("{hero} .agent-hero-open"))?;
-    let kept = b.until(page, &format!("document.querySelector({fold})?.getAttribute('aria-expanded') === 'false' && {by_title} && {settled}"), wait);
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
+    let kept = b.until(page, &format!("{} && {by_title} && {settled}", unfolded(false)), wait);
     let _ = b.screenshot(page, &shots.join("desktop-pins-1280-light.png"));
     b.color_scheme(page, "dark")?;
     let _ = b.screenshot(page, &shots.join("desktop-pins-1280-dark.png"));
@@ -6865,7 +6893,7 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
         shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
     }
     api.signed(&other, "DELETE", &format!("/api/f/{theirs}"), None)?;
-    for name in connectors.iter().chain(made_pair.then_some(&pair)) {
+    for name in connectors.iter().chain(made_pair.then_some(&pair)).chain(made_here.as_ref()) {
         shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
     }
     anyhow::ensure!(b.until(page, &format!("{} && {settled}", names.iter().chain([&theirs]).map(|n| format!("!{}", row(n))).collect::<Vec<_>>().join(" && ")), wait), "the chats made here gone from the list");
@@ -7518,7 +7546,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let main_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, me.first)?)));
     let reader_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, "reader")?)));
     let new_chat = |b: &mut Browser, hero: &str| -> Result<bool> {
-        b.click(page, &format!("{hero} .row-more"))?;
+        b.click(page, hero)?;
         let open = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
         Ok(open && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'New chat'); i?.click(); return !!i; })()")? == true)
     };
@@ -9908,10 +9936,10 @@ const HEROES: &str = "(() => { const out = []; for (const e of document.getEleme
     else if (e.dataset.key === 'head:shared') break; \
     else if (e.dataset.key?.startsWith('chat:') && out.length) out.at(-1).chats.push(e.dataset.key.slice(5)); } return out; })()";
 
-/// What an agent's hero's menu offers (opened from its ⋯, read and closed
-/// again): the hero `hero` names (its `[data-key]` selector).
+/// What an agent's hero's menu offers (opened, read and closed again): the
+/// hero `hero` names (its `[data-key]` selector).
 fn hero_menu(b: &mut Browser, page: &Page, hero: &str) -> Result<Vec<String>> {
-    b.click(page, &format!("{hero} .row-more"))?;
+    b.click(page, hero)?;
     b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", std::time::Duration::from_secs(5));
     let items = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
     b.press(page, "Escape", false)?;
@@ -9958,8 +9986,8 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         heroes[0]["face"] == main_colour && heroes[1]["face"] == reader_colour && main_colour.is_string() && faceless == true,
         json!({ "heroes": heroes, "main": main_colour, "reader": reader_colour }),
     );
-    // its hero's New chat (its ⋯'s): a new chat with it alone, never with the main agent
-    b.click(page, &format!("{} .row-more", hero(reader)))?;
+    // its hero's New chat: a new chat with it alone, never with the main agent
+    b.click(page, &hero(reader))?;
     let menu = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
     let offered = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
     let picked = menu && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'New chat'); i?.click(); return !!i; })()")? == true;
@@ -9968,7 +9996,7 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let members = shell(api, session, "GET", &format!("/api/f/{made}/members"), None, &[])?;
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
     s.ok(
-        "the Reader's hero's ⋯ opens its menu (New chat, Rename, Pin to top, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
+        "the Reader's hero opens its menu (New chat, Rename, Pin to top, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
         offered == ["New chat", "Rename…", "Pin to top", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
         json!({ "offered": offered, "made": made, "agents": agents }),
     );
@@ -10045,7 +10073,7 @@ fn pinned_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     let hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
     let order = |names: &str| format!("({HEROES}).map((h) => h.name).join() === {}", js(names));
     let pick = |b: &mut Browser, text: &str| -> Result<bool> {
-        b.click(page, &format!("{hero} .row-more"))?;
+        b.click(page, &hero)?;
         let open = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
         Ok(open && menu_item(b, page, text)?)
     };

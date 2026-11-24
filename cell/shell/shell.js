@@ -782,8 +782,8 @@ sheet.onclose = () => {
 
 // ---- one menu, for whichever button asked ----
 const menu = $("menu");
-// An agent's hero's menu (its ⋯'s) hangs from the hero, one surface with
-// it (chat-list.js `hero`): its edge, drawn over both while it is open.
+// An agent's hero's menu hangs from it, one surface with it (chat-list.js
+// `hero`): its edge, drawn over both while it is open.
 const menuEdge = el("div", "agent-menu-edge");
 menuEdge.hidden = true;
 menuEdge.setAttribute("aria-hidden", "true");
@@ -849,7 +849,7 @@ function openMenu(button, items) {
   const again = menuFor?.button === button && !menuClosing;
   if (again) return closeMenu();
   closeMenu(true);
-  // what it hangs from: an agent's hero, for its ⋯; else the button
+  // what it hangs from: an agent's hero, for its face and name; else the button
   const hero = button.closest("#chats .agent-hero");
   menuFor = { button, anchor: hero ?? button };
   menu.replaceChildren(...items.map((it) => {
@@ -922,7 +922,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
     reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem, deleteItems },
   navigation: { newChat, rename: (name) => rename(name), openChat: pickChat, openApp, openScreen, leaveSidebar, seg },
-  listLive, load,
+  listLive, load, store,
 });
 // Continue: a conversation (an import, an archived chat) as a new chat with
 // an agent of the person's choosing (continue.js)

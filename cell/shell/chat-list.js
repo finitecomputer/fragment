@@ -51,7 +51,12 @@ export function askedAgentOf({ open, own, agentsOf, mine, main }) {
   return agentsOf(open.name).map((id) => mine.find((a) => a.identity === id)).find(Boolean) ?? main;
 }
 
-export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load }) {
+// The sections a device keeps unfolded (More), as its storage holds them:
+// their keys, at most FOLDS_MAX; anything else is none.
+export const FOLDS_MAX = 64;
+export const foldsOf = (saved) => new Set(Array.isArray(saved) ? saved.filter((k) => typeof k === "string" && k.length <= 256).slice(-FOLDS_MAX) : []);
+
+export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, store }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
   // `onScreen`: the chat whose row is active (making.js `shownChat`);
@@ -257,14 +262,12 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // each headed by the original pill): its face and its name. What it is
   // doing is said on its chats' rows alone, never here too (Paul,
   // 2026-11-02), each such row shown however many its section folds
-  // (`sectionShown`'s `busy`). Pressed, it shows its agent's chats: all of
-  // them, or its first five again, as More and Less do (`unfolded`: its
-  // section's, else null, nothing folded and nothing to press); never a new
-  // chat, which is its menu's (FIN-722). Its ⋯ opens its agent's menu,
-  // attached below it. Drawn again, it keeps the edge its pointer lit and
-  // whether its menu is open, so it stays the same node unless what it
-  // shows changed.
-  function hero(agent, unfolded) {
+  // (`sectionShown`'s `busy`). It opens its agent's menu, attached below
+  // it; at its end, a new chat with its agent, as the iOS sidebar's
+  // (Paul, 2026-11-24, FIN-722). Drawn again, it keeps the edge its pointer
+  // lit and whether its menu is open, so it stays the same node unless what
+  // it shows changed.
+  function hero(agent) {
     const name = titleOf(agent.fragment);
     const row = el("div", "row agent-hero");
     row.dataset.key = `agent:${agent.fragment}`;
@@ -272,16 +275,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     // copied by the CSSOM: the page's CSP refuses a style attribute set
     // from a string (`style-src` has no 'unsafe-inline')
     for (const prop of was?.style ?? []) row.style.setProperty(prop, was.style.getPropertyValue(prop));
-    const open = el(unfolded === null ? "span" : "button", "agent-hero-open");
-    if (unfolded !== null) {
-      open.type = "button";
-      open.setAttribute("aria-expanded", String(unfolded));
-      // its section as it is when pressed (keyed as `renderChats` keys it)
-      open.onclick = () => {
-        const { identity, fragment } = agentNow(agent.fragment);
-        foldAgain(identity ?? fragment);
-      };
-    }
+    const open = el("button", "agent-hero-open");
+    open.type = "button";
+    open.setAttribute("aria-label", `${name}: its menu`);
+    open.setAttribute("aria-haspopup", "menu");
+    open.setAttribute("aria-controls", "menu");
+    const wasOpen = was?.querySelector(":scope > .agent-hero-open");
+    open.setAttribute("aria-expanded", String(!!wasOpen && menuOwner()?.button === wasOpen));
     const face = el("span", "agent-hero-face");
     face.append(avatar(agentFace(agent.fragment, agent.identity), "small"));
     const named = el("span", "agent-hero-named");
@@ -294,29 +294,25 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       pin.append(icon("pin"));
       open.append(pin);
     }
-    const more = el("button", "row-more", "⋯");
-    more.type = "button";
-    more.title = "Agent options";
-    more.setAttribute("aria-label", `${name}: its menu`);
-    more.setAttribute("aria-haspopup", "menu");
-    more.setAttribute("aria-controls", "menu");
-    const wasMore = was?.querySelector(":scope > .row-more");
-    more.setAttribute("aria-expanded", String(!!wasMore && menuOwner()?.button === wasMore));
     // its agent as it is when pressed: a hero kept from an earlier drawing
     // (the same node) may have been drawn before its computer was read
-    more.onclick = () => openAgentMenu(agentNow(agent.fragment), more);
-    row.append(open, more);
+    open.onclick = () => openAgentMenu(agentNow(agent.fragment), open);
+    row.append(open);
+    // its New chat, as its menu's: once their computer has the agent
+    if (agent.identity && !isGuest()) {
+      const add = el("button", "agent-new-chat");
+      add.type = "button";
+      add.title = `New chat with ${name}`;
+      add.setAttribute("aria-label", `New chat with ${name}`);
+      add.append(icon("newChat"));
+      add.onclick = () => { newChat(agent.identity); leaveSidebar(); };
+      row.append(add);
+    }
     return row;
   }
   // An agent of theirs by its fragment, as the list and their computer say
   // now: its identity once their computer has it.
   const agentNow = (fragment) => ownAgents().find((a) => a.fragment === fragment) ?? (primaryAgent()?.fragment === fragment ? primaryAgent() : { fragment, identity: null });
-  // A section shown whole, or folded to its first five again (its hero, More, Less).
-  function foldAgain(key) {
-    if (unfolded.has(key)) unfolded.delete(key);
-    else unfolded.add(key);
-    renderChats();
-  }
   // An agent's menu: where it is doing something (each chat opens; read as
   // it opens, not from when its hero was drawn), a new chat with it, its
   // name, its Pin to top where pinning moves it (an agent already as high
@@ -358,9 +354,19 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // A section's chats (`sectionShown`): its first five, its pinned ones
   // first, the open one wherever it is, and each whose row says what its
   // agent is doing (`busy`); then More, which shows the rest, and Less,
-  // which folds them again. Answers its rows, and whether it is unfolded
-  // (null: nothing to fold).
-  const unfolded = new Set();
+  // which folds them again. Which are unfolded is kept on this device
+  // (FIN-722: whoever keeps a section open keeps it open), the newest
+  // FOLDS_MAX; storage is a convenience (`store`'s reads and writes never
+  // throw), so without it a section starts folded.
+  const FOLDS = "finite.sidebar.unfolded.v1";
+  const unfolded = foldsOf(store.get(FOLDS, []));
+  function foldAgain(key) {
+    if (unfolded.has(key)) unfolded.delete(key);
+    else unfolded.add(key);
+    for (const k of unfolded) if (unfolded.size > FOLDS_MAX) unfolded.delete(k);
+    store.set(FOLDS, [...unfolded]);
+    renderChats();
+  }
   function sectionRows(key, list, rowOf, busy) {
     const open = unfolded.has(key);
     const { shown, more: many } = sectionShown(list, { unfolded: open, current: onScreen(), busy, title: (f) => chatTitle(f.name) });
@@ -373,7 +379,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       more.onclick = () => foldAgain(key);
       rows.push(more);
     }
-    return [rows, many ? open : null];
+    return rows;
   }
   // The sidebar's chats, a section per agent of the person's (Paul,
   // 2026-10-31): the ones they pinned first, then their main agent, then
@@ -445,15 +451,12 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       return [row];
     };
     const rows = [];
-    for (const [key, { agent, chats: list }] of sections) {
-      const [chatRows, open] = sectionRows(key, list, rowOf, busy);
-      rows.push(hero(agent, open), ...makingRow(key), ...chatRows);
-    }
-    rows.push(...sectionRows("own", loose, rowOf, busy)[0]);
+    for (const [key, { agent, chats: list }] of sections) rows.push(hero(agent), ...makingRow(key), ...sectionRows(key, list, rowOf, busy));
+    rows.push(...sectionRows("own", loose, rowOf, busy));
     if (shared.length) {
       const head = el("div", "section-head", "Shared");
       head.dataset.key = "head:shared";
-      rows.push(head, ...sectionRows("shared", shared, rowOf, busy)[0]);
+      rows.push(head, ...sectionRows("shared", shared, rowOf, busy));
     }
     if (!rows.some((r) => r.dataset.key.startsWith("chat:"))) rows.push(el("div", "empty-row", chats().length ? "Every chat is archived" : isGuest() ? "Chats shared with you show here" : "Your chats will appear here"));
     doingAgain(seen);
@@ -472,7 +475,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   let sidebarEdgeFrame = 0;
   let sidebarEdgePointer = null;
   const sidebarEdgeControls = () => $("sidebar").querySelectorAll(".agent-hero, .sidebar-new-chat");
-  const expandedEdge = (control) => !!control.querySelector(':scope > .row-more[aria-expanded="true"]') && !menu.hidden && menu.classList.contains("agent-menu");
+  const expandedEdge = (control) => !!control.querySelector(':scope > .agent-hero-open[aria-expanded="true"]') && !menu.hidden && menu.classList.contains("agent-menu");
   // whether it is lit is its own style's, so a hero drawn again with the
   // edge it kept (`hero`) goes dark as the pointer leaves
   function lightEdge(surface, x, y, light) {
