@@ -360,26 +360,32 @@ pub enum HomeChat {
     Nowhere,
 }
 
+/// Whether a chat's label is a SimpleX chat's: `…-simplex`, or a label
+/// Settings took after it (`…-simplex-<n>`, shell.js `freeLabel`), as it
+/// labels a SimpleX connector (`connectorLabel`). Settings offers a door
+/// as an agent's SimpleX home by the same rule (connections.js).
+pub fn simplex_labelled(label: &str) -> bool {
+    let base = label.rsplit_once('-').filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).map_or(label, |(base, _)| base);
+    base.ends_with("-simplex")
+}
+
 /// The chats an agent's SimpleX door may be (a connector its owner bound
 /// from Settings, templates/simplex), in the order their members are read
-/// (`HOME_DOORS_MAX` at most): its owner's chats it is in, but its own,
-/// those labelled as its SimpleX chat first (Settings labels a connector
-/// `<label>-simplex`), then the rest as its owner's list has them. Which
-/// one is its door its row of that chat's members says (`Member::door`),
-/// never a label.
+/// (`HOME_DOORS_MAX` at most): its owner's chats it is in that are
+/// labelled as SimpleX chats (`simplex_labelled`), its own label's first.
+/// Which one is its door its row of that chat's members says
+/// (`Member::door`), never a label.
 pub fn door_candidates(agent_fragment: &str, owners: &[FragmentEntry], mine: &[FragmentEntry]) -> Vec<String> {
-    let theirs: Vec<&FragmentEntry> = owners.iter().filter(|f| f.kind == "chat" && f.owned && mine.iter().any(|m| m.name == f.name)).collect();
-    let own = own_chat(agent_fragment, &theirs.iter().map(|f| (*f).clone()).collect::<Vec<_>>());
     let sx = simplex_label(agent_fragment);
-    let mut out: Vec<&FragmentEntry> = theirs.into_iter().filter(|f| Some(&f.name) != own.as_ref()).collect();
+    let mut out: Vec<&FragmentEntry> = owners.iter().filter(|f| f.kind == "chat" && f.owned && simplex_labelled(label(&f.name)) && mine.iter().any(|m| m.name == f.name)).collect();
     // stable: the list's order kept within each
     out.sort_by_key(|f| !label(&f.name).starts_with(&sx));
     out.into_iter().take(crate::limits::HOME_DOORS_MAX).map(|f| f.name.clone()).collect()
 }
 
-/// The chat an agent's home names: its SimpleX chat (`simplex`, the one its
-/// computer's link mirrors, while bound; else `door`, the chat bound as its
-/// SimpleX door) when its home is SimpleX, else its own chat,
+/// The chat an agent's home names: its SimpleX chat (`door`, the chat bound
+/// as its SimpleX door, else `simplex`, the one its computer's link
+/// mirrors, while bound) when its home is SimpleX, else its own chat,
 /// one of its owner's (`owners`: the agent's list for them) that the agent
 /// is in (`mine`: its own list), so one an earlier agent of its label left,
 /// or one it has left, is none; none when it has neither. Its SimpleX chat
@@ -390,7 +396,7 @@ pub fn door_candidates(agent_fragment: &str, owners: &[FragmentEntry], mine: &[F
 /// (`limits::HOME_CHAT_WAIT_MS`): then its own chat, never dropped.
 pub fn home_chat(agent_fragment: &str, home: Home, simplex: Option<&str>, door: Option<&str>, owners: &[FragmentEntry], mine: &[FragmentEntry], waited: bool) -> HomeChat {
     if home == Home::Simplex {
-        if let Some(chat) = [simplex, door].into_iter().flatten().find(|c| mine.iter().any(|m| m.name == *c)) {
+        if let Some(chat) = [door, simplex].into_iter().flatten().find(|c| mine.iter().any(|m| m.name == *c)) {
             return HomeChat::In(chat.to_string());
         }
         if simplex.is_some() && !waited {
@@ -1044,29 +1050,36 @@ mod tests {
         let door = Some("juniper-simplex--d3d3");
         let with_door: Vec<FragmentEntry> = list.iter().cloned().chain([listed("juniper-simplex--d3d3", "chat", true)]).collect();
         assert_eq!(home_chat("juniper--k3x9", Home::Simplex, None, door, &with_door, &with_door, false), HomeChat::In("juniper-simplex--d3d3".into()));
-        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, door, &made.iter().cloned().chain(with_door.clone()).collect::<Vec<_>>(), &made, false), HomeChat::In("juniper-simplex--w9x2".into()), "its computer's link first");
+        let both: Vec<FragmentEntry> = made.iter().cloned().chain([listed("juniper-simplex--d3d3", "chat", true)]).collect();
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, door, &both, &both, false), HomeChat::In("juniper-simplex--d3d3".into()), "its door first, as Settings shows it");
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, door, &both, &made, false), HomeChat::In("juniper-simplex--w9x2".into()), "a door it is not in: its link's chat");
         assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, door, &with_door, &with_door, false), HomeChat::In("juniper-simplex--d3d3".into()), "its link's chat not made: its door, no wait");
         assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, door, &with_door, &with_door, false), own, "its home its own chat: never its door");
         assert_eq!(home_chat("juniper--k3x9", Home::Simplex, None, door, &list, &list, false), own, "a door it is no longer in: its own chat");
     }
 
     /// Goal: the chats a routine's home reads the members of, to find its
-    /// agent's SimpleX door: its owner's chats it is in, but its own, those
-    /// labelled as its SimpleX chat first, a bounded few. Invalid: another
-    /// owner's, one it is not in, an app, its own chat.
+    /// agent's SimpleX door: its owner's chats it is in labelled as SimpleX
+    /// chats (as Settings labels a connector, and offers one), its own
+    /// label's first, a bounded few. Invalid: a chat of another label,
+    /// another owner's, one it is not in, an app.
     #[test]
-    fn a_simplex_doors_candidates_are_its_owners_chats_it_is_in() {
+    fn a_simplex_doors_candidates_are_its_owners_simplex_chats_it_is_in() {
+        for (l, yes) in [("juniper-simplex", true), ("juniper-simplex-2", true), ("long-name-simplex-12", true), ("simplex", false), ("juniper-simplexy", false), ("juniper-simplex-", false), ("juniper-simplex-a", false), ("juniper-chat", false)] {
+            assert_eq!(simplex_labelled(l), yes, "{l}");
+        }
         let owners = [
             listed("juniper-chat--h6j7", "chat", true),
+            listed("weekend-simplex--f6f6", "chat", true),
             listed("talk--a1a1", "chat", true),
             listed("juniper-simplex-2--b2b2", "chat", true),
-            listed("theirs--c3c3", "chat", false),
+            listed("theirs-simplex--c3c3", "chat", false),
             listed("juniper-simplex--d4d4", "app", true),
-            listed("left--e5e5", "chat", true),
+            listed("left-simplex--e5e5", "chat", true),
         ];
-        let mine: Vec<FragmentEntry> = owners.iter().filter(|f| f.name != "left--e5e5").cloned().collect();
-        assert_eq!(door_candidates("juniper--k3x9", &owners, &mine), ["juniper-simplex-2--b2b2", "talk--a1a1"]);
-        let many: Vec<FragmentEntry> = (0..20).map(|i| listed(&format!("talk-{i}--k3x9"), "chat", true)).collect();
+        let mine: Vec<FragmentEntry> = owners.iter().filter(|f| f.name != "left-simplex--e5e5").cloned().collect();
+        assert_eq!(door_candidates("juniper--k3x9", &owners, &mine), ["juniper-simplex-2--b2b2", "weekend-simplex--f6f6"]);
+        let many: Vec<FragmentEntry> = (0..20).map(|i| listed(&format!("talk-{i}-simplex--k3x9"), "chat", true)).collect();
         assert_eq!(door_candidates("juniper--k3x9", &many, &many).len(), crate::limits::HOME_DOORS_MAX);
     }
 

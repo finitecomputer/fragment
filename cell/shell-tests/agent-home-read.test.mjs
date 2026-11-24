@@ -34,6 +34,7 @@ const AGENT = { fragment: "maple--a1b2", identity: "npub1maple" };
 // `chats`, the person's list; `door`, the chat bound as its SimpleX door
 function world({ chats = [], door = null } = {}) {
   const reads = [];
+  const needs = [];
   const picks = [];
   globalThis.document = { querySelectorAll: (sel) => (sel === "select[data-home-for]" ? picks : []) };
   const homes = createAgentHomes({
@@ -70,12 +71,13 @@ function world({ chats = [], door = null } = {}) {
     writeAgentJson: async () => {},
     renderChats: () => {},
     simplexDoorOf: (agent) => (agent === AGENT.fragment ? door : null),
+    needDoors: () => needs.push(1),
   });
   const [label, line] = homes.homePicker(AGENT, new Node("span"));
   const pick = label.children[1];
   picks.push(pick);
   const again = line.children[1];
-  return { homes, reads, pick, line, again };
+  return { homes, reads, pick, line, again, needs };
 }
 
 test("a refresh's read that answers after Try again's newer one is let go: the newer home stays", async () => {
@@ -131,6 +133,18 @@ test("an agent whose SimpleX is a door is offered SimpleX, and its bell is on th
   assert.equal(w.pick.value, "simplex");
   assert.equal(w.homes.homeMark(door).length, 1, "its bell on the door's chat");
   assert.equal(w.homes.homeMark({ name: "maple-chat--g7h8" }).length, 0);
+  assert.equal(w.needs.length, 1, "its SimpleX home has the bindings read, wherever the page opened");
+  // a SimpleX chat of its label kept from before (its computer's): its door first, as its bridge picks
+  const kept = { name: "maple-simplex--r1r1", owner: "npub1robin", agents: [AGENT.identity] };
+  const both = world({ chats: [kept, door], door: door.name });
+  await both.reads[0].ok({ home: "simplex" });
+  assert.deepEqual([both.homes.homeMark(door).length, both.homes.homeMark(kept).length], [1, 0]);
+  // a door labelled as no SimpleX chat is none its bridge reads: not offered
+  const odd = { name: "maple-phone--s2s2", owner: "npub1robin", agents: [AGENT.identity] };
+  const unread = world({ chats: [odd], door: odd.name });
+  await unread.reads[0].ok({});
+  assert.deepEqual(unread.pick.children.map((o) => o.value), [""]);
+  assert.equal(unread.needs.length, 0, "its home its own chat: no bindings read for it");
   // its home its own chat still: SimpleX offered to pick
   const offered = world({ chats: [door], door: door.name });
   await offered.reads[0].ok({});

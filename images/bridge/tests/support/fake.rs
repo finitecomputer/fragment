@@ -109,6 +109,9 @@ pub struct World {
     pub fail_lists: u32,
     /// The next this many reads of any fragment's members answer 503.
     pub fail_members: u32,
+    /// The next this many reads of each fragment's members named here
+    /// answer 503.
+    pub fail_members_of: BTreeMap<String, u32>,
     /// The next this many reads of any agent's `agent.json` answer 503.
     pub fail_agent_json: u32,
     /// The next this many listings of a fragment's files (`GET files`),
@@ -826,8 +829,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             answer(StatusCode::OK, json!({ "principal": who, "role": added }))
         }
-        (Method::GET, ["members"]) if w.fail_members > 0 => {
-            w.fail_members -= 1;
+        (Method::GET, ["members"]) if w.fail_members > 0 || w.fail_members_of.get(&fragment).is_some_and(|n| *n > 0) => {
+            match w.fail_members_of.get_mut(&fragment).filter(|n| **n > 0) {
+                Some(n) => *n -= 1,
+                None => w.fail_members -= 1,
+            }
             answer(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "unavailable", "message": "the fake's members, refused" }))
         }
         (Method::GET, ["members"]) => {

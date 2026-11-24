@@ -584,7 +584,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
 }
 
 // Home reads and writes share the agent.json writer with model settings.
-export function createAgentHomes({ el, icon, named, actionLine, settingLabel, modelOption, savePick, agents, chats, own, labelOf, byName, titleOf, agentsOwnChat, agentJson, writeAgentJson, renderChats, simplexDoorOf = () => null }) {
+export function createAgentHomes({ el, icon, named, actionLine, settingLabel, modelOption, savePick, agents, chats, own, labelOf, byName, titleOf, agentsOwnChat, agentJson, writeAgentJson, renderChats, simplexDoorOf = () => null, needDoors = () => {} }) {
   // An agent's SimpleX chat: the person's chat labelled `<label>-simplex`,
   // which the agent's computer makes for them as its SimpleX is linked, and
   // which mirrors their SimpleX app both ways (docs/bridge.md, "SimpleX").
@@ -598,12 +598,15 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
   };
   const simplexAgentOf = (name) => [...agents().values()].find((a) => simplexChatOf(a.fragment)?.name === name)?.fragment ?? null;
   // The chat its SimpleX home is, as its computer's bridge picks it
-  // (images/bridge api.rs `home_chat`): its computer's SimpleX chat, else
-  // the chat bound as its SimpleX door (a connector, createConnectors'
-  // binding as Settings read it), else none
+  // (images/bridge api.rs `home_chat`, `door_candidates`): the chat bound
+  // as its SimpleX door (a connector, createConnectors' binding as read),
+  // labelled as a SimpleX chat as Settings labels one; else its computer's
+  // SimpleX chat; else none
+  const simplexLabelled = (label) => /-simplex(-\d+)?$/.test(label);
   const simplexHomeOf = (agent) => {
     const door = simplexDoorOf(agent);
-    return simplexChatOf(agent) ?? (door ? (chats().find((f) => f.name === door) ?? null) : null);
+    const bound = door && simplexLabelled(labelOf(door)) ? (chats().find((f) => f.name === door) ?? null) : null;
+    return bound ?? simplexChatOf(agent);
   };
   function chatTitle(name) {
     const agent = byName(name)?.title === SIMPLEX_TITLE ? simplexAgentOf(name) : null;
@@ -659,6 +662,9 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
   }
   function homeIs(agent, home) {
     homes.set(agent, home === "simplex" ? "simplex" : "chat");
+    // its SimpleX home may be a door: the bindings read, so its bell is on
+    // the chat its routines run in wherever the page opened
+    if (home === "simplex") needDoors();
     renderChats();
     paintHomes();
   }
@@ -1074,5 +1080,12 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
   }
   // the chat bound as `agent`'s SimpleX door, as the latest read says
   const simplexDoorOf = (agent) => boundOf(SIMPLEX.door, agent);
-  return { telegramSection: () => sectionOf(TELEGRAM), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors, simplexDoorOf };
+  // the bindings read once, where none is (a SimpleX home on a page that
+  // opened elsewhere than Settings); one under way is left to answer
+  let reading = null;
+  const needDoors = () => {
+    if (doors || reading || !listed()) return;
+    reading = readDoors().finally(() => (reading = null));
+  };
+  return { telegramSection: () => sectionOf(TELEGRAM), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors, simplexDoorOf, needDoors };
 }
