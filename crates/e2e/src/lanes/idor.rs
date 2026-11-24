@@ -229,6 +229,9 @@ fn share_link(s: &mut Suite, api: &Api, owner: &Keys, stranger: &Keys) -> Result
     let file = "site/linked.txt";
     let r = api.signed(owner, "POST", &path(&name, "files"), Some(&json!({ "files": [{ "path": file, "text": "the owner's, by link\n" }] })))?;
     anyhow::ensure!(r.status == 200, "the owner's file: {r}");
+    // the site serves only a live commit: deployed, as an owner would
+    let r = api.signed(owner, "POST", &path(&name, "deploy"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200, "the owner's deploy: {r}");
     let status = api.signed(owner, "GET", &path(&name, "status"), None)?;
     let view = status.body["viewToken"].as_str().unwrap_or_default().to_string();
     anyhow::ensure!(status.status == 200 && status.body["visibility"] == "link" && !view.is_empty(), "a link fragment with its share link: {status}");
@@ -244,12 +247,14 @@ fn share_link(s: &mut Suite, api: &Api, owner: &Keys, stranger: &Keys) -> Result
         let q = if route.contains('?') { "&" } else { "?" };
         let signed = api.signed(stranger, "GET", &path(&name, &format!("{route}{q}view={view}")), None)?;
         let unsigned = api.unsigned("GET", &path(&name, &format!("{route}{q}view={view}")), None)?;
-        if signed.status != 403 || unsigned.status != 401 {
-            lent.push(format!("{route}: signed {signed}, unsigned {unsigned}"));
+        // the owner reads the same route, so the refusals refuse something
+        let owners = api.signed(owner, "GET", &path(&name, &format!("{route}{q}view={view}")), None)?;
+        if signed.status != 403 || unsigned.status != 401 || owners.status != 200 {
+            lent.push(format!("{route}: signed {signed}, unsigned {unsigned}, owner {owners}"));
         }
     }
     s.ok(
-        "the same valid share link on the control API lends nothing: a signed stranger is 403 and no one signed is 401, on its status, members, files and a file",
+        "the same valid share link on the control API lends nothing: a signed stranger is 403 and no one signed is 401, on its status, members, files and a file, which its owner reads (200)",
         lent.is_empty(),
         lent.join("\n"),
     );
