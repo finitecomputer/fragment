@@ -1538,7 +1538,6 @@ impl Engine {
     /// platform's time); `hop` past zero is a hand-off from another agent,
     /// which the chat's budget counts.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, (asker, mandate): (&str, Option<String>), asker_name: String, m: &Message, hop: u32, ask: Ask) {
         let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
         if self.state.turns.contains_key(&id) {
