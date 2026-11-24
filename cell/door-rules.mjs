@@ -29,9 +29,11 @@ export const JOB_ASKS = ["connect", "state", "link", "unlink", "reply", "file"];
 // The files a door holds between its connector and its runner (its
 // owner's, on their way to the connector's chat; its agent's, on their way
 // to its owner's SimpleX app), each for a moment: at most this many, this
-// many bytes between them, and each this long. Past the first two, a new
-// one is refused until older ones go (asked again later); SimpleX's own
-// bound on one file is its runner's (images/simplex-door).
+// many bytes between them, and each this long since it was last given or
+// used. Past the first two, those already taken make room, the oldest
+// first; with none, a new one is refused until older ones go (asked again
+// later). SimpleX's own bound on one file is its runner's
+// (images/simplex-door).
 export const FILES_KEPT = 64;
 export const FILES_BYTES_MAX = 1024 * 1024 * 1024;
 export const FILE_KEPT_MS = 24 * 60 * 60 * 1000;
@@ -56,8 +58,9 @@ export const STEPS = [
   // whether its connector's inbox took it
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
   // the files it holds (`FILES_KEPT`): each by its SHA-256, its bytes, its
-  // type as its giver said, and when it came
-  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL)",
+  // type as its giver said, when it was last given or used, and whether the
+  // one it was for has read it
+  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL, taken INTEGER NOT NULL)",
 ];
 
 // The steps a schema at `version` has yet to take, in order.

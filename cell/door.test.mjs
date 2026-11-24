@@ -547,16 +547,60 @@ test("a file its runner received is held for its connector: once, from its runni
   assert.deepEqual([r.headers.get("x-door-sha256"), r.headers.get("content-type"), r.headers.get("content-length"), await r.text()], [sha(1), "audio/mp4", "11", "voice bytes"]);
   assert.equal((await d.jobFile("GET", sha(9))).status, 404, "one it does not hold");
   assert.equal((await d.call("GET", `/job/file/${sha(1)}`, { "x-fragment-door": `${NAME}--fedcba987654`, "x-fragment-connector": NAME })).status, 409, "another life's connector: refused");
-  // as many as it may hold: refused until older ones go
+  // as many as it may hold: the one taken (read by its connector) makes
+  // room; then, none taken, a new one is refused until older ones go
   for (let n = 10; n < 10 + 63; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
+  assert.equal((await d.give(life1, sha(98), "x")).status, 200, "room made by the file already taken");
+  assert.deepEqual(d.st.sql.exec("SELECT sha FROM files WHERE sha = ?", sha(1)).toArray(), [], "the taken one let go");
+  assert.ok(!d.prefixed().includes(`doors/${DOOR}/files/${sha(1)}`), "its file too");
   const full = await d.give(life1, sha(99), "x");
-  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"]);
+  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"], "none taken: refused");
   // a day on, its watch lets them go, rows and files
   d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
   await d.o.alarm();
   assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 0);
   assert.deepEqual(d.prefixed().filter((k) => k.includes("/files/")), [], "their files gone too");
   assert.equal((await d.give(life1, sha(99), "x")).status, 200, "room again");
+});
+
+test("files on their way in hold their room: two given at once past it, one is refused", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  for (let n = 10; n < 10 + 63; n += 1) await d.give(life1, sha(n), "x");
+  // the first held mid-upload while the second is given
+  let release;
+  const held = new Promise((r) => (release = r));
+  d.blobs.uploading = () => held;
+  const first = d.give(life1, sha(1), "one");
+  await new Promise((r) => setTimeout(r, 10));
+  d.blobs.uploading = null;
+  const second = await d.give(life1, sha(2), "two");
+  release();
+  assert.equal((await first).status, 200);
+  assert.deepEqual([second.status, (await second.json()).error], [503, "files_full"], "the second refused: the first held its room");
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 64, "never past its bound");
+  // the same file given twice at once (room for one, a file taken): the
+  // second asked again later, "uploading"
+  await d.jobFile("GET", sha(10));
+  d.blobs.uploading = () => new Promise((r) => setTimeout(r, 20));
+  const [a, b] = await Promise.all([d.give(life1, sha(3), "three"), d.give(life1, sha(3), "three")]);
+  assert.deepEqual([a.status, b.status, (await b.json()).error], [200, 503, "uploading"]);
+});
+
+test("a delivery its inbox has yet to take keeps its file past a day", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(1), "voice bytes");
+  d.inbox.status = 503;
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 } }));
+  d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
+  await d.o.alarm();
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 1, "its delivery, still waiting, kept it");
+  d.inbox.status = 200;
+  await d.o.alarm();
+  assert.equal((await d.jobFile("GET", sha(1))).status, 200, "its connector keeps it once its inbox takes the delivery");
 });
 
 test("a delivery names its file by its SHA-256; a file named otherwise (an older runner's) goes as none", async () => {

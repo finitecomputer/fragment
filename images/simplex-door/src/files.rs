@@ -50,10 +50,12 @@ pub enum Got {
     /// Asked of the core (`/freceive`) at `since` (the runner's clock, ms):
     /// waited for whole.
     Receiving { since: u64 },
-    /// Whole at `path`, for its door (again, after a door that did not take it).
-    Whole { path: PathBuf },
+    /// Whole at `path` since `since` (the runner's clock, ms), for its door
+    /// (again, after a door that did not take it, until `run::FILE_WAIT_MS`
+    /// has passed: then noted, so the messages after it go on).
+    Whole { path: PathBuf, since: u64 },
     /// Being given to its door.
-    Giving { path: PathBuf },
+    Giving { path: PathBuf, since: u64 },
     /// Its door holds it: its delivery names it.
     Carried { path: PathBuf, file: File },
     /// It will not come: its delivery says why.
@@ -64,6 +66,14 @@ impl Receipt {
     /// Whether its message may be delivered now.
     pub fn settled(&self) -> bool {
         matches!(self.state, Got::Carried { .. } | Got::Noted(_))
+    }
+
+    /// Whether its core may hold it received, and its door not yet: no
+    /// save is taken meanwhile, since a save holds the core's databases and
+    /// not its files folder, and a start from it on a new disk would find
+    /// the file received and gone.
+    pub fn unheld(&self) -> bool {
+        matches!(self.state, Got::Receiving { .. } | Got::Whole { .. } | Got::Giving { .. })
     }
 }
 

@@ -1133,7 +1133,7 @@ impl FragmentCell {
     /// A door's answer to a fetch that keeps it (`keep`): a 2xx's body, the
     /// file its `FILE_SHA_HEADER` names, stored as that blob of this
     /// fragment's, its bytes checked against the name as they stream in
-    /// (stored already, nothing is read), typed as the door said when that
+    /// (stored and recorded already, nothing is read), typed as the door said when that
     /// is passive media; answered `{status, headers, blob: {sha256, size,
     /// type}}`. Any other answer, as a fetch's.
     async fn keep_file(&self, send: impl std::future::Future<Output = CellResult<Response>>, deadline: Duration, host: &str, redact: &dyn Fn(String) -> String) -> Result<Value, StepFail> {
@@ -1153,7 +1153,10 @@ impl FragmentCell {
             let size = headers.get("content-length").and_then(Value::as_str).and_then(|l| l.parse::<u64>().ok()).filter(|n| (1..=limits::BLOB_MAX_BYTES).contains(n)).ok_or_else(|| permanent(format!("{host} answered a file of no length it said, or past {} bytes", limits::BLOB_MAX_BYTES)))?;
             let mime = headers.get("content-type").and_then(Value::as_str).and_then(fragment_core::blob::served_type);
             let key = self.blob_key(&sha).map_err(retry)?;
-            if js::blob_head(&self.env, &key).await.map_err(retry)?.is_none() {
+            // stored already only where a verified write recorded it (its
+            // row): bytes at the key with none are hashed again here
+            let recorded = !self.rows("SELECT 1 FROM blobs WHERE sha = ?", vec![sha.as_str().into()]).map_err(retry)?.is_empty();
+            if !recorded || js::blob_head(&self.env, &key).await.map_err(retry)?.is_none() {
                 let ResponseBody::Stream(body) = resp.body() else { return Err(permanent(format!("{host} answered no bytes"))) };
                 let body = body.clone();
                 let digest = js::blob_put(&self.env, &key, body, size).await.map_err(retry)?;

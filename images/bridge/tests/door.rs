@@ -837,8 +837,9 @@ async fn files_against_the_real_core() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert_eq!(door.with(|s| s.read), 1, "its file read from its door once");
-    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "here is the file")).await;
+    // its file first (the words' wait would take its message's event too)
     let (content, path) = received_file(&mut person, &lab.db_dir("person").join("files"), "file", Duration::from_secs(120)).await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "here is the file")).await;
     assert_eq!(sha256_of(&path), sha, "the reply's file reaches the person whole: {content}");
     let (up, down) = door.with(|s| (s.relay_up, s.relay_down));
     println!("the reply's file whole at the person's in {} ms; the relay carried {up} bytes up, {down} down", t0.elapsed().as_millis());
