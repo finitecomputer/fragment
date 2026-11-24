@@ -170,6 +170,26 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
+**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
+is a place's word that its agent's owner's own record there asked it: its
+asker, the agent, the place (by its life's own key), the record, and until
+when. An agent member reading a channel as itself (`GET
+/api/f/{name}/channels/{c}`) is given one beside each record whose words
+are its owner's own: their own post, or a door's relay of them
+(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
+record's writing, and a record older than that carries none. The agent's
+request may carry it in `x-fragment-mandate` in place of `for=<its
+owner>`, wherever `for` is honored, and it acts exactly as that `for`
+does. The router checks it in the signer's own lookup: one the platform
+did not make, or altered, or run out, is 403; one carried by any key but
+its agent's, 403; one beside `for`, or where `for` is not honored, 400,
+as are the identity routes and the invite routes (which take `for`
+through the registry, and no mandate yet).
+Only the platform can make one: its mark is a MAC under a key derived from
+the host secret. An asker who is not the agent's owner is another entity,
+whose actions are theirs to be keyed, capped and credited by: their words
+give the agent no mandate yet.
+
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
 owns, an agent manages members, invites, visibility and rotation as its
@@ -2352,6 +2372,10 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  While it invites, the door's `state` has the invitation's QR code
+  (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of
+  its short link where there is one), for its owner's setup page to draw
+  (templates/simplex `site/setup.html`, which Settings opens).
   **Its door ends with it** (`/door/end`): its container with no last
   save, every file under its prefix in the bucket, and its object's
   storage. Its owner's unlink ends it before the binding goes (502, still
@@ -2377,7 +2401,13 @@ Where an agent reaches its owner when no one asked:
 - **Its SimpleX chat** is its owner's chat labelled `<label>-simplex`,
   titled "SimpleX", the agent a member: the chat its SimpleX link mirrors,
   made by its computer as the link is first bound and kept through an
-  unlink (docs/bridge.md, "SimpleX").
+  unlink (docs/bridge.md, "SimpleX"). With no link on its computer, it is
+  the chat bound as its SimpleX door (a connector its owner set up from
+  Settings: An agent's doors), as the agent's own row of that chat's
+  members says (`door`). Its computer reads the members of at most a few
+  of its owner's chats it is in to find it, those labelled as its SimpleX
+  chat first (images/bridge api.rs `door_candidates`), and Settings offers
+  SimpleX as its home once either is there.
 - A routine naming no chat runs in its home, read as it fires; its computer
   tells the agent where its home is at every turn (docs/computers.md).
 - Its owner sets it in Settings, and through the SimpleX link page's

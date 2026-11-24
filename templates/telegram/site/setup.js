@@ -17,46 +17,20 @@
 // 2. the account: `pair`'s link opened in Telegram, the account that
 //    answers it shown as it comes, its owner confirming it (`confirm`);
 // 3. done: the bot and the account, with New token and Unpair.
-// Each step is the same three parts (its tags, one line, its controls),
-// a failure said in its line, so it fits the dialog's one height.
+// Each step is the same three parts (its tags, one line, its controls:
+// setup-page.js, SimpleX's too), a failure said in its line, so it fits
+// the dialog's one height.
 // Settings binds it as its agent's door as it makes it; `__door` is read
 // here only to say so when it is not.
 import * as fragment from "./__fragment.js";
 import { KIND } from "./frame-messages.js";
+import { button, el, framed, platformJson, randomHex, row, signedIn, stepper } from "./setup-page.js";
 
 const TELEGRAM_HOST = "api.telegram.org";
 const POLL_MS = 1000;
 // how long a Connect waits for its job's answer (`state.answered`)
 const CONNECT_WAIT_MS = 60_000;
 const JSON_TYPE = { "content-type": "application/json" };
-const framed = window.parent !== window;
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
-function button(text, cls, onclick) {
-  const b = el("button", cls, text);
-  b.type = "button";
-  b.addEventListener("click", onclick);
-  return b;
-}
-
-const row = (...items) => {
-  const r = el("div", "setup-row");
-  r.append(...items);
-  return r;
-};
-
-async function platformJson(path, init) {
-  const resp = await fetch(new URL(path, location.href), { credentials: "same-origin", ...init });
-  const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw Object.assign(new Error(body.message || `${resp.status}`), { status: resp.status });
-  return body;
-}
 
 // one of this fragment's secrets, its value never read back
 const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "PUT", headers: JSON_TYPE, body: JSON.stringify({ ...value, hosts: [TELEGRAM_HOST] }) });
@@ -66,39 +40,16 @@ const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "P
 const VAULT = framed ? new URLSearchParams(location.search).get("vault") : null;
 // how long Use it waits for Settings to move the Vault's bot
 const MOVE_WAIT_MS = 30_000;
-const randomHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // what it is, a word each (Paul, 2026-10-31): experimental, and less
 // secure than SimpleX, its words end to end, as Telegram's servers read
 // these
-function tags() {
-  const t = el("div", "setup-tags");
-  const less = el("span", "setup-tag", "Less secure");
-  less.title = "Telegram's servers can read these messages";
-  t.append(el("span", "setup-tag", "Experimental"), less);
-  return t;
-}
+const TAG = ["Less secure", "Telegram's servers can read these messages"];
 
 export async function setup(root) {
-  // the shell's light or dark, from its frame's parent at the platform's
-  // origin alone (frame-messages.js), heard from the start: the shell says
-  // it as the frame loads, before `me` answers
-  let platform = null;
-  const heard = [];
-  const theme = (e) => {
-    if (e.origin === platform && (e.data.mode === "light" || e.data.mode === "dark")) document.documentElement.dataset.theme = e.data.mode;
-  };
-  if (framed) {
-    addEventListener("message", (e) => {
-      if (e.source !== window.parent || e.data?.fragment !== KIND.theme) return;
-      if (platform) theme(e);
-      else heard.push(e);
-    });
-  }
-  const me = await fragment.me();
-  platform = me.platform;
-  heard.splice(0).forEach(theme);
+  const me = await signedIn();
+  const platform = me.platform;
 
   let state = null;
   let error = "";
@@ -110,18 +61,8 @@ export async function setup(root) {
   let declined = false;
 
   // a step: its line (or what failed, in its place), and its controls
-  const say = (line, ...parts) => {
-    const head = [];
-    if (!framed) head.push(el("h1", null, "Telegram"));
-    head.push(tags());
-    root.replaceChildren(...head, ...[error ? el("p", "setup-error", error) : line].filter(Boolean), ...parts);
-    // in a tab, the way back
-    if (!framed && platform) {
-      const back = el("a", "quiet", "Back to Settings");
-      back.href = `${platform}/settings`;
-      root.append(row(back));
-    }
-  };
+  const step = stepper(root, { title: "Telegram", tag: TAG, platform });
+  const say = (line, ...parts) => step(error ? el("p", "setup-error", error) : line, ...parts);
   const act = (fn) => async () => {
     error = "";
     try {

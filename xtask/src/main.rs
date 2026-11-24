@@ -414,6 +414,7 @@ fn dev(args: &[String]) -> Result<()> {
         // a door's image is built only for a stack that runs them (the e2e's door lane)
         doors: false,
         computer_internet: true,
+        door_internet: true,
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
         // WorkOS environment has no such provider, so then none

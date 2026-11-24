@@ -1,8 +1,9 @@
-/* The Telegram connector's setup (setup.js): the shell's look from
-   __fragment.css, spaced by proximity (Paul, 2026-11-04): a step's line
-   hugs its controls, and its tags sit apart above them. Framed in
-   Settings' dialog (`data-framed`) it is the dialog's content, on its
-   surface, in its type; in a tab, a narrow column under its heading. */
+/* A connector's setup page: Telegram's (setup.js), and SimpleX's, linked
+   (templates/simplex/site). The shell's look from __fragment.css, spaced
+   by proximity (Paul, 2026-11-04): a step's line hugs its controls, and
+   its tags sit apart above them. Framed in Settings' dialog
+   (`data-framed`) it is the dialog's content, on its surface, in its
+   type; in a tab, a narrow column under its heading. */
 :root[data-framed], :root[data-framed] body { background: transparent; }
 .setup { display: flex; flex-direction: column; max-width: 28rem; margin: 0 auto; padding: 3rem 1.25rem; font-size: .875rem; line-height: 1.45; }
 /* room for a control's focus ring, inside the frame */
@@ -22,3 +23,7 @@
 .setup-row a { display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 1rem; border-radius: 999px; text-decoration: none; background: var(--fg); color: var(--bg); }
 /* a quiet action, as the shell's dialogs draw one: its hairline, its surface */
 .setup button.quiet, .setup-row a.quiet { color: var(--fg); background: var(--soft); box-shadow: inset 0 0 0 1px var(--line-strong); }
+/* SimpleX's invitation: its QR code under its links, on its own light
+   square (setup.js `qrCode`), within Settings' taller frame on a wide
+   screen (shell.css `.connector-setup-frame.tall`) */
+.setup-qr { display: block; width: 100%; max-width: 200px; height: auto; margin: 12px 0 0; border-radius: 8px; }
