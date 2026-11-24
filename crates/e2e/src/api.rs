@@ -202,6 +202,17 @@ pub struct Call<'a> {
     pub extra: Vec<(&'a str, String)>,
 }
 
+/// Whether a call made a computer: the platform's answer to `POST
+/// /api/computers` (docs/api.md) that it did. A local node's section that
+/// makes one says it uses computers, so the node runs them when the
+/// section runs alone (`node_classes`). In a whole run the node has them
+/// whoever asks, so only this call tells a section that never said so:
+/// `Api::send` fails it there, as its lone run would fail on a node with
+/// none. A refusal made none, and is any section's to ask.
+fn made_computer(method: &str, path: &str, status: u16) -> bool {
+    method == "POST" && path == "/api/computers" && (200..300).contains(&status)
+}
+
 /// Where a run's requests go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -267,6 +278,11 @@ pub struct Run {
     /// with them, so the run's spend counts them apart.
     wiped: Mutex<Vec<String>>,
     budget: Mutex<Budget>,
+    /// The section running and whether it said it uses computers
+    /// (`Suite::section_using`), for `Api::send` to hold it to
+    /// (`made_computer`). None before the first: what sets a run up is no
+    /// section's.
+    section: Mutex<Option<(String, bool)>>,
 }
 
 /// The run's paid calls: those it may still lend, and those it lent.
@@ -290,7 +306,18 @@ impl Run {
 
     fn make(secret: String, levers_sign_in: bool, paid_calls: u64) -> Arc<Run> {
         assert!(secret.len() >= fragment_core::levers::SECRET_BYTES_MIN, "a test secret is long");
-        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), emails: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
+        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), emails: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }), section: Mutex::new(None) })
+    }
+
+    /// The section `name` starts: whether it said it uses computers (in
+    /// what it needs, or in what it uses where the run has them).
+    pub fn section_starts(&self, name: &str, uses_computers: bool) {
+        *self.section.lock().expect("the section's lock") = Some((name.to_string(), uses_computers));
+    }
+
+    /// The section running, when it never said it uses computers.
+    fn unsaid(&self) -> Option<String> {
+        self.section.lock().expect("the section's lock").as_ref().filter(|(_, said)| !said).map(|(name, _)| name.clone())
     }
 
     /// The people this run signed in (hosted), oldest first.
@@ -537,6 +564,11 @@ impl Api {
         let bytes = resp.bytes().with_context(failed)?.to_vec();
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let body = serde_json::from_str(&text).unwrap_or(Value::Null);
+        if self.target == Target::Local && made_computer(c.method, c.url.strip_prefix(self.base.as_str()).unwrap_or_default(), status) {
+            if let Some(section) = self.run.unsaid() {
+                anyhow::bail!("{section} made a computer ({} {}: {status}) and never said it uses one: name Need::Computers in what it needs, or in what it uses (Suite::section_using)", c.method, c.url);
+            }
+        }
         Ok(Reply { status, body, text, bytes, headers })
     }
 
@@ -1179,6 +1211,40 @@ mod tests {
             get();
         }
         assert_eq!(accepted.load(Ordering::SeqCst), 3, "a connection each");
+    }
+
+    /// Goal: a section that makes a computer and never said it uses one is
+    /// told so in any run, where a whole run's node (which has computers
+    /// whoever asks) would let it pass, and only its lone run, on a node
+    /// with none, would fail. Valid: the platform answers that it made one
+    /// (`POST /api/computers`, 2xx) while such a section runs: the call
+    /// fails, naming the section and `section_using`. Invalid: a refusal
+    /// (none was made: any section may ask and be refused), another method
+    /// or route, a section that said so, the run's setup before any
+    /// section. Replay: each section's own word, whatever the last said.
+    #[test]
+    fn a_computer_made_by_a_section_that_never_said_it_uses_one_fails_its_call() {
+        assert!(super::made_computer("POST", "/api/computers", 200));
+        assert!(super::made_computer("POST", "/api/computers", 201));
+        for (method, path, status) in [("POST", "/api/computers", 400), ("POST", "/api/computers", 402), ("POST", "/api/computers", 503), ("GET", "/api/computers", 200), ("POST", "/api/computers/c1/wake", 200), ("POST", "/api/agents", 200), ("POST", "", 200)] {
+            assert!(!super::made_computer(method, path, status), "{method} {path} {status}");
+        }
+        // the client itself, against a server that answers 200 to anything
+        let (url, _) = keep_alive_server();
+        let port: u16 = url.trim_end_matches('/').rsplit(':').next().and_then(|p| p.parse().ok()).expect("the server's port");
+        let run = super::Run::new("s".repeat(64), 0);
+        let api = super::Api::new(port, "localhost", &run);
+        let make = || api.unsigned("POST", "/api/computers", None);
+        assert!(make().is_ok(), "before any section: the run's own setup");
+        run.section_starts("ledger", false);
+        let refused = make().err().map(|e| format!("{e:#}")).expect("it never said so");
+        assert!(refused.contains("ledger made a computer") && refused.contains("section_using"), "{refused}");
+        assert!(api.unsigned("GET", "/api/computers", None).is_ok(), "a read makes none");
+        assert!(api.unsigned("POST", "/api/apps", None).is_ok(), "another route");
+        run.section_starts("computers", true);
+        assert!(make().is_ok(), "it said so");
+        run.section_starts("auth", false);
+        assert!(make().is_err(), "each section's own word");
     }
 
     /// A server that answers one request and hands its head back, lowercased.
