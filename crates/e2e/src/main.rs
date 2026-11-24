@@ -1102,6 +1102,12 @@ impl Suite {
         if self.tools.is_none() || self.containers_removed {
             return Ok(None);
         }
+        // a wrangler node that ran no container class left none and built
+        // no image: its run asks Docker nothing, on a machine that may
+        // have none running (`node_classes`)
+        if self.celld.is_none() && !self.node_computers && !self.node_doors {
+            return Ok(None);
+        }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
         self.containers_removed = true;
         Ok(Some(remove_leftovers(&self.project, self.celld.as_ref().map(|c| &c.engine))?))
