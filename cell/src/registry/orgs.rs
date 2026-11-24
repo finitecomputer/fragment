@@ -594,21 +594,33 @@ impl RegistryCell {
         }
         // the seat's computer: theirs from before, else their first agent's
         // own (a computer per agent: the seat keeps one computer always on,
-        // as before, and its other agents' sleep when idle). Both are told
-        // each push, the first made on as the seat says and the other off, so
-        // a computer from before made after the first agent's own leaves no
-        // two always on
+        // as before, and its other agents' sleep when idle). Which is the
+        // seat's is read first (its `agents`, which changes nothing), then
+        // the other is told off before the seat's is told on, so a push cut
+        // short (or a computer from before made after the first agent's own)
+        // never leaves two always on: at worst none, until the next
         let first = self.live_agents_of(super::calls::AgentsOf { person: person.to_string() })?.agents.into_iter().next();
-        let mut on = d.always_on;
-        for computer in fragment_core::computer::computers_of(person, first.as_slice()) {
-            match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": on })).await {
-                // none made: the next, or no computer yet, whose making (or
-                // its agent's assigning) asks for a push, and fails (to be
-                // made again) when it cannot (cell/src/orgs.rs, `computer_made`)
-                Err(e) if e.code == ErrorCode::NotFound => continue,
-                Err(e) => return Err(e),
-                Ok(_) => on = false,
+        let made = |computer: String, route: &'static str, body: Value| async move {
+            match crate::computer::ask(&self.env, &computer, route, &body).await {
+                // none made: no computer yet, whose making (or its agent's
+                // assigning) asks for a push, and fails (to be made again)
+                // when it cannot (cell/src/orgs.rs, `computer_made`)
+                Err(e) if e.code == ErrorCode::NotFound => Ok(false),
+                Err(e) => Err(e),
+                Ok(_) => Ok(true),
             }
+        };
+        let mut computers = fragment_core::computer::computers_of(person, first.as_slice());
+        let theirs = computers.remove(0);
+        let (seats, others) = match made(theirs.clone(), "computer/agents", json!({ "owner": person })).await? {
+            true => (Some(theirs), computers),
+            false => (computers.first().cloned(), computers.into_iter().skip(1).collect()),
+        };
+        for computer in others {
+            made(computer, "computer/always-on", json!({ "on": false })).await?;
+        }
+        if let Some(computer) = seats {
+            made(computer, "computer/always-on", json!({ "on": d.always_on })).await?;
         }
         Ok(())
     }

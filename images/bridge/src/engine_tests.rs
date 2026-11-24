@@ -2458,9 +2458,10 @@ fn a_mention_of_a_teammate_elsewhere_is_not_the_leads() {
     assert!(started(&s).is_some(), "named no agent of the chat: the lead's");
 }
 
-/// Goal (a computer per agent): one answer a question. A second answer to
-/// the same question (another record, vouched for all the same) starts no
-/// second turn, after a restart too (the state keeps what it took).
+/// Goal (a computer per agent): one answer a question from each agent asked
+/// it. A second answer to the same question by the same agent (another
+/// record, vouched for all the same) starts no second turn, after a restart
+/// too (the state keeps what it took); another agent's answer to it does.
 #[test]
 fn a_question_takes_one_answer() {
     let juniper = agent("juniper");
@@ -2471,8 +2472,14 @@ fn a_question_takes_one_answer() {
     assert!(started(&s).is_some(), "the first answer: a turn");
     let s = read(&mut e, &juniper, &juniper.fragment, answer_task(2, &juniper.identity, body("Sunny, really.")), None, T0 + 1);
     assert!(started(&s).is_none() && posts(&s).is_empty(), "the same question again: nothing: {:?}", s.effects);
+    // the same question answered by another agent asked it (one message
+    // naming two): its answer is its own, taken
+    let by_fern = records::answer(HOME, "Rainy.", "npub1fern", "Fern", &asked, "t-fern", &Outcome::Idle, 2, false);
+    let turns = e.state().turns.len();
+    let _ = read(&mut e, &juniper, &juniper.fragment, answer_task(3, &juniper.identity, by_fern), None, T0 + 2);
+    assert_eq!(e.state().turns.len(), turns + 1, "another agent's answer to it: a turn (after the first's)");
     let state = e.state().clone();
-    assert_eq!(state.answered.len(), 1);
+    assert_eq!(state.answered.len(), 2);
     let back: State = serde_json::from_str(&serde_json::to_string(&state).expect("a state")).expect("read back");
     assert_eq!(back.answered, state.answered, "kept across a restart");
 }

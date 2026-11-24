@@ -122,8 +122,11 @@ kept as the month rolls, for rows heard late), after a row's reference
 is checked, so a replayed row never spends the included hours twice. A
 row counts in each month its time falls in (`awake_parts`: it ends at its
 `at` and lasted its `ms`, so one across a month's start is two parts); a
-part in an older month is let off whole and counts in none, in the
-person's favour. What is past a month's bound is charged at the book's
+part in an older month, or in the next (a row's clock up to
+`CLOCK_SKEW_MS` ahead), is let off whole and counts in none, in the
+person's favour. The bound is read at the plan the ledger has as a row
+is metered: a row heard after a seat ends is priced as the plan after it
+(at most one five-minute meter span a computer, as for any row). What is past a month's bound is charged at the book's
 price, from credit, with no cap or question. Its status says what this
 month used (`awake: {usedMs, includedMs}`), Billing's line.
 

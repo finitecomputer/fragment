@@ -1421,9 +1421,10 @@ impl Engine {
             // deep than the turn that answered, so a callback resets no
             // depth and spends that chat's budget.
             Task::Answer { chat, text, by, name, hop, refused, files, asked } if record.principal == agent.identity => {
-                // one answer a question: another for the same is passed over
+                // one answer a question from each agent asked it: another
+                // from the same agent is passed over (a message may ask two)
                 if let Some((fragment, seq)) = records::answers(&record.body) {
-                    let key = format!("{}|{fragment}/{seq}", agent.fragment);
+                    let key = format!("{}|{fragment}/{seq}|{by}", agent.fragment);
                     if self.state.answered.contains_key(&key) {
                         crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "its question took an answer already" });
                         return;

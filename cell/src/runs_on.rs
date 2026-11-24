@@ -210,9 +210,15 @@ impl FragmentCell {
                 }
                 // one computer runs it at a time: on another, it is unassigned
                 // there first, so no computer keeps running it beside this one
-                if let Some(other) = self.meta(MetaKey::Computer)?.filter(|c| *c != b.computer) {
-                    return Err(CellError::new(ErrorCode::Conflict, format!("{} runs on {other}: unassign it there first", self.name()?)));
-                }
+                // (asked again after the registry's answer below: an assign
+                // there, or its own computer's making, may have come meanwhile)
+                let elsewhere = || -> CellResult<()> {
+                    match self.meta(MetaKey::Computer)?.filter(|c| *c != b.computer) {
+                        Some(other) => Err(CellError::new(ErrorCode::Conflict, format!("{} runs on {other}: unassign it there first", self.name()?))),
+                        None => Ok(()),
+                    }
+                };
+                elsewhere()?;
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
                     Some(id) => id,
                     None => {
@@ -230,6 +236,7 @@ impl FragmentCell {
                         agent.id
                     }
                 };
+                elsewhere()?;
                 self.set_meta(MetaKey::Computer, &b.computer)?;
                 // the agent keeps its own state here (its SOUL.md, memories,
                 // skills, routines): it is an editor of its own fragment

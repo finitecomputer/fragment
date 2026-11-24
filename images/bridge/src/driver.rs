@@ -909,22 +909,7 @@ impl ViewCache {
         // the door this chat is of this agent's, as its own row says (the
         // connector's binding, while open: docs/api.md, "An agent's doors")
         self.view.door = members.iter().find(|m| m.principal == agent.identity).and_then(|m| m.door.clone()).filter(|d| records::door_ok(d));
-        // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
-        // record asked first, then its people, then its other agents (an
-        // agent's message, a hand-off, is told by its name: its title, as
-        // `__people` says it now).
-        let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w) && *w != agent.identity).map(str::to_string).into_iter().collect();
-        // the agent itself too: an answer names the agent that gave it
-        // (engine.rs, `owe_answer`) from whichever agent's view it holds
-        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
-        for m in people.into_iter().chain(agents) {
-            if ids.len() >= api::PEOPLE_MAX {
-                break;
-            }
-            if !ids.contains(&m.principal) {
-                ids.push(m.principal.clone());
-            }
-        }
+        let ids = to_name(writer.filter(|w| *w != agent.identity), &members);
         match api.profiles(&agent.fragment, fragment, &ids).await {
             Ok((names, fragments)) => (self.view.names, self.view.fragments) = (names, fragments),
             Err(e) => crate::ev!("people.unread", { "fragment": fragment, "error": e.to_string() }),
@@ -2454,10 +2439,51 @@ pub(crate) async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: 
     }
 }
 
+/// Who a chat's view names, at most `PEOPLE_MAX` (one `__people`): the
+/// writer whose record asked first, then its agents (the reading agent
+/// itself too: an answer names the agent that gave it, engine.rs
+/// `owe_answer`, from whichever agent's view it holds), then its people (an
+/// agent's message, a hand-off, is told by its name: its title, as
+/// `__people` says it now). Agents before people: an agent's fragment, read
+/// with its name, is where it is asked and answered (`ChatView::fragments`),
+/// so a chat of many people still finds a teammate on another computer; a
+/// person past the bound is only unnamed.
+fn to_name(writer: Option<&str>, members: &[api::Member]) -> Vec<String> {
+    let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w)).map(str::to_string).into_iter().collect();
+    let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
+    for m in agents.into_iter().chain(people) {
+        if ids.len() >= api::PEOPLE_MAX {
+            break;
+        }
+        if !ids.contains(&m.principal) {
+            ids.push(m.principal.clone());
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Goal (a computer per agent): a chat of more people than one
+    /// `__people` names still names its agents, so a teammate on another
+    /// computer is found there (its fragment, `ChatView::fragments`): the
+    /// writer first, then the agents, then the people, to the bound.
+    /// Invalid: a principal that is no identity is never asked for.
+    #[test]
+    fn a_crowded_chat_still_names_its_agents() {
+        let member = |principal: String, kind: &str, at: i64| -> api::Member { serde_json::from_value(json!({ "principal": principal, "kind": kind, "addedAt": at })).expect("a member") };
+        let mut members: Vec<api::Member> = (0..api::PEOPLE_MAX as i64 + 6).map(|i| member(format!("npub1person{i}"), "person", i)).collect();
+        members.push(member("npub1juniper".into(), "agent", 900));
+        members.push(member("npub1rowan".into(), "agent", 901));
+        members.push(member("link:abc".into(), "person", 902));
+        let ids = to_name(Some("npub1person3"), &members);
+        assert_eq!(ids.len(), api::PEOPLE_MAX);
+        assert_eq!(ids[..3], ["npub1person3", "npub1juniper", "npub1rowan"], "the writer, then the agents");
+        assert!(!ids.iter().any(|i| i == "link:abc"), "no identity, never asked for");
+    }
 
     /// Goal (M17; Codex on #1358): a marker moves to a turn only once its
     /// runtime has it (`Event::Taken`), or ended it untaken when that memory

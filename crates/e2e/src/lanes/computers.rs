@@ -2078,12 +2078,14 @@ fn deleted_agent_leaves(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str,
 /// question vouches for it. Deleted, an agent ends its own computer.
 /// Invalid: another's agent fragment, another agent's own computer, an
 /// unassign from an agent's own.
+/// An agent fragment's `fragment.json`, of kind `agent` as the shell's are:
+/// its list row names its agent.
+const KIND_AGENT_JSON: &[u8] = br#"{ "kind": "agent", "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
+
 fn own_computers(s: &mut Suite, api: &Api, scripted: bool, wake: Duration) -> Result<()> {
     let owner = api.person()?;
     let stranger = api.person()?;
     let owner_id = api.identity(&owner)?;
-    // of kind `agent`, as the shell's are: its list row names its agent
-    const KIND_AGENT_JSON: &[u8] = br#"{ "kind": "agent", "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
     let agent = |s: &mut Suite, label: &str| -> Result<(String, String)> {
         let name = s.named(api, &owner, label)?;
         let made = s.create(api, &owner, &name)?;
@@ -2182,6 +2184,48 @@ fn own_computers(s: &mut Suite, api: &Api, scripted: bool, wake: Duration) -> Re
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{cut}"), None)?;
     let ended = s.eventually(Duration::from_secs(60), || api.signed(&owner, "GET", &format!("/api/computers/{cuts}"), None).is_ok_and(|v| v.status == 404));
     s.ok("an agent whose making stopped after its computer was made: its delete ends that computer", made.status == 200 && r.status == 200 && ended, &made);
+    Ok(())
+}
+
+/// A $200 seat keeps one computer always on (docs/computers.md,
+/// Billing): for a person whose agent has a computer of its own (a
+/// computer per agent), that one. Their computer from before, made after
+/// it, takes the seat's over: the agent's own is told off before it is told
+/// on (registry/orgs.rs `push`), and the two end with one always on.
+/// Invalid: the seat let sleep, neither stays on. A local run's (the
+/// operator's comp).
+fn seat_of_an_agents_own(s: &mut Suite, api: &Api) -> Result<()> {
+    let person = api.person()?;
+    let name = s.named(api, &person, "birch")?;
+    let made = s.create(api, &person, &name)?;
+    s.commit(&made, &[("fragment.json", Some(KIND_AGENT_JSON))]);
+    s.deploy(&made);
+    members_only(api, &person, &name)?;
+    let made = api.signed(&person, "POST", "/api/computers", Some(&json!({ "agent": name })))?;
+    let own = made.body["computer"].as_str().unwrap_or("").to_string();
+    let assigned = api.signed(&person, "PUT", &format!("/api/computers/{own}/agents/{name}"), Some(&json!({})))?;
+    let comp = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&person), "kind": "seat_always_on" })))?;
+    let view = |id: &str| api.signed(&person, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let on = s.eventually(Duration::from_secs(20), || view(&own)["alwaysOn"] == true);
+    s.ok(
+        "a $200 seat of a person whose agent has a computer of its own keeps that one always on",
+        made.status == 200 && assigned.status == 200 && comp.status == 200 && on,
+        json!({ "made": made.status, "assigned": assigned.status, "comp": comp.body, "own": view(&own) }),
+    );
+    let before = api.signed(&person, "POST", "/api/computers", Some(&json!({})))?;
+    let theirs = before.body["computer"].as_str().unwrap_or("").to_string();
+    let moved = s.eventually(Duration::from_secs(20), || view(&theirs)["alwaysOn"] == true && view(&own)["alwaysOn"] == false);
+    s.ok(
+        "their computer from before, made after it: the seat's is that one now, the agent's own told off, one always on",
+        before.status == 200 && theirs != own && moved,
+        json!({ "theirs": view(&theirs), "own": view(&own) }),
+    );
+    let r = api.signed(&person, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
+    let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(&theirs)["alwaysOn"] == false && view(&own)["alwaysOn"] == false);
+    s.ok("its holder lets them sleep: neither stays always on", off, json!({ "theirs": view(&theirs), "own": view(&own) }));
+    for id in [&theirs, &own] {
+        let _ = api.signed(&person, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+    }
     Ok(())
 }
 
@@ -3546,6 +3590,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(dns, !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep", json!({ "sidecars": dropping.len(), "asked": asked }));
     }
     made_while_its_seat_sync_fails(s, &api)?;
+    seat_of_an_agents_own(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an
     // operator makes its owner a guest

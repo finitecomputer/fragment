@@ -143,7 +143,9 @@ pub fn agent_own(s: &mut Suite, api: &Api) -> Result<()> {
     let started = if pair.is_empty() { None } else { records(api, &keys, &pair, "work").into_iter().find(|r| r["principal"] == maple_id.as_str() && r["body"]["kind"] == "turn.start") };
     let began_ms = started.as_ref().and_then(|r| r["at"].as_i64());
     let asked_at = records(api, &keys, &jchat, "chat").into_iter().find(|r| r["body"]["text"] == ask.as_str()).and_then(|r| r["at"].as_i64());
-    let read_word = answer["body"]["text"].as_str().is_some_and(|t| t.contains(&word));
+    // what Maple said, past the answer's head line (which quotes the question
+    // Juniper asked, and may name the word: records.rs `answer_text`)
+    let read_word = answer["body"]["text"].as_str().and_then(|t| t.split_once("\n\n")).is_some_and(|(_, said)| said.contains(&word));
     println!(
         "      (an ask to a sleeping teammate: answered in {:?}; the file in the team folder after {:?}; Maple's turn began {:?} ms after the message)",
         answered_in,

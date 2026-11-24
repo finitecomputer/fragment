@@ -929,6 +929,31 @@ fn a_row_counts_in_the_months_its_time_falls_in() {
     }
 }
 
+/// A row's clock may run up to `CLOCK_SKEW_MS` ahead of the ledger's: its
+/// minutes past the month's end are next month's, never charged against
+/// this month's spent bound (let off, as an older month's are). Invalid:
+/// the same row's minutes inside the month are charged as before.
+#[test]
+fn a_rows_minutes_ahead_of_the_month_are_not_charged_against_it() {
+    let january = Month::parse("2027-01").expect("a month").start_ms();
+    let february = Month::parse("2027-02").expect("a month").start_ms();
+    let mut w = World::seat();
+    // the ledger in January's last minutes
+    w.now = february - 3 * 60_000;
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    assert_eq!(w.ledger.money.month, Month::of(january));
+    let minutes = |n: i64| w.book.price(&Usage::Awake { instance: "2vcpu-6gib".into(), ms: (n * 60_000) as u64 }).expect("priced").charge;
+    let (eight, ten) = (minutes(8), minutes(10));
+    assert!(eight < ten, "the book prices minutes");
+    // January's bound spent, its last minutes
+    w.ledger.money.awake_waived_ms = SEAT_AWAKE_INCLUDED_MS;
+    // ten minutes, two of them past January's end by the row's clock (within its skew)
+    let ahead = february + 2 * 60_000;
+    assert!(ahead <= w.now + CLOCK_SKEW_MS, "a row the ledger takes");
+    assert_eq!(charged_by(&mut w, "skew", vec![awake_row("a:skew", "computer:0a1b", 10 * 60_000, ahead)]), eight, "January's eight minutes alone");
+    assert_eq!(awake_parts(ahead, 10 * 60_000, Month::of(january)), [8 * 60_000, 0, 2 * 60_000]);
+}
+
 /// A head kept before the bound (no `awake_waived_ms`) reads as a month
 /// with none of it used yet.
 #[test]

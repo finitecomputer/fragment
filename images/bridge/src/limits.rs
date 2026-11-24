@@ -293,8 +293,8 @@ pub const AGENT_TURNS_WINDOW_MS: i64 = 5 * 60 * 1000;
 /// them; past it the chat counted least lately is let go).
 pub const AGENT_TURN_CHATS_MAX: usize = 256;
 /// Questions whose answer the state remembers taking (`State::answered`),
-/// the newest: one answer a question, however many an agent on another
-/// computer posts. Far more than a computer's agents ask between restores.
+/// the newest: one answer a question from each agent asked it, however many
+/// an agent on another computer posts. Far more than a computer's agents ask between restores.
 pub const ANSWERED_KEPT: usize = 1024;
 
 /// A turn of this computer's that ended is remembered this long, at most

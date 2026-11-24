@@ -818,17 +818,19 @@ pub fn row_charge(usage: &Usage, book: &PriceBook, plan: Plan, awake_left_ms: i6
 }
 
 /// An awake row's time (`ms`, ending at `at_ms`) in the months of a
-/// ledger at `month`: its part in `month` or later (a row's clock may run a
-/// little ahead), in the month before it, and in any older, which sum to
-/// it.
+/// ledger at `month`: its part in `month`, in the month before it, and the
+/// rest (an older month's, or the next one's: a row's clock may run up to
+/// `CLOCK_SKEW_MS` ahead), which sum to it.
 pub fn awake_parts(at_ms: i64, ms: i64, month: Month) -> [i64; 3] {
     assert!(ms >= 0, "a row lasts no less than nothing");
     let start = at_ms - ms;
     let this = month.start_ms();
     let before = Month(month.0.saturating_sub(1)).start_ms().min(this);
+    let next = Month(month.0.saturating_add(1)).start_ms().max(this);
     let within = |from: i64, to: i64| (at_ms.min(to) - start.max(from)).max(0);
-    let parts = [within(this, i64::MAX), within(before, this), within(i64::MIN, before)];
-    assert_eq!(parts.iter().sum::<i64>(), ms, "a row's parts are all of it");
+    let (now, last) = (within(this, next), within(before, this));
+    let parts = [now, last, ms - now - last];
+    assert!(parts.iter().all(|p| *p >= 0), "a row's parts are all of it");
     parts
 }
 
@@ -1174,10 +1176,10 @@ impl Ledger {
     /// awake row counts in the bound of each month its time falls in: it
     /// ends at `at_ms` and lasted its `ms`, so a row across a month's start
     /// is two parts, the earlier counted in the month before (kept for rows
-    /// heard late), and a part in an older month let off whole (counted in
-    /// none: in the person's favour). So one computer is never charged for
-    /// being awake, whatever its rows straddle. Nothing is changed when it
-    /// is not priced.
+    /// heard late), and a part in an older month, or in the next (a clock
+    /// ahead), let off whole (counted in none: in the person's favour). So
+    /// one computer is never charged for being awake, whatever its rows
+    /// straddle. Nothing is changed when it is not priced.
     fn charge_for(&mut self, usage: &Usage, book: &PriceBook, at_ms: i64) -> Result<(Priced, i64), PriceError> {
         let (Usage::Awake { instance, ms }, Plan::SeatAlwaysOn) = (usage, self.money.plan) else {
             let (priced, charge, _) = row_charge(usage, book, self.money.plan, 0)?;
@@ -1185,8 +1187,8 @@ impl Ledger {
         };
         let priced = book.price(usage)?;
         let parts = awake_parts(at_ms, i64::try_from(*ms).expect("a row's time is bounded"), self.money.month);
-        // this month's (and one ahead's, within the clock's skew), the month
-        // before's, an older one's: each let off up to what its bound has left
+        // this month's, the month before's, and the rest (an older month's or
+        // the next's): each let off up to what its bound has left
         let left = [SEAT_AWAKE_INCLUDED_MS - self.money.awake_waived_ms, SEAT_AWAKE_INCLUDED_MS - self.money.awake_waived_before_ms, i64::MAX];
         let waived: [i64; 3] = std::array::from_fn(|i| parts[i].min(left[i].max(0)));
         let over: i64 = parts.iter().zip(&waived).map(|(p, w)| p - w).sum();

@@ -1519,8 +1519,9 @@ a month, all its person's computers together, its always-on one's hours
 metered and counted too; past it, it is charged from their credit
 (`fragment_core::ledger::SEAT_AWAKE_INCLUDED_MS`). The seat's always-on
 computer is their computer from before, else their first agent's own,
-each push telling the other it is not: their other agents' sleep when
-idle.
+each push telling the other it is not before it tells the seat's it is
+(so a push cut short leaves at most one always on, at worst none until
+the next): their other agents' sleep when idle.
 Awake time is time the computer was shown up: from its start's `Ready`
 (or, for a start put to sleep before it, that sleep), in the intervals
 the DO hears, each alarm's at least every five minutes and each step of
