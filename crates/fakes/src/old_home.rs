@@ -2,6 +2,10 @@
 //! `fixtures/old-home`, synthetic and already filtered, laid out as
 //! finite.computer kept one, and its layout (`fixtures/old-home.layout.json`).
 //! A stage brings a home as one zip (zip64): `stage` makes one of it.
+//!
+//! Its caller names the checkout (`repo`, the repo root). A path compiled
+//! in here would name the checkout this crate was built in, and cargo takes
+//! the crate as built in any other that is handed its target directory.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -9,26 +13,27 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// The home's folder.
-pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/old-home")
+pub fn root(repo: &Path) -> PathBuf {
+    repo.join("crates/fakes/fixtures/old-home")
 }
 
 /// Its layout file.
-pub fn layout() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/old-home.layout.json")
+pub fn layout(repo: &Path) -> PathBuf {
+    repo.join("crates/fakes/fixtures/old-home.layout.json")
 }
 
 /// Every file of the home, by its path relative to `root`, in path order.
-fn files() -> Result<Vec<(String, PathBuf)>> {
+fn files(repo: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let root = root(repo);
     let mut out = Vec::new();
-    let mut folders = vec![root()];
+    let mut folders = vec![root.clone()];
     while let Some(dir) = folders.pop() {
         for e in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = e?.path();
             if path.is_dir() {
                 folders.push(path);
             } else {
-                let rel = path.strip_prefix(root())?.to_str().context("a fixture's path is text")?.to_string();
+                let rel = path.strip_prefix(&root)?.to_str().context("a fixture's path is text")?.to_string();
                 out.push((rel, path));
             }
         }
@@ -39,9 +44,9 @@ fn files() -> Result<Vec<(String, PathBuf)>> {
 
 /// The home as one zip at `to`, as a stage brings it, with `extra` files
 /// (path, bytes) beside its own: every file it holds, in its order.
-pub fn stage(to: &Path, extra: &[(&str, Vec<u8>)]) -> Result<Vec<(String, Vec<u8>)>> {
+pub fn stage(repo: &Path, to: &Path, extra: &[(&str, Vec<u8>)]) -> Result<Vec<(String, Vec<u8>)>> {
     let mut all: Vec<(String, Vec<u8>)> = Vec::new();
-    for (rel, path) in files()? {
+    for (rel, path) in files(repo)? {
         all.push((rel, std::fs::read(&path)?));
     }
     all.extend(extra.iter().map(|(p, b)| (p.to_string(), b.clone())));
