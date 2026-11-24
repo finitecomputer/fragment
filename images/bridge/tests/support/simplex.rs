@@ -429,3 +429,152 @@ pub fn sha256_of(path: &Path) -> String {
     let out = Command::new("sha256sum").arg(path).output().expect("sha256sum runs");
     String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string()
 }
+
+// ---- the bridge's SimpleX, as a computer runs it (tests/simplex.rs, and
+// the move to a door: tests/door.rs) ----
+
+/// The lab's computer: the bridge with SimpleX's core
+/// (`tests/simplex/bridge.Dockerfile`).
+pub const BRIDGE_IMAGE: &str = "fragment-simplex-bridge:test";
+
+/// The lab's computer, a container of `BRIDGE_IMAGE` on the lab's network:
+/// its fragment API the fake on this host, its `/data` the directory
+/// `data` here, its screen port on this host's loopback.
+pub struct Computer {
+    pub name: String,
+    pub port: u16,
+    /// The nonce of the link ticket its page was handed last: the session
+    /// its invitation is shown to.
+    pub session: std::sync::Mutex<String>,
+}
+
+impl Computer {
+    pub fn start(lab: &Lab, fake: &super::fake::Fake, data: &Path) -> Computer {
+        let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
+        let xftp = format!("BRIDGE_SIMPLEX_XFTP={}", lab.xftp.as_deref().expect("a lab with files"));
+        Computer::start_with(lab, fake, data, &["-e", &smp, "-e", &xftp])
+    }
+
+    /// `start`, its cores on SimpleX's preset servers, as a computer's are.
+    pub fn start_on_presets(lab: &Lab, fake: &super::fake::Fake, data: &Path) -> Computer {
+        Computer::start_with(lab, fake, data, &[])
+    }
+
+    pub fn start_with(lab: &Lab, fake: &super::fake::Fake, data: &Path, servers: &[&str]) -> Computer {
+        let name = lab.container("computer");
+        let _ = docker(&["rm", "-f", &name]);
+        std::fs::create_dir_all(data).expect("its /data");
+        let (net, ids, vol) = (format!("{}-net", lab.prefix), uid_gid(), format!("{}:/data", data.display()));
+        let api = format!("FRAGMENT_API=http://api.fragment.internal:{}", fake.addr.port());
+        let mut args = vec!["run", "-d", "--name", &name, "--network", &net, "--add-host", "api.fragment.internal:host-gateway", "--user", &ids, "-e", "HOME=/data", "-e", &api];
+        args.extend(servers);
+        args.extend(["-e", "FRAGMENT_COMPUTER=computer:00aa", "-v", &vol, "-p", "127.0.0.1::6080", BRIDGE_IMAGE]);
+        docker(&args).expect("the computer starts");
+        let port = docker(&["port", &name, "6080/tcp"]).expect("its port").lines().next().and_then(|l| l.rsplit_once(':')).and_then(|(_, p)| p.parse().ok()).expect("a port");
+        Computer { name, port, session: std::sync::Mutex::new(String::new()) }
+    }
+
+    /// `method` on its screen port, as its page asks (with its session):
+    /// the status and the JSON answered.
+    pub fn http(&self, method: &str, path: &str) -> (u16, Value) {
+        self.http_with(method, path, None)
+    }
+
+    /// `http` as another page would ask (the agent's tools, say): no session.
+    pub fn http_bare(&self, method: &str, path: &str) -> (u16, Value) {
+        self.http_as("", method, path, None)
+    }
+
+    pub fn http_with(&self, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+        let session = self.session.lock().expect("its session").clone();
+        self.http_as(&session, method, path, body)
+    }
+
+    pub fn http_as(&self, session: &str, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+        let url = format!("http://127.0.0.1:{}{path}{}", self.port, if session.is_empty() { String::new() } else { format!("&s={session}") });
+        let sent = body.map(Value::to_string).unwrap_or_default();
+        let mut args = vec!["-s", "-X", method, "-w", "\n%{http_code}", url.as_str()];
+        if body.is_some() {
+            args.extend(["-H", "content-type: application/json", "--data-binary", sent.as_str()]);
+        }
+        let out = Command::new("curl").args(&args).output().expect("curl runs");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+        (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(Value::Null))
+    }
+
+    /// Its owner links juniper from their Settings: with the ticket the
+    /// platform (the fake) signed as the agent's key.
+    pub fn link(&self, fake: &super::fake::Fake) -> (u16, Value) {
+        self.link_as(fake, "juniper")
+    }
+
+    /// `link`, of the agent labeled `label`.
+    pub fn link_as(&self, fake: &super::fake::Fake, label: &str) -> (u16, Value) {
+        let t = fake.ticket(label, "link");
+        *self.session.lock().expect("its session") = t["nonce"].as_str().expect("a nonce").to_string();
+        self.http_with("POST", &format!("/simplex/link?agent={label}--k3x9"), Some(&t))
+    }
+
+    /// Its owner unlinks juniper from their Settings.
+    pub fn unlink(&self, fake: &super::fake::Fake) -> (u16, Value) {
+        self.http_with("POST", "/simplex/unlink?agent=juniper--k3x9", Some(&fake.ticket("juniper", "unlink")))
+    }
+
+    /// Its SimpleX state, once `done` holds (within `within`).
+    pub async fn state_until(&self, within: Duration, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+        self.state_of_until("juniper--k3x9", within, what, done).await
+    }
+
+    /// `state_until`, of `agent`'s.
+    pub async fn state_of_until(&self, agent: &str, within: Duration, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+        let t0 = Instant::now();
+        // bounded by `within`
+        loop {
+            let (code, v) = self.http("GET", &format!("/simplex/state?agent={agent}"));
+            if code == 200 && done(&v) {
+                return v;
+            }
+            assert!(t0.elapsed() < within, "{what}: not within {within:?}; last {code} {v}\n{}", fragment_bridge::simplex::wire::cut(&logs(&self.name), 6_000));
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    pub fn exec(&self, cmd: &str) -> String {
+        docker(&["exec", &self.name, "sh", "-c", cmd]).unwrap_or_default()
+    }
+
+    /// How many SimpleX cores run in it now.
+    pub fn cores(&self) -> usize {
+        self.exec("for c in /proc/[0-9]*/comm; do cat $c 2>/dev/null; done").lines().filter(|l| l.trim() == "simplex-chat").count()
+    }
+
+    pub fn events(&self, kind: &str) -> Vec<Value> {
+        logs(&self.name).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["event"] == kind).collect()
+    }
+
+    /// SIGTERM, as a sleep's stop sends it; gone.
+    pub fn stop(&self) {
+        let _ = std::fs::write(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{}.log", self.name)), logs(&self.name));
+        docker(&["stop", "-t", "10", &self.name]).expect("it stops");
+        docker(&["rm", "-f", &self.name]).expect("it goes");
+    }
+}
+
+impl Drop for Computer {
+    fn drop(&mut self) {
+        let _ = std::fs::write(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{}.log", self.name)), logs(&self.name));
+        let _ = docker(&["rm", "-f", &self.name]);
+    }
+}
+
+pub fn build_bridge_image() {
+    if std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_ok() {
+        return;
+    }
+    let images = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("images/").to_path_buf();
+    // loaded into the local images whatever builder builds it (a
+    // docker-container builder keeps its result in its cache otherwise)
+    let status = Command::new("docker").args(["build", "--load", "--platform", "linux/amd64", "-q", "-f", "bridge/tests/simplex/bridge.Dockerfile", "-t", BRIDGE_IMAGE, "."]).current_dir(images).status().expect("docker runs");
+    assert!(status.success(), "the lab's computer builds");
+}

@@ -849,3 +849,141 @@ async fn files_against_the_real_core() {
     let left = docker(&["exec", &g1.ctr, "sh", "-c", "ls -A /data/door/out | wc -l"]).expect("its copies");
     assert_eq!(left.trim(), "0", "its copy let go once uploaded");
 }
+
+/// The platform's handover of juniper's link, as the cell's Computer
+/// object asks it (its screen port, a handover's ticket): its status, its
+/// door's first save and the SHA-256 its answer says.
+fn hand_over(c: &Computer, ticket: &Value, into: &std::path::Path) -> (u16, Vec<u8>, String) {
+    let url = format!("http://127.0.0.1:{}/simplex/handover?agent=juniper--k3x9", c.port);
+    let out = Command::new("curl").args(["-s", "-X", "POST", "-D", "-", "-o"]).arg(into).args(["-H", "content-type: application/json", "--data-binary", &ticket.to_string(), &url]).output().expect("curl runs");
+    let head = String::from_utf8_lossy(&out.stdout).to_string();
+    let status = head.lines().next().and_then(|l| l.split(' ').nth(1)).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let sha = head.lines().find_map(|l| l.strip_prefix("x-door-sha256: ")).unwrap_or("").trim().to_string();
+    (status, std::fs::read(into).unwrap_or_default(), sha)
+}
+
+/// The way back, as the cell's Computer object asks it: its ticket, and its
+/// door's newest save (`behind` its door's newest effects or not).
+fn hand_back(c: &Computer, ticket: &Value, save: &std::path::Path, behind: bool) -> (u16, Value) {
+    let url = format!("http://127.0.0.1:{}/simplex/back?agent=juniper--k3x9", c.port);
+    let out = Command::new("curl")
+        .args(["-s", "-X", "POST", "-w", "\n%{http_code}", "-H", &format!("x-door-ticket: {ticket}"), "-H", &format!("x-door-behind: {}", u8::from(behind)), "--data-binary"])
+        .arg(format!("@{}", save.display()))
+        .arg(&url)
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+    (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(Value::Null))
+}
+
+fn relayed_on(fake: &support::fake::Fake, chat: &str) -> Vec<Value> {
+    fake.with(|w| w.records(chat, "chat").into_iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").collect())
+}
+
+/// Goal (D4, Paul's FIN-731: the move carries the data): a computer's
+/// SimpleX link moves into a door with nothing for its owner to do, and
+/// back. Linked on a computer (the bridge's own core and chat), the
+/// owner's message answered; handed over by the platform's ticket: the
+/// computer's core stopped for good, its answer the door's first save,
+/// whose SHA-256 it says; a second handover's ticket refused. The door
+/// restores it: the same contact, linked, with no invitation; the owner's
+/// next message arrives there once, and nothing the computer posted comes
+/// again; the door's reply reaches the owner's app once. The way back: the
+/// door's planned stop saves last, the computer places that save, takes its
+/// door key back, and its core runs again on it: the owner's next message
+/// is answered in the computer's chat. Method: the real bridge image (the
+/// lab's computer) and the door's real image, SimpleX's real core, a
+/// person's real client, fakes for the platform and the door's object.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn a_computers_link_moves_into_a_door_and_back() {
+    build_image();
+    build_bridge_image();
+    let mut lab = Lab::up("door-move");
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
+    let c = Computer::start_with(&lab, &fake, &data, &["-e", &smp]);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let agent = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    fake.until(30_000, "its SimpleX chat", |w| w.made.len() == 1).await;
+    let chat = fake.with(|w| w.made[0].clone());
+    say(&mut person, agent, "before the move").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the move")).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), 1);
+
+    // handed over: once its posts are acknowledged (busy until then)
+    fake.with(|w| w.computer["simplexMoved"] = json!(["juniper--k3x9"]));
+    let ticket = fake.ticket("juniper", "handover");
+    let first = lab.dir.join("handover.sxd");
+    let t0 = Instant::now();
+    let (bytes, sha) = loop {
+        let (code, bytes, sha) = hand_over(&c, &fake.ticket("juniper", "handover"), &first);
+        if code == 200 {
+            break (bytes, sha);
+        }
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "handed over within 30 s: {code} {}", String::from_utf8_lossy(&bytes));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert_eq!(sha256_hex(&bytes), sha, "its answer names its save's SHA-256");
+    assert_eq!(kept_of(&bytes)["link"]["phase"], "linked");
+    let again = lab.dir.join("again.sxd");
+    let (code, _, _) = hand_over(&c, &ticket, &again);
+    assert_eq!(code, 409, "another handover's ticket, once moved");
+    let t0 = Instant::now();
+    while c.cores() != 0 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "its core stopped");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // the door restores it as its first save
+    let door = FakeDoor::start().await;
+    door.with(|s| {
+        s.keep = Some(lab.dir.clone());
+        s.saves.push(Kept { start: 0, life: 0, seq: 1, mark: 0, bytes: Bytes::from(bytes.clone()) });
+    });
+    let g1 = start(&lab, &door, 1);
+    let s = g1.until(Duration::from_secs(90), |s| s["ready"] == true && s["phase"] == "linked").await;
+    assert_eq!(s["name"], "person", "the same contact, with no invitation: {s}");
+    say(&mut person, agent, "after the move").await;
+    let t0 = Instant::now();
+    while door.texts() != ["after the move"] {
+        assert!(t0.elapsed() < Duration::from_secs(60), "the owner's next message at the door, and nothing again: {:?}", door.texts());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let mut got = vec![];
+    g1.reply(&door, "chat:1", "from the door").await;
+    person_got(&mut person, &mut got, &["from the door"]).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), 1, "nothing more on the computer's chat");
+    assert_eq!(c.cores(), 0, "the computer's core never ran beside the door's");
+    assert_eq!(door.with(|s| s.delivered.iter().filter(|(_, t)| t == "after the move").count()), 1, "delivered once");
+
+    // the way back: the door's planned stop saves last; the computer places it
+    let saves = door.with(|s| s.saves.len());
+    g1.kill("TERM");
+    assert_eq!(g1.exited(), 0, "a planned stop");
+    let (newest, behind) = door.with(|s| (s.saves.last().expect("its last save").bytes.clone(), s.saves.last().expect("its last").mark < s.marks));
+    assert!(door.with(|s| s.saves.len()) > saves, "its last save taken");
+    let newest_at = lab.dir.join("newest.sxd");
+    std::fs::write(&newest_at, &newest).expect("written");
+    fake.with(|w| w.computer["simplexMoved"] = json!([]));
+    let (code, v) = hand_back(&c, &fake.ticket("juniper", "back"), &newest_at, behind);
+    assert_eq!(code, 200, "{v}");
+    assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door key taken back");
+    c.state_until(Duration::from_secs(90), "running again", |v| v["running"] == true && v["phase"] == "linked").await;
+    say(&mut person, agent, "after the way back").await;
+    received(&mut person, Duration::from_secs(90), |got| got.iter().any(|t| t == "echo: [paul] after the way back")).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), 2, "on the computer's chat again");
+    println!("moved and back: the door's save {} bytes, behind {behind}", bytes.len());
+}
