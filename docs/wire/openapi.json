@@ -217,6 +217,14 @@
           "kind": {
             "type": "string"
           },
+          "mandate": {
+            "default": null,
+            "description": "Proof that the agent reading it was asked by its owner (docs/api.md,\n\"Who asked: mandates\"): on a channel read by an agent member as\nitself, a record its owner wrote (or a door relayed for them)\ncarries one, which its calls carry in place of `for`. Absent\nelsewhere.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "principal": {
             "description": "npub, `anon:…`, or `platform`",
             "type": "string"

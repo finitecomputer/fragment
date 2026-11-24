@@ -75,10 +75,16 @@ export function stale(status, body) {
   return status === 409 && typeof body?.message === "string" && body.message.startsWith("a stale mark");
 }
 
+// Every file a door keeps in the bucket is under this prefix of its own,
+// which its end deletes whole.
+export function doorPrefix(door) {
+  if (!nameOk(door)) throw new Error(`no door is named ${JSON.stringify(door)}`);
+  return `doors/${door}/`;
+}
+
 // A save's file in the bucket, under the door's own prefix.
 export function saveKey(door, generation, seq) {
-  if (!nameOk(door)) throw new Error(`no door is named ${JSON.stringify(door)}`);
-  return `doors/${door}/saves/${generation}-${seq}`;
+  return `${doorPrefix(door)}saves/${generation}-${seq}`;
 }
 
 const newestFirst = (a, b) => b.generation - a.generation || b.seq - a.seq;

@@ -23,7 +23,8 @@ use crate::api::{Api, Call, Reply};
 use crate::{Need, Suite};
 
 pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("admin", &[Need::Deployment, Need::Operator]) {
+    // its operator's pin of a person's computer, where the run makes them
+    if !s.section_using("admin", &[Need::Deployment, Need::Operator], &[Need::Computers]) {
         return Ok(());
     }
     let op_session = api.sign_in("operator@e2e.test")?;

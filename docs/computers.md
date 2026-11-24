@@ -243,15 +243,17 @@ Not built either:
   not restore is never given again, and a door with saves never starts as
   a new one over them). A deployment runs doors only when its config names
   their image (`doors`), and a local stack only for the e2e's
-  `simplex-door` lane. Its connector (templates/simplex, a hosted door as
+  `simplex-door` lane (with `simplex-link`, its doors reach SimpleX's
+  servers for a real link). Its connector (templates/simplex, a hosted door as
   Telegram's is) starts it and is its only caller of the two: its jobs
   reach the door of the connector's life (`door_id`: a name made again
   reaches another), and the door posts its
   owner's messages to the connector's inbox as a webhook does, which
   publishes each to the bound agent; the agent's computer wakes for it as
-  for any message, so it may sleep. Until Settings makes one (the next
-  step) and existing links move to doors, SimpleX runs on an always-on
-  computer (decision 32).
+  for any message, so it may sleep. Settings makes one for every seat,
+  its setup page showing the invitation's QR code (D3); an always-on
+  computer that does SimpleX keeps each agent's own (decision 32) until
+  existing links move to doors.
 
 ## What its owner is told
 

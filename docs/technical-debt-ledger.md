@@ -709,19 +709,14 @@ unfinished design, not debt.
   computer's (images/bridge/src/simplex, its door key and signed records
   posted as the agent into its `<label>-simplex` chat), and the
   connector's (templates/simplex on the platform's door, cell/door.mjs:
-  no key, records the platform checks through `job.door`). The
-  connector is made only by a test or the e2e so far, and a connector
-  deleted or unbound leaves its door running, its saves in the bucket,
-  until it is stopped (its life's own: a name made again reaches another
-  door, never its link).
-- **Risk:** two paths to keep proven for one messenger; a door no one
-  stops costs its container (about $2 a month), and a deleted
-  connector's SimpleX state outlives it.
-- **Delete when:** Settings links through the connector (D3), existing
-  links move to doors (D4), and the bridge's SimpleX module, its door key
-  and the signed-record route are deleted (D5); the connector's deletion
-  stops its door and deletes its saves (`ended.rs`), and its unlinking
-  stops it, with tests.
+  no key, records the platform checks through `job.door`). Settings
+  makes the connector for every seat (D3) but where an always-on
+  computer that does SimpleX keeps an agent's own: its links there, and
+  a chat moved from finite.computer to keep (FIN-463).
+- **Risk:** two paths to keep proven for one messenger.
+- **Delete when:** existing links move to doors (D4), and the bridge's
+  SimpleX module, its door key and the signed-record route are deleted
+  (D5).
 
 ## SimpleX retains the computer's root trust and rewindable state
 
@@ -934,7 +929,9 @@ unfinished design, not debt.
   intercepts through public DNS first, so a run's saves failed while
   public DNS did not answer (#1017). The e2e's fleet starts computers
   with it off (`FRAGMENT_COMPUTER_INTERNET=off`, crates/devstack's
-  `Fleet::computer_internet`), and the sidecar answers them at once.
+  `Fleet::computer_internet`), and the sidecar answers them at once; its
+  SimpleX doors too (`FRAGMENT_DOOR_INTERNET=off`), but for a run that
+  names `simplex-link`, whose door links to SimpleX's servers for real.
   The computers lane checks it by dropping a sidecar's queries to public
   DNS (`containers::drop_public_dns`, which leans on the sidecar's mark
   for them).

@@ -48,7 +48,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
-  const { computerSection, connectionsSection, secretsSection, simplexSection, telegramSection, readTelegram } = sections;
+  const { computerSection, connectionsSection, secretsSection, simplexSection, telegramSection, readConnectors } = sections;
   const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
@@ -230,7 +230,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
       read("/api/connections"),
       read("/api/ledger/uses"),
       read("/api/vault"),
-    ]), readTelegram()]);
+    ]), readConnectors()]);
     if (lost()) return;
     const [ledger, mySeat, linked, uses, vault] = reads.map((r) => r.value ?? null);
     // what failed on its way is read again by itself once these render

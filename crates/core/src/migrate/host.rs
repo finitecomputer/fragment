@@ -243,7 +243,7 @@ mod tests {
     use super::*;
 
     fn checked_in() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = std::path::PathBuf::from("../..");
         std::fs::read_to_string(root.join(LOCK_PATH)).expect("the lock is checked in")
     }
 

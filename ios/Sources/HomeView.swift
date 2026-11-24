@@ -174,7 +174,7 @@ struct HomeView: View {
 
     var body: some View {
         ZStack {
-            DesktopWallpaper().glassLogo(size: 136, y: expanded ? cardY : logoY)
+            DesktopWallpaper().glassLogo(size: 136, y: expanded ? cardY : logoY, paused: covered)
             VStack(spacing: 0) {
                 // The logo sits midway between the top bar and the card.
                 // 7 past the bar's own 9 under its buttons: the sides' 16 by eye.

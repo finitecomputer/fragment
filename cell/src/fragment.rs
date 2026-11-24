@@ -1293,7 +1293,7 @@ impl FragmentCell {
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
             (Method::Get, ["api", "channels", channel]) => {
                 let (after, before, limit) = crate::channels::page_query(&caller.url)?;
-                self.channel(&caller, channel, after, before, limit)
+                self.channel(&caller, channel, after, before, limit).await
             }
             (Method::Get, ["api", "channels", channel, "newest"]) => self.newest_api(&caller, channel),
             (Method::Post, ["api", "channels", channel]) => {

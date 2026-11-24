@@ -19,10 +19,6 @@ use std::time::SystemTime;
 /// Entries the check of the system's cache walks at most.
 const WALK_ENTRIES_MAX: u32 = 100_000;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask sits below the repo root").to_path_buf()
-}
-
 /// Files and directories under `dir` modified after `since` (none if
 /// `dir` is absent).
 fn changed_since(dir: &Path, since: SystemTime) -> Vec<PathBuf> {
@@ -58,7 +54,7 @@ fn system_wrangler_cache() -> PathBuf {
 #[test]
 #[ignore = "runs the e2e's deploy, site and shell sections"]
 fn the_e2e_passes_with_a_broken_node_first_on_path() {
-    let root = repo_root();
+    let root = fragment_devstack::repo_root();
     let dir = std::env::temp_dir().join(format!("broken-node-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("make the broken node's directory");
     let ran = dir.join("ran");
@@ -79,7 +75,7 @@ fn the_e2e_passes_with_a_broken_node_first_on_path() {
     let started = SystemTime::now();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     println!("PATH={}", path.to_string_lossy());
-    let status = Command::new(cargo).args(["xtask", "e2e", "--only", "deploy,site,shell"]).env("PATH", &path).current_dir(&root).status().expect("run the e2e");
+    let status = fragment_devstack::outside_cargo(cargo).args(["xtask", "e2e", "--only", "deploy,site,shell"]).env("PATH", &path).current_dir(&root).status().expect("run the e2e");
     assert!(status.success(), "the e2e passed with a broken node first on PATH: {status}");
     assert!(!ran.exists(), "nothing ran the node on PATH: {}", fs::read_to_string(&ran).unwrap_or_default());
 

@@ -67,7 +67,7 @@ use crate::{browser, Fake, Planned, Shape, Suite};
 pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
-const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
+const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]] [--containers]
        fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,models]
                     [--max-paid-calls <n>] [--upgrade-from <image>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
@@ -84,6 +84,9 @@ pub struct Args {
     /// A local run of one shard's sections, `k` of `--shard k/n` (the
     /// table's split: lanes/mod.rs `SHARDS`), as CI runs the suite.
     pub shard: Option<u32>,
+    /// `--containers`: no run, only the container classes the local run's
+    /// node would run, one per line (xtask builds their images ahead).
+    pub containers: bool,
 }
 
 /// A hosted run's settings.
@@ -139,7 +142,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
     let (mut operator_key_file, mut operators, mut upgrade_from) = (None, vec![], None);
     let (mut dry_run, mut sweep, mut rehearse) = (false, None, false);
-    let mut shard = None;
+    let (mut shard, mut containers) = (None, false);
     let mut it = args.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(arg) = it.next() {
@@ -167,6 +170,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
             }
             "--sweep-all" if sweep.is_none() => sweep = Some(SweepOf::All),
             "--rehearse" => rehearse = true,
+            "--containers" => containers = true,
             _ => return Err(usage()),
         }
     }
@@ -191,7 +195,10 @@ pub fn parse(args: &[String]) -> Result<Args> {
             true => Some(max_paid_calls_or_default()?),
             false => None,
         };
-        return Ok(Args { only, except, hosted: None, rehearse, shard });
+        return Ok(Args { only, except, hosted: None, rehearse, shard, containers });
+    }
+    if containers {
+        bail!("--containers names a local node's containers: not with --hosted");
     }
     if rehearse {
         bail!("--rehearse is the hosted lane on the local node: not with --hosted");
@@ -236,7 +243,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
     let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, doors, models, max_paid_calls, upgrade_from, action };
-    Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None })
+    Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None, containers: false })
 }
 
 /// `--upgrade-from <image>`'s name, as a pin takes it: 1 to 64 visible
@@ -297,14 +304,24 @@ fn offers(hosted: &Hosted) -> Offers {
 /// A hosted suite: no node and no fakes, the preview's API, its levers'
 /// secret in `shared`.
 fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared: Arc<api::Run>, cli: PathBuf, scratch: PathBuf) -> Suite {
+    let mut s = nodeless(only, except, Rung::Hosted(offers(hosted)), shared, cli, scratch);
+    s.hosted_rules = true;
+    s.preview = Some(hosted.preview.clone());
+    s.upgrade_from = hosted.upgrade_from.clone();
+    s
+}
+
+/// A suite on `rung` with no node and no fakes: a hosted run's (`suite`),
+/// or a plan's (`plan`, `plan_local`).
+fn nodeless(only: Option<Vec<String>>, except: Vec<String>, rung: Rung, shared: Arc<api::Run>, cli: PathBuf, scratch: PathBuf) -> Suite {
     Suite {
         only,
         except,
         shard: None,
-        rung: Rung::Hosted(offers(hosted)),
-        hosted_rules: true,
-        preview: Some(hosted.preview.clone()),
-        upgrade_from: hosted.upgrade_from.clone(),
+        rung,
+        hosted_rules: false,
+        preview: None,
+        upgrade_from: None,
         plan: None,
         shared,
         owners: Default::default(),
@@ -348,7 +365,25 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         door_url: None,
         secrets: devstack::Secrets::Store,
         containers_removed: false,
+        node_computers: false,
+        node_doors: false,
     }
+}
+
+/// The plan of a local run on `rung` (`local_rung`: a rehearsal's keeps
+/// the hosted lane's rules), its sections chosen as the run chooses them
+/// (`only`, `except`, `shard`): each with what it needs and uses, and
+/// whether it would run. Nothing is called; the run's node is shaped by
+/// it (`node_classes`).
+pub fn plan_local(only: Option<Vec<String>>, except: Vec<String>, shard: Option<u32>, rung: Rung) -> Vec<Planned> {
+    // never sent: a plan makes no request
+    let shared = api::Run::signing_in_by_levers("0".repeat(levers::SECRET_BYTES_MIN), 0);
+    let mut s = nodeless(only, except, rung, shared, PathBuf::new(), devstack::repo_root().join("target/e2e/plan"));
+    s.shard = shard;
+    s.hosted_rules = matches!(rung, Rung::Hosted(_));
+    s.plan = Some(vec![]);
+    crate::lanes::run(&mut s);
+    s.plan.take().unwrap_or_default()
 }
 
 /// The plan of a hosted run: each section the lanes ask for, in order,
