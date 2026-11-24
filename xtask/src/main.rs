@@ -702,8 +702,9 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// (`run` none: CI's, whose runs come after it), every one the cell's
 /// config names, beside the Rust; for a run (`run`: its suite arguments),
 /// those of the container classes its node keeps, which the suite says
-/// once it is built (`node_classes`). A run of sections that use no
-/// computer builds none, and asks nothing of Docker.
+/// once it is built (`node_classes`): so the suite builds first, and the
+/// CLI beside those images. A run of sections that use no computer builds
+/// none, and asks nothing of Docker.
 fn build_e2e(run: Option<&[&String]>) -> Result<()> {
     let t0 = std::time::Instant::now();
     // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
@@ -711,12 +712,9 @@ fn build_e2e(run: Option<&[&String]>) -> Result<()> {
     let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
         let every = (images && run.is_none()).then(|| s.spawn(|| build::images(None)));
-        let native = s.spawn(move || -> Result<()> {
-            build_native()?;
-            match run {
-                Some(args) if images => build::images(Some(&node_classes(args)?)),
-                _ => Ok(()),
-            }
+        let native = s.spawn(move || match run {
+            Some(args) if images => build_native_beside(|| build::images(Some(&node_classes(args)?))),
+            _ => build_native_beside(|| Ok(())),
         });
         let cell = build::cell();
         let every = every.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
@@ -741,12 +739,23 @@ fn node_classes(suite_args: &[&String]) -> Result<Vec<String>> {
 
 /// The CLI and the suite, for this machine.
 fn build_native() -> Result<()> {
+    build_native_beside(|| Ok(()))
+}
+
+/// The suite, then the CLI with `beside` running beside its build: what
+/// only the built suite can say (a run's images, `build_e2e`) starts as
+/// soon as it can, and waits on no more of the Rust than that.
+fn build_native_beside(beside: impl FnOnce() -> Result<()> + Send) -> Result<()> {
     let t0 = std::time::Instant::now();
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
     build_suite()?;
+    let built = std::thread::scope(|s| {
+        let beside = s.spawn(beside);
+        let cli = run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]));
+        cli.and(beside.join().expect("what builds beside the CLI does not panic"))
+    });
     println!("built the CLI and the suite in {:.1?}", t0.elapsed());
-    Ok(())
+    built
 }
 
 /// A merge conflict's markers (git's diff3 style too), at the start of a
