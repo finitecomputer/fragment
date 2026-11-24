@@ -23,31 +23,15 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     set: "Key set",
     not_set: "No key yet",
   };
-  // a connection's scope for people, by its last path segment (Google's
-  // https://www.googleapis.com/auth/<name>), else that segment itself; the
-  // list never names a sign-in scope as missing
-  const SCOPE_NAMES = {
-    "gmail.readonly": "Gmail (read)",
-    "gmail.modify": "Gmail (manage)",
-    "gmail.send": "Gmail (send)",
-    drive: "Drive",
-    "drive.readonly": "Drive (read)",
-    spreadsheets: "Sheets",
-    "spreadsheets.readonly": "Sheets (read)",
-    documents: "Docs",
-    "documents.readonly": "Docs (read)",
-    calendar: "Calendar",
-    "calendar.readonly": "Calendar (read)",
-    "contacts.readonly": "Contacts",
-  };
+  // a connection's scope for people: the name its provider's row gives it
+  // (`scopeNames`). The shell knows no scope of its own: one a row leaves
+  // unnamed is no chip (a sign-in's is never named), and a missing one,
+  // which is never a sign-in's, shows by its last path segment
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said
   const ACCESS = { read: "read only", write: "read and write" };
   const ACCESS_NAME = { read: "Read only", write: "Read and write" };
-  const scopeName = (scope) => {
-    const last = scope.split("/").pop();
-    return SCOPE_NAMES[last] ?? last;
-  };
+  const scopeName = (p, scope) => p.scopeNames?.[scope] ?? scope.split("/").pop();
   // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
   const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
   // Connect: a window opened by the press itself, before any await, and only
@@ -150,7 +134,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     return off;
   }
   // What the person left unticked when they connected an account, in words.
-  const notAllowed = (missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map(scopeName))].join(", ")}`);
+  const notAllowed = (p, missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map((s) => scopeName(p, s)))].join(", ")}`);
   // An account of several, for people: its label, or the provider's name.
   const accountLabel = (p, a) => a.account ?? `A ${providerLabel(p)} account`;
   // A connection that takes several accounts: each of the person's, oldest
@@ -187,7 +171,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         const again = connectButton(p, "Reconnect to add", said, { account: a.id, access: accessFor(p, a.access) });
         again.dataset.action = "reconnect";
         actions.append(again);
-        details.push(notAllowed(a.missing));
+        details.push(notAllowed(p, a.missing));
       }
       if (a.state === "connected" && a.access === "read") actions.append(allowChanges(p, said, { account: a.id }));
       if (a.state === "connected" && a.access === "write") details.push(readOnlyHow());
@@ -313,13 +297,12 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       st.append(el("span", `provider-light ${lightOf(p)}`));
       return st;
     };
-    // the card: its name, the deployment's note on it and a key's price, its
-    // light, and this month's calls; the whole card opens its sheet
+    // the card: its name, a key's price, its light, and this month's calls;
+    // the whole card opens its sheet, which alone says the row's note (Paul,
+    // 2026-11-20: no explaining on the list)
     const body = el("span", "provider-body");
-    const sub = el("span", "provider-sub");
-    if (p.note) sub.append(el("span", "provider-note", p.note));
-    if (price) sub.append(el("span", "provider-price", `${price} a call`));
-    body.append(el("span", "provider-name", name), sub);
+    body.append(el("span", "provider-name", name));
+    if (price) body.append(el("span", "provider-sub provider-price", `${price} a call`));
     const foot = el("span", "provider-foot", calls ? `${callsSaid(calls)} in ${month}${charge}` : `No calls in ${month}`);
     const open = el("button", "provider-open");
     open.type = "button";
@@ -346,11 +329,11 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     close.onclick = () => sheet.close();
     top.append(tile(true), titled, close);
     const inner = el("div", "provider-sheet-body");
-    if (p.note) inner.append(el("p", "provider-about", p.note));
-    // what a connection's account allows, in words
+    if (p.note) inner.append(el("p", "provider-about provider-note", p.note));
+    // what a connection's account allows, in words: each granted scope its
+    // row names for people
     const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
-    // (never its sign-in's: openid, email, profile)
-    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g));
+    const scopes = [...new Set(granted.map((g) => p.scopeNames?.[g]).filter(Boolean))];
     if (scopes.length) {
       const chips = el("div", "provider-chips");
       chips.append(...scopes.map((g) => el("span", null, g)));
@@ -412,7 +395,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       const again = connectButton(p, "Reconnect to add", said, { access: accessFor(p, p.access) });
       again.dataset.action = "reconnect";
       actions.append(again);
-      details.push(notAllowed(p.missing), said);
+      details.push(notAllowed(p, p.missing), said);
     }
     // read only: Allow changes; read and write: how to go back
     if (!several && p.kind === "connection" && p.state === "connected" && p.access === "read") {

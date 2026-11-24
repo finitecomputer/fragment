@@ -330,6 +330,7 @@ fn nodeless(only: Option<Vec<String>>, except: Vec<String>, rung: Rung, shared: 
         failed: vec![],
         skipped: vec![],
         ran: vec![],
+        declared: vec![],
         recovery_due: false,
         lost: None,
         cron: None,

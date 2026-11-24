@@ -56,6 +56,11 @@ gets the 404 a missing route gets, word for word. On a branch the levers
 reach the e2e's own things alone: a fragment lever only an `e2e-…`
 fragment, a ledger or computer lever only an e2e person's (403
 otherwise); the registry's, the move's and the mail lever are no route.
+A fragment lever that acts as or for someone (`member`'s `who`,
+`records`' `principal`: `levers::acting_for`) also needs the fragment's
+owner and that one each an e2e person or one's agent (403 otherwise).
+An `e2e-` label is not reserved: the other fragment levers reach a real
+person's fragment so labelled.
 
 | Route | Body |
 |---|---|
@@ -534,7 +539,13 @@ Over https every session cookie with `Path=/` is named `__Host-…`
 (`__Host-fragment_session`, `__Host-fragment_login`,
 `__Host-fragment_switch`, `__Host-fragment_own_key`,
 `__Host-fragment_site`) and read under that name only, so no fragment's
-page can set one for another origin.
+page can set one for another origin. A fragment's origin's own cookies
+are too: the share link's (`__Host-fragview`) and an unsigned visitor's
+(`__Host-fragment_anon`, whose hash is its anonymous principal). A
+browser still holding one under its plain name from before is sent it,
+and the cell ignores it: the share link opens again from its URL, and the
+visitor gets a new anonymous principal. Plain http (the dev stack) can
+hold no `__Host-` cookie, so there each is its plain name.
 
 **On a fragment's origin**, `GET __signin?token=` redeems a redemption for
 that fragment only (another's is 401 and stays unspent; its wait, the
@@ -1369,6 +1380,10 @@ commits) and `job.push(who, payload)` in a job (a step answering
 `{queued}`) push `{title, body, tag, url, icon?}` (at most 3800 bytes) to
 the subscriptions tagged `who` (at most `PUSH_WHO_MAX_CHARS`), or `*`; a
 relative `url` is the fragment's own, and `icon` an `http(s)` picture.
+A subscription ends with its subscriber's standing: removing a member
+(or a member leaving) drops the subscriptions they stored, and their
+agents', and making the fragment members only drops every subscription
+stored by someone who is not a member then.
 
 Every delivery (a record to a subscription, a push, a computer's wake) is
 written to the fragment's outbox with what caused it, then sent; one not
@@ -1844,7 +1859,12 @@ overdraft every trigger's run is `blocked`. A deploy dropping an operation
 drops its pause. A cron tick whose last run still goes is skipped. The
 inbox's pending records are its unfinished runs (`inbox.rejected` past
 `INBOX_PENDING_MAX`). Finished runs are kept `RUN_RETENTION_MS` (at most
-`RUNS_KEPT`).
+`RUNS_KEPT`), except that a run with a call id (a job's call, a record's
+trigger) that ran outlives the count for the retry window, so a retry never
+starts it twice: past the count a succeeded one keeps only its id, status
+and input hash (its input and output shed), and a held one is kept whole,
+replayable, at most `HELD_RUNS_GUARDED` of them. A blocked run never ran,
+so it goes with the count.
 
 ### Scheduled records
 
@@ -2083,7 +2103,7 @@ authorization is browser-bound (docs/pipes-browser-binding.md).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, access?, note?, accounts?, accountsMax?, charged?}]}`, in catalog order. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its access asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `access` what its grant lets agents do, `read` or `write`, and `accesses` what a connection offers to pick, `[read, write]`, or `[write]` where its provider has no read-only scope (then no `access`: the account's own permissions are its limit) ([access](pipes-browser-binding.md#access)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, access?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
+| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, access?, note?, scopeNames?, accounts?, accountsMax?, charged?}]}`, in catalog order. `scopeNames` is a connection's scopes for people, as its row names them (`{scope: name}`): settings shows a granted scope by its name there and no other, and a missing one it leaves out by its last path segment. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its access asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `access` what its grant lets agents do, `read` or `write`, and `accesses` what a connection offers to pick, `[read, write]`, or `[write]` where its provider has no read-only scope (then no `access`: the account's own permissions are its limit) ([access](pipes-browser-binding.md#access)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, access?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
 | `POST /api/connections/{provider}/authorize` | the shell's session (a signed key 403) | a connection's `{access: "read" \| "write"}`, the access the person picked of those its row offers (none, or `read` where it offers `write` alone, 400: never assumed), and beside it, on a row of several accounts, `{add: true}` (400 at `accounts_max`) or `{account: "<id>"}` (not theirs 404); an own key's `{}` → `{provider, url}` and a host-only state cookie. A connection's state, its session binding and S256 verifier are kept ten minutes; an own key's sign-in uses their Vault, `fragment_own_key` and PKCE. No `connection_oauth`: `not_connected`, no vendor call. Not offered 404; a provider with no sign-in 400 |
 | `GET /api/connections/{provider}/callback?code=&state=` | the browser that began it, on the platform host, with its state cookie and the **same live session** | → HTML with no credentials: the code exchanged once and the grant imported into the person's Pipes account with exactly the scopes it holds (an own key's sealed in their Vault); of several accounts, a grant of one already connected (its ID token's `sub`) reauthorizes it. A failure is 303 to `?refused=<word>`: `elsewhere`, `signed-out`, `declined`, `not-under-way`, `code-refused`, `no-scopes`, `one-account`, `account-limit`, `finishing`, `no-key`. Another host 404 |
 | `DELETE /api/connections/{provider}[?account=<id>]` | a person | → `{provider, account?, state, revoked}`: a connection disconnected (of several, the one named; none named with several 400; `account` on a row of one 400; an id not theirs 404). The account is fenced first, so no connect begun before lands after (while one is importing: 429, asked again); its grant revoked at the row's `revoke` endpoint (RFC 7009) when it names one, then deleted at Pipes; the computer told. `revoked`: the provider answered 200. Another kind 400 |
@@ -2281,7 +2301,9 @@ On a computer's origin `/__ticket?t=` redeemed by a top-level visit sets
 `fragment_computer_frame` (`HttpOnly; Secure; SameSite=None;
 Partitioned`); both `__Host-` over https, for 12 hours, naming its owner
 only. Every answer there but a socket's upgrade carries `frame-ancestors
-<platform>`. Its cookies count as on a fragment's origin (Which cookies
+<platform>` and no `Service-Worker-Allowed`. No service worker is served
+there: any `Service-Worker: script` request is 404 before `/__ticket` or a
+port sees it, so no port's page registers one. Its cookies count as on a fragment's origin (Which cookies
 count); a socket from any page but its own is 403.
 
 A guest's request to a provider's host has its placeholders swapped

@@ -381,11 +381,11 @@ fn a_sign_in_capped_otherwise_is_refused() {
 /// names, and reads them back by their plain ones.
 #[test]
 fn https_cookies_carry_the_host_prefix() {
-    assert_eq!(https_cookies("fragment_session=a; fragview=b; fragment_site=c"), "__Host-fragment_session=a; fragview=b; __Host-fragment_site=c");
-    assert_eq!(https_cookies("fragment_anon=d"), "fragment_anon=d", "an anonymous visitor's cookie is a site's own");
+    assert_eq!(https_cookies("fragment_session=a; fragview=b; fragment_site=c"), "__Host-fragment_session=a; __Host-fragview=b; __Host-fragment_site=c");
+    assert_eq!(https_cookies("fragment_anon=d; other=e"), "__Host-fragment_anon=d; other=e", "an anonymous visitor's cookie is the origin's own too");
     let mut headers = reqwest::header::HeaderMap::new();
     headers.append("set-cookie", "__Host-fragment_site=t; Path=/; Secure".parse().unwrap());
-    headers.append("set-cookie", "fragment_anon=v; Path=/".parse().unwrap());
+    headers.append("set-cookie", "__Host-fragment_anon=v; Path=/; Secure".parse().unwrap());
     let reply = Reply { status: 302, body: Value::Null, text: String::new(), bytes: vec![], headers };
     assert_eq!(reply.cookies(), ["fragment_site=t", "fragment_anon=v"]);
 }

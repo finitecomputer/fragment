@@ -261,6 +261,10 @@ pub fn not_modified(if_none_match: &str, etag: &str) -> bool {
 /// one place a page's token is (`?view=` sets it and goes on without it).
 pub const VIEW_COOKIE: &str = "fragview";
 
+/// An unsigned visitor's cookie on a fragment's origin: a random value
+/// whose hash names its anonymous principal.
+pub const ANON_COOKIE: &str = "fragment_anon";
+
 /// A query without its `view` pairs, each other pair as it came (not
 /// encoded again), or `None` when nothing is left: where a navigation that
 /// brought the share link goes on to, and what an app's `fetch` is handed,
@@ -294,6 +298,27 @@ pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
         let (k, v) = pair.split_once('=')?;
         (k.trim() == name).then(|| v.trim())
     })
+}
+
+/// A platform cookie's name: `__Host-` first wherever it can be (https,
+/// `Path=/`). Every fragment's page shares its domain with the others,
+/// and may set a cookie for all of it; a browser takes a `__Host-` cookie
+/// only host-only and Secure, so none such can stand in for the
+/// platform's own or another fragment's. Plain http (the dev stack's
+/// `*.fragment.localhost`) can hold no such cookie, so there it is the
+/// plain name.
+pub fn cookie_name(base: &str, secure: bool, path: &str) -> String {
+    if secure && path == "/" {
+        format!("__Host-{base}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// A platform cookie's value on an origin, read under the name it is set
+/// by there (`cookie_name`, at `Path=/`) and no other.
+pub fn origin_cookie<'a>(header: &'a str, base: &str, secure: bool) -> Option<&'a str> {
+    cookie(header, &cookie_name(base, secure, "/"))
 }
 
 /// The path a browser returns to after signing in, from the `return=` it
@@ -656,6 +681,27 @@ mod tests {
         assert_eq!(content_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(content_hash(b"foobar"), 0x8594_4171_f739_67e8);
         assert_eq!(hash_etag(0xaf63_dc4c_8601_ec8c), "\"af63dc4c8601ec8c\"");
+    }
+
+    /// Goal: over https a fragment's origin reads its platform cookies
+    /// (the share link's, an anonymous visitor's, a site session's) only
+    /// under their `__Host-` names, which a browser holds host-only and
+    /// Secure, so a cookie set for the whole domain never stands in for
+    /// one; over plain http, where no such name can be held, the plain
+    /// one. Method: a header carrying both names, read each way.
+    #[test]
+    fn origin_cookies_are_host_only_over_https() {
+        for base in [VIEW_COOKIE, ANON_COOKIE, "fragment_site"] {
+            let host = format!("__Host-{base}");
+            assert_eq!(cookie_name(base, true, "/"), host);
+            assert_eq!(cookie_name(base, false, "/"), base);
+            let both = format!("{base}=domain-wide; {host}=own");
+            assert_eq!(origin_cookie(&both, base, true), Some("own"), "{base}");
+            assert_eq!(origin_cookie(&format!("{base}=domain-wide"), base, true), None, "{base}: the plain name is nobody's over https");
+            assert_eq!(origin_cookie(&both, base, false), Some("domain-wide"), "{base}: plain http reads the plain name");
+        }
+        // a cookie under a narrower path cannot be `__Host-`
+        assert_eq!(cookie_name("fragment_x", true, "/__op"), "fragment_x");
     }
 
     #[test]

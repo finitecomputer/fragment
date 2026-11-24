@@ -1009,7 +1009,10 @@ provider's own hosts.
   book's; or an `own` key the person gives), its
   hosts, where its credential goes on a request, and its environment
   variables. Adding a provider is a row; no code names one.
-  deploy/example.jsonc has the platform's. Connecting one is
+  deploy/example.jsonc has the platform's. A connection's row is a file
+  of the checkout (deploy/providers), which a deployment names beside
+  its own client id and secret and never copies, so the row ships with
+  the release that reads it (deploy/providers/README.md). Connecting one is
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
   its person allowed: read only or read and write, as they picked, and

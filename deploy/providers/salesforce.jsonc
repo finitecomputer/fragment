@@ -1,0 +1,22 @@
+// The person's Salesforce org (a production org; a sandbox is Pipes'
+// `salesforce-test`, a row of its own): Pipes' `salesforce` provider,
+// connected through the browser once its External Client App's secret is
+// in the store (the app Pipes' Salesforce integration uses, with the
+// platform's callback beside Pipes', PKCE on). Its token goes to
+// login.salesforce.com (the identity an agent learns its org's host from)
+// and to the org's own host, as Pipes' metadata names it (`account_host`).
+// Salesforce's answer names no `expires_in`: its grant lands expired, and
+// Pipes refreshes it first. Its scopes reach all the signed-in user may do
+// (Salesforce has no read-only one), so it offers read and write alone,
+// and its note says how to limit that: the user's own permissions. Its
+// skill is salesforce-finite.
+{ "name": "salesforce", "kind": "connection", "title": "Salesforce",
+  "hosts": ["login.salesforce.com"],
+  "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "note": "Your agents can do anything the Salesforce user you sign in as can. To limit them, sign in as a dedicated integration user with only the permissions they need.",
+  "connection_oauth": { "authorize": "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent",
+    "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
+    "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
+  "scope_names": { "api": "Your org's data", "refresh_token": "Stay connected" },
+  "env": ["SALESFORCE_ACCESS_TOKEN"] }

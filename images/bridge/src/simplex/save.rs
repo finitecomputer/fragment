@@ -93,7 +93,7 @@ pub fn copy(source: &Path, target: &Path) -> Result<(), SaveError> {
     let _ = std::fs::remove_file(target);
     let c = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(io)?;
     c.busy_timeout(Duration::from_millis(BUSY_MS)).map_err(io)?;
-    c.backup(rusqlite::MAIN_DB, target, None).map_err(io)
+    c.backup(rusqlite::MAIN_DB, target, None::<fn(rusqlite::backup::Progress)>).map_err(io)
 }
 
 /// Each database in `dir` whole, as a stopped core left it: opened for
