@@ -2706,6 +2706,28 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     b.eval(page, &format!("(document.querySelector({face})?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("settings-agent-face.png"));
+    // a computer per agent: its computer is on its card in Settings' Agents,
+    // its own (made for it by Add's making), with its state, version and
+    // Restart; Settings has no Computer of its own any more
+    let own = format!("[data-agent={}] .agent-computer", js(&agent));
+    let carded = b.until(page, &format!("(() => {{ const c = document.querySelector({own}); return !!c && /State/.test(c.innerText) && !!c.querySelector('[data-action=restart-ask]'); }})()"), wait);
+    let seen = b.eval(page, &format!("({{ id: document.querySelector({own})?.dataset.computer ?? null, headings: [...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent) }})"))?;
+    let computers = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let mine = computers.body["computers"].as_array().and_then(|l| l.iter().find(|c| c["agents"].as_array().is_some_and(|a| a.iter().any(|x| x["fragment"] == agent.as_str())))).cloned().unwrap_or(Value::Null);
+    for (width, height, mobile, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+        b.viewport(page, width, height, mobile)?;
+        b.color_scheme(page, scheme)?;
+        b.eval(page, &format!("(document.querySelector({own})?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = b.screenshot(page, &shots.join(format!("agent-computer-{width}-{scheme}.png")));
+    }
+    b.viewport(page, 1280, 800, false)?;
+    b.color_scheme(page, "light")?;
+    s.ok(
+        "a computer per agent: Add's agent runs on its own computer, whose card is on the agent's own in Settings (its state and Restart), and Settings has no Computer section of its own",
+        carded && seen["id"] == mine["computer"] && mine["agents"].as_array().map(Vec::len) == Some(1) && seen["headings"].as_array().is_some_and(|h| !h.contains(&json!("Computer"))),
+        json!({ "seen": seen, "computer": mine }),
+    );
     // the chat: its header in the shell (the chat's own title), and its page
     open_row(b, page, chat, wait)?;
     let headed = b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(FIRST_CHAT)), wait);

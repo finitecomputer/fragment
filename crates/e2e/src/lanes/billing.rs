@@ -1760,6 +1760,25 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         at_stripe && credited && ledger(api, &gus)["purchasedMicros"].as_i64() == Some(before + offer.pack_micros),
         ledger(api, &gus),
     );
+    // a $200 seat's awake time this month, all their computers together (a
+    // computer per agent): one line in Billing, the ledger's own count
+    let awake = b.until(&page, "!!document.querySelector('#settings-page [data-awake]')", wait);
+    let line = b.eval(&page, "document.querySelector('#settings-page [data-awake]')?.innerText ?? ''")?;
+    for (width, height, mobile, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+        b.viewport(&page, width, height, mobile)?;
+        b.color_scheme(&page, scheme)?;
+        b.eval(&page, "(document.querySelector('#settings-page [data-awake]')?.scrollIntoView({ block: 'center' }), true)")?;
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = b.screenshot(&page, &shots.join(format!("billing-awake-{width}-{scheme}.png")));
+    }
+    b.viewport(&page, 1280, 800, false)?;
+    b.color_scheme(&page, "light")?;
+    let counted = ledger(api, &gus)["awake"].clone();
+    s.ok(
+        "a $200 seat's Billing says its computers' awake hours included this month, as its ledger counts them (744 a month, all their computers together)",
+        awake && line.as_str().is_some_and(|t| t.contains("Computers awake") && t.contains("of 744 hours included this month")) && counted["includedMs"] == 744 * 3_600_000_i64,
+        json!({ "line": line, "awake": counted }),
+    );
     b.close(page)?;
     // ---- Checkout's return settles once for every load of settings (#461
     // review): its POST held before it is sent, and settings opened again
