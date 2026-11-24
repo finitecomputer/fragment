@@ -150,8 +150,12 @@ hit blocks: wrong money, lost or wrong data, a crash, a broken or slowed
 call, or a security hole. Fix those, and file anything else in Linear. A
 second round only checks the fixes, and there is no third.
 
-Keep PRs small and many. Ten small proven PRs land faster and safer than
-one large one.
+Keep PRs small, and each one whole: one thing that stands on its own,
+something a person can use or a step that is safe and useful by itself.
+If two PRs mean nothing without each other, they are one PR. Split only
+where a piece stands alone, or must wait (a deletion after a migration
+has run). A plan that grows a PR each review round is a smell; merge the
+pieces back.
 
 ## How work lands
 
