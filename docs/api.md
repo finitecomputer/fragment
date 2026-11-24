@@ -533,7 +533,13 @@ Over https every session cookie with `Path=/` is named `__Host-…`
 (`__Host-fragment_session`, `__Host-fragment_login`,
 `__Host-fragment_switch`, `__Host-fragment_own_key`,
 `__Host-fragment_site`) and read under that name only, so no fragment's
-page can set one for another origin.
+page can set one for another origin. A fragment's origin's own cookies
+are too: the share link's (`__Host-fragview`) and an unsigned visitor's
+(`__Host-fragment_anon`, whose hash is its anonymous principal). A
+browser still holding one under its plain name from before is sent it,
+and the cell ignores it: the share link opens again from its URL, and the
+visitor gets a new anonymous principal. Plain http (the dev stack) can
+hold no `__Host-` cookie, so there each is its plain name.
 
 **On a fragment's origin**, `GET __signin?token=` redeems a redemption for
 that fragment only (another's is 401 and stays unspent; its wait, the
