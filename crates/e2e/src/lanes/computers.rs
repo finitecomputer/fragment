@@ -64,12 +64,18 @@ const WAKE: Duration = Duration::from_secs(90);
 /// owner's sleeps.
 pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 
+/// The app `asker_checks` asks: it tells whom it was told (`whoami`), and
+/// has an op for editors and up (`backstage`).
+const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
+const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
+const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
+
 /// Whose ask a turn is (FIN-720; docs/api.md, "An agent's computer proves
 /// who asked"): the checks `asker_checks` makes, as a run without the stub
 /// or the fakes skips them.
 const ASKER_CHECKS: &[&str] = &[
-    "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the record is theirs, the agent its author; its owner's same ask is its owner's",
-    "held to their role: where they may not (a channel only editors post to, they a viewer), it is refused, though its owner's same ask goes",
+    "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the app is told them, at their own role; its owner's same ask is its owner's",
+    "held to their role: what only editors may do (they a viewer) is refused, though its owner's same ask goes",
     "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
     "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
     "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
@@ -87,14 +93,15 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let ben_id = api.identity(&ben)?;
     let r = api.share(chat, &ben_id, "editor")?;
     anyhow::ensure!(r.status == 200, "Ben in the chat: {r}");
-    // its owner's board: Ben a viewer, its wall for anyone in, its staff channel for editors
+    // its owner's app, Ben a viewer there: `whoami` tells who the app is
+    // told, at what role; `backstage` is for editors and up
     let board = s.named(api, w.owner, "board")?;
     let c = s.create(api, w.owner, &board)?;
-    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"wall":{"read":"viewer","post":"viewer"},"staff":{"read":"viewer","post":"editor"}}}"#))]);
-    s.deploy(&c);
+    s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+    super::app::ship(s, &c, WHOAMI_APP, WHOAMI_JSON);
     let r = api.share(&board, &ben_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Ben on the board: {r}");
-    let post = |channel: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{board}/channels/{channel}?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"body\":{{\"text\":\"asked\"}}}}", w.agent);
+    let op = |name: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{board}/ops/{name}?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
     let asked_by_ben = |s: &Suite, n: u32, text: &str| -> Result<String> {
         turns.set(turns.get() + 1);
         let r = api.signed(&ben, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("ben{n}"), "body": { "text": text } })))?;
@@ -104,27 +111,27 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
         s.eventually(wake, || reply().is_some());
         Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     };
-    let whose = |said: &str| -> (String, String) {
-        let body = said.split_once(": ").map_or("", |(_, b)| b);
-        let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-        (v["record"]["principal"].as_str().unwrap_or("").to_string(), v["record"]["author"].as_str().unwrap_or("").to_string())
+    // who the app was told, and at what role (`whoami`'s answer)
+    let whose = |said: &str| -> Value {
+        let body = said.strip_prefix("fetched 200: ").unwrap_or("");
+        serde_json::from_str::<Value>(body).map(|v| v["result"].clone()).unwrap_or(Value::Null)
     };
 
-    let bens = asked_by_ben(s, 1, &post("wall", "wall-ben"))?;
+    let bens = asked_by_ben(s, 1, &op("whoami", "who-ben"))?;
     turns.set(turns.get() + 1);
-    let owners = fetched(s, 200, &post("wall", "wall-owner"))?;
+    let owners = fetched(s, 300, &op("whoami", "who-owner"))?;
     s.ok(
         ASKER_CHECKS[0],
-        bens.starts_with("fetched 200") && whose(&bens) == (ben_id.clone(), "agent".to_string()) && owners.starts_with("fetched 200") && whose(&owners).0 == owner_id,
+        whose(&bens) == json!({ "principal": ben_id, "role": "viewer" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
         json!({ "ben": bens, "owner": owners }),
     );
-    let bens = asked_by_ben(s, 2, &post("staff", "staff-ben"))?;
+    let bens = asked_by_ben(s, 2, &op("backstage", "back-ben"))?;
     turns.set(turns.get() + 1);
-    let owners = fetched(s, 201, &post("staff", "staff-owner"))?;
-    s.ok(ASKER_CHECKS[1], bens.starts_with("fetched 403") && owners.starts_with("fetched 200") && whose(&owners).0 == owner_id, json!({ "ben": bens, "owner": owners }));
+    let owners = fetched(s, 301, &op("backstage", "back-owner"))?;
+    s.ok(ASKER_CHECKS[1], bens.starts_with("fetched 403") && whose(&owners) == json!({ "role": "editor" }), json!({ "ben": bens, "owner": owners }));
 
     let schedules = format!("/api/f/{chat}/schedules");
-    let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": post("wall", "wall-schedule") } })))?;
+    let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": op("whoami", "who-schedule") } })))?;
     cron_now(api, chat)?;
     let fire = || records(api, w.owner, chat, "chat").into_iter().find(|r| r["author"] == "platform" && r["asker"] == ben_id.as_str());
     s.eventually(wake, || fire().is_some());
@@ -136,7 +143,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let removed = api.signed(&ben, "DELETE", &format!("{schedules}/{}", made.body["schedule"]["id"]), None)?;
     s.ok(
         ASKER_CHECKS[2],
-        made.status == 200 && fire().is_some() && said.starts_with("fetched 200") && whose(&said) == (ben_id.clone(), "agent".to_string()) && removed.status == 200,
+        made.status == 200 && fire().is_some() && whose(&said) == json!({ "principal": ben_id, "role": "viewer" }) && removed.status == 200,
         json!({ "made": made.status, "fire": fire(), "said": said, "removed": removed.status }),
     );
 
