@@ -342,6 +342,13 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     }
 }
 
+/// Whether a request names whom it acts for, by `for` or by a mandate (its
+/// proof: `fragment_core::mandate`): what a route that takes neither
+/// refuses (400, `FOR_HONORED`), so neither is ever silently dropped.
+pub(crate) fn names_for(req: &Request, url: &Url) -> CellResult<bool> {
+    Ok(acting_for(url)?.is_some() || req.headers().get(fragment_core::mandate::HEADER)?.is_some())
+}
+
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
 pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments, the model routes (/api/models/…) and a move's copy (POST /api/migrations/stages/…/copy) only";
@@ -865,7 +872,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 /// asks (`calls::By`): one round trip a call, and a key revoked a moment
 /// before cannot act.
 async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest: &[&str]) -> CellResult<Response> {
-    if acting_for(url)?.is_some() {
+    if names_for(&req, url)? {
         return Err(CellError::invalid(FOR_HONORED));
     }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

@@ -182,7 +182,9 @@ request may carry it in `x-fragment-mandate` in place of `for=<its
 owner>`, wherever `for` is honored, and it acts exactly as that `for`
 does. The router checks it in the signer's own lookup: one the platform
 did not make, or altered, or run out, is 403; one carried by any key but
-its agent's, 403; one beside `for`, or where `for` is not honored, 400.
+its agent's, 403; one beside `for`, or where `for` is not honored, 400,
+as are the identity routes and the invite routes (which take `for`
+through the registry, and no mandate yet).
 Only the platform can make one: its mark is a MAC under a key derived from
 the host secret. An asker who is not the agent's owner is another entity,
 whose actions are theirs to be keyed, capped and credited by: their words

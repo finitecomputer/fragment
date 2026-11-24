@@ -22,7 +22,7 @@ use fragment_core::org::Status;
 use crate::registry::calls::By;
 use crate::registry::orgs::Mine;
 use crate::stripe::Stripe;
-use crate::{acting_for, ask_registry, caller, js, json_answer, read_body, signer, Caller};
+use crate::{ask_registry, caller, js, json_answer, read_body, signer, Caller};
 use fragment_nip98::Payload;
 
 /// A Checkout's life, past Stripe's least (30 minutes) by a minute.
@@ -59,7 +59,7 @@ struct Portal {
 }
 
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
-    if acting_for(url)?.is_some() {
+    if crate::names_for(req, url)? {
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
     Ok(match caller(env, req, url, Payload::Read(bytes))? {

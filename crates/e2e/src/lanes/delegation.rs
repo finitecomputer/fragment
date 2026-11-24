@@ -248,11 +248,13 @@ fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
     let forged = whoami(&juniper, &altered, "w2")?;
     let freds = whoami(&fred, &anas, "w3")?;
     let both = carrying(&juniper, &anas, "POST", &format!("/api/f/{private}/ops/whoami?for={ana_id}"), Some(json!({ "id": "w4", "input": {} })))?;
-    let unhonored = carrying(&juniper, &anas, "GET", "/api/notices", None)?;
+    // where `for` is refused, a mandate is too, never dropped: a route
+    // acting as its signer alone, the registry's own, and the invites
+    let unhonored: Vec<Reply> = ["/api/notices", "/api/identities/me", "/api/invites"].iter().map(|path| carrying(&juniper, &anas, "GET", path, None)).collect::<Result<_>>()?;
     s.ok(
-        "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400) and one where `for` is not honored (400) are refused",
-        forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && unhonored.status == 400,
-        format!("{forged} {freds} {both} {unhonored}"),
+        "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400), and one where `for` is not honored (400, the identities and invites too) are refused",
+        forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && unhonored.iter().all(|r| r.status == 400),
+        format!("{forged} {freds} {both} {:?}", unhonored.iter().map(|r| r.status).collect::<Vec<_>>()),
     );
     Ok(())
 }
