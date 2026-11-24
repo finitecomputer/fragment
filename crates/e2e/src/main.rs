@@ -566,6 +566,12 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether the run names a real SimpleX link (`simplex-link`): its
+    /// doors then reach the internet (`Fleet::door_internet`).
+    fn links_simplex(&self) -> bool {
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_setup::LINK))
+    }
+
     /// Whether the stack runs SimpleX doors: a deployment whose config names
     /// them; a local one whose node runs them (`node_doors`: a run of the
     /// door's lane, which runs by name alone).
@@ -623,6 +629,14 @@ impl Suite {
     /// rehearsal (whose fakes no lane reaches, but which answer the node).
     pub fn on_fakes(&self) -> bool {
         self.preview.is_none()
+    }
+
+    /// Whether `--only` names `name`, a part of a section that runs by name
+    /// alone, the section named beside it: counted as asked, so naming it
+    /// is no unknown name.
+    pub fn names(&mut self, name: &str) -> bool {
+        self.asked.push(name.to_string());
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
@@ -961,8 +975,10 @@ impl Suite {
             // for a run whose sections use it (`node_classes`)
             computers: self.node_computers,
             doors: self.node_doors,
-            // a run must not depend on public DNS (devstack::Fleet)
+            // a run must not depend on public DNS (devstack::Fleet), but
+            // for a door that links to SimpleX's servers for real
             computer_internet: false,
+            door_internet: self.links_simplex(),
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;

@@ -1562,61 +1562,58 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
-    // SimpleX only on an image that does it: the stub's bridge never says so
+    // SimpleX: its connector's on any seat (D3), and its computer's where an
+    // always-on computer whose image does it keeps it (its links, and a
+    // moved chat to keep there, until they move to doors: D4); the stub's
+    // bridge never says its image does
+    const CONNECTOR_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for]:not([data-simplex-computer])";
+    const COMPUTER_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for][data-simplex-computer]";
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let said = computers.body["computers"][0].get("simplex").cloned();
     let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     s.ok(
-        "settings offer no SimpleX on a computer whose image does not do it (the stub's, as production's before SimpleX): the section and its link hidden, no Set up, and its view says nothing of it",
-        computers.status == 200 && said.is_none() && !has("#settings-simplex:not([hidden])") && !has(".settings-nav-link[data-section=settings-simplex]:not([hidden])") && !text.contains("SimpleX"),
+        "settings offer SimpleX's connector on a computer whose image does not do it (the stub's, as every agent's own computer's): its section and nav link shown, each agent's Set up its connector's, and the computer's view says nothing of SimpleX",
+        computers.status == 200 && said.is_none() && has(CONNECTOR_ROW) && !has(COMPUTER_ROW) && has(".settings-nav-link[data-section=settings-simplex]:not([hidden])"),
         json!({ "simplex": said, "settings": &text[..text.len().min(600)] }),
     );
-    // its bridge says its image does (the lever, as `?simplex=1` would), and
-    // then no more: the open settings follow each, through the list's
-    // socket, with what was typed elsewhere on them kept (Alex's review)
-    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
-    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
-    let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
     // marked what it is, a word each (Paul, 2026-10-31), its nav link still
     // its name alone
     let tags = b.eval(&page, "[[...document.querySelectorAll('#settings-simplex .connector-tag')].map((t) => [t.textContent, t.title]), document.querySelector('.settings-nav-link[data-section=settings-simplex]')?.textContent]")?;
     s.ok(
-        "settings mark SimpleX experimental and secure (end to end), a word each, its nav link still \"SimpleX\"",
-        tags == json!([[["Experimental", ""], ["Secure", "End-to-end encrypted to your computer"]], "SimpleX"]),
+        "settings mark SimpleX experimental and secure (SimpleX's servers can't read it), a word each, its nav link still \"SimpleX\"",
+        tags == json!([[["Experimental", ""], ["Secure", "SimpleX's servers can't read these messages"]], "SimpleX"]),
         &tags,
     );
-    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
-    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
-    let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
-    s.ok(
-        "settings left open follow the computer's SimpleX: shown once its bridge says its image does it (not always on: it says the plan does), hidden once it no longer does, with nothing else redrawn",
-        on.status == 200 && on.body["simplex"] == true && shown && kept == json!(true) && off.status == 200 && off.body["simplex"] == false && hidden,
-        json!({ "on": on.body, "off": off.body, "shown": shown, "kept": kept, "hidden": hidden }),
-    );
-    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
-    // a $200 seat's holder who lets their computer sleep is told how to take
-    // it back, as they tick Billing's box, with Settings left open (#609's
-    // review: the line read the seat as Settings first did)
+    // its bridge says its image does (the lever, as `?simplex=1` would) on a
+    // $200 seat, its computer kept on: its computer's row; its holder lets it
+    // sleep (Billing's box, Settings left open): its connector's; kept on
+    // again, its computer's; its image no longer doing it, its connector's,
+    // through the list's socket, with what was typed elsewhere on them kept
+    // (Alex's review), and nothing else redrawn
     let op_session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&op_session, &s.operator);
-    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
     b.eval(&page, "(document.getElementById('settings').click(), true)")?;
     let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
-    let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
-    let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
+    let row_is = |which: &str| format!("!!document.querySelector({which:?}) && !document.querySelector({other:?})", other = if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW });
+    let kept_on = b.until(&page, &format!("!!({box_}) && !({box_}).checked && {}", row_is(COMPUTER_ROW)), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Turn off') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    let sleeps = b.until(&page, &row_is(CONNECTOR_ROW), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
+    let back = b.until(&page, &row_is(COMPUTER_ROW), std::time::Duration::from_secs(30));
+    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
+    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
+    let followed = b.until(&page, &row_is(CONNECTOR_ROW), wait);
+    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
+    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
     s.ok(
-        "a $200 seat's holder who ticks Billing's sleep box, Settings left open, is told in SimpleX to untick it; unticked, SimpleX offers Set up again",
-        comped.status == 200 && ready && told && back,
-        json!({ "comped": comped.status, "ready": ready, "told": told, "back": back, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
+        "an always-on computer whose image does SimpleX keeps each agent's SimpleX (its computer's Set up); let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
+        on.status == 200 && comped.status == 200 && kept_on && sleeps && back && off.status == 200 && off.body["simplex"] == false && followed && kept == json!(true),
+        json!({ "on": on.body, "comped": comped.status, "keptOn": kept_on, "sleeps": sleeps, "back": back, "off": off.body, "followed": followed, "kept": kept, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
     );
     // as it was for what follows: its computer let sleep, no SimpleX
     shell(api, &session, "PUT", "/api/seat", Some(&json!({ "sleeps": true })), &[])?;
-    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",
@@ -5503,9 +5500,14 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // Alex's review of #619: one home a page, whatever comes in what order.
     // A pane of its link page stands in a frame (`data-simplex`), and its
     // asks are its messages (the shell takes a message only from such a
-    // frame, of its origin); the computer says its image does SimpleX
+    // frame, of its origin); the computer says its image does SimpleX, and
+    // it is kept on: Settings' SimpleX row is then the computer's own
+    // (`data-simplex-computer`), shown once the shell's view of it says so
+    // (every seat's Settings shows SimpleX, its connector's elsewhere)
     let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": true }))?;
+    const ITS_OWN: &str = "!!document.querySelector('#settings-simplex:not([hidden]) [data-simplex-computer]')";
     let write_home = |home: Option<&str>| {
         let text = match home {
             Some(h) => format!("{{\n  \"tier\": \"cheap\",\n  \"home\": {h:?}\n}}\n"),
@@ -5528,7 +5530,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         ok && shows(b, p, home)
     };
     // a link's ticked box, then an unlink, with Settings open: the home, the bell and the pick follow
-    b.until(page, "!!document.querySelector('#settings-simplex:not([hidden])')", wait);
+    b.until(page, ITS_OWN, wait);
     ask(b, page, "link", Some(true))?;
     let linked = shows(b, page, "simplex") && home_now() == Some(json!("simplex"));
     ask(b, page, "unlink", None)?;
@@ -5553,7 +5555,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     for (as404, before, want, after) in [(false, None, Some(true), "simplex"), (true, None, Some(true), "simplex"), (false, Some("simplex"), None, "")] {
         anyhow::ensure!(write_home(before)? == 200, "agent.json as the case starts");
         let p = b.open_with_script(&format!("{}/settings", api.base), &hold(as404))?;
-        let read = b.until(&p, "typeof window.__read === 'function' && !!document.querySelector('#settings-simplex:not([hidden])')", wait);
+        let read = b.until(&p, &format!("typeof window.__read === 'function' && {ITS_OWN}"), wait);
         ask(b, &p, if want.is_some() { "link" } else { "unlink" }, want)?;
         let written = shows(b, &p, after);
         b.eval(&p, "(window.__read(), true)")?;
@@ -5625,6 +5627,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{refresh}"), None, &[])?;
     anyhow::ensure!(deleted.status == 200, "the fragment made for a refresh deleted: {deleted}");
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;

@@ -1,5 +1,7 @@
-// cell/shell/connections.js `createSimplex`: Settings' SimpleX row, one per
-// agent, as Telegram's is (FIN-393): Set up opens its computer's link page
+// cell/shell/connections.js `createSimplex`: Settings' SimpleX row of an
+// agent whose computer keeps its SimpleX (an always-on computer whose image
+// does it), as Telegram's is (FIN-393); anywhere else none, its connector's
+// row in its place (connector-settings.test.mjs). Set up opens its computer's link page
 // in the connector setup dialog (connector-setup.js), at its taller height
 // on a wide screen, the frame the page's messages are taken from; Open,
 // once the list holds its SimpleX chat, goes to that chat. A Set up whose
@@ -50,8 +52,9 @@ const buttons = (row) => all(row).filter((n) => n.tag === "button");
 const AGENTS = [{ fragment: "maple--a1b2", identity: "npub1maple" }, { fragment: "wren--c3d4", identity: "npub1wren" }];
 const CHATS = { "maple--a1b2": { name: "maple-simplex--e5f6" } };
 
-// `deferred`: each port ticket answered only when the test says (`answer`)
-function world({ deferred = false } = {}) {
+// `deferred`: each port ticket answered only when the test says (`answer`);
+// `computer`, its view
+function world({ deferred = false, computer = { computer: "c-robin", simplex: true, alwaysOn: true, agents: AGENTS } } = {}) {
   const asked = [];
   const went = [];
   const notices = [];
@@ -68,11 +71,6 @@ function world({ deferred = false } = {}) {
     waiting.get(agent)();
     await new Promise((r) => setTimeout(r, 0));
   };
-  const section = (title) => {
-    const s = new Node("section", "settings-section");
-    s.append(new Node("h2", null, title));
-    return s;
-  };
   const actionLine = (label, ...actions) => {
     const row = new Node("div", "settings-line settings-action-line");
     row.append(label, ...actions);
@@ -86,28 +84,30 @@ function world({ deferred = false } = {}) {
   globalThis.document = { querySelector: () => null, querySelectorAll: () => [], body: { append: (d) => dialogs.push(d) } };
   const setup = createConnectorSetup({ el, named, frameOf });
   const simplex = createSimplex({
-    api, el, section, actionLine, named, seg: (s) => s,
-    computer: () => ({ computer: "c-robin", simplex: true, alwaysOn: true, agents: AGENTS }), getSeat: () => null, titleOf: (a) => a.split("--")[0],
+    api, el, actionLine, named, seg: (s) => s,
+    computer: () => computer, titleOf: (a) => a.split("--")[0],
     frameOf, pressSetup: setup.pressSetup, openSetup: setup.openSetup, simplexChatOf: (a) => CHATS[a] ?? null, openChat: (name) => went.push(name),
-    notice: (...n) => notices.push(n), setHome: async () => null,
+    notice: (...n) => notices.push(n), setHome: async () => null, markOffer: (node, agent, what) => Object.assign(node, { offer: [agent, what] }), refresh: () => {},
   });
   // the dialogs open now: their title, the agent they name, their frame
   const shown = () => dialogs.filter((d) => d.open).map((d) => [d.children[0].textContent, d.children[1].textContent, d.children[2].className, d.children[2].dataset.simplex ?? d.children[2].src]);
-  const rows = () => {
-    const s = simplex.simplexSection();
-    return s.children.filter((c) => c.className.includes("settings-line"));
-  };
+  const rows = () => AGENTS.map((a) => simplex.computerRow(a));
   return { simplex, setup, asked, went, notices, answer, shown, rows };
 }
 
 test("each agent's row is Set up, and Open once the list holds its SimpleX chat, which Open goes to", () => {
   const w = world();
-  const s = w.simplex.simplexSection();
-  const rows = s.children.filter((c) => c.className.includes("settings-line"));
+  const rows = w.rows();
   assert.deepEqual(rows.map((r) => buttons(r).map((b) => b.textContent)), [["Open", "Set up"], ["Set up"]]);
-  assert.equal(s.children.find((c) => c.tag === "p").textContent, "Message your agents from SimpleX Chat.");
+  assert.deepEqual(rows.map((r) => [buttons(r).at(-1).dataset.simplexFor, buttons(r).at(-1).dataset.simplexComputer, r.offer]), [["maple--a1b2", "", ["maple--a1b2", "doors"]], ["wren--c3d4", "", ["wren--c3d4", "doors"]]], "its computer's, a door its runtime offers");
   buttons(rows[0])[0].onclick();
   assert.deepEqual(w.went, ["maple-simplex--e5f6"]);
+});
+
+test("a computer that sleeps, or whose image does no SimpleX, keeps none: its connector's row is in its place", () => {
+  for (const computer of [{ computer: "c-robin", simplex: true, alwaysOn: false, agents: AGENTS }, { computer: "c-robin", alwaysOn: true, agents: AGENTS }, null]) {
+    assert.deepEqual(world({ computer }).rows(), [null, null], JSON.stringify(computer));
+  }
 });
 
 test("Set up opens its computer's link page, through a port ticket, in the connector setup dialog at its taller height", async () => {
@@ -132,7 +132,7 @@ test("a Set up whose ticket comes after a later Set up's never closes that one's
 test("nor does a SimpleX ticket that comes after a Telegram Set up pressed since", async () => {
   const w = world({ deferred: true });
   const simplex = buttons(w.rows()[0])[1].onclick();
-  // Telegram's Set up, as createTelegram's presses and then opens
+  // Telegram's Set up, as createConnectors' presses and then opens
   const pressed = w.setup.pressSetup();
   w.setup.openSetup({ pressed, src: "/auth/frame?name=maple-telegram--g7h8&return=/setup.html", name: "maple-telegram--g7h8", agent: "maple--a1b2", title: "Telegram" });
   await w.answer("maple--a1b2");
@@ -159,10 +159,10 @@ test("an adoption's ask is answered with an adopt ticket, its home left be", asy
     return { door: "simplex", act: body.act, agent: "maple--a1b2", nonce: "0f".repeat(16) };
   };
   createSimplex({
-    api, el: () => ({}), section: () => ({}), actionLine: () => ({}), named: (n) => n, seg: (s) => s,
-    computer: () => ({ computer: "c-robin", simplex: true, alwaysOn: true, agents: AGENTS }), getSeat: () => null, titleOf: (a) => a,
+    api, el: () => ({}), actionLine: () => ({}), named: (n) => n, seg: (s) => s,
+    computer: () => ({ computer: "c-robin", simplex: true, alwaysOn: true, agents: AGENTS }), titleOf: (a) => a,
     frameOf: () => ({}), pressSetup: () => {}, openSetup: () => {}, simplexChatOf: () => null, openChat: () => {}, notice: () => {},
-    setHome: async (agent, home) => homes.push([agent, home]),
+    setHome: async (agent, home) => homes.push([agent, home]), markOffer: (n) => n, refresh: () => {},
   });
   const ask = (m) => heard({ data: { fragment: "simplex", agent: "maple--a1b2", ...m }, source, origin: "https://c-robin-6080.example" });
   await ask({ want: "adopt" });
