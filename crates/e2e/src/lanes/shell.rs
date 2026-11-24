@@ -2720,7 +2720,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // a computer per agent: its computer is on its card in Settings' Agents,
     // its own (made for it by Add's making), with its state, version and
     // Restart; Settings has no Computer of its own any more
-    let own = format!("[data-agent={}] .agent-computer", js(&agent));
+    let own = js(&format!(".agent-setting[data-agent={}] .agent-computer", js(&agent)));
     let carded = b.until(page, &format!("(() => {{ const c = document.querySelector({own}); return !!c && /State/.test(c.innerText) && !!c.querySelector('[data-action=restart-ask]'); }})()"), wait);
     let seen = b.eval(page, &format!("({{ id: document.querySelector({own})?.dataset.computer ?? null, headings: [...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent) }})"))?;
     let computers = shell(api, me.session, "GET", "/api/computers", None, &[])?;
@@ -3927,9 +3927,12 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let before = view()["generation"].as_u64().unwrap_or(0);
     b.eval(page, RESTART_STEPS)?;
     b.eval(page, &format!("(window.__restartFails = false, {RESTART_ROW}.querySelector('button[data-action=restart]').click(), true)"))?;
+    // its agent's card's Restart (the Reader's, on a computer of its own,
+    // keeps its own)
+    let its_restart_ask = format!("#settings-page .agent-computer[data-computer={id:?}] [data-action=restart-ask]");
     let starting = b.until(
         page,
-        &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…' && document.querySelector('#settings-page .restart-status')?.textContent === 'Starting…' && !document.querySelector('#settings-page [data-action=restart-ask]') && document.getElementById('settings-page').innerText.includes('Starting')"),
+        &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…' && document.querySelector('#settings-page .restart-status')?.textContent === 'Starting…' && !document.querySelector({}) && document.getElementById('settings-page').innerText.includes('Starting')", js(&its_restart_ask)),
         hold,
     );
     let _ = b.screenshot(page, &shots.join("computer-restart-starting.png"));
