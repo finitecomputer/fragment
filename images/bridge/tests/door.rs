@@ -363,7 +363,9 @@ fn build_image() {
         return;
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Command::new("docker").args(["build", "--platform", "linux/amd64", "-q", "-f", "images/simplex-door/Dockerfile", "-t", DOOR_IMAGE, "."]).current_dir(&root).output().expect("docker runs");
+    // loaded into the local images whatever builder builds it (a
+    // docker-container builder keeps its result in its cache otherwise)
+    let out = Command::new("docker").args(["build", "--load", "--platform", "linux/amd64", "-q", "-f", "images/simplex-door/Dockerfile", "-t", DOOR_IMAGE, "."]).current_dir(&root).output().expect("docker runs");
     assert!(out.status.success(), "the door's image builds: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -378,7 +380,8 @@ async fn person_got(person: &mut Api, seen: &mut Vec<String>, want: &[&str]) {
 
 /// Goal: a door outside any computer holds one link through everything
 /// its container meets, nothing lost or doubled either way: a new door
-/// linked by its invitation; messages each way; a reply asked again sent
+/// linked by its invitation, as its QR code in its state holds it;
+/// messages each way; a reply asked again sent
 /// once; an ask under a stale mark refused; a crash (SIGKILL) with 300
 /// messages saved and not yet delivered, its next start reading them on
 /// from its cursor, in order; a rollback to a save from before both, healed
@@ -411,8 +414,15 @@ async fn the_door_against_the_real_core() {
     let (code, _) = g1.call("POST", "/link", Some(door.mark()), None).await;
     assert_eq!(code, 202);
     let s = g1.until(Duration::from_secs(60), |s| s["phase"] == "inviting").await;
+    // its QR code, as its owner's page draws it (templates/simplex
+    // setup.js): of its short link where there is one, whole; the person
+    // connects with what it holds
+    let drawn = s["short"].as_str().or(s["link"].as_str()).expect("its invitation").to_string();
+    let qr = qrcode::QrCode::with_error_correction_level(drawn.as_bytes(), qrcode::EcLevel::M).expect("drawn");
+    let dark: String = qr.to_colors().iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect();
+    assert_eq!((s["qr"]["size"].as_u64(), s["qr"]["dark"].as_str()), (Some(qr.width() as u64), Some(dark.as_str())), "its state's QR code is its invitation's");
     let mut person = lab.start("person", false).await;
-    let r = person.cmd(&format!("/connect {}", s["link"].as_str().expect("its invitation"))).await;
+    let r = person.cmd(&format!("/connect {drawn}")).await;
     assert_eq!(tag(&r), "sentConfirmation", "{r}");
     g1.until(Duration::from_secs(90), |s| s["phase"] == "linked" && s["name"] == "person").await;
     let agent = person.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the door, at the person's");

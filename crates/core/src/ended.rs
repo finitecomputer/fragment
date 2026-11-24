@@ -121,6 +121,18 @@ pub fn agent_left(code: ErrorCode, message: &str) -> Result<(), Failure> {
     }
 }
 
+/// What a try of an ended connector's door's end answered (cell/door.mjs
+/// `/door/end`), told apart: 200 is done (an end asked again ends it
+/// again); a 429 or a 5xx (its object deploying, the bucket failing) may
+/// pass later; any other refusal (a door that is another's) cannot.
+pub fn door_ended(status: u16, detail: &str) -> Result<(), Failure> {
+    match status {
+        200 => Ok(()),
+        429 | 500..=599 => Err(Failure::Transient(kept_error(&format!("its door answered {status} {detail}")))),
+        _ => Err(Failure::Refused(kept_error(&format!("its door refused its end: {status} {detail}")))),
+    }
+}
+
 /// How a life ended: its owner's delete, or an operator's wipe of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum End {
@@ -225,5 +237,23 @@ mod tests {
         }
         let long = agent_left(ErrorCode::HostFailed, &"z\n".repeat(1000)).unwrap_err();
         assert!(long.message().starts_with("500 ") && long.message().chars().count() <= ERROR_MAX_CHARS);
+    }
+
+    /// Goal: an ended connector's door's end is done once it answers 200
+    /// (an end asked again answers so too), tried again for a failure that
+    /// may pass (429, 5xx: its object deploying), and held for any other
+    /// refusal (a door that is another's); the error kept is bounded.
+    /// Method: each status.
+    #[test]
+    fn a_doors_end_is_told_apart() {
+        assert_eq!(door_ended(200, ""), Ok(()));
+        for status in [429, 500, 503] {
+            assert!(matches!(door_ended(status, "deploying"), Err(Failure::Transient(_))), "{status}");
+        }
+        for status in [400, 404, 409] {
+            assert!(matches!(door_ended(status, "x"), Err(Failure::Refused(_))), "{status}");
+        }
+        let long = door_ended(503, &"z\n".repeat(1000)).unwrap_err();
+        assert!(long.message().starts_with("its door answered 503 ") && long.message().chars().count() <= ERROR_MAX_CHARS);
     }
 }

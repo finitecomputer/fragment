@@ -523,6 +523,18 @@ pub async fn model_key(env: &Env, slot: &str) -> CellResult<String> {
 /// while a rotation is under way (a guest reads its placeholders again
 /// within seconds). Only the platform holds them.
 pub async fn tag_keys(env: &Env) -> CellResult<Vec<fragment_core::swap::TagKey>> {
+    derived(env, fragment_core::swap::TagKey::derive).await
+}
+
+/// The keys mandates are marked with (`mandate::MandateKey`), derived from
+/// the host secret as tags' are: the current one's first (the one a place
+/// marks with), then the previous one's while a rotation is under way.
+pub async fn mandate_keys(env: &Env) -> CellResult<Vec<fragment_core::mandate::MandateKey>> {
+    derived(env, fragment_core::mandate::MandateKey::derive).await
+}
+
+/// A key derived from each host secret, the current one's first.
+async fn derived<K>(env: &Env, derive: fn(&str) -> K) -> CellResult<Vec<K>> {
     let hosts = host_secrets(env).await?;
     if hosts.is_empty() {
         return Err(sealing(SealError::NoHostSecret));
@@ -530,5 +542,5 @@ pub async fn tag_keys(env: &Env) -> CellResult<Vec<fragment_core::swap::TagKey>>
     if hosts.iter().any(|h| h.len() < fragment_core::seal::HOST_SECRET_MIN_BYTES) {
         return Err(sealing(SealError::WeakHostSecret));
     }
-    Ok(hosts.iter().map(|h| fragment_core::swap::TagKey::derive(h)).collect())
+    Ok(hosts.iter().map(|h| derive(h)).collect())
 }

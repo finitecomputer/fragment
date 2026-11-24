@@ -1135,6 +1135,8 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         ("a channel only one kind of member posts on", "0 * * * *", "work", water.clone(), 400, "only its members of one kind"),
         ("a channel only its owner posts on", "0 * * * *", "desk", water.clone(), 403, "needs the owner role"),
         ("a record that relays someone, as a post would be", "0 0 1 1 *", "pings", relaying, 403, "relays no one"),
+        // the fragment's own key is asked nothing: a fire would answer for no one (docs/api.md, Questions and answers)
+        ("a record that answers a question", "0 0 1 1 *", "pings", json!({ "kind": "prompt_response", "option": "yes", "answers": { "channel": "pings", "seq": 1 } }), 403, "answers no question"),
     ];
     let (mut each, mut said) = (true, vec![]);
     for (why, cron, channel, record, status, says) in refusals {

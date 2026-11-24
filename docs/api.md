@@ -56,6 +56,11 @@ gets the 404 a missing route gets, word for word. On a branch the levers
 reach the e2e's own things alone: a fragment lever only an `e2e-…`
 fragment, a ledger or computer lever only an e2e person's (403
 otherwise); the registry's, the move's and the mail lever are no route.
+A fragment lever that acts as or for someone (`member`'s `who`,
+`records`' `principal`: `levers::acting_for`) also needs the fragment's
+owner and that one each an e2e person or one's agent (403 otherwise).
+An `e2e-` label is not reserved: the other fragment levers reach a real
+person's fragment so labelled.
 
 | Route | Body |
 |---|---|
@@ -66,7 +71,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -169,6 +174,26 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 /api/migrations/stages/{stage}/copy` (the fragment it copies into decides
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
+
+**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
+is a place's word that its agent's owner's own record there asked it: its
+asker, the agent, the place (by its life's own key), the record, and until
+when. An agent member reading a channel as itself (`GET
+/api/f/{name}/channels/{c}`) is given one beside each record whose words
+are its owner's own: their own post, or a door's relay of them
+(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
+record's writing, and a record older than that carries none. The agent's
+request may carry it in `x-fragment-mandate` in place of `for=<its
+owner>`, wherever `for` is honored, and it acts exactly as that `for`
+does. The router checks it in the signer's own lookup: one the platform
+did not make, or altered, or run out, is 403; one carried by any key but
+its agent's, 403; one beside `for`, or where `for` is not honored, 400,
+as are the identity routes and the invite routes (which take `for`
+through the registry, and no mandate yet).
+Only the platform can make one: its mark is a MAC under a key derived from
+the host secret. An asker who is not the agent's owner is another entity,
+whose actions are theirs to be keyed, capped and credited by: their words
+give the agent no mandate yet.
 
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -513,7 +538,13 @@ Over https every session cookie with `Path=/` is named `__Host-…`
 (`__Host-fragment_session`, `__Host-fragment_login`,
 `__Host-fragment_switch`, `__Host-fragment_own_key`,
 `__Host-fragment_site`) and read under that name only, so no fragment's
-page can set one for another origin.
+page can set one for another origin. A fragment's origin's own cookies
+are too: the share link's (`__Host-fragview`) and an unsigned visitor's
+(`__Host-fragment_anon`, whose hash is its anonymous principal). A
+browser still holding one under its plain name from before is sent it,
+and the cell ignores it: the share link opens again from its URL, and the
+visitor gets a new anonymous principal. Plain http (the dev stack) can
+hold no `__Host-` cookie, so there each is its plain name.
 
 **On a fragment's origin**, `GET __signin?token=` redeems a redemption for
 that fragment only (another's is 401 and stays unspent; its wait, the
@@ -797,7 +828,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
-| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed` 403; past the overdraft 402 |
+| `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed`, or that answers a question, 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
 | `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`; none 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent) | its app's database, for an export (`__dump`, cell/platform.mjs). No `table`: `{schema: [{type, name, table, sql}], tables}`, the platform's own tables left out. A `table`: `{table, offset, rows, next}`, at most 1000 rows and about 4 MiB from `offset`, each a JSON object (a blob `{"$base64"}`); not in the schema 404. No app code: 404 `no_code` |
@@ -858,6 +889,30 @@ chose its words:
 
 A record stored before the stamp has no `author`, and reads as it did. A
 reader meets an author it does not know as `other`.
+
+### Questions and answers
+
+A question is answered only by whom it asks (FIN-615,
+`fragment_core::permit::may_answer`), in any fragment:
+
+- **A question** is a record whose body names whom it asks: `asks`, an
+  identity (a chat's card asks its agent's owner).
+- **An answer** is a record whose body names the question's record in the
+  same fragment: `"answers": {"channel": "work", "seq": 12}`, exactly
+  those two fields. An `answers` naming no `seq` is the app's own field.
+- **Who answers.** An answer comes only as a post: the asked identity's
+  own, written as itself (`author` `person` or `agent`, acting for no
+  one). Anyone else's is 403 and appends nothing: another person, an
+  agent acting for whom it asks (an agent never answers its own card), an
+  agent answering for someone. App code answers nothing (a mutation's
+  effect or a job step that answers is refused), nor does a scheduled
+  record (403 at its add) or a door. So is an answer to a record that asks
+  no one, is not kept, or is on a channel its poster may not read: one
+  refusal for all three. A malformed `answers` is 400. The same post again
+  is the record it appended, whatever became of its question.
+
+A reader still attributes an answer by its `principal`, as any record: a
+record stored before this rule promises nothing.
 
 ### Listed records
 
@@ -1324,6 +1379,10 @@ commits) and `job.push(who, payload)` in a job (a step answering
 `{queued}`) push `{title, body, tag, url, icon?}` (at most 3800 bytes) to
 the subscriptions tagged `who` (at most `PUSH_WHO_MAX_CHARS`), or `*`; a
 relative `url` is the fragment's own, and `icon` an `http(s)` picture.
+A subscription ends with its subscriber's standing: removing a member
+(or a member leaving) drops the subscriptions they stored, and their
+agents', and making the fragment members only drops every subscription
+stored by someone who is not a member then.
 
 Every delivery (a record to a subscription, a push, a computer's wake) is
 written to the fragment's outbox with what caused it, then sent; one not
@@ -1793,7 +1852,12 @@ overdraft every trigger's run is `blocked`. A deploy dropping an operation
 drops its pause. A cron tick whose last run still goes is skipped. The
 inbox's pending records are its unfinished runs (`inbox.rejected` past
 `INBOX_PENDING_MAX`). Finished runs are kept `RUN_RETENTION_MS` (at most
-`RUNS_KEPT`).
+`RUNS_KEPT`), except that a run with a call id (a job's call, a record's
+trigger) that ran outlives the count for the retry window, so a retry never
+starts it twice: past the count a succeeded one keeps only its id, status
+and input hash (its input and output shed), and a held one is kept whole,
+replayable, at most `HELD_RUNS_GUARDED` of them. A blocked run never ran,
+so it goes with the count.
 
 ### Scheduled records
 
@@ -1816,8 +1880,9 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   `RECORD_SCHEDULE_EVERY_MIN_MINUTES` (each fire wakes and costs its owner;
   more often belongs in a cron trigger), else `invalid_request`; `record`
   any JSON of at most `RECORD_SCHEDULE_BODY_MAX_BYTES` as canonical JSON,
-  else `too_large`, and relaying no one (no `relayed`: the fragment's own
-  key is no door), else 403; `channel` declared, taking posts, and not
+  else `too_large`, relaying no one (no `relayed`: the fragment's own
+  key is no door) and answering no question (no `answers` naming a seq:
+  Questions and answers), else 403; `channel` declared, taking posts, and not
   only from one kind of member (`from`), else `invalid_request`, and the
   caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
 - The same schedule again answers the one there (`replayed: true`).
@@ -2031,7 +2096,7 @@ authorization is browser-bound (docs/pipes-browser-binding.md).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, access?, note?, accounts?, accountsMax?, charged?}]}`, in catalog order. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its access asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `access` what its grant lets agents do, `read` or `write`, and `accesses` what a connection offers to pick, `[read, write]`, or `[write]` where its provider has no read-only scope (then no `access`: the account's own permissions are its limit) ([access](pipes-browser-binding.md#access)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, access?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
+| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, access?, note?, scopeNames?, accounts?, accountsMax?, charged?}]}`, in catalog order. `scopeNames` is a connection's scopes for people, as its row names them (`{scope: name}`): settings shows a granted scope by its name there and no other, and a missing one it leaves out by its last path segment. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its access asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `access` what its grant lets agents do, `read` or `write`, and `accesses` what a connection offers to pick, `[read, write]`, or `[write]` where its provider has no read-only scope (then no `access`: the account's own permissions are its limit) ([access](pipes-browser-binding.md#access)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, access?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
 | `POST /api/connections/{provider}/authorize` | the shell's session (a signed key 403) | a connection's `{access: "read" \| "write"}`, the access the person picked of those its row offers (none, or `read` where it offers `write` alone, 400: never assumed), and beside it, on a row of several accounts, `{add: true}` (400 at `accounts_max`) or `{account: "<id>"}` (not theirs 404); an own key's `{}` → `{provider, url}` and a host-only state cookie. A connection's state, its session binding and S256 verifier are kept ten minutes; an own key's sign-in uses their Vault, `fragment_own_key` and PKCE. No `connection_oauth`: `not_connected`, no vendor call. Not offered 404; a provider with no sign-in 400 |
 | `GET /api/connections/{provider}/callback?code=&state=` | the browser that began it, on the platform host, with its state cookie and the **same live session** | → HTML with no credentials: the code exchanged once and the grant imported into the person's Pipes account with exactly the scopes it holds (an own key's sealed in their Vault); of several accounts, a grant of one already connected (its ID token's `sub`) reauthorizes it. A failure is 303 to `?refused=<word>`: `elsewhere`, `signed-out`, `declined`, `not-under-way`, `code-refused`, `no-scopes`, `one-account`, `account-limit`, `finishing`, `no-key`. Another host 404 |
 | `DELETE /api/connections/{provider}[?account=<id>]` | a person | → `{provider, account?, state, revoked}`: a connection disconnected (of several, the one named; none named with several 400; `account` on a row of one 400; an id not theirs 404). The account is fenced first, so no connect begun before lands after (while one is importing: 429, asked again); its grant revoked at the row's `revoke` endpoint (RFC 7009) when it names one, then deleted at Pipes; the computer told. `revoked`: the provider answered 200. Another kind 400 |
@@ -2229,7 +2294,9 @@ On a computer's origin `/__ticket?t=` redeemed by a top-level visit sets
 `fragment_computer_frame` (`HttpOnly; Secure; SameSite=None;
 Partitioned`); both `__Host-` over https, for 12 hours, naming its owner
 only. Every answer there but a socket's upgrade carries `frame-ancestors
-<platform>`. Its cookies count as on a fragment's origin (Which cookies
+<platform>` and no `Service-Worker-Allowed`. No service worker is served
+there: any `Service-Worker: script` request is 404 before `/__ticket` or a
+port sees it, so no port's page registers one. Its cookies count as on a fragment's origin (Which cookies
 count); a socket from any page but its own is 403.
 
 A guest's request to a provider's host has its placeholders swapped
@@ -2327,6 +2394,21 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  While it invites, the door's `state` has the invitation's QR code
+  (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of
+  its short link where there is one), for its owner's setup page to draw
+  (templates/simplex `site/setup.html`, which Settings opens).
+  **Its door ends with it** (`/door/end`): its container with no last
+  save, every file under its prefix in the bucket, and its object's
+  storage. Its owner's unlink ends it before the binding goes (502, still
+  bound, while it cannot); its deletion, a wipe's end of it, or other
+  code installed records it for its alarm to end, retried as a delete's
+  other parts are. Bound to another of its owner's agents, it stays.
+  Unbound, its connector bound again connects a new door; deleted, wiped
+  or running other code, its door never starts again, whatever connect
+  comes late (one row of its object says so). An unlink re-reads its
+  connector after the door ends, and one deleted or made again meanwhile
+  is 409, nothing unlinked.
 
 A SimpleX door's key and ticket live in the agent fragment's `meta`, and
 go with it.
@@ -2341,7 +2423,13 @@ Where an agent reaches its owner when no one asked:
 - **Its SimpleX chat** is its owner's chat labelled `<label>-simplex`,
   titled "SimpleX", the agent a member: the chat its SimpleX link mirrors,
   made by its computer as the link is first bound and kept through an
-  unlink (docs/bridge.md, "SimpleX").
+  unlink (docs/bridge.md, "SimpleX"). With no link on its computer, it is
+  the chat bound as its SimpleX door (a connector its owner set up from
+  Settings: An agent's doors), as the agent's own row of that chat's
+  members says (`door`). Its computer reads the members of at most a few
+  of its owner's chats it is in to find it, those labelled as its SimpleX
+  chat first (images/bridge api.rs `door_candidates`), and Settings offers
+  SimpleX as its home once either is there.
 - A routine naming no chat runs in its home, read as it fires; its computer
   tells the agent where its home is at every turn (docs/computers.md).
 - Its owner sets it in Settings, and through the SimpleX link page's

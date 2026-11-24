@@ -51,7 +51,7 @@ enum Mode {
 }
 
 fn wake(host: &str, key: &Path, list: &Path, mode: Mode) -> Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_fragment"));
+    let mut c = Command::new(std::env::var_os("CARGO_BIN_EXE_fragment").expect("cargo names the binary to a test it runs"));
     c.env("HOME", list.parent().unwrap()).env_remove("XDG_CONFIG_HOME").env_remove("FRAGMENT_OPERATOR_KEY_FILE").env_remove("FRAGMENT_OUTPUT");
     c.args(["operator", "wake", "Fragment"]).arg(list).arg("--key-file").arg(key).args(["--host", host]);
     match mode {

@@ -82,6 +82,16 @@ pub fn data(name: &str) -> Vec<&'static File> {
     template(name).map(|t| t.files.iter().filter(|f| is_data(f.path)).collect()).unwrap_or_default()
 }
 
+/// The connection a skill is for, as its frontmatter names it (`metadata:
+/// fragment: connection: <provider>`): the catalog row an agent must hold
+/// to use it (FIN-509). None for a skill of no connection.
+pub fn skill_connection(skill_md: &str) -> Option<&str> {
+    let front = skill_md.strip_prefix("---\n")?.split_once("\n---")?.0;
+    let mut metadata = front.lines().skip_while(|l| l.trim_end() != "metadata:").skip(1).take_while(|l| l.starts_with(' '));
+    metadata.by_ref().find(|l| l.trim_end() == "  fragment:")?;
+    metadata.take_while(|l| l.starts_with("    ")).find_map(|l| l.trim().strip_prefix("connection:")).map(str::trim).filter(|c| !c.is_empty())
+}
+
 /// One data file of a blessed template, when `path` is one.
 pub fn data_file(name: &str, path: &str) -> Option<&'static File> {
     template(name)?.file(path).filter(|f| is_data(f.path))
@@ -361,7 +371,9 @@ mod tests {
         let total: u64 = files.iter().map(|f| f.size).sum();
         assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
         let mut names = std::collections::BTreeSet::new();
-        for f in files {
+        // each connection's skill: its folder, and the connection it names
+        let mut connections: Vec<(String, String)> = vec![];
+        for f in files.iter().copied() {
             assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
             assert!(f.size <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.size);
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
@@ -384,6 +396,10 @@ mod tests {
                 assert_eq!(name, parts[parts.len() - 2], "{}: a skill's name is its directory's", f.path);
                 assert!(front.lines().any(|l| l.starts_with("description:")), "{} says what it is for", f.path);
                 assert!(names.insert(name.to_string()), "{name} twice");
+                if let Some(connection) = skill_connection(text) {
+                    assert!(text.contains(&format!("fragment connection call {connection}")), "{}: a connection's skill calls it with `fragment connection call {connection}`", f.path);
+                    connections.push((f.path.trim_end_matches("SKILL.md").to_string(), connection.to_string()));
+                }
             }
         }
         for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite"] {
@@ -396,7 +412,17 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
-        assert_eq!(names.len(), 19, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides, import-agent-home and disk-space-finite");
+        // a connection's skill is its docs and its quirks, and no code: the
+        // one caller is `fragment connection call` (FIN-509)
+        assert!(connections.iter().any(|(_, c)| c == "google"), "Google's skill names its connection");
+        for (dir, connection) in &connections {
+            let code: Vec<&str> = files.iter().map(|f| f.path).filter(|p| p.starts_with(dir.as_str()) && (p.contains("/scripts/") || [".py", ".sh", ".js"].iter().any(|e| p.ends_with(e)))).collect();
+            assert!(code.is_empty(), "{connection}'s skill carries code of its own: {code:?}");
+        }
+        assert_eq!(skill_connection("---\nname: a\nmetadata:\n  hermes:\n    tags: [A]\n  fragment:\n    connection: linear\n---\n"), Some("linear"));
+        for none in ["---\nname: a\n---\n", "---\nname: a\nmetadata:\n  hermes:\n    connection: x\n---\n", "---\nname: a\nconnection: x\n---\n", "no frontmatter"] {
+            assert_eq!(skill_connection(none), None, "{none:?}");
+        }
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
@@ -548,6 +574,32 @@ mod tests {
         assert_eq!((copy("SOUL.md"), copy("memories/MEMORY.md"), copy("skills/mine/SKILL.md")), (Some("who I am".into()), Some("what I remember".into()), Some("what I made".into())));
         assert_eq!(read(".hermes/SOUL.md").as_deref(), Some("who I am"), "the agent itself as it was");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Goal: a big move never tells the agent to reply to its owner mid-turn
+    /// before `fragment home files --store` runs (FIN-701). A reply ends the
+    /// agent's turn in Hermes, so steps 3 to 8 never run and nothing wakes it.
+    #[test]
+    fn the_import_skill_does_not_reply_before_step_3_finishes() {
+        let skills = template("skills").unwrap();
+        let f = skills.file("skills/productivity/import-agent-home/SKILL.md").unwrap();
+        let text = String::from_utf8(bytes_of(skills, f)).unwrap();
+        let step3: String = text
+            .split_once("## 3. Files, into an app")
+            .and_then(|(_, rest)| rest.split_once("## 4. Personality"))
+            .expect("step 3..4 section in import-agent-home/SKILL.md")
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !step3.contains("first tell your owner"),
+            "step 3 must not ask the agent to send a mid-turn message before running home files"
+        );
+        assert!(
+            step3.contains("Don't reply to your owner until step 8"),
+            "step 3 must warn against replying mid-turn"
+        );
     }
 
     #[test]

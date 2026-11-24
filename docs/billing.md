@@ -129,8 +129,10 @@ Wiping the sole admin of an org others hold seats in ends their seats
   An event without this deployment's metadata is answered 200 and
   dropped; an event older than the last applied changes nothing.
 - **Credit packs** are a Checkout payment, its session id the grant's id
-  (docs/ledger.md). An admin may buy one for a member. No usage goes to
-  Stripe.
+  (docs/ledger.md). An admin may buy one for a member. Like a seat's
+  Checkout, a pack's is made on the org's customer only for its last
+  payer; anyone else's is made on their own email, and the credit goes to
+  the ledger its metadata names either way. No usage goes to Stripe.
 - **Discounts** are Stripe promotion codes, made in Stripe's dashboard.
 - **Its keys** are store secrets (docs/secrets.md); the restricted key's
   grants are in deploy/example.jsonc. `cargo xtask stripe check|setup`

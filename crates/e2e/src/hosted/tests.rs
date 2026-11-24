@@ -28,7 +28,7 @@ fn hosted(args: &[&str]) -> Hosted {
 /// hosted lane's rules on the local node.
 #[test]
 fn a_local_run_reads_as_before() {
-    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None });
+    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, containers: false });
     let only = parse(&strings(&["--only", "ledger,ai"])).unwrap();
     assert_eq!((only.only, only.hosted), (Some(strings(&["ledger", "ai"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));
@@ -37,6 +37,10 @@ fn a_local_run_reads_as_before() {
     for bad in [&["--only", "a", "--except", "b"][..], &["--only"], &["--max-paid-calls", "3"], &["--dry-run"], &["--zone", "finite.place"], &["--nope"], &["--only", ""]] {
         assert!(parse(&strings(bad)).is_err(), "{bad:?}");
     }
+    // the containers a run's node runs, asked of a local run's selection alone
+    let asked = parse(&strings(&["--shard", "2/5", "--containers"])).unwrap();
+    assert_eq!((asked.containers, asked.shard), (true, Some(2)));
+    assert!(parse(&strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--containers"])).is_err(), "a hosted run's node is no local one");
 }
 
 /// A local run takes one shard of the table's split, as CI runs it; a
@@ -377,11 +381,11 @@ fn a_sign_in_capped_otherwise_is_refused() {
 /// names, and reads them back by their plain ones.
 #[test]
 fn https_cookies_carry_the_host_prefix() {
-    assert_eq!(https_cookies("fragment_session=a; fragview=b; fragment_site=c"), "__Host-fragment_session=a; fragview=b; __Host-fragment_site=c");
-    assert_eq!(https_cookies("fragment_anon=d"), "fragment_anon=d", "an anonymous visitor's cookie is a site's own");
+    assert_eq!(https_cookies("fragment_session=a; fragview=b; fragment_site=c"), "__Host-fragment_session=a; __Host-fragview=b; __Host-fragment_site=c");
+    assert_eq!(https_cookies("fragment_anon=d; other=e"), "__Host-fragment_anon=d; other=e", "an anonymous visitor's cookie is the origin's own too");
     let mut headers = reqwest::header::HeaderMap::new();
     headers.append("set-cookie", "__Host-fragment_site=t; Path=/; Secure".parse().unwrap());
-    headers.append("set-cookie", "fragment_anon=v; Path=/".parse().unwrap());
+    headers.append("set-cookie", "__Host-fragment_anon=v; Path=/; Secure".parse().unwrap());
     let reply = Reply { status: 302, body: Value::Null, text: String::new(), bytes: vec![], headers };
     assert_eq!(reply.cookies(), ["fragment_site=t", "fragment_anon=v"]);
 }

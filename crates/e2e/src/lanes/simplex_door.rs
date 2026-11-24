@@ -57,6 +57,30 @@ fn until(api: &Api, door: &str, within: Duration, done: impl Fn(&Value) -> bool)
     }
 }
 
+/// Whether it has ended (cell/door.mjs `/door/end`): its storage gone,
+/// so its every ask but a start is refused (410); and its files left
+/// under its prefix in the bucket.
+fn end_of(api: &Api, door: &str) -> Result<(bool, Value)> {
+    let r = api.unsigned("POST", "/api/test/door", Some(&json!({ "door": door, "op": "state" })))?;
+    ensure!(r.status == 200 || r.status == 410, "the door's state: {r}");
+    Ok((r.status == 410, lever(api, door, "files", json!({}))?["files"].clone()))
+}
+
+/// Its end, once it has and its files are gone (within `within`): whether
+/// it ended, and its files left. A door refuses its asks (410) from the
+/// moment its end begins, before its files are deleted.
+pub(super) fn ended(api: &Api, door: &str, within: Duration) -> Result<(bool, Value)> {
+    let t0 = Instant::now();
+    // bounded by `within`
+    loop {
+        let (gone, files) = end_of(api, door)?;
+        if (gone && files.as_array().is_some_and(Vec::is_empty)) || t0.elapsed() >= within {
+            return Ok((gone, files));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// Its runner up, at start `generation` or a later one: an exit Docker
 /// restarts in place (a code of the runner's own) keeps its generation.
 fn ready_from(generation: u64) -> impl Fn(&Value) -> bool {
@@ -145,24 +169,35 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
         kept.as_array().is_some_and(|k| k.iter().any(|d| d["id"] == "sx-lane-1" && d["sent"] == 1)) && intake["output"]["ignored"] == "not linked",
         json!({ "deliveries": kept, "intake": intake }),
     );
-    // its name deleted and made again by someone else (the review of
-    // #1450): their connector's door is their life's, never the earlier
-    // one's (its SimpleX link), and the earlier door's messages reach their
-    // inbox no more
+    // its connector deleted, its door stopped already (FIN-614): the
+    // alarm ends it all the same, its saves and storage gone
+    let saved = until(api, &door, Duration::from_secs(120), |x| x["saves"].as_array().is_some_and(|a| !a.is_empty()))?;
+    lever(api, &door, "stop", json!({}))?;
+    let before = end_of(api, &door)?.1;
     let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
     ensure!(deleted.status == 200, "deleting the connector: {deleted}");
-    let other = api.person()?;
-    let (_, theirs, _) = connected(s, api, &other, name.clone(), "e2e-simplex-inbox-of-the-next-life-0a1b2c3d4e5f6a7b")?;
-    deliver(api, &door, "sx-lane-2", "still there?")?;
-    let old = lever(api, &door, "deliveries", json!({}))?;
-    let runs = api.signed(&other, "GET", &format!("/api/f/{name}/runs?op=intake"), None)?;
+    let (gone, files) = ended(api, &door, Duration::from_secs(60))?;
     s.ok(
-        "its name made again by someone else: their connect starts a door of their own, and the earlier door's messages reach their chat no more",
-        theirs != door && old.as_array().is_some_and(|k| k.iter().any(|d| d["id"] == "sx-lane-2" && d["sent"] == 0)) && runs.status == 200 && runs.body["runs"].as_array().is_some_and(Vec::is_empty),
-        json!({ "theirs": theirs, "earlier": door, "deliveries": old, "runs": runs.body }),
+        "its connector deleted, its door (stopped already) ends: its saves' files and its storage gone",
+        before.as_array().is_some_and(|f| !f.is_empty()) && gone && files.as_array().is_some_and(Vec::is_empty),
+        json!({ "saves": saved["saves"], "filesBefore": before, "ended": gone, "filesAfter": files }),
     );
-    lever(api, &door, "stop", json!({}))?;
-    lever(api, &theirs, "stop", json!({}))?;
+    // its name made again by someone else (the review of #1450): their
+    // connect starts a door of their own, new, and the earlier door's
+    // files come back no more
+    let other = api.person()?;
+    let (_, theirs, fresh) = connected(s, api, &other, name.clone(), "e2e-simplex-inbox-of-the-next-life-0a1b2c3d4e5f6a7b")?;
+    let (earlier, left) = end_of(api, &door)?;
+    s.ok(
+        "its name made again by someone else: their connect starts a new door of their own, and the earlier one's stays ended, its files gone",
+        theirs != door && generation(&fresh) <= 2 && fresh["door"]["saved"].as_u64().is_some_and(|n| n <= 1) && earlier && left.as_array().is_some_and(Vec::is_empty),
+        json!({ "theirs": theirs, "earlier": door, "fresh": fresh["door"], "earlierEnded": earlier, "earlierFiles": left }),
+    );
+    // theirs ends with their connector, deleted while it runs
+    let deleted = api.signed(&other, "DELETE", &format!("/api/f/{name}"), None)?;
+    ensure!(deleted.status == 200, "deleting their connector: {deleted}");
+    let (gone, files) = ended(api, &theirs, Duration::from_secs(60))?;
+    s.ok("their connector deleted while its door runs: its door ends, its files gone", gone && files.as_array().is_some_and(Vec::is_empty), json!({ "ended": gone, "files": files }));
     Ok(())
 }
 
@@ -284,15 +319,18 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     let forged = api.call(Call { method: "POST", url, body: Some(json!({ "payload": { "id": "sx-forged", "kind": "text", "text": "forged", "at": "2026-11-21T00:00:00Z" } }).to_string().into_bytes()), content_type: Some("application/json"), extra: vec![("x-simplex-door-secret", "not-the-secret".into())], ..Call::default() })?;
     s.ok("a delivery without the inbox's secret is refused", forged.status == 403, &forged);
 
-    // unbound by its owner: their next message reaches no one
+    // unbound by its owner (FIN-614): its door ends with the unlink, its
+    // saves and storage gone, and its binding with it
+    let before = end_of(api, &door)?.1;
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "unlink" })))?;
     ensure!(r.status == 200, "unbinding: {r}");
-    deliver(api, &door, "sx-e2e-2", "anyone there?")?;
-    let intake = newest("intake");
-    let none = chat().into_iter().all(|r| r["body"]["text"] != "anyone there?");
-    s.ok("unbound by its owner, their next message reaches no one", intake["output"]["ignored"] == "not linked" && none, &intake);
-    // its door's container is the connector's alone to keep: let go here
-    lever(api, &door, "stop", json!({}))?;
+    let (gone, files) = end_of(api, &door)?;
+    let bound = api.signed(owner, "GET", &format!("/api/f/{name}/door"), None)?;
+    s.ok(
+        "unbound by its owner, its door ends with the unlink: its saves' files and its storage gone, and it is no one's door",
+        before.as_array().is_some_and(|f| !f.is_empty()) && gone && files.as_array().is_some_and(Vec::is_empty) && bound.status == 200 && bound.body["bound"].is_null(),
+        json!({ "filesBefore": before, "ended": gone, "filesAfter": files, "bound": bound.body }),
+    );
     Ok(())
 }
 

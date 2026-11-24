@@ -8,6 +8,33 @@ struct WorkingIndicatorTests {
         .init(channel: "work", seq: seq, at: seq * 1000, principal: agent, kind: "message", body: try JSONDecoder().decode(JSONValue.self, from: Data(body.utf8)))
     }
 
+    /// A finished turn's summary heads its agent's reply right after it, one
+    /// header, not two: never a running one, one with words of its own, one
+    /// followed by someone else's message, or by a reply of another turn of
+    /// the same agent's (or of none named).
+    @Test func aFinishedTurnsSummaryHeadsTheReplyAfterIt() throws {
+        func message(_ seq: Int64, from principal: String, turn: String? = "t") throws -> ChannelRecord {
+            let body = turn.map { #"{"text":"hi","turn":"\#($0)"}"# } ?? #"{"text":"hi"}"#
+            return .init(channel: "chat", seq: seq, at: seq * 1000, principal: principal, kind: "message", body: try JSONDecoder().decode(JSONValue.self, from: Data(body.utf8)))
+        }
+        let step = ToolStep(record: try work(2, #"{"kind":"turn.call","turn":"t","tool":"x","category":"shell"}"#), running: false)
+        var done = ToolCard(id: "work:1", turn: TurnKey(agent: "npub1preview", id: "t"), steps: [step], since: 0)
+        done.until = 22_000
+        let rows: [ChatItem] = [.record(try work(1, "{}")), .record(try message(3, from: "npub1preview"))]
+        let led = ChatRows.leads(rows, cards: ["work:1": done])
+        #expect(led.folded == ["work:1"] && led.by["chat:3"] == done)
+
+        var running = done; running.until = nil; running.steps = [ToolStep(record: step.record, running: true)]
+        #expect(ChatRows.leads(rows, cards: ["work:1": running]).folded.isEmpty, "still working")
+        let others: [ChatItem] = [.record(try work(1, "{}")), .record(try message(3, from: "npub1someone"))]
+        #expect(ChatRows.leads(others, cards: ["work:1": done]).folded.isEmpty, "someone else's message")
+        // a turn with steps and no reply, then the same agent's next turn's reply
+        let later: [ChatItem] = [.record(try work(1, "{}")), .record(try message(3, from: "npub1preview", turn: "u"))]
+        #expect(ChatRows.leads(later, cards: ["work:1": done]).folded.isEmpty, "another turn's reply")
+        let unnamed: [ChatItem] = [.record(try work(1, "{}")), .record(try message(3, from: "npub1preview", turn: nil))]
+        #expect(ChatRows.leads(unnamed, cards: ["work:1": done]).folded.isEmpty, "a reply of no turn named")
+    }
+
     /// The one line says what the newest running step does in a plain word,
     /// Thinking between steps; done, a word for how long it took, the same
     /// each time for the same card.
