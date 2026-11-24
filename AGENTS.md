@@ -129,7 +129,16 @@ Put an evidence pack in the PR body and in your report:
     that you watched it fail.
   - Anything a person sees comes with screenshots of the real app against
     a dev stack: web at 1280 and 390 px, iOS from the simulator, light and
-    dark where it matters. Nothing staged or mocked.
+    dark where it matters. Nothing staged or mocked. Attach them to the PR
+    with the gh CLI, which uploads images and videos; a screenshot that
+    stays on your machine isn't evidence, and none goes in the repo:
+
+    ```sh
+    gh pr create --title "…" --body "…" --attach './after.png#The new sheet'
+    gh pr edit 123 --attach ./after-390-dark.png     # appended to the body
+    gh pr comment 123 --body "Before and after:" \
+      --attach ./before.png --attach ./after.png
+    ```
   - When only the real platform can tell, run a hosted check against
     preview (`cargo xtask e2e --hosted`, preview account only).
 - **Gaps:** what you didn't verify and what could still go wrong. Never
