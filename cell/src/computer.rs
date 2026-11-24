@@ -4303,7 +4303,7 @@ struct Runs {
 /// the first made first). Not stored anywhere (docs/computers.md, "What a
 /// computer is"): read from the registry and their computer from before at
 /// once. An agent's own computer not made yet answers none where asked.
-async fn theirs(env: &Env, who: &str) -> CellResult<Vec<String>> {
+pub(crate) async fn theirs(env: &Env, who: &str) -> CellResult<Vec<String>> {
     let own = fragment_core::computer::default_computer_of(who);
     let (agents, on_own) = futures_util::future::join(
         crate::ask_registry(env, &crate::registry::calls::AgentsOf { person: who.to_string() }),

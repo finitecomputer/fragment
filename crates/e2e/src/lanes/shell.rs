@@ -1568,9 +1568,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // bridge never says its image does
     const CONNECTOR_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for]:not([data-simplex-computer])";
     const COMPUTER_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for][data-simplex-computer]";
+    // their first agent's computer (its own: a computer per agent), the
+    // Reader's another
+    let first_agent = own_named(api, &session, &first_label)?;
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
-    let said = computers.body["computers"][0].get("simplex").cloned();
-    let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let firsts = computer_running(&computers.body, &first_agent);
+    let said = firsts.get("simplex").cloned();
+    let simplex_id = firsts["computer"].as_str().unwrap_or("").to_string();
     s.ok(
         "settings offer SimpleX's connector on a computer whose image does not do it (the stub's, as every agent's own computer's): its section and nav link shown, each agent's Set up its connector's, and the computer's view says nothing of SimpleX",
         computers.status == 200 && said.is_none() && has(CONNECTOR_ROW) && !has(COMPUTER_ROW) && has(".settings-nav-link[data-section=settings-simplex]:not([hidden])"),
@@ -1585,18 +1589,25 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         &tags,
     );
     // its bridge says its image does (the lever, as `?simplex=1` would) on a
-    // $200 seat, its computer kept on: its computer's row; its holder lets it
-    // sleep (Billing's box, Settings left open): its connector's; kept on
-    // again, its computer's; its image no longer doing it, its connector's,
-    // through the list's socket, with what was typed elsewhere on them kept
-    // (Alex's review), and nothing else redrawn
+    // $200 seat, its computer kept on: its agent's row its computer's, the
+    // Reader's (on a computer of its own, which does not) its connector's
+    // still; its holder lets it sleep (Billing's box, Settings left open):
+    // its connector's; kept on again, its computer's; its image no longer
+    // doing it, its connector's, through the list's socket, with what was
+    // typed elsewhere on them kept (Alex's review), and nothing else redrawn
     let op_session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&op_session, &s.operator);
     let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
     b.eval(&page, "(document.getElementById('settings').click(), true)")?;
     let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
-    let row_is = |which: &str| format!("!!document.querySelector({which:?}) && !document.querySelector({other:?})", other = if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW });
+    // the first agent's row is `which`, the Reader's its connector's
+    let of_first = |row: &str| row.replacen("[data-simplex-for]", &format!("[data-simplex-for={first_agent:?}]"), 1);
+    let readers = CONNECTOR_ROW.replacen("[data-simplex-for]", &format!("[data-simplex-for={:?}]", own_named(api, &session, "reader").unwrap_or_default()), 1);
+    let row_is = |which: &str| {
+        let (mine, other) = (of_first(which), of_first(if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW }));
+        format!("!!document.querySelector({mine:?}) && !document.querySelector({other:?}) && !!document.querySelector({readers:?})")
+    };
     let kept_on = b.until(&page, &format!("!!({box_}) && !({box_}).checked && {}", row_is(COMPUTER_ROW)), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
     let sleeps = b.until(&page, &row_is(CONNECTOR_ROW), std::time::Duration::from_secs(30));
@@ -1608,7 +1619,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
     b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
     s.ok(
-        "an always-on computer whose image does SimpleX keeps each agent's SimpleX (its computer's Set up); let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
+        "an always-on computer whose image does SimpleX keeps its agent's SimpleX (its computer's Set up), another agent's on its own computer its connector's still; let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
         on.status == 200 && comped.status == 200 && kept_on && sleeps && back && off.status == 200 && off.body["simplex"] == false && followed && kept == json!(true),
         json!({ "on": on.body, "comped": comped.status, "keptOn": kept_on, "sleeps": sleeps, "back": back, "off": off.body, "followed": followed, "kept": kept, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
     );
@@ -3690,7 +3701,7 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=disk_filling]')";
     // its words, over settings once they have loaded (what the shots show)
-    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
+    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && !!document.querySelector('#settings-page .agent-computer h3')");
     let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 9_000_000_000u64, "data": 14_200_000_000u64 }))?;
     // its update waits for room while it is told filling (docs/computers.md,
     // "An image's share of the disk"; Codex on #1422)
@@ -3862,8 +3873,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=update]')";
     let settings_text = |b: &mut Browser| b.eval(page, "document.getElementById('settings-page').innerText").ok().and_then(|t| t.as_str().map(str::to_string)).unwrap_or_default();
     let idle = |s: &Suite| s.eventually(std::time::Duration::from_secs(15), || super::computers::lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
-    // settings' Computer section, in view for its screenshot
-    let to_computer = "([...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Computer')?.scrollIntoView({ block: 'start' }), true)";
+    // its agent's Computer card in settings, in view for its screenshot
+    let to_computer = &format!("(document.querySelector({})?.scrollIntoView({{ block: 'start' }}), true)", js(&format!("#settings-page .agent-computer[data-computer={id:?}]")));
     let first = view();
     let running = first["version"].as_str().unwrap_or("").to_string();
     idle(s);
@@ -4054,8 +4065,9 @@ const READ_AGAIN: &str = "(window.__failComputers = false, document.querySelecto
 /// What the page made and said, under `FAIL_COMPUTERS`.
 const MADE: &str = "({ path: location.pathname, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').innerText, band: document.getElementById('computer-notices').innerText, \
     makingSaid: window.__makingSaid, makingAt: window.__makingAt ?? null, makes: window.__makes, reads: window.__computerReads })";
-/// Settings' Computer section, as shown (null before it is).
-const COMPUTER_SECTION: &str = "[...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Computer')?.parentElement.innerText ?? null";
+/// Settings' Computer card of their (first) agent, as shown (null before
+/// it is): a computer per agent, each agent's on its page.
+const COMPUTER_SECTION: &str = "document.querySelector('#settings-page .agent-computer')?.innerText ?? null";
 
 /// The shell at `path` under `FAIL_COMPUTERS` from its first document,
 /// its first run's makes held, after `before` (a script setting it).
@@ -4440,8 +4452,8 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
     let said = b.eval(&page, COMPUTER_SECTION)?;
     let _ = b.screenshot(&page, &shots.join("settings-refresh-failed.png"));
     s.ok(
-        "their computer unread, Settings' Computer section says it couldn't be loaded, never that it starts with their first agent, under the line",
-        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load your computer") && !t.contains("starts with your first agent")),
+        "their computer unread, their agent's Computer card in Settings says it couldn't be loaded, never that it starts with its first message, under the line",
+        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load its computer") && !t.contains("starts with its first message")),
         &said,
     );
     b.eval(&page, READ_AGAIN)?;
@@ -5526,7 +5538,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // it is kept on: Settings' SimpleX row is then the computer's own
     // (`data-simplex-computer`), shown once the shell's view of it says so
     // (every seat's Settings shows SimpleX, its connector's elsewhere)
-    let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let computer = computer_running(&shell(api, me.session, "GET", "/api/computers", None, &[])?.body, &agent)["computer"].as_str().unwrap_or("").to_string();
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
     super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": true }))?;
     const ITS_OWN: &str = "!!document.querySelector('#settings-simplex:not([hidden]) [data-simplex-computer]')";
@@ -9617,9 +9629,10 @@ fn all_agents(view: &Value) -> Vec<Value> {
     view["computers"].as_array().into_iter().flatten().flat_map(|c| c["agents"].as_array().cloned().unwrap_or_default()).collect()
 }
 
-/// The computer that runs agent `fragment`, from the person's computers' view.
-fn computer_running(view: &Value, fragment: &str) -> Value {
-    view["computers"].as_array().into_iter().flatten().find(|c| c["agents"].as_array().is_some_and(|l| l.iter().any(|a| a["fragment"] == fragment))).cloned().unwrap_or(Value::Null)
+/// The computer that runs an agent (`agent`: its fragment or its identity),
+/// from the person's computers' view.
+fn computer_running(view: &Value, agent: &str) -> Value {
+    view["computers"].as_array().into_iter().flatten().find(|c| c["agents"].as_array().is_some_and(|l| l.iter().any(|a| a["fragment"] == agent || a["identity"] == agent))).cloned().unwrap_or(Value::Null)
 }
 
 /// The sidebar's sections (Paul, 2026-10-31: one per agent of theirs, its
@@ -10120,19 +10133,21 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
         json!({ "start": start, "stoppable": stoppable, "ended": ended, "byOwner": by_owner }),
     );
 
-    // cut by a restart: Lost, said until the answer is in (its asker's turn
-    // that asked was cut too, its card closed: its answer's turn's alone)
+    // cut by a restart: Lost, said until the answer is in. The Reader's own
+    // computer is restarted (a computer per agent: its turn runs there, its
+    // asker's on another), which cuts its turn; its asker's turn that asked
+    // waits on its own card still (its words hold "approve"), answered after,
+    // and then its answer's turn's
     say("thread-2", json!({ "text": "ask reader approve once more" }))?;
     let needs = state_is(b, "you");
-    let computer = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
-    // the first agent's turns here as it is killed: its own that asked,
-    // whose card waits too. The restarted computer ends each as lost once
-    // it reaches it, after a rollback only once it has claimed again every
-    // turn before it, which may be after the Reader's is (the line's Lost):
-    // until then its card looks open, and answering it answers no one
+    let computer = computer_running(&shell(api, session, "GET", "/api/computers", None, &[])?.body, reader_id)["computer"].as_str().unwrap_or("").to_string();
+    // the Reader's turns in the pair chat as it is killed. The restarted
+    // computer ends each as lost once it reaches it, after a rollback only
+    // once it has claimed again every turn before it
+    let pair_work = || shell(api, session, "GET", &format!("/api/f/{pair}/channels/work?before={}&limit=200", i64::MAX), None, &[]).map(|r| r.body["records"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
     let ended = |w: &[Value], turn: &Value| w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn);
-    let before = work();
-    let open: Vec<Value> = before.iter().filter(|r| r["principal"] == first_id.as_str() && r["body"]["kind"] == "turn.start" && !ended(&before, &r["body"]["turn"])).map(|r| r["body"]["turn"].clone()).collect();
+    let before = pair_work();
+    let open: Vec<Value> = before.iter().filter(|r| r["principal"] == reader_id && r["body"]["kind"] == "turn.start" && !ended(&before, &r["body"]["turn"])).map(|r| r["body"]["turn"].clone()).collect();
     let view = || shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let generation = view()["generation"].as_u64().unwrap_or(0);
     let killed = super::computers::lever(api, &computer, "kill")?;
@@ -10151,10 +10166,11 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let lost = killed.status == 200 && heard && state_is(b, "lost");
     let _ = b.screenshot(page, &shots.join("desktop-thread-lost.png"));
     let cut = !open.is_empty() && s.eventually(agent_wait, || {
-        let w = work();
+        let w = pair_work();
         open.iter().all(|t| ended(&w, t))
     });
-    let answered = cut && answer_own(s)?;
+    // its asker's card (the turn that asked), then its answer's turn's
+    let answered = cut && answer_own(s)? && answer_own(s)?;
     let then_gone = gone(b);
     s.ok(
         "cut by a restart, its line says Lost (never dropped) until its asker has answered in the chat, then goes",

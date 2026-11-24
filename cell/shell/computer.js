@@ -165,12 +165,17 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // followed (its progress is the page's own row, not a notice's): the one
   // route the band knows, never a kind. The computer it restarts, else none.
   const restarts = (a) => computers().find((c) => a.post === `/api/computers/${seg(c.computer)}/restart`)?.computer ?? null;
-  // Each computer card as last built (an agent's page shows its computer's:
-  // two agents on one computer from before, two of the same): its State's
-  // words, and its Restart's buttons, painted again as the computer changes
+  // Each computer card as last built, by its computer and its agent (an
+  // agent's page shows its computer's: two agents on one computer from
+  // before, two of the same): its State's words, and its Restart's buttons,
+  // painted again as the computer changes while it is on the page
   // (`paintSettings`); its buttons only when the restart's step changed, so
-  // a Restart now asked stays until pressed or cancelled.
-  let cards = [];
+  // a Restart now asked stays until pressed or cancelled. A card built
+  // again replaces its own alone: Settings builds every agent's before it
+  // shows any. Bounded by their agents.
+  const cards = new Map();
+  const cardKey = (id, agent) => `${id ?? ""}|${agent ?? ""}`;
+  const shownCards = () => [...cards.values()].filter((k) => k.section?.isConnected);
   // a button with its icon before its words; `words`, the span its words
   // are in (a named one: renderNames rewrites only its text)
   const iconed = (name, words, cls = "quiet") => {
@@ -487,12 +492,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   function redrawSection(id) {
     const c = viewOf(id);
     if (!c) return;
-    for (const card of cards.filter((k) => k.id === id && k.section.isConnected)) {
+    for (const card of shownCards().filter((k) => k.id === id)) {
       const old = card.section;
       const fresh = computerSection(c, card.agent);
       old.replaceChildren(...fresh.children);
-      cards.find((k) => k.section === fresh).section = old;
-      cards = cards.filter((k) => k !== card);
+      cards.get(cardKey(id, card.agent)).section = old;
     }
   }
   // Try again: the list and the computer read again (`load`, which goes on
@@ -581,8 +585,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       computer.append(restartRow);
     }
     card.section = computer;
-    // the cards still shown, and this one
-    cards = [...cards.filter((k) => k.section?.isConnected), card];
+    cards.set(cardKey(card.id, agent), card);
     return computer;
   }
   // Storage: a bar of what takes its disk by kind, the room left, the
@@ -678,8 +681,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     return l;
   }
   function paintSettings() {
-    cards = cards.filter((k) => k.section?.isConnected);
-    for (const card of cards) {
+    for (const card of shownCards()) {
       const c = viewOf(card.id);
       if (!c) continue;
       if (card.state?.isConnected) card.state.textContent = stateSaid(c, active(followOf(c.computer).op()));
