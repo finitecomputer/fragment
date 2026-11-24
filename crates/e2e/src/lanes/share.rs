@@ -205,7 +205,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let lend = |fields: &[(&str, &str)]| -> Result<Reply> {
         let form = armed(api, &talk_sheet, &owner_session)?;
-        let all = [&[("form", form.as_str()), ("action", "lend"), ("member", agent.as_str())][..], fields].concat();
+        let all = [&[("form", form.as_str()), ("action", "lend"), ("agent", agent.as_str())][..], fields].concat();
         post(api, &talk_sheet, &owner_session, &platform, &all)
     };
     let changed = lend(&[("accounts", "on")])?;

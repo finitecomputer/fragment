@@ -817,7 +817,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         };
         let inner = format!(
             "{}<p class=\"hint\">{}</p>{}{}",
-            hidden("member", agent),
+            hidden("agent", agent),
             esc(&fragment_core::permit::asked_here(&named)),
             switch("spend", lend.spend, "Spend my credit on paid tools", "Images, video, search"),
             switch("accounts", lend.accounts, "Use my accounts and keys", "Gmail, Calendar, Drive, my Vault"),
@@ -933,9 +933,9 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             Ok(m) => ask(env, url, name, &who, Method::Delete, &format!("/api/members/{m}"), None).await,
             Err(e) => Err(e),
         },
-        "lend" => match member() {
-            Ok(m) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{m}/lend"), body(&Lend { spend: field("spend") == "on", accounts: field("accounts") == "on" })).await,
-            Err(e) => Err(e),
+        "lend" => match field("agent") {
+            a if npub::is_identity(a) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{a}/lend"), body(&Lend { spend: field("spend") == "on", accounts: field("accounts") == "on" })).await,
+            a => Err(CellError::invalid(format!("{a:?} is no agent of yours here"))),
         },
         "uninvite" => match field("email") {
             email if fragment_core::mail::valid_address(email) => ask(env, url, name, &who, Method::Delete, &format!("/api/invites/{}", enc(email)), None).await,
