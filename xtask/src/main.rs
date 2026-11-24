@@ -211,6 +211,11 @@ fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
 
+/// `program`, to be started by xtask.
+fn outside_cargo(program: &str) -> Command {
+    Command::new(program)
+}
+
 fn run(cmd: &mut Command) -> Result<()> {
     let shown = shown(cmd);
     let status = cmd.status().with_context(|| format!("could not start {shown}"))?;
@@ -883,6 +888,30 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: the cargo xtask starts is told nothing of xtask's own package,
+    /// so it builds as cargo run by hand does. Before, it inherited what
+    /// `cargo xtask` (a `cargo run`) sets for xtask, and ring's build
+    /// script, which reads `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`, was
+    /// rerun whenever a build by hand followed one of xtask's or the other
+    /// way round: ring, reqwest and every crate of ours above them, built
+    /// again. Method: `env` started as xtask starts cargo, from this test,
+    /// for which `cargo test` sets the same variables. Valid: every other
+    /// variable is passed on, cargo's own settings among them.
+    #[test]
+    fn what_xtask_starts_is_told_nothing_of_xtasks_own_package() {
+        for set in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR"] {
+            assert!(std::env::var_os(set).is_some(), "cargo sets {set} for this test, as for xtask");
+        }
+        let out = super::outside_cargo("env").env("CARGO_TERM_COLOR", "never").output().expect("env runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let names: Vec<&str> = text.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name).collect();
+        let own: Vec<&&str> = names.iter().filter(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_")).collect();
+        assert!(own.is_empty(), "passed on: {own:?}");
+        for kept in ["PATH", "HOME", "CARGO_TERM_COLOR"] {
+            assert!(names.contains(&kept), "{kept} is passed on: {names:?}");
+        }
+    }
+
     /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
     /// `--models` without its config, and `--models` without `--real-agent`
     /// are refused before anything builds.
