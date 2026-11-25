@@ -1389,8 +1389,10 @@ unfinished design, not debt.
   next import compare by hand (`NO RECORD`), and an edited one stops it
   (`STOP`). Two teammates catching up within the same few seconds can
   lose one's record entries (they heal at the next catch-up), or one's
-  new page can replace the other's at the same path (its bytes stay in
-  the brain's history). Nothing in a test runs the profile's text itself,
+  new page can replace the other's at the same path. A page a person
+  deletes in the seconds between a catch-up's pull and its push, after
+  the catch-up updated it, comes back (the sync's local change wins over
+  a remote delete). Either way, the bytes stay in the brain's history. Nothing in a test runs the profile's text itself,
   only the helper (`crates/templates/tests/import_brains.rs`).
 - **Delete when:** an agent can list `main`'s commits and read a file at
   one (FIN-780). Then each import's commit names its old brain, its

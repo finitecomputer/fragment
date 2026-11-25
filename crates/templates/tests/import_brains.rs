@@ -89,8 +89,15 @@ impl Dir {
     /// The helper, as the profile runs it: its answer, or what it said
     /// when it refused. Never a traceback.
     fn run(&self, args: &[&str]) -> Result<Value, String> {
+        self.run_capped("unlimited", args)
+    }
+
+    /// The helper with each file it writes capped at `kb` KiB (`ulimit
+    /// -f`), as a full disk stops a write partway.
+    fn run_capped(&self, kb: &str, args: &[&str]) -> Result<Value, String> {
         let helper = std::fs::canonicalize(HELPER).expect("the helper, from crates/templates");
-        let out = Command::new("python3").arg("-I").arg(helper).args(args).current_dir(&self.0).output().expect("python3 runs");
+        let script = format!("ulimit -f {kb} && exec python3 -I \"$@\"");
+        let out = Command::new("bash").arg("-c").arg(script).arg("bash").arg(helper).args(args).current_dir(&self.0).output().expect("bash runs");
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         assert!(!said.contains("Traceback"), "{args:?}: {said}");
         match out.status.success() {
@@ -122,6 +129,11 @@ impl Dir {
     /// it: the copy's files, less the folders left out, then `start`.
     fn found(&self, old: &Old, edited: &[(&str, &str)], left_out: &[&str]) -> Value {
         self.copy("founder", old, edited);
+        self.make(left_out)
+    }
+
+    /// The brain made from the founder's copy as it stands (`found`).
+    fn make(&self, left_out: &[&str]) -> Value {
         for (path, text) in self.files("founder") {
             self.put(&format!("brain/{path}"), &text);
         }
@@ -169,7 +181,7 @@ fn a_team_brain_comes_together_one_move_at_a_time() {
         pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/b.md", "b", 1, "b1"), ("Notes/g.md", "g", 1, "g1"), ("Board/m.md", "m", 1, "m1"), ("Leadership/x.md", "x", 1, "x1")],
     };
     // the founder leaves the restricted folder out: never shared, nor named
-    assert_eq!(d.found(&at10, &[], &["Leadership"]), json!({"recorded": 4, "shared": ["Board", "Notes"], "not shared": ["Leadership"]}));
+    assert_eq!(d.found(&at10, &[], &["Leadership"]), json!({"recorded": 4, "shared": ["Board", "Notes"], "not shared": ["Leadership"], "removed": [], "refused": []}));
     assert!(!d.read(RECORD).unwrap().contains("Leadership"));
     d.put("brain/Notes/b.md", "b1, edited here");
 
@@ -229,17 +241,29 @@ fn a_team_brain_comes_together_one_move_at_a_time() {
 /// Goal: a catch-up brings nothing into a folder the brain doesn't share
 /// (left out when it was made, a child left out, one made since, another
 /// folder at a shared path), nor an asset into a folder this copy couldn't
-/// read; a folder it couldn't read is untouched. Invalid: what would open
-/// a restricted folder to the whole team.
+/// read; a folder it couldn't read is untouched. Nor does the founder's
+/// push carry a folder left out: not its assets, which sit in its parent's
+/// wiki, nor a folder's files the old agent could no longer read. Invalid:
+/// what would open a restricted folder to the whole team.
 #[test]
 fn what_the_brain_doesnt_share_never_comes_in() {
     let d = Dir::new("folders");
+    let (private, shared) = ("---\nresource: raw/assets/private.pdf\n---\np1", "---\nresource: raw/assets/shared.png\n---\na1");
     let at10 = Old {
         sequence: 10,
-        folders: vec![("Notes", "n", true), ("Notes/Private", "np", true), ("Board", "b", true), ("Team", "t", true), ("Team/Public", "tp", true)],
-        pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/Private/p.md", "p", 1, "p1"), ("Board/k.md", "k", 1, "k1"), ("Team/t.md", "t", 1, "t1"), ("Team/Public/u.md", "u", 1, "u1")],
+        folders: vec![("Notes", "n", true), ("Notes/Private", "np", true), ("Board", "b", true), ("Team", "t", true), ("Team/Public", "tp", true), ("Archive", "ar", false)],
+        pages: vec![("Notes/a.md", "a", 1, shared), ("Notes/Private/p.md", "p", 1, private), ("Board/k.md", "k", 1, "k1"), ("Team/t.md", "t", 1, "t1"), ("Team/Public/u.md", "u", 1, "u1")],
     };
-    assert_eq!(d.found(&at10, &[], &["Notes/Private"]), json!({"recorded": 4, "shared": ["Board", "Notes", "Team", "Team/Public"], "not shared": ["Notes/Private"]}));
+    d.copy("founder", &at10, &[]);
+    d.put("founder/Notes/raw/assets/private.pdf", "the private folder's");
+    d.put("founder/Notes/raw/assets/shared.png", "a shared note's");
+    d.put("founder/Archive/old.md", "from before the old agent lost it");
+    assert_eq!(
+        d.make(&["Notes/Private"]),
+        json!({"recorded": 4, "shared": ["Board", "Notes", "Team", "Team/Public"], "not shared": ["Archive", "Notes/Private"], "removed": ["Archive/old.md", "Notes/raw/assets/private.pdf"], "refused": []})
+    );
+    let made = d.files("brain");
+    assert!(made.contains_key("Notes/raw/assets/shared.png") && !made.keys().any(|p| p.contains("private") || p.starts_with("Archive")), "{made:?}");
     let note = "---\nresource: raw/assets/v.png\n---\nv1";
     let at20 = Old {
         sequence: 20,
@@ -307,6 +331,8 @@ fn paths_and_assets_stay_in_the_brain() {
     let d = Dir::new("paths");
     let with = |name: &str| format!("---\ntitle: {name}\nresource: raw/assets/{name}.png\n---\n{name}");
     let (s, q, diff, link) = (with("s"), with("q"), with("diff"), with("link"));
+    // over the 300 bytes a repo path may be, which sync never carries
+    let long = format!("Notes/{}/long.md", vec!["d".repeat(100); 3].join("/"));
     let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true)], pages: vec![("Notes/s.md", "s", 1, s.as_str()), ("Notes/q.md", "q", 1, "q1"), ("Notes/k.md", "k", 1, "k1")] };
     d.found(&at10, &[], &[]);
     d.put("brain/Notes/raw/assets/q.png", "q-png");
@@ -331,6 +357,8 @@ fn paths_and_assets_stay_in_the_brain() {
             ("Notes/file/x.md", "x", 1, "x1"),
             ("Notes/../../escape.md", "esc", 1, "esc1"),
             ("Notes/sym.md", "sym", 1, "sym1"),
+            ("Notes/x.conflict-1.md", "conflict", 1, "c1"),
+            (long.as_str(), "long", 1, "l1"),
         ],
     };
     d.copy("t20", &at20, &[]);
@@ -344,7 +372,7 @@ fn paths_and_assets_stay_in_the_brain() {
         answer(json!({
             "added": 1, "updated": 1, "assets": 1,
             "both": ["Notes/diff.md", "Notes/dir.md", "Notes/file/x.md", "Notes/link.md"],
-            "refused": ["Notes/../../escape.md", "Notes/sym.md"],
+            "refused": ["Notes/../../escape.md", long, "Notes/sym.md", "Notes/x.conflict-1.md"],
             "extra": ["Notes/raw/assets/diff.png", "Notes/raw/assets/link.png"],
         }))
     );
@@ -357,6 +385,25 @@ fn paths_and_assets_stay_in_the_brain() {
     assert_eq!(brain["Notes/file"], "a file where a folder goes");
     assert!(!brain.values().any(|text| text.contains("never in the brain")) && !brain.keys().any(|p| p.contains("link") || p.contains("sym")));
     assert!(d.read("escape.md").as_deref() == Some("esc1") && !d.files("brain").contains_key("escape.md"));
+    assert!(!brain.keys().any(|p| p.contains(".conflict-") || p.contains("long.md")), "what sync never carries never looks taken");
+}
+
+/// Goal: a write that fails partway (a full disk) leaves the brain's page
+/// as it was, never part of the newer one that its push would carry.
+/// Replay: with room again, the same catch-up takes it.
+#[test]
+fn a_write_that_fails_leaves_the_page_as_it_was() {
+    let d = Dir::new("full");
+    let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true)], pages: vec![("Notes/big.md", "big", 1, "small")] };
+    d.found(&at10, &[], &[]);
+    let big = "b".repeat(8192);
+    d.copy("t20", &Old { sequence: 20, folders: vec![("Notes", "n", true)], pages: vec![("Notes/big.md", "big", 2, &big)] }, &[]);
+    let args = ["catch-up", OLD, "t20.json", "brain", "t20"];
+    assert_eq!(d.run_capped("4", &args).unwrap(), answer(json!({"both": ["Notes/big.md"]})));
+    assert_eq!(d.files("brain").keys().collect::<Vec<_>>(), ["Notes/big.md", "imported-from-finite.json"], "nothing partial left beside it");
+    assert_eq!(d.read("brain/Notes/big.md").as_deref(), Some("small"));
+    assert_eq!(d.run(&args).unwrap(), answer(json!({"updated": 1, "settled": true})));
+    assert_eq!(d.read("brain/Notes/big.md"), Some(big));
 }
 
 /// Goal: an import that can't tell versions compares by hand, as before

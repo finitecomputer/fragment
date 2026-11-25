@@ -118,8 +118,12 @@ python3 -I "<profiles>/finite-computer.brains.py" start <id> "$H.json" "$W" "$H"
 ```
 
 It shares only the folders the brain holds now: a folder made later in
-the old brain, or one left out, never comes in by a catch-up. Running it
-again before the push is safe. If it says `NO VERSIONS` (an export, a
+the old brain, or one left out, never comes in by a catch-up. It takes
+out of the push what would show a folder it doesn't share (`removed`):
+the files of one your old agent couldn't read, and the assets only a
+left-out folder's notes name. `refused` lists pages `fragment sync`
+can't carry (a path over 300 bytes, say): they stay out, so name them in
+the report. Running it again before the push is safe. If it says `NO VERSIONS` (an export, a
 stage from before versions, or no name file), there is nothing to
 record: go on. If it says `STOP`, push nothing, and say in the report
 what it said.
@@ -229,8 +233,9 @@ It leaves the rest as it is, for a person, and lists it:
 - **unshared:** folders the real one doesn't share: left out when it
   was made, for only some to read, or made since in the old brain (even
   at a shared folder's path). Never bring one in yourself;
-- **refused:** a page's path that climbs out of the brain or through a
-  link.
+- **refused:** a page's path that climbs out of the brain, goes through
+  a link, or is one `fragment sync` never carries (over 300 bytes, a
+  name starting with `.`, or one holding `.conflict-`).
 
 It never changes **unread folders** (folders you couldn't read on the old
 Finite, so your copy has none of them).

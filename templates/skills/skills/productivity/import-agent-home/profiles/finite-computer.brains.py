@@ -48,6 +48,19 @@ def clean(path):
     )
 
 
+def carried(path):
+    # A path `fragment sync` carries (cli/src/sync/scan.rs `syncable`, and
+    # proto's `valid_repo_path`): one it skips would stay in this folder
+    # alone, and look settled here.
+    if not clean(path) or len(path.encode()) > 300 or path[1:2] == ":" or path.split("/")[0] == "node_modules":
+        return False
+    return not any(
+        name[0] == "." or name[-1] == "~" or name[:2] == "~$" or name.endswith(".swp")
+        or ".conflict-" in name or ".fragment-partial" in name
+        for name in path.split("/")
+    )
+
+
 def at(root, path):
     # `root`/`path`, or None when a part of it is a link.
     full = os.path.join(root, *path.split("/"))
@@ -73,6 +86,23 @@ def blocked(root, path):
     return full is None or (os.path.lexists(full) and not os.path.isfile(full))
 
 
+def whole(path, write):
+    # Written whole beside it under a dot name (which never syncs), then
+    # moved over it: a link there is replaced, never followed, and a write
+    # that fails leaves what was there.
+    part = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".partial")
+    try:
+        if os.path.lexists(part):
+            os.unlink(part)
+        with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644), "wb") as f:
+            write(f)
+        os.replace(part, path)
+    except OSError:
+        if os.path.lexists(part):
+            os.unlink(part)
+        raise
+
+
 def put(src_root, dst_root, path):
     # The copy's file onto the brain's, never through a link: whether it went.
     src, dst = at(src_root, path), at(dst_root, path)
@@ -80,10 +110,19 @@ def put(src_root, dst_root, path):
         return False
     try:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(src, dst)
+        with open(src, "rb") as f:
+            whole(dst, lambda out: shutil.copyfileobj(f, out))
         return True
     except OSError:
-        return False  # a file where its folder goes, say
+        return False  # a file where its folder goes, or a full disk
+
+
+def files_in(root):
+    # Every file under `root`, by its path there, but in dot folders.
+    for top, folders_here, names in os.walk(root):
+        folders_here[:] = [name for name in folders_here if not name.startswith(".")]
+        for name in names:
+            yield os.path.relpath(os.path.join(top, name), root).replace(os.sep, "/")
 
 
 def assets(root, path):
@@ -103,8 +142,9 @@ def assets(root, path):
             break
         if line.startswith("resource:"):
             name = line[len("resource:"):].strip().strip("\"'")
-            if name.startswith("raw/assets/") and clean(name):
-                found.append(path.split("/", 1)[0] + "/" + name)
+            asset = path.split("/", 1)[0] + "/" + name
+            if name.startswith("raw/assets/") and carried(asset):
+                found.append(asset)
     return found
 
 
@@ -122,14 +162,10 @@ def load(path, what):
 
 
 def save(path, value):
-    # Written whole beside it under a dot name (which never syncs), then
-    # moved over it: a link there is replaced, never followed.
-    part = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".partial")
-    if os.path.lexists(part):
-        os.unlink(part)
-    with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644), "w") as f:
-        json.dump(value, f, indent=1, sort_keys=True)
-    os.replace(part, path)
+    try:
+        whole(path, lambda f: f.write(json.dumps(value, indent=1, sort_keys=True).encode()))
+    except OSError as e:
+        stop(f"{path} can't be written ({e}): push nothing")
 
 
 def ident(value):
@@ -193,9 +229,9 @@ if record is not MISSING:
 if mode == "start":
     # From a reference copy, `copied` checked its staged pages already.
     staged, exact = other, named.get("exact")
-    pages = {}
+    pages, refused = {}, sorted(p for p in listed if not carried(p) and sha(work, p) is not None)
     for path, (id_, revision, old_sha) in listed.items():
-        here = sha(work, path) if clean(path) else None
+        here = sha(work, path) if carried(path) else None
         if here is not None:
             # Staged as other text than its revision's: an edit the old brain
             # never got. Nothing is recorded as written, so any later change
@@ -214,8 +250,18 @@ if mode == "start":
     new = {"from": "finite.computer", "old": old, "folders": shared, "pages": pages}
     if record is not MISSING and record != new:
         stop(f"{RECORD} is there already, and isn't this brain's start: push nothing")
+    # Out of the push goes what would show a folder it doesn't share: the
+    # files of one (left out, or one the old agent couldn't read), and the
+    # assets only its notes name (they sit in its wiki's `raw/assets/`).
+    def outside(rel):
+        return folder_of(rel, folders) not in (None, *shared)
+    kept = {a for rel in files_in(work) if not outside(rel) for a in assets(work, rel)}
+    theirs = {a for rel in files_in(staged) if outside(rel) for a in assets(staged, rel)}
+    removed = sorted({rel for rel in files_in(work) if outside(rel)} | {a for a in theirs - kept if a not in pages and sha(work, a)})
+    for rel in removed:
+        os.unlink(os.path.join(work, *rel.split("/")))  # a link itself, never what it names
     save(record_path, new)
-    print(json.dumps({"recorded": len(pages), "shared": sorted(shared), "not shared": sorted(set(folders) - set(shared))}))
+    print(json.dumps({"recorded": len(pages), "shared": sorted(shared), "not shared": sorted(set(folders) - set(shared)), "removed": removed, "refused": refused}))
     sys.exit(0)
 
 if record is MISSING:
@@ -260,8 +306,8 @@ took = {"added": 0, "updated": 0, "assets": 0}
 held = {k: [] for k in ("both", "gone", "unsynced", "missing", "older", "extra", "refused")}
 unshared, take = set(), []
 for path, (id_, revision, _) in sorted(listed.items()):
-    if not clean(path) or at(copy_dir, path) is None or at(work, path) is None:
-        held["refused"].append(path)  # climbs out, or through a link
+    if not carried(path) or at(copy_dir, path) is None or at(work, path) is None:
+        held["refused"].append(path)  # climbs out, goes through a link, or never syncs
         continue
     folder = folder_of(path, known)
     if not ours(folder):
@@ -320,12 +366,10 @@ for kind, path, entry, plan in take:
 
 # Files the copy holds that no listed page is: kept for a person, unless
 # an asset the brain holds the same.
-for top, _, files in os.walk(copy_dir):
-    for name in files:
-        rel = os.path.relpath(os.path.join(top, name), copy_dir).replace(os.sep, "/")
-        asset = "/raw/assets/" in "/" + rel and sha(copy_dir, rel) is not None and sha(copy_dir, rel) == sha(work, rel)
-        if rel not in listed and not asset:
-            held["extra"].append(rel)
+for rel in files_in(copy_dir):
+    asset = "/raw/assets/" in "/" + rel and sha(copy_dir, rel) is not None and sha(copy_dir, rel) == sha(work, rel)
+    if rel not in listed and not asset:
+        held["extra"].append(rel)
 # Pages the old brain deleted since, by a copy no older: listed, while they're here.
 held["gone"] = sorted(
     p for p in record["pages"]
