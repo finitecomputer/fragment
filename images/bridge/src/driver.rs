@@ -428,7 +428,12 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
                 }
-                Effect::Claim { agent, fragment, turn, id, body, told } => lanes.push(&fragment, Job::Claim { agent, turn, id, body, told }),
+                Effect::Claim { agent, fragment, turn, id, body, told } => {
+                    // held from its claim, in the step that makes it: let go
+                    // only as the engine lets it go (`Turns::ended`)
+                    turns.claimed(&agent, &turn);
+                    lanes.push(&fragment, Job::Claim { agent, turn, id, body, told })
+                }
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
                 Effect::Owed { agent, fragment, channel, turn, id, body } => match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
                     // an answer goes from its question's chat's lane, after
@@ -1364,10 +1369,11 @@ struct Claims {
 /// What this life told its agents' fragments of their turns (docs/bridge.md,
 /// "A turn is told before it runs"). A turn's mandate signs its agent's
 /// calls for its owner while its fragment holds it open, so a turn is
-/// held as open from before it is told so (an answer lost, it is still
-/// told ended), each ended one is told ended until that lands (`due`,
-/// at each step), and no turn reaches its runtime while one its agent
-/// ended may still be held open (`settle`). Each call names this life and
+/// held from its claim (`claimed`), told open only while it is still held
+/// (an answer lost, it is still told ended), each ended one is told ended
+/// until that lands (`due`, at each step), and no turn reaches its runtime
+/// while one its agent ended may still be held open (`settle`), nor once
+/// its own is let go (`send_held`): one lock decides each. Each call names this life and
 /// its computer's start, so the fragment forgets every other life's turns,
 /// and refuses a late call from one before (its turn not run).
 #[derive(Clone)]
@@ -1375,7 +1381,7 @@ struct Turns {
     life: String,
     /// Its computer's start, as the platform said it when this life began.
     start: u64,
-    /// Told open, or being told: turn → agent.
+    /// Held from its claim, told open, or being told: turn → agent.
     open: Arc<Mutex<HashMap<String, String>>>,
     /// Ended by the engine, and not yet told so: (agent, turn) → a close
     /// in flight.
@@ -1403,14 +1409,28 @@ impl Turns {
         api.turn_close(agent, (&self.life, self.start), None).await
     }
 
-    /// `turn` of `agent` told open, held as open from before it is sent,
-    /// and closed only once this answer is back.
-    async fn open(&self, api: &Api, agent: &str, turn: &str, told: &engine::Told) -> Result<(), ApiError> {
-        self.open.lock().expect("turns").insert(turn.to_string(), agent.to_string());
-        self.opening.lock().expect("opening").insert(turn.to_string());
+    /// `turn` of `agent` held, as its claim is made: from here it is told
+    /// ended once the engine runs it no more (`ended`), whether or not it
+    /// was told open.
+    fn claimed(&self, agent: &str, turn: &str) {
+        self.open.lock().expect("turns").entry(turn.to_string()).or_insert_with(|| agent.to_string());
+    }
+
+    /// `turn` of `agent` told open while this life still holds it, under
+    /// the hold `ended` takes, so a turn let go while its claim was in
+    /// flight (stopped, its agent gone) is never told open: false, nothing
+    /// told. Closed only once this answer is back.
+    async fn open(&self, api: &Api, agent: &str, turn: &str, told: &engine::Told) -> Result<bool, ApiError> {
+        {
+            let open = self.open.lock().expect("turns");
+            if !open.contains_key(turn) {
+                return Ok(false);
+            }
+            self.opening.lock().expect("opening").insert(turn.to_string());
+        }
         let opened = api.turn_open(agent, (&self.life, self.start), turn, told).await;
         self.opening.lock().expect("opening").remove(turn);
-        opened
+        opened.map(|()| true)
     }
 
     /// The turns held open that `gone` says the engine runs no more, moved
@@ -1681,7 +1701,13 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                 if matches!(answer, ClaimAnswer::Ours { .. }) {
                     let told = proven(&api, &agent, told).await;
                     match async { claims.turns.open(&api, &agent, &turn, &told?).await }.await {
-                        Ok(()) => {}
+                        Ok(true) => {}
+                        // let go while its claim was in flight: its proof
+                        // never told, its answer stale to the engine
+                        Ok(false) => {
+                            crate::ev!("turn.untold", { "turn": turn, "agent": agent, "why": "let go while its claim was in flight" });
+                            answer = ClaimAnswer::Unanswered;
+                        }
                         Err(e) => {
                             crate::ev!("turn.untold", { "turn": turn, "agent": agent, "error": e.to_string() });
                             answer = ClaimAnswer::Unanswered;

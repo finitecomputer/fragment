@@ -5291,8 +5291,9 @@ fn a_turn_is_told_as_whose_ask_it_is() {
 /// owner's agent's words): Rowan's turn, from Juniper's reply in a turn
 /// Skyler asked, is told as Skyler's, unproven (Skyler's mandate names
 /// Juniper); from a turn Paul asked, as Paul's, even read after that turn
-/// was let go; from words no known turn was said in, as no one's. Its owner's own words to Rowan are still
-/// Paul's.
+/// was let go; from words no known turn was said in, or naming a turn that
+/// is not Juniper's own in that chat (running elsewhere, or another
+/// agent's), as no one's. Its owner's own words to Rowan are still Paul's.
 #[test]
 fn a_hand_off_carries_on_the_ask_it_came_from() {
     let (j, r) = (agent("juniper"), agent("rowan"));
@@ -5330,4 +5331,15 @@ fn a_hand_off_carries_on_the_ask_it_came_from() {
     assert_eq!(on.iter().map(|t| t.asker.clone()).collect::<Vec<_>>(), vec![Some("npub1paul".into())], "Paul's ask, carried on after its turn was let go");
     let on = handed(&mut e, 7, "npub1juniper", "rowan, from nowhere", "no-such-turn");
     assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "no known turn: no one's");
+    // invalid: a turn running now that is not Juniper's own in this chat
+    // (Juniper's in another chat, Rowan's) carries on no one's ask
+    let elsewhere = "elsewhere--k3x9";
+    let ask = |seq: u64, to: &str| Record { mandate: Some("fm1.skyler".into()), ..rec_at(seq, seq as i64 * 10, "npub1skyler", json!({ "text": "and here", "to": [to] })) };
+    let theirs_elsewhere = to_all(&mut e, &[&j], &v, elsewhere, ask(8, "npub1juniper"), T0 + 8)[0].0.turn.clone();
+    let rowans = to_all(&mut e, &[&r], &v, elsewhere, ask(9, "npub1rowan"), T0 + 9)[0].0.turn.clone();
+    for (seq, named, said) in [(10, &theirs_elsewhere, "Juniper's turn in another chat"), (11, &rowans, "another agent's turn")] {
+        assert!(e.state().turns.get(named.as_str()).is_some_and(Turn::active), "{said}: running");
+        let on = handed(&mut e, seq, "npub1juniper", "rowan, as if", named);
+        assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "{said}: no one's");
+    }
 }

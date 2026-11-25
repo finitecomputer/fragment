@@ -777,6 +777,13 @@ impl FragmentCell {
                 self.sharing_changed()?;
                 json!({ "visibility": v })
             }
+            Some("legacy-schedule") => {
+                // a schedule kept from before askers (Fragment step 14,
+                // 2026-11-25): its asker NULL, as such rows were left
+                let id = body["schedule"].as_i64().ok_or_else(|| CellError::invalid("legacy-schedule names a schedule's id"))?;
+                let n = self.rows("UPDATE record_schedules SET asker = NULL WHERE id = ? RETURNING id", vec![SqlStorageValue::Integer(id)])?.len();
+                json!({ "schedules": n })
+            }
             Some("records") => {
                 // posts filled in as a member made them (channels.rs `fill_records`)
                 let channel = body["channel"].as_str().ok_or_else(|| CellError::invalid("records names a channel"))?;

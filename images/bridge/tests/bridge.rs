@@ -346,6 +346,34 @@ async fn a_new_life_takes_its_agents_turns() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): a turn stopped while its claim is in flight is never
+/// told open: its proof would sign its agent's other calls as Skyler's.
+/// It is held from its claim, and told open only while still held. Paul's
+/// next message in the chat is claimed in the same lane after it, so once
+/// his turn has run, Skyler's would have been told.
+#[tokio::test]
+async fn a_turn_stopped_while_claimed_is_never_told_open() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("stopped-while-claimed");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.with(|w| w.work_post_delay_ms = 2_000);
+    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
+    let skylers = turn_of("juniper", &chat, seq(&first));
+    fake.until(WAIT, "skyler's claim on its way", |w| w.calls.iter().any(|c| c.starts_with("POST") && c.ends_with("/channels/work"))).await;
+    fake.say(&chat, &person("skyler"), json!({ "kind": "stop", "turn": skylers }));
+    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
+    let pauls = turn_of("juniper", &chat, seq(&next));
+    fake.until(WAIT * 3, "paul's turn ran, claimed after skyler's", |w| ran_beside(w, &pauls).is_some()).await;
+    fake.with(|w| {
+        assert!(!w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == skylers.as_str()), "skyler's stopped turn never told open: {:?}", w.turns);
+        assert_eq!(ran_beside(w, &pauls), Some(vec![]));
+    });
+    bridge.stop().await;
+}
+
 /// Goal (FIN-720): a turn let go while it is made ready never reaches its
 /// runtime: its proof is its own. Juniper's turn is told open, then, while
 /// its file downloads, Juniper leaves the chat: the turn is let go and told

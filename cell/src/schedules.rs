@@ -51,14 +51,21 @@ struct Row {
     next_at: Option<i64>,
     last_at: Option<i64>,
     /// Whose ask it is: whoever its maker acted for, else its maker
-    /// (FIN-720). `None` on one made before (Fragment step 14), which
-    /// fires as before: the fragment's own, its owner's to admit.
+    /// (FIN-720). `None` on one made before (Fragment step 14): its maker's
+    /// (`Row::asker`).
     asker: Option<String>,
 }
 
 const COLUMNS: &str = "id, cron, channel, body, created_by, created_at, next_at, last_at, asker";
 
 impl Row {
+    /// Whose ask it is, always: its asker, or, on one made before askers,
+    /// its maker (`created_by`), whom it fires as, checked as if they asked
+    /// now (FIN-720).
+    fn asker(&self) -> &str {
+        self.asker.as_deref().unwrap_or(&self.created_by)
+    }
+
     /// Only the cell writes `record_schedules`, from a checked cron.
     fn cron(&self) -> Cron {
         Cron::parse(&self.cron).unwrap_or_else(|e| panic!("record_schedules.cron is a checked schedule: {e}: {:?}", self.cron))
@@ -244,19 +251,15 @@ impl FragmentCell {
             let builtin = BUILTIN_CHANNELS.contains(&r.channel.as_str());
             let decl = if builtin { None } else { self.declared_channel(&r.channel)? };
             let record = r.record();
-            // as its asker may now (one made before askers, as its owner
-            // may): whether the channel takes the fragment's records at all,
-            // from their role; and its record relays no one (one kept by a
-            // release before `check` refused it)
+            // as its asker may now: whether the channel takes the
+            // fragment's records at all, from their role (none, they are
+            // gone, and it fires no more); and its record relays no one
+            // (one kept by a release before `check` refused it)
             // a skipped fire moves on without claiming it fired (`lastAt` keeps the last real one)
-            let role = match r.asker.as_deref() {
-                None => Some(Role::Owner),
-                Some(asker) => self.member_role(asker)?,
-            };
-            let admitted = role.ok_or(schedule::Refusal::AskerGone).and_then(|role| schedule::admit_channel(&r.channel, decl.as_ref(), builtin, role));
+            let admitted = self.member_role(r.asker())?.ok_or(schedule::Refusal::AskerGone).and_then(|role| schedule::admit_channel(&r.channel, decl.as_ref(), builtin, role));
             let fired = match admitted.and_then(|()| schedule::fires(&record)) {
                 Ok(()) => {
-                    self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at), r.asker.as_deref()).await?;
+                    self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at), Some(r.asker())).await?;
                     true
                 }
                 Err(why) => {

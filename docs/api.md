@@ -1934,8 +1934,8 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   their role now: one no longer in the fragment fires no more
   (`schedule::Refusal::AskerGone`, 403), and the record it appends is
   the platform's, for them (`records.asker`), so an agent asked by it
-  acts for them (Who asked: mandates). One made before has none, and
-  fires as before.
+  acts for them (Who asked: mandates). One made before has none: its
+  maker (`created_by`) is its asker.
 - Viewers list them; editors add, pause, resume and remove them (an agent
   on its own fragment is its editor: no special case).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five

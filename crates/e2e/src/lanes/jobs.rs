@@ -1235,13 +1235,24 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         r.status == 200 && fired && rec["principal"] == own.as_str() && rec["author"] == "platform" && rec["asker"] == editor_id.as_str() && rec["body"] == theirs,
         &rec,
     );
+    // one kept from before askers (its asker unset) is its maker's all the same
+    let legacy = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-schedule", "schedule": sid })))?;
+    let before = pinged().len();
+    cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    let rec = pinged().last().cloned().unwrap_or_default();
+    s.ok(
+        "one kept from before askers is its maker's ask: it fires written for them",
+        legacy.body["schedules"] == 1 && fired && rec["author"] == "platform" && rec["asker"] == editor_id.as_str() && rec["body"] == theirs,
+        json!({ "lever": legacy.body, "record": rec }),
+    );
     let out = api.signed(&owner, "DELETE", &format!("/api/f/{name}/members/{editor_id}"), None)?;
     let before = pinged().len();
     let lever = cron_now(api, &name)?;
     std::thread::sleep(Duration::from_secs(3));
     let unfired = events(api, &owner, &name).into_iter().rev().find(|e| e["kind"] == "schedule.unfired").unwrap_or_default();
     s.ok(
-        "its maker gone from the fragment, it fires no more for them, saying why; it is kept, for its owner to remove",
+        "its maker gone from the fragment, it fires no more for them (one from before askers too), saying why; it is kept, for its owner to remove",
         out.status == 200 && pinged().len() == before && unfired["data"]["schedule"] == sid && unfired.to_string().contains("no longer in this fragment") && list().iter().any(|x| x["id"] == sid),
         json!({ "removed": out.status, "lever": lever.body, "pinged": pinged().len() - before, "event": unfired }),
     );

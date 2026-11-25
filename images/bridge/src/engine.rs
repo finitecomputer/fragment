@@ -1939,17 +1939,17 @@ impl Engine {
     }
 
     /// Whose ask the turn `named` was, that agent `poster` (an identity of
-    /// this computer's) said words in, in `fragment`: one running, or one
-    /// ended a moment ago (its replies read after it is let go, as `hop_of`
-    /// reads its hop); none known, no one's.
+    /// this computer's) said words in, in `fragment`: its own turn there,
+    /// running, or ended a moment ago (its replies read after it is let
+    /// go, as `hop_of` reads its hop); none such, no one's.
     fn ask_said_in(&self, poster: &str, fragment: &str, named: Option<&str>) -> Option<String> {
-        let named = named?;
-        if let Some(t) = self.state.turns.get(named) {
+        let (named, poster) = (named?, self.agents.iter().find(|a| a.identity == poster)?);
+        let its_own_here = |agent: &str, place: &str| agent == poster.fragment && place == fragment;
+        if let Some(t) = self.state.turns.get(named).filter(|t| its_own_here(&t.agent, &t.fragment)) {
             return self.told_as(t).asker;
         }
-        let poster = self.agents.iter().find(|a| a.identity == poster)?;
         let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
-        self.ended.iter().rev().filter(fresh).find(|e| e.id == named && e.agent == poster.fragment && e.fragment == fragment).and_then(|e| e.asked.clone())
+        self.ended.iter().rev().filter(fresh).find(|e| e.id == named && its_own_here(&e.agent, &e.fragment)).and_then(|e| e.asked.clone())
     }
 
     /// How a turn is told to its agent's fragment (`Told`): its owner's ask
