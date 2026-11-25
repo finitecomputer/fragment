@@ -566,7 +566,9 @@ put on disks.
   stored is still the one that start was handed, the head falls back to
   the one before it, and it starts again at once, no strike (that life's
   writes since lost, and logged). With none before it, a strike as any
-  failed start; with the head moved since, it starts again on that one.
+  failed start; with the head moved since, it starts again on that one. A
+  new disk's first life that ended before anything of it shipped (its head
+  a claim, nothing to replay: a blank device) starts again as a new disk.
 - **Its sleep is a signal and a wait.** Its port tabs close; the DO
   measures its `/data` for its owner's Storage (the `df` and the walk an
   awake save's measure makes, of its own filesystem); it reads its
@@ -582,8 +584,11 @@ put on disks.
 - **No saves of its own.** A disk is saved only for its owner's export:
   the export asks its computer for a save taken after it began, which is
   taken awake under the hold as any awake save (waking it, so an export
-  costs its awake time), and looks again every 20 s for at most 20
-  minutes, then goes on without it, saying so. Its view lists those
+  costs its awake time; one it may not wake has none to give), and looks
+  again every 20 s for at most 20 minutes from its first look, then goes on
+  without it, saying so. The ask lasts the life it was made in; the export
+  asks again while it waits. On a disk, Hermes' boot never puts a hold's
+  copies back: the live databases are newer. Its view lists those
   saves; no start restores one; `restored.from` is `disk`.
 - **What an image does.** It carries `/usr/local/bin/fpac` and `mke2fs`
   1.47 or later (a new disk's ext4), and on `FRAGMENT_DISK=fpac` mounts

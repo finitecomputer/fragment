@@ -314,6 +314,18 @@ pub fn read_manifest(data: &Path, staging: &Path) -> Result<Option<Manifest>, He
     Ok(Some(manifest))
 }
 
+/// At a start, before Hermes: on a disk (docs/computers.md, "A disk"),
+/// nothing goes back, as its live databases are as its disk kept them,
+/// never older than a hold's copy (an export's save's, that save's alone),
+/// and the copies go; otherwise `put_back`.
+pub fn put_back_on(disk: bool, data: &Path, staging: &Path) -> Result<Vec<PathBuf>, HeldError> {
+    if disk {
+        clear_staging(staging)?;
+        return Ok(vec![]);
+    }
+    put_back(data, staging)
+}
+
 /// At a start, before Hermes: puts back what the staging's manifest names,
 /// each copy over its live path, the live file's `-wal`, `-shm` and
 /// `-journal` removed (they are of the file the save left out, never of the
@@ -732,6 +744,37 @@ mod tests {
         std::fs::remove_file(staging.join(MANIFEST)).unwrap();
         assert_eq!(put_back(&root, &staging).unwrap(), Vec::<PathBuf>::new());
         assert!(!staging.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal: on a disk, a hold's copies (its export's save's) never go back
+    /// over the live databases, which its disk kept as they were, newer than
+    /// any copy; they go. Method: a copy taken, the live database moving on
+    /// (its WAL beside it), then a start on a disk and one not.
+    #[test]
+    fn on_a_disk_the_live_databases_stay_and_a_holds_copies_go() {
+        let root = dir("on-disk");
+        let live = root.join("hermes/state.db");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        db(&live, 50);
+        let staging = root.join("held-copies");
+        make_staging(&staging, None).unwrap();
+        copy_all(std::slice::from_ref(&live), &staging).unwrap();
+        // shipped since the hold: rows its copy never had
+        db(&live, 10);
+        let conn = rusqlite::Connection::open(&live).unwrap();
+        conn.execute_batch("INSERT INTO t VALUES (7, 'after the hold');").unwrap();
+        drop(conn);
+        let before = count(&live);
+        assert_eq!(before, 61);
+        assert_eq!(put_back_on(true, &root, &staging).unwrap(), Vec::<PathBuf>::new(), "nothing put back on a disk");
+        assert_eq!(count(&live), before, "the live database as its disk kept it, never the hold's 50");
+        assert!(!staging.exists(), "the copies go");
+        // not on a disk: as before, the copy goes back
+        make_staging(&staging, None).unwrap();
+        copy_all(std::slice::from_ref(&live), &staging).unwrap();
+        db(&live, 5);
+        assert_eq!(put_back_on(false, &root, &staging).unwrap(), vec![live.clone()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

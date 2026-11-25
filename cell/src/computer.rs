@@ -1918,13 +1918,16 @@ impl ComputerCell {
                 let disk = self.disk().ok().flatten();
                 let stored = disk.and_then(|d| d.head).map(|h| h.encode());
                 let (fell, older) = match (disk, &tried) {
-                    // the head it tried is the head stored: the one before it next
-                    (Some(d), Some(tried)) if *tried == stored => match d.back {
-                        Some(back) => {
+                    // the head it tried is the head stored: the one before it
+                    // next, or a new disk again for a first life's claim that
+                    // shipped nothing (`fpac::fallback`)
+                    (Some(d), Some(tried)) if *tried == stored => match fpac::fallback(d.head.as_ref(), d.back.as_ref()) {
+                        fpac::Fallback::To(back) => {
                             let moved = self.set_disk_heads(Some(&back), None).is_ok();
                             (moved.then_some(back), moved)
                         }
-                        None => (None, false),
+                        fpac::Fallback::Fresh => (None, self.set_disk_heads(None, None).is_ok()),
+                        fpac::Fallback::Nowhere => (None, false),
                     },
                     // moved since it was handed: that head is next, untouched
                     (Some(_), Some(_)) => (None, true),
@@ -3213,7 +3216,8 @@ impl ComputerCell {
         let (mut objects, mut more) = js::blob_delete_under(&self.env, js::BLOBS, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
         // then its disk's, every life's objects (docs/computers.md, "A
         // disk"): at most `WIPE_PAGES_PER_CALL` pages more
-        if let (false, Some(prefix)) = (more, id.as_deref().and_then(fpac::disk_prefix)) {
+        let on_disk = self.disk()?.is_some();
+        if let (false, true, Some(prefix)) = (more, on_disk, id.as_deref().and_then(fpac::disk_prefix)) {
             let (disk_objects, disk_more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix, WIPE_PAGES_PER_CALL).await?;
             objects += disk_objects;
             more = disk_more;
@@ -3273,7 +3277,8 @@ impl ComputerCell {
         let saves = self.saves()?;
         let (keys, more) = js::blob_list(&self.env, js::BLOBS, &self.backups_prefix()).await?;
         // its disk's objects, one page (`diskMore` past it)
-        let disk = match self.meta(MetaKey::Id)?.as_deref().and_then(fpac::disk_prefix) {
+        // its disk's objects, a computer on one alone (Codex on #1552)
+        let disk = match self.meta(MetaKey::Id)?.as_deref().and_then(fpac::disk_prefix).filter(|_| self.disk().is_ok_and(|d| d.is_some())) {
             Some(prefix) => Some(js::blob_list(&self.env, js::BLOBS, &prefix).await?),
             None => None,
         };
@@ -3687,17 +3692,19 @@ impl ComputerCell {
                     if !b.wake {
                         return json_response(&json!({ "pending": true }));
                     }
-                    // due, its alarm takes it: this ask only looks (Codex on #1552)
-                    self.drive(Event::ExportAsked).await?;
                     // woken as its owner's wake is; one refused (no credit) or
                     // that starts nothing has no save to give, and the export
-                    // goes on without it, saying why: never fails the archive
+                    // goes on without it, saying why: never fails the archive,
+                    // and asks nothing a later wake would take (Codex on #1552)
                     match self.wake(Wake::Owner).await {
                         Err(e) if e.code != ErrorCode::HostFailed => {
                             return json_response(&json!({ "save": null, "setAside": null, "unsaved": format!("it could not wake: {}", e.message) }));
                         }
                         r => r?,
                     }
+                    // then due, its alarm takes it: this ask only looks; due for
+                    // this life alone, the export asking again while it waits
+                    self.drive(Event::ExportAsked).await?;
                     return json_response(&json!({ "pending": true }));
                 }
                 let save = saves.all().iter().find(|s| !s.unusable);

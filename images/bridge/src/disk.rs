@@ -113,13 +113,7 @@ impl Mounting {
                 return Ok(mounted);
             }
             if let Ok(Some(status)) = self.child.try_wait() {
-                // its error, if it said one
-                let why = log_events().iter().rev().find(|e| e["fpac"] == "error").and_then(|e| e["why"].as_str().map(str::to_string));
-                return Err(match why {
-                    Some(why) if why.starts_with(UNUSABLE) => Unmounted::Unusable(why),
-                    Some(why) => Unmounted::Failed(why),
-                    None => Unmounted::Failed(format!("fpac exited ({status}) saying nothing")),
-                });
+                return Err(unmounted(&log_events(), &status.to_string()));
             }
             if self.t0.elapsed() > Duration::from_millis(MOUNT_MS_MAX) {
                 let _ = self.child.kill();
@@ -127,6 +121,22 @@ impl Mounting {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+/// Why a daemon that exited (`status`) did not mount, from its log's
+/// `events`: its error, if it said one. A disk it opened as not new with
+/// nothing mapped or replayed is a blank device (a new disk's first life
+/// ended before its filesystem shipped: its head a claim alone), which no
+/// retry mounts: unusable, so the platform starts it as a new disk again.
+fn unmounted(events: &[Value], status: &str) -> Unmounted {
+    let why = events.iter().rev().find(|e| e["fpac"] == "error").and_then(|e| e["why"].as_str().map(str::to_string));
+    let blank = events.iter().rev().find(|e| e["fpac"] == "opened").is_some_and(|o| o["new"] == false && o["extents_mapped"] == 0 && o["replayed"] == 0);
+    match why {
+        Some(why) if why.starts_with(UNUSABLE) => Unmounted::Unusable(why),
+        Some(why) if blank => Unmounted::Unusable(format!("a blank disk (nothing of it shipped): {why}")),
+        Some(why) => Unmounted::Failed(why),
+        None => Unmounted::Failed(format!("fpac exited ({status}) saying nothing")),
     }
 }
 
@@ -238,6 +248,25 @@ mod tests {
         // FPAC v0.1.0's two errors at an open (daemon.rs, `open_store`)
         assert!("the disk does not open: a head that names a checkpoint not found".starts_with(UNUSABLE));
         assert!(!"the remote is unavailable: connection refused".starts_with(UNUSABLE));
+    }
+
+    #[test]
+    fn a_disk_whose_first_life_ended_before_its_filesystem_shipped_is_unusable() {
+        let error = |why: &str| json!({ "fpac": "error", "why": why });
+        let opened = |new: bool, mapped: u64, replayed: u64| json!({ "fpac": "opened", "new": new, "extents_mapped": mapped, "replayed": replayed });
+        let mount = "mount ext4 at /data: Invalid argument (os error 22)";
+        // its head a claim and nothing replayed: a blank device, which no
+        // retry mounts; the platform starts it again as a new disk
+        assert!(matches!(unmounted(&[opened(false, 0, 0), error(mount)], "exit status: 1"), Unmounted::Unusable(why) if why.contains("blank")));
+        // anything mapped or replayed: its files are there, and a mount that
+        // fails may pass (a failed start, retried)
+        assert_eq!(unmounted(&[opened(false, 12, 0), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));
+        assert_eq!(unmounted(&[opened(false, 0, 3), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));
+        // a new disk it made itself, failing: a failed start too
+        assert_eq!(unmounted(&[opened(true, 0, 0), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));
+        // an open that refused its head, as before; and one that said nothing
+        assert!(matches!(unmounted(&[error("the disk does not open: no such checkpoint")], "exit status: 1"), Unmounted::Unusable(_)));
+        assert!(matches!(unmounted(&[], "exit status: 9"), Unmounted::Failed(why) if why.contains("saying nothing")));
     }
 
     #[test]

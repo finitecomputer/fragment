@@ -472,7 +472,8 @@ fn pre_init() -> ! {
     // (the gateway waits for go): after a restore the platform's check has
     // done it already; from a snapshot it is done here, so both wakes leave
     // the same /data.
-    match held::put_back(Path::new(held::DATA), Path::new(held::STAGING)) {
+    // on a disk, its live databases are never older than a copy: none goes back
+    match held::put_back_on(fragment_bridge::disk::wanted(), Path::new(held::DATA), Path::new(held::STAGING)) {
         Ok(put) if put.is_empty() => {}
         Ok(put) => ev!("boot.put_back", { "databases": put.len() }),
         Err(e) => ev!("boot.put_back_failed", { "error": e.to_string() }),

@@ -1306,6 +1306,32 @@ fn an_export_saves_a_disk_once_awake() {
     assert_eq!(serde_json::to_value(&saves).unwrap(), before, "nothing changed");
 }
 
+/// Goal: an export's ask lasts the life it was asked in: a life that ends
+/// before its save forgets it, so a later wake takes no save nobody waits
+/// for (the export asks again while it waits, which wakes it). Method: an
+/// ask awake, a sleep before its alarm (its hold answered, its stop), a
+/// start after; and an ask asleep, kept until the start it brings.
+#[test]
+fn an_exports_ask_ends_with_its_life() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    l.apply(Event::ExportAsked, T + 5_000);
+    let s = l.apply(Event::Sleep, T + 5_001);
+    assert_eq!(s.actions, vec![Action::Sleep { generation: g }], "its owner's sleep first");
+    assert_eq!(l.apply(Event::Held { generation: g, held: true }, T + 5_500).actions, vec![Action::Stop { generation: g, saved: true }]);
+    l.apply(Event::Asleep { generation: g }, T + 6_000);
+    let g = started(&mut l, T + 60_000);
+    let (saves, _) = run_alarms(&mut l, T + 60_000 + IDLE_MS / 2);
+    assert!(saves.is_empty(), "no save for an export that stopped asking: {saves:?}");
+    // a crash forgets it as well
+    l.apply(Event::ExportAsked, T + 70_000);
+    l.apply(Event::Exited { generation: g }, T + 70_001);
+    assert!(l.next_alarm().is_none_or(|at| at > T + 70_001 + 1_000) || !matches!(l.phase, Phase::Awake { .. }));
+    let ended = serde_json::to_value(&l).unwrap();
+    assert!(ended.get("export_due_ms").is_none(), "nothing due after its life ended: {ended}");
+}
+
 /// Goal: a computer goes on a disk only as it is made, never after its
 /// first start. Method: the mark set on a computer that started.
 #[test]

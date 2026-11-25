@@ -228,7 +228,8 @@ pub struct Lifecycle {
     disk: bool,
     /// A disk's save its owner's export asked for (`Event::ExportAsked`):
     /// due from then, taken awake under the hold as any awake save; one
-    /// that failed is due again after its pause. None once one is saved.
+    /// that failed is due again after its pause. None once one is saved,
+    /// and as the life it was asked in ends (the export asks again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     export_due_ms: Option<i64>,
 }
