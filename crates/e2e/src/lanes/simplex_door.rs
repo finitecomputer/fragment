@@ -400,8 +400,9 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     // starts it again (its sleep answers starting): once that start is up,
     // it is slept again, and never otherwise
     let sleep = || api.signed(owner, "POST", &format!("/api/computers/{}/sleep", a.computer), Some(&json!({})));
-    let up = || api.signed(owner, "GET", &format!("/api/computers/{}", a.computer), None).is_ok_and(|r| r.body["phase"] == "awake");
     let deadline = Instant::now() + a.wake;
+    // up within the deadline: a start that comes up past it fails the check
+    let up = || api.signed(owner, "GET", &format!("/api/computers/{}", a.computer), None).is_ok_and(|r| r.body["phase"] == "awake") && Instant::now() < deadline;
     let mut slept = sleep()?;
     // bounded by its wake, one deadline for every pass
     while slept.status == 200 && slept.body["phase"] == "starting" && Instant::now() < deadline {
