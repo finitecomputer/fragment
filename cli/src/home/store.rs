@@ -17,6 +17,11 @@
 //! come back onto a computer with room; past either, its folders and its
 //! files each get their own (a file alone, whatever its size).
 //!
+//! **Too deep is kept, not refused** (FIN-755). A file whose own place,
+//! `home/<its path>`, would be past a repo path's length (an old export's
+//! run logs, folders deep) is a group alone, kept under a short place of
+//! its own (`LONG`). Its note is still where it was, and names that place.
+//!
 //! **Proven before its note.** A group's parts are committed, then found
 //! at main, each the size it was written, and each blob in the store. Only
 //! then is its note written (whole, never over another: offload's
@@ -72,6 +77,21 @@ const WINDOW: usize = 16;
 const _: () = assert!(NOTE_FILES_MAX as u64 <= offload::PARTS_MAX && STORE_FILES_MAX as u64 <= offload::PARTS_MAX, "a note a store writes is one offload reads");
 const _: () = assert!(NOTE_BYTES_MAX > 0 && NOTE_BYTES_MAX < fragment_core::computer::ROOM_TOLD_MAX, "a note comes back where there is room");
 
+/// Where a file too deep for its own place is kept (FIN-755): under
+/// `<root>/.long/`, in a folder named by its path's sha256 (the first
+/// `LONG_HEX` hex digits), as its own name. Its note is where the file was,
+/// as every note is, and names this place (a record's `at`), so `--back`
+/// brings it there unchanged.
+const LONG: &str = ".long";
+const LONG_HEX: usize = 24;
+
+/// Whether `path` of the home has its own place in storage, `<root>/<path>`,
+/// for any part it could be in: a repo path, as `offload::record_of` checks
+/// a note's.
+fn fits(root: &str, path: &str) -> bool {
+    RepoPath::parse(&format!("{root}/{path}.part-{n}-of-{n}", n = offload::PARTS_MAX)).is_ok()
+}
+
 fn coded(code: Code, msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(CodedError { code, msg: msg.into() })
 }
@@ -125,17 +145,28 @@ impl Group {
         notes.join(format!("{}{NOTE_SUFFIX}", self.key))
     }
 
+    /// Its place in storage, its note's `at`: where it is in the home, under
+    /// `root`; or, a file alone too deep for that, a short one (`LONG`).
+    /// None when neither is a place a note can name (its own name too long).
+    fn at(&self, root: &str) -> Option<String> {
+        let parent = self.parent();
+        if self.folder || fits(root, &self.key) {
+            return Some(if parent.is_empty() { root.to_string() } else { format!("{root}/{parent}") });
+        }
+        let short = format!("{root}/{LONG}/{}", &blob::sha256_hex(self.key.as_bytes())[..LONG_HEX]);
+        fits(&short, self.key.rsplit('/').next().expect("a key names something")).then_some(short)
+    }
+
     /// Its parent folder in the home ("" at the top).
     fn parent(&self) -> &str {
         self.key.rsplit_once('/').map_or("", |(d, _)| d)
     }
 
-    /// Its record, its files' sums as the zip names them, under `root` in
-    /// the storage fragment (the notes folder's name).
-    fn record(&self, fragment: &str, root: &str, notes: &Path, part_bytes: u64) -> Record {
+    /// Its record, its files' sums as the zip names them, at `at` in the
+    /// storage fragment (`Group::at`).
+    fn record(&self, fragment: &str, at: String, notes: &Path, part_bytes: u64) -> Record {
         let parent = self.parent();
         let rel = |p: &str| if parent.is_empty() { p.to_string() } else { p[parent.len() + 1..].to_string() };
-        let at = if parent.is_empty() { root.to_string() } else { format!("{root}/{parent}") };
         let files: Vec<Moved> = self.files.iter().map(|k| Moved { path: rel(&k.path), size: k.size, sha256: None, crc32: Some(k.crc32), mode: k.mode }).collect();
         // a folder's folders, its own first (a child sorts after its parent)
         let mut dirs = BTreeSet::new();
@@ -155,9 +186,12 @@ impl Group {
 
 /// The groups of `keep`, each a note's worth: a file's group is the
 /// outermost folder on its way whose kept files are within a note's
-/// bounds, else the file alone. Iterative, in path order.
-fn groups(keep: Vec<Keep>, part_bytes: u64) -> Vec<Group> {
+/// bounds, else the file alone. A file too deep for its own place under
+/// `root` (`fits`) is alone, whatever its folder: kept elsewhere (`LONG`),
+/// it is no part of its folder's note. Iterative, in path order.
+fn groups(keep: Vec<Keep>, part_bytes: u64, root: &str) -> Vec<Group> {
     assert!(part_bytes > 0, "a part holds bytes");
+    let (keep, deep): (Vec<Keep>, Vec<Keep>) = keep.into_iter().partition(|k| fits(root, &k.path));
     // each folder's files, bytes, parts and folders (its own among them)
     let mut sums: HashMap<&str, (usize, u64, u64, usize)> = HashMap::new();
     let mut folders: BTreeSet<&str> = BTreeSet::new();
@@ -188,6 +222,9 @@ fn groups(keep: Vec<Keep>, part_bytes: u64) -> Vec<Group> {
     let mut out: BTreeMap<String, Group> = BTreeMap::new();
     for (k, (key, folder)) in keep.into_iter().zip(keys) {
         out.entry(key.clone()).or_insert_with(|| Group { key, folder, files: Vec::new() }).files.push(k);
+    }
+    for k in deep {
+        out.insert(k.path.clone(), Group { key: k.path.clone(), folder: false, files: vec![k] });
     }
     let out: Vec<Group> = out.into_values().collect();
     assert!(out.iter().all(|g| g.files.len() <= NOTE_FILES_MAX && (g.folder || g.files.len() == 1)), "each group is a note's worth");
@@ -324,8 +361,14 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     };
     let had_manifest = there.contains_key("fragment.json");
     let mut done = Stored { fragment: into.clone(), notes: notes.display().to_string(), files: 0, bytes: 0, notes_written: 0, already, already_bytes, more: None };
-    let groups = groups(todo, part_bytes);
-    let records: Vec<Record> = groups.iter().map(|g| g.record(&into, &root, &notes, part_bytes)).collect();
+    let groups = groups(todo, part_bytes, &root);
+    let records: Vec<Record> = groups
+        .iter()
+        .map(|g| {
+            let at = g.at(&root).ok_or_else(|| coded(Code::InvalidUsage, format!("{} cannot be kept: its name is too long for any place in storage. Nothing was written", g.key)))?;
+            Ok(g.record(&into, at, &notes, part_bytes))
+        })
+        .collect::<Result<_>>()?;
     // every path a run writes is its file's alone: never another's, nor
     // one a note keeps (a file named as another's part), checked first
     for (g, r) in groups.iter().zip(&records) {
@@ -779,6 +822,64 @@ mod tests {
         assert!(notes_under(&s.notes).unwrap().is_empty());
     }
 
+    /// Goal (FIN-755): a file whose own place in storage would be past a
+    /// repo path's length (an old export's deep run logs) is kept whole
+    /// under a short place of its own, and never stops the rest. Its note
+    /// stays where the file was, and `--back` brings it there, byte for
+    /// byte, from its parts too. Replay: kept already, nothing committed.
+    #[test]
+    fn a_file_too_deep_for_its_own_place_is_kept_under_a_short_one() {
+        let deep = format!("work/finite-export-v2/run-1/stage/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
+        let (log, video) = (format!("{deep}/run.log"), format!("{deep}/trace.bin"));
+        assert!(!fits("home", &log), "past a repo path where it was");
+        let mut files = home();
+        files.push((log.clone(), b"step 1 ok\n".to_vec()));
+        files.push((video.clone(), bytes(5 * MIB + 1, 13)));
+        files.push(("work/finite-export-v2/run-1/stage/top.json".into(), b"{}".to_vec()));
+        let s = setup(&files);
+        let b = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
+        let stored = b.stored.expect("kept");
+        assert_eq!(b.files + stored.files, files.len() - 1, "every file but the key brought or kept");
+        let notes = notes_under(&s.notes).unwrap();
+        for (path, want) in [(&log, &files[files.len() - 3].1), (&video, &files[files.len() - 2].1)] {
+            let (note, r) = notes.iter().find(|(_, r)| r.files.iter().any(|f| path.ends_with(&format!("/{}", f.path)) && r.from.ends_with(path.as_str()))).expect("its own note");
+            assert!(r.at.starts_with(&format!("home/{LONG}/")) && r.at.len() < 40, "a short place: {}", r.at);
+            assert_eq!(note, &s.notes.join(format!("{path}{NOTE_SUFFIX}")), "its note where it was");
+            assert_eq!(kept(&s.mock, STORE, &format!("{}/{}", r.at, r.files[0].path)).as_ref(), Some(want), "{path}: whole");
+        }
+        assert!(s.mock.paths(STORE, "main").iter().all(|p| RepoPath::parse(p).is_ok()));
+        // its folder's other files, as they were: brought, or kept where they were
+        let here = kept(&s.mock, FILES, "files/finite-export-v2/run-1/stage/top.json");
+        let there = kept(&s.mock, STORE, "home/work/finite-export-v2/run-1/stage/top.json");
+        assert!((here.as_deref() == Some(&b"{}"[..])) ^ (there.as_deref() == Some(&b"{}"[..])), "{here:?} {there:?}");
+
+        // replay: nothing kept twice, nothing committed
+        let head = s.mock.branch(STORE, "main");
+        let again = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
+        assert_eq!((again.files, again.already), (0, stored.files));
+        assert_eq!(s.mock.branch(STORE, "main"), head);
+
+        // back: each comes to where it was, as it was
+        for (path, want) in [(&log, &files[files.len() - 3].1), (&video, &files[files.len() - 2].1)] {
+            crate::offload::back(&s.c, &s.notes.join(format!("{path}{NOTE_SUFFIX}"))).unwrap();
+            assert_eq!(std::fs::read(s.notes.join(path)).unwrap(), *want, "{path}: back");
+        }
+    }
+
+    /// Invalid: a deep file with no place a note can name, its own name too
+    /// long even for a short one, is refused before anything is written:
+    /// never kept without a note.
+    #[test]
+    fn a_file_with_no_place_in_storage_is_refused_before_anything_is_written() {
+        let deep = format!("work/x/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
+        let mut files = home();
+        files.push((format!("{deep}/{}", "n".repeat(250)), b"x".to_vec()));
+        let s = setup(&files);
+        let e = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("too long for any place in storage. Nothing was written"), "{e}");
+        assert!(s.mock.paths(STORE, "main").is_empty() && notes_under(&s.notes).unwrap().is_empty());
+    }
+
     /// Goal: each group is a note's worth: a folder within the bounds is
     /// one note; past them, its folders and files each their own (a file
     /// past the bytes alone), every file in exactly one group.
@@ -792,16 +893,28 @@ mod tests {
             k("work/data/x.csv", gb / 2), k("work/data/y.csv", gb / 2),
             k("top.txt", 1),
         ];
-        let made = groups(keep.clone(), 256 * MIB as u64);
+        let made = groups(keep.clone(), 256 * MIB as u64, "home");
         let keys: Vec<(&str, bool, usize)> = made.iter().map(|g| (g.key.as_str(), g.folder, g.files.len())).collect();
         assert_eq!(keys, [("agent", true, 2), ("top.txt", false, 1), ("work/data", true, 2), ("work/videos/one.mp4", false, 1), ("work/videos/thumb.png", false, 1)]);
         assert_eq!(made.iter().map(|g| g.files.len()).sum::<usize>(), keep.len());
         let many: Vec<Keep> = (0..NOTE_FILES_MAX + 1).map(|i| k(&format!("deps/p{}/f{i}", i % 2), 1)).collect();
-        let keys: Vec<String> = groups(many, MIB as u64).into_iter().map(|g| g.key).collect();
+        let keys: Vec<String> = groups(many, MIB as u64, "home").into_iter().map(|g| g.key).collect();
         assert_eq!(keys, ["deps/p0", "deps/p1"], "a folder past the count: its folders");
         // past a note's folders (Codex on #1389): 5,001 files in 10,003 folders
         let deep: Vec<Keep> = (0..5_001).map(|i| k(&format!("deps/a{i}/b/f"), 1)).collect();
-        let made = groups(deep, MIB as u64);
+        let made = groups(deep, MIB as u64, "home");
         assert!(made.len() == 5_001 && made.iter().all(|g| g.folder && g.key.starts_with("deps/a")), "a folder past the folders: its own");
+        // too deep for its own place (FIN-755): alone, never in its folder's
+        let far = format!("run/{}/x.log", "d".repeat(280));
+        let made = groups(vec![k("run/a.txt", 1), k(&far, 1)], MIB as u64, "home");
+        let keys: Vec<(&str, bool)> = made.iter().map(|g| (g.key.as_str(), g.folder)).collect();
+        assert_eq!(keys, [("run", true), (far.as_str(), false)]);
+        assert_eq!(made[0].files.len(), 1);
+        // its place: where it was if that fits (a home's own `.long` file too), else short, else none
+        let alone = |key: &str| Group { key: key.into(), folder: false, files: vec![k(key, 1)] };
+        assert_eq!(alone("run/a.txt").at("home").as_deref(), Some("home/run"));
+        assert_eq!(alone(&format!("{LONG}/0123/v.bin")).at("home").as_deref(), Some(&*format!("home/{LONG}/0123")));
+        assert_eq!(alone(&far).at("home"), Some(format!("home/{LONG}/{}", &blob::sha256_hex(far.as_bytes())[..LONG_HEX])));
+        assert_eq!(alone(&format!("run/{}/{}", "d".repeat(280), "n".repeat(250))).at("home"), None);
     }
 }
