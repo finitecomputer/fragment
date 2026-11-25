@@ -110,7 +110,8 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let linked = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["phase"] == "linked"));
     s.ok("its computer's SimpleX linked to the phone, by its owner's ticket", linking.status == 200 && linked && contact > 0, json!({ "link": linking.status, "invite": invite["phase"] }));
     let old = s.eventually(SLOW, || simplex_chat(api, &owner, &agent).is_some()).then(|| simplex_chat(api, &owner, &agent)).flatten().unwrap_or_default();
-    let answered = |phone: &mut Phone, text: &str| phone.say(contact, text).and_then(|()| phone.received(SLOW, |got| got.iter().any(|g| !g.is_empty() && !g.contains("You're linked") && !g.contains(text))));
+    // its agent's answer: any word from it after the phone's (it may quote it)
+    let answered = |phone: &mut Phone, text: &str| phone.say(contact, text).and_then(|()| phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty() && !g.contains("You're linked"))));
     let before = answered(&mut phone, "before the move");
     let relayed_before = relayed(api, &owner, &old);
     s.ok("the phone's message lands in its computer's SimpleX chat, and its agent's answer reaches the phone", before.is_ok() && relayed_before == ["before the move"], json!({ "chat": old, "relayed": relayed_before, "answer": format!("{before:?}") }));
@@ -140,10 +141,17 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let after = answered(&mut phone, "after the move");
     let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
+    // what its connector's chat and its door hold now, said when an answer does not come
+    let door = went["record"]["door"].as_str().unwrap_or("").to_string();
+    let held = || {
+        let chat: Vec<Value> = records(api, &owner, &connector, "chat").iter().map(|r| json!({ "by": r["principal"], "text": r["body"]["text"], "relayed": r["body"]["relayed"].is_object() })).collect();
+        let st = api.unsigned("POST", "/api/test/door", Some(&json!({ "door": door, "op": "state" }))).map(|r| r.body).unwrap_or(Value::Null);
+        json!({ "chat": chat, "runner": st["runner"], "unsent": st["unsent"], "running": st["running"] })
+    };
     s.ok(
         "the phone's next message lands in the connector's chat, once, nothing more in the old one, and the agent's answer reaches the phone through the door",
         after.is_ok() && in_door.iter().filter(|t| *t == "after the move").count() == 1 && in_old == ["before the move"],
-        json!({ "door": in_door, "old": in_old, "answer": format!("{after:?}") }),
+        json!({ "door": in_door, "old": in_old, "answer": format!("{after:?}"), "held": if after.is_err() { held() } else { Value::Null } }),
     );
 
     // back: its computer runs the link again, the connector gone
