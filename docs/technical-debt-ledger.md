@@ -876,15 +876,37 @@ unfinished design, not debt.
   project's by the name celld gives them: its node is `dev-` and 12 hex of
   the SHA-256 of the project's canonical path (the fork's dev.rs), each
   container `celld-`, 6 hex of the SHA-256 of the node, `-` (its
-  container.rs `node_prefix`).
+  container.rs `node_prefix`). It destroys celld's image builder too
+  (`celld-builder`, the fork's krun_build.rs) when the celld its label
+  names (`<pid>-<start>`) is gone, holding the lock celld's build
+  sessions take turns by (its `lock_path`: `celld-builder-<uid>-<12 hex of
+  the socket's canonical path>.lock` in `/run/user/<uid>`): a run killed
+  while its node built images left it holding 12 GiB of the engine's
+  memory.
 - **Risk:** a celld that names them otherwise leaves a killed run's VMs on
   the engine (its `vms_max` is 16), where its next start does not reap
   them: each e2e run is a project of its own.
-- **Delete when:** celld reaps a dev node's containers by itself when its
-  supervisor dies, or names them by a label devstack sets; then `remove`
-  and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
+- **Delete when:** celld reaps a dev node's containers and its builder by
+  itself when its supervisor dies, or names them by a label devstack sets;
+  then `remove` and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
   pins the naming as the fork has it; a celld that moves it must move
   that test too.
+
+## A celld node's images stay in its krun engine
+
+- **Shortcut:** the krun engine's API removes no image, so the images a
+  `celld dev` node builds into it (the fork's `krun_build`) stay there
+  after its run, and devstack removes none (crates/e2e main.rs
+  `remove_leftovers`). Each is named by its content, unlabeled for the
+  run's project (devstack's `write_local_config`, `own_images`), so a
+  run on an unchanged tree loads nothing, and the engine gains an image
+  only when an image's sources change.
+- **Risk:** the engine's store, root's, grows by an image per change to
+  an image's sources (a Hermes is 1.5 GB compressed) until someone clears
+  it, on a box whose disk the other stacks share.
+- **Delete when:** the engine removes an image (`DELETE
+  /v1/images/<reference>`) and celld removes, at the end of a dev
+  session's builds, the names of its images no deployment names.
 
 ## A local node's port is a front door of ours, past wrangler's proxy
 

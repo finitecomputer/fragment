@@ -132,11 +132,20 @@ WebSocket and a large body through one, a `monitor()` whose event had
 answered (its object now woken as the container stops), and an `exec()`
 during a start.
 
-- **Images:** `celld dev` builds the config's images with Docker, as it
-  does for its Docker engine, and loads each into the krun engine under
-  its content key (`celld-image:<sha256>` of its layers and config), so a
-  computer is pinned to an image by its digest. An unchanged image is not
-  loaded again.
+- **Images:** `celld dev` builds the config's images in the krun engine
+  itself, with no Docker on the box: BuildKit (pinned by digest) in a
+  microVM of the engine, its cache on a data disk of the engine's
+  (64 GiB, collected to at most 44 GB after each deploy's builds), each
+  image loaded from there (the fork's `krun_build`). An image's name is
+  its config digest (`celld-image:<sha256>`), built with
+  `SOURCE_DATE_EPOCH=0` so the same layers make the same name, and a
+  computer is pinned to an image by it. An unchanged image exports and
+  loads nothing. devstack labels a node's images for its project only on
+  wrangler, so every celld run builds the same images by name. A node
+  builds the images its config names: the stubs for a run that makes
+  computers, Hermes' two only when `--only` names the hermes lane, and
+  the door's for its lane. The engine keeps what it loaded
+  (docs/technical-debt-ledger.md).
 - **Egress:** each start's intercepts (the platform's API and model
   routes, a connection's hosts, `backups.sandbox.internal`) go from the
   engine's egress proxy to celld's socket and on to `ComputerEgress`, a
@@ -159,7 +168,8 @@ during a start.
   (a stub guest uses about 250 MB of its 6 GiB).
 - **Cleanup:** a node reaps its VMs when it stops and when it starts again
   on its project; a run killed outright has devstack destroy its node's by
-  celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
+  celld's naming, and celld's image builder when the celld that started it
+  is gone (`celld::Engine::remove`; docs/technical-debt-ledger.md).
 - **Skips on celld,** each a gap of celld's:
   - a turn's keepalive across a deploy: the e2e's reload of `celld dev`
     restarts its node, which reaps its VMs. A deploy to a running celld
