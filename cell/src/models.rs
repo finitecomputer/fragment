@@ -35,8 +35,8 @@
 //!   `FRAGMENT_AI_URL` instead, and the same input is POSTed to
 //!   `<url>/run/<model>`, its answer read the same way: a lower-rung fake
 //!   at the vendor boundary (crates/fakes, `workers_ai`), never product
-//!   proof. A job's image step and a transcription call their models here
-//!   (`run`).
+//!   proof. A job's image step calls its model here (`run`), and a
+//!   transcription slot on Workers AI its own.
 //! - An OpenAI-compatible API (`openai`, OpenRouter's or Finite
 //!   Private's): the same input, the slot's own fields over the client's
 //!   (its config's `body`: OpenRouter's provider routing) and its model's
@@ -66,11 +66,15 @@
 //!
 //! Transcription (decision 9: a voice memo is one the agent transcribes
 //! itself): `POST /api/models/v1/audio/transcriptions`, OpenAI's multipart
-//! shape, `model` the route's `whisper` (`transcription_route`), runs
-//! Workers AI's Whisper on the same transport, charged at the length
-//! Whisper heard, in neurons (`fragment_core::transcribe`). It names no
-//! fragment: its agent's owner pays, under no fragment's cap, as a call
-//! through the model intercept does.
+//! shape, `model` the route's `whisper` (`transcription_route`), runs on
+//! the deployment's transcription slot (`models.transcription`): a Workers
+//! AI model on the same transport, sent Whisper's input, or an
+//! OpenAI-compatible API, sent OpenAI's form at `<base_url>/audio/
+//! transcriptions` with the slot's key; charged at the length its model
+//! heard, at the slot's price (`fragment_core::transcribe`). A deployment
+//! that names none transcribes nothing. It names no fragment: its agent's
+//! owner pays, under no fragment's cap, as a call through the model
+//! intercept does.
 //!
 //! Decisions: `POST /api/models/v1/decide` (`decide_route`), a job's
 //! `ai.decide` input with its media inline, on the Clef family
@@ -481,11 +485,17 @@ async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &str) -
 
 /// `openai`, its key read already.
 async fn keyed(key: &str, base_url: &str, path: &str, body: &str) -> CellResult<Response> {
+    keyed_as(key, base_url, path, "application/json", body.into()).await
+}
+
+/// `keyed`'s call, its body `body` of `content_type` (a transcription's
+/// form: `transcribe::openai_form`).
+async fn keyed_as(key: &str, base_url: &str, path: &str, content_type: &str, body: worker::wasm_bindgen::JsValue) -> CellResult<Response> {
     let h = Headers::new();
-    h.set("content-type", "application/json")?;
+    h.set("content-type", content_type)?;
     h.set("authorization", &format!("Bearer {key}"))?;
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(h).with_body(Some(body.into()));
+    init.with_method(Method::Post).with_headers(h).with_body(Some(body));
     let req = Request::new_with_init(&format!("{base_url}{path}"), &init)?;
     Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
 }
@@ -759,8 +769,10 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
 
 /// `POST /api/models/v1/audio/transcriptions`: an agent's transcription
 /// (the module's doc), signed by the agent; OpenAI's multipart shape, its
-/// `model` `whisper`. Its owner pays, after its answer. The audio is
-/// refused past `transcribe::AUDIO_MAX_BYTES` (413) before anything is sent.
+/// `model` `whisper`, run on the deployment's transcription slot. Its owner
+/// pays, after its answer. A deployment that names no slot answers 404,
+/// and audio past `transcribe::AUDIO_MAX_BYTES` is 413, before anything is
+/// sent.
 pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, transcribe::BODY_MAX_BYTES).await?;
     let agent = crate::signer_for(env, &req, url, &body).await?;
@@ -768,6 +780,10 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
         return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
     }
     let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let cfg = Config::from_env(env);
+    let Some(slot) = &cfg.models.transcription else {
+        return Err(CellError::new(ErrorCode::NotFound, "this deployment transcribes nothing: its models name no transcription slot (models.transcription)"));
+    };
     let content_type = req.headers().get("content-type")?.unwrap_or_default();
     let malformed = |m: multipart::Malformed| CellError::invalid(m.message());
     let boundary = multipart::boundary(&content_type).map_err(malformed)?;
@@ -777,11 +793,23 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
         Err(transcribe::Refusal::TooLarge(n)) => return Err(CellError::too_large("the audio", n, transcribe::AUDIO_MAX_BYTES)),
         Err(why) => return Err(CellError::invalid(why.message())),
     };
+    let format = bounded.format;
+    let sent = match &slot.upstream {
+        Upstream::WorkersAi { model } => Sent::WorkersAi { model, input: transcribe::workers_ai_input(&bounded) },
+        Upstream::Openai { base_url, model, .. } => {
+            // the platform's own: 128 random bits no audio carries
+            let boundary = format!("fragment-{}", js::random_hex::<16>());
+            let form = transcribe::openai_form(&bounded, model, &boundary).ok_or_else(|| CellError::host("a form's boundary was found in its audio: send it again"))?;
+            Sent::Openai { base_url, content_type: format!("multipart/form-data; boundary={boundary}"), form }
+        }
+    };
     drop(parts);
     drop(body);
-    let mut charge = gate(env, &owner, Some(&agent.id), None, transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER, after).await?;
+    let model = slot.upstream.model();
+    let mut charge = gate(env, &owner, Some(&agent.id), None, model, transcribe::WHISPER, after).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
-    let (answer, calls) = whispered(env, Config::from_env(env), &bounded.input, &meta).await;
+    let (answer, calls) = transcribed(env, cfg, model, &sent, &meta).await;
+    drop(sent);
     charge.calls = calls;
     // not reached: it used nothing, and nothing is charged
     let mut upstream = answer?;
@@ -804,13 +832,13 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
             return Err(e);
         }
     };
-    let whisper: Value = serde_json::from_slice(&answer).unwrap_or(Value::Null);
+    let heard: Value = serde_json::from_slice(&answer).unwrap_or(Value::Null);
     // its shape, never its words (`transcribe::shape`): logged, and told
     // the client (`ANSWER_SHAPE_HEADER`)
-    let shape = transcribe::shape(&whisper);
+    let shape = transcribe::shape(&heard);
     console_log!("{}", json!({ "event": "model.transcribed", "ref": charge.bill.reference, "shape": shape, "bytes": answer.len() }));
-    charge.later(after, transcribe::usage_of(&whisper), log_id);
-    let Some((kind, out)) = transcribe::answer(bounded.format, &whisper) else {
+    charge.later(after, transcribe::usage_of(slot, &heard), log_id);
+    let Some((kind, out)) = transcribe::answer(format, &heard) else {
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's transcription carried no text"));
     };
     let mut resp = Response::from_bytes(out)?;
@@ -819,26 +847,42 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     Ok(resp)
 }
 
-/// Whisper's answer to a transcription, and the tries it took: a first try
-/// that failed fast for want of capacity (`transcribe::again`: a 429, a 5xx,
-/// a 408 or no answer, within `AGAIN_WITHIN_MS`) is made once more after
-/// `AGAIN_AFTER_MS`, and the second's answer is final. A failed try used
-/// nothing and is charged nothing. Workers AI's speech recognition takes 720
-/// calls a minute an account (developers.cloudflare.com/workers-ai/platform/
-/// limits, read 2026-10-22); what it refuses past that, or when short of
-/// capacity, is a passing 429. Not AI Gateway's own retries: its Retry
-/// Requests setting is the gateway's, so it would hold back a chat call's
-/// fallback too, and the binding's options name no retry, nor its docs
-/// which failures it retries.
-async fn whispered(env: &Env, cfg: &Config, input: &Value, meta: &Metadata) -> (CellResult<Response>, u32) {
+/// A transcription as its slot is sent it: Whisper's input to a Workers
+/// AI model, or OpenAI's form to an OpenAI-compatible API.
+enum Sent {
+    WorkersAi { model: &'static str, input: Value },
+    Openai { base_url: &'static str, content_type: String, form: Vec<u8> },
+}
+
+/// The slot's model's answer to a transcription, and the tries it took: a
+/// first try that failed fast for want of capacity (`transcribe::again`: a
+/// 429, a 5xx, a 408 or no answer, within `AGAIN_WITHIN_MS`) is made once
+/// more after `AGAIN_AFTER_MS`, and the second's answer is final. A failed
+/// try used nothing and is charged nothing. Workers AI's speech recognition
+/// takes 720 calls a minute an account (developers.cloudflare.com/workers-ai/
+/// platform/limits, read 2026-10-22); what it refuses past that, or when
+/// short of capacity, is a passing 429. Not AI Gateway's own retries: its
+/// Retry Requests setting is the gateway's, so it would hold back a chat
+/// call's fallback too, and the binding's options name no retry, nor its
+/// docs which failures it retries. An OpenAI-compatible API's key is read
+/// once, before the first try: a deployment that binds none has its call
+/// not reached, charged nothing.
+async fn transcribed(env: &Env, cfg: &Config, model: &str, sent: &Sent, meta: &Metadata) -> (CellResult<Response>, u32) {
+    let key = match sent {
+        Sent::Openai { .. } => match crate::keys::model_key(env, transcribe::TRANSCRIPTION).await {
+            Ok(k) => k,
+            Err(e) => return (Err(e), 0),
+        },
+        Sent::WorkersAi { .. } => String::new(),
+    };
     let t0 = js::now_ms();
-    let first = workers_ai(env, cfg, transcribe::TRANSCRIBE_MODEL, input, meta).await;
+    let first = send(env, cfg, sent, &key, meta).await;
     let status = first.as_ref().ok().map(Response::status_code);
     let ms = js::now_ms() - t0;
     if !transcribe::again(status, ms) {
         return (first, 1);
     }
-    // where Workers AI's error is (the gateway's log of the call), never
+    // where the model's error is (the gateway's log of the call), never
     // its body: an answer whose headers came fast can still stall its body,
     // and a read of it would hold back the second try past what its client
     // waits (Alex's review of #520)
@@ -846,9 +890,18 @@ async fn whispered(env: &Env, cfg: &Config, input: &Value, meta: &Metadata) -> (
         Ok(failed) => failed.headers().get("cf-aig-log-id").ok().flatten().map(|id| format!("cf-aig-log-id {id}")).unwrap_or_default(),
         Err(e) => e.message,
     };
-    console_log!("{}", json!({ "event": "model.transcribe-again", "model": transcribe::TRANSCRIBE_MODEL, "status": status, "ms": ms, "why": why }));
+    console_log!("{}", json!({ "event": "model.transcribe-again", "model": model, "status": status, "ms": ms, "why": why }));
     Delay::from(std::time::Duration::from_millis(transcribe::AGAIN_AFTER_MS)).await;
-    (workers_ai(env, cfg, transcribe::TRANSCRIBE_MODEL, input, meta).await, 2)
+    (send(env, cfg, sent, &key, meta).await, 2)
+}
+
+/// One try of a transcription (`transcribed`), where its slot runs: `key`
+/// an OpenAI-compatible API's.
+async fn send(env: &Env, cfg: &Config, sent: &Sent, key: &str, meta: &Metadata) -> CellResult<Response> {
+    match sent {
+        Sent::WorkersAi { model, input } => workers_ai(env, cfg, model, input, meta).await,
+        Sent::Openai { base_url, content_type, form } => keyed_as(key, base_url, transcribe::OPENAI_PATH, content_type, worker::js_sys::Uint8Array::from(form.as_slice()).into()).await,
+    }
 }
 
 /// A transcription's answer names the shape of the model's own (its

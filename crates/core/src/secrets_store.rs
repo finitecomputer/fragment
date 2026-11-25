@@ -46,9 +46,9 @@ pub fn connection_secret(provider: &str) -> String {
 pub const CACHE_MS_MAX: i64 = 60_000;
 /// The bindings one Worker has: the eight above, a model's key per slot a
 /// deployment's `models` may name (`models::SLOTS_MAX`, and its
-/// embeddings slot's), and an operator key per provider of the catalog, at
-/// most.
-pub const CACHE_ENTRIES_MAX: usize = 8 + crate::models::SLOTS_MAX + 1 + catalog::PROVIDERS_MAX;
+/// embeddings and transcription slots'), and an operator key per provider
+/// of the catalog, at most.
+pub const CACHE_ENTRIES_MAX: usize = 8 + crate::models::SLOTS_MAX + 2 + catalog::PROVIDERS_MAX;
 
 /// The binding that holds operator key `provider` (`perplexity` →
 /// `OPERATOR_KEY_PERPLEXITY`, `google-places` → `OPERATOR_KEY_GOOGLE_PLACES`).

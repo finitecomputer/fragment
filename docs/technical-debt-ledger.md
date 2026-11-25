@@ -1300,6 +1300,26 @@ unfinished design, not debt.
   `production.jsonc`, deploy/example.jsonc, docs/self-host.md and the
   e2e's configs name routes; then `legacy` goes and its tests read lists.
 
+## A config naming no transcription slot is given Workers AI's Whisper
+
+- **Shortcut:** xtask gives a deployment's `models` that names no
+  `transcription` slot Workers AI's Whisper large v3 turbo at its 46.63
+  neurons a minute (deploy.rs `TRANSCRIPTION_UNTIL_NAMED`, in
+  `models_cell`; a config naming no `models` is read as `{}`), where every
+  deployment transcribed before the slot was its config's (FIN-742). The
+  cell names no transcription model: without the slot it transcribes
+  nothing.
+- **Why:** preview's and production's configs name no slot yet, and a
+  config naming one is refused by a release from before it, so the code
+  lands first and the configs follow.
+- **Risk:** a model named in tooling, not config, until the configs
+  name it; a box's models file without the slot is given a model its node
+  cannot run.
+- **Delete when:** fragment-deploy's `preview.jsonc` and
+  `production.jsonc` name `models.transcription`, and production runs a
+  release that reads it (no rollback past it). Then `models_cell` adds
+  nothing, and a config without the slot transcribes nothing.
+
 ## An older bridge reads the state's snapshot, not its log
 
 - **Shortcut:** the bridge appends each step's change to `state.log`

@@ -494,7 +494,7 @@ pub struct Fleet {
     pub ai_gateway: Option<String>,
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
-    /// every one on Workers AI), and the key of each that runs on an
+    /// every route on Workers AI, and no transcription), and the key of each that runs on an
     /// OpenAI-compatible API (`ModelKey`).
     pub models: Option<String>,
     pub model_keys: Vec<ModelKey>,

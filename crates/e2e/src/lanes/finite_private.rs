@@ -41,6 +41,14 @@
 //! sees, within its own route: OpenRouter's failure on Workers AI, never
 //! Tinfoil, its `vision` and `fallback` there too, a job's step the same.
 //!
+//! What `transcription_checks` proves: the node's transcription slot, on
+//! an OpenAI-compatible API (a self-hosted Whisper server, the fake's
+//! face), is where an agent's voice memo goes: OpenAI's form at the slot's
+//! `base_url`, its model and its key, never Workers AI's and never the
+//! route's name; answered in OpenAI's shape, charged at the slot's dollars
+//! a minute by the second; a fast refusal for capacity tried once more and
+//! charged once; a refusal of the request passed through, charged nothing.
+//!
 //! The fallback of each status (429, 5xx, a model down) and "the fallback
 //! fails too" are crates/core's (models.rs) and the ledger lane's.
 
@@ -56,9 +64,9 @@ use serde_json::{json, Value};
 use super::ai_tools;
 use super::app::ship;
 use super::jobs::{settle, started};
-use super::ledger::{charged, entries, ids_masked, logged, quiet, usage};
+use super::ledger::{charged, entries, ids_masked, logged, quiet, transcription_call, usage};
 use crate::api::{Api, Call};
-use crate::{Suite, FINITE_PRIVATE_KEY, TINFOIL_KEY};
+use crate::{Suite, FINITE_PRIVATE_KEY, TINFOIL_KEY, TRANSCRIPTION_KEY};
 
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
@@ -74,6 +82,8 @@ const FLASH: &str = fragment_core::models::DEEPSEEK_FLASH;
 const TINFOIL: &str = fragment_fakes::workers_ai::TINFOIL_FLASH;
 /// DeepSeek V4.1 Flash as OpenRouter names it: Standard's Deep here.
 const ROUTED_DEEP: &str = fragment_fakes::workers_ai::OPENROUTER_DEEPSEEK;
+/// The self-hosted Whisper the node's transcription slot names.
+const TRANSCRIBER: &str = fragment_fakes::workers_ai::OPENAI_TRANSCRIBE_MODEL;
 /// How long a call the fake holds back hangs: past the impatient caller's
 /// wait, as a stalled stream is past Hermes' 20 s.
 const HANG: Duration = Duration::from_secs(15);
@@ -124,19 +134,96 @@ pub fn finite_private(s: &mut Suite, _: &Api) -> Result<()> {
     let api = s.start_as_private_tier()?;
     s.ai.accept_key(FINITE_PRIVATE_KEY);
     s.ai.accept_key_for(TINFOIL, TINFOIL_KEY);
+    s.ai.accept_key_for(TRANSCRIBER, TRANSCRIPTION_KEY);
     s.ai.clear_script();
     let checked = checks(s, &api);
     s.ai.clear_script();
     s.ai.down(&[]);
     s.ai.transcripts(false);
     let tiered = tier_checks(s, &api);
+    s.ai.clear_script();
+    let transcribed = transcription_checks(s, &api);
     // the node as the lanes after it expect it: every tier on Workers AI
     s.ai.clear_script();
     s.ai.down(&[]);
     s.ai.transcripts(false);
     s.stop()?;
     s.start(false)?;
-    checked.and(tiered)
+    checked.and(tiered).and(transcribed)
+}
+
+/// The private tier's transcriptions (the module's doc), on a node of its
+/// shape.
+fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    use base64::Engine;
+    use fragment_core::transcribe::SECONDS;
+    let wait = Duration::from_secs(40);
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let aig = || entries(api, &owner_id, "aig:");
+    // the node's book: its slot's seconds at the dollars a minute it names
+    let models = crate::private_tier_models(&s.ai.node().url).to_string();
+    let parsed = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models");
+    let mut book = parsed.priced(PriceBook::defaults());
+    book.keys.extend(parsed.cost_keys());
+    let seconds = |units: u64| Usage::Key { key: SECONDS.into(), units };
+    let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its slot's seconds").charge;
+    let settled_at = |before: usize, units: u64| {
+        let now = aig();
+        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(charge(&seconds(units))) && usage(e)["kind"] == "key" && usage(e)["key"] == SECONDS && usage(e)["units"] == units)
+    };
+    let memo = fragment_fakes::workers_ai::spoken_wav("hello from a voice memo", 3);
+    let slot_key = format!("Bearer {TRANSCRIPTION_KEY}");
+
+    // ---- a memo on the slot's API: OpenAI's form at its base_url, its model and key
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    let r = transcription_call(api, &hand, &[("model", "whisper"), ("response_format", "json"), ("language", "de")], &memo)?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let sent = made.len() == 1 && {
+        let c = &made[0];
+        c.face == Face::OpenAi
+            && c.model == TRANSCRIBER
+            && c.authorization.as_deref() == Some(slot_key.as_str())
+            && c.body["response_format"] == "verbose_json"
+            && c.body["language"] == "de"
+            && c.body["file"] == base64::engine::general_purpose::STANDARD.encode(&memo)
+            && (c.body["filename"].clone(), c.body["content_type"].clone()) == (json!("memo.wav"), json!("audio/wav"))
+    };
+    let settled = s.eventually(wait, || settled_at(before, 3));
+    s.ok(
+        "a voice memo on an OpenAI-compatible transcription slot is OpenAI's form at its base_url (its model, never `whisper`; its own key; the audio and its name as they came; the language passed on), answered in OpenAI's shape and charged at the slot's dollars a minute for the 3 s it heard",
+        r.status == 200 && r.body == json!({ "text": "hello from a voice memo" }) && sent && settled,
+        json!({ "status": r.status, "answer": r.text, "made": made.iter().map(|c| json!({ "face": format!("{:?}", c.face), "model": c.model, "format": c.body["response_format"], "keyed": c.authorization.as_deref() == Some(slot_key.as_str()) })).collect::<Vec<_>>(), "charge": charge(&seconds(3)), "entries": aig() }),
+    );
+    let r = transcription_call(api, &hand, &[("model", "whisper"), ("response_format", "text")], &memo)?;
+    s.ok("asked for text, it answers the text alone", r.status == 200 && r.text == "hello from a voice memo", json!({ "status": r.status, "answer": r.text }));
+    s.eventually(wait, || aig().len() == before + 2);
+
+    // ---- its API short of capacity a moment: asked once more, charged once
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[429]);
+    let r = transcription_call(api, &hand, &[("model", "whisper")], &memo)?;
+    let settled = s.eventually(wait, || settled_at(before, 3));
+    s.ok(
+        "a transcription its API refuses for capacity (429) is asked once more, heard, and charged once",
+        r.status == 200 && s.ai.calls().len() == calls + 2 && settled,
+        json!({ "status": r.status, "calls": s.ai.calls().len() - calls, "entries": aig() }),
+    );
+
+    // ---- a refusal of the request: passed through, charged nothing
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[400]);
+    let r = transcription_call(api, &hand, &[("model", "whisper")], &memo)?;
+    s.ok(
+        "its API's refusal is passed through, sent once, and nothing is charged",
+        r.status == 400 && s.ai.calls().len() == calls + 1 && aig().len() == before,
+        json!({ "status": r.status, "calls": s.ai.calls().len() - calls, "entries": aig() }),
+    );
+    Ok(())
 }
 
 /// The private tier's checks (the module's doc), on a node of its shape.
