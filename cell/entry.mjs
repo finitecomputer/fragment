@@ -621,7 +621,7 @@ class ContainerHost {
   async port(port, request, usedEvery) {
     if (usedEvery > 0) this.#usedEvery = usedEvery;
     const sleeps = this.#sleeps;
-    const damaged = this.#damage?.path === new URL(request.url).pathname && this.#damage.n-- > 0;
+    const damaged = !!this.#damage && this.#damage.path === new URL(request.url).pathname && this.#damage.n-- > 0;
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return damaged && resp.body ? new Response(flipped(resp.body), resp) : resp;
