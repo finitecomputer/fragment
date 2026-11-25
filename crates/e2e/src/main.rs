@@ -1540,7 +1540,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // SQLite call of the node until it fenced itself (FIN-728). The run's
     // logs stay in its scratch, on disk.
     let ram = match &celld {
-        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES)?),
+        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES, hosted::sweep::is_run)?),
         None => None,
     };
     if let Some(ram) = &ram {
@@ -1591,6 +1591,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // in the run's RAM on celld, beside the node's state: on disk, another
     // job's writes held a secret's read past its deadline
     let openbao = with_openbao.then(|| openbao(&state, &scratch)).transpose()?;
+    // until the suite holds OpenBao (its drop keeps them), its logs are
+    // kept should what starts next fail
+    let logs = KeepOpenBaoLogs { state: state.clone(), scratch: scratch.clone(), armed: openbao.is_some() };
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let rung = local_rung(celld.as_ref(), rehearse);
@@ -1660,6 +1663,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         node_computers,
         node_doors,
     };
+    // the suite holds OpenBao now, and keeps its logs as it ends
+    let mut logs = logs;
+    logs.armed = false;
     if let Some(k) = s.shard {
         println!("shard {k}/{}: {}", lanes::SHARDS.len(), lanes::SHARDS[k as usize - 1].join(", "));
     }
@@ -1740,7 +1746,7 @@ fn openbao(state: &Path, scratch: &Path) -> Result<devstack::openbao::OpenBao> {
         Err(e) => {
             // its log goes with the run's RAM: kept in the scratch first
             keep_openbao_logs(state, scratch);
-            return Err(e.into());
+            return Err(anyhow!(e).context(format!("OpenBao did not start (its logs, kept: {})", scratch.join("openbao").display())));
         }
     };
     println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret read by the celld node)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
@@ -1763,6 +1769,22 @@ fn keep_openbao_logs(state: &Path, scratch: &Path) {
         }
         if let Err(e) = std::fs::create_dir_all(&to).and_then(|()| std::fs::copy(from.join(name), to.join(name))) {
             println!("      could not keep OpenBao's {name} in {}: {e}", to.display());
+        }
+    }
+}
+
+/// OpenBao's logs kept (`keep_openbao_logs`) when this drops armed: a
+/// run's setup failing between OpenBao's start and the suite that holds it.
+struct KeepOpenBaoLogs {
+    state: PathBuf,
+    scratch: PathBuf,
+    armed: bool,
+}
+
+impl Drop for KeepOpenBaoLogs {
+    fn drop(&mut self) {
+        if self.armed {
+            keep_openbao_logs(&self.state, &self.scratch);
         }
     }
 }
