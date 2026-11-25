@@ -59,9 +59,20 @@ def sha(root, path):
         return None
 
 
+def occupied(root, path):
+    # Something at `path` that isn't a plain file (a folder, say).
+    full = inside(root, path)
+    try:
+        return full is None or not stat.S_ISREG(os.lstat(full).st_mode)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def copy(src_root, dst_root, path):
     src, dst = inside(src_root, path), inside(dst_root, path)
-    if src is None or dst is None:
+    if src is None or dst is None or occupied(dst_root, path):
         return False
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copyfile(src, dst, follow_symlinks=False)
@@ -258,8 +269,10 @@ def asset_plan(names):
     plan = []
     for asset in names:
         there, here = sha(copy_dir, asset), sha(work, asset)
-        if inside(copy_dir, asset) is None or inside(work, asset) is None:
-            return False, []
+        if not shared_here(folder_of(asset, known) or ""):
+            return False, []  # in a folder the brain doesn't share
+        if occupied(copy_dir, asset) or occupied(work, asset):
+            return False, []  # a link or a folder there
         if here is None and there is None:
             return False, []
         if here is not None and there is not None and here != there:
@@ -283,6 +296,9 @@ for path, (id_, revision, old_sha) in sorted(listed.items()):
     there = sha(copy_dir, path)
     if there is None:
         out["missing"].append(path)  # listed, but not in this copy
+        continue
+    if occupied(work, path):
+        out["both"].append(path)  # a folder or such where the page goes
         continue
     seen, here = record["pages"].get(path), sha(work, path)
     fine, plan = asset_plan(assets(copy_dir, path))
