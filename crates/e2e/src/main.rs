@@ -1568,10 +1568,13 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // SQLite call of the node until it fenced itself (FIN-728). The run's
     // logs stay in its scratch, on disk.
     let ram = match &celld {
-        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES, hosted::sweep::is_run)?),
+        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES, RAM_RUNS)?),
         None => None,
     };
     if let Some(ram) = &ram {
+        // where this run's scratch is, should a later run sweep this one's
+        // RAM (`keep_gone_runs_logs`)
+        std::fs::write(ram.path().join(SCRATCH_NOTE), scratch.display().to_string()).with_context(|| format!("note the scratch in {}", ram.path().display()))?;
         // celld bundles the project's bare imports (`@cloudflare/sandbox`)
         // from the repo's node_modules, which esbuild looks for above the
         // project: staged outside the repo, the run's directory links it
@@ -1779,6 +1782,24 @@ fn openbao(state: &Path, scratch: &Path) -> Result<devstack::openbao::OpenBao> {
     };
     println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret read by the celld node)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
     Ok(bao)
+}
+
+/// A celld run's RAM directories (devstack::shm): named by run ids, and a
+/// gone run's OpenBao logs kept before its directory goes.
+const RAM_RUNS: devstack::shm::Runs = devstack::shm::Runs { is_run: hosted::sweep::is_run, before_removing: keep_gone_runs_logs };
+
+/// In a run's RAM directory: the path of its scratch, on disk.
+const SCRATCH_NOTE: &str = "scratch";
+
+/// A run killed outright kept nothing of its RAM: before a later run's
+/// sweep removes it, its OpenBao logs go to its scratch (`SCRATCH_NOTE`),
+/// as its own end would have put them.
+fn keep_gone_runs_logs(dir: &Path) {
+    let Ok(scratch) = std::fs::read_to_string(dir.join(SCRATCH_NOTE)) else { return };
+    let scratch = PathBuf::from(scratch);
+    if scratch.is_dir() {
+        keep_openbao_logs(dir, &scratch);
+    }
 }
 
 /// OpenBao's own log and its audit log, copied from `state` (the run's RAM)

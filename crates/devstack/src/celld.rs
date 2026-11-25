@@ -345,6 +345,8 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
         .env(Engine::VAR, tools.engine.value())
         .env("NO_COLOR", "1");
     cmd.current_dir(&opts.project);
+    // its state is the run's, in RAM for the e2e (`shm`): gone with it
+    crate::dies_with_this_process(&mut cmd);
     let t0 = Instant::now();
     let child = spawn_node(cmd, opts, out, heard.clone())?;
     let mut node = Node { child, own_group: opts.own_group, what: "celld dev", base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };

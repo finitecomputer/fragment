@@ -35,6 +35,15 @@ pub fn root() -> PathBuf {
     PathBuf::from(format!("/dev/shm/fragment-e2e-{uid}"))
 }
 
+/// What a caller knows of its runs: which names are runs' (the e2e's run
+/// ids; the sweep touches nothing else), and what to keep of a gone run
+/// before its directory goes (a run killed outright kept nothing itself).
+#[derive(Clone, Copy)]
+pub struct Runs {
+    pub is_run: fn(&str) -> bool,
+    pub before_removing: fn(&Path),
+}
+
 /// One run's directory, held until the run ends.
 #[must_use = "the run's directory is removed when it is dropped"]
 pub struct RunDir {
@@ -45,16 +54,15 @@ pub struct RunDir {
 
 impl RunDir {
     /// `run`'s directory under `root`, after removing every directory there
-    /// whose run is gone. `is_run` tells a run's name (the e2e's own run
-    /// ids), and the sweep touches nothing else. Refused, saying why, when
-    /// `root`'s file system has less than `room` free.
-    pub fn claim(root: &Path, run: &str, room: u64, is_run: fn(&str) -> bool) -> Result<RunDir> {
-        anyhow::ensure!(is_run(run), "{run:?} is not a run's name");
+    /// whose run is gone (`runs`). Refused, saying why, when `root`'s file
+    /// system has less than `room` free.
+    pub fn claim(root: &Path, run: &str, room: u64, runs: Runs) -> Result<RunDir> {
+        anyhow::ensure!((runs.is_run)(run), "{run:?} is not a run's name");
         trusted_root(root)?;
         // A claim and a sweep hold this alike: a sweep never sees a run's
         // lock file before its run holds it.
         let _claiming = hold(&root.join(".claims"), true)?.context("a claim's hold is waited for")?;
-        sweep(root, is_run)?;
+        sweep(root, runs)?;
         let free = free_bytes(root).with_context(|| format!("read the room in {}", root.display()))?;
         if free < room {
             bail!(
@@ -143,9 +151,11 @@ fn trusted_root(root: &Path) -> Result<()> {
 /// Removes each run's directory under `root` whose run is gone: its lock
 /// is free, or it has none. Answers how many. Its caller holds `.claims`.
 /// Only a run's own entries count: a real directory named as a run
-/// (`is_run`), or a regular file named as its lock. Anything else, a link
-/// among them, is left as it is.
-fn sweep(root: &Path, is_run: fn(&str) -> bool) -> Result<u32> {
+/// (`Runs::is_run`), or a regular file named as its lock. Anything else, a
+/// link among them, is left as it is. `Runs::before_removing` sees each
+/// directory before it goes.
+fn sweep(root: &Path, runs: Runs) -> Result<u32> {
+    let is_run = runs.is_run;
     let mut removed = 0;
     for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
         let entry = entry?;
@@ -159,10 +169,15 @@ fn sweep(root: &Path, is_run: fn(&str) -> bool) -> Result<u32> {
             // held while its run lives, by the kernel's count: free once
             // the run is gone, however it went
             let Some(_free) = hold(&entry.path(), false)? else { continue };
-            Remover { dir: root.join(run), lock: entry.path() }.remove()?;
+            let dir = root.join(run);
+            if dir.is_dir() {
+                (runs.before_removing)(&dir);
+            }
+            Remover { dir, lock: entry.path() }.remove()?;
             removed += 1;
         } else if is_run(&name) && kind.is_dir() && !root.join(format!("{name}.lock")).exists() {
             // its lock went first: a removal cut short
+            (runs.before_removing)(&entry.path());
             remove_dir(&entry.path())?;
             removed += 1;
         }
@@ -219,6 +234,9 @@ mod tests {
     /// run is claimed in.
     const CHILD: &str = "FRAGMENT_SHM_TEST_CHILD";
 
+    /// These tests' runs: named `run-…`, nothing kept of a gone one.
+    const RUNS: Runs = Runs { is_run, before_removing: |_| {} };
+
     /// These tests' runs' names, as the e2e's are its run ids.
     fn is_run(name: &str) -> bool {
         name.strip_prefix("run-").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
@@ -229,7 +247,7 @@ mod tests {
     #[test]
     fn helper_a_run_to_kill() {
         let Some(root) = std::env::var_os(CHILD) else { return };
-        let run = RunDir::claim(Path::new(&root), "run-killed", 0, is_run).unwrap();
+        let run = RunDir::claim(Path::new(&root), "run-killed", 0, RUNS).unwrap();
         fs::write(run.path().join("objects.sqlite3"), vec![0u8; 1 << 20]).unwrap();
         println!("claimed");
         loop {
@@ -258,6 +276,14 @@ mod tests {
         }
     }
 
+    /// The directories `saw` was shown, and whether each still held its
+    /// state then.
+    static SAW: std::sync::Mutex<Vec<(PathBuf, bool)>> = std::sync::Mutex::new(Vec::new());
+
+    fn saw(dir: &Path) {
+        SAW.lock().unwrap().push((dir.to_path_buf(), dir.join("objects.sqlite3").is_file()));
+    }
+
     fn wait_for(what: &str, done: impl Fn() -> bool) {
         let t0 = Instant::now();
         while !done() {
@@ -283,7 +309,7 @@ mod tests {
         let killed = root.path().join("run-killed");
         wait_for("the child's run is claimed and filled", || killed.join("objects.sqlite3").metadata().is_ok_and(|m| m.len() == 1 << 20));
 
-        let alive = RunDir::claim(root.path(), "run-while-it-lives", 0, is_run).unwrap();
+        let alive = RunDir::claim(root.path(), "run-while-it-lives", 0, RUNS).unwrap();
         assert!(killed.is_dir(), "a live run's directory was removed");
         drop(alive);
 
@@ -291,10 +317,71 @@ mod tests {
         child.wait().unwrap();
         assert!(killed.is_dir(), "the killed run left its directory (as a SIGKILL does)");
 
-        let next = RunDir::claim(root.path(), "run-next", 0, is_run).unwrap();
+        let next = RunDir::claim(root.path(), "run-next", 0, Runs { is_run, before_removing: saw }).unwrap();
         assert!(!killed.exists(), "the next run left the killed run's directory in RAM");
+        assert!(
+            SAW.lock().unwrap().iter().any(|(dir, filled)| *dir == killed && *filled),
+            "the killed run's directory went before its caller could keep anything of it"
+        );
         assert!(!root.path().join("run-killed.lock").exists(), "the next run left the killed run's lock");
         assert!(next.path().is_dir());
+    }
+
+    /// Set for the child `a_started_process_dies_with_its_starter` starts.
+    const STARTER: &str = "FRAGMENT_SHM_TEST_STARTER";
+
+    /// Not a test of its own: the starter `a_started_process_dies_with_its_starter`
+    /// kills. It starts a long sleep, as a run starts its node and OpenBao,
+    /// says its pid, and waits to be killed.
+    #[test]
+    fn helper_a_starter_to_kill() {
+        if std::env::var_os(STARTER).is_none() {
+            return;
+        }
+        let mut sleep = Command::new("sleep");
+        sleep.arg("600");
+        crate::dies_with_this_process(&mut sleep);
+        let child = sleep.spawn().unwrap();
+        println!("started {}", child.id());
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    /// Goal: a run killed outright leaves no process holding its RAM: what
+    /// it started (its node, OpenBao) dies with it, so the next run's sweep
+    /// frees the RAM it removes. Method: a starter process starts a sleep
+    /// and is SIGKILLed; the sleep is gone within seconds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_started_process_dies_with_its_starter() {
+        use std::io::BufRead as _;
+        let mut starter = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "shm::tests::helper_a_starter_to_kill", "--nocapture"])
+            .env(STARTER, "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(starter.stdout.take().unwrap()).lines();
+        let pid: u32 = loop {
+            let line = lines.next().expect("the starter says its child's pid").unwrap();
+            if let Some(pid) = line.strip_prefix("started ") {
+                break pid.trim().parse().unwrap();
+            }
+        };
+        let alive = || Path::new(&format!("/proc/{pid}")).exists() && !fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default().contains(") Z ");
+        assert!(alive(), "the started sleep runs");
+        starter.kill().unwrap();
+        starter.wait().unwrap();
+        let t0 = Instant::now();
+        while alive() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if alive() {
+            // SAFETY: kill has no preconditions; the pid is the test's own sleep.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            panic!("the process a killed starter started outlived it (pid {pid})");
+        }
     }
 
     /// Goal: a run's directory goes as the run ends, by its end's own call
@@ -302,12 +389,12 @@ mod tests {
     #[test]
     fn a_run_removes_its_directory_as_it_ends() {
         let root = Root::new("ends");
-        let run = RunDir::claim(root.path(), "run-ends", 0, is_run).unwrap();
+        let run = RunDir::claim(root.path(), "run-ends", 0, RUNS).unwrap();
         fs::write(run.path().join("state"), b"x").unwrap();
         run.remove().unwrap();
         assert!(!root.path().join("run-ends").exists() && !root.path().join("run-ends.lock").exists());
 
-        let dropped = RunDir::claim(root.path(), "run-dropped", 0, is_run).unwrap();
+        let dropped = RunDir::claim(root.path(), "run-dropped", 0, RUNS).unwrap();
         let remover = dropped.remover();
         drop(dropped);
         assert!(!root.path().join("run-dropped").exists() && !root.path().join("run-dropped.lock").exists());
@@ -322,7 +409,7 @@ mod tests {
         let outside = Root::new("links-outside");
         fs::create_dir_all(outside.path().join("pkg")).unwrap();
         fs::write(outside.path().join("pkg/index.js"), b"x").unwrap();
-        let run = RunDir::claim(root.path(), "run-linked", 0, is_run).unwrap();
+        let run = RunDir::claim(root.path(), "run-linked", 0, RUNS).unwrap();
         std::os::unix::fs::symlink(outside.path(), run.path().join("node_modules")).unwrap();
         run.remove().unwrap();
         assert!(!root.path().join("run-linked").exists());
@@ -331,7 +418,7 @@ mod tests {
         // and so does the sweep, for a killed run's directory
         fs::create_dir(root.path().join("run-swept")).unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("run-swept/node_modules")).unwrap();
-        drop(RunDir::claim(root.path(), "run-next", 0, is_run).unwrap());
+        drop(RunDir::claim(root.path(), "run-next", 0, RUNS).unwrap());
         assert!(!root.path().join("run-swept").exists());
         assert!(outside.path().join("pkg/index.js").is_file(), "the sweep followed the link");
     }
@@ -346,7 +433,7 @@ mod tests {
         fs::create_dir_all(target.path().join("victim")).unwrap();
         let link = Root::new("untrusted-link");
         std::os::unix::fs::symlink(target.path(), link.path()).unwrap();
-        let refused = RunDir::claim(link.path(), "run-run", 0, is_run).err().expect("a linked root is refused");
+        let refused = RunDir::claim(link.path(), "run-run", 0, RUNS).err().expect("a linked root is refused");
         assert!(format!("{refused:#}").contains("not this user's private directory"), "{refused:#}");
         assert!(target.path().join("victim").is_dir(), "a sweep through the link removed what it names");
         fs::remove_file(link.path()).unwrap();
@@ -355,7 +442,7 @@ mod tests {
         fs::create_dir(open.path()).unwrap();
         fs::set_permissions(open.path(), fs::Permissions::from_mode(0o777)).unwrap();
         fs::create_dir(open.path().join("planted")).unwrap();
-        assert!(RunDir::claim(open.path(), "run-run", 0, is_run).is_err(), "a root others may write is refused");
+        assert!(RunDir::claim(open.path(), "run-run", 0, RUNS).is_err(), "a root others may write is refused");
         assert!(open.path().join("planted").is_dir());
     }
 
@@ -367,12 +454,12 @@ mod tests {
         let root = Root::new("only-runs");
         let outside = Root::new("only-runs-outside");
         fs::create_dir_all(outside.path().join("kept")).unwrap();
-        drop(RunDir::claim(root.path(), "run-first", 0, is_run).unwrap());
+        drop(RunDir::claim(root.path(), "run-first", 0, RUNS).unwrap());
         std::os::unix::fs::symlink(outside.path(), root.path().join("run-link")).unwrap();
         fs::write(root.path().join("notes.txt"), b"x").unwrap();
         fs::create_dir(root.path().join("not.a.run")).unwrap();
         fs::create_dir(root.path().join("saved-state")).unwrap();
-        drop(RunDir::claim(root.path(), "run-next", 0, is_run).unwrap());
+        drop(RunDir::claim(root.path(), "run-next", 0, RUNS).unwrap());
         assert!(fs::symlink_metadata(root.path().join("run-link")).is_ok(), "the sweep took a link");
         assert!(outside.path().join("kept").is_dir(), "the sweep followed a link");
         assert!(root.path().join("notes.txt").is_file() && root.path().join("not.a.run").is_dir());
@@ -384,7 +471,7 @@ mod tests {
     #[test]
     fn a_run_without_room_is_refused() {
         let root = Root::new("room");
-        let refused = RunDir::claim(root.path(), "run-big", u64::MAX, is_run).err().expect("refused");
+        let refused = RunDir::claim(root.path(), "run-big", u64::MAX, RUNS).err().expect("refused");
         let said = format!("{refused:#}");
         assert!(said.contains(&root.path().display().to_string()) && said.contains("free"), "{said}");
         assert!(!root.path().join("run-big").exists());

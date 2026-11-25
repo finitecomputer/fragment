@@ -750,8 +750,12 @@ impl OpenBao {
         let err = log.try_clone().map_err(io_error("clone the log"))?;
         let t0 = Instant::now();
         // nothing from this environment: every setting is the config's
-        let child = crate::spawn(Command::new(&self.bin).arg("server").arg(format!("-config={}", layout.config().display())).env_clear().env("HOME", &layout.dir).stdin(Stdio::null()).stdout(log).stderr(err))
-            .map_err(io_error(format!("start {}", self.bin.display())))?;
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("server").arg(format!("-config={}", layout.config().display())).env_clear().env("HOME", &layout.dir).stdin(Stdio::null()).stdout(log).stderr(err);
+        // gone with the process that started it: its state may be a run's,
+        // in RAM (`shm`)
+        crate::dies_with_this_process(&mut cmd);
+        let child = crate::spawn(&mut cmd).map_err(io_error(format!("start {}", self.bin.display())))?;
         self.child = Some(child);
         if let Err(e) = self.wait_ready(t0) {
             let _ = self.down();
