@@ -252,6 +252,8 @@ class JobResponse {
     this.ok = v.status >= 200 && v.status < 300;
     this.headers = new Headers(v.headers || {});
     this.body = v.body ?? "";
+    // a fetch that kept its door's file: the blob it is now, {sha256, size, type}
+    this.blob = v.blob ?? null;
   }
   text() {
     return this.body;
@@ -309,6 +311,10 @@ class Job {
     }
     const args = { url, method: init.method || "GET", headers };
     if (body != null) args.body = body;
+    // a SimpleX connector's, to its own door alone: one of its blobs as
+    // the body, or the door's file kept as one of its blobs
+    if (init.blob != null) args.blob = String(init.blob);
+    if (init.keep === true) args.keep = true;
     return this.#step("fetch", args).then((v) => new JobResponse(v));
   }
 

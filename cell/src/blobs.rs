@@ -81,7 +81,7 @@ impl FragmentCell {
     }
 
     /// A blob seen now; its type the latest upload's that declared one.
-    fn record_blob(&self, sha: &str, size: u64, mime: Option<&str>) -> CellResult<()> {
+    pub(crate) fn record_blob(&self, sha: &str, size: u64, mime: Option<&str>) -> CellResult<()> {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
             "INSERT INTO blobs (sha, size, uploaded_at, seen_at, mime) VALUES (?, ?, ?, ?, ?)
@@ -103,7 +103,8 @@ impl FragmentCell {
     }
 
     async fn store_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
-        self.require(caller, false, Role::Editor)?;
+        // its facts first: a fragment never made is not found (404)
+        crate::fragment::decide(self.facts()?.visibility, self.standing(caller, false)?, fragment_core::permit::Action::Upload)?;
         self.writable().await?;
 
         check_sha(sha)?;

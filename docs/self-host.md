@@ -21,7 +21,7 @@ self-hosted runtime's. Each binding has workerd's class (`R2Bucket`,
 `Fetcher`, `SendEmail`, …, as workers-rs checks them); the Secrets Store's
 secrets are read from the node's secrets backend; and the services a node
 does not run are bound with workerd's classes, every call rejecting,
-saying so. A gap is closed in celld (github.com/futurepaul/celld), never
+saying so. A gap is closed in celld (github.com/finitecomputer/celld), never
 in the cell: a self-host change to master does not touch `cell/`,
 `crates/core` or `crates/proto`.
 
@@ -43,7 +43,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 
 ## 1. The runtime: celld
 
-celld (github.com/futurepaul/celld, its `selfhost` line: upstream's
+celld (github.com/finitecomputer/celld, its `selfhost` line: upstream's
 v0.6.3, still its latest, and the fork's parity fixes, among them V8
 15.2.124.45, far alarms, a forwarded body's length, facet aborts and
 Cloudflare's binding surface) runs the cell from the config a local
@@ -74,7 +74,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | `r2_buckets` (`BLOBS`) | yes, `R2Bucket` | works | |
 | `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes, `Fetcher` | works | |
 | `secrets_store_secrets` | yes, `Fetcher`: read from the node's secrets backend | works | seam 12; people's secrets stay in the Vault object |
-| `ai` (`AI`: Workers AI) | bound (`Ai`); every call rejects, "this node has no Workers AI" | degraded | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai` on either runtime |
+| `ai` (`AI`: Workers AI) | bound (`Ai`); every call rejects, "this node has no Workers AI" | degraded | text tiers, embeddings and transcription on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps and decisions fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai` on either runtime |
 | `send_email` (`EMAIL`) | bound (`SendEmail`); every send rejects, `E_NO_MAILER` | degraded | a failed send: Mail, below. Dev and the e2e keep the mail fake (`FRAGMENT_MAIL_URL`) |
 | `browser` (`BROWSER`) | bound (`Fetcher`); every fetch rejects, "this node has no Browser Rendering" | degraded | a card's shot fails, as one Browser Rendering fails. Seam 7 brings a renderer |
 | `images` (`IMAGES`) | bound (`ImagesBindingImpl`); every output rejects, "this node has no Images" | degraded | an icon's making offers no candidate, and an upload that needs fitting fails (`host_failed`); a PNG at the icon's size is kept as it is |
@@ -125,7 +125,7 @@ runs them on the box's krun engine (sandcastle's `sandcastle-engine`,
 root, a jailed microVM per container), which speaks Cloudflare's container
 API. `CELLD_CONTAINER_ENGINE=krun:<the engine's socket>` names it; the
 cell, the core and the wire know nothing of it, and nothing sits between
-celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #21,
+celld and the engine. The fork's fixes for it (finitecomputer/celld#14 to #21,
 a stack) are each a gap the e2e's computer lanes found: a dev node's images,
 the intercept socket's path, intercepts set during a start or set again, a
 WebSocket and a large body through one, a `monitor()` whose event had
@@ -203,6 +203,52 @@ self-hosted model names its price in its slot, zero for the box's own:
 ```sh
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
+
+### Use your own models
+
+Every model a deployment runs is its config's `models`, so a box points
+each at a server of its own by config alone, at the price it names (zero
+for its own). Chat, embeddings and transcription each take a slot of one
+shape: `provider` `workers_ai` with a `model`, or `openai` with a
+`base_url`, a `model` and a `key` (its secret's name in the store; dev
+reads its value from `FRAGMENT_MODEL_KEY_FILE`). The route calls an
+`openai` slot at its `base_url` and a path of OpenAI's API, in OpenAI's
+shape, so any server that answers that API serves it.
+
+- **Chat**, a route's slots: `POST <base_url>/chat/completions`, its
+  `price` dollars a million tokens.
+
+  ```jsonc
+  "cheap": { "provider": "openai", "base_url": "http://127.0.0.1:8080/v1", "key": "local-key",
+             "model": "local-27b", "price": { "input": 0, "output": 0 } }
+  ```
+
+- **Embeddings**, `embeddings`: `POST <base_url>/embeddings`, its vectors'
+  `dimensions` named, its `price` a million input tokens.
+
+  ```jsonc
+  "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:8081/v1", "key": "local-key",
+                  "model": "BAAI/bge-m3", "dimensions": 1024, "price": { "input": 0, "output": 0 } }
+  ```
+
+- **Transcription**, `transcription`: `POST <base_url>/audio/transcriptions`,
+  OpenAI's form, asked for `verbose_json`, whose `duration` (or OpenAI's
+  `usage` of type `duration`) is the length charged, so its server answers
+  that format (every Whisper server does); its `price` dollars a minute of
+  audio, by the second.
+
+  ```jsonc
+  "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:8082/v1", "key": "local-key",
+                     "model": "whisper-large-v3", "price": { "audio_minute": 0 } }
+  ```
+
+  The code names no transcription model. A config that names none is given
+  Workers AI's Whisper for now (the debt ledger), which a box without
+  Workers AI cannot run: its agents' voice memos fail.
+
+Not yet: a job's decisions (`ai.decide`, Clef) and its image step
+(`ai.image`, FLUX) still name Workers AI's models in code; they become
+slots the same way.
 
 ## 4. Sign-in: the identity door
 
@@ -605,7 +651,7 @@ browser, so the tailnet is enough.
 
 | Feature | Why | On celld today |
 |---|---|---|
-| Voice transcription (iOS voice memos too) | Whisper on Workers AI | fails: celld's `AI` rejects ("this node has no Workers AI"); a later seam moves it to OpenRouter |
+| Voice transcription (iOS voice memos too) | Whisper on Workers AI, by config | on the box's own server when its `models.transcription` names one (seam 3, "Use your own models"); else it fails: celld's `AI` rejects ("this node has no Workers AI") |
 | Job steps `ai.image`, `ai.video`, `ai.decide`; embeddings | Workers AI (video through AI Gateway too) | fails, as above; a later seam |
 | Drawn icons, and fitting uploaded ones | Workers AI and Cloudflare Images | a making offers no candidate, a fitting fails (`host_failed`): celld's `AI` and `IMAGES` reject; a 256×256 PNG is kept as it is |
 | Preview cards | Browser Rendering | a shot fails: celld's `BROWSER` rejects; seam 7's renderer |

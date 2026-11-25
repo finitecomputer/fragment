@@ -81,14 +81,21 @@ const BROWSER_MEMOS: [(&str, &[u8]); 4] = [
 const MEMO_SECONDS: (f64, f64) = (1.9, 2.2);
 
 /// Whether `milli` thousandths of a neuron is what the route charges for
-/// `lo..=hi` seconds of audio (fragment_core::transcribe::usage_of).
+/// `lo..=hi` seconds of audio (fragment_core::transcribe::usage_of), on
+/// Workers AI's Whisper at its price (`crate::whisper_slot`).
 fn charged_for(milli: u64, (lo, hi): (f64, f64)) -> bool {
-    let at = |seconds: f64| fragment_core::transcribe::usage_of(&json!({ "transcription_info": { "duration": seconds } }));
+    let at = |seconds: f64| fragment_core::transcribe::usage_of(&whisper(), &json!({ "transcription_info": { "duration": seconds } }));
     match (at(lo), at(hi)) {
         (Some(Usage::Neurons { milli: lo }), Some(Usage::Neurons { milli: hi })) => (lo..=hi).contains(&milli),
         _ => false,
     }
 }
+/// The transcription slot the node names, and a deployment the hosted lane
+/// meets: Workers AI's Whisper at its price (`crate::whisper_slot`).
+pub(super) fn whisper() -> fragment_core::transcribe::Slot {
+    fragment_core::transcribe::slot_of(&mut json!({ "transcription": crate::whisper_slot() })).expect("the e2e's slot is a deployment's").expect("named")
+}
+
 /// Its decisions (fragment_core::decide).
 const DECIDE_ROUTE: &str = "/api/models/v1/decide";
 const GLM: &str = "@cf/zai-org/glm-5.3";
@@ -1381,7 +1388,7 @@ fn transcription_form(fields: &[(&str, &str)], audio: &[u8]) -> Vec<u8> {
 }
 
 /// A transcription, signed by `keys`: the form's fields and its audio.
-fn transcription_call(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[u8]) -> Result<Reply> {
+pub(super) fn transcription_call(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[u8]) -> Result<Reply> {
     api.call(Call {
         method: "POST",
         url: format!("{}{TRANSCRIBE_ROUTE}", api.base),
@@ -1810,7 +1817,7 @@ mod tests {
     /// on the fakes, Whisper's 2 s.
     #[test]
     fn a_memo_is_charged_at_its_length() {
-        let milli = |seconds: f64| match fragment_core::transcribe::usage_of(&json!({ "transcription_info": { "duration": seconds } })) {
+        let milli = |seconds: f64| match fragment_core::transcribe::usage_of(&whisper(), &json!({ "transcription_info": { "duration": seconds } })) {
             Some(Usage::Neurons { milli }) => milli,
             other => panic!("{seconds} s is {other:?}"),
         };
