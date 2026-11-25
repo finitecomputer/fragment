@@ -28,6 +28,7 @@ pub mod node;
 mod node_release;
 pub mod openbao;
 mod openbao_release;
+pub mod rows;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -204,7 +205,7 @@ const ADMIN_BUCKET: &str = "STAGE";
 /// it imports from beside it, and theirs (a deploy runs it from the source
 /// tree, so only a staged copy can miss one:
 /// `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 5] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "door.mjs", "door-rules.mjs"];
+pub const SHIM_FILES: [&str; 6] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "relay.mjs", "door.mjs", "door-rules.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -311,10 +312,13 @@ pub fn admin_local_config(project: &Path) -> PathBuf {
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in the local node's store (wrangler's,
 /// or celld's backend), as a deploy binds them in the account's, `images`
-/// beside its own computer images, and every one built from a Dockerfile
-/// of its own (`containers::scope_images`), so that no other stack's
-/// teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], computers: bool, doors: bool) -> Result<PathBuf> {
+/// beside its own computer images, and, for a wrangler node (`own_images`),
+/// every one built from a Dockerfile of its own (`containers::scope_images`),
+/// so that no other stack's teardown removes its computers. A celld node's
+/// are the images' own: celld names its containers itself, and an image
+/// labeled for a project would be a new image every run, which its krun
+/// engine loads again and keeps (docs/self-host.md, seam 2).
+fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets: &[(String, &str)], images: &[(String, serde_json::Value)], computers: bool, doors: bool, own_images: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     for (runs, class) in [(computers, COMPUTER_CLASS), (doors, DOOR_CLASS)] {
         if !runs {
@@ -329,7 +333,9 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], admin_secrets:
         }
     }
     absolute_images(&mut config, project)?;
-    containers::scope_images(&mut config, project)?;
+    if own_images {
+        containers::scope_images(&mut config, project)?;
+    }
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
@@ -493,7 +499,7 @@ pub struct Fleet {
     pub ai_gateway: Option<String>,
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
-    /// every one on Workers AI), and the key of each that runs on an
+    /// every route on Workers AI, and no transcription), and the key of each that runs on an
     /// OpenAI-compatible API (`ModelKey`).
     pub models: Option<String>,
     pub model_keys: Vec<ModelKey>,
@@ -690,7 +696,9 @@ impl Fleet {
     /// (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.computers, self.doors)?;
+        // wrangler's store is wrangler's alone: its node is wrangler's
+        let on_wrangler = matches!(self.secrets, Secrets::Store);
+        write_local_config(project, &bound.cell(), &bound.admin(), &self.images, self.computers, self.doors, on_wrangler)?;
         match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
@@ -1340,7 +1348,7 @@ mod tests {
         std::fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
         std::fs::copy(super::cell_dir().join(super::ADMIN_CONFIG), dir.join(super::ADMIN_CONFIG)).unwrap();
         let classes = |computers, doors| {
-            let path = super::write_local_config(&dir, &[], &[], &[], computers, doors).unwrap();
+            let path = super::write_local_config(&dir, &[], &[], &[], computers, doors, true).unwrap();
             let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             config["containers"].as_array().unwrap().iter().map(|c| c["class_name"].as_str().unwrap().to_string()).collect::<Vec<_>>()
         };
@@ -1349,7 +1357,32 @@ mod tests {
         assert_eq!(classes(false, true), [super::DOOR_CLASS]);
         assert!(classes(false, false).is_empty(), "no container, so no image built at boot");
         let hermes = [("hermes".to_string(), serde_json::json!({ "dockerfile": "/x/Dockerfile", "build_context": "/x" }))];
-        assert!(super::write_local_config(&dir, &[], &[], &hermes, false, false).is_err(), "a computer image for a node with no computers");
+        assert!(super::write_local_config(&dir, &[], &[], &hermes, false, false, true).is_err(), "a computer image for a node with no computers");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: a wrangler node builds each image from a Dockerfile of the
+    /// project's own (labeled for it), and a celld node from the image's
+    /// own, so its krun engine is given the same image by every run.
+    /// Method: the checked-in config, written for each.
+    #[test]
+    fn only_a_wrangler_node_labels_its_images() {
+        let dir = std::env::temp_dir().join(format!("devstack-labels-{}", super::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = super::read_config(&super::cell_dir()).unwrap();
+        super::absolute_images(&mut config, &super::cell_dir()).unwrap();
+        let source = config["containers"][0]["images"]["stub"]["dockerfile"].as_str().unwrap().to_string();
+        std::fs::write(dir.join("wrangler.jsonc"), config.to_string()).unwrap();
+        std::fs::copy(super::cell_dir().join(super::ADMIN_CONFIG), dir.join(super::ADMIN_CONFIG)).unwrap();
+        let stub = |own_images| {
+            let path = super::write_local_config(&dir, &[], &[], &[], true, false, own_images).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            config["containers"][0]["images"]["stub"]["dockerfile"].as_str().unwrap().to_string()
+        };
+        let wrangler = stub(true);
+        assert!(wrangler.starts_with(&super::containers::images_dir(&dir).display().to_string()), "{wrangler}");
+        assert!(std::fs::read_to_string(&wrangler).unwrap().contains(super::containers::PROJECT_LABEL));
+        assert_eq!(stub(false), source, "celld's: the image's own Dockerfile");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

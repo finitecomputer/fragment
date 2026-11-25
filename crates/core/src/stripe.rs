@@ -95,6 +95,22 @@ pub fn ours(metadata: &BTreeMap<String, String>, deployment: &str) -> bool {
     metadata.get(META_DEPLOYMENT).is_some_and(|d| d == deployment)
 }
 
+/// The Stripe customer a Checkout `buyer` opens for their org is made on,
+/// a seat's or a credit pack's: the org's own (`org_customer`) only when
+/// the buyer is the person whose Checkout bought its last subscription
+/// (`last_payer`), else none, and Checkout makes the buyer one of their
+/// own from their email. The org's customer is its payer's: its address,
+/// which Stripe's tax keeps current from what a Checkout on it is given,
+/// and its email, which its invoices and receipts go to, are theirs
+/// (docs/billing.md). Which ledger a pack credits is its metadata's,
+/// whoever's customer it is made on.
+pub fn checkout_customer<'a>(buyer: &str, last_payer: Option<&str>, org_customer: Option<&'a str>) -> Option<&'a str> {
+    match last_payer {
+        Some(payer) if payer == buyer => org_customer,
+        Some(_) | None => None,
+    }
+}
+
 // ------------------------------------------------------------- signatures
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,5 +551,31 @@ mod tests {
         let o = offer();
         assert_eq!((o.kind, o.seat_micros, o.included_micros, o.pack_micros), (SeatKind::SeatAlwaysOn, 200_000_000, crate::ledger::SEAT_ALWAYS_ON_INCLUDED, 25_000_000));
         assert_eq!(EVENTS.len(), 4);
+    }
+
+    /// Valid: the org's last payer buys again on its own customer.
+    #[test]
+    fn the_orgs_last_payer_buys_on_its_customer() {
+        assert_eq!(checkout_customer("ann", Some("ann"), Some("cus_org")), Some("cus_org"));
+    }
+
+    /// Invalid: anyone else in the org, an admin or a seat's holder, buys
+    /// on a customer of their own, as does anyone once the org's payer is
+    /// forgotten; an org with no customer (comped) lends none.
+    #[test]
+    fn anyone_but_the_last_payer_buys_on_a_customer_of_their_own() {
+        assert_eq!(checkout_customer("fay", Some("ann"), Some("cus_org")), None, "a seat's holder");
+        assert_eq!(checkout_customer("ann", None, Some("cus_org")), None, "no payer kept");
+        assert_eq!(checkout_customer("ann", Some("ann"), None), None, "no customer to lend");
+        assert_eq!(checkout_customer("fay", None, None), None);
+    }
+
+    /// Becoming invalid: the org's customer was its payer's; once another
+    /// person's Checkout pays for it, the first buys on one of their own.
+    #[test]
+    fn a_new_payer_takes_the_orgs_customer_from_the_last() {
+        assert_eq!(checkout_customer("ann", Some("ann"), Some("cus_org")), Some("cus_org"));
+        assert_eq!(checkout_customer("ann", Some("dee"), Some("cus_org")), None);
+        assert_eq!(checkout_customer("dee", Some("dee"), Some("cus_org")), Some("cus_org"));
     }
 }

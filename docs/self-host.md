@@ -21,7 +21,7 @@ self-hosted runtime's. Each binding has workerd's class (`R2Bucket`,
 `Fetcher`, `SendEmail`, …, as workers-rs checks them); the Secrets Store's
 secrets are read from the node's secrets backend; and the services a node
 does not run are bound with workerd's classes, every call rejecting,
-saying so. A gap is closed in celld (github.com/futurepaul/celld), never
+saying so. A gap is closed in celld (github.com/finitecomputer/celld), never
 in the cell: a self-host change to master does not touch `cell/`,
 `crates/core` or `crates/proto`.
 
@@ -43,13 +43,23 @@ in the cell: a self-host change to master does not touch `cell/`,
 
 ## 1. The runtime: celld
 
-celld (github.com/futurepaul/celld, its `selfhost` line: upstream's
+celld (github.com/finitecomputer/celld, its `selfhost` line: upstream's
 v0.6.3, still its latest, and the fork's parity fixes, among them V8
-15.2.124.45, far alarms, a forwarded body's length, facet aborts and
-Cloudflare's binding surface) runs the cell from the config a local
-wrangler node runs (`wrangler.local.jsonc`, its secrets bound by name),
-less `build` (`crates/devstack/src/celld.rs`, `DROPPED`), written beside
-the cell's own as `wrangler.celld.jsonc`. Its node's settings are celld's
+15.2.124.45, far alarms, a forwarded body's length, facet aborts,
+Cloudflare's binding surface, object bindings across scripts and a Cache
+API per node) runs the
+cell from the config a local wrangler node runs (`wrangler.local.jsonc`,
+its secrets bound by name), less `build` (`crates/devstack/src/celld.rs`,
+`DROPPED`), written beside the cell's own as `wrangler.celld.jsonc`; and
+beside it the operators' admin Worker, as on Cloudflare: its local config
+(`wrangler.admin.local.jsonc`) less the same, as
+`wrangler.admin.celld.jsonc`, co-hosted with `celld dev --with`. The
+cell's `ADMIN` binding reaches it, and its bindings of the cell's classes
+(`script_name`) reach the cell's objects; the admin hosts none and runs
+none of their code. The stack needs the fork's selfhost line with
+finitecomputer/celld#35 (`durable-object-script-name-v1`; a celld without
+it refuses to start the pair) and finitecomputer/celld#38 (the Cache API).
+Its node's settings are celld's
 own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and its container
 engine (`CELLD_CONTAINER_ENGINE`: `none`, or the box's krun engine, seam 2). One `devstack::Node` runs either runtime behind the
 node's front door (front.rs): celld listens on a port of its own, which
@@ -67,6 +77,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | `durable_objects`: Migrations, and R2 `STAGE` | yes | off | the finite.computer move: unconfigured (`FRAGMENT_MIGRATIONS_MOVER` unset), as on any deployment but finite.chat's |
 | `migrations` (`new_sqlite_classes`, v1 to v4) | yes | works | |
 | `durable_objects.code_update_strategy` | accepted, no effect | works | celld reads the bindings alone; `celld dev` deploys once (`--no-watch`), and the e2e's reload restarts the node |
+| `services` (`ADMIN`: the operators' admin Worker) | yes, `Fetcher`, to the admin co-hosted beside the cell (`celld dev --with`) | works | the admin binds every one of the cell's classes by `script_name` (crates/devstack `pair_admin`): the cell's objects, as on Cloudflare |
 | `worker_loaders` (`LOADER`) and facets (`ctx.facets`) | yes | works | apps' facets, their databases capped past the cell's own (`CELLD_FACET_MAX_BYTES`), loaded code locked down (`CELLD_DYNAMIC_LOCKDOWN`); `facets.abort` releases a brain's facet (found 51, fixed in the fork) |
 | `workflows` (`JOBS`) | yes, durable | works | a sleep is an alarm, so a job sleeping through a crash wakes (local workerd's does not) |
 | `queues` (`DELIVERIES`, `METERS`, the dead letters) | yes | works | |
@@ -74,7 +85,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | `r2_buckets` (`BLOBS`) | yes, `R2Bucket` | works | |
 | `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes, `Fetcher` | works | |
 | `secrets_store_secrets` | yes, `Fetcher`: read from the node's secrets backend | works | seam 12; people's secrets stay in the Vault object |
-| `ai` (`AI`: Workers AI) | bound (`Ai`); every call rejects, "this node has no Workers AI" | degraded | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai` on either runtime |
+| `ai` (`AI`: Workers AI) | bound (`Ai`); every call rejects, "this node has no Workers AI" | degraded | text tiers, embeddings and transcription on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps and decisions fail. Dev and the e2e keep the fake (`FRAGMENT_AI_URL`), and their local config drops `ai` on either runtime |
 | `send_email` (`EMAIL`) | bound (`SendEmail`); every send rejects, `E_NO_MAILER` | degraded | a failed send: Mail, below. Dev and the e2e keep the mail fake (`FRAGMENT_MAIL_URL`) |
 | `browser` (`BROWSER`) | bound (`Fetcher`); every fetch rejects, "this node has no Browser Rendering" | degraded | a card's shot fails, as one Browser Rendering fails. Seam 7 brings a renderer |
 | `images` (`IMAGES`) | bound (`ImagesBindingImpl`); every output rejects, "this node has no Images" | degraded | an icon's making offers no candidate, and an upload that needs fitting fails (`host_failed`); a PNG at the icon's size is kept as it is |
@@ -88,7 +99,8 @@ Every binding and runtime API master's cell uses, against the fork's
 | `build` | refused | n/a | dropped by the render (`DROPPED`): worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length carried, as workerd's (found 47, fixed in the fork) | works | |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
-| Cache API, HTMLRewriter, cron triggers | | n/a | the cell uses none |
+| Cache API (`caches.default`) | yes, per node, in memory, per script (finitecomputer/celld#38): kept as Cloudflare's rules say, at most 64 MiB (`CELLD_CACHE_API_MAX_BYTES`) and 65,536 entries; a restart empties it; a `Range` or conditional request misses | works | the admin Worker's glance (cell/src/glance.rs) keeps its read of the logs for two minutes |
+| HTMLRewriter, cron triggers | | n/a | the cell uses none |
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
   worker-build's cache or `CELLD_ESBUILD`): the same fakes and settings as
@@ -113,18 +125,27 @@ runs them on the box's krun engine (sandcastle's `sandcastle-engine`,
 root, a jailed microVM per container), which speaks Cloudflare's container
 API. `CELLD_CONTAINER_ENGINE=krun:<the engine's socket>` names it; the
 cell, the core and the wire know nothing of it, and nothing sits between
-celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #21,
+celld and the engine. The fork's fixes for it (finitecomputer/celld#14 to #21,
 a stack) are each a gap the e2e's computer lanes found: a dev node's images,
 the intercept socket's path, intercepts set during a start or set again, a
 WebSocket and a large body through one, a `monitor()` whose event had
 answered (its object now woken as the container stops), and an `exec()`
 during a start.
 
-- **Images:** `celld dev` builds the config's images with Docker, as it
-  does for its Docker engine, and loads each into the krun engine under
-  its content key (`celld-image:<sha256>` of its layers and config), so a
-  computer is pinned to an image by its digest. An unchanged image is not
-  loaded again.
+- **Images:** `celld dev` builds the config's images in the krun engine
+  itself, with no Docker on the box: BuildKit (pinned by digest) in a
+  microVM of the engine, its cache on a data disk of the engine's
+  (64 GiB, collected to at most 44 GB after each deploy's builds), each
+  image loaded from there (the fork's `krun_build`). An image's name is
+  its config digest (`celld-image:<sha256>`), built with
+  `SOURCE_DATE_EPOCH=0` so the same layers make the same name, and a
+  computer is pinned to an image by it. An unchanged image exports and
+  loads nothing. devstack labels a node's images for its project only on
+  wrangler, so every celld run builds the same images by name. A node
+  builds the images its config names: the stubs for a run that makes
+  computers, Hermes' two only when `--only` names the hermes lane, and
+  the door's for its lane. The engine keeps what it loaded
+  (docs/technical-debt-ledger.md).
 - **Egress:** each start's intercepts (the platform's API and model
   routes, a connection's hosts, `backups.sandbox.internal`) go from the
   engine's egress proxy to celld's socket and on to `ComputerEgress`, a
@@ -147,7 +168,8 @@ during a start.
   (a stub guest uses about 250 MB of its 6 GiB).
 - **Cleanup:** a node reaps its VMs when it stops and when it starts again
   on its project; a run killed outright has devstack destroy its node's by
-  celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
+  celld's naming, and celld's image builder when the celld that started it
+  is gone (`celld::Engine::remove`; docs/technical-debt-ledger.md).
 - **Skips on celld,** each a gap of celld's:
   - a turn's keepalive across a deploy: the e2e's reload of `celld dev`
     restarts its node, which reaps its VMs. A deploy to a running celld
@@ -191,6 +213,52 @@ self-hosted model names its price in its slot, zero for the box's own:
 ```sh
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
+
+### Use your own models
+
+Every model a deployment runs is its config's `models`, so a box points
+each at a server of its own by config alone, at the price it names (zero
+for its own). Chat, embeddings and transcription each take a slot of one
+shape: `provider` `workers_ai` with a `model`, or `openai` with a
+`base_url`, a `model` and a `key` (its secret's name in the store; dev
+reads its value from `FRAGMENT_MODEL_KEY_FILE`). The route calls an
+`openai` slot at its `base_url` and a path of OpenAI's API, in OpenAI's
+shape, so any server that answers that API serves it.
+
+- **Chat**, a route's slots: `POST <base_url>/chat/completions`, its
+  `price` dollars a million tokens.
+
+  ```jsonc
+  "cheap": { "provider": "openai", "base_url": "http://127.0.0.1:8080/v1", "key": "local-key",
+             "model": "local-27b", "price": { "input": 0, "output": 0 } }
+  ```
+
+- **Embeddings**, `embeddings`: `POST <base_url>/embeddings`, its vectors'
+  `dimensions` named, its `price` a million input tokens.
+
+  ```jsonc
+  "embeddings": { "provider": "openai", "base_url": "http://127.0.0.1:8081/v1", "key": "local-key",
+                  "model": "BAAI/bge-m3", "dimensions": 1024, "price": { "input": 0, "output": 0 } }
+  ```
+
+- **Transcription**, `transcription`: `POST <base_url>/audio/transcriptions`,
+  OpenAI's form, asked for `verbose_json`, whose `duration` (or OpenAI's
+  `usage` of type `duration`) is the length charged, so its server answers
+  that format (every Whisper server does); its `price` dollars a minute of
+  audio, by the second.
+
+  ```jsonc
+  "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:8082/v1", "key": "local-key",
+                     "model": "whisper-large-v3", "price": { "audio_minute": 0 } }
+  ```
+
+  The code names no transcription model. A config that names none is given
+  Workers AI's Whisper for now (the debt ledger), which a box without
+  Workers AI cannot run: its agents' voice memos fail.
+
+Not yet: a job's decisions (`ai.decide`, Clef) and its image step
+(`ai.image`, FLUX) still name Workers AI's models in code; they become
+slots the same way.
 
 ## 4. Sign-in: the identity door
 
@@ -593,7 +661,7 @@ browser, so the tailnet is enough.
 
 | Feature | Why | On celld today |
 |---|---|---|
-| Voice transcription (iOS voice memos too) | Whisper on Workers AI | fails: celld's `AI` rejects ("this node has no Workers AI"); a later seam moves it to OpenRouter |
+| Voice transcription (iOS voice memos too) | Whisper on Workers AI, by config | on the box's own server when its `models.transcription` names one (seam 3, "Use your own models"); else it fails: celld's `AI` rejects ("this node has no Workers AI") |
 | Job steps `ai.image`, `ai.video`, `ai.decide`; embeddings | Workers AI (video through AI Gateway too) | fails, as above; a later seam |
 | Drawn icons, and fitting uploaded ones | Workers AI and Cloudflare Images | a making offers no candidate, a fitting fails (`host_failed`): celld's `AI` and `IMAGES` reject; a 256×256 PNG is kept as it is |
 | Preview cards | Browser Rendering | a shot fails: celld's `BROWSER` rejects; seam 7's renderer |

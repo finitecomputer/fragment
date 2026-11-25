@@ -4,6 +4,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod connected;
 mod home;
 mod mcp;
 mod notice;
@@ -315,6 +316,11 @@ enum Cmd {
     Invites {
         #[command(subcommand)]
         sub: Option<InvitesCmd>,
+    },
+    /// A connected service, as this agent (on a computer): call its API
+    Connection {
+        #[command(subcommand)]
+        sub: ConnectionCmd,
     },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
@@ -1101,6 +1107,57 @@ enum VaultCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ConnectionCmd {
+    /// Call the connected service's API: the service's placeholder is
+    /// found in the environment and sent as a bearer token, which the
+    /// computer swaps for a short-lived one on the way to that service's
+    /// own hosts. Prints the answer's body; a refusal is one line of JSON
+    /// on stderr ({error, status, message, hint, body}, `body` what the
+    /// service answered, as it came) and exit 1. A redirect is followed,
+    /// the token never to another host. `fragment connection call linear
+    /// POST https://api.linear.app/graphql --query 'query { viewer { name }
+    /// }'`
+    Call {
+        /// The connection's name, as Settings' Connections lists it (linear, google)
+        provider: String,
+        /// GET, POST, PUT, PATCH, DELETE or HEAD
+        method: String,
+        /// The whole address, on one of the service's own hosts
+        url: String,
+        /// A query parameter, name=value, encoded for you (repeat it)
+        #[arg(long = "param", value_name = "NAME=VALUE")]
+        params: Vec<String>,
+        /// The body: JSON as written, @<file>, or - for stdin
+        #[arg(long)]
+        body: Option<String>,
+        /// The body's type, when it is not JSON
+        #[arg(long)]
+        content_type: Option<String>,
+        /// A GraphQL document: sent as {query, variables}, and an answer
+        /// that names errors is a refusal (graphql_errors)
+        #[arg(long)]
+        query: Option<String>,
+        /// The GraphQL document's variables, a JSON object
+        #[arg(long)]
+        variables: Option<String>,
+        /// A header, "Name: value" (repeat it); never Authorization
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
+        /// Save the answer's body to this file, whole or not at all, and
+        /// print where (a download, or an answer too long to read at once)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Read the token from this environment variable instead (off a
+        /// computer: any token of the service's)
+        #[arg(long)]
+        env: Option<String>,
+        /// Seconds the call may take (default 120; a large file takes more)
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+}
+
 /// A Vault secret's name, of its form (`fragment_core::vault::name_form`)
 /// before it goes in any URL: none chooses another route (`../…`).
 fn vault_name(name: &str) -> Result<String, String> {
@@ -1562,6 +1619,11 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Skill => {
             print!("{}", agent_doc(SKILL, &cli.host));
             return Ok(());
+        }
+        // a connected service's API, never the platform's: no host, no key
+        Cmd::Connection { sub: ConnectionCmd::Call { provider, method, url, params, body, content_type, query, variables, headers, out, env, timeout } } => {
+            let status = connected::run(connected::Call { provider, method, url, params, body, query, variables, content_type, headers, out, env, timeout }).map_err(|e| usage(format!("{e:#}")))?;
+            std::process::exit(status);
         }
         Cmd::Operator { sub: OperatorCmd::Key { path } } => {
             let npub = operator::make_key(&path, write_secret_file)?;
@@ -2999,7 +3061,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::Connection { .. } | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -3459,6 +3521,23 @@ mod tests {
         assert!(parses(&["fragment", "vault", "list"]) && parses(&["fragment", "vault", "rm", "linear"]));
         assert!(parses(&["fragment", "inbox", "x--k3x9", "--payload", "{}"]));
         assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
+    }
+
+    /// Goal: a connected service is called through the `connection` noun
+    /// (`fragment connection call`), as the CLI's other groups are. `api`
+    /// is the platform's word (docs/api.md), and no release or image
+    /// shipped an `api` subcommand, so it is cut, never kept as an alias.
+    /// Method: the command lines clap takes and refuses.
+    #[test]
+    fn a_connected_service_is_called_through_its_connection() {
+        let parses = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).is_ok();
+        let graphql = ["linear", "POST", "https://api.linear.app/graphql", "--query", "query { viewer { name } }"];
+        assert!(parses(&[&["fragment", "connection", "call"][..], &graphql].concat()));
+        assert!(parses(&["fragment", "connection", "call", "google", "GET", "https://www.googleapis.com/drive/v3/files", "--param", "pageSize=5", "--out", "f.json", "--env", "GOOGLE_OAUTH_ACCESS_TOKEN", "--timeout", "600"]));
+        assert!(parses(&["fragment", "connection", "call", "github", "PATCH", "https://api.github.com/repos/o/r/issues/1", "--body", "@b.json", "--header", "Accept: application/vnd.github+json"]));
+        assert!(!parses(&["fragment", "connection", "call", "linear", "POST"]), "a call names its address");
+        assert!(!parses(&["fragment", "connection", "linear", "GET", "https://api.linear.app/graphql"]), "a call is named");
+        assert!(!parses(&[&["fragment", "api"][..], &graphql].concat()), "no `api` subcommand");
     }
 
     /// Goal: a write is one file's text, or several files from a folder in

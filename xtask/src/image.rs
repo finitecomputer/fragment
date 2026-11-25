@@ -40,13 +40,67 @@ use crate::deploy::{pinned_ok, repository_ok, REGISTRY};
 pub(crate) mod disk;
 pub(crate) mod preview;
 
-const USAGE: &str = "usage: cargo xtask image push <image> --repository <name> --tag <tag> [--summary <file>]\n       cargo xtask image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]\nthe registry's account in CLOUDFLARE_ACCOUNT_ID (wrangler's token in CLOUDFLARE_API_TOKEN); a copy's source's in FROM_CLOUDFLARE_ACCOUNT_ID and FROM_CLOUDFLARE_API_TOKEN; images: hermes";
+const USAGE: &str = "usage: cargo xtask image push <image> --repository <name> --tag <tag> [--summary <file>]\n       cargo xtask image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]\nthe registry's account in CLOUDFLARE_ACCOUNT_ID (wrangler's token in CLOUDFLARE_API_TOKEN); a copy's source's in FROM_CLOUDFLARE_ACCOUNT_ID and FROM_CLOUDFLARE_API_TOKEN; images: hermes, door";
 
-/// The images it builds, by name: each one's Dockerfile and build context,
-/// relative to the repo, as a deploy config's line builds it
-/// (deploy/example.jsonc: the Hermes image builds from the repo's root,
-/// as it carries the fragment CLI).
-const IMAGES: [(&str, &str, &str); 1] = [("hermes", "images/hermes/Dockerfile", ".")];
+/// An image xtask builds, pushes and copies, and preview follows (preview.rs):
+/// its Dockerfile and build context, relative to the repo, as a deploy
+/// config's line builds it (each builds from the repo's root: the Hermes
+/// image carries the fragment CLI); the preview's repository its
+/// input-keyed tags live in; the Dockerfile's local inputs, which alone
+/// make its version (a host test holds them to its every local COPY); and
+/// where a deploy config pins it.
+#[derive(Debug)]
+pub(crate) struct Image {
+    pub(crate) name: &'static str,
+    dockerfile: &'static str,
+    context: &'static str,
+    /// Preview's registry repository. Hermes's is the canary's, which
+    /// preview once ran: every input tag (`inputs-<key>`) lives there, so a
+    /// new name would build each image again, cold. The door's is the one
+    /// preview's config pinned it in by hand before master's job did.
+    pub(crate) preview: &'static str,
+    inputs: &'static [&'static str],
+    pub(crate) runs: Runs,
+}
+
+/// Where a deploy config pins an image, and so what preview's follows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Runs {
+    /// `computers.images`, under its name, as the default image a new
+    /// computer is pinned to: one image does.
+    Computers,
+    /// `doors.image`: the SimpleX doors' (cell/door.mjs).
+    Doors,
+}
+
+pub(crate) const IMAGES: [Image; 2] = [
+    Image {
+        name: "hermes",
+        dockerfile: "images/hermes/Dockerfile",
+        context: ".",
+        preview: "fragment-preview-computer-hermes-canary",
+        inputs: &[
+            ".dockerignore", "images/hermes", "images/bridge", "images/Cargo.toml", "images/Cargo.lock", "images/simplex-door/Cargo.toml",
+            "Cargo.toml", "Cargo.lock", "cli", "crates/core", "crates/nip98", "crates/proto", "crates/templates",
+            "templates/blank", "templates/board", "templates/calories", "templates/doc", "templates/inbox", "templates/notes", "templates/slides", "templates/todo",
+            "crates/devstack/Cargo.toml", "crates/e2e/Cargo.toml", "crates/fakes/Cargo.toml", "crates/identity-door/Cargo.toml", "xtask/Cargo.toml",
+        ],
+        runs: Runs::Computers,
+    },
+    Image {
+        name: "door",
+        dockerfile: "images/simplex-door/Dockerfile",
+        context: ".",
+        preview: "fragment-preview-door",
+        inputs: &[".dockerignore", "images/simplex-door", "images/bridge", "images/Cargo.toml", "images/Cargo.lock", "images/hermes/boot/Cargo.toml"],
+        runs: Runs::Doors,
+    },
+];
+
+/// The image named `name`, if xtask builds it.
+pub(crate) fn by_name(name: &str) -> Option<&'static Image> {
+    IMAGES.iter().find(|i| i.name == name)
+}
 
 /// How many times a push or a copy is tried, and the pause after each that
 /// fails: the Hermes image's base is one layer of 1.4 GB compressed, whose
@@ -84,6 +138,12 @@ impl Source {
     /// Its digest, `sha256:<64 hex>`.
     fn digest(&self) -> &str {
         self.reference.split_once('@').expect("a source is pinned by digest").1
+    }
+
+    /// Its repository in its account's registry.
+    fn repository(&self) -> &str {
+        let at = self.reference.strip_prefix(&format!("{REGISTRY}/{}/", self.account)).expect("a source is in its account's registry");
+        at.split_once('@').expect("a source is pinned by digest").0
     }
 }
 
@@ -142,8 +202,8 @@ fn parse(rest: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Reques
         }
     }
     let (image, repository, tag) = (image.ok_or_else(usage)?, repository.ok_or_else(usage)?, tag.ok_or_else(usage)?);
-    let Some(&(image, dockerfile, context)) = IMAGES.iter().find(|(name, ..)| *name == image) else {
-        bail!("no image {image:?}: {}", IMAGES.map(|(name, ..)| name).join(", "));
+    let Some(&Image { name: image, dockerfile, context, preview, .. }) = by_name(&image) else {
+        bail!("no image {image:?}: {}", IMAGES.map(|i| i.name).join(", "));
     };
     let set = |name: &str| env(name).filter(|v| !v.is_empty());
     let account = set("CLOUDFLARE_ACCOUNT_ID").context("CLOUDFLARE_ACCOUNT_ID is not set: it names the account whose registry the image goes to, the deployment's own (its config's account_id)")?;
@@ -158,6 +218,10 @@ fn parse(rest: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Reques
             anyhow::ensure!(account_ok(&source_account), "FROM_CLOUDFLARE_ACCOUNT_ID is no account id (32 lowercase hex digits)");
             anyhow::ensure!(set("FROM_CLOUDFLARE_API_TOKEN").is_some(), "FROM_CLOUDFLARE_API_TOKEN is not set: the token a copy mints its credentials for the source's registry with");
             let source = source_of(&from, &source_account).with_context(|| format!("--from {from:?} is no reference pinned by digest in FROM_CLOUDFLARE_ACCOUNT_ID's registry ({REGISTRY}/<account>/<repository>@sha256:<64 hex>)"))?;
+            // a promotion copies the image the preview ran as this one: one
+            // from another image's repository would be pinned as this one
+            // (Hermes copied as the door's: Codex on #1534)
+            anyhow::ensure!(source.repository() == preview, "--from {from:?} is in {}, not the {image}'s preview repository {preview}: a copy of {image} reads the {image} image the preview ran", source.repository());
             Some(source)
         }
     };
@@ -362,18 +426,22 @@ fn tried(tries: u32, pause: Duration, mut attempt: impl FnMut(u32) -> Result<()>
 
 /// What a run says it made (and, with `--summary`, writes as Markdown):
 /// the reference, readable with the account as `<account>`, and whole in
-/// its line of a deploy config's `computers.images`, under the image's own
-/// name. A runner masks the account in that line, as it is the
-/// environment's secret: it is the config's own `account_id`.
+/// its line of a deploy config: a computer image's in `computers.images`,
+/// under the image's own name, the door's as `doors`. A runner masks the
+/// account in that line, as it is the environment's secret: it is the
+/// config's own `account_id`.
 fn summary(req: &Request, reference: &str) -> String {
     let readable = |r: &str, account: &str| r.replacen(account, "<account>", 1);
     let (done, from) = match &req.from {
         None => ("pushed", String::new()),
         Some(s) => ("copied", format!("From `{}`, its digest unchanged.\n\n", readable(&s.reference, &s.account))),
     };
-    let line = req.image;
+    let (place, line) = match by_name(req.image).expect("a request's image is one xtask builds").runs {
+        Runs::Computers => ("`computers.images`", format!("\"{}\": {{ \"image\": \"{reference}\" }},", req.image)),
+        Runs::Doors => ("top level", format!("\"doors\": {{ \"image\": {{ \"image\": \"{reference}\" }} }},")),
+    };
     format!(
-        "### {} {done} as {}:{}\n\n{from}`{}`\n\nIts line in the deploy config's `computers.images`, the account the config's `account_id` (docs/computers.md, \"Preview and production\"):\n\n```jsonc\n\"{line}\": {{ \"image\": \"{reference}\" }},\n```\n",
+        "### {} {done} as {}:{}\n\n{from}`{}`\n\nIts line in the deploy config's {place}, the account the config's `account_id` (docs/computers.md, \"Preview and production\"):\n\n```jsonc\n{line}\n```\n",
         req.image,
         req.repository,
         req.tag,
@@ -453,6 +521,15 @@ mod tests {
         for bad in [whole.replace(&format!("@sha256:{digest}"), ":r8"), whole.replace(PREVIEW, ACCOUNT), whole.replace(PREVIEW, "<other>"), whole.replace(&digest, &digest[..12])] {
             assert!(refused(copy(&bad), &all).contains("is no reference pinned by digest"), "{bad}");
         }
+        // a copy reads the chosen image's own preview repository: Hermes's
+        // reference given for the door (or the door's for Hermes) is refused
+        // before anything is minted (Codex on #1534)
+        let door = whole.replace("fragment-preview-computer-hermes-canary", "fragment-preview-door");
+        let copy_door = |from: &str| args(&["copy", "door", "--from", from, "--repository", "fragment-door", "--tag", "r9"]);
+        assert_eq!(parse(&copy_door(&door), &all).unwrap().from.unwrap().reference, door);
+        assert!(refused(copy_door(&whole), &all).contains("not the door's"), "Hermes copied as the door");
+        assert!(refused(copy(&door), &all).contains("not the hermes's"), "the door copied as Hermes");
+        assert!(refused(copy(&whole.replace("-canary", "")), &all).contains("not the hermes's"), "another repository");
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_API_TOKEN", "t")])).contains("FROM_CLOUDFLARE_ACCOUNT_ID is not set"));
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_ACCOUNT_ID", "x"), ("FROM_CLOUDFLARE_API_TOKEN", "t")])).contains("no account id"));
         assert!(refused(copy(&whole), &env(&[("CLOUDFLARE_ACCOUNT_ID", ACCOUNT), ("FROM_CLOUDFLARE_ACCOUNT_ID", PREVIEW), ("FROM_CLOUDFLARE_API_TOKEN", "")])).contains("FROM_CLOUDFLARE_API_TOKEN is not set"));
@@ -538,5 +615,27 @@ mod tests {
         assert!(text.starts_with("### hermes copied as fragment-computer-hermes:r9") && text.contains(&format!("From `registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:{digest}`, its digest unchanged")), "{text}");
         assert!(!text.contains(PREVIEW), "{text}");
         assert_eq!(line_of(&text, "hermes")["hermes"]["image"], reference.as_str());
+        // the door's line is the config's `doors`, its image whole
+        let from = format!("registry.cloudflare.com/{PREVIEW}/fragment-preview-door@sha256:{digest}");
+        let c = parse(&args(&["copy", "door", "--from", &from, "--repository", "fragment-door", "--tag", "r9"]), &all).unwrap();
+        assert_eq!((c.dockerfile, c.context), ("images/simplex-door/Dockerfile", "."));
+        let reference = format!("registry.cloudflare.com/{ACCOUNT}/fragment-door@sha256:{digest}");
+        let text = summary(&c, &reference);
+        assert!(text.starts_with("### door copied as fragment-door:r9") && !text.contains(PREVIEW) && !text.contains("\"door\":"), "{text}");
+        assert_eq!(line_of(&text, "doors")["doors"]["image"]["image"], reference.as_str());
+    }
+
+    /// Goal: one list of images. The Image workflow offers each image xtask
+    /// builds, and only those; one is the computers' default, which
+    /// preview's deploy pins `hermes` as (deploy.rs, `preview_image`).
+    #[test]
+    fn the_image_workflow_offers_each_image() {
+        let workflow = fs::read_to_string(devstack::repo_root().join(".github/workflows/image.yml")).unwrap();
+        let lines: Vec<&str> = workflow.lines().collect();
+        let at = lines.iter().position(|l| l.trim() == "image:").expect("the `image` input");
+        let options = lines[at..].iter().find_map(|l| l.trim().strip_prefix("options: [")).and_then(|l| l.strip_suffix(']')).expect("its options");
+        assert_eq!(options.split(", ").collect::<Vec<_>>(), IMAGES.map(|i| i.name).to_vec());
+        let computers: Vec<&str> = IMAGES.iter().filter(|i| i.runs == Runs::Computers).map(|i| i.name).collect();
+        assert_eq!(computers, ["hermes"]);
     }
 }

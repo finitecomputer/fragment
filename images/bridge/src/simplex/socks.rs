@@ -1,5 +1,7 @@
 //! The SimpleX cores' way out: a SOCKS5 proxy on loopback, which every core
-//! connects through (`--socks-proxy`).
+//! connects through (`--socks-proxy`): a computer's (`serve`, through its
+//! API) and a SimpleX door's (images/simplex-door, through its door:
+//! `serve_with` and a `Relay` of its own).
 //!
 //! Cloudflare Containers reset a TLS hello on 443 that names no server, and
 //! a SimpleX server on 443 takes its protocol only from such a hello
@@ -170,9 +172,47 @@ async fn answer<S: AsyncWrite + Unpin>(io: &mut S, code: u8) {
     let _ = io.write_all(&[5, code, 0, 1, 0, 0, 0, 0, 0, 0]).await;
 }
 
+/// The platform's XFTP relay as a proxy's client reaches it.
+pub trait Relay: Clone + Send + Sync + 'static {
+    /// What a relay holds while it is open (a door's place among the
+    /// relays it opens at once), let go as its session ends.
+    type Held: Send;
+    /// The host it carries that a session names on `port` (as its list
+    /// names it), or none: that session goes straight out.
+    fn carried(&self, host: &str, port: u16) -> Option<String>;
+    /// A relay to `host`:`port`, its bytes untouched both ways.
+    fn open(&self, host: &str, port: u16) -> impl std::future::Future<Output = Result<(ClientWs, Self::Held), String>> + Send;
+}
+
+/// A computer's relay: through its API, to what its view's `relay` offers.
+#[derive(Clone)]
+struct Offered {
+    api: Api,
+    offer: watch::Receiver<Option<RelayOffer>>,
+}
+
+impl Relay for Offered {
+    // its computer holds each relay's place (fragment_core::relay)
+    type Held = ();
+
+    fn carried(&self, host: &str, port: u16) -> Option<String> {
+        Ask { dest: Dest::Name(host.into()), port }.relayed(self.offer.borrow().as_ref()).map(str::to_string)
+    }
+
+    async fn open(&self, host: &str, port: u16) -> Result<(ClientWs, ()), String> {
+        Ok((self.api.relay(host, port).await?, ()))
+    }
+}
+
 /// Serves `listener` until `stop`: each session handshaken, then sent on
 /// by the relay `offer` says (the computer's view's, as last read).
-pub async fn serve(listener: TcpListener, api: Api, offer: watch::Receiver<Option<RelayOffer>>, mut stop: watch::Receiver<bool>) {
+pub async fn serve(listener: TcpListener, api: Api, offer: watch::Receiver<Option<RelayOffer>>, stop: watch::Receiver<bool>) {
+    serve_with(listener, Offered { api, offer }, stop).await
+}
+
+/// Serves `listener` until `stop`: each session handshaken, then sent on
+/// through `relay` when it carries it, else straight out.
+pub async fn serve_with<R: Relay>(listener: TcpListener, relay: R, mut stop: watch::Receiver<bool>) {
     let sessions = Arc::new(Semaphore::new(SESSIONS_MAX));
     // bounded by `stop`, and each session by `SESSIONS_MAX`
     loop {
@@ -185,26 +225,29 @@ pub async fn serve(listener: TcpListener, api: Api, offer: watch::Receiver<Optio
             crate::ev!("simplex.socks_bounded", { "max": SESSIONS_MAX });
             continue;
         };
-        let (api, offer, stop) = (api.clone(), offer.clone(), stop.clone());
+        let (relay, stop) = (relay.clone(), stop.clone());
         tokio::spawn(async move {
-            session(tcp, &api, &offer, stop).await;
+            session(tcp, &relay, stop).await;
             drop(permit);
         });
     }
 }
 
-async fn session(mut tcp: TcpStream, api: &Api, offer: &watch::Receiver<Option<RelayOffer>>, stop: watch::Receiver<bool>) {
+async fn session<R: Relay>(mut tcp: TcpStream, relay: &R, stop: watch::Receiver<bool>) {
     let _ = tcp.set_nodelay(true);
     let ask = match tokio::time::timeout(Duration::from_millis(HANDSHAKE_MS), handshake(&mut tcp)).await {
         Ok(Ok(ask)) => ask,
         Ok(Err(e)) => return crate::ev!("simplex.socks_refused", { "error": e }),
         Err(_) => return crate::ev!("simplex.socks_refused", { "error": "no request in time" }),
     };
-    let relayed = ask.relayed(offer.borrow().as_ref()).map(str::to_string);
+    let relayed = match &ask.dest {
+        Dest::Name(host) => relay.carried(host, ask.port),
+        _ => None,
+    };
     match relayed {
         Some(host) => {
-            let ws = match api.relay(&host, ask.port).await {
-                Ok(ws) => ws,
+            let (ws, _held) = match relay.open(&host, ask.port).await {
+                Ok(open) => open,
                 Err(e) => {
                     answer(&mut tcp, reply::NOT_ALLOWED).await;
                     return crate::ev!("simplex.relay_refused", { "host": host, "error": e });

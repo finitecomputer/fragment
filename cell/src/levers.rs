@@ -27,7 +27,13 @@
 //! people's ledgers and computers; the registry's (the whole deployment's)
 //! and the mail lever (a preview's mail is real) are no route; and a day makes at most `levers::E2E_PEOPLE_DAILY_MAX` e2e
 //! people and lends them at most `levers::E2E_PAID_CALLS_DAILY_MAX` paid
-//! calls. A secret that leaked spends that much, and touches no one real.
+//! calls. A fragment lever that acts as or for someone (`member` adds them
+//! with no yes of theirs, `records` posts as them: `levers::acting_for`)
+//! acts there only for an e2e person or their agent, on a fragment an e2e
+//! person owns (`acts_for_e2e`). The fragment's other levers check its
+//! label alone: they reach any fragment labelled `e2e-…`, which a label
+//! does not reserve, though they act as no one. A secret that leaked
+//! spends that much, and adds no real person anywhere nor posts as one.
 
 use fragment_core::{levers, npub};
 use fragment_proto::computer::valid_computer_id;
@@ -38,9 +44,9 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{FragmentLever, KeysLever};
+use crate::fragment::calls::{Call, FragmentLever, KeysLever, Whose};
 use crate::registry::calls;
-use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body};
+use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body, ReadJson};
 
 /// The ledger command that makes an e2e person a seat: one id, so signing
 /// the same person in again sets nothing twice.
@@ -176,6 +182,13 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 return Err(CellError::new(ErrorCode::Forbidden, format!("on a preview, the fragment levers reach the e2e's own fragments ({}…) alone", levers::E2E_LABEL_PREFIX)));
             }
             let lever: serde_json::Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if cfg.levers_scoped && *hook == "fragment" {
+                let op = lever["op"].as_str().unwrap_or_default();
+                if let Some(field) = levers::acting_for(op) {
+                    let named = lever[field].as_str().ok_or_else(|| CellError::invalid(format!("{op} names its `{field}`")))?;
+                    acts_for_e2e(env, &target.fragment, named).await?;
+                }
+            }
             match *hook {
                 "keys" => crate::fragment::pass(env, &target.fragment, &KeysLever(lever)).await,
                 _ => crate::fragment::pass(env, &target.fragment, &FragmentLever(lever)).await,
@@ -321,6 +334,28 @@ async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
     let paid_calls = cap["max"].as_u64().ok_or_else(|| CellError::host(format!("the ledger's paid-calls cap: {cap}")))?;
     assert!(asked.paid_calls.is_none_or(|asked| asked == paid_calls), "the ledger holds the cap it was given");
     Ok(SignedIn { session: signed.token, identity: signed.identity, created: signed.created, paid_calls })
+}
+
+/// On a branch deployment, whether a fragment lever that acts as or for
+/// `named` (an npub, a key or an email: `levers::acting_for`) may: the
+/// fragment's owner and `named` are each an e2e person or one's agent
+/// (`levers::acts_for`), or a 403 that says why.
+async fn acts_for_e2e(env: &Env, fragment: &str, named: &str) -> CellResult<()> {
+    let mut whose = crate::fragment::pass(env, fragment, &Whose { principal: String::new() }).await?;
+    if whose.status_code() != 200 {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {fragment}")));
+    }
+    let whose: <Whose as Call>::Answer = whose.read_json().await?;
+    let owner_is_e2e = person_is_e2e(env, &whose.owner).await?;
+    let named_is_e2e = owner_is_e2e && person_is_e2e(env, named).await?;
+    levers::acts_for(owner_is_e2e, named_is_e2e).map_err(|why| CellError::new(ErrorCode::Forbidden, why.message()))
+}
+
+/// Whether the person behind `who` (an npub, a key or an email; an
+/// agent's owner) is an e2e person.
+async fn person_is_e2e(env: &Env, who: &str) -> CellResult<bool> {
+    let found = ask_registry(env, &calls::Lookup { who: who.to_string() }).await?;
+    is_e2e(env, levers::person_behind(&found.id, found.owner.as_deref())).await
 }
 
 /// Whether the registry knows `identity` as an e2e person.

@@ -1,0 +1,50 @@
+// The person's Google account (Gmail, Calendar, Drive, Contacts, Sheets,
+// Docs and Slides): Pipes' `google` provider, connected through the browser
+// once its OAuth client's secret is in the store
+// (docs/pipes-browser-binding.md). `access_type=offline` is what has Google
+// answer a refresh token; `include_granted_scopes` keeps what the person
+// allowed before, so a reconnect asks only for the rest; and its consent
+// lets a person untick a scope, so a grant may hold less than was asked
+// (settings names what is missing). Read only asks for each service's
+// `.readonly` scope, read and write for the scope itself, and both for
+// `openid` and the two `userinfo` scopes that label the account. While
+// Google reviews an app's sign-in, a deployment says so in its own `note`;
+// several accounts a person (personal and work) are its `accounts_max`.
+// Its skill is google-workspace-finite, which tells an agent this access
+// (its references/google-workspace-access.json, held to this row's).
+{ "name": "google", "kind": "connection", "title": "Google",
+  "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com", "slides.googleapis.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
+    "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
+    "access": {
+      "read": { "scopes": [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/documents.readonly",
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile"] },
+      "write": { "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/documents",
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile"] } } },
+  "scope_names": {
+    "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)", "https://www.googleapis.com/auth/gmail.modify": "Gmail (manage)", "https://www.googleapis.com/auth/gmail.send": "Gmail (send)",
+    "https://www.googleapis.com/auth/drive": "Drive", "https://www.googleapis.com/auth/drive.readonly": "Drive (read)",
+    "https://www.googleapis.com/auth/spreadsheets": "Sheets", "https://www.googleapis.com/auth/spreadsheets.readonly": "Sheets (read)",
+    "https://www.googleapis.com/auth/documents": "Docs", "https://www.googleapis.com/auth/documents.readonly": "Docs (read)",
+    "https://www.googleapis.com/auth/calendar": "Calendar", "https://www.googleapis.com/auth/calendar.readonly": "Calendar (read)",
+    "https://www.googleapis.com/auth/contacts.readonly": "Contacts" },
+  "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] }
