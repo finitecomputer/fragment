@@ -16,9 +16,12 @@
 .action-tooltip.is-description { max-width: min(260px, calc(100vw - 12px)); padding: 8px 10px; border-radius: 8px; font-size: 12px; white-space: normal; }
 /* thin scrollbars */
 :root { --scrollbar-thumb: rgba(180, 180, 180, .28); --scrollbar-hover: rgba(180, 180, 180, .45); }
+/* light: the system's unless the person chose dark, or their choice of
+   light (Settings, Theme: theme.js sets the root's data-theme) */
 @media (prefers-color-scheme: light) {
-  :root { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
+  :root:where(:not([data-theme="dark"])) { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
 }
+:root:where([data-theme="light"]) { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
 * { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
@@ -61,8 +64,10 @@
   --wallpaper-dark-opacity: 1;
   color-scheme: dark;
 }
+/* light, as the scrollbars are: the system's unless the person chose dark,
+   or their choice */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:where(:not([data-theme="dark"])) {
     --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
     --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
     --chat-composer:#fffdf9; --chat-code:#ece8df;
@@ -74,6 +79,18 @@
     --wallpaper-dark-opacity: 0;
     color-scheme: light;
   }
+}
+:root:where([data-theme="light"]) {
+  --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
+  --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
+  --chat-composer:#fffdf9; --chat-code:#ece8df;
+  --tooltip-bg:var(--bg-card); --tooltip-shadow:rgba(0,0,0,.1);
+  --text-primary:#171717; --text-secondary:#66615b; --text-tertiary:#918a82; --text-icon:#5d5954;
+  --accent-blue:#315fbd; --success:#167a52;
+  --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
+  --danger-text:#81112f;
+  --wallpaper-dark-opacity: 0;
+  color-scheme: light;
 }
 
 @media (min-width: 48rem) { :root { --type-field: 400 .875rem/1.45 var(--font-sans); } }
@@ -371,6 +388,7 @@ body.reordering iframe { pointer-events: none; }
    (disabled while it saves or arms: fragment-title.js holds its width) */
 .rename-actions button { font: var(--type-control); min-height: 40px; padding: 0 18px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-muted); }
 .rename-actions button[type=submit] { border-color: var(--text-primary); background: var(--text-primary); color: var(--bg-window); }
+.rename-actions button[type=submit].danger { border-color: transparent; background: var(--danger-text); }
 button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 @media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .topbar .grow { display: none; } }
 
@@ -1346,7 +1364,12 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 #chats { flex: 1 1 auto; min-height: 0; max-height: none; overflow-x: hidden; padding-inline: 2px; }
 /* its rows keep their height: past the room, the list scrolls, never squeezes them */
 #chats > * { flex-shrink: 0; }
-#chats .agent-hero { --edge-light: 0; flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
+#chats .agent-hero { --edge-light: 0; flex: none; gap: 0; height: 48px; margin: 10px 0 2px; padding: 0; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
+/* its face and name, which open its menu, then its New chat (chat-list.js `hero`) */
+.agent-hero-open { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 8px 6px 8px 13px; border: 0; border-radius: inherit; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.agent-new-chat { display: grid; flex: none; place-items: center; width: 32px; height: 32px; margin-right: 8px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-secondary); cursor: pointer; }
+.agent-new-chat:hover { background: var(--bg-hover); color: var(--text-primary); }
+.agent-new-chat svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #chats .agent-hero:first-child { margin-top: 2px; }
 #chats .agent-hero:hover { background: var(--bg-active); }
 .agent-hero-face { display: flex; flex: none; }
@@ -1381,7 +1404,7 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 .launcher-key { color: var(--text-tertiary); font: 500 12px/1 var(--font-sans); white-space: nowrap; }
 @media (pointer: coarse) and (not (any-pointer: fine)) { .launcher-key { display: none; } .sidebar-new-chat { padding: 0; } }
 .sidebar-new-chat, #chats .agent-hero { position: relative; border-color: transparent; }
-#chats .agent-hero:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
+#chats .agent-hero-open:focus-visible, .agent-new-chat:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
 /* The composer's pointer-following reflection, with no resting outline. */
 .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-hero::before, .agent-hero::after, .agent-menu-edge::before, .agent-menu-edge::after {
   content: ""; position: absolute; inset: -1px; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
@@ -1394,8 +1417,8 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 .sidebar-new-chat::after, .agent-hero::after, .agent-menu-edge::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
 /* an agent's hero, open: its menu hangs from it, one surface with it, and
    the menu's edge (shell.js `menuEdge`) is lit in the hero's place */
-#chats .agent-hero[aria-expanded="true"] { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
-.agent-hero[aria-expanded="true"]::before, .agent-hero[aria-expanded="true"]::after { opacity: 0; }
+#chats .agent-hero:has(> .agent-hero-open[aria-expanded="true"]) { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
+.agent-hero:has(> .agent-hero-open[aria-expanded="true"])::before, .agent-hero:has(> .agent-hero-open[aria-expanded="true"])::after { opacity: 0; }
 .menu.agent-menu { --edge-light: 0; min-width: 0; padding: 4px 8px 10px; border: 0; border-radius: 0 0 24px 24px; background: var(--bg-sidebar); box-shadow: none; overflow-y: auto; }
 .menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
 .agent-menu-edge { --edge-light: 0; position: fixed; z-index: 21; border-radius: 24px; pointer-events: none; }
@@ -1413,6 +1436,8 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 .chat-line, .chat-sub { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .chat-line .label { color: var(--text-primary); font-size: 14px; line-height: 19px; }
 .chat-line .pin-mark, .agent-hero .pin-mark { display: inline-grid; flex: none; place-items: center; color: var(--text-tertiary); }
+/* a line with no time to give the ⋯ its place keeps the ⋯'s room, so its marks (pin, bell) never sit under it */
+#chats .chat-line:not(:has(time)) { padding-right: 24px; }
 .chat-line .pin-mark svg, .agent-hero .pin-mark svg { width: 12px; height: 12px; stroke-width: 2; }
 .chat-line time { flex: none; margin-left: auto; color: var(--text-tertiary); font-size: 11.5px; line-height: 19px; }
 .chat-sub { min-height: 17px; color: var(--text-tertiary); font-size: 12.5px; line-height: 17px; }

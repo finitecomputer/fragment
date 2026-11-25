@@ -25,6 +25,57 @@ platform concept.
   release assertions, typed errors, and valid/invalid/replay/restart tests.
   Tooling is Rust.
 
+## How work is asked for
+
+A Linear ticket is a problem statement: what hurts, for whom, and why it
+matters. It is not a plan or a list of PRs. Plans, research and notes go
+in its comments or outside the repo, never in a commit.
+
+Its title names the problem, not the fix ("People can't delete a chat",
+not "Allow deleting chats"). Its description has these bold lead-ins, in
+this order, as the team's "Problem statement" template in Linear does:
+
+- **The problem:** what hurts, in one to three plain sentences.
+- **Who it hurts:** who runs into it, and when.
+- **Why it matters:** what it costs if left, and how often.
+- **How we know:** the evidence: a report, logs, steps, file:line refs.
+- **Done when:** an outcome someone can check, not a task list.
+
+Add **What a fix must keep:**, **Out of scope:**, **Open question:** or
+**Where the work is:** (links, not plans) only when there is something to
+say. One problem per ticket: a second one gets its own.
+
+Any ticket can be built, but Paul merges no PR until he has commented on
+its root problem statement. His comment protects The Fragment Way, often
+as "yes, solve this, but don't do X, and line it up with One Right Way".
+He looks for:
+
+- pieces built one at a time that should be one abstraction;
+- a regression in quality;
+- work that is sloppy or not ready;
+- complication nobody needed, and gold plating.
+
+The patterns are emergent, named as Paul finds them. So far:
+
+- **One Right Way:** one permission decision for every caller
+  (`fragment_core::permit`).
+- **One Pipe:** every paid call goes through one gateway and is billed
+  there, with no hooks scattered elsewhere.
+- **Untangle:** a typical change lands in one place, and state is derived
+  from its one authority, never a copy kept in sync.
+
+Say in the PR which pattern your change follows, or that it follows none.
+In Paul's words:
+
+- "find a simple understandable core model from which the right things
+  emerge. don't let codex trick you into making 10,000 little edge case
+  edits" (2026-11-23)
+- "if two PRs are meaningless without each other, why aren't they one PR?
+  … avoid xeno's paradoxes!" (2026-11-24)
+
+If a rule here fights the task in front of you, say so plainly, and get
+Paul's sign-off before you break it.
+
 ## Where things live
 
 - `cell/`: Rust Worker and JS shims; `cell/shell/`: platform pages. The
@@ -109,12 +160,16 @@ tests faster than CI does, so run them here. Work is ready only when you
 can show evidence that it does what it claims and breaks nothing else.
 "It compiles" and "the tests I wrote pass" are not evidence.
 
-Put an evidence pack in the PR body and in your report:
+The PR body follows `.github/pull_request_template.md`. A bot closes a
+PR whose body doesn't; fix the body and reopen it. #1540 is a good
+example. Under "Why this design", and in your report, put an evidence
+pack:
 
 - **What and why:** what changed and why, in plain words. Say whether it
   touches the wire, stored rows or money.
 - **What ran:** each command with its result and counts, on the final head
-  merged with current `master`:
+  merged with `master` as it was when the proof started; name both SHAs.
+  `master` moving while a proof runs doesn't restart it:
   - `cargo xtask check`.
   - `cargo xtask e2e --only …` for every section that covers a changed file.
     Grep `crates/e2e` for each file and run every lane that uses it.
@@ -149,8 +204,43 @@ hit blocks: wrong money, lost or wrong data, a crash, a broken or slowed
 call, or a security hole. Fix those, and file anything else in Linear. A
 second round only checks the fixes, and there is no third.
 
-Keep PRs small and many. Ten small proven PRs land faster and safer than
-one large one.
+Keep PRs small, and each one whole: one thing that stands on its own,
+something a person can use or a step that is safe and useful by itself.
+If two PRs mean nothing without each other, they are one PR. Split when
+a piece stands alone, or must wait (a deletion after a migration has
+run). A plan that grows a PR each review round is a smell; merge the
+pieces back.
+
+### Hit every surface
+
+The most common gap is a change that works where it was tested and is
+missing everywhere else. Before you call it done, say which of these
+applied:
+
+- **Clients:** the web shell (`cell/shell/`), the iOS app and the CLI.
+- **Runtimes:** Hermes and Claude. Each offers only what it supports
+  (`cell/shell/agent-runtimes.js`), so decide for each one, even when the
+  answer is "not here".
+- **The agent:** can an agent do it too (a skill, the CLI), or only a
+  person?
+- **The wire:** `crates/proto`, then `cargo xtask wire`. Older clients
+  must still read every answer.
+- **Self-host:** celld looks like Cloudflare to the cell; there are no
+  runtime shims in `cell/`.
+- **Reverse states:** every way in needs a way out and a way to see it:
+  archive and unarchive, link and unlink, delete. A one-way door is a bug.
+
+### Ways to hurt yourself
+
+- **Killing by pattern.** `pkill -f` and `pgrep` match your own shell,
+  whose command holds the pattern, and other sessions' stacks. Kill only a
+  PID you started, or a dev stack by its own process group.
+- **The shared dev port.** :8790 is Paul's `cargo xtask dev`. Run yours on
+  another port.
+- **Printing what is secret.** Never print a secret, a deploy config or
+  the CLI's config (it holds a key), not even to check it.
+- **Sweeping commits.** Never run `git add -A`, since a dev stack's files
+  sit beside yours, or `cargo fmt`, which reformats all of `cell/`.
 
 ## How work lands
 
@@ -169,6 +259,9 @@ one large one.
 
 ## Rules and approvals
 
+- When a documented decision changes, rewrite its text; don't append
+  another account of the new behavior. Most code changes need no doc
+  change: agents can read the code.
 - Prefer an idiomatic Cloudflare feature, standard crate or maintained
   library when it simplifies the stack. Bespoke code needs its reason
   beside it (comment, decision or debt entry). A build step is welcome

@@ -101,11 +101,11 @@ pub fn cell_as(profile: Profile) -> Result<()> {
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
     let ours: Vec<String> = local.remapped().into_iter().chain(CELL_TARGET_FLAGS.map(String::from)).collect();
     let flags = encoded_rustflags(given, &ours);
-    run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir))?;
+    run(crate::devstack::outside_cargo("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir))?;
     let size = wasm_built(&out, &local, profile, &Wasm::CELL)?;
     // the admin Worker: the same crate and flags, its other entry, after the
     // cell's (whose build clears `build/`)
-    let admin = Command::new("worker-build").args(profile.worker_build_args()).args(["--out-dir", ADMIN_BUILD, "--", "--features", "admin"]).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir).status();
+    let admin = crate::devstack::outside_cargo("worker-build").args(profile.worker_build_args()).args(["--out-dir", ADMIN_BUILD, "--", "--features", "admin"]).env("CARGO_ENCODED_RUSTFLAGS", &flags).current_dir(&dir).status();
     anyhow::ensure!(admin.context("run worker-build for the admin Worker")?.success(), "worker-build for the admin Worker (--features admin) failed");
     let admin_size = wasm_built(&dir.join(ADMIN_BUILD), &local, profile, &Wasm::ADMIN)?;
     let (files, bytes) = fragment_templates::write_assets(&out.join("assets")).context("writing the release's files into cell/build/assets")?;
@@ -311,7 +311,7 @@ fn within_budget(w: &Wasm, size: u64) -> Result<String> {
 }
 
 fn worker_build_installed() -> Result<()> {
-    let out = Command::new("worker-build")
+    let out = crate::devstack::outside_cargo("worker-build")
         .arg("--version")
         .output()
         .context("worker-build is not installed: cargo install worker-build --version 0.8.5 --locked")?;
@@ -322,8 +322,9 @@ fn worker_build_installed() -> Result<()> {
     Ok(())
 }
 
-/// The computer images the cell's config names (`containers[].images`),
-/// each built as `wrangler dev` builds it at boot (wrangler's
+/// The images the cell's config names (`containers[].images`) that the
+/// run's node builds (`ahead`: those of the container classes it runs,
+/// `classes`), each built as `wrangler dev` builds it at boot (wrangler's
 /// `constructBuildCommand`: `docker build --load --platform linux/amd64
 /// --provenance=false [--build-arg …] -f - <context>`, the Dockerfile on
 /// stdin), so the boot's build finds every layer cached. A cold build of
@@ -333,20 +334,59 @@ fn worker_build_installed() -> Result<()> {
 /// that read them for itself warmed nothing here (BuildKit takes a remote
 /// cache's hits without fetching them, and a build that exports nothing
 /// keeps nothing), so the stub compiled its bridge on every shard.
-pub fn images() -> Result<()> {
+pub fn images(classes: &[String]) -> Result<()> {
     let cell = devstack::cell_dir();
-    let mut config = devstack::read_config(&cell)?;
-    devstack::absolute_images(&mut config, &cell)?;
-    let containers = config["containers"].as_array().cloned().unwrap_or_default();
     let env = |k: &str| std::env::var(k).ok();
-    // bounded: the images one config names
-    for (n, (name, image)) in containers.iter().flat_map(|c| c["images"].as_object().into_iter().flatten()).enumerate() {
+    for (name, image, cache) in ahead(devstack::read_config(&cell)?, &cell, classes, env)? {
         let t0 = Instant::now();
-        let built = docker_build(image, None, &["--load".as_ref()], &image_cache_args(env, n == 0)).with_context(|| format!("building the {name} image ahead of the node"))?;
+        let built = docker_build(&image, None, &[ahead_output(&cache).as_ref()], &cache).with_context(|| format!("building the {name} image ahead of the node"))?;
         let (cached, steps) = cached_steps(&built);
         println!("image {name} built ahead of the node in {:.1?} ({cached} of {steps} steps cached)", t0.elapsed());
     }
     Ok(())
+}
+
+/// The images `images` builds ahead of the node, by name, each with its
+/// cache flags: those of `config` (the cell's, from `cell`) that the run's
+/// node builds as it boots, its container classes' (`classes`: the stub's
+/// for a run that makes computers, the door's for a run of its lane).
+/// The Actions cache (`image_cache_args`) is one scope, the first image's
+/// (the stub's): the first writes it, and an image from the same
+/// Dockerfile (the stub's next build) reads it. An image from another
+/// Dockerfile (the door's) builds with no cache flags: none of its layers
+/// are there, and its write would replace the stub's (a scope holds one
+/// build's). No CI run names the door's lane, so CI never builds it.
+fn ahead(mut config: serde_json::Value, cell: &Path, classes: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Vec<(String, serde_json::Value, Vec<String>)>> {
+    devstack::absolute_images(&mut config, cell)?;
+    let containers = config["containers"].as_array().cloned().unwrap_or_default();
+    let all = || containers.iter().flat_map(|c| c["images"].as_object().into_iter().flatten());
+    // the cache's Dockerfile: the config's first image's (the stub's), whichever classes run
+    let cached = all().next().map(|(_, image)| image["dockerfile"].clone());
+    let runs = |c: &&serde_json::Value| classes.iter().any(|class| c["class_name"] == class.as_str());
+    // bounded: the images one config names
+    let images: Vec<_> = containers.iter().filter(runs).flat_map(|c| c["images"].as_object().into_iter().flatten()).collect();
+    let cache = |n: usize, image: &serde_json::Value| match Some(&image["dockerfile"]) == cached.as_ref() {
+        true => image_cache_args(&env, n == 0),
+        false => Vec::new(),
+    };
+    Ok(images.iter().enumerate().map(|(n, (name, image))| (name.to_string(), (*image).clone(), cache(n, image))).collect())
+}
+
+/// Where a build ahead of the node puts its result, given its cache flags
+/// (`ahead`). Its layers, in the builder's cache, are all the node's build
+/// needs; an image loaded into Docker's store is one no one tags (each
+/// node builds its own, labeled for its project: devstack's
+/// `scope_images`), and a box kept every one (1,087 untagged stubs, 11.5 GB
+/// on 2026-11-23). So nothing (`type=cacheonly`), but for a build that
+/// reads a remote cache (CI's): BuildKit takes a remote cache's hits
+/// without fetching them, and only an exported result fetches them into
+/// the builder for the node's build to find (`--load`; a runner's store
+/// goes with it).
+fn ahead_output(cache: &[String]) -> &'static str {
+    match cache.iter().any(|flag| flag == "--cache-from") {
+        true => "--load",
+        false => "--output=type=cacheonly",
+    }
 }
 
 /// The Actions cache an image built ahead of the node reads, and writes
@@ -397,7 +437,7 @@ pub fn image_push(image: &serde_json::Value, tag: &str, metadata: &Path) -> Resu
 }
 
 /// `docker build` of `image` as wrangler builds it, `how` its output
-/// (`--load`, or `--push`), `cache` its cache flags. Untagged (ahead of the
+/// (`--load`, none: `ahead_output`; or `--push`), `cache` its cache flags. Untagged (ahead of the
 /// node), its output is kept, shown only when it fails, and answered (its
 /// progress); a push's (`tag`: image.rs) is shown as it runs.
 fn docker_build(image: &serde_json::Value, tag: Option<&str>, how: &[&std::ffi::OsStr], cache: &[String]) -> Result<String> {
@@ -453,6 +493,53 @@ mod tests {
         let saving = env(&[("FRAGMENT_IMAGE_CACHE", gha), ("FRAGMENT_IMAGE_CACHE_SAVE", "true")]);
         assert_eq!(super::image_cache_args(&saving, true), ["--cache-from", gha, "--cache-to", "type=gha,scope=e2e-stub,mode=max,ignore-error=true"]);
         assert_eq!(super::image_cache_args(&saving, false), ["--cache-from", gha], "only the first image writes");
+    }
+
+    /// Goal: a run builds ahead of the node the images its node builds,
+    /// and reads and writes the Actions cache for the stub's alone. Valid:
+    /// a run of the door's lane builds the door's image too; a run that
+    /// makes computers, the stub's two alone; a run that makes none (its
+    /// node runs no container: the suite's `node_classes`), none. In CI the
+    /// stub writes the cache and its next build reads it. Invalid: the
+    /// door's image reads the stub's cache, where none of its layers are,
+    /// or writes it, which would replace the stub's there (a run of the
+    /// door's lane alone too, its door the first image it builds).
+    #[test]
+    fn a_run_builds_ahead_only_the_images_its_node_builds() {
+        let cell = fragment_devstack::cell_dir();
+        let config = fragment_devstack::read_config(&cell).unwrap();
+        let gha = "type=gha,scope=e2e-stub";
+        let saving = |k: &str| match k {
+            "FRAGMENT_IMAGE_CACHE" => Some(gha.to_string()),
+            "FRAGMENT_IMAGE_CACHE_SAVE" => Some("true".to_string()),
+            _ => None,
+        };
+        let (computers, doors) = (fragment_devstack::COMPUTER_CLASS.to_string(), fragment_devstack::DOOR_CLASS.to_string());
+        let shown = |classes: &[String]| super::ahead(config.clone(), &cell, classes, saving).unwrap().into_iter().map(|(name, _, cache)| (name, cache.join(" "))).collect::<Vec<_>>();
+        let (reads, writes) = (format!("--cache-from {gha}"), format!("--cache-from {gha} --cache-to {gha},mode=max,ignore-error=true"));
+        let stubs = [("stub".to_string(), writes), ("stub-next".to_string(), reads)];
+        assert_eq!(shown(std::slice::from_ref(&computers)), stubs, "no door's image for a run without its lane");
+        let with_door: Vec<_> = stubs.iter().cloned().chain([("door".to_string(), String::new())]).collect();
+        assert_eq!(shown(&[computers.clone(), doors.clone()]), with_door, "the door's image for its lane's run, with no cache flags");
+        assert!(shown(&[]).is_empty(), "no image for a run that makes no computer");
+        assert_eq!(shown(std::slice::from_ref(&doors)), [("door".to_string(), String::new())], "a door's run alone writes no stub's cache");
+        for (_, image, _) in super::ahead(config.clone(), &cell, &[computers, doors], saving).unwrap() {
+            assert!(std::path::Path::new(image["dockerfile"].as_str().unwrap()).is_absolute(), "its Dockerfile's path works from anywhere");
+        }
+    }
+
+    /// Goal: a build ahead of the node leaves no image in Docker's store,
+    /// unless it reads a remote cache, whose hits only an exported result
+    /// fetches into the builder. Valid: a local build (no cache flags)
+    /// exports nothing; CI's (`--cache-from`, and `--cache-to` when it
+    /// saves) loads its image. Invalid: a local build that loads an
+    /// untagged image no one removes.
+    #[test]
+    fn a_build_ahead_loads_an_image_only_to_fetch_a_remote_cache() {
+        assert_eq!(super::ahead_output(&[]), "--output=type=cacheonly");
+        let gha = "type=gha,scope=e2e-stub".to_string();
+        assert_eq!(super::ahead_output(&["--cache-from".into(), gha.clone()]), "--load");
+        assert_eq!(super::ahead_output(&["--cache-from".into(), gha.clone(), "--cache-to".into(), format!("{gha},mode=max")]), "--load");
     }
 
     /// Goal: a build's cached steps are counted from BuildKit's plain

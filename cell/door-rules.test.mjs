@@ -5,7 +5,7 @@
 // and its schema's steps held to their released text.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STEPS, SAVES_KEPT, behind, doorOf, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
+import { FILES_BYTES_MAX, FILES_KEPT, FILE_KEPT_MS, REPLY_FILES_MAX, STEPS, SAVES_KEPT, behind, fileKey, fileRoom, replyFiles, shaOk, typeOf, doorOf, doorPrefix, fenced, inboxUrl, nameOk, parseSaveId, restorable, restoreOf, saveId, saveKey, secretOk, stale, startable, steps, surplus } from "./door-rules.mjs";
 
 const save = (generation, seq, mark, unreadable = 0) => ({ generation, seq, mark, unreadable });
 
@@ -55,6 +55,12 @@ test("a door's name is a fragment's, and its saves are under its own prefix", ()
     assert.equal(nameOk(bad), false, String(bad));
   }
   assert.throws(() => saveKey("../x", 1, 1));
+  // its end deletes its prefix whole: every save's key is under it, and
+  // no other door's (a name that begins another's) is
+  assert.equal(doorPrefix("pat-simplex--k3x9"), "doors/pat-simplex--k3x9/");
+  assert.ok(saveKey("pat-simplex--k3x9", 2, 5).startsWith(doorPrefix("pat-simplex--k3x9")));
+  assert.ok(!saveKey("pat-simplex--k3x9a", 1, 1).startsWith(doorPrefix("pat-simplex--k3x9")), "a longer name is another prefix");
+  assert.throws(() => doorPrefix("../x"));
 });
 
 // Each released step's text, as it was released: a step is never edited or
@@ -65,6 +71,8 @@ const RELEASED = [
   "CREATE TABLE deliveries (id TEXT PRIMARY KEY, mark INTEGER NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL)",
   "CREATE TABLE inbox (id INTEGER PRIMARY KEY CHECK (id = 1), fragment TEXT NOT NULL, secret TEXT NOT NULL, asked INTEGER NOT NULL DEFAULT 0)",
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
+  "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL)",
+  "CREATE TABLE uses (sha TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (sha, owner))",
 ];
 
 test("the schema's released steps are as released, and taken in order", () => {
@@ -96,4 +104,34 @@ test("an inbox secret is a header's value; only a stale mark's refusal is asked 
   assert.equal(stale(409, { message: "not linked" }), false);
   assert.equal(stale(503, { message: "a stale mark: ask again under a new one" }), false);
   assert.equal(stale(409, null), false);
+});
+
+test("a file it holds is named by its SHA-256, under its own prefix, and typed as a media type or not at all", () => {
+  const sha = "ab".repeat(32);
+  assert.equal(fileKey("pat-simplex--k3x9", sha), `doors/pat-simplex--k3x9/files/${sha}`);
+  for (const bad of ["AB".repeat(32), "ab".repeat(31), `${"ab".repeat(31)}/x`, "../x", null]) {
+    assert.equal(shaOk(bad), false, String(bad));
+    assert.throws(() => fileKey("pat-simplex--k3x9", bad));
+  }
+  assert.equal(typeOf("Audio/MP4"), "audio/mp4");
+  for (const bad of ["audio", "audio/mp4; codecs=x", "text/html\r\nx: y", "", null, "a/".repeat(80)]) assert.equal(typeOf(bad), "application/octet-stream", String(bad));
+});
+
+test("it holds files while there is room: at most so many, so many bytes between them, every one counted", () => {
+  const f = (bytes) => ({ bytes });
+  assert.equal(fileRoom([], 1), true);
+  assert.equal(fileRoom(Array.from({ length: FILES_KEPT - 1 }, () => f(1)), 1), true);
+  assert.equal(fileRoom(Array.from({ length: FILES_KEPT }, () => f(1)), 1), false, "as many as it may");
+  assert.equal(fileRoom([f(FILES_BYTES_MAX - 1)], 1), true);
+  assert.equal(fileRoom([f(FILES_BYTES_MAX - 1)], 2), false, "past its bytes");
+  assert.ok(FILE_KEPT_MS > 0, "an old file a waiting delivery keeps is one it holds: its door's cleanup lets the others go first");
+});
+
+test("a reply's files are a message's at most, each named by its SHA-256", () => {
+  const one = { sha256: "cd".repeat(32), name: "a.mp3", type: "Audio/MPEG", size: 9 };
+  assert.deepEqual(replyFiles(undefined), []);
+  assert.deepEqual(replyFiles([one]), [{ ...one, type: "audio/mpeg" }]);
+  assert.equal(replyFiles(Array.from({ length: REPLY_FILES_MAX + 1 }, () => one)), null);
+  for (const bad of [{ ...one, sha256: "x" }, { ...one, name: 7 }, { ...one, size: -1 }, { ...one, size: 1.5 }, null]) assert.equal(replyFiles([bad]), null, JSON.stringify(bad));
+  assert.equal(replyFiles("nope"), null);
 });

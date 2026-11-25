@@ -72,14 +72,25 @@ where that frame can't sign in, in a tab.
   `relayed`, `{via: "telegram", for, agent}`, `to` that agent), which the
   platform takes only from a connector its owner bound as that agent's
   door, while it runs this template unforked and the deployment allows
-  `telegram`. `mirror` sends each reply an agent posts here (not its
-  interim words) to the paired chat, in at most four messages, while the
-  door is open. While the agent works on a message relayed from Telegram,
+  `telegram`. Its words alone go as theirs: a message they forward, or
+  send through an inline bot, is someone else's, so it goes with a first
+  line of the connector's saying so and where Telegram says it came from
+  (a user's name, a hidden sender's, a group's or channel's title and its
+  signature, the bot's username: each on one line, at most 64
+  characters), then its text with every line quoted (`> `), so none of it
+  reads as theirs; a reply to another chat's message keeps their words
+  theirs, after a line naming where the message came from and the part
+  they quoted, quoted so. Only their own `/start` pairs. `mirror` sends
+  each reply an agent posts here (not its interim words), and each
+  question it asks its owner (a card on `work`, worded by
+  `applib/question.mjs`, the SimpleX connector's), to the paired chat, in
+  at most four messages, while the door is open. Their next message
+  answers a question that takes words; one that needs a button says so. While the agent works on a message relayed from Telegram,
   `typing` shows the bot typing there (Bot API `sendChatAction`, which
   Telegram shows for five seconds at most, so it is sent again every four)
   until `mirror` sends the agent's answer, a newer message takes over, or
   about five minutes pass: a turn that ends with no answer there (an
-  error, a card, silence) shows it to that cap. Unlinked, or turned off by the deployment, nothing is
+  error, silence) shows it to that cap. Unlinked, or turned off by the deployment, nothing is
   relayed or sent (the inbox still keeps what Telegram delivers, as any
   inbox does); unlinked, Telegram is told so, and the agent stays a
   viewer of the chat, its words there going nowhere else.

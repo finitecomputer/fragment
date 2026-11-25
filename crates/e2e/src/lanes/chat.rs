@@ -878,8 +878,9 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response").cloned().unwrap_or_default();
     let asked = records(api, &owner, &chat_name, "work").into_iter().find(|x| x["body"]["kind"] == "turn.prompt" && x["body"]["prompt"] == answer["body"]["prompt"]).unwrap_or_default();
     s.ok(
-        "the page answered with a prompt_response for the card's option, naming the card's agent and turn",
-        answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string() && answer["body"]["agent"] == identity.as_str() && answer["body"]["turn"] == asked["body"]["turn"] && asked["principal"] == identity.as_str(),
+        "the page answered with a prompt_response for the card's option, naming the card's agent and turn, and its record (`answers`)",
+        answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string() && answer["body"]["agent"] == identity.as_str() && answer["body"]["turn"] == asked["body"]["turn"] && asked["principal"] == identity.as_str()
+            && answer["body"]["answers"] == json!({ "channel": "work", "seq": asked["seq"] }),
         json!({ "answer": answer, "card": asked }),
     );
     s.ok("the member's card closes too", chrome.until(&theirs, "!!document.querySelector('.prompt.closed .outcome.answered')", TURN), "");
@@ -1477,7 +1478,8 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     chrome.press(&page, "Enter", false)?;
     let install = ".prompt:not(.closed) button[data-option=\"install\"]";
     // its first turn waits for the bridge to see a new agent's runtime (its
-    // read of the computer, each minute: images/bridge `COMPUTER_EVERY_MS`)
+    // read of the computer: every few seconds in the stub, images/stub
+    // BRIDGE_COMPUTER_EVERY_MS)
     let asked = chrome.until(&page, &format!("!!document.querySelector({}) && document.querySelector('.prompt:not(.closed) .prompt-text')?.textContent === {}", js(install), js(CLAUDE_INSTALL_ASK)), Duration::from_secs(150));
     // its chat's row in the shell's list, as its listed records say (each
     // after the list's gap, `LISTED_MIN_GAP_MS`)

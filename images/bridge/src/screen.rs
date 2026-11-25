@@ -20,6 +20,9 @@
 //!   computer knows it by its label, which is no name (the page is told its
 //!   name, its fragment's title, by the platform's page framing it).
 //!
+//! Both sockets are the platform's proxy's alone (the cell's, which sends
+//! no `Origin` and no Fetch Metadata): a handshake carrying `Origin` or
+//! `sec-fetch-site`, a browser's own sent straight to the port, is 403.
 //! An `agent` or `viewer` that is no name is 400. An agent this bridge does
 //! not run, or one the image names no screen for when it names screens,
 //! is 404, as is the RFB stream of an agent with no display: one agent's
@@ -441,6 +444,17 @@ async fn tick(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     }
 }
 
+/// Whether a screen socket's handshake is a browser's own, sent straight
+/// to this port. The screen's sockets are for the platform's proxy: the
+/// cell checks a viewer's `Origin` against the computer's own and forwards
+/// the handshake with a header set of its own (`host_answer`), which has no
+/// `Origin` and no Fetch Metadata. A browser sends `Origin` on every
+/// WebSocket handshake, and Fetch Metadata where it supports it, so either
+/// one names a caller that is not the proxy, whatever its value.
+fn from_a_browser(headers: &hyper::HeaderMap) -> bool {
+    headers.contains_key(hyper::header::ORIGIN) || headers.contains_key("sec-fetch-site")
+}
+
 /// The agents, once the bridge has read them (within `AGENTS_WAIT_MS`).
 async fn running(agents: &Agents) -> Option<Vec<Named>> {
     let mut rx = agents.clone();
@@ -463,6 +477,9 @@ async fn handle(mut req: Request<Incoming>, shared: Arc<Shared>) -> Response<Bod
     match path.as_str() {
         "/websockify" | "/control" => {
             let rfb = path == "/websockify";
+            if from_a_browser(req.headers()) {
+                return net::refusal(StatusCode::FORBIDDEN, "forbidden", "a screen's socket opens through the computer's page alone");
+            }
             let (viewer, agent) = match asked(req.uri().query()) {
                 Ok(asked) => asked,
                 Err(why) => return net::refusal(StatusCode::BAD_REQUEST, "invalid", &why),

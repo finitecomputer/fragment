@@ -22,7 +22,7 @@ use fragment_core::org::Status;
 use crate::registry::calls::By;
 use crate::registry::orgs::Mine;
 use crate::stripe::Stripe;
-use crate::{acting_for, ask_registry, caller, js, json_answer, read_body, signer, Caller};
+use crate::{ask_registry, caller, js, json_answer, read_body, signer, Caller};
 use fragment_nip98::Payload;
 
 /// A Checkout's life, past Stripe's least (30 minutes) by a minute.
@@ -59,7 +59,7 @@ struct Portal {
 }
 
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
-    if acting_for(url)?.is_some() {
+    if crate::names_for(req, url)? {
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
     Ok(match caller(env, req, url, Payload::Read(bytes))? {
@@ -197,7 +197,8 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     if stripe_cfg.tax {
         form = form.push("automatic_tax[enabled]", "true");
     }
-    // the org's customer when it has paid; a comped org's pack makes none of its own
+    // the org's customer for its last payer; anyone else's, or a comped
+    // org's, is made on the buyer's email (registry/billing.rs `pack_begin`)
     form = billed(form, plan.customer.as_deref(), &plan.email, stripe_cfg.tax);
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-pack-{}-{attempt}", plan.org)).await?;

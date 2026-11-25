@@ -1485,6 +1485,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // the person's agents in any chat's @, and one asking another
     roster_ui(s, api, &mut b, &page, &me, &shots)?;
     ask_cli(s, api, &me)?;
+    // the chat list as home (FIN-722): squeezed, its agent, pins, delete
+    chat_list_home_ui(s, api, &mut b, &page, &me, &chat, &reader, &reader_id, &shots)?;
 
     // an app's window: the desktop's (its dock and its windows)
     let desktop = b.until(&page, "document.getElementById('layout').classList.contains('right-open') && document.getElementById('viewer').getBoundingClientRect().width > 0 && !!document.querySelector('#apps #add-app')", wait);
@@ -1562,61 +1564,58 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
-    // SimpleX only on an image that does it: the stub's bridge never says so
+    // SimpleX: its connector's on any seat (D3), and its computer's where an
+    // always-on computer whose image does it keeps it (its links, and a
+    // moved chat to keep there, until they move to doors: D4); the stub's
+    // bridge never says its image does
+    const CONNECTOR_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for]:not([data-simplex-computer])";
+    const COMPUTER_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for][data-simplex-computer]";
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let said = computers.body["computers"][0].get("simplex").cloned();
     let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     s.ok(
-        "settings offer no SimpleX on a computer whose image does not do it (the stub's, as production's before SimpleX): the section and its link hidden, no Set up, and its view says nothing of it",
-        computers.status == 200 && said.is_none() && !has("#settings-simplex:not([hidden])") && !has(".settings-nav-link[data-section=settings-simplex]:not([hidden])") && !text.contains("SimpleX"),
+        "settings offer SimpleX's connector on a computer whose image does not do it (the stub's, as every agent's own computer's): its section and nav link shown, each agent's Set up its connector's, and the computer's view says nothing of SimpleX",
+        computers.status == 200 && said.is_none() && has(CONNECTOR_ROW) && !has(COMPUTER_ROW) && has(".settings-nav-link[data-section=settings-simplex]:not([hidden])"),
         json!({ "simplex": said, "settings": &text[..text.len().min(600)] }),
     );
-    // its bridge says its image does (the lever, as `?simplex=1` would), and
-    // then no more: the open settings follow each, through the list's
-    // socket, with what was typed elsewhere on them kept (Alex's review)
-    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
-    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
-    let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
     // marked what it is, a word each (Paul, 2026-10-31), its nav link still
     // its name alone
     let tags = b.eval(&page, "[[...document.querySelectorAll('#settings-simplex .connector-tag')].map((t) => [t.textContent, t.title]), document.querySelector('.settings-nav-link[data-section=settings-simplex]')?.textContent]")?;
     s.ok(
-        "settings mark SimpleX experimental and secure (end to end), a word each, its nav link still \"SimpleX\"",
-        tags == json!([[["Experimental", ""], ["Secure", "End-to-end encrypted to your computer"]], "SimpleX"]),
+        "settings mark SimpleX experimental and secure (SimpleX's servers can't read it), a word each, its nav link still \"SimpleX\"",
+        tags == json!([[["Experimental", ""], ["Secure", "SimpleX's servers can't read these messages"]], "SimpleX"]),
         &tags,
     );
-    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
-    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
-    let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
-    s.ok(
-        "settings left open follow the computer's SimpleX: shown once its bridge says its image does it (not always on: it says the plan does), hidden once it no longer does, with nothing else redrawn",
-        on.status == 200 && on.body["simplex"] == true && shown && kept == json!(true) && off.status == 200 && off.body["simplex"] == false && hidden,
-        json!({ "on": on.body, "off": off.body, "shown": shown, "kept": kept, "hidden": hidden }),
-    );
-    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
-    // a $200 seat's holder who lets their computer sleep is told how to take
-    // it back, as they tick Billing's box, with Settings left open (#609's
-    // review: the line read the seat as Settings first did)
+    // its bridge says its image does (the lever, as `?simplex=1` would) on a
+    // $200 seat, its computer kept on: its computer's row; its holder lets it
+    // sleep (Billing's box, Settings left open): its connector's; kept on
+    // again, its computer's; its image no longer doing it, its connector's,
+    // through the list's socket, with what was typed elsewhere on them kept
+    // (Alex's review), and nothing else redrawn
     let op_session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&op_session, &s.operator);
-    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
     b.eval(&page, "(document.getElementById('settings').click(), true)")?;
     let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
-    let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
-    let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
+    let row_is = |which: &str| format!("!!document.querySelector({which:?}) && !document.querySelector({other:?})", other = if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW });
+    let kept_on = b.until(&page, &format!("!!({box_}) && !({box_}).checked && {}", row_is(COMPUTER_ROW)), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Turn off') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    let sleeps = b.until(&page, &row_is(CONNECTOR_ROW), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
+    let back = b.until(&page, &row_is(COMPUTER_ROW), std::time::Duration::from_secs(30));
+    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
+    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
+    let followed = b.until(&page, &row_is(CONNECTOR_ROW), wait);
+    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
+    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
     s.ok(
-        "a $200 seat's holder who ticks Billing's sleep box, Settings left open, is told in SimpleX to untick it; unticked, SimpleX offers Set up again",
-        comped.status == 200 && ready && told && back,
-        json!({ "comped": comped.status, "ready": ready, "told": told, "back": back, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
+        "an always-on computer whose image does SimpleX keeps each agent's SimpleX (its computer's Set up); let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
+        on.status == 200 && comped.status == 200 && kept_on && sleeps && back && off.status == 200 && off.body["simplex"] == false && followed && kept == json!(true),
+        json!({ "on": on.body, "comped": comped.status, "keptOn": kept_on, "sleeps": sleeps, "back": back, "off": off.body, "followed": followed, "kept": kept, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
     );
     // as it was for what follows: its computer let sleep, no SimpleX
     shell(api, &session, "PUT", "/api/seat", Some(&json!({ "sleeps": true })), &[])?;
-    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",
@@ -5503,9 +5502,14 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // Alex's review of #619: one home a page, whatever comes in what order.
     // A pane of its link page stands in a frame (`data-simplex`), and its
     // asks are its messages (the shell takes a message only from such a
-    // frame, of its origin); the computer says its image does SimpleX
+    // frame, of its origin); the computer says its image does SimpleX, and
+    // it is kept on: Settings' SimpleX row is then the computer's own
+    // (`data-simplex-computer`), shown once the shell's view of it says so
+    // (every seat's Settings shows SimpleX, its connector's elsewhere)
     let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": true }))?;
+    const ITS_OWN: &str = "!!document.querySelector('#settings-simplex:not([hidden]) [data-simplex-computer]')";
     let write_home = |home: Option<&str>| {
         let text = match home {
             Some(h) => format!("{{\n  \"tier\": \"cheap\",\n  \"home\": {h:?}\n}}\n"),
@@ -5528,7 +5532,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         ok && shows(b, p, home)
     };
     // a link's ticked box, then an unlink, with Settings open: the home, the bell and the pick follow
-    b.until(page, "!!document.querySelector('#settings-simplex:not([hidden])')", wait);
+    b.until(page, ITS_OWN, wait);
     ask(b, page, "link", Some(true))?;
     let linked = shows(b, page, "simplex") && home_now() == Some(json!("simplex"));
     ask(b, page, "unlink", None)?;
@@ -5553,7 +5557,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     for (as404, before, want, after) in [(false, None, Some(true), "simplex"), (true, None, Some(true), "simplex"), (false, Some("simplex"), None, "")] {
         anyhow::ensure!(write_home(before)? == 200, "agent.json as the case starts");
         let p = b.open_with_script(&format!("{}/settings", api.base), &hold(as404))?;
-        let read = b.until(&p, "typeof window.__read === 'function' && !!document.querySelector('#settings-simplex:not([hidden])')", wait);
+        let read = b.until(&p, &format!("typeof window.__read === 'function' && {ITS_OWN}"), wait);
         ask(b, &p, if want.is_some() { "link" } else { "unlink" }, want)?;
         let written = shows(b, &p, after);
         b.eval(&p, "(window.__read(), true)")?;
@@ -5625,6 +5629,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{refresh}"), None, &[])?;
     anyhow::ensure!(deleted.status == 200, "the fragment made for a refresh deleted: {deleted}");
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
+    super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;
@@ -6569,10 +6574,359 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
+/// The chat list as home (FIN-722), as a person uses it.
+/// - Squeezed: a window with no room for the sidebar, the chat and the
+///   desktop at their least (820 px, the desktop open as it is by default):
+///   the chat list stays and the desktop gives way. The desktop asked for
+///   there shows, the list giving way; Show sidebar brings the list back and
+///   never saves it closed, so widened, both are back. On a phone and a
+///   laptop at a high zoom (731 px), Show sidebar is in the top bar, one
+///   press from the list.
+/// - More: a section's More, pressed, shows all its chats and stays so
+///   after a reload (kept on this device); Less folds it, kept so too.
+/// - Its agent: the pill opens its menu as before; the New chat at its end
+///   opens a new chat with that agent alone.
+/// - Pins: Pin from the open chat's ⋯ and from a row's; pinned chats head
+///   their section by title, each shown, and hold their places as a
+///   message comes; the main agent, first already, offers no Pin to top.
+/// - Delete: a chat of theirs its agent spoke in, from its row's ⋯, asked
+///   once more naming it: it leaves the list and the platform (404), and
+///   their agent still answers in another chat. Invalid: none on the
+///   agent's own chat, nor on one someone shared with them, nor, in either
+///   menu, on a Telegram or SimpleX connector with a label of its own bound
+///   as their agent's door. The open chat deleted gives its place to a chat
+///   the list shows, never a newer agents' pair chat, which has no row.
+#[allow(clippy::too_many_arguments)]
+fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, chat: &str, reader: &str, reader_id: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    // the chat open now, open again at the end: the checks after these say in it
+    let was_open = open_chat(b, page);
+    let settled = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
+    let open = |side: &str| format!("document.getElementById('layout').classList.contains('{side}-open')");
+    let (left, right) = (open("left"), open("right"));
+    let toggle_shown = "document.getElementById('toggle-left').checkVisibility()";
+    let wide = b.eval(page, "[innerWidth, innerHeight]")?;
+    let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(800) as u32);
+    let both_schemes = |b: &mut Browser, name: &str| -> Result<()> {
+        for scheme in ["light", "dark"] {
+            b.color_scheme(page, scheme)?;
+            b.until(page, settled, wait);
+            let _ = b.screenshot(page, &shots.join(format!("{name}-{scheme}.png")));
+        }
+        b.color_scheme(page, "light")
+    };
+
+    // ---- squeezed: 820 px, the layout as a person first has it ----
+    b.viewport(page, 820, h, false)?;
+    b.eval(page, "(localStorage.removeItem('finite.layout.v3'), true)")?;
+    b.reload(page)?;
+    let stays = b.until(page, &format!("innerWidth === 820 && !document.getElementById('layout').hidden && !document.getElementById('layout').classList.contains('narrow') && {left} && !{right} && !{toggle_shown} && document.getElementById('sidebar').getBoundingClientRect().width > 0 && !!document.querySelector('#chats .chat-row') && {settled}"), wait);
+    both_schemes(b, "squeezed-820-list-stays")?;
+    b.click(page, "#toggle-right")?;
+    let asked = b.until(page, &format!("{right} && !{left} && {toggle_shown} && {settled}"), wait);
+    let _ = b.screenshot(page, &shots.join("squeezed-820-desktop-asked.png"));
+    b.click(page, "#toggle-left")?;
+    let back = b.until(page, &format!("{left} && !{right} && document.getElementById('sidebar').getBoundingClientRect().width > 0 && {settled}"), wait);
+    let saved = b.eval(page, "JSON.parse(localStorage.getItem('finite.layout.v3'))")?;
+    both_schemes(b, "squeezed-820-show-sidebar")?;
+    b.viewport(page, w, h, false)?;
+    let widened = b.until(page, &format!("innerWidth === {w} && {left} && {right} && {settled}"), wait);
+    s.ok(
+        "FIN-722: at 820 px with the desktop open, the chat list stays and the desktop gives way; the desktop asked for there shows, the list giving way; Show sidebar brings the list back, never saved closed, and widened both are back",
+        stays && asked && back && saved["leftOpen"] == true && saved["rightOpen"] == true && widened,
+        json!({ "stays": stays, "asked": asked, "back": back, "saved": saved, "widened": widened }),
+    );
+    // a phone, and a laptop at a high zoom: the list one press away
+    let mut one_press = json!({});
+    for (width, mobile, name) in [(390, true, "phone-390-list"), (731, false, "laptop-zoomed-731-list")] {
+        b.viewport(page, width, if mobile { 844 } else { h }, mobile)?;
+        let shut = b.until(page, &format!("innerWidth === {width} && document.getElementById('layout').classList.contains('narrow') && !{left} && {toggle_shown} && {settled}"), wait);
+        let _ = b.screenshot(page, &shots.join(format!("{name}-closed.png")));
+        b.click(page, "#toggle-left")?;
+        let listed = b.until(page, &format!("{left} && document.querySelector('.sidebar-shell').getBoundingClientRect().width > 0 && !!document.querySelector('#chats .chat-row') && {settled}"), wait);
+        both_schemes(b, name)?;
+        b.eval(page, "(document.getElementById('scrim').click(), true)")?;
+        b.until(page, &format!("!{left} && {settled}"), wait);
+        one_press[name] = json!(shut && listed);
+    }
+    b.viewport(page, w, h, false)?;
+    anyhow::ensure!(b.until(page, &format!("innerWidth === {w} && {left} && {settled}"), wait), "wide again, the sidebar open");
+    s.ok(
+        "FIN-722: on a phone (390) and a laptop at a high zoom (731), Show sidebar is in the top bar and one press shows the list",
+        one_press.as_object().is_some_and(|o| o.len() == 2 && o.values().all(|v| v == true)),
+        &one_press,
+    );
+
+    // ---- its section's More, kept; its pill's menu, and its New chat ----
+    let first_id = agent_ids(api, me.session, &[me.first])?.remove(0);
+    let made = |label: &str, title: &str| -> Result<String> {
+        let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "chat", "title": title })), &[])?;
+        let name = r.body["name"].as_str().unwrap_or_default().to_string();
+        let joined = shell(api, me.session, "PUT", &format!("/api/f/{name}/members/{first_id}"), Some(&json!({ "role": "editor" })), &[])?;
+        anyhow::ensure!(r.status == 200 && joined.status == 200, "{title} made with their agent: {r} {joined}");
+        Ok(name)
+    };
+    let chat_names = || -> Result<Vec<String>> {
+        Ok(shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
+    };
+    let titles = ["Zinnia", "Tulip", "Rose", "Peony", "Lily", "Iris"];
+    let mut names = vec![];
+    for t in titles {
+        names.push(made(&format!("home-{}", t.to_lowercase()), t)?);
+    }
+    let [zinnia, tulip, rose, _, _, iris] = [0, 1, 2, 3, 4, 5].map(|i| names[i].clone());
+    let main = own_named(api, me.session, me.first)?;
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{main}")));
+    let main_chats = format!("(({HEROES}).find((h) => h.fragment === {})?.chats ?? [])", js(&main));
+    let row = |name: &str| format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{name}")))));
+    // its section's More (keyed by its agent's identity), and whether it is unfolded
+    let more = js(&format!("#chats [data-key={}]", js(&format!("more:{first_id}"))));
+    let unfolded = |open: bool| format!("document.querySelector({more})?.getAttribute('aria-expanded') === '{open}'");
+    let kept = "(() => { try { return JSON.parse(localStorage.getItem('finite.sidebar.unfolded.v1')) ?? []; } catch { return 'unreadable'; } })()";
+    // folded to start with (a More an earlier check pressed is kept too)
+    b.until(page, &format!("!!document.querySelector({more})"), wait);
+    b.eval(page, &format!("({} && document.querySelector({more}).click(), true)", unfolded(true)))?;
+    // (made now, nothing said in them: the newest, by name; the sixth folded)
+    let listed = b.until(page, &format!("{main_chats}.includes({}) && {} && {settled}", js(&iris), unfolded(false)), wait);
+    let folded = b.eval(page, &format!("{main_chats}.length"))?;
+    let all = names.iter().map(|n| format!("{main_chats}.includes({})", js(n))).collect::<Vec<_>>().join(" && ");
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
+    let opened = b.until(page, &format!("{} && {main_chats}.length > {folded} && {all} && {settled}", unfolded(true)), wait);
+    b.reload(page)?;
+    let still_open = b.until(page, &format!("!document.getElementById('layout').hidden && {} && {all} && {settled}", unfolded(true)), wait);
+    let stored_open = b.eval(page, kept)?;
+    let _ = b.screenshot(page, &shots.join("desktop-more-kept-after-reload.png"));
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("more:{first_id}"))))?;
+    b.until(page, &unfolded(false), wait);
+    b.reload(page)?;
+    let still_folded = b.until(page, &format!("!document.getElementById('layout').hidden && {} && {main_chats}.length === {folded} && {settled}", unfolded(false)), wait);
+    let stored_folded = b.eval(page, kept)?;
+    s.ok(
+        "FIN-722: a section's More, pressed, shows all its chats and stays so after a reload (kept on this device); its Less, pressed, folds it again, and a reload keeps it folded",
+        listed && opened && still_open && stored_open.as_array().is_some_and(|l| l.contains(&json!(format!("agent:{main}")))) && still_folded && stored_folded.as_array().is_some_and(|l| !l.contains(&json!(format!("agent:{main}")))),
+        json!({ "opened": opened, "after reload": still_open, "stored": stored_open, "folded after reload": still_folded, "stored folded": stored_folded }),
+    );
+    // the pill opens its agent's menu, as before; the Reader's New chat, from
+    // their main agent's chat, makes a chat with the Reader alone, one
+    let pill_menu = hero_menu(b, page, &hero)?;
+    let reader_hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
+    open_row(b, page, chat, wait)?;
+    let before = chat_names()?;
+    b.click(page, &format!("{reader_hero} .agent-new-chat"))?;
+    let started = b.until(page, &format!("document.getElementById('menu').hidden && document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden) && {settled}"), wait);
+    let fresh = open_chat(b, page);
+    let fresh_row = own_row_of(api, me.session, &fresh);
+    let added: Vec<String> = chat_names()?.into_iter().filter(|n| !before.contains(n)).collect();
+    let _ = b.screenshot(page, &shots.join("desktop-agent-new-chat.png"));
+    s.ok(
+        "FIN-722: pressing their agent's pill opens its menu as before (its New chat among it); the Reader's New chat at its pill's end opens a new chat with the Reader alone, one at most made",
+        pill_menu.iter().any(|m| m == "New chat") && started && fresh != chat && fresh_row["agents"] == json!([reader_id]) && fresh_row["title"] == "New chat" && added.len() <= 1 && added.iter().all(|n| *n == fresh),
+        json!({ "menu": pill_menu, "opened": fresh, "row": fresh_row, "made": added }),
+    );
+    // made by it (not a blank chat it opened again): gone at the end
+    let made_here = (!before.contains(&fresh)).then_some(fresh);
+
+    // ---- pins: from the open chat's ⋯ and a row's; by title, held ----
+    // (unfolded, so each row and its newest words are drawn; folded again at
+    // the end; a More pressed to reach a row since, as `open_row` presses
+    // it, is kept, so each is pressed only when it is not so already)
+    let fold_to = |b: &mut Browser, open: bool| -> Result<bool> {
+        b.eval(page, &format!("({} && document.querySelector({more}).click(), true)", unfolded(!open)))?;
+        Ok(b.until(page, &unfolded(open), wait))
+    };
+    anyhow::ensure!(fold_to(b, true)?, "their agent's chats unfolded");
+    // a row's ⋯, pressed by script: shown on hover alone where a pointer hovers
+    let row_menu = |b: &mut Browser, name: &str| -> Result<bool> {
+        let more = js(&format!("#chats [data-key={}] .row-more", js(&format!("chat:{name}"))));
+        b.eval(page, &format!("(document.querySelector({more})?.click(), true)"))?;
+        Ok(b.until(page, &format!("!document.getElementById('menu').hidden && document.getElementById('menu').querySelectorAll('button').length > 0 && document.querySelector({more})?.getAttribute('aria-expanded') === 'true'"), wait))
+    };
+    let said = |chat: &str, id: &str, text: &str| shell(api, me.session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })), &[]);
+    // Iris said something first, so it is the older of the two
+    let r0 = said(&iris, "home-pin-0", "pins iris first")?;
+    anyhow::ensure!(r0.status == 200 && b.until(page, &format!("{}?.textContent.includes('pins iris first')", row(&iris)), agent_wait), "Iris's message listed: {r0}");
+    open_row(b, page, &tulip, wait)?;
+    b.click(page, "#chat-options")?;
+    let from_chat = menu_item(b, page, "Pin")?;
+    let pinned_one = b.until(page, &format!("!!{}?.querySelector('.pin-mark') && {main_chats}[0] === {}", row(&tulip), js(&tulip)), wait);
+    let from_row = row_menu(b, &iris)? && menu_item(b, page, "Pin")?;
+    let by_title = format!("{main_chats}.slice(0, 2).join() === {}", js(&format!("{iris},{tulip}")));
+    let pinned_two = b.until(page, &format!("!!{}?.querySelector('.pin-mark') && {by_title}", row(&iris)), wait);
+    // a message to the second: the order holds; one to an unpinned chat goes under them
+    let r1 = said(&tulip, "home-pin-1", "pins hold tulip")?;
+    let r2 = said(&rose, "home-pin-2", "pins hold rose")?;
+    let held = r1.status == 200 && r2.status == 200
+        && b.until(page, &format!("{}?.textContent.includes('pins hold tulip') && {}?.textContent.includes('pins hold rose') && {by_title} && {main_chats}.indexOf({}) > 1", row(&tulip), row(&rose), js(&rose)), agent_wait);
+    let main_menu = hero_menu(b, page, &hero)?;
+    // folded again: both pinned still shown, first
+    let kept = fold_to(b, false)? && b.until(page, &format!("{} && {by_title} && {settled}", unfolded(false)), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-pins-1280-light.png"));
+    b.color_scheme(page, "dark")?;
+    let _ = b.screenshot(page, &shots.join("desktop-pins-1280-dark.png"));
+    b.color_scheme(page, "light")?;
+    b.viewport(page, 390, 844, true)?;
+    b.until(page, &format!("innerWidth === 390 && document.getElementById('layout').classList.contains('narrow') && {settled}"), wait);
+    b.click(page, "#toggle-left")?;
+    let phone_pins = b.until(page, &format!("{left} && {by_title} && {settled}"), wait);
+    both_schemes(b, "phone-390-pins")?;
+    b.eval(page, "(document.getElementById('scrim').click(), true)")?;
+    b.viewport(page, w, h, false)?;
+    b.until(page, &format!("innerWidth === {w} && {left} && {settled}"), wait);
+    s.ok(
+        "FIN-722: Pin from the open chat's ⋯ and from a row's ⋯ puts each at the top of its agent's section, marked, by title; a new message moves neither, an unpinned chat's goes under them; their main agent, first already, offers no Pin to top",
+        from_chat && pinned_one && from_row && pinned_two && held && kept && phone_pins && !main_menu.iter().any(|m| m == "Pin to top" || m == "Unpin") && main_menu.iter().any(|m| m == "New chat"),
+        json!({ "section": b.eval(page, &main_chats)?, "main agent's menu": main_menu, "folded, pins kept": kept, "phone": phone_pins }),
+    );
+
+    // ---- delete ----
+    // their agent speaks in the chat first, so its computer holds it
+    let r = said(&zinnia, "home-del-1", "before delete zinnia")?;
+    let spoke = r.status == 200 && s.eventually(agent_wait, || replies(api, me.session, &zinnia, &first_id, "before delete zinnia") >= 1);
+    let items_of = |b: &mut Browser, name: &str| -> Result<Vec<String>> {
+        let more = format!("#chats [data-key={}] .row-more", js(&format!("chat:{name}")));
+        if b.eval(page, &format!("!document.querySelector({})", js(&more)))? == true {
+            b.eval(page, &format!("({UNFOLD}, true)"))?;
+            b.until(page, &format!("!!document.querySelector({})", js(&more)), wait);
+        }
+        anyhow::ensure!(row_menu(b, name)?, "{name}'s ⋯ opened its menu");
+        let items = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
+        b.press(page, "Escape", false)?;
+        b.until(page, "document.getElementById('menu').hidden", wait);
+        Ok(items)
+    };
+    // someone else's chat, shared with them
+    let me_id = api.who(me.session)?["id"].as_str().context("the person's identity")?.to_string();
+    let other = api.person()?;
+    let theirs = api.qualified(&other, "home-theirs")?;
+    let r = api.create_with(&other, json!({ "name": theirs, "template": "chat", "title": "Their plans" }))?;
+    anyhow::ensure!(r.status == 200 && api.share(&theirs, &me_id, "editor")?.status == 200, "a chat shared with them: {r}");
+    b.until(page, &format!("!!{}", row(&theirs)), wait);
+    let own_chat_items = items_of(b, chat)?;
+    let shared_items = items_of(b, &theirs)?;
+    // connectors with labels of their own (no `-telegram`), each bound as
+    // their agent's door: its reach says so, whatever its label, in the
+    // row's ⋯ and the open chat's
+    let mut connectors = vec![];
+    let mut connector_items = serde_json::Map::new();
+    for (template, label, title) in [("telegram", "home-desk", "Help desk"), ("simplex", "home-line", "Phone line")] {
+        let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": template, "title": title })), &[])?;
+        let name = r.body["name"].as_str().unwrap_or_default().to_string();
+        let linked = shell(api, me.session, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": main })), &[])?;
+        anyhow::ensure!(r.status == 200 && linked.status == 200, "{title}, a {template} connector, bound as their agent's door: {r} {linked}");
+        connectors.push(name.clone());
+        b.until(page, &format!("!!{}", row(&name)), wait);
+        let reach = own_row_of(api, me.session, &name)["sharing"]["reach"].clone();
+        let in_row = items_of(b, &name)?;
+        open_row(b, page, &name, wait)?;
+        b.click(page, "#chat-options")?;
+        b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').querySelectorAll('button').length > 0", wait);
+        let in_chat = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
+        b.press(page, "Escape", false)?;
+        b.until(page, "document.getElementById('menu').hidden", wait);
+        connector_items.insert(template.to_string(), json!({ "reach": reach, "row": in_row, "chat": in_chat }));
+    }
+    open_row(b, page, chat, wait)?;
+    s.ok(
+        "FIN-722: a Telegram and a SimpleX connector, each with a label of its own and bound as their agent's door, offer no Delete in their row's ⋯ nor the open chat's",
+        connector_items.len() == 2 && connector_items.values().all(|c| c["reach"] == true && !strings(&c["row"]).iter().any(|i| i == "Delete…") && !strings(&c["chat"]).iter().any(|i| i == "Delete…") && !strings(&c["row"]).is_empty() && !strings(&c["chat"]).is_empty()),
+        Value::Object(connector_items.clone()),
+    );
+    let zinnia_items = items_of(b, &zinnia)?;
+    let asked = row_menu(b, &zinnia)?
+        && menu_item(b, page, "Delete…")?
+        && b.until(page, "document.getElementById('delete-chat-dialog').open && document.getElementById('delete-chat-title').textContent === 'Delete Zinnia?'", wait);
+    let _ = b.screenshot(page, &shots.join("desktop-delete-confirm-1280-light.png"));
+    b.color_scheme(page, "dark")?;
+    let _ = b.screenshot(page, &shots.join("desktop-delete-confirm-1280-dark.png"));
+    b.color_scheme(page, "light")?;
+    b.click(page, "#delete-chat-go")?;
+    let gone = b.until(page, &format!("!document.getElementById('delete-chat-dialog').open && !{} && {settled}", row(&zinnia)), wait);
+    let status = shell(api, me.session, "GET", &format!("/api/f/{zinnia}/status"), None, &[])?;
+    let unlisted = own_row_of(api, me.session, &zinnia).is_null();
+    let _ = b.screenshot(page, &shots.join("desktop-deleted.png"));
+    // their agent's computer goes on: it answers in another chat
+    let r = said(&tulip, "home-del-2", "after delete tulip")?;
+    let answers = r.status == 200 && s.eventually(agent_wait, || replies(api, me.session, &tulip, &first_id, "after delete tulip") >= 1);
+    s.ok(
+        "FIN-722: a chat of theirs its agent spoke in, deleted from its ⋯ after a confirm that names it, leaves the list and the platform (404), and their agent still answers in another chat; their agent's own chat and one shared with them offer no Delete",
+        spoke && zinnia_items.iter().any(|i| i == "Delete…") && asked && gone && status.status == 404 && unlisted && answers
+            && !own_chat_items.iter().any(|i| i == "Delete…") && !shared_items.iter().any(|i| i == "Delete…"),
+        json!({ "own chat": own_chat_items, "shared": shared_items, "zinnia": zinnia_items, "asked": asked, "gone": gone, "status": status.status, "unlisted": unlisted, "answers": answers }),
+    );
+
+    // the open chat, deleted from its own ⋯: another opens in its place, one
+    // the list shows; an agents' pair chat (no row), newer, is passed over
+    let pair_label = pair_label(label_of(&main), label_of(reader));
+    let listed = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
+    let found = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == "chat" && f["name"].as_str().map(label_of) == Some(pair_label.as_str())).and_then(|f| f["name"].as_str().map(str::to_string)));
+    let made_pair = found.is_none();
+    let pair = match found {
+        Some(name) => name,
+        None => {
+            let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": pair_label, "template": "chat" })), &[])?;
+            let name = r.body["name"].as_str().unwrap_or_default().to_string();
+            for id in [first_id.as_str(), reader_id] {
+                let joined = shell(api, me.session, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })), &[])?;
+                anyhow::ensure!(r.status == 200 && joined.status == 200, "their two agents' pair chat: {r} {joined}");
+            }
+            name
+        }
+    };
+    let r = said(&pair, "home-pair-1", "a newer pair chat")?;
+    let newest = r.status == 200
+        && s.eventually(wait, || own_row_of(api, me.session, &pair)["preview"].as_str().is_some_and(|p| p.contains("a newer pair chat")))
+        && b.until(page, &format!("!{}", row(&pair)), wait);
+    let lily = names[4].clone();
+    open_row(b, page, &lily, wait)?;
+    b.click(page, "#chat-options")?;
+    let offered = menu_item(b, page, "Delete…")? && b.until(page, "document.getElementById('delete-chat-dialog').open && document.getElementById('delete-chat-title').textContent === 'Delete Lily?'", wait);
+    b.click(page, "#delete-chat-go")?;
+    let open_now = "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null";
+    let moved = offered
+        && b.until(page, &format!("!document.getElementById('delete-chat-dialog').open && !{} && (({open_now}) ?? {}) !== {} && !!document.querySelector('#chats [data-key=\"chat:' + ({open_now}) + '\"]') && document.getElementById('chat-title').textContent !== 'Lily' && {settled}", row(&lily), js(&lily), js(&lily)), wait);
+    let _ = b.screenshot(page, &shots.join("desktop-deleted-open-chat.png"));
+    let opened = b.eval(page, open_now)?;
+    s.ok(
+        "FIN-722: the open chat, deleted from its own ⋯, leaves the list and another chat of theirs the list shows opens in its place, not their agents' newer pair chat",
+        newest && moved && opened != json!(pair) && shell(api, me.session, "GET", &format!("/api/f/{lily}/status"), None, &[])?.status == 404,
+        json!({ "offered": offered, "newest": newest, "pair": pair, "open": opened, "title": b.eval(page, "document.getElementById('chat-title').textContent")? }),
+    );
+
+    // as they were: nothing pinned, the chats made here and the shared one gone
+    for name in [&tulip, &iris] {
+        shell(api, me.session, "PUT", &format!("/api/fragments/{name}/pinned"), Some(&json!({ "pinned": false })), &[])?;
+    }
+    for name in names.iter().filter(|n| **n != zinnia && **n != lily) {
+        shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
+    }
+    api.signed(&other, "DELETE", &format!("/api/f/{theirs}"), None)?;
+    for name in connectors.iter().chain(made_pair.then_some(&pair)).chain(made_here.as_ref()) {
+        shell(api, me.session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
+    }
+    anyhow::ensure!(b.until(page, &format!("{} && {settled}", names.iter().chain([&theirs]).map(|n| format!("!{}", row(n))).collect::<Vec<_>>().join(" && ")), wait), "the chats made here gone from the list");
+    if was_open.is_empty() {
+        return Ok(());
+    }
+    open_row(b, page, &was_open, wait)
+}
+
 /// A chat's `unread` in the person's list (0 when its row leaves it out).
 fn unread_of(api: &Api, session: &str, chat: &str) -> i64 {
     let r = shell(api, session, "GET", "/api/fragments", None, &[]);
     r.ok().and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat).map(|f| f["unread"].as_i64().unwrap_or(0)))).unwrap_or(-1)
+}
+
+/// Two agents' pair chat's label, as threads.js `pairLabel` makes it: their
+/// labels in order, joined by `-`, each cut to fit when both do not.
+fn pair_label(a: &str, b: &str) -> String {
+    const ROOM: usize = 39;
+    let (x, y) = if a <= b { (a, b) } else { (b, a) };
+    if x.len() + 1 + y.len() <= ROOM {
+        return format!("{x}-{y}");
+    }
+    let cut = |l: &str| l[..l.len().min((ROOM - 1) >> 1)].trim_end_matches('-').to_string();
+    format!("{}-{}", cut(x), cut(y))
 }
 
 /// The fragment of the chat the shell shows (its frame not hidden).

@@ -111,8 +111,13 @@ ARG STUB_VERSION=1
 RUN echo "$STUB_VERSION" > /opt/fragment/screen/version.txt
 # Its answer to a save's hold names `*.scratch` as what the save leaves out
 # (docs/computers.md, "The hold"): nothing it keeps another way, only so the
-# platform's lanes can see a save leave out what a guest names.
+# platform's lanes can see a save leave out what a guest names. It reads its
+# computer's view every 5 s, where an image's bridge reads it every minute
+# (images/bridge limits.rs `COMPUTER_EVERY_MS`): the lanes that wait on a
+# read (a filling disk told to its agent, an agent's new runtime followed)
+# wait seconds, not a minute each. A read is one small call.
 ENV BRIDGE_RUNTIME=script \
+    BRIDGE_COMPUTER_EVERY_MS=5000 \
     BRIDGE_HELD_LEAVE_OUT=*.scratch \
     BRIDGE_STATE_DIR=/data/bridge \
     BRIDGE_MEDIA_DIR=/tmp/bridge-media \

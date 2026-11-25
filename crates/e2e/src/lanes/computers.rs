@@ -359,14 +359,15 @@ const TOLD_FILLING: &str = "(told: Your computer is almost full: only 2.4 GB of 
 /// Its agent told to make room: a read that finds its disk filling (the
 /// `disk` lever, as a read after a save: a 20 GB disk with 9 GB free by
 /// `df` whose `/data` restores to 14.2 GB, 2.4 GB of room) reaches its
-/// guest at its next read of its view (the bridge's, a minute apart at
-/// most: the `saves` lever's `heard`), and its agent's next turn carries
+/// guest at its next read of its view (the bridge's, a few seconds apart
+/// in the stub: the `saves` lever's `heard`), and its agent's next turn carries
 /// the line first in its note, which the stub's scripted runtime says back;
 /// the turn after carries none (once per read). A read with room again,
 /// once its guest read it, tells nothing. Starts and ends awake. Answers
 /// how many replies of its agent it added.
 fn told_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
-    // its bridge reads its view a minute apart (images' COMPUTER_EVERY_MS), and some
+    // its bridge reads its view every few seconds (the stub's
+    // BRIDGE_COMPUTER_EVERY_MS), well within this; an image's, a minute apart
     let reread = Duration::from_secs(60 + 30);
     let heard = || lever(api, c.id, "saves").ok().and_then(|r| r.body["heard"].as_i64()).unwrap_or(0);
     let replies = || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity);
@@ -1403,6 +1404,53 @@ struct Doors<'a> {
 /// (telegram_settings.rs): this connector, set up as its page did before,
 /// a release later; and, once it is no door, another its agent's Set up
 /// makes. Answers the replies its agent's pokes made in the lane's own chat.
+/// Telegram's delivery of an update to a connector's inbox, with or without its webhook's secret.
+type Deliver<'a> = &'a dyn Fn(Value, Option<&str>) -> Result<crate::api::Reply>;
+
+/// Its agent's questions (FIN-747): a card of choices goes to Telegram as
+/// the computer's own SimpleX words one (applib/question.mjs), and its
+/// owner's next message there answers it, once, the turn going on with
+/// their words and no turn of their message's own; a card that needs a
+/// button says so there, and pressed in the chat, the turn's answer goes
+/// to Telegram too.
+fn telegram_questions(s: &mut Suite, api: &Api, c: &Doors, tg: &fragment_fakes::telegram::Telegram, name: &str, (deliver, hook, paul): (Deliver<'_>, &str, i64), wake: Duration) -> Result<()> {
+    use fragment_fakes::telegram::Telegram;
+    let said = |text: &str| tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"] == text);
+    let card_of = |text: &str| records(api, c.owner, name, "work").into_iter().find(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["text"] == text).unwrap_or_default();
+    deliver(Telegram::message(15, paul, "Paul", "choose a plant"), Some(hook))?;
+    let question = "What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)";
+    let shown = s.eventually(wake, || said(question));
+    let card = card_of("What should I plant?");
+    s.ok(
+        "its agent's question goes to Telegram, its choices named and how to answer, as the computer's own SimpleX words it",
+        shown && card["body"]["asks"] == c.owner_id,
+        json!({ "sent": tg.sent(), "card": card }),
+    );
+    deliver(Telegram::message(16, paul, "Paul", "Mint"), Some(hook))?;
+    let chose = s.eventually(wake, || tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"].as_str().is_some_and(|t| t.contains("choose a plant (chose: Mint)"))));
+    let closed: Vec<Value> = records(api, c.owner, name, "work").into_iter().filter(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["prompt"] == card["body"]["prompt"]).collect();
+    let replies = agent_replies(&records(api, c.owner, name, "chat"), c.identity);
+    let own_turn = replies.iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.ends_with("] Mint")));
+    s.ok(
+        "its owner's next message from Telegram answers it, once: the card closed with their words, its turn going on with them, and no turn of its own",
+        chose && closed.len() == 1 && closed[0]["body"]["outcome"] == "answered" && closed[0]["body"]["by"] == c.owner_id && closed[0]["body"]["text"] == "Mint" && !own_turn,
+        json!({ "closed": closed, "replies": replies, "sent": tg.sent() }),
+    );
+    deliver(Telegram::message(17, paul, "Paul", "approve this"), Some(hook))?;
+    let pressed = "Run `rm -rf ./scratch`?\n\n(This one needs a button: answer it in our chat.)";
+    let told = s.eventually(wake, || said(pressed));
+    let card = card_of("Run `rm -rf ./scratch`?");
+    let answer = json!({ "id": "e2e-tg-press", "body": { "kind": "prompt_response", "prompt": card["body"]["prompt"], "option": "once", "agent": c.identity, "turn": card["body"]["turn"], "answers": { "channel": "work", "seq": card["seq"] } } });
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&answer))?;
+    let approved = s.eventually(wake, || tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"].as_str().is_some_and(|t| t.contains("approve this (approved)"))));
+    s.ok(
+        "a question that needs a button says so in Telegram; pressed in the chat, its turn's answer goes to Telegram",
+        told && r.status == 200 && approved,
+        json!({ "pressed": { "status": r.status, "body": r.body }, "card": card, "sent": tg.sent() }),
+    );
+    Ok(())
+}
+
 fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
     use fragment_fakes::telegram::{Telegram, BOT_USERNAME};
     const TOKEN: &str = "7001000:e2e-telegram-bot-token";
@@ -1532,14 +1580,21 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     // (FIN-393, telegram_settings.rs)
     let settings = super::telegram_settings::Connector { owner: c.owner, owner_id: c.owner_id, agent: c.agent, identity: c.identity, tg: &tg, token: TOKEN, wake };
     super::telegram_settings::after_a_release(s, api, &settings, &name, HOOK)?;
-    // its words before a tool call stay in the chat; a reply's file, which a
-    // viewer cannot upload, is named in its words
+    // its words before a tool call stay in the chat; a reply's file, which
+    // its agent (a viewer there) uploads as the connector's own agent, is
+    // the chat's, and Telegram is told so with its words
     deliver(Telegram::message(12, PAUL, "Paul", "tool please"), Some(HOOK))?;
     let tooled = s.eventually(wake, || sent("tool please").is_some());
     s.ok("its agent's interim words are not sent to Telegram, its answer is", tooled && sent("Let me look.").is_none(), json!(tg.sent()));
     deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
-    let named = s.eventually(wake, || sent("could not be attached").is_some());
-    s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+    let named = s.eventually(wake, || sent("open the chat to see it").is_some());
+    let drawn = agent_replies(&records(api, c.owner, &name, "chat"), c.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
+    let blob = api.signed(c.owner, "GET", &format!("/api/f/{name}/blobs/{}", drawn["body"]["attachments"][0]["sha256"].as_str().unwrap_or("")), None)?;
+    s.ok(
+        "its agent's reply's file is in the connector's chat (its agent, a viewer there, uploads it), and Telegram is told so with its words",
+        named && blob.status == 200 && blob.text.contains("a drawing for") && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
+        json!({ "sent": tg.sent(), "reply": drawn, "blob": blob.status }),
+    );
     // while its agent works on a message from Telegram (a slow tool call),
     // Telegram shows the bot typing, and no longer once its answer went
     let relay = ran(&deliver(Telegram::message(14, PAUL, "Paul", "tool please, slowly"), Some(HOOK))?);
@@ -1555,6 +1610,7 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
             && answer.is_some_and(|at| actions.iter().any(|a| a["after"] == at) && actions.iter().all(|a| a["action"] == "typing" && a["after"].as_u64().is_some_and(|n| n <= at as u64))),
         json!({ "relay": relay, "typing": typing, "answer": answer, "actions": actions, "sent": tg.sent() }),
     );
+    telegram_questions(s, api, c, &tg, &name, (&deliver, HOOK, PAUL), wake)?;
 
     // only its owner edits it: the agent, acting for its owner, sets none of
     // its secrets (it would know the webhook's and forge a delivery), writes
@@ -2742,6 +2798,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             // SimpleX's connector, on a door (run by name: its stack builds the door's image)
             let sx = super::simplex_door::Agent { owner: &owner, owner_id: &owner_id, computer: &id, agent: &agent_name, identity: &identity, wake };
             super::simplex_door::connector(s, api, &sx)?;
+            // and set up from Settings, its connector's (D3)
+            super::simplex_setup::from_settings(s, api, &sx)?;
         }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
@@ -2863,9 +2921,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok("a second agent runs on the same computer", r.status == 200 && fragment_core::npub::is_identity(&maple_id) && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
-    // the stub's bridge reads its agents again every minute (the Hermes lane
-    // proves the seconds of our Hermes image): a sleep and a wake follows the
-    // new one at once
+    // the stub's bridge reads its agents again every few seconds (an
+    // image's, every minute; the Hermes lane proves the seconds of our
+    // Hermes image): a sleep and a wake follows the new one at once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();
