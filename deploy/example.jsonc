@@ -158,7 +158,16 @@
                                         "quantizations": ["fp8", "bf16"],
                                         "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
     "fallback": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" },
-    "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" }
+    "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" },
+    // Transcription (docs/api.md, Models): an agent's voice memos, here on
+    // Workers AI's Whisper at its neurons a minute of audio. A self-hosted
+    // deployment names its own OpenAI-compatible server, at its dollars a
+    // minute (docs/self-host.md, "Use your own models"):
+    //   "transcription": { "provider": "openai", "base_url": "https://stt.example.internal/v1",
+    //                      "key": "fragment-transcription-key", "model": "whisper-large-v3",
+    //                      "price": { "audio_minute": 0 } }
+    "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo",
+                       "price": { "neurons_a_minute": 46.63 } }
     // Embeddings (docs/api.md, Models): BGE-M3 on Workers AI unnamed, as
     // if named so:
     //   "embeddings": { "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024 }
