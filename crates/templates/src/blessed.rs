@@ -323,6 +323,29 @@ mod tests {
         assert!(CONNECTORS.iter().all(|c| fragment_proto::Visibility::made_from(Some(c)) == fragment_proto::Visibility::Members), "{CONNECTORS:?}");
     }
 
+    /// Goal (FIN-747): every door shows its agent's questions one way, as
+    /// the computer's own SimpleX shows one. Method: every connector
+    /// carries the one question module (the same bytes: Telegram's is a
+    /// link to SimpleX's), imports it, and runs its mirror on its agent's
+    /// questions on `work` alone (`kinds`), not each step of its turns.
+    #[test]
+    fn every_connector_asks_one_way() {
+        let question = |c: &str| {
+            let t = template(c).unwrap();
+            bytes_of(t, t.file("applib/question.mjs").unwrap_or_else(|| panic!("{c} carries the question module")))
+        };
+        for c in CONNECTORS {
+            assert_eq!(question(c), question(CONNECTORS[0]), "{c}'s question module is the one");
+            let t = template(c).unwrap();
+            let app = String::from_utf8(bytes_of(t, t.file("app.mjs").unwrap())).unwrap();
+            assert!(app.contains(r#"import { asked } from "./applib/question.mjs";"#), "{c} words its questions with it");
+            let m = manifest(c, &bytes_of(t, manifest_file(c).unwrap())).unwrap();
+            let asks: Vec<_> = m.triggers.iter().filter(|t| t.on == fragment_proto::TriggerOn::Channel("work".into())).collect();
+            assert_eq!(asks.len(), 1, "{c} has one trigger on work");
+            assert_eq!((asks[0].run.as_str(), asks[0].from, asks[0].kinds.as_slice()), ("mirror", Some(fragment_proto::IdentityKind::Agent), &["turn.prompt".to_string()][..]), "{c}'s mirror runs on its agent's questions alone");
+        }
+    }
+
     /// The named statics are the templates under templates/ of those names,
     /// and only the blessed ones are named.
     #[test]

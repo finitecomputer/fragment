@@ -38,7 +38,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer | not yet: a card's shot fails (celld's `BROWSER` rejects) |
 | 10 | Money: own hardware in points | not yet |
-| 12 | Secrets | celld's node backend: OpenBao 2.7.2 (the default), a file of their values for `celld dev` alone |
+| 12 | Secrets | celld's node backend: OpenBao 2.7.3 (the default), a file of their values for `celld dev` alone |
 | — | Mail | debt: celld's `EMAIL` rejects every send (`E_NO_MAILER`), a failed send |
 
 ## 1. The runtime: celld
@@ -114,6 +114,18 @@ Every binding and runtime API master's cell uses, against the fork's
   seam 2. Checks celld cannot make are skips saying why (a card's shot,
   an icon's making; found 31's 413; Telegram, below); the check local
   workerd cannot make runs (a job sleeping through a crash).
+  - **Its node's state is in RAM.** A run stages its project in
+    `/dev/shm/fragment-e2e-<uid>/<run>` (`devstack::shm`), and `celld dev`
+    keeps its state beside it, as does the run's OpenBao, so no other
+    job's disk writes reach the node or its secrets (found 45). The run
+    removes it as it ends, its Ctrl-C handler as it is stopped, and the
+    next run's start removes one a killed run left. A run needs 3 GiB free
+    there to start, and says so when it lacks it. The run's logs stay in
+    its scratch, on disk, OpenBao's copied there as its RAM goes; the
+    node's state is not kept for a look. The root must be this user's own
+    (a directory, mode 0700), and a sweep takes only runs' entries. The cost: the
+    e2e no longer runs celld on a slow disk. The dev stack keeps its state
+    on disk, where it survives a reboot.
 - **Master's path is unchanged:** nothing here branches on the runtime,
   and the cell has no code of celld's.
 
@@ -480,10 +492,10 @@ connections' client secrets, the model keys, the operator keys).
 
 **OpenBao** (crates/devstack/src/openbao.rs), used as it ships:
 
-- **The pin:** 2.7.2 (2026-10-26), the newest 2.x on 2026-11-11: each
+- **The pin:** 2.7.3 (2026-11-19), the newest 2.x on 2026-11-24: each
   platform's tarball by its SHA-256 in the release's `checksums.txt`, whose
   signature (`checksums.txt.gpgsig`, by subkey E617 DCD4 065C 2AFC 0B2C
-  F7A7 BA8B C08C 0F69 1F94) checked good on 2026-11-11 against OpenBao's
+  F7A7 BA8B C08C 0F69 1F94) checked good on 2026-11-24 against OpenBao's
   key (primary 66D1 5FDD 8728 7219 C8E1 5478 D200 CD70 2853 E6D0, fetched
   from openbao.org and identical to the release's copy). Fetched once
   into `target/tools`; `FRAGMENT_OPENBAO_TARBALL` names an intranet's copy,
@@ -553,8 +565,8 @@ The old lane's numbering is kept.
 45. **`celld dev` fences itself when one lease renewal stalls** past its
     10 s TTL (`SELF-FENCE: node lease not renewed within TTL`, exit 3): its
     store's SQLite waits on a disk busy writing back. Off that disk it does
-    not stall: an e2e run, whose state is thrown away, can keep it on
-    tmpfs.
+    not stall, so the e2e keeps its node's state in RAM (seam 1, The e2e).
+    A dev stack's state stays on disk.
 48. **No `CF-Connecting-IP` on celld:** the cell counts a CLI code's asks
     by it, so every address is `unnamed` and shares one bucket. A front
     proxy that sets the header (a tailnet's, a company's) gives each its

@@ -29,6 +29,7 @@ mod node_release;
 pub mod openbao;
 mod openbao_release;
 pub mod rows;
+pub mod shm;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -1079,6 +1080,35 @@ impl std::ops::DerefMut for Started {
     fn deref_mut(&mut self) -> &mut Child {
         &mut self.0
     }
+}
+
+/// Makes the process `cmd` starts die with this one (Linux's parent-death
+/// signal, SIGKILL), however this one ends: a run killed outright leaves
+/// no node or OpenBao running, holding its ports and the run's state in RAM
+/// (`shm`) after the next run's start has swept it. It fires when the
+/// thread that spawns exits, so it is for processes started, as the node
+/// and OpenBao are, on a thread that lives as long as the process.
+pub fn dies_with_this_process(cmd: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: prctl and getppid are async-signal-safe, and the closure
+        // allocates nothing.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // this process ended between the fork and the prctl
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cmd;
 }
 
 /// Spawns `cmd` (`Started`); refused once the process is ending, when
