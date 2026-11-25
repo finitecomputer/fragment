@@ -6806,10 +6806,17 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     let shared_items = items_of(b, &theirs)?;
     // connectors with labels of their own (no `-telegram`), each bound as
     // their agent's door: its reach says so, whatever its label, in the
-    // row's ⋯ and the open chat's
+    // row's ⋯ and the open chat's. A self-hosted stack allows no Telegram,
+    // whose webhook needs inbound internet, and refuses its door
+    // (docs/self-host.md): there, SimpleX's alone.
+    let kinds: &[(&str, &str, &str)] = if s.on_celld() {
+        &[("simplex", "home-line", "Phone line")]
+    } else {
+        &[("telegram", "home-desk", "Help desk"), ("simplex", "home-line", "Phone line")]
+    };
     let mut connectors = vec![];
     let mut connector_items = serde_json::Map::new();
-    for (template, label, title) in [("telegram", "home-desk", "Help desk"), ("simplex", "home-line", "Phone line")] {
+    for &(template, label, title) in kinds {
         let r = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": template, "title": title })), &[])?;
         let name = r.body["name"].as_str().unwrap_or_default().to_string();
         let linked = shell(api, me.session, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": main })), &[])?;
@@ -6828,8 +6835,12 @@ fn chat_list_home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me:
     }
     open_row(b, page, chat, wait)?;
     s.ok(
-        "FIN-722: a Telegram and a SimpleX connector, each with a label of its own and bound as their agent's door, offer no Delete in their row's ⋯ nor the open chat's",
-        connector_items.len() == 2 && connector_items.values().all(|c| c["reach"] == true && !strings(&c["row"]).iter().any(|i| i == "Delete…") && !strings(&c["chat"]).iter().any(|i| i == "Delete…") && !strings(&c["row"]).is_empty() && !strings(&c["chat"]).is_empty()),
+        if s.on_celld() {
+            "FIN-722: a SimpleX connector with a label of its own and bound as their agent's door offers no Delete in its row's ⋯ nor the open chat's (a self-hosted stack allows no Telegram)"
+        } else {
+            "FIN-722: a Telegram and a SimpleX connector, each with a label of its own and bound as their agent's door, offer no Delete in their row's ⋯ nor the open chat's"
+        },
+        connector_items.len() == kinds.len() && connector_items.values().all(|c| c["reach"] == true && !strings(&c["row"]).iter().any(|i| i == "Delete…") && !strings(&c["chat"]).iter().any(|i| i == "Delete…") && !strings(&c["row"]).is_empty() && !strings(&c["chat"]).is_empty()),
         Value::Object(connector_items.clone()),
     );
     let zinnia_items = items_of(b, &zinnia)?;
