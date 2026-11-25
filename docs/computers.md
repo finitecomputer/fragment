@@ -552,7 +552,7 @@ put on disks.
   objects (bodies streamed, a put checked against its SHA-256 and refused
   over an existing name, only under its own epoch); `POST /head` goes to
   the DO's rules. Beside the contract, the platform's own `POST /unusable
-  {why}`: its boot's word that the head it was handed will not open,
+  {why, blank}`: its boot's word that the head it was handed will not open,
   which the route sends on with that life's epoch and that head. The
   guest names no disk and holds no credential.
 - **Its start.** No restore, no gate, no snapshot: `FRAGMENT_DISK=fpac`,
@@ -566,9 +566,11 @@ put on disks.
   stored is still the one that start was handed, the head falls back to
   the one before it, and it starts again at once, no strike (that life's
   writes since lost, and logged). With none before it, a strike as any
-  failed start; with the head moved since, it starts again on that one. A
-  new disk's first life that ended before anything of it shipped (its head
-  a claim, nothing to replay: a blank device) starts again as a new disk.
+  failed start. A new disk's first life that ended before anything of it
+  shipped (its head a claim, nothing to replay: its boot finds the device
+  blank, `blank` in its word) starts again as a new disk; a head that will
+  not open for any other reason keeps what shipped, for an operator, never
+  started over.
 - **Its sleep is a signal and a wait.** Its port tabs close; the DO
   measures its `/data` for its owner's Storage (the `df` and the walk an
   awake save's measure makes, of its own filesystem); it reads its
@@ -586,7 +588,9 @@ put on disks.
   taken awake under the hold as any awake save (waking it, so an export
   costs its awake time; one it may not wake has none to give), and looks
   again every 20 s for at most 20 minutes from its first look, then goes on
-  without it, saying so. The ask lasts the life it was made in; the export
+  without it, saying so. The ask is for a computer that runs (one whose
+  start or life ended has none) and the export's last look drops it; the
+  export
   asks again while it waits. On a disk, Hermes' boot never puts a hold's
   copies back: the live databases are newer. Its view lists those
   saves; no start restores one; `restored.from` is `disk`.
