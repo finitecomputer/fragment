@@ -500,6 +500,32 @@ async fn stop_interrupts_hermes() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): a turn the bridge lets go (gone quiet past its bound)
+/// is interrupted at Hermes before it is forgotten, so it works on no
+/// more as no one's ask once its proof is gone; the turn ends as quiet.
+#[tokio::test]
+async fn a_let_go_turn_is_interrupted_at_hermes() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-let-go");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let quiet = fragment_bridge::engine::Settings { turn_idle_ms: 800, ..support::settings() };
+    let bridge = support::start(support::config(&fake.url(), &dir, quiet), relay(&port, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    hermes.with(|s| s.turn_ms = 20_000);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "slow please" }));
+    fake.until(WAIT, "the quiet turn let go", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["error"] == "the agent stopped answering")).await;
+    let interrupted = async {
+        while hermes.with(|s| s.interrupted) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(WAIT), interrupted).await.expect("Hermes heard the interrupt");
+    bridge.stop().await;
+}
+
 /// Goal: Stop while a turn waits on an approval closes its card as
 /// stopped and interrupts Hermes, which ends the turn with no reply.
 #[tokio::test]

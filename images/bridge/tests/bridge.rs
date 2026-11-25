@@ -218,6 +218,35 @@ async fn a_refused_close_is_told_again_before_the_next_turn_runs() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): while an ended turn's close is refused past its tries,
+/// the agent's next turn does not run: it ends, saying why (ask again), so
+/// no call of Paul's is signed with Skyler's mandate.
+#[tokio::test]
+async fn a_turn_does_not_run_while_an_ended_one_is_held() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("turn-held-fails-closed");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.with(|w| w.fail_turn_closes = 1_000);
+    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
+    let skylers = turn_of("juniper", &chat, seq(&first));
+    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
+    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
+    let pauls = turn_of("juniper", &chat, seq(&next));
+    fake.until(WAIT * 4, "paul's turn ended unrun", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == pauls)).await;
+    fake.with(|w| {
+        let end = w.bodies(&chat, "work", "turn.end").into_iter().find(|b| b["turn"] == pauls).unwrap_or_default();
+        assert_eq!(end["outcome"], "error", "{end}");
+        assert!(end["error"].as_str().is_some_and(|e| e.contains("Ask me again")), "saying why: {end}");
+        // its only words are the bridge's, saying why: its runtime never had it
+        let said: Vec<String> = replies(w, &chat).iter().filter(|r| r["turn"] == pauls).filter_map(|r| r["text"].as_str().map(str::to_string)).collect();
+        assert!(said.iter().all(|t| !t.starts_with("echo:")), "it never ran: {said:?}");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (FIN-720): a refused close is told again at a later step (a tick's
 /// too), no new turn needed: while any other turn of the agent's runs, an
 /// ended one held open would sign its calls.

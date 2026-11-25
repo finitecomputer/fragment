@@ -416,6 +416,12 @@ pub struct Turn {
     /// answered (`Told`). A state from before holds none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mandate: Option<String>,
+    /// Started by another agent of this computer's words in its chat (a
+    /// hand-off): no ask of that agent's own, but the ask of the turn they
+    /// were said in, carried on as that turn was told it ("" no one's, as
+    /// when that turn is not known). A state from before holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed_ask: Option<String>,
     pub text: String,
     pub attachments: Vec<AttachmentRef>,
     /// Where its attachments' blobs are, when not its chat's: an answer's
@@ -1571,6 +1577,11 @@ impl Engine {
             Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
         });
         self.state.admitted += 1;
+        // another agent of this computer's words in a chat: the ask of the
+        // turn they were said in, carried on (FIN-720), never its owner's
+        // by being theirs
+        let handed_ask = (ask == Ask::Message && cause.channel == records::CHAT && self.agents.iter().any(|a| a.identity == asker))
+            .then(|| m.turn.as_deref().and_then(|said_in| self.state.turns.get(said_in)).and_then(|t| self.told_as(t).asker).unwrap_or_default());
         let turn = Turn {
             id: id.clone(),
             agent: agent.fragment.clone(),
@@ -1580,6 +1591,7 @@ impl Engine {
             asker_name,
             by_code: ask == Ask::Code,
             mandate,
+            handed_ask,
             text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES),
             attachments: m.attachments.clone(),
             attachments_in: m.attachments_in.clone(),
@@ -1843,6 +1855,7 @@ impl Engine {
             asker_name: CONTINUE_ASKER.into(),
             by_code: cut.by_code,
             mandate: cut.mandate,
+            handed_ask: cut.handed_ask,
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
             attachments_in: None,
@@ -1918,9 +1931,14 @@ impl Engine {
     /// How a turn is told to its agent's fragment (`Told`): its owner's ask
     /// for what is theirs or one entity's with them (their words, a routine,
     /// another agent of this computer's answer: they are all its owner's
-    /// agents); no one's for app code's words; anyone else's as them, with
-    /// the proof its cause carried.
+    /// agents); a hand-off as the ask it carries on; no one's for app
+    /// code's words; anyone else's as them, with the proof its cause carried.
     fn told_as(&self, t: &Turn) -> Told {
+        // a hand-off is the ask it carries on, with no proof of its own (a
+        // mandate names the agent it was given to): held unproven
+        if let Some(asker) = &t.handed_ask {
+            return Told { place: t.fragment.clone(), asker: (!asker.is_empty()).then(|| asker.clone()), mandate: None, unproven: None };
+        }
         let owner = self.agent(&t.agent).map(|a| a.owner.clone()).unwrap_or_default();
         let ours = t.asker == owner || self.agents.iter().any(|a| a.identity == t.asker);
         let asker = match (t.by_code, ours) {

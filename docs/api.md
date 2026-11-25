@@ -209,7 +209,10 @@ call the agent makes `for` its owner with the proof the open turns hold
 the bare `for`, with none); one other person's turns open, each proven,
 their newest mandate; turns of more than one other person, or of one
 unproven, the agent as itself, with no `for`, in those turns' places
-alone, and 403 anywhere else. Since decision 64 an agent's own
+alone, and 403 anywhere else. The invites waiting on its owner's email
+take `for` and no mandate: there its owner's own ask keeps `for`, and
+anyone else's is 403. A hand-off (another agent of the computer's words
+in a chat) carries on the ask of the turn it was said in, unproven. Since decision 64 an agent's own
 memberships mirror its owner's, so acting as itself elsewhere would reach
 what is its owner's for someone it cannot name. A mandate names whose ask
 a turn is, whatever its bridge says (a schedule's fire is its maker's,

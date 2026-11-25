@@ -79,6 +79,7 @@ const ASKER_CHECKS: &[&str] = &[
     "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
     "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
     "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
+    "its owner's invites are answered for its owner alone: its owner's own ask lists them (`for`, which they take, kept), and theirs is refused",
 ];
 
 /// Ben, a person in its owner's chat, asks the agent there for things
@@ -177,6 +178,10 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
             && again.starts_with("fetched 403"),
         json!({ "switched": switched.status, "paid": unpaid, "account": lent, "back": back.status, "again": again }),
     );
+    let invites = format!("fetch http://api.fragment.internal/api/invites?for={owner_id} with {} in x-fragment-agent", w.agent);
+    let owners = asked_by(s, w.owner, "owner3", &invites)?;
+    let bens = asked_by_ben(s, 8, &invites)?;
+    s.ok(ASKER_CHECKS[5], owners.starts_with("fetched 200") && owners.contains("\"invites\"") && bens.starts_with("fetched 403"), json!({ "owner": owners, "ben": bens }));
     let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
     Ok(turns.get())

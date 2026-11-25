@@ -5258,3 +5258,42 @@ fn a_turn_is_told_as_whose_ask_it_is() {
     let again = step(record(1, "npub1skyler", Some("fm1.theirs")), T0 + 6);
     assert!(again.is_empty(), "a record heard again claims nothing more: {again:?}");
 }
+
+/// Goal (FIN-720): a hand-off carries on the ask it came from. Another
+/// agent of this computer's words are no ask of their own (being its
+/// owner's agent's words): Rowan's turn, from Juniper's reply in a turn
+/// Skyler asked, is told as Skyler's, unproven (Skyler's mandate names
+/// Juniper); from a turn Paul asked, as Paul's; from words no known turn
+/// was said in, as no one's. Its owner's own words to Rowan are still
+/// Paul's.
+#[test]
+fn a_hand_off_carries_on_the_ask_it_came_from() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let talk = "talk--k3x9";
+    let handed = |e: &mut Engine, seq: u64, by: &str, text: &str, turn: &str| -> Vec<Asked> {
+        let rec = rec_at(seq, seq as i64 * 10, by, json!({ "text": text, "to": ["npub1rowan"], "turn": turn, "hop": 1 }));
+        let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: talk.into(), record: rec, view: Some(v.clone()), since: 0 }, T0 + seq);
+        let said = told(&answered(e, s, T0 + seq));
+        // over, so the next one Rowan is handed starts
+        let rt = records::turn_id(&r.fragment, talk, records::CHAT, seq);
+        if e.state().turns.get(&rt).is_some_and(Turn::active) {
+            let ended = e.step(heard(Event::End { turn: rt, outcome: Outcome::Idle }), T0 + seq);
+            answered(e, ended, T0 + seq);
+        }
+        said
+    };
+    let skylers = Record { mandate: Some("fm1.skyler".into()), ..rec_at(1, 10, "npub1skyler", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
+    let jt = to_all(&mut e, &[&j], &v, talk, skylers, T0)[0].0.turn.clone();
+    let on = handed(&mut e, 2, "npub1juniper", "rowan, over to you", &jt);
+    assert_eq!(on, vec![Asked { place: talk.into(), asker: Some("npub1skyler".into()), mandate: None, unproven: None }], "Skyler's ask, carried on, unproven");
+    let ended = e.step(heard(Event::End { turn: jt.clone(), outcome: Outcome::Idle }), T0 + 2);
+    answered(&mut e, ended, T0 + 2);
+    let pauls = rec_at(3, 30, "npub1paul", json!({ "text": "ask rowan too", "to": ["npub1juniper"] }));
+    let pt = to_all(&mut e, &[&j], &v, talk, pauls, T0 + 3)[0].0.turn.clone();
+    let on = handed(&mut e, 4, "npub1juniper", "rowan, and this", &pt);
+    assert_eq!(on.iter().map(|t| t.asker.clone()).collect::<Vec<_>>(), vec![Some("npub1paul".into())], "Paul's ask, carried on");
+    let on = handed(&mut e, 5, "npub1juniper", "rowan, from nowhere", "no-such-turn");
+    assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "no known turn: no one's");
+}

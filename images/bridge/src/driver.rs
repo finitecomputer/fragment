@@ -372,7 +372,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
         }
     }
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone(), turns: turns.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves, RuntimeLane::spawn(api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone(), turns.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves.clone(), RuntimeLane::spawn(&serves, api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone(), turns.clone(), inbox_tx.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     tokio::spawn(crate::load::watch(inbox_tx.clone(), Msg::Input, Duration::from_millis(limits::LOAD_SLICE_MS), held_rx.clone(), stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
@@ -1384,9 +1384,11 @@ struct Turns {
 }
 
 /// The tries `Turns::settle` gives an agent's ended turns' closes before
-/// its turn goes on (an ended turn held only narrows: its asker's mandate,
-/// never more), and the first wait between them, doubled each time.
+/// its next turn is ended unrun (`UNSETTLED`), and the first wait between
+/// them, doubled each time.
 const SETTLE_TRIES: u32 = 5;
+/// Why a turn did not run: its agent's last turn was not told ended.
+const UNSETTLED: &str = "I couldn't start: the platform didn't take that my last turn ended. Ask me again in a moment.";
 const SETTLE_WAIT: Duration = Duration::from_millis(250);
 
 impl Turns {
@@ -1452,9 +1454,10 @@ impl Turns {
 
     /// Before a turn of `agent` reaches its runtime: each of its ended turns
     /// told ended (a close slow or refused, told again now), tried
-    /// `SETTLE_TRIES` times. Past them it goes on: one held still only
-    /// narrows the agent's calls, to its asker's mandate.
-    async fn settle(&self, api: &Api, agent: &str) {
+    /// `SETTLE_TRIES` times. Past them it is not settled, and the turn does
+    /// not run: an ended turn still held would sign its calls as that
+    /// turn's asker.
+    async fn settle(&self, api: &Api, agent: &str) -> bool {
         let mut wait = SETTLE_WAIT;
         for attempt in 1..=SETTLE_TRIES {
             let due: Vec<String> = self.ending.lock().expect("ending").keys().filter(|(a, _)| a == agent).map(|(_, t)| t.clone()).collect();
@@ -1468,14 +1471,15 @@ impl Turns {
                 }
             }
             if held == 0 {
-                return;
+                return true;
             }
             if attempt < SETTLE_TRIES {
                 tokio::time::sleep(wait).await;
                 wait *= 2;
             }
         }
-        crate::ev!("turns.unsettled", { "agent": agent, "why": "its ended turns' closes were refused: it goes on, narrower meanwhile" });
+        crate::ev!("turns.unsettled", { "agent": agent, "why": "its ended turns' closes were refused: its next turn does not run" });
+        false
     }
 }
 
@@ -1935,7 +1939,9 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, marks: Marks, scratch: Arc<Scratch>, turn_files: TurnFiles, turns: Turns) -> RuntimeLane {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(serves: &str, api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, marks: Marks, scratch: Arc<Scratch>, turn_files: TurnFiles, turns: Turns, inbox: mpsc::Sender<Msg>) -> RuntimeLane {
+        let serves = serves.to_string();
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -2002,7 +2008,12 @@ impl RuntimeLane {
                 // once to its runtime: nothing waits between the two
                 let Ok(room) = to_runtime.reserve().await else { return };
                 if let Command::Start(ts) = &c {
-                    turns.settle(&api, &ts.agent.fragment).await;
+                    if !turns.settle(&api, &ts.agent.fragment).await {
+                        // not run: ended as its runtime would end it, saying why
+                        let end = Event::End { turn: ts.turn.clone(), outcome: records::Outcome::Error(UNSETTLED.into()) };
+                        let _ = inbox.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event: end })).await;
+                        continue;
+                    }
                 }
                 room.send(c);
             }
