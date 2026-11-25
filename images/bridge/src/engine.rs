@@ -1373,10 +1373,9 @@ impl Engine {
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
                     let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                     self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message });
-                    // said in a room: its own conversation there, told where
-                    // (handed once claimed, after this)
-                    if let (Some((room, note)), Some(t)) = (place, self.state.turns.get_mut(&id)) {
-                        t.room = Some(room);
+                    // said in a room (its room the message's: `admit`): told
+                    // where, once handed, after this
+                    if let (Some(note), Some(t)) = (place, self.state.turns.get_mut(&id)) {
                         t.place = Some(note);
                     }
                 }
@@ -1389,10 +1388,9 @@ impl Engine {
     }
 
     /// What a message's asker is called (`whose` said whose it is), and,
-    /// said in a room of the agent's door, that room's id (the runtime's
-    /// conversation there) and what its turn is told of it (note.rs,
-    /// `place`). App code's words are no one's, and in no room.
-    fn speaker(&self, agent: &Agent, view: &ChatView, record: &Record, m: &Message) -> (String, Option<(String, String)>) {
+    /// said in a room of the agent's door, what its turn is told of it
+    /// (note.rs, `place`). App code's words are no one's, and in no room.
+    fn speaker(&self, agent: &Agent, view: &ChatView, record: &Record, m: &Message) -> (String, Option<String>) {
         if record.by_code() {
             return (records::CODE_SAYS.to_string(), None);
         }
@@ -1401,7 +1399,7 @@ impl Engine {
         match (&m.room, via) {
             (Some(room), Some(via)) => {
                 let place = crate::note::place(&name, record.principal == agent.owner, &via, room);
-                (crate::note::speaker(&name, &via, room), Some((room.id.clone(), place)))
+                (crate::note::speaker(&name, &via, room), Some(place))
             }
             _ => (name, None),
         }
@@ -1669,7 +1667,9 @@ impl Engine {
             ret,
             continues: None,
             continue_after: false,
-            room: None,
+            // said in a room of its door (`whose` kept it): its own
+            // conversation there
+            room: m.room.as_ref().map(|r| r.id.clone()),
             place: None,
             open: None,
         };
@@ -1687,7 +1687,7 @@ impl Engine {
                 // refused) are posted and not kept: a crash before they land
                 // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
-                let start = records::turn_start(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life);
+                let start = records::turn_start_in(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life, turn.room.as_deref());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
                 if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
@@ -1717,7 +1717,7 @@ impl Engine {
         let life = self.life.clone();
         let t = self.state.turns.get_mut(id).expect("held");
         assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
-        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start(id, &t.asker, t.by_code, &identity, &t.cause, &life), to: None };
+        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start_in(id, &t.asker, t.by_code, &identity, &t.cause, &life, t.room.as_deref()), to: None };
         let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![start.clone(), end.clone()];
@@ -1974,7 +1974,7 @@ impl Engine {
         let Some(id) = next else { return };
         let identity = self.agent(agent).expect("a held turn's agent is on this computer").identity.clone();
         let t = &self.state.turns[&id];
-        let body = records::turn_start(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life);
+        let body = records::turn_start_in(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life, t.room.as_deref());
         let fragment = t.fragment.clone();
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });

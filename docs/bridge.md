@@ -488,7 +488,10 @@ own work. An idle server, an idle runtime and its desktop never do
 A person's agents hand work to each other in a chat they share. One
 agent names another with an `@name` in a reply (the bridge stamps its
 `to`), or posts a message naming the other in `to` (`fragment ask`; our
-image's `fragment_ask`). The bridge that answers decides whether this is
+image's `fragment_ask`). In a room of an agent's door (docs/chat-records.md,
+"A message heard in a room") a reply hands off to no one, since the other
+agent is in no room, and `fragment_ask` refuses, saying it asks from a
+chat of the agent's own. The bridge that answers decides whether this is
 a turn:
 
 - **It counts the hop** (`engine.rs`, `hop_of`). A record by an agent of
@@ -708,8 +711,10 @@ reaches it (`withheld`).
   memory with its agent fragment (docs/computers.md, "Claude Code").
 - **A session per agent and chat**, and per room of a chat, its id
   derived from the two and the chat's `/new` count, so every life names
-  the same one. It resumes when
-  its transcript is on disk, and its process stops once idle.
+  the same one. It resumes when its transcript is on disk, and its
+  process stops once idle. At most `SESSIONS_MAX` run at once; past it,
+  the least lately used idle one stops for the next turn (a door's rooms
+  are many), and a turn is refused only when none is idle.
 - **A turn** is one user message: its note, quote, asker and files in
   words. Text deltas are the draft, each text block a reply part, each
   `tool_use` its call's intent (`turn.call`: its assistant message the

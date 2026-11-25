@@ -131,6 +131,8 @@ until a reply of that turn replaces it.
   an interim reply out; a page shows it as any reply. A turn posts at
   most 64 replies that are not interim and, counted apart, 200 interim
   ones, so narration never costs the answer.
+- `room` names the room of the agent's door its turn was said in ("A
+  message heard in a room"); a reply in a room is no hand-off.
 - `to` and `hop` are set on a hand-off: a reply that `@mentions` another
   agent of the chat. An agent answers another agent's record (a reply,
   or a message an agent posts itself: `fragment ask`) only when its `to`
@@ -196,7 +198,8 @@ message is:
   speak for no one on the platform. Their asker is `<via>:<from>`
   (`slack:U0456`), never an npub: their words answer no card and command
   nothing, and a question the agent asks them takes only their next
-  words.
+  words, in the same room. The platform gives them no mandate (docs/api.md,
+  "Who asked: mandates").
 - `room` says where: `id` the door's id for it (`^[A-Za-z0-9._-]{1,64}$`),
   `name` what it is called, `thread` the door's own, for its replies. The
   agent keeps a conversation (its runtime's session) per room of a chat:
@@ -206,21 +209,32 @@ message is:
   `{name, text, at?}`. The bridge reads the newest 20, each text cut to
   640 bytes, and tells them before the message.
 - Names are one line, at most 60 characters (more is cut).
-- Only the agent's own bridge honors these, and only from its door: a
-  key that is none of the chat's members, in a chat whose members list
-  marks that agent's row as the door `heard.via` names (`room` and
-  `context`: on a relayed message it honors, too), and never app code's
-  (author `code`). From anyone else, the record is read without them.
-  One of them of another shape is read as absent.
+- Only the agent's own bridge honors these, by one rule: the platform
+  stamped the record a door's (`author: door`, "Who wrote a record": what
+  an open hosted door's own release code publishes, never app code, a
+  schedule, or a person's or another agent's post), it relays no one, and
+  its chat's members list marks that agent's row as the door `heard.via`
+  names. A relayed message's `room` and `context` are honored when so
+  stamped too. From anyone else, the record is read without them. A
+  door's record that names someone heard but in no room the bridge can
+  read (or one of another shape) is never run: never in the chat's own
+  conversation, which is its owner's.
 - A turn in a room is told where it is and who asks, by name, door and
   room (`Maple · Slack · #deploys`), whether that is its owner, and the
   room's context. It is never told the chat's other notes (a recap, a
   history, another turn's cut, any of which may be another room's), only
   its own cut turn as that turn's continuation. One turn of an agent runs
   in a chat at a time, whichever room.
+- What the agent says in a room stays there. Its `turn.start` and each
+  reply name the room (`"room": "C0123"`). A reply in a room hands off to
+  no other agent of the chat, whom the room does not hold. A message's
+  quote (`reply_to`) is told only in the room its words were said in, as
+  the quoted record itself says (the agent's reply its `room`, a door's
+  message its `room`; any other record is the chat's own). Words said in
+  one room answer only a question or a card asked there.
 - The door routes the agent's replies back to the room: by turn, as it
   remembers which record it posted for which turn (the turn's id is the
-  record's: "Turns").
+  record's: "Turns"), or by the reply's `room`.
 
 **An ask** (`fragment ask --return-to`): an agent's message to another
 agent of its computer whose answer comes back to it, as a turn of its
@@ -335,8 +349,9 @@ a step posted again is the same record. A chat's helpers set
 ```
 
 `asker` may stop the turn: an npub, or someone a door heard
-(`<via>:<from>`, "A message heard in a room"). `agent` is the agent's
-identity. `life` is the
+(`<via>:<from>`, "A message heard in a room"). `room`, for a turn said in
+a room of the agent's door, names it. `agent` is the agent's identity.
+`life` is the
 bridge process that claims the turn. The record is the claim, "this life
 runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
 wrote the message that started it ("Who wrote a record"): its asker is

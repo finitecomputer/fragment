@@ -5257,7 +5257,7 @@ fn a_message_heard_in_a_room_is_its_speakers_in_that_rooms_conversation() {
         Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. Maple is not your owner.\nSaid there just before, oldest first:\n> Sam: deploy started\n> Your owner (a member): ship it")
     );
     let start = posts(&s).into_iter().find(|(_, b)| b["kind"] == "turn.start").expect("its claim").1;
-    assert_eq!(start["asker"], "slack:U0456", "its claim names its speaker");
+    assert_eq!((&start["asker"], &start["room"]), (&json!("slack:U0456"), &json!("C0123")), "its claim names its speaker, and its room");
     assert_eq!(said_by_door(&mut e, &a, &v, 1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "again"), T0 + 1), Step::default(), "read again: nothing");
     ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 2);
     // another room, another conversation
@@ -5275,6 +5275,18 @@ fn a_message_heard_in_a_room_is_its_speakers_in_that_rooms_conversation() {
     ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 6);
     let t = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "from the page" }), T0 + 7)).expect("a turn");
     assert_eq!((t.conversation(), t.room, t.place, t.asker_name.as_str()), ("talk--k3x9".to_string(), None, None, "paul"));
+    let s = e.step(heard(Event::End { turn: t.turn, outcome: Outcome::Idle }), T0 + 8);
+    assert!(posts(&s).iter().all(|(_, b)| b.get("room").is_none()), "the chat's own names no room");
+    // a room's turn refused as it comes (its chat's queue full) names its
+    // room too, on its claim posted at once
+    let mut e = engine(std::slice::from_ref(&a));
+    let _running = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "a long one" }), T0)).expect("a turn");
+    let mut refused = None;
+    for seq in 2..=(limits::QUEUED_PER_CHAT_MAX as u64 + 2) {
+        let s = said_by_door(&mut e, &a, &v, seq, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "and this"), T0 + seq);
+        refused = refused.or_else(|| posts(&s).into_iter().find(|(_, b)| b["kind"] == "turn.start").map(|(_, b)| b));
+    }
+    assert_eq!(refused.expect("one refused past the queue")["room"], "C0123");
 }
 
 /// Goal (security, invalid): only the agent's door says who spoke and

@@ -694,12 +694,21 @@ pub struct Cause {
 /// body as 409, so with the life in the body this life's own retry is a
 /// replay and any other life's claim of the turn is a 409.
 pub fn turn_start(turn: &str, asker: &str, by_code: bool, agent: &str, cause: &Cause, life: &str) -> Value {
+    turn_start_in(turn, asker, by_code, agent, cause, life, None)
+}
+
+/// `turn_start`, for a turn said in a room of the agent's door (its id:
+/// docs/chat-records.md, "A message heard in a room"), which it names.
+pub fn turn_start_in(turn: &str, asker: &str, by_code: bool, agent: &str, cause: &Cause, life: &str, room: Option<&str>) -> Value {
     assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
     let mut start = json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
         "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life });
     // app code wrote what started it: its asker is no one (`Record::by_code`)
     if by_code {
         start["code"] = json!(true);
+    }
+    if let Some(room) = room {
+        start["room"] = json!(room);
     }
     start
 }
