@@ -1561,7 +1561,7 @@ one id at two places is refused. A job's step names a route, never an id.
 | --- | --- | --- |
 | `GET /api/models/v1/models` | an agent | → OpenAI's list, `{object: "list", data: [{id, object: "model", created: 0, owned_by: "fragment"}]}`: the ids its calls may name |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` its asker) | an OpenAI chat completion, `model` a name or an id → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
-| `POST /api/models/v1/audio/transcriptions` | an agent | `multipart/form-data`: `file` (the audio, as recorded), `model` `whisper`, optional `language` (ISO-639-1), `prompt`, `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text |
+| `POST /api/models/v1/audio/transcriptions` | an agent | `multipart/form-data`: `file` (the audio, as recorded), `model` `whisper` (the route's name, whatever model the slot runs), optional `language` (ISO-639-1), `prompt`, `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text; 404 on a deployment that names no transcription slot |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` its asker) | a decision, media inline (Decisions) → `{model, answers, usage}`. A blob 400 (the route reads no fragment's store). An answer that does not answer what was asked is charged and 502 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on its intercept |
 | `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` its asker) | OpenAI's `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings). `POST /v1/embeddings` on a computer's intercept |
 
@@ -1610,16 +1610,26 @@ slot's; `encoding_format` other than `float` or `base64`. A body past
 502, and charged. It is paid as a chat call, at its input tokens (the
 model's count, else estimated).
 
-**Transcription** (decision 9): `whisper` is Workers AI's Whisper, sent the
-audio as base64 with its voice-activity filter on; `language` and `prompt`
-pass on, OpenAI's other fields do not. A form that is none, another model
-or format is 400; audio past `transcribe::BODY_MAX_BYTES` 413. Its payer is
-the agent's owner, under no fragment's cap, charged by the audio's length
-(`fragment_core::transcribe`). A first try answering 429, 408 or 5xx, or
-nothing within 15 s, is made once more; a 429 passed on carries
-`retry-after: 5`. Every answer carries `x-fragment-answer-shape` (the
-model's own answer's top-level keys and small `usage`, never its words). An
-answer in another shape is 502, charged nothing.
+**Transcription** (decision 9) runs on the deployment's
+`models.transcription` slot (`fragment_core::transcribe`), no chat slot:
+a Workers AI model, sent Whisper's catalog input (the audio as base64, its
+voice-activity filter on), or a model on an OpenAI-compatible API, sent
+OpenAI's form at `<base_url>/audio/transcriptions` with the slot's key and
+`response_format` `verbose_json` (a model that answers no `verbose_json`,
+OpenAI's token-billed gpt-4o transcription models, refuses each call; its
+refusal is passed on). Each names its price, a minute of audio
+(docs/ledger.md). A deployment that names none transcribes nothing (404).
+A call to an OpenAI-compatible API, chat, embeddings or transcription,
+follows no redirect: one is the call not answered.
+`language` and `prompt` pass on, OpenAI's other fields do not. A form that
+is none, another model or format is 400; audio past
+`transcribe::BODY_MAX_BYTES` 413. Its payer is the agent's owner, under no
+fragment's cap, charged by the audio's length its model reports. A first
+try answering 429, 408 or 5xx, or nothing within 15 s, is made once more; a
+429 passed on carries `retry-after: 5`. Every answer carries
+`x-fragment-answer-shape` (the model's own answer's top-level keys and
+small `usage`, never its words). An answer in another shape is 502,
+charged nothing.
 
 ### Ledger (docs/ledger.md)
 
