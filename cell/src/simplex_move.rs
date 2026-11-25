@@ -65,9 +65,9 @@ use crate::routed::{Routed, Signed};
 const TEMPLATE: &str = fragment_core::door::SIMPLEX;
 const SECRET: &str = "SIMPLEX_DOOR_SECRET";
 const DOOR_HOST: &str = "door.fragment.internal";
-/// A way back's asks of its door, a copy its computer found damaged on its
-/// way asked for again (`back`).
-const BACK_ASKS: u32 = 3;
+/// A handover's and a way back's asks, a copy found damaged on its way
+/// (FIN-775) asked for again (`hand_over`, `back`).
+const HAND_ASKS: u32 = 3;
 
 pub(crate) async fn simplex_move(env: &Env, cfg: &Config, url: &Url, by: &str, person: &str, bytes: &[u8]) -> CellResult<Value> {
     if !fragment_core::npub::is_identity(person) {
@@ -282,13 +282,26 @@ impl Move<'_> {
     /// the agent's computer door closed: what its computer signs relays no
     /// one now.
     async fn hand_over(&self, rec: &Value) -> CellResult<Value> {
-        let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false, "").await?.into();
-        let head = |k: &str| save.headers().get(k).ok().flatten().unwrap_or_default();
-        let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
-        let body = save.body().map(Into::into);
-        let headers = [("x-fragment-door", text(rec, "door")), ("x-door-agent", label_of(&self.agent)), ("x-door-sha256", sha.as_str()), ("x-door-length", length.as_str()), ("x-door-staged", if staged { "1" } else { "0" })];
-        let mut put = crate::routed::send(self.env, "SIMPLEX_DOOR", text(rec, "door"), crate::routed::internal_stream("door/import", Method::Put, &headers, body)?).await?;
-        answer(&mut put, "its door's import").await?;
+        // its save, streamed out of its computer's container into its door,
+        // whose bucket checks its SHA-256 as it stores it: a copy damaged on
+        // its way (FIN-775, seen on Cloudflare) is kept by no one, and asked
+        // for again (its computer answers its handover's ticket again with
+        // the same save), at most `HAND_ASKS` times
+        let mut asks = 0;
+        let (sha, length, staged) = loop {
+            asks += 1;
+            let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false, "").await?.into();
+            let head = |k: &str| save.headers().get(k).ok().flatten().unwrap_or_default();
+            let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
+            let body = save.body().map(Into::into);
+            let headers = [("x-fragment-door", text(rec, "door")), ("x-door-agent", label_of(&self.agent)), ("x-door-sha256", sha.as_str()), ("x-door-length", length.as_str()), ("x-door-staged", if staged { "1" } else { "0" })];
+            let mut put = crate::routed::send(self.env, "SIMPLEX_DOOR", text(rec, "door"), crate::routed::internal_stream("door/import", Method::Put, &headers, body)?).await?;
+            match answer(&mut put, "its door's import").await {
+                Err(e) if e.message.contains(" 422 not_its_sha:") && asks < HAND_ASKS => continue,
+                Err(e) => return Err(e),
+                Ok(_) => break (sha, length, staged),
+            }
+        };
         crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
         self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
         // a staged chat waits for its person's word once bound, never
@@ -320,8 +333,8 @@ impl Move<'_> {
         // its door stops, saving last, and hands its newest save back, with
         // its SHA-256; a copy its computer finds damaged on its way (seen
         // once on Cloudflare) changed nothing there, and is asked for again
-        // (the door answers the same save), at most `BACK_ASKS` times
-        for asks in 1..=BACK_ASKS {
+        // (the door answers the same save), at most `HAND_ASKS` times
+        for asks in 1..=HAND_ASKS {
             if rec["moved"] != true {
                 break;
             }
@@ -347,7 +360,7 @@ impl Move<'_> {
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),
             };
             match self.hand("back", save, behind, &sha).await {
-                Err(e) if e.message.contains(" 422 damaged:") && asks < BACK_ASKS => continue,
+                Err(e) if e.message.contains(" 422 damaged:") && asks < HAND_ASKS => continue,
                 Err(e) => return Err(e),
                 Ok(_) => {}
             }
