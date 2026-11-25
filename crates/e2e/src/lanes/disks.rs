@@ -79,7 +79,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
         for check in DISK_CHECKS {
             s.skip(check, "it needs the stub's scripted runtime, and this deployment's new computers run another image");
         }
-        return Ok(());
+        return image_on_disk(s, api, &owner, &id);
     }
     let local = !s.hosted();
     let row = || lever(api, &id, "fpac").map(|r| r.body).unwrap_or(Value::Null);
@@ -208,6 +208,30 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(DISK_CHECKS[8], slept && exported["ok"] == true, &exported);
     Ok(())
 }
+
+/// The deployment's own image on a disk (hosted, ours: Hermes), its agent
+/// unneeded: woken by its owner `LIVES` times, each start mounting the
+/// disk (its boot's first read of its view), each sleep's final flush
+/// posting that life's head, clean.
+fn image_on_disk(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> {
+    const LIVES: u64 = 3;
+    let view = || api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let mut lives = vec![];
+    for _ in 0..LIVES {
+        let _ = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+        let woke = s.eventually(WAKE * 3, || phase(api, owner, id) == "awake");
+        let up = view();
+        let (slept, _) = put_to_sleep(s, api, owner, id);
+        let head = head_of(&lever(api, id, "fpac").map(|r| r.body["head"].clone()).unwrap_or(Value::Null));
+        let generation = up["restored"]["generation"].as_u64();
+        lives.push(json!({ "woke": woke, "from": up["restored"]["from"], "generation": generation, "slept": slept, "head": head.map(|(e, c)| json!([e, c])) }));
+    }
+    let ok = lives.iter().all(|l| l["woke"] == true && l["from"] == "disk" && l["slept"] == true && l["head"][1] == true && l["head"][0] == l["generation"]);
+    s.ok(IMAGE_ON_DISK, ok, json!({ "image": view()["image"], "lives": lives }));
+    Ok(())
+}
+
+const IMAGE_ON_DISK: &str = "the deployment's own image on a disk: each of three wakes mounts it, each sleep's final flush posts that life's head, clean";
 
 /// Its owner's export, pressed with the computer asleep: built (its disk's
 /// save taken awake for it on the way), its meta naming that save, taken
