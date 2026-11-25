@@ -448,11 +448,11 @@ struct ShellTests {
         #expect(try route("mailto:someone@example.com", clicked: true) == .leave)
     }
 
-    /// An address leaving the sheet goes to the system only by a scheme the
-    /// app has a use for: the web to the browser (a script's navigation too,
-    /// as a checkout's redirect), `mailto:` only from a tapped link, and no
-    /// other app's scheme at all, tapped or not.
-    @Test func aSheetHandsOnlyTheWebAndATappedMailtoToTheSystem() throws {
+    /// An address leaving the sheet goes to the system as Safari would send
+    /// it: the web always (a script's navigation too, as a checkout's
+    /// redirect), and any other scheme (`mailto:`, `tel:`, `sms:`, an app's
+    /// own links) only from a link a person tapped.
+    @Test func aSheetHandsTheWebAndATappedLinkToTheSystem() throws {
         func handed(_ raw: String, tapped: Bool) throws -> Bool {
             WebLinks.handsToSystem(try #require(URL(string: raw)), tapped: tapped)
         }
@@ -461,12 +461,10 @@ struct ShellTests {
             #expect(try handed("http://example.com/", tapped: tapped))
             #expect(try handed("HTTPS://example.com/", tapped: tapped), "a scheme is case-insensitive")
         }
-        #expect(try handed("mailto:someone@example.com", tapped: true))
-        #expect(try !handed("mailto:someone@example.com", tapped: false), "a page alone opens no mail")
-        for raw in ["tel:+15555550100", "sms:+15555550100", "facetime:someone@example.com", "itms-apps://apps.apple.com/app/id1",
-                    "maps://?q=x", "someapp://do/thing", "file:///etc/hosts", "javascript:alert(1)", "data:text/html,x"] {
-            #expect(try !handed(raw, tapped: true), "\(raw)")
-            #expect(try !handed(raw, tapped: false), "\(raw)")
+        for raw in ["mailto:someone@example.com", "tel:+15555550100", "sms:+15555550100", "facetime:someone@example.com",
+                    "itms-apps://apps.apple.com/app/id1", "maps://?q=x", "someapp://do/thing"] {
+            #expect(try handed(raw, tapped: true), "a tapped \(raw) opens")
+            #expect(try !handed(raw, tapped: false), "a page alone opens no \(raw)")
         }
     }
 

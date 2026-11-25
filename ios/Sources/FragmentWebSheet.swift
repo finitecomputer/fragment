@@ -72,18 +72,13 @@ enum WebLinks {
         return .leave
     }
 
-    /// Whether an address leaving the sheet goes to the system at all. A
-    /// page may only reach what the app has a use for: the web, to the
-    /// browser (a script's navigation too: a checkout or sign-in redirects
-    /// there), and `mailto:`, to Mail, from a tapped link alone. Any other
-    /// scheme is another app's (`tel:`, `sms:`, an app's own links) and is
-    /// never opened from a page, tapped or not.
+    /// Whether an address leaving the sheet goes to the system at all, as
+    /// Safari would send it: the web always, to the browser (a script's
+    /// navigation too: a checkout or sign-in redirects there), and any other
+    /// scheme (`mailto:`, `tel:`, `sms:`, an app's own links) only from a
+    /// link a person tapped. A page alone opens no other app.
     static func handsToSystem(_ url: URL, tapped: Bool) -> Bool {
-        switch url.scheme?.lowercased() {
-        case "http", "https": true
-        case "mailto": tapped
-        default: false
-        }
+        tapped || ["http", "https"].contains(url.scheme?.lowercased())
     }
 
     /// The address of `page` that may be shared: this fragment's page alone,
@@ -293,8 +288,8 @@ private struct WebContent: UIViewRepresentable {
             }
         }
         /// Out of the sheet: a fragment of the person's opens in the app, any
-        /// other web address in the system's own browser, a tapped `mailto:`
-        /// in Mail, and nothing else (`WebLinks.handsToSystem`).
+        /// other web address in the system's own browser, and a tapped link
+        /// of another scheme in its app (`WebLinks.handsToSystem`).
         private func leave(_ url: URL, tapped: Bool) {
             if ["http", "https"].contains(url.scheme?.lowercased()), openLink(url) { return }
             guard WebLinks.handsToSystem(url, tapped: tapped) else { return }
