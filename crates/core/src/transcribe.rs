@@ -349,13 +349,16 @@ pub fn openai_form(slot: &Slot, b: &Bounded<'_>, boundary: &str) -> Option<Vec<u
 /// the slot's kind says it (Whisper's `transcription_info.duration` on
 /// Workers AI; OpenAI's `usage` of type `duration`, else `verbose_json`'s
 /// `duration`), at the slot's price, and its request's price. A slot that
-/// prices no minute needs no length. An answer that does not say one when
-/// its price needs it, or says what no audio is, is `None`: charged
-/// nothing, said aloud (cell/src/models.rs; decision 62).
+/// prices no minute needs no length, and is charged for an answer that
+/// carries its text (`answer`'s), never for one in another shape. An
+/// answer that does not say a length when its price needs it, or says what
+/// no audio is, is `None`: charged nothing, said aloud (cell/src/models.rs;
+/// decision 62).
 pub fn usage_of(slot: &Slot, answer: &Value) -> Option<Usage> {
     // exact, in sixtieths of a micro-dollar: a request at USD_A_MINUTE_MAX
     // is 6 * 10^7
     if let Price::Usd { micros_a_minute: 0, micros_a_request } = slot.price {
+        answer["text"].as_str()?;
         return Some(Usage::Key { key: COST.to_string(), units: 60 * micros_a_request as u64 });
     }
     let seconds = match &slot.upstream {
@@ -593,6 +596,9 @@ mod tests {
         let request = usage_of(&t, &json!({ "text": "hi" })).unwrap();
         assert_eq!((request.clone(), keyed.price(&request).unwrap().list, keyed.price(&request).unwrap().charge), (cost(600_000), 10_000, 15_000), "$0.01 a request, with the margin");
         assert_eq!(usage_of(&t, &json!({ "text": "hi", "duration": 3600.0 })), Some(request), "its length is no part of its price");
+        for other in [json!({}), json!(null), json!({ "result": { "text": "hi" } }), json!({ "text": 7 })] {
+            assert_eq!(usage_of(&t, &other), None, "an answer in another shape (502) is charged nothing: {other}");
+        }
         let both = slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "m", "price": { "audio_minute": 0.006, "request": 0.001 } })).unwrap().unwrap();
         assert_eq!(usage_of(&both, &json!({ "duration": 2.04 })), Some(cost(18_000 + 60_000)), "3 s at $0.006 a minute and a request at $0.001");
         assert_eq!(usage_of(&both, &json!({ "text": "hi" })), None, "a minute's price needs the length: none said, charged nothing, said aloud");
