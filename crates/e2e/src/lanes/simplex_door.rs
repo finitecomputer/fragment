@@ -34,8 +34,11 @@
 //! is kept as one of the connector's blobs and published as its
 //! attachment; its agent's reply's file (uploaded there by its agent, a
 //! viewer) is given to the door, which holds those very bytes (hashed
-//! again there); a delivery without the inbox's secret is refused, and
-//! one once its owner unbound it reaches no one.
+//! again there); its question to its owner (a card on `work`) starts the
+//! mirror, and no other work of its turns does, and their next message
+//! through the door answers it, once (FIN-747); a delivery without the
+//! inbox's secret is refused, and one once its owner unbound it reaches no
+//! one.
 
 use std::time::{Duration, Instant};
 
@@ -455,6 +458,39 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
         "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes, and the door holds those very bytes",
         drew && held && look()["size"] == file["size"] && mirror["output"] == json!({ "sent": 0, "why": "not linked" }) && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
         json!({ "reply": drawn, "held": look(), "mirror": mirror }),
+    );
+
+    // its agent's question (FIN-747): its card on `work` starts the mirror,
+    // and no other work of its turns does; the mirror sends it to the door
+    // (which has no SimpleX link here, and says so), as the computer's own
+    // SimpleX words it (applib/question.mjs: its words are Telegram's
+    // lane's to see); its owner's next message through the door answers
+    // it, once, and its turn goes on
+    let work = || super::jobs::records(api, owner, &name, "work");
+    let on_work = || -> Vec<Value> {
+        let runs = api.signed(owner, "GET", &format!("/api/f/{name}/runs?op=mirror&limit=50"), None).ok().and_then(|r| r.body["runs"].as_array().cloned()).unwrap_or_default();
+        runs.into_iter().filter(|r| r["trigger"] == "work").collect()
+    };
+    deliver(api, &door, "sx-e2e-2", "choose a plant")?;
+    let carded = s.eventually(a.wake, || work().iter().any(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["text"] == "What should I plant?"));
+    let card = work().into_iter().find(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["text"] == "What should I plant?").unwrap_or_default();
+    let started = s.eventually(a.wake, || !on_work().is_empty());
+    let asked = on_work().first().map(|r| super::jobs::settle(api, owner, &name, r["id"].as_i64().unwrap_or(0), &["succeeded", "failed", "held"], a.wake)).unwrap_or_default();
+    s.ok(
+        "its agent's question to its owner, its card on work, starts the mirror, which sends it to the door (no SimpleX link here, which it says)",
+        carded && card["body"]["asks"] == a.owner_id && started && asked["output"] == json!({ "sent": 0, "why": "not linked" }) && asked["input"]["record"]["seq"] == card["seq"],
+        json!({ "card": card, "mirror": asked }),
+    );
+    deliver(api, &door, "sx-e2e-3", "Mint")?;
+    let chose = s.eventually(a.wake, || super::computers::agent_replies(&chat(), a.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("choose a plant (chose: Mint)"))));
+    let closed: Vec<Value> = work().into_iter().filter(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["prompt"] == card["body"]["prompt"]).collect();
+    let own_turn = super::computers::agent_replies(&chat(), a.identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.ends_with("] Mint")));
+    let turns = work().iter().filter(|r| r["body"]["kind"] == "turn.start").count();
+    let mirrored = on_work();
+    s.ok(
+        "its owner's next message through the door answers it, once: the card closed with their words, its turn going on with them, no turn of its own; and no other work of its turns started the mirror",
+        chose && closed.len() == 1 && closed[0]["body"]["outcome"] == "answered" && closed[0]["body"]["by"] == a.owner_id && closed[0]["body"]["text"] == "Mint" && !own_turn && turns >= 2 && mirrored.len() == 1,
+        json!({ "closed": closed, "turns": turns, "mirrorsOnWork": mirrored }),
     );
 
     // a delivery without the inbox's secret, from anyone, starts nothing

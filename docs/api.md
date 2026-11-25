@@ -826,7 +826,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with `input` and `output`. A channel's run whose channel the asker may not read (or no longer declared) withholds `input` and `error` (`withheld: true`). `output` is the app's own answer, shown to viewers whatever it copied |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
-| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, from?, kinds?, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed`, or that answers a question, 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
@@ -1141,8 +1141,9 @@ does not ship is never answered from its repo (Serving).
 - `triggers` (at most `TRIGGERS_MAX`) start runs of a mutation or a job an
   editor may call: `{"cron": "0 9 * * *", "run": op}` (five fields, UTC,
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
-  "person" | "agent"}` (each new record, of that kind's members only with
-  `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
+  "person" | "agent", "kinds"?: [...]}` (each new record, of that kind's
+  members only with `from`, and only of those kinds with `kinds`: a body's
+  `kind`, 1 to `TRIGGER_KINDS_MAX`, named as `listed`'s are, each once); `{"files": "notes/**", "run": op}` (a move of `main` changing a
   matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
   "run": op}` (once per install of new code: a deploy moving `live`, or a
   blessed template's changed release, at the fragment's next request; its
