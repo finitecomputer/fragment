@@ -197,22 +197,21 @@ impl FragmentCell {
     /// Test fleets only: one capability call, counted against the
     /// `facet-calls` lever's budget for the facet's current start and
     /// refused past it in the runtime's words (`facet::at_limit`), as
-    /// Cloudflare refuses a facet's subrequests past its life's limit.
-    pub(crate) fn facet_calls_lever(&self) -> CellResult<()> {
+    /// Cloudflare refuses a facet's subrequests past its life's limit: the
+    /// refusal to answer, which is the runtime's and never the platform's
+    /// own failure (the caller answers it unmarked).
+    pub(crate) fn facet_calls_lever(&self) -> CellResult<Option<CellError>> {
         if !self.cfg.test_hooks {
-            return Ok(());
+            return Ok(None);
         }
         let Some(limit) = self.meta(MetaKey::TestFacetCalls)?.and_then(|n| n.parse::<u64>().ok()) else {
-            return Ok(());
+            return Ok(None);
         };
         let start = self.app.starts();
         let (at, made) = self.facet_calls.get();
         let made = if at == start { made + 1 } else { 1 };
         self.facet_calls.set((start, made));
-        if made > limit {
-            return Err(CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)")));
-        }
-        Ok(())
+        Ok((made > limit).then(|| CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)"))))
     }
 
     /// The installed app code's identity (its stored loader id), when live has an app.
