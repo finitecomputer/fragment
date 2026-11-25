@@ -4,7 +4,8 @@
 -- them; a run's asker when that is someone else than its agent's owner,
 -- whose call ids are then their own (`runs_asked` in place of `runs_call`,
 -- the same key with the asker after it, so a lookup seeks as before: none
--- for a run from before); an agent member's lend here, what its owner lets
+-- for a run from before), and whom an agent's run acts for, its owner too,
+-- whom its app is told it runs for; an agent member's lend here, what its owner lets
 -- it use of theirs for someone else's ask (the lend card); and, on an agent
 -- fragment, the turns its bridge runs, each with whose ask it is, its
 -- mandate and the bridge life that told it, and the lives heard, each
@@ -14,6 +15,7 @@
 ALTER TABLE record_schedules ADD COLUMN asker TEXT;
 ALTER TABLE records ADD COLUMN asker TEXT;
 ALTER TABLE runs ADD COLUMN asker TEXT;
+ALTER TABLE runs ADD COLUMN acting_for TEXT;
 DROP INDEX IF EXISTS runs_call;
 CREATE UNIQUE INDEX IF NOT EXISTS runs_asked ON runs (principal, call_id, COALESCE(asker, '')) WHERE call_id IS NOT NULL;
 ALTER TABLE members ADD COLUMN lend INTEGER;

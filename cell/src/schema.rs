@@ -235,7 +235,7 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
             // 14's askers and lend on step 1's tables (a later step's table,
             // `record_schedules`, went whole above); and step 1's index step
             // 14 replaced
-            let later = "ALTER TABLE ended DROP COLUMN search; ALTER TABLE records DROP COLUMN author; ALTER TABLE pending DROP COLUMN code; ALTER TABLE records DROP COLUMN asker; ALTER TABLE runs DROP COLUMN asker; ALTER TABLE members DROP COLUMN lend; CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL; DROP TABLE _schema";
+            let later = "ALTER TABLE ended DROP COLUMN search; ALTER TABLE records DROP COLUMN author; ALTER TABLE pending DROP COLUMN code; ALTER TABLE records DROP COLUMN asker; ALTER TABLE runs DROP COLUMN asker; ALTER TABLE runs DROP COLUMN acting_for; ALTER TABLE members DROP COLUMN lend; CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL; DROP TABLE _schema";
             sql.exec(&format!("{later}; {plant}"), None)?;
             Ok(json!({ "members": columns(&sql, "members")?, "runs": columns(&sql, "runs")? }))
         }

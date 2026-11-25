@@ -325,6 +325,7 @@ impl FragmentCell {
                 trigger: inv.trigger,
                 principal: inv.principal,
                 asker: inv.other,
+                acting_for: inv.asker,
                 role: inv.role,
                 depth: inv.depth,
                 call: Some((&inv.id, &input_sha)),

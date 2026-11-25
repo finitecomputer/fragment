@@ -77,7 +77,7 @@ const ASKER_CHECKS: &[&str] = &[
     "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the app is told them, at their own role; its owner's same ask is its owner's",
     "held to their role: what only editors may do (they a viewer) is refused, though its owner's same ask goes",
     "each asks it to post under one id: each post is their own record, keyed by whom it posts for, as a call's id is",
-    "they ask it to run a job (Calories' summary of their day): the job is told whose ask it runs, as an op is, and answers them",
+    "each asks it to run a job (Calories' summary of their day): the job is told whose ask it runs, as an op is, reads their own entries, and answers them, its owner's own ask too",
     "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
     "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
     "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
@@ -148,12 +148,24 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     s.owned(&r.body, w.owner);
     let r = api.share(&calories, &ben_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Ben on calories: {r}");
-    let summary = format!("fetch http://api.fragment.internal/api/f/{calories}/ops/summarize?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"sum-ben\",\"input\":{{}}}}", w.agent);
-    let started = asked_by_ben(s, 10, &summary)?;
-    let answered = || records(api, w.owner, &calories, "replies").into_iter().find(|r| r["body"]["text"].is_string());
-    s.eventually(wake, || answered().is_some());
-    let reply = answered().unwrap_or_default();
-    s.ok(ASKER_CHECKS[3], started.starts_with("fetched 200") && reply["body"]["for"] == ben_id.as_str(), json!({ "started": started, "reply": reply }));
+    // each one's day: Ana's porridge, Ben's toast (she logs both: an editor's)
+    for (id, who, food) in [("ana-1", owner_id.as_str(), "porridge"), ("ben-1", ben_id.as_str(), "toast")] {
+        let r = api.op(w.owner, &calories, "log_food", id, json!({ "who": who, "food": food, "calories": 300 }))?;
+        anyhow::ensure!(r.status == 200, "{food} logged: {r}");
+    }
+    let summary = |id: &str| format!("fetch http://api.fragment.internal/api/f/{calories}/ops/summarize?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    let reply_for = |who: &str| records(api, w.owner, &calories, "replies").into_iter().find(|r| r["body"]["for"] == who && r["body"]["text"].is_string());
+    let bens = asked_by_ben(s, 10, &summary("sum-ben"))?;
+    s.eventually(wake, || reply_for(&ben_id).is_some());
+    let owners = asked_by(s, w.owner, "owner-sum", &summary("sum-owner"))?;
+    s.eventually(wake, || reply_for(&owner_id).is_some());
+    let text = |who: &str| reply_for(who).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let (ben_said, owner_said) = (text(&ben_id), text(&owner_id));
+    s.ok(
+        ASKER_CHECKS[3],
+        bens.starts_with("fetched 200") && owners.starts_with("fetched 200") && ben_said.contains("toast") && !ben_said.contains("porridge") && owner_said.contains("porridge") && !owner_said.contains("toast"),
+        json!({ "ben": bens, "owner": owners, "replies": records(api, w.owner, &calories, "replies") }),
+    );
 
     let schedules = format!("/api/f/{chat}/schedules");
     let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": op("whoami", "who-schedule") } })))?;
