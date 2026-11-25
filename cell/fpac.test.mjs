@@ -51,9 +51,6 @@ function bucket() {
       objects.set(key, bytes);
       return { key };
     },
-    async delete(key) {
-      objects.delete(key);
-    },
   };
 }
 
@@ -68,7 +65,7 @@ const RULES = {
 };
 const DISK = { prefix: "disks/17c33cdf88c6d1d8f58b7a0f/", name: "17c33cdf88c6d1d8f58b7a0f", epoch: 7, volume: 20_971_520_000, head: "6 6 2 " + "ab".repeat(32) + " clean" };
 const call = (b, method, path, { body, headers = {} } = {}, posted = async () => ({ answer: "taken" })) =>
-  fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method, body, headers, duplex: "half" }), b, DISK, RULES, posted, async () => ({}), async () => true, () => {});
+  fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method, body, headers, duplex: "half" }), b, DISK, RULES, posted, async () => ({}));
 const putOf = (b, path, bytes, sum = sha(bytes).toString("hex")) => call(b, "PUT", path, { body: bytes, headers: { "x-fpac-sha256": sum, "content-length": String(bytes.length) } });
 
 test("open names the disk, this life's epoch, its volume and its head, from the props", async () => {
@@ -212,22 +209,4 @@ test("a small post's body is read within its bound as it comes: one that names n
     assert.equal(r.status, 413, `${path} refused past its bound`);
     assert.ok(seen.pulled <= Math.ceil(bound / 1024) + 2, `${path} read ${seen.pulled} KiB of a 1 MiB body, not past its ${bound} bytes`);
   }
-});
-
-test("a put that lands as its life ends is taken back: only a life that still runs keeps what it put", async () => {
-  const bytes = new Uint8Array([1, 2, 3]);
-  const kept = [];
-  const put = (b, runs) =>
-    fpacRoute(new Request("http://fpac.fragment.internal/o/e7/s9", { method: "PUT", body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": "3" }, duplex: "half" }), b, DISK, RULES, async () => ({}), async () => ({}), runs, (p) => kept.push(p));
-  const running = bucket();
-  assert.equal((await put(running, async () => true)).status, 201);
-  assert.ok(running.objects.has(`${DISK.prefix}e7/s9`), "its life runs: kept");
-  const ended = bucket();
-  const r = await put(ended, async () => false);
-  assert.equal(r.status, 410, "its life ended as it landed");
-  assert.ok(!ended.objects.has(`${DISK.prefix}e7/s9`), "taken back");
-  const unknown = bucket();
-  assert.equal((await put(unknown, async () => { throw new Error("the DO did not answer"); })).status, 503, "unknown: tried again");
-  assert.ok(!unknown.objects.has(`${DISK.prefix}e7/s9`), "taken back: a retry puts it again");
-  assert.equal(kept.length, 3, "each put and its check outlive the guest's connection (waitUntil)");
 });

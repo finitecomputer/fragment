@@ -132,12 +132,25 @@ pub enum Unopened {
     Unmountable,
 }
 
+impl Unopened {
+    /// As the platform's lines and levers say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Unopened::Unusable => "unusable",
+            Unopened::Blank => "blank",
+            Unopened::Unmountable => "unmountable",
+        }
+    }
+}
+
 /// Where a disk's start goes past a head its guest found would not open
 /// (`head`, the one it was handed, and `back`, the one before it). A disk
 /// none of whose lives came up (`came_up`: its guest ran, after a new
 /// disk's format had shipped) holds nothing of anyone's, so whatever its
 /// boot found, a new disk again; so too a blank device none of whose heads
-/// names a checkpoint. Else the one before it; else nowhere, a failed
+/// names a checkpoint. A filesystem that would not mount on a disk that
+/// came up is tried again as it is (a mount's error may pass), never rolled
+/// back (Codex on #1552). Else the one before it; else nowhere, a failed
 /// start, whatever it kept left as it is for an operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fallback {
@@ -151,9 +164,22 @@ pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_
     let fresh = !came_up || (found == Unopened::Blank && checkpointless(head) && checkpointless(back));
     match (head, back) {
         (Some(_), _) if fresh => Fallback::Fresh,
+        _ if found == Unopened::Unmountable => Fallback::Nowhere,
         (_, Some(b)) => Fallback::To(*b),
         _ => Fallback::Nowhere,
     }
+}
+
+/// How long after a wipe's mark its disk's objects are listed once more
+/// before it is done: past any put its route took before the container
+/// went (R2 lands a put whose body it had within its own request, seconds
+/// at most), so one that landed after the wipe's first list, or whose own
+/// delete failed, is deleted too (Codex on #1552).
+pub const WIPE_SETTLE_MS: i64 = 120_000;
+
+/// Whether a wipe marked at `marked_ms` may finish its disk (`WIPE_SETTLE_MS`).
+pub fn wipe_settled(marked_ms: i64, now_ms: i64) -> bool {
+    now_ms >= marked_ms.saturating_add(WIPE_SETTLE_MS)
 }
 
 /// The platform's answer to a head a life posts.
@@ -387,7 +413,7 @@ mod tests {
         assert_eq!(fallback(Some(&claim), None, Unusable, true), Fallback::Nowhere, "a claim whose segments would not open (corrupt, not blank): never a new disk over what shipped");
         assert_eq!(fallback(Some(&newer), None, Blank, true), Fallback::Nowhere, "a checkpointed head is never blank: its files kept");
         assert_eq!(fallback(Some(&claim), None, Unmountable, true), Fallback::Nowhere, "a filesystem that would not mount on a disk that came up: its files kept");
-        assert_eq!(fallback(Some(&newer), Some(&older), Unmountable, true), Fallback::To(older), "or the head before it");
+        assert_eq!(fallback(Some(&newer), Some(&older), Unmountable, true), Fallback::Nowhere, "never rolled back past: a mount's error may pass, and the newest head is someone's (Codex on #1552)");
         assert_eq!(fallback(Some(&Head { epoch: 5, checkpoint: None, clean: false }), Some(&older), Unusable, true), Fallback::To(older), "a claim with a head before it: that one");
         assert_eq!(fallback(None, None, Unusable, true), Fallback::Nowhere, "no head: a new disk that would not make, a failed start");
         // a disk no life came up on holds nothing of anyone's: a format
@@ -398,6 +424,14 @@ mod tests {
         assert_eq!(fallback(Some(&claim), None, Unusable, false), Fallback::Fresh);
         assert_eq!(fallback(Some(&claim), None, Blank, false), Fallback::Fresh);
         assert_eq!(fallback(None, None, Unmountable, false), Fallback::Nowhere, "no head: nothing to start over from");
+    }
+
+    #[test]
+    fn a_wipe_lists_its_disk_again_once_any_put_taken_has_landed() {
+        assert!(!wipe_settled(1_000, 1_000));
+        assert!(!wipe_settled(1_000, 1_000 + WIPE_SETTLE_MS - 1));
+        assert!(wipe_settled(1_000, 1_000 + WIPE_SETTLE_MS));
+        assert!(!wipe_settled(i64::MAX, i64::MAX - 1), "no overflow");
     }
 
     #[test]

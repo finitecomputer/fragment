@@ -1427,3 +1427,38 @@ fn an_export_begun_before_a_disks_sleep_still_takes_its_save() {
     l.apply(Event::ExportAsked { since_ms: began }, slept + 6_100);
     assert!(l.apply(Event::Alarm, slept + 6_100).actions.contains(&Action::Hold { generation: g }), "its save is taken");
 }
+
+/// Goal (Codex on #1552): an export begun as a save is stored but before
+/// its event (its records' cleanup between) finds that save too old, and
+/// its ask is heard: a save is taken for it.
+#[test]
+fn an_export_begun_as_a_save_was_kept_still_takes_its_own() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    l.apply(Event::ExportAsked { since_ms: T }, T + 5_000);
+    l.apply(Event::Alarm, T + 5_000);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 5_500));
+    // a second export begins after that save was asked, before its event
+    let began = T + 5_800;
+    l.apply(Event::Saved { generation: g, seq }, T + 6_000);
+    l.apply(Event::ExportAsked { since_ms: began }, T + 6_100);
+    assert!(l.apply(Event::Alarm, T + 6_100).actions.contains(&Action::Hold { generation: g }), "its own save is taken");
+}
+
+/// Goal (Codex on #1552): a disk's sleep whose final flush ended in no
+/// clean head ends unsaved, saying so: never recorded as saved.
+#[test]
+fn a_disks_sleep_whose_final_flush_did_not_finish_ends_unsaved() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    let (_, slept) = run_alarms(&mut l, T + 2 * IDLE_MS);
+    let slept = slept.expect("it sleeps once idle");
+    assert_eq!(l.apply(Event::Held { generation: g, held: true }, slept + 500).actions, vec![Action::Stop { generation: g, saved: true }]);
+    let s = l.apply(Event::AsleepUnshipped { generation: g }, slept + 140_000);
+    let ended = s.ended.clone().expect("its life ends");
+    assert_eq!((ended.by, ended.saved), (LifeEnd::Sleep, false), "{s:?}");
+    assert!(matches!(s.note, SaveNote::Says(_)), "it says so: {:?}", s.note);
+    assert!(matches!(l.phase, Phase::Asleep { .. }));
+}

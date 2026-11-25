@@ -14,10 +14,7 @@
 // its boot's word that the head it was handed will not open, carried by
 // `postUnusable` with this life's epoch and that head, so the start it
 // fails is this one alone. `rules` are the Rust side's, one source of each: the name's grammar
-// (`nameEpoch`) and the bounds. A put that lands is kept only while its life
-// still runs (`stillRuns`, the DO's word): one that lands as its life ends (a
-// sleep's stop, a wipe) is taken back, under `waitUntil` so the guest's
-// connection, gone with its container, cannot cut that short.
+// (`nameEpoch`) and the bounds.
 
 const RANGE = /^bytes=(\d{1,15})-(\d{1,15})$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -61,8 +58,8 @@ async function smallBody(request, max) {
 }
 
 // Answers the guest's call `request` for `disk` ({ prefix, name, epoch,
-// volume, head }) from `bucket` (R2: ranged get, put-if-absent, head, delete).
-export async function fpacRoute(request, bucket, disk, rules, postHead, postUnusable, stillRuns, waitUntil) {
+// volume, head }) from `bucket` (R2: ranged get, put-if-absent, head).
+export async function fpacRoute(request, bucket, disk, rules, postHead, postUnusable) {
   const url = new URL(request.url);
   const route = `${request.method} ${url.pathname}`;
   if (route === "GET /open") {
@@ -102,10 +99,7 @@ export async function fpacRoute(request, bucket, disk, rules, postHead, postUnus
   if (request.method === "PUT") {
     // only this life writes, and only under its own epoch
     if (epoch !== disk.epoch) return text(403, "a put names another life's epoch\n");
-    // the put and its check go on if the guest's connection goes
-    const putting = put(bucket, key, request, rules.objectBytesMax, stillRuns);
-    waitUntil(putting.catch(() => {}));
-    return putting;
+    return put(bucket, key, request, rules.objectBytesMax);
   }
   return text(405, "GET or PUT\n");
 }
@@ -150,10 +144,8 @@ async function get(bucket, key, range) {
 // Put-if-absent. R2 checks the body against the SHA-256 the put names and
 // refuses the put when the name is taken; then the stored object's
 // checksum tells our own earlier put (200: its answer was lost) from
-// another writer's (409: the daemon is fenced). One it made is kept only if
-// its life still runs as it lands (410, taken back: its life ended; 503,
-// taken back: the DO did not say, and the daemon puts it again).
-async function put(bucket, key, request, objectBytesMax, stillRuns) {
+// another writer's (409: the daemon is fenced).
+async function put(bucket, key, request, objectBytesMax) {
   const claimed = request.headers.get("x-fpac-sha256") || "";
   if (!SHA256_HEX.test(claimed)) return text(400, "a put names its SHA-256\n");
   const length = Number(request.headers.get("content-length"));
@@ -170,17 +162,7 @@ async function put(bucket, key, request, objectBytesMax, stillRuns) {
     const why = String((e && e.message) || e);
     return text(/sha|checksum|digest/i.test(why) ? 400 : 503, `the put: ${why}\n`);
   }
-  if (stored !== null) {
-    let runs;
-    try {
-      runs = (await stillRuns()) === true;
-    } catch {
-      runs = null;
-    }
-    if (runs) return text(201, "", { "x-fpac-sha256": claimed });
-    await bucket.delete(key);
-    return runs === null ? text(503, "its life's word did not come: taken back\n") : text(410, "its life has ended: taken back\n");
-  }
+  if (stored !== null) return text(201, "", { "x-fpac-sha256": claimed });
   const there = await bucket.head(key);
   if (there === null || !there.checksums || !there.checksums.sha256) return text(503, "the name was taken, then gone\n");
   const sum = hex(there.checksums.sha256);

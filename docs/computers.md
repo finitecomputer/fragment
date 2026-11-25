@@ -550,9 +550,8 @@ put on disks.
   /open` names the disk, that life's epoch (its generation), its volume
   (20,000 MiB) and its head; `GET` and `PUT /o/<name>` read and put
   objects (bodies streamed, a put checked against its SHA-256 and refused
-  over an existing name, only under its own epoch, and kept only if that
-  life still runs as it lands: one landing as its life ends, a sleep's
-  stop or a wipe, is taken back); `POST /head` goes to the DO's rules.
+  over an existing name, only under its own epoch); `POST /head` goes to
+  the DO's rules.
   Beside the contract, the platform's own `POST /unusable {why, blank,
   unmountable}`: its boot's word that the head it was handed will not
   open, which the route sends on with that life's epoch and that head.
@@ -576,7 +575,8 @@ put on disks.
   cut short, `unmountable`), it starts again as a new disk. So does a
   blank device none of whose heads names a checkpoint. A head that will
   not open on a disk that came up keeps what shipped, for an operator,
-  never started over.
+  never started over; a filesystem that will not mount there is tried
+  again as it is (a mount's error may pass), never rolled back past.
 - **Its sleep is a signal and a wait.** Its port tabs close; the DO
   reads its owner's Storage from its `/data`'s own filesystem (one `df`,
   its used bytes its data: nothing in a sleep grows with its files, and a
@@ -591,10 +591,12 @@ put on disks.
   Drained, SIGTERM; its image's boot stops its own
   programs and its daemon's final flush ships what is left and posts a
   clean head; the DO waits for the container to exit
-  (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A crash
-  loses at most what its daemon had not shipped, about a second of
-  synced writes: the next mount replays the life's segments past its
-  last checkpoint.
+  (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A final
+  flush that posted no clean head (its store unreachable as it stopped)
+  ends its life unsaved, saying its last moments' writes may not have
+  shipped. A crash loses at most what its daemon had not shipped, about a
+  second of synced writes: the next mount replays the life's segments
+  past its last checkpoint.
 - **No saves of its own.** A disk is saved only for its owner's export:
   the export asks its computer for a save taken after it began, which is
   taken awake under the hold as any awake save (waking it, so an export
@@ -616,7 +618,10 @@ put on disks.
   the stub's bridge as its PID 1). The runtime gives its container FUSE
   and a loop device: Cloudflare's does, and krun's on a self-hosted box;
   workerd's Docker does not.
-- **A wipe** deletes its disk's objects with its saves'.
+- **A wipe** deletes its disk's objects with its saves', and lists them
+  once more `WIPE_SETTLE_MS` (2 minutes) after its mark before it is done:
+  a put its route took before the container went, landing after the
+  first list, or one whose delete failed, goes too.
 
 ### Saves and what a wake restores
 

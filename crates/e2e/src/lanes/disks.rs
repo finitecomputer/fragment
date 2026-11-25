@@ -153,7 +153,8 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     for i in 0..cycles() {
         let token = format!("cycle-{i}");
         let wrote = talk.said(s, &format!("write disk/cycle.txt {token}"))?;
-        let crash = i % CRASH_EVERY == CRASH_EVERY - 1;
+        // each tenth, and the last of a run shorter than ten
+        let crash = i % CRASH_EVERY == CRASH_EVERY - 1 || (cycles() < CRASH_EVERY && i + 1 == cycles());
         let (ended, head) = if crash {
             std::thread::sleep(SHIPPED_WITHIN);
             let before = view()["restored"]["generation"].as_u64().unwrap_or(0);
@@ -165,14 +166,18 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
                 shipping = lever(api, &id, "fpac-status").ok().and_then(|r| r.body["unshipped"].as_u64()).unwrap_or(0);
                 shipping > 0
             });
-            let killed = lever(api, &id, "kill").is_ok_and(|r| r.status == 200);
+            let kill = lever(api, &id, "kill").ok();
+            let killed = kill.as_ref().is_some_and(|r| r.status == 200);
+            // its daemon's own count, read by the kill itself just before
+            // its signal: the fill still shipping as it was killed
+            let at_kill = kill.as_ref().and_then(|r| r.body["unshipped"].as_u64()).unwrap_or(0);
             crashes += 1;
-            unshipped_at_kill.push(shipping);
+            unshipped_at_kill.push(at_kill);
             let back = s.eventually(WAKE + WAKE, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > before) && phase(api, &owner, &id) == "awake");
-            if !(filled.starts_with("filled ") && shipping > 0 && killed && back) {
-                println!("      (crash {i}: filled {filled:?}, unshipped {shipping}, killed {killed}, back {back})");
+            if !(filled.starts_with("filled ") && at_kill > 0 && killed && back) {
+                println!("      (crash {i}: filled {filled:?}, unshipped {shipping} then {at_kill} at its kill, killed {killed}, back {back})");
             }
-            (filled.starts_with("filled ") && shipping > 0 && killed && back, None)
+            (filled.starts_with("filled ") && at_kill > 0 && killed && back, None)
         } else {
             let (slept, _) = put_to_sleep(s, api, &owner, &id);
             let head = head_of(&row()["head"]);
@@ -290,12 +295,15 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
         let fell = next == killed + 2 && checkpoint == Some(None) && life["back"].is_null();
         // which it should have been, by what the bucket and the DO said at
         // its kill, apart from the rules that decided it: a life that fell
-        // back shipped nothing, or never came up (its format cut short); one
-        // kept had shipped (Codex on #1552)
+        // back shipped nothing (its device blank), or shipped what never came
+        // up and would not mount (its format cut short); one kept had
+        // shipped (Codex on #1552)
         let shipped = life["shipped"].as_array().map(Vec::len);
         let never_up = life["cameUp"] == false;
+        let found = life["fellRecord"]["found"].as_str().unwrap_or("");
         let evidenced = match shipped {
-            Some(n) if fell => n == 0 || never_up,
+            Some(0) if fell => found == "blank",
+            Some(_) if fell => never_up && found == "unmountable",
             Some(n) => n > 0,
             None => false,
         };
@@ -379,9 +387,9 @@ fn killed_and_back(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Value
     let up = view();
     let now = up["restored"]["generation"].as_u64().unwrap_or(0);
     let now_row = row();
-    let (head, back) = (now_row["head"].clone(), now_row["back"].clone());
+    let (head, back, fell_record) = (now_row["head"].clone(), now_row["back"].clone(), now_row["fell"].clone());
     let own = head_of(&head).is_some_and(|(e, _)| e == now);
-    json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "cameUp": came_up, "shipped": shipped, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "back": back, "own": own })
+    json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "cameUp": came_up, "shipped": shipped, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "back": back, "fellRecord": fell_record, "own": own })
 }
 
 /// What a sleep takes as its disk grows (`FRAGMENT_E2E_DISK_GROWTH`: a

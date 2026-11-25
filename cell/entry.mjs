@@ -750,8 +750,6 @@ export class ComputerEgress extends WorkerEntrypoint {
         rules,
         (epoch, line) => E.disk_head(this.env, computer, epoch, line),
         (epoch, head, why, blank, unmountable) => E.disk_unusable(this.env, computer, epoch, head, why, blank, unmountable),
-        async () => (await E.disk_runs(this.env, computer, this.ctx.props.disk.epoch)) === true,
-        (p) => this.ctx.waitUntil(p),
       );
     }
     // a relay only where one was asked for: its route, a GET that upgrades

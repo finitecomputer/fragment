@@ -378,6 +378,8 @@ enum MetaKey {
     SlowTell,
     /// The test lever's wait before a start's owner is told (`slow-start-tell`), in ms.
     SlowStartTell,
+    /// Its disk's last fallback: `{generation, found, to}` (the fpac lever's).
+    DiskFell,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -434,6 +436,7 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::SlowTell => "slow_tell",
             MetaKey::SlowStartTell => "slow_start_tell",
+            MetaKey::DiskFell => "disk_fell",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -471,13 +474,6 @@ struct Planned {
 struct DiskHeadAsk {
     epoch: u64,
     line: String,
-}
-
-/// `computer/disk-runs`: whether life `epoch` is still the one that runs
-/// (cell/fpac.mjs keeps a put that lands only then).
-#[derive(Deserialize)]
-struct DiskRunsAsk {
-    epoch: u64,
 }
 
 /// The heads a disk's start was handed (`Computer::disk_handed`): its
@@ -1966,7 +1962,13 @@ impl ComputerCell {
                     },
                     _ => (None, false),
                 };
-                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unusable", "generation": generation, "why": why, "head": stored.map(|h| h.encode()), "fellBackTo": fell.filter(|_| older) }));
+                let found = handed.map_or(fpac::Unopened::Unusable, |h| h.3);
+                if let Some(to) = fell.as_ref().filter(|_| older) {
+                    if let Err(e) = self.set_meta(MetaKey::DiskFell, &json!({ "generation": generation, "found": found.name(), "to": to }).to_string()) {
+                        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "fell unkept", "error": e.message }));
+                    }
+                }
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unusable", "generation": generation, "why": why, "found": found.name(), "head": stored.map(|h| h.encode()), "fellBackTo": fell.filter(|_| older) }));
                 let _ = self.destroy(generation, "its disk would not mount").await;
                 Event::RestoreFailed { generation, why, older }
             }
@@ -2847,7 +2849,13 @@ impl ComputerCell {
         if !gone {
             console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
         }
-        Event::Asleep { generation }
+        // a final flush that posted no clean head: its last moments' writes
+        // may not have shipped, and its life ends unsaved, saying so
+        if clean {
+            Event::Asleep { generation }
+        } else {
+            Event::AsleepUnshipped { generation }
+        }
     }
 
     /// A sleep's snapshot, taken after its save `save`: kept as that save's
@@ -3294,7 +3302,11 @@ impl ComputerCell {
         if let (false, true, Some(prefix)) = (more, on_disk, id.as_deref().and_then(fpac::disk_prefix)) {
             let (disk_objects, disk_more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix, WIPE_PAGES_PER_CALL).await?;
             objects += disk_objects;
-            more = disk_more;
+            // listed again once any put its route took has landed: one that
+            // landed after this list, or whose own delete failed, goes too
+            // (Codex on #1552); until then, more (the next call lists again)
+            let marked = self.rows("SELECT at FROM wiped", vec![])?.first().and_then(|r| r["at"].as_i64()).unwrap_or(0);
+            more = disk_more || !fpac::wipe_settled(marked, js::now_ms());
         }
         if !more {
             // one step, no await: its record emptied, the mark kept
@@ -3583,12 +3595,21 @@ impl ComputerCell {
                 let Some(generation) = self.lifecycle()?.running() else {
                     return Err(CellError::invalid("it is not running: wake it first"));
                 };
+                // on a disk, its daemon's count as it is killed (a crash
+                // test's evidence that writes were shipping)
+                let unshipped = if self.lifecycle()?.disk() {
+                    let argv = js::to_js(&json!(["sh", "-c", DISK_STATUS]));
+                    let out = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_STATUS_EXEC_MS as f64)]).await.ok().and_then(|o| js::from_js(&o).ok());
+                    out.and_then(|o| fpac::Status::read(o["output"].as_str().unwrap_or_default())).map(|s| s.unshipped_bytes)
+                } else {
+                    None
+                };
                 let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await?;
                 if sent.as_bool() != Some(true) {
                     return Err(CellError::host(format!("start {generation}'s container is not running here")));
                 }
-                console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
-                Ok(json!({ "computer": id, "killed": generation }))
+                console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation, "unshipped": unshipped }));
+                Ok(json!({ "computer": id, "killed": generation, "unshipped": unshipped }))
             }
             "fail-restore" => {
                 // each start that restores save `save` stops its restore for
@@ -3646,6 +3667,7 @@ impl ComputerCell {
                     "back": disk.and_then(|d| d.back).map(|h| h.encode()),
                     "sleptUnshipped": disk.and_then(|d| d.slept_unshipped),
                     "cameUp": disk.map(|d| d.came_up),
+                    "fell": self.meta(MetaKey::DiskFell)?.and_then(|j| crate::json_text::<Value>(&j).ok()),
                 }))
             }
             // what one life of its disk put in the bucket, as the bucket
@@ -3980,13 +4002,7 @@ impl ComputerCell {
                 let b: DiskHeadAsk = body_json(&mut req).await?;
                 json_response(&self.disk_head(b.epoch, &b.line)?)
             }
-            // a put of its disk's that just landed: kept only if its life
-            // still runs and the computer is not being wiped (Codex on #1552)
-            "computer/disk-runs" => {
-                let b: DiskRunsAsk = body_json(&mut req).await?;
-                let runs = !self.wiped.get() && self.lifecycle()?.running() == Some(b.epoch);
-                json_response(&json!({ "runs": runs }))
-            }
+
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
                 if let Some(event) = self.exit_of(b.generation)? {
@@ -4968,18 +4984,6 @@ impl ComputerEgress {
     /// (`fragment_core::computer::fpac::decide`). Answers `{answer}`
     /// (`taken`, `same`) or `{refused, status}`; a DO unheard is `503`,
     /// which the guest's daemon tries again.
-    /// Whether life `epoch` of `computer`'s disk still runs, as its put
-    /// lands (cell/fpac.mjs keeps it only then): the Computer DO's word
-    /// (`computer/disk-runs`); unheard, an error, and the route takes the
-    /// put back and asks for it again.
-    pub async fn disk_runs(env: Env, computer: String, epoch: f64) -> Result<bool, JsValue> {
-        let epoch = if epoch.is_finite() && epoch >= 1.0 { epoch as u64 } else { 0 };
-        match ask(&env, &computer, "computer/disk-runs", &json!({ "epoch": epoch })).await {
-            Ok(answer) => Ok(answer["runs"] == true),
-            Err(e) => Err(JsValue::from_str(&e.message)),
-        }
-    }
-
     pub async fn disk_head(env: Env, computer: String, epoch: f64, line: String) -> JsValue {
         let epoch = if epoch.is_finite() && epoch >= 1.0 { epoch as u64 } else { 0 };
         match ask(&env, &computer, "computer/disk-head", &json!({ "epoch": epoch, "line": line })).await {
