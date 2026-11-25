@@ -310,10 +310,14 @@ export class App extends DurableObject {
   // earlier life of its name made is another's): the door may deliver one
   // again (an answer from the inbox lost; its runner restored from an
   // older save)
-  seen({ id, door }) {
+  seen({ id, door, own }) {
     // none recorded yet: its connect under way (`unknown`, which `intake`
-    // settles by asking which door its own fetch reaches)
-    if (this.get("door") === null) return { fresh: false, unknown: true };
+    // settles by asking which door its own fetch reaches, then says so:
+    // `own`, recorded here, as its connect's `connected` would)
+    if (this.get("door") === null) {
+      if (own !== true) return { fresh: false, unknown: true };
+      this.put("door", String(door));
+    }
     if (door !== this.get("door")) return { fresh: false, other: true };
     const fresh = this.ctx.storage.sql.exec("INSERT INTO seen (id, n) VALUES (?, (SELECT coalesce(max(n), 0) + 1 FROM seen)) ON CONFLICT DO NOTHING RETURNING n", id).toArray().length === 1;
     this.ctx.storage.sql.exec("DELETE FROM seen WHERE n < (SELECT max(n) FROM seen) - ?", SEEN_MAX);
@@ -333,8 +337,7 @@ export class App extends DurableObject {
     if (seen.unknown) {
       const { said } = await door(job, "state");
       if (said?.door?.door !== m.door) return { ignored: "not its door's" };
-      await job.call("connected", { door: m.door });
-      seen = await job.call("seen", { id: m.id, door: m.door });
+      seen = await job.call("seen", { id: m.id, door: m.door, own: true });
     }
     if (seen.other || seen.unknown) return { ignored: "not its door's" };
     if (!seen.fresh) return { ignored: "taken already" };

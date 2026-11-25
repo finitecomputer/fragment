@@ -4227,8 +4227,15 @@ impl ComputerCell {
                 if at.as_deref().unwrap_or("") != from || (at.is_some() && from.is_empty()) {
                     return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is at {:?}, not {from:?}: another `go` moved it on; ask again", at.unwrap_or_default())));
                 }
+                // a `go`'s own claim, when it names one: another's claim
+                // (this one let go by a `back`, then claimed again) is not it
+                if let Some(claim) = b["claim"].as_str() {
+                    if moves.get(agent).is_some_and(|r| r["claim"].as_str() != Some(claim)) {
+                        return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is another `go`'s now: this one stops")));
+                    }
+                }
                 let rec = moves.entry(agent.to_string()).or_insert_with(|| json!({ "moved": false }));
-                for k in ["connector", "door", "step", "chat", "staged"] {
+                for k in ["connector", "door", "step", "chat", "staged", "claim"] {
                     if let Some(v) = b["record"].get(k).filter(|v| v.is_string() || v.is_boolean()) {
                         rec[k] = v.clone();
                     }

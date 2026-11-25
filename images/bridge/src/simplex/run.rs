@@ -1626,8 +1626,10 @@ impl Manager {
             s.saved.link = link;
             s.saved.moved = None;
             // what its door took and had not sent goes on from here, in
-            // order, once its core is up (`up`)
-            s.saved.carried.extend(unsent.iter().cloned());
+            // order, once its core is up (`up`); placed again (a way back
+            // whose answer was lost, asked again before its core started),
+            // the same, never twice
+            s.saved.carried.clone_from(&unsent);
             if let Err(e) = store(&s.dir, &s.saved) {
                 crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
                 return Err(Refused::new(500, format!("SimpleX placed its door's save, and could not write its link: {e}")));
@@ -4650,6 +4652,12 @@ mod tests {
         let read = load(&link_dir, &agent()).expect("its file");
         assert!(read.moved.is_none() && !m.moved(f), "moved no more");
         assert_eq!(read.carried, ["taken, not yet sent", FILE_LEFT], "kept for its core's next start, on disk");
+        // the same way back again, its answer lost before the platform
+        // unmarked it (its view still says moved, so its bridge takes it):
+        // what its door had not sent is carried once, never twice
+        let Ok(Placing::Link(again, carried)) = place_back(&into, &newest) else { panic!("placed again") };
+        m.placed(f, Back::Placed(again, carried), true).expect("its view");
+        assert_eq!(load(&link_dir, &agent()).expect("its file").carried, ["taken, not yet sent", FILE_LEFT], "carried once (Codex's fix-check of #1541)");
         at_door.syncing = true;
         at_door.forced = true;
         assert_eq!(read.link, at_door, "its door's link, forced to sync as it was behind");

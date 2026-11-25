@@ -24,7 +24,7 @@
     "invited": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["n", "link"], "properties": { "n": { "type": "integer" }, "link": { "type": "string", "maxLength": 2000 }, "short": { "type": "string", "maxLength": 2000 }, "qr": { "type": ["object", "null"], "properties": { "size": { "type": "integer" }, "dark": { "type": "string", "maxLength": 31329 } } } } } },
     "linked": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["n", "name"], "properties": { "n": { "type": "integer" }, "name": { "type": "string", "maxLength": 200 } } } },
     "unlink": { "kind": "job", "role": "owner", "description": "Ends the door's SimpleX link to its owner's app." },
-    "seen": { "kind": "mutation", "input": { "type": "object", "required": ["id", "door"], "properties": { "id": { "type": "string", "maxLength": 64 }, "door": { "type": "string", "maxLength": 128 } } } },
+    "seen": { "kind": "mutation", "input": { "type": "object", "required": ["id", "door"], "properties": { "id": { "type": "string", "maxLength": 64 }, "door": { "type": "string", "maxLength": 128 }, "own": { "type": "boolean" } } } },
     "intake": { "kind": "job" },
     "mirror": { "kind": "job" }
   },

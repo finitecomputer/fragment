@@ -14,8 +14,10 @@
 //!   it, **making**, before any connector is made):
 //!   1. **made**: the connector, the person's own (made as Settings' Set
 //!      up makes one, as the person: the platform makes a fragment for its
-//!      person, a first, each logged as `simplex-move`), its inbox's
-//!      secret set; not yet bound, so no page of it starts a door yet;
+//!      person, a first, each logged as `simplex-move`), its door fenced
+//!      until the link is given (`/door/expect`: no connect begins it as a
+//!      new profile first, its setup page opened meanwhile included), its
+//!      inbox's secret set; not yet bound;
 //!   2. **imported**: its computer's link handed over (its core stopped for
 //!      good there: `computer/simplex-hand`), the answer that door's first
 //!      save, streamed into the door (`/door/import`, its SHA-256 checked
@@ -114,6 +116,11 @@ impl Move<'_> {
         crate::computer::ask(self.env, &self.computer, "computer/simplex-moves", &json!({ "op": "set", "agent": self.agent, "from": from, "record": record })).await
     }
 
+    /// The same, and only while the record is still this `go`'s claim.
+    async fn set_claimed(&self, from: &str, claim: &str, record: Value) -> CellResult<Value> {
+        crate::computer::ask(self.env, &self.computer, "computer/simplex-moves", &json!({ "op": "set", "agent": self.agent, "from": from, "claim": claim, "record": record })).await
+    }
+
     async fn note(&self, detail: String) -> CellResult<()> {
         crate::ask_registry(self.env, &admin::Note { by: self.by.to_string(), action: "simplex-move".into(), target: self.person.id.clone(), detail, request: None }).await?;
         Ok(())
@@ -177,9 +184,12 @@ impl Move<'_> {
             if let Some(why) = self.blocked(&read) {
                 return Err(CellError::new(ErrorCode::Conflict, why));
             }
-            // claimed first: a `go` beside this one finds it claimed
-            self.set("", json!({ "step": "making" })).await?;
-            read["record"] = self.make().await?;
+            // claimed first, by a claim of its own: a `go` beside this one
+            // finds it claimed, and one after a `back` let this claim go
+            // never has its record finished by this one
+            let claim = hex::encode(crate::js::random_bytes::<8>());
+            self.set("", json!({ "step": "making", "claim": claim })).await?;
+            read["record"] = self.make(&claim).await?;
         }
         let mut rec = read["record"].clone();
         if text(&rec, "step") == "making" {
@@ -226,7 +236,7 @@ impl Move<'_> {
     /// on a deployment whose doors run, its inbox's secret set, recorded
     /// as it is made (the claim's `go` alone makes one). Bound only once
     /// its door holds the link (`bind`).
-    async fn make(&self) -> CellResult<Value> {
+    async fn make(&self, claim: &str) -> CellResult<Value> {
         let label = fragment_core::door::connector_label(label_of(&self.agent), TEMPLATE, fragment_proto::label_room(self.cfg.host_label_suffix()));
         let create = CreateFragment { name: String::new(), label: Some(label), visibility: None, template: Some(TEMPLATE.into()), title: None, agent: None };
         let mut made = crate::create_fragment(self.env, self.cfg, self.url, create, self.person.clone()).await?;
@@ -237,9 +247,22 @@ impl Move<'_> {
             self.forget().await?;
             return Err(CellError::new(ErrorCode::Conflict, "this deployment runs no SimpleX doors: nothing moved"));
         }
+        // its door fenced from now until the link is given (cell/door.mjs
+        // `EXPECTING`): its setup page, opened meanwhile, starts no new profile
+        let mut expected = crate::routed::send(self.env, "SIMPLEX_DOOR", &door, crate::routed::internal_request("door/expect", &json!({ "door": door }).to_string())?).await?;
+        answer(&mut expected, "its door's fence").await?;
         let secret = hex::encode(crate::js::random_bytes::<32>());
         self.as_person(&made.name, Method::Put, &format!("/api/secrets/{SECRET}"), Some(&json!({ "value": secret, "hosts": [DOOR_HOST] }))).await?;
-        let rec = self.set("making", json!({ "connector": made.name, "door": door, "step": "made" })).await?;
+        let rec = match self.set_claimed("making", claim, json!({ "connector": made.name, "door": door, "step": "made" })).await {
+            Ok(rec) => rec,
+            // its claim let go meanwhile (a `back`): the connector it made
+            // is no one's move, so it goes, its door with it
+            Err(e) if e.code == ErrorCode::Conflict => {
+                self.as_person(&made.name, Method::Delete, "/delete", None).await?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         self.note(format!("made {} for {}'s SimpleX", made.name, self.agent)).await?;
         Ok(rec)
     }
@@ -339,19 +362,17 @@ impl Move<'_> {
     /// Whether `connector` has a run of its `intake` that has not published
     /// what its door delivered: queued or under way, or held (failed, kept
     /// for a replay) or blocked (paused), whose file its door must keep
-    /// until it is replayed or let go. Each status asked for one run.
+    /// until it is replayed or let go.
     async fn intake_waiting(&self, connector: &str) -> CellResult<bool> {
-        for status in ["queued", "running", "held", "blocked"] {
-            let mut url = self.url.clone();
-            url.set_query(Some(&format!("op=intake&status={status}&limit=1")));
-            let bare = Request::new(url.as_str(), Method::Get)?;
-            let routed = Routed { name: connector.into(), url, signed: Some(self.person.clone()), credential: None };
-            let mut r = crate::forward(self.env, &bare, None, crate::Forward { routed, inner: "/api/runs".into(), extra: vec![] }).await?;
-            if answer(&mut r, &format!("{connector}'s runs")).await?["runs"].as_array().is_some_and(|runs| !runs.is_empty()) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        // one read, so a run replayed meanwhile is seen in one status or
+        // another; the newest page of its runs (its intake's, one a message)
+        let mut url = self.url.clone();
+        url.set_query(Some("op=intake&limit=200"));
+        let bare = Request::new(url.as_str(), Method::Get)?;
+        let routed = Routed { name: connector.into(), url, signed: Some(self.person.clone()), credential: None };
+        let mut r = crate::forward(self.env, &bare, None, crate::Forward { routed, inner: "/api/runs".into(), extra: vec![] }).await?;
+        let runs = answer(&mut r, &format!("{connector}'s runs")).await?;
+        Ok(runs["runs"].as_array().is_some_and(|runs| runs.iter().any(|r| matches!(r["status"].as_str(), Some("queued" | "running" | "held" | "blocked")))))
     }
 }
 

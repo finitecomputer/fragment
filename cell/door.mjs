@@ -69,6 +69,12 @@ const HANDBACK_MS = 30_000;
 // Its stop's word once it handed its link back: no connect, lever or watch
 // starts it again (its computer runs that link now), until its end.
 const HANDED_BACK = "handed back";
+// A door a computer's link moves into (the operators' move,
+// cell/src/simplex_move.rs), from its birth until that link's save is
+// given: no connect, nor any start, begins it as a new profile first,
+// which would leave no room for the link (its setup page opened
+// meanwhile connects on its own).
+const EXPECTING = "expecting its link";
 // Pages of its files (the bucket's, up to 1000 keys each) one end deletes;
 // asked again, it deletes the rest.
 const END_PAGES_MAX = 10;
@@ -169,6 +175,7 @@ export class SimplexDoor extends DurableObject {
       // its way back, whatever it is
       if (url.pathname === "/door/state" && request.method === "POST") return await this.#state();
       if (url.pathname === "/door/handback" && request.method === "POST") return await this.#handback(await bounded(request));
+      if (url.pathname === "/door/expect" && request.method === "POST") return await this.#expect(await bounded(request));
       const lever = url.pathname === "/door/lever" && request.method === "POST" ? await bounded(request) : null;
       // the e2e's look at its files, whatever it is
       if (lever?.op === "files") return json(await this.#files(lever.door));
@@ -268,6 +275,7 @@ export class SimplexDoor extends DurableObject {
     if (!d) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
     else if (d.door !== door) return refusal(409, "another_door", `this door is ${d.door}`);
     else if (d.stopped === HANDED_BACK) return refusal(409, "handed_back", "this door handed its link back to its computer: it never starts again");
+    else if (d.stopped === EXPECTING) return refusal(409, "moving", "a SimpleX link is moving into this door: it starts once that link is given");
     else this.ctx.storage.sql.exec("UPDATE door SET stopped = NULL WHERE id = 1");
     // its watch first: a start that fails is tried again by it
     await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
@@ -323,6 +331,8 @@ export class SimplexDoor extends DurableObject {
       // generation 0: no life of its own is numbered so, nor will be
       this.ctx.storage.transactionSync(() => {
         if (!this.#door()) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
+        // the link it expected, given: its connect starts it now
+        else this.ctx.storage.sql.exec("UPDATE door SET agent = ?, stopped = NULL WHERE id = 1 AND stopped = ?", agent, EXPECTING);
         this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (0, 1, 0, ?, ?, 0)", put.size, Date.now());
         this.ctx.storage.sql.exec("UPDATE door SET saved = 1 WHERE id = 1");
         this.ctx.storage.sql.exec("INSERT INTO imported (sha, at, staged) VALUES (?, ?, ?)", sha, Date.now(), staged);
@@ -332,6 +342,31 @@ export class SimplexDoor extends DurableObject {
     }
     this.#log("door.imported", { sha, bytes: length });
     return json({ imported: sha });
+  }
+
+  // Its link on its way (the operators' move, before its computer hands
+  // it over): fenced from now until its save is given (`EXPECTING`), so
+  // no connect begins it as a new profile first. Asked again, the same; a
+  // door given its save already says so; one that started or saved, or
+  // handed back, takes no link (409).
+  async #expect(body) {
+    if (!nameOk(body.door)) throw Object.assign(new Error("an expected link names its door"), { status: 400 });
+    if (this.#over) return refusal(410, "over", "this door's connector is gone");
+    if (this.#ended) {
+      this.#migrate();
+      this.#ended = false;
+    }
+    const d = this.#door();
+    if (d && d.door !== body.door) return refusal(409, "another_door", `this door is ${d.door}`);
+    if (d?.stopped === HANDED_BACK) return refusal(409, "handed_back", "this door handed its link back to its computer: it takes no link");
+    const had = this.ctx.storage.sql.exec("SELECT sha FROM imported").toArray()[0];
+    if (had) return json({ imported: had.sha });
+    if (!d) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, '', 0, 0, 0, 0, ?)", body.door, EXPECTING);
+    else if (d.stopped !== EXPECTING) {
+      if (d.started > 0 || d.saved > 0) return refusal(409, "has_saves", "this door has started, or saved: no link moves into it");
+      this.ctx.storage.sql.exec("UPDATE door SET stopped = ? WHERE id = 1", EXPECTING);
+    }
+    return json({ expecting: body.door });
   }
 
   // The way back of the operators' move (docs/bridge.md, "SimpleX"): a
@@ -471,6 +506,8 @@ export class SimplexDoor extends DurableObject {
       if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them)");
       // fenced before anything (a new chat's let-go included): its computer runs its link now
       if (d?.stopped === HANDED_BACK) return refusal(409, "handed_back", "this door handed its link back to its computer: it never starts again");
+      // nor a new profile before a link moving into it is given
+      if (d?.stopped === EXPECTING) return refusal(409, "moving", "a SimpleX link is moving into this door: its connect starts it once that link is given");
       // its owner's SimpleX chat with their old agent, handed over staged
       // (never kept on their computer), starts only at their word: kept
       // (`keep`: its runner adopts it as it restores), or let go for a new chat

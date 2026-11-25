@@ -926,6 +926,29 @@ test("the way back: a planned stop, its runner's last save, and that save handed
   assert.equal(d.c.starts.length, 1, "never started again");
 });
 
+test("a door a link moves into starts only from that link: its connect, or a start, refused until the link's save is given, then its connect starts it from that save (Codex's fix-check of #1541)", async () => {
+  const d = door();
+  const expect = (name = DOOR) => d.call("POST", "/door/expect", {}, JSON.stringify({ door: name }));
+  assert.equal((await expect()).status, 200);
+  assert.deepEqual([(await expect()).status, (await expect(`${NAME}--fedcba987654`)).status], [200, 409], "again the same; another door's refused");
+  // its setup page opened as it moves connects on its own: refused, no new profile
+  const early = await d.connect();
+  assert.deepEqual([early.status, (await early.json()).error], [409, "moving"]);
+  assert.equal((await d.start()).status, 409, "nor the lever's start");
+  assert.deepEqual([d.c.starts.length, d.saves()], [0, []], "nothing begun");
+  // a way back now: nothing given, so its computer's own copy is the link
+  // still (checked in the way back's own test); the link given, it starts
+  assert.equal((await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("the moved link") })).status, 200);
+  assert.equal(d.row().stopped, null, "its link given: no longer fenced");
+  assert.equal((await d.connect()).status, 200);
+  assert.equal(d.c.starts.length, 1, "started, from that save");
+  assert.equal((await expect()).status, 200, "expected again once given: says so, changes nothing");
+  // a door that started takes no link moving in
+  const { d: e } = await saved();
+  const late = await e.call("POST", "/door/expect", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([late.status, (await late.json()).error], [409, "has_saves"]);
+});
+
 test("an ended door has no way back: refused (410), never a save of nothing that would run its computer's old copy, now or after a restart (Codex's round on #1541)", async () => {
   const { d } = await saved();
   await d.end();

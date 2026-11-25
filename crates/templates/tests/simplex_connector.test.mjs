@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 
 const BASE = "export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }";
 const HOOKS = `export async function resolve(specifier, context, next) {
@@ -21,6 +22,11 @@ const HOOKS = `export async function resolve(specifier, context, next) {
 }`;
 register("data:text/javascript," + encodeURIComponent(HOOKS));
 const { App } = await import(new URL("../../../templates/simplex/app.mjs", import.meta.url).href);
+
+// its operations' roles, as the platform checks a job's calls: a
+// trigger's run acts as an editor (crates/core manifest.rs), so an owner's
+// operation it calls is refused, as `step_call` refuses it
+const OPS = JSON.parse(readFileSync(new URL("../../../templates/simplex/fragment.json", import.meta.url), "utf8")).operations;
 
 const AGENT = "npub1juniper";
 // its door, its life's, as its connect was told it
@@ -38,7 +44,11 @@ function world(answers = {}, connected = true) {
   w.job = (via, door = BOUND) => ({
     via,
     door,
-    call: async (op, input) => (w.calls.push(op), app[op](input, { agent: null })),
+    call: async (op, input) => {
+      if (via === "channel" && OPS[op]?.role === "owner") throw new Error(`${op} needs the owner role: a trigger's run acts as an editor`);
+      w.calls.push(op);
+      return app[op](input, { agent: null });
+    },
     publish: async (channel, body, kind) => void w.published.push({ channel, body, kind }),
     sleep: async (ms) => void w.slept.push(ms),
     fetch: async (url, init = {}) => {
