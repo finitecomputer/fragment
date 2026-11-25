@@ -178,13 +178,17 @@ impl Engine {
             anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {name}: {status} {}", String::from_utf8_lossy(&body));
             removed += 1;
         }
-        let (status, body) = engine_call(socket, "GET", &format!("/v1/containers/{BUILDER}"))?;
-        if status == 200 {
-            let builder: serde_json::Value = serde_json::from_slice(&body).context("the krun engine's builder is JSON")?;
-            if orphan_builder(&builder, proc_start) {
-                let (status, body) = engine_call(socket, "POST", &format!("/v1/containers/{BUILDER}/destroy"))?;
-                anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {BUILDER}: {status} {}", String::from_utf8_lossy(&body));
-                removed += 1;
+        // On the builder's lock: a session holding it runs, and reaps a
+        // builder left before it itself; one that starts after this waits.
+        if let Some(_turn) = builder_turn(socket)? {
+            let (status, body) = engine_call(socket, "GET", &format!("/v1/containers/{BUILDER}"))?;
+            if status == 200 {
+                let builder: serde_json::Value = serde_json::from_slice(&body).context("the krun engine's builder is JSON")?;
+                if orphan_builder(&builder, proc_start) {
+                    let (status, body) = engine_call(socket, "POST", &format!("/v1/containers/{BUILDER}/destroy"))?;
+                    anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {BUILDER}: {status} {}", String::from_utf8_lossy(&body));
+                    removed += 1;
+                }
             }
         }
         Ok(removed)
@@ -196,6 +200,33 @@ impl Engine {
 /// `<pid>-<start>`, the celld process and its start time (`/proc/<pid>/stat`
 /// field 22), so a reused pid is told apart.
 const BUILDER: &str = "celld-builder";
+
+/// The lock celld's build sessions on the engine at `socket` take turns
+/// by (the fork's krun_build.rs `lock_path`, `engine_id`):
+/// `celld-builder-<uid>-<12 hex of the SHA-256 of the socket's canonical
+/// path>.lock`, in `/run/user/<uid>` when there is one, else `/tmp`.
+fn builder_lock(socket: &Path, uid: u32, runtime: Option<&Path>) -> PathBuf {
+    use sha2::Digest as _;
+    let canonical = fs::canonicalize(socket).unwrap_or_else(|_| socket.to_path_buf());
+    let digest = sha2::Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let name = format!("celld-builder-{uid}-{}.lock", &format!("{digest:x}")[..12]);
+    runtime.unwrap_or(Path::new("/tmp")).join(name)
+}
+
+/// The builder's lock, taken when no session holds it; `None` while one
+/// does.
+fn builder_turn(socket: &Path) -> Result<Option<fs::File>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = fs::metadata("/proc/self").context("this process's user")?.uid();
+    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let path = builder_lock(socket, uid, runtime.is_dir().then_some(runtime.as_path()));
+    let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e).with_context(|| format!("lock {}", path.display())),
+    }
+}
 
 /// Whether `builder` (the engine's view of it) belongs to a celld that is
 /// gone: its owner's pid runs no more, or runs a process started at
@@ -504,6 +535,28 @@ mod tests {
         assert!(super::orphan_builder(&builder("4194305-1"), super::proc_start), "past pid_max: gone");
         assert!(!super::orphan_builder(&serde_json::json!({ "labels": {} }), super::proc_start), "no owner");
         assert!(!super::orphan_builder(&builder("x"), super::proc_start));
+    }
+
+    /// Goal: devstack takes the builder's lock where celld does, so a
+    /// session that holds it keeps its builder. Method: the fork's naming,
+    /// a symlink to the socket naming the same lock, and the lock held.
+    #[test]
+    fn the_builders_lock_is_celld_s() {
+        let dir = std::env::temp_dir().join(format!("celld-lock-{}", crate::random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("engine.sock");
+        fs::write(&socket, "").unwrap();
+        std::os::unix::fs::symlink(&socket, dir.join("link.sock")).unwrap();
+        let lock = super::builder_lock(&socket, 1000, Some(&dir));
+        assert_eq!(lock, super::builder_lock(&dir.join("link.sock"), 1000, Some(&dir)));
+        let name = lock.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(name.starts_with("celld-builder-1000-") && name.ends_with(".lock") && name.len() == "celld-builder-1000-".len() + 12 + 5, "{name}");
+        assert!(super::builder_lock(&socket, 1000, None).starts_with("/tmp"));
+        let held = fs::File::create(&lock).unwrap();
+        held.try_lock().unwrap();
+        let other = fs::OpenOptions::new().write(true).open(&lock).unwrap();
+        assert!(matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)), "a session holds it: the builder is kept");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -886,8 +886,11 @@ unfinished design, not debt.
   container `celld-`, 6 hex of the SHA-256 of the node, `-` (its
   container.rs `node_prefix`). It destroys celld's image builder too
   (`celld-builder`, the fork's krun_build.rs) when the celld its label
-  names (`<pid>-<start>`) is gone: a run killed while its node built
-  images left it holding 12 GiB of the engine's memory.
+  names (`<pid>-<start>`) is gone, holding the lock celld's build
+  sessions take turns by (its `lock_path`: `celld-builder-<uid>-<12 hex of
+  the socket's canonical path>.lock` in `/run/user/<uid>`): a run killed
+  while its node built images left it holding 12 GiB of the engine's
+  memory.
 - **Risk:** a celld that names them otherwise leaves a killed run's VMs on
   the engine (its `vms_max` is 16), where its next start does not reap
   them: each e2e run is a project of its own.
