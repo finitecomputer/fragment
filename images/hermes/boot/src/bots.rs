@@ -93,7 +93,7 @@ pub fn profile_routes(agents: &[Agent], routed: &BTreeMap<String, String>) -> St
         .iter()
         .filter_map(|a| {
             let profile = wire::profile(&a.fragment);
-            let chat = wire::chat_id(routed.get(&a.fragment)?, &a.fragment);
+            let chat = wire::chat_id(routed.get(&a.fragment)?, &a.fragment, None);
             Some(format!("  - name: {}\n    platform: \"relay\"\n    profile: {}\n    chat_id: {}\n", q(&profile), q(&profile), q(&chat)))
         })
         .collect();

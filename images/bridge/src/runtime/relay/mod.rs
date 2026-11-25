@@ -715,7 +715,9 @@ impl Loop {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the
                 // running turn after its next tool call) or beside none
-                let chat = wire::chat_id(&fragment, &agent);
+                // into the running turn's own conversation (a room's, too)
+                let running = turn.as_ref().and_then(|t| self.inflight.get(t)).map(|f| f.chat.clone());
+                let chat = running.unwrap_or_else(|| wire::chat_id(&fragment, &agent, None));
                 let profile = wire::profile(&agent);
                 let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None, topic: wire::topic(simplex) };
                 let buffer = format!("x-{id}");
@@ -777,7 +779,7 @@ impl Loop {
     }
 
     fn start(&mut self, ts: TurnStart) {
-        let chat = wire::chat_id(&ts.fragment, &ts.agent.fragment);
+        let chat = wire::chat_id(&ts.fragment, &ts.agent.fragment, ts.room.as_deref());
         let profile = wire::profile(&ts.agent.fragment);
         if let Some(old) = self.by_chat.get(&chat).cloned() {
             // The engine runs one turn of an agent in a chat at a time; a
@@ -975,7 +977,8 @@ impl Loop {
                 let id = self.message_id();
                 let (text, _) = wire::uncursored(content);
                 crate::ev!("relay.aside_answered", { "chat": chat, "answering": reply_to });
-                self.emit(Event::Say { agent, fragment, text: text.to_string(), files: Vec::new() }).await;
+                // the owner's command's answer, theirs: in no room
+                self.emit(Event::Say { agent, fragment, text: text.to_string(), files: Vec::new(), room: None }).await;
                 return json!({ "success": true, "message_id": id });
             }
         }
@@ -996,7 +999,7 @@ impl Loop {
                     // the turn is done) is still that turn's
                     match wire::notice(&text) {
                         Some((category, text)) => self.emit(Event::Notice { agent, fragment, category, text }).await,
-                        None => self.emit(Event::Say { agent, fragment, text, files: Vec::new() }).await,
+                        None => self.emit(Event::Say { agent, fragment, text, files: Vec::new(), room: wire::room_of_chat_id(&chat).map(str::to_string) }).await,
                     }
                     return json!({ "success": true, "message_id": id });
                 };
@@ -1175,8 +1178,10 @@ impl Loop {
         let Some(turn) = self.by_chat.get(chat).cloned() else {
             let Some((fragment, agent)) = wire::split_chat_id(chat) else { return json!({ "success": false, "error": "no chat by that id" }) };
             // A background completion has no bridge-owned turn, just as
-            // its text send above. Its file is a reply of its own.
-            self.emit(Event::Say { agent: agent.into(), fragment: fragment.into(), text: caption, files: vec![file] }).await;
+            // its text send above. Its file is a reply of its own, in its
+            // conversation's room.
+            let room = wire::room_of_chat_id(chat).map(str::to_string);
+            self.emit(Event::Say { agent: agent.into(), fragment: fragment.into(), text: caption, files: vec![file], room }).await;
             return json!({ "success": true, "message_id": id });
         };
         let f = self.inflight.get_mut(&turn).expect("held");
