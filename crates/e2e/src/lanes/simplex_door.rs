@@ -287,7 +287,20 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     // bound to its owner's agent, whose computer then sleeps
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": a.agent })))?;
     ensure!(r.status == 200 && r.body["door"] == "simplex", "binding the connector as the agent's simplex door: {r}");
-    let slept = api.signed(owner, "POST", &format!("/api/computers/{}/sleep", a.computer), Some(&json!({})))?;
+    // the binding makes its agent a member of the connector, whose join is
+    // told, and its computer woken for it, after the binding answers
+    // (cell/src/runs_on.rs, `joined_outbox`): a wake that lands as it sleeps
+    // starts it again, so once it is up it is slept again, until it answers
+    // asleep
+    let sleep = || api.signed(owner, "POST", &format!("/api/computers/{}/sleep", a.computer), Some(&json!({})));
+    let up = || api.signed(owner, "GET", &format!("/api/computers/{}", a.computer), None).is_ok_and(|r| r.body["phase"] == "awake");
+    let t0 = Instant::now();
+    let mut slept = sleep()?;
+    // bounded by its wake: each pass waits for a start the last sleep owed
+    while slept.body["phase"] != "asleep" && t0.elapsed() < a.wake {
+        s.eventually(a.wake, &up);
+        slept = sleep()?;
+    }
     ensure!(slept.body["phase"] == "asleep", "the agent's computer asleep first: {slept}");
 
     // its owner's message, as the door's runner delivers it: on to the
