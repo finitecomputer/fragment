@@ -116,6 +116,10 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("one whose payload tag names any other hash is 401", r.status == 401, &r);
     let r = put(None, &sha256_hex(&wrong), wrong.clone())?;
     s.ok("an unsigned upload is 401", r.status == 401, &r);
+    // a fragment never made: not found, as any read of it is
+    let url = format!("{}/api/f/{}--k3x9/blobs/{}", api.base, s.name("blobs-unmade"), sha256_hex(&wrong));
+    let r = api.call(Call { method: "PUT", url: url.clone(), body: Some(wrong.clone()), extra: vec![("authorization", keys.header_for_payload("PUT", &url, None, now_s()))], ..Call::default() })?;
+    s.ok("an upload to a fragment never made is 404", r.status == 404, &r);
 
     // a person's upload is at most what the platform tells its clients
     // (`limits` on the list: this fleet's own `UPLOAD_MAX_BYTES`); an

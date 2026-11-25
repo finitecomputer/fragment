@@ -299,19 +299,30 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Provid
 /// name in the store.
 pub(crate) type SlotKeys = Vec<(String, String)>;
 
-/// The deployment's models (`models`, `models_cell`), when it names them.
+/// The deployment's models (`models`, `models_cell`): a config naming
+/// none is read as `{}` (the cell's defaults), so it gets the transcription
+/// slot it had (`TRANSCRIPTION_UNTIL_NAMED`) too.
 fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
-    let Some(models) = &d.models else { return Ok((None, vec![])) };
-    let (cell, keys) = models_cell(models, false)?;
+    let (cell, keys) = models_cell(d.models.as_ref().unwrap_or(&json!({})), false)?;
     Ok((Some(cell), keys))
 }
+
+/// The transcription slot a deployment's `models` is given when it names
+/// none (`models_cell`): Workers AI's Whisper large v3 turbo, at its 46.63
+/// neurons a minute (developers.cloudflare.com/workers-ai/platform/pricing,
+/// read 2026-10-07), where every deployment transcribed before its slot was
+/// its config's. Debt (docs/technical-debt-ledger.md): gone once
+/// fragment-deploy's configs name `models.transcription`.
+pub(crate) const TRANSCRIPTION_UNTIL_NAMED: &str = r#"{"provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": {"neurons_a_minute": 46.63}}"#;
 
 /// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, its
 /// routes over its slots, each slot's upstream less its key) and the store
 /// secret each slot on an OpenAI-compatible API names for its key. Such a
 /// slot names one; a Workers AI slot names none. A config naming the four
 /// slots of before 2026-11-17 is read as the routes it meant
-/// (`fragment_core::models::legacy`: debt, docs/technical-debt-ledger.md).
+/// (`fragment_core::models::legacy`: debt, docs/technical-debt-ledger.md),
+/// and one naming no `transcription` slot is given
+/// `TRANSCRIPTION_UNTIL_NAMED` (debt too).
 /// Checked as the cell checks them (`fragment_core::models::Models::parse`),
 /// on no local address unless `local` (a local fleet's models file, whose
 /// egress reaches this machine). `cargo xtask dev --real-agent` reads one
@@ -320,9 +331,13 @@ pub(crate) fn models_cell(models: &Value, local: bool) -> Result<(Value, SlotKey
     let mut cell = fragment_core::models::legacy(models).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut keys = vec![];
     let Some(top) = cell.as_object_mut() else { bail!("models is an object: its default, routes and slots") };
+    let transcription = fragment_core::transcribe::TRANSCRIPTION;
+    if !top.contains_key(transcription) {
+        top.insert(transcription.into(), serde_json::from_str(TRANSCRIPTION_UNTIL_NAMED).expect("the slot is JSON"));
+    }
     let mut rows: Vec<(String, String, &mut Value)> = vec![];
     for (key, value) in top.iter_mut() {
-        if key == fragment_core::embed::EMBEDDINGS {
+        if key == fragment_core::embed::EMBEDDINGS || key == transcription {
             rows.push((key.clone(), key.clone(), value));
         } else if let Some(slots) = value.as_object_mut().filter(|_| key == "slots") {
             rows.extend(slots.iter_mut().map(|(name, row)| (format!("slots.{name}"), name.clone(), row)));
@@ -2967,8 +2982,10 @@ mod tests {
         let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } });
         let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing });
         let flash = json!({ "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
-        let listed = fragment_core::models::legacy(&json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash })).unwrap();
-        assert_eq!(models, listed, "no key in the cell's variable, the routing in it, as routes over slots");
+        let whisper = json!({ "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 } });
+        let listed = fragment_core::models::legacy(&json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash, "transcription": whisper })).unwrap();
+        assert_eq!(models, listed, "no key in the cell's variable, the routing in it, as routes over slots, its transcription slot as named");
+        assert_eq!(models["transcription"], whisper);
         assert_eq!(models["routes"].as_array().map(|r| r.iter().map(|r| r["name"].clone()).collect::<Vec<_>>()), Some(vec![json!("cheap"), json!("medium")]));
         let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
         assert_eq!(parsed.slots[parsed.routes[parsed.default].slot].upstream.model(), fragment_core::models::OPENROUTER_FLASH);
@@ -2991,9 +3008,15 @@ mod tests {
         let said = refusal(Path::new("/home/p/prod.jsonc"), Some(&devstack::store::AccountStore { name: "fragment".into(), id: "0f0e".into() }), &missing);
         assert!(said.contains("lacks 1 of the secrets") && said.contains("models.cheap.key, models.medium.key  cargo xtask secret set fragment-openrouter-key --config /home/p/prod.jsonc"), "{said}");
 
-        // the preview's: every tier on Workers AI, no key named or bound
+        // the preview's: every tier on Workers AI, no key named or bound,
+        // and the transcription slot every deployment had (debt)
         let (cell, b) = rendered("deploy/e2e.jsonc");
-        assert!(cell["vars"].get("FRAGMENT_MODELS").is_none(), "unnamed: the cell's defaults, every slot on Workers AI");
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        let until: Value = serde_json::from_str(TRANSCRIPTION_UNTIL_NAMED).unwrap();
+        assert_eq!(models, fragment_core::models::legacy(&json!({ "transcription": until })).unwrap(), "unnamed: the cell's defaults, every slot on Workers AI, transcribing on Whisper");
+        let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
+        assert_eq!(parsed, fragment_core::models::Models { transcription: parsed.transcription.clone(), ..fragment_core::models::Models::defaults() }, "the cell's defaults");
+        assert_eq!(parsed.transcription.as_ref().map(|t| t.upstream.model()), Some("@cf/openai/whisper-large-v3-turbo"));
         assert!(b.model_keys.is_empty() && !cell.to_string().contains("MODEL_KEY_"));
     }
 
@@ -3068,8 +3091,9 @@ mod tests {
         let d = load(&config_file("models-fallback", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
         let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
-        let alone = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
-        assert_eq!(vars["FRAGMENT_MODELS"], fragment_core::models::legacy(&alone).unwrap().to_string());
+        let until: Value = serde_json::from_str(TRANSCRIPTION_UNTIL_NAMED).unwrap();
+        let alone = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" }, "transcription": until });
+        assert_eq!(vars["FRAGMENT_MODELS"], fragment_core::models::legacy(&alone).unwrap().to_string(), "and the transcription slot it had");
         // Tinfoil's, its price in the cell's variable and its key bound for its slot alone
         v["models"] = tinfoil(listed.clone());
         let d = load(&config_file("models-tinfoil", &v)).unwrap();
@@ -3077,6 +3101,23 @@ mod tests {
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
         assert_eq!(models["slots"]["fallback"], json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed }), "no key in the cell's variable, the price in it");
         assert_eq!(bound(&d).unwrap().model_keys, [("fallback".to_string(), "fragment-tinfoil-api-key".to_string())]);
+        // a transcription slot on an OpenAI-compatible API (a box's own
+        // server): its price in the cell's variable, its key bound for it alone
+        let stt = json!({ "provider": "openai", "base_url": "https://stt.example.internal/v1", "model": "whisper-large-v3", "price": { "audio_minute": 0.006 } });
+        let mut keyed = stt.clone();
+        keyed["key"] = json!("fragment-transcription-key");
+        v["models"] = json!({ "transcription": keyed });
+        let d = load(&config_file("models-transcription", &v)).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        assert_eq!(models["transcription"], stt, "no key in the cell's variable, the price in it");
+        assert_eq!(bound(&d).unwrap().model_keys, [("transcription".to_string(), "fragment-transcription-key".to_string())]);
+        refused(json!({ "transcription": stt }), "models.transcription: an OpenAI-compatible API names its key");
+        let mut plain = keyed.clone();
+        plain["base_url"] = json!("http://stt.example.internal/v1");
+        refused(json!({ "transcription": plain }), "models.transcription: base_url:");
+        refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo" } }), "models.transcription: price is {\"neurons_a_minute\"");
+        refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 }, "key": "k" } }), "models.transcription: only an OpenAI-compatible API (provider openai) names a key");
         // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
         let mut private = row(json!({ "private": true }));
         private["vision"] = private["cheap"].clone();
