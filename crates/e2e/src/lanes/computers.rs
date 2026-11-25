@@ -1533,14 +1533,21 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     // (FIN-393, telegram_settings.rs)
     let settings = super::telegram_settings::Connector { owner: c.owner, owner_id: c.owner_id, agent: c.agent, identity: c.identity, tg: &tg, token: TOKEN, wake };
     super::telegram_settings::after_a_release(s, api, &settings, &name, HOOK)?;
-    // its words before a tool call stay in the chat; a reply's file, which a
-    // viewer cannot upload, is named in its words
+    // its words before a tool call stay in the chat; a reply's file, which
+    // its agent (a viewer there) uploads as the connector's own agent, is
+    // the chat's, and Telegram is told so with its words
     deliver(Telegram::message(12, PAUL, "Paul", "tool please"), Some(HOOK))?;
     let tooled = s.eventually(wake, || sent("tool please").is_some());
     s.ok("its agent's interim words are not sent to Telegram, its answer is", tooled && sent("Let me look.").is_none(), json!(tg.sent()));
     deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
-    let named = s.eventually(wake, || sent("could not be attached").is_some());
-    s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+    let named = s.eventually(wake, || sent("open the chat to see it").is_some());
+    let drawn = agent_replies(&records(api, c.owner, &name, "chat"), c.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
+    let blob = api.signed(c.owner, "GET", &format!("/api/f/{name}/blobs/{}", drawn["body"]["attachments"][0]["sha256"].as_str().unwrap_or("")), None)?;
+    s.ok(
+        "its agent's reply's file is in the connector's chat (its agent, a viewer there, uploads it), and Telegram is told so with its words",
+        named && blob.status == 200 && blob.text.contains("a drawing for") && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
+        json!({ "sent": tg.sent(), "reply": drawn, "blob": blob.status }),
+    );
     // while its agent works on a message from Telegram (a slow tool call),
     // Telegram shows the bot typing, and no longer once its answer went
     let relay = ran(&deliver(Telegram::message(14, PAUL, "Paul", "tool please, slowly"), Some(HOOK))?);

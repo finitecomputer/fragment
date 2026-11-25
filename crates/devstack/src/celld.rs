@@ -1,7 +1,7 @@
 //! The stack on celld (docs/self-host.md, seam 1): one `celld dev` process
 //! serving the platform Worker, as `wrangler dev` does, from the config a
 //! local node runs (`crate::local_config`), and with its `.dev.vars`.
-//! celld is a self-hosted Workers runtime (github.com/futurepaul/celld: its
+//! celld is a self-hosted Workers runtime (github.com/finitecomputer/celld: its
 //! `selfhost` line is upstream's release and the fork's parity fixes).
 //!
 //! celld presents Cloudflare's binding surface, so the cell runs on it as
@@ -262,7 +262,7 @@ impl CelldTools {
         engine.check()?;
         let celld = std::env::var_os("CELLD_BIN")
             .map(PathBuf::from)
-            .context("set CELLD_BIN to a celld built from github.com/futurepaul/celld's selfhost line (cargo build --release -p celld)")?;
+            .context("set CELLD_BIN to a celld built from github.com/finitecomputer/celld's selfhost line (cargo build --release -p celld)")?;
         if !celld.is_file() {
             bail!("no celld at {} (CELLD_BIN)", celld.display());
         }

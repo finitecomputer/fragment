@@ -46,7 +46,10 @@
 //!    umbrella of this email' access"): a member's agents reach what the
 //!    member does, capped as above.
 //! 5. **A connector is its owner's alone to edit**: everyone else, their
-//!    own agent acting for them included, is at most a viewer there.
+//!    own agent acting for them included, is at most a viewer there. Its
+//!    one exception: the agent it is an open door of, acting as itself,
+//!    uploads the files its replies there carry (`Action::Upload`), which
+//!    its door sends on; it is a viewer there for everything else.
 //! 6. **The repo is its members'** (`Action::Repo`): its whole history,
 //!    whatever the visibility; no floor, share link or agent of theirs
 //!    that is a member lends it.
@@ -106,12 +109,17 @@ pub enum Action {
     /// main's files. It is read first, as `Read`, then decided by
     /// memberships alone (rule 6).
     Repo(Role),
+    /// Upload a blob: a file one of its records will carry (`PUT
+    /// …/blobs/<sha256>`), an editor's act; on a connector, its bound
+    /// agent's too (rule 5's exception).
+    Upload,
 }
 
 impl Action {
     fn needs(self) -> Role {
         match self {
             Action::Read(role) | Action::Act(role) | Action::Repo(role) => role,
+            Action::Upload => Role::Editor,
         }
     }
 }
@@ -141,6 +149,9 @@ pub struct Standing {
     pub connector: bool,
     /// The caller is the fragment's owner, a person signing as themselves.
     pub owner_in_person: bool,
+    /// The caller is the agent this connector is an open door of, signing
+    /// as itself (rule 5's exception).
+    pub door_agent: bool,
 }
 
 impl Standing {
@@ -232,9 +243,15 @@ impl Refusal {
 pub fn decide(facts: &Facts) -> Verdict {
     let Facts { visibility, standing, action } = *facts;
     let needs = action.needs();
+    // rule 5's one exception: a connector's bound agent, as itself and a
+    // member there, uploads the files its replies there carry
+    let door_upload = action == Action::Upload && standing.connector && standing.door_agent && standing.cap.is_none() && standing.signed && standing.member.is_some();
+    if door_upload {
+        return Verdict::Allow(Role::Editor);
+    }
     let purpose = match action {
         Action::Read(_) | Action::Repo(_) => Purpose::Read,
-        Action::Act(_) => Purpose::Act,
+        Action::Act(_) | Action::Upload => Purpose::Act,
     };
     let role = match effective_role(visibility, standing, purpose) {
         Some(role) if role >= needs => role,
@@ -694,7 +711,7 @@ mod tests {
     ///   stay; only the move between them goes.
     #[test]
     fn the_rule_table() {
-        use Action::{Act, Read, Repo};
+        use Action::{Act, Read, Repo, Upload};
         let anon = st(None, false, false);
         let link = st(None, true, false);
         let signed = st(None, false, true);
@@ -702,6 +719,7 @@ mod tests {
         let held = |held, s: Standing| Standing { held: Some(held), ..s };
         let beside = |s: Standing| Standing { beside_person: true, ..s };
         let connector = |s: Standing| Standing { connector: true, ..s };
+        let door = |s: Standing| Standing { door_agent: true, ..s };
         let rows: &[(&str, Visibility, Standing, Action, Verdict)] = &[
             // rule 1: a caller's own role
             ("anonymous reads a public page", V::Public, anon, Read(Public), Verdict::Allow(Public)),
@@ -749,6 +767,16 @@ mod tests {
             ("a connector's owner as their own agent is a viewer", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Act(Editor), refused(Editor, Why::Capped, false)),
             ("a connector's owner's agent reads", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Read(Viewer), Verdict::Allow(Viewer)),
             ("a connector, by its link", V::Link, connector(link), Read(Viewer), Verdict::Allow(Viewer)),
+            // rule 5's exception: its bound agent uploads its replies' files there
+            ("a connector's bound agent, as itself, uploads its replies' files", V::Members, door(connector(member(Viewer))), Upload, Verdict::Allow(Editor)),
+            ("…and does nothing else an editor does", V::Members, door(connector(member(Viewer))), Act(Editor), refused(Editor, Why::Short, false)),
+            ("the same agent acting for someone uploads nothing there", V::Members, door(connector(acting(Some(Owner), Some(Viewer), Some(Owner)))), Upload, refused(Editor, Why::Capped, false)),
+            ("another agent, a member there, uploads nothing", V::Members, connector(member(Viewer)), Upload, refused(Editor, Why::Short, false)),
+            ("its owner's other agent, acting for its owner, uploads nothing", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Upload, refused(Editor, Why::Capped, false)),
+            ("its bound agent's fact on a fragment no connector lends nothing", V::Members, door(member(Viewer)), Upload, refused(Editor, Why::Short, false)),
+            ("a connector's owner, in person, uploads", V::Members, Standing { owner_in_person: true, ..connector(member(Owner)) }, Upload, Verdict::Allow(Owner)),
+            ("an editor uploads", V::Members, member(Editor), Upload, Verdict::Allow(Editor)),
+            ("a viewer uploads nothing", V::Members, member(Viewer), Upload, refused(Editor, Why::Short, false)),
             // a role kept from earlier (a socket's)
             ("a kept role reaches what it holds", V::Members, Standing::kept(Editor), Read(Editor), Verdict::Allow(Editor)),
             ("a kept role is short of more", V::Members, Standing::kept(Viewer), Read(Editor), refused(Editor, Why::Short, false)),
@@ -816,7 +844,7 @@ mod tests {
                     for held in [None, Some(Viewer), Some(Editor)] {
                         for bits in 0u8..32 {
                             let flag = |i: u8| bits & (1 << i) != 0;
-                            let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap: *cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false };
+                            let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap: *cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false, door_agent: false };
                             for standing in [standing, Standing { owner_in_person: true, ..standing }] {
                                 for &action in &actions {
                                     let new = decide(&Facts { visibility, standing, action });
