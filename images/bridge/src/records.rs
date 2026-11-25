@@ -50,6 +50,12 @@ pub const CODE: &str = "code";
 /// fragment's key, which on an agent's fragment is the agent's identity.
 pub const PLATFORM: &str = "platform";
 
+/// The author the platform stamps on what a door wrote: a door's signed
+/// relay it checked, or what an open hosted door's own release code
+/// publishes (never a fork's, nor code installed since: docs/chat-records.md,
+/// "Who wrote a record").
+pub const DOOR: &str = "door";
+
 /// Whom a turn names as asking when app code wrote the message that
 /// started it: no one, whoever called the code.
 pub const CODE_SAYS: &str = "app code";
@@ -65,6 +71,12 @@ impl Record {
     /// Whether these are `who`'s own words: written as them, not by code.
     pub fn by(&self, who: &str) -> bool {
         self.principal == who && !self.by_code()
+    }
+
+    /// Whether the platform took it as a door's (`DOOR`): the only record
+    /// whose `heard`, `room` and `context` are honored.
+    pub fn by_door(&self) -> bool {
+        self.author.as_deref() == Some(DOOR)
     }
 
     /// Whether the platform appended it as the fragment's own (`PLATFORM`):
@@ -412,6 +424,14 @@ fn room_of(o: &Map<String, Value>) -> Option<Room> {
 pub fn heard(body: &Value) -> Option<Heard> {
     match said(body) {
         Said::Message(m) => m.heard,
+        _ => None,
+    }
+}
+
+/// A message's `room`, as `heard` is read: none for any other body.
+pub fn room(body: &Value) -> Option<Room> {
+    match said(body) {
+        Said::Message(m) => m.room,
         _ => None,
     }
 }

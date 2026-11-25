@@ -1970,8 +1970,29 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
         crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes no message" });
         return None;
     }
+    // a room's words are told only in it, and the chat's only outside any
+    // room: what the record itself says, so nothing else need be read
+    if room_of(&r, &ts.agent) != ts.room {
+        crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes another room's words" });
+        return None;
+    }
     let id = records::turn_id(&ts.agent.fragment, &ts.fragment, records::CHAT, seq);
     Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: own_words(&r.principal, &r.body, &ts.agent) })
+}
+
+/// The room of the agent's door a `chat` record was said in, as the record
+/// itself says (docs/chat-records.md, "A message heard in a room"): the
+/// agent's own reply names its turn's (`room`), and a record the platform
+/// stamped a door's names its `room`. Any other record is the chat's own,
+/// in no room, whatever it claims.
+fn room_of(r: &Record, agent: &crate::runtime::Agent) -> Option<String> {
+    if r.by(&agent.identity) {
+        return r.body.get("room").and_then(Value::as_str).filter(|id| records::valid_token(id, 64)).map(str::to_string);
+    }
+    match records::said(&r.body) {
+        records::Said::Message(m) if r.by_door() => m.room.map(|room| room.id),
+        _ => None,
+    }
 }
 
 /// Whether a record `principal` posted is `agent`'s own words (a quote of

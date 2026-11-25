@@ -90,8 +90,9 @@ async fn a_reply_with_steps_and_drafts() {
 /// rooms of its chat reaches Hermes as two chats of their own (each its
 /// own session), each said by its speaker by name, door and room, told
 /// where it is and what was said there just before; its owner's words on
-/// the chat's page stay the chat's own. The same record from a chat that
-/// is no door of the agent's is its carrier's, in no room.
+/// the chat's page stay the chat's own. The same record unstamped (no
+/// door's: `author`), in a chat that is no door of the agent's, is its
+/// carrier's, in no room.
 #[tokio::test]
 async fn each_room_of_a_door_is_a_chat_of_its_own_to_hermes() {
     let (fake, bridge, hermes, _dir) = setup("relay-rooms", &["juniper"]).await;
@@ -104,9 +105,9 @@ async fn each_room_of_a_door_is_a_chat_of_its_own_to_hermes() {
     };
     let turn = |chat: &str, said: &Value| records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
     let ended = |w: &World, chat: &str, t: &str| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == t);
-    let a = fake.say(&door, "npub1slack", heard("C0123", "U0456", "Maple", "is it green?"));
+    let a = fake.say_as_door(&door, "npub1slack", heard("C0123", "U0456", "Maple", "is it green?"));
     fake.until(WAIT, "the first room's turn", |w| ended(w, &door, &turn(&door, &a))).await;
-    let b = fake.say(&door, "npub1slack", heard("D0789", "U0789", "Rowan", "hello"));
+    let b = fake.say_as_door(&door, "npub1slack", heard("D0789", "U0789", "Rowan", "hello"));
     fake.until(WAIT, "the second room's turn", |w| ended(w, &door, &turn(&door, &b))).await;
     let c = fake.say(&door, "npub1paul", json!({ "text": "from the page" }));
     fake.until(WAIT, "the page's turn", |w| ended(w, &door, &turn(&door, &c))).await;

@@ -1112,7 +1112,7 @@ async fn real_hermes_keeps_a_conversation_per_room() {
     within(&fake, &chat, &c, 120_000, "the bridge follows the door's chat", |w| w.live_sockets() >= 3).await;
     let said = |room: &str, text: &str| {
         let body = json!({ "text": text, "to": ["npub1juniper"], "heard": { "via": "slack", "from": "U0456", "name": "Maple" }, "room": { "id": room, "name": format!("#{}", room.to_lowercase()) } });
-        fragment_bridge::records::turn_id("juniper--k3x9", &door, "chat", fake.say(&door, "npub1slack", body)["seq"].as_u64().unwrap())
+        fragment_bridge::records::turn_id("juniper--k3x9", &door, "chat", fake.say_as_door(&door, "npub1slack", body)["seq"].as_u64().unwrap())
     };
     for (room, text) in [("C0123", "remember the word persimmon"), ("D0789", "which word did I ask you to remember"), ("C0123", "say that word again")] {
         let t = said(room, text);

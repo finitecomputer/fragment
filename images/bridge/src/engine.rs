@@ -1165,9 +1165,8 @@ impl Engine {
         }
         match record.channel.as_str() {
             records::CHAT => {
-                let record = self.whose(&agent, fragment, record);
                 // the agent's own words are not for it
-                if record.principal != agent.identity {
+                if let Some(record) = self.whose(&agent, fragment, record).filter(|r| r.principal != agent.identity) {
                     self.said(&agent, fragment, &record);
                 }
             }
@@ -1293,6 +1292,12 @@ impl Engine {
         !member && v.door.as_deref() == Some(via)
     }
 
+    /// Whether this chat is the agent's door `via`, as its members list
+    /// marks the agent's row (`ChatView::door`).
+    fn door_here(&self, fragment: &str, via: &str) -> bool {
+        self.views.get(fragment).is_some_and(|v| v.door.as_deref() == Some(via))
+    }
+
     /// Whose words a `chat` record is, as the agent's door says
     /// (docs/chat-records.md):
     ///
@@ -1304,16 +1309,29 @@ impl Engine {
     ///   agent at most, never its owner.
     /// - **someone outside the platform**, heard in a room of its hosted
     ///   door ("A message heard in a room"): asked as them
-    ///   (`Heard::asker`), never as the door's key. Only that door, and
-    ///   never app code, says who spoke.
+    ///   (`Heard::asker`), never as the door's key.
     ///
-    /// Either keeps the room it names, and its context. From anyone else,
-    /// a record is read without them: its carrier's own words.
-    fn whose(&self, agent: &Agent, fragment: &str, mut record: Record) -> Record {
+    /// Who spoke, and in which room, is honored by one rule: the platform
+    /// stamped the record a door's (`Record::by_door`: what an open hosted
+    /// door's own release publishes, never app code, a schedule or a
+    /// person's post), relaying no one, in a chat that is the agent's door
+    /// `heard.via` names. A relayed message keeps its room only when so
+    /// stamped too. From anyone else, a record is read without them: its
+    /// carrier's own words. One a door wrote naming someone heard, but in
+    /// no room it can read, is none: never run in the chat's own
+    /// conversation, which is its owner's.
+    fn whose(&self, agent: &Agent, fragment: &str, mut record: Record) -> Option<Record> {
         let relayed = self.relayed_for(agent, fragment, &record);
-        let heard = records::heard(&record.body).filter(|h| !relayed && !record.by_code() && self.door_carried(fragment, &record, &h.via));
+        // (the agent's own words are never someone it heard: it carries
+        // its owner's alone, as their door: `relayed_for`)
+        let door = record.by_door() && record.principal != agent.identity;
+        let heard = records::heard(&record.body).filter(|h| door && records::relayed(&record.body).is_none() && self.door_here(fragment, &h.via));
+        if door && record.body.get("heard").is_some() && (heard.is_none() || records::room(&record.body).is_none()) {
+            crate::ev!("heard.dropped", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "why": "a door's message naming someone heard, in no room the bridge can read: never its owner's conversation" });
+            return None;
+        }
         if let Value::Object(o) = &mut record.body {
-            if !relayed && heard.is_none() {
+            if !(door && (relayed || heard.is_some())) {
                 o.remove("room");
                 o.remove("context");
             }
@@ -1330,7 +1348,7 @@ impl Engine {
             crate::ev!("heard", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": h.via });
             record.principal = h.asker();
         }
-        record
+        Some(record)
     }
 
     fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
@@ -2185,8 +2203,13 @@ impl Engine {
         let by_name = m.heard.as_ref().map(|h| h.name.clone()).or_else(|| view.names.get(principal).cloned()).unwrap_or_else(|| "someone".into());
         let attached = (!m.attachments.is_empty()).then(|| Attached { agent: agent.fragment.clone(), fragment: fragment.to_string(), by_name: by_name.clone(), refs: m.attachments.clone() });
         let mine = |t: &&Turn| t.agent == agent.fragment && t.fragment == fragment;
-        if let Some((id, answers)) = self.state.turns.values().filter(mine).find(|t| t.asking && t.active()).map(|t| (t.id.clone(), self.who_answers(t))) {
-            if answers != principal {
+        // words said in one room answer only a question asked in it: a turn
+        // in a room is told nothing of another's, nor of the chat's own
+        // (docs/chat-records.md, "A message heard in a room")
+        let room = m.room.as_ref().map(|r| r.id.as_str());
+        let here = |t: &&Turn| t.room.as_deref() == room;
+        if let Some((id, answers, here)) = self.state.turns.values().filter(mine).find(|t| t.asking && t.active()).map(|t| (t.id.clone(), self.who_answers(t), here(&t))) {
+            if answers != principal || !here {
                 return false;
             }
             // a voice memo alone: no words, every file audio (Austin,
@@ -2206,8 +2229,8 @@ impl Engine {
             return true;
         }
         // its card that takes words, the oldest open one: its owner's alone
-        // to answer, as its options are
-        let carded = self.state.turns.values().filter(mine).filter(|t| t.phase == Phase::Waiting).find_map(|t| t.prompts.iter().find(|p| !p.closed && !p.words.is_empty()).map(|p| (t.id.clone(), p.id.clone(), p.words[0].clone())));
+        // to answer, as its options are, in words said where it was asked
+        let carded = self.state.turns.values().filter(mine).filter(|t| t.phase == Phase::Waiting).filter(here).find_map(|t| t.prompts.iter().find(|p| !p.closed && !p.words.is_empty()).map(|p| (t.id.clone(), p.id.clone(), p.words[0].clone())));
         let Some((id, prompt, option)) = carded else { return false };
         if principal != agent.owner {
             return false;
@@ -2784,11 +2807,20 @@ impl Engine {
             }
         }
         self.dirty = true;
-        let (agent, fragment, n, hop) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop);
-        // A reply that names another agent of the chat hands off to it.
+        let (agent, fragment, n, hop, room) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop, t.room.clone());
+        // A reply that names another agent of the chat hands off to it; one
+        // in a room hands off to no one, whom the room does not hold
         let words = records::mentions(&open.text);
-        let to: Vec<String> = self.agents.iter().filter(|a| a.fragment != agent && view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).map(|a| a.identity.clone()).collect();
-        let body = records::reply(&open.text, id, &to, hop + 1, interim);
+        let to: Vec<String> = match room {
+            Some(_) => Vec::new(),
+            None => self.agents.iter().filter(|a| a.fragment != agent && view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).map(|a| a.identity.clone()).collect(),
+        };
+        let mut body = records::reply(&open.text, id, &to, hop + 1, interim);
+        // said in a room: which, so a quote of it is told only there
+        // (driver.rs, `quote_of`)
+        if let Some(room) = room {
+            body["room"] = Value::String(room);
+        }
         crate::ev!("reply.posted", { "turn": id, "n": n, "files": open.files.len(), "to": to.len(), "interim": interim });
         self.post(&agent, &fragment, records::CHAT, records::reply_id(id, n), body, open.files);
         self.draft(&agent, &fragment, id, None);

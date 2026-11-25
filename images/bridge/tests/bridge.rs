@@ -2927,3 +2927,68 @@ async fn a_late_card_with_unavailable_history_runs_nothing() {
         bridge.stop().await;
     }
 }
+
+/// Goal (security, Alex on #1494: quotes fail closed): a quote is told
+/// only in the room its words were said in, by what the quoted record
+/// itself says: the agent's reply names its turn's room (`room`), a door's
+/// message its `room`. So a reply said in Boss's DM is never quoted to the
+/// chat's own conversation nor to #public, even with its door unlinked and
+/// every read of the chat's journal failing (nothing else is read to
+/// tell); in the DM it is, as its own words.
+#[tokio::test]
+async fn a_quote_is_told_only_in_the_room_its_words_were_said_in() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let door = fake.connector("slackq", "juniper", Some("slack"));
+    let reply_for = |w: &World, said: &Value| {
+        let t = turn_of("juniper", &door, seq(said));
+        w.bodies(&door, "chat", "reply").into_iter().find(|r| r["turn"] == t)
+    };
+    let heard = |text: &str, from: &str, room: &str, reply_to: Option<u64>| {
+        let mut b = json!({ "text": text, "to": ["npub1juniper"], "heard": { "via": "slack", "from": from, "name": from }, "room": { "id": room, "name": room } });
+        if let Some(q) = reply_to {
+            b["reply_to"] = json!(q);
+        }
+        b
+    };
+    let dir = support::dir("room-quotes");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+
+    let dm = fake.say_as_door(&door, "npub1slackq", heard("secret salary 999k", "Boss", "D0001", None));
+    fake.until(WAIT, "the DM's reply", |w| reply_for(w, &dm).is_some()).await;
+    let dm_reply = fake.with(|w| {
+        let reply = reply_for(w, &dm).expect("its reply");
+        assert_eq!(reply["room"], "D0001", "a reply names its room");
+        let t = turn_of("juniper", &door, seq(&dm));
+        w.records(&door, "chat").into_iter().find(|r| r["body"]["turn"] == t).map(|r| r["seq"].as_u64().expect("a seq")).expect("its seq")
+    });
+
+    // its door unlinked, and every read of the journal failing
+    fake.with(|w| {
+        w.fragments.get_mut(&door).expect("the chat").members.iter_mut().find(|m| m.principal == "npub1juniper").expect("its row").door = None;
+        w.fail_history_reads = 1_000;
+    });
+    let root = fake.say(&door, &person("paul"), json!({ "text": "root check", "to": ["npub1juniper"], "reply_to": dm_reply }));
+    fake.until(WAIT, "the chat's reply", |w| reply_for(w, &root).is_some()).await;
+    fake.with(|w| {
+        let text = reply_for(w, &root).expect("its reply")["text"].as_str().expect("words").to_string();
+        assert!(text.starts_with("echo: ") && !text.contains("999k") && !text.contains("quoting"), "the DM's reply is never the chat's quote: {text}");
+    });
+
+    // bound again: #public is told nothing of it, the DM is
+    fake.with(|w| {
+        w.fragments.get_mut(&door).expect("the chat").members.iter_mut().find(|m| m.principal == "npub1juniper").expect("its row").door = Some("slack".into());
+        w.fail_history_reads = 0;
+    });
+    let public = fake.say_as_door(&door, "npub1slackq", heard("status?", "Maple", "C0123", Some(dm_reply)));
+    fake.until(WAIT, "#public's reply", |w| reply_for(w, &public).is_some()).await;
+    let same = fake.say_as_door(&door, "npub1slackq", heard("and?", "Boss", "D0001", Some(dm_reply)));
+    fake.until(WAIT, "the DM's next reply", |w| reply_for(w, &same).is_some()).await;
+    fake.with(|w| {
+        let public = reply_for(w, &public).expect("its reply")["text"].as_str().expect("words").to_string();
+        assert!(!public.contains("999k") && !public.contains("quoting"), "another room's words: {public}");
+        let same = reply_for(w, &same).expect("its reply")["text"].as_str().expect("words").to_string();
+        assert!(same.contains("(quoting itself: echo:") && same.contains("secret salary 999k"), "its own room's: {same}");
+    });
+    bridge.stop().await;
+}
