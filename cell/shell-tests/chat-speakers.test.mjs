@@ -80,7 +80,7 @@ test("outside speaker heard in a room: parsed, attributed, and formatted", () =>
 
   // Once members load, connector key is a non-member with author "door"
   assert.deepEqual(heardSpeaker(m, MEMBERS), { via: "slack", from: "U0456", name: "Maple Lee" });
-  assert.deepEqual(roomOf(m, MEMBERS), { id: "C0123", name: "#deploys", thread: "1790000000.000100" });
+  assert.deepEqual(roomOf(m, MEMBERS), { id: "C0123", name: "#deploys" });
   assert.equal(contextOf(m, MEMBERS).length, 2);
   assert.equal(contextOf(m, MEMBERS)[1].text, "watching logs");
   assert.equal(viaLabel(m, MEMBERS), "Slack · #deploys");
@@ -185,6 +185,23 @@ test("strict parsing rejects contradictory relayed+heard, missing/bad room, and 
   );
   assert.equal(badRoom.relayed, null);
   assert.equal(badRoom.room, null);
+
+  // the record's own rules (docs/chat-records.md), as the bridge and the
+  // transcript read them: ids are `[A-Za-z0-9._-]`, a room's at most 64, a
+  // speaker's at most 128; `thread` is the door's own, read by no one here
+  const owners = (room) => parseDoorFields({ text: "x", relayed: { via: "slack", for: OWNER, agent: "juniper--k3x9" }, room }, CONN, null, false);
+  assert.ok(owners({ id: "C0123", thread: "id\u0085tail" }).relayed, "a thread is no reason to refuse a relay");
+  assert.equal(owners({ id: "C0123", thread: "1790000000.000100" }).room.thread, undefined, "nor kept");
+  assert.equal(owners({ id: "C".repeat(65) }).relayed, null, "a room id past 64 is no room");
+  assert.ok(owners({ id: "C".repeat(64) }).relayed);
+  const from = (f) => parseDoorFields({ text: "x", heard: { via: "slack", from: f, name: "Maple" }, room: { id: "C1" } }, CONN, null, false).heard;
+  assert.equal(from("U\u00e9"), null, "a speaker's id is ASCII");
+  assert.equal(from("U".repeat(129)), null);
+  assert.ok(from("U".repeat(128)));
+  assert.equal(from("U1").name, "Maple");
+  const long = parseDoorFields({ text: "x", heard: { via: "slack", from: "U1", name: "M".repeat(70) }, room: { id: "C1", name: "#".repeat(70) } }, CONN, null, false);
+  assert.equal([...long.heard.name].length, 60, "a name is cut at 60, as the bridge cuts it");
+  assert.equal([...long.room.name].length, 60);
 
   // >20 context items or >16 KiB context yields empty context without dropping heard/room
   const tooMany = Array.from({ length: 21 }, (_, i) => ({ name: "Sam", text: `m${i}` }));

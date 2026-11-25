@@ -664,12 +664,12 @@ impl Names {
         }
         let h = body.get("heard")?.as_object()?;
         let via = h.get("via")?.as_str().filter(|v| crate::connectors::id_ok(v))?;
-        let _from = h.get("from")?.as_str().filter(|f| valid_door_token(f, 128))?;
+        let _from = h.get("from")?.as_str().filter(|f| door_token(f, 128))?;
         let name = one_line(h.get("name")?.as_str()?);
         if name.is_empty() {
             return None;
         }
-        Some((via, cut_chars(&name, 80)))
+        Some((via, cut_chars(&name, NAME_MAX_CHARS)))
     }
 }
 
@@ -867,13 +867,15 @@ fn door_name(via: &str) -> &str {
     }
 }
 
-fn valid_door_token(s: &str, max: usize) -> bool {
-    !s.is_empty() && s.len() <= max && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+/// A door's id for a room (at most 64) or a speaker (at most 128), by the
+/// record's own rule (docs/chat-records.md, "A message heard in a room"),
+/// as the bridge and the chat page read it.
+fn door_token(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn valid_room_id(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
+/// A name a door gives (a room's, a speaker's), cut at this many characters.
+const NAME_MAX_CHARS: usize = 60;
 
 enum RoomParsed {
     Absent,
@@ -886,19 +888,15 @@ fn parse_room(body: &Value) -> RoomParsed {
         return RoomParsed::Absent;
     };
     let Some(r) = v.as_object() else { return RoomParsed::Malformed };
-    let Some(id) = r.get("id").and_then(Value::as_str).filter(|s| valid_room_id(s)) else {
+    let Some(id) = r.get("id").and_then(Value::as_str).filter(|s| door_token(s, 64)) else {
         return RoomParsed::Malformed;
     };
     let name = match r.get("name") {
         None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => cut_chars(&one_line(s), 80),
+        Some(Value::String(s)) => cut_chars(&one_line(s), NAME_MAX_CHARS),
         Some(_) => return RoomParsed::Malformed,
     };
-    match r.get("thread") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(s)) if valid_door_token(s, 128) => {}
-        Some(_) => return RoomParsed::Malformed,
-    }
+    // `thread` is the door's own, for its replies: read by no one here
     RoomParsed::Valid(if name.is_empty() { id.to_string() } else { name })
 }
 
@@ -930,7 +928,7 @@ fn parse_context(body: &Value) -> Vec<(String, String)> {
         if bytes > MAX_BYTES {
             return vec![];
         }
-        out.push((cut_chars(&name, 80), cut_chars(&text, 4000)));
+        out.push((cut_chars(&name, NAME_MAX_CHARS), cut_chars(&text, 4000)));
     }
     out
 }
@@ -1266,6 +1264,22 @@ mod tests {
         let bad_room = serde_json::json!({ "text": "odd", "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" }, "room": "C0123" });
         let unstamped_bad = transcript_part(&Said { channel: "chat", seq: 13, at: 1_791_000_600_000, principal: &conn, author: None, body: &bad_room }, &names).unwrap();
         assert!(!unstamped_bad.contains("paul@example.com") && !unstamped_bad.contains("via Slack"), "{unstamped_bad}");
+
+        // the record's own rules (docs/chat-records.md), as the bridge and the
+        // page read them: a `thread` is the door's own and refuses nothing; a
+        // room id past 64, or a speaker's id that is no `[A-Za-z0-9._-]`, is none
+        let odd_thread = serde_json::json!({ "text": "t", "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" }, "room": { "id": "C0123", "thread": "id\u{85}tail" } });
+        let r_thread = transcript_part(&Said { channel: "chat", seq: 14, at: 1_791_000_660_000, principal: &conn, author: None, body: &odd_thread }, &names).unwrap();
+        assert!(r_thread.contains("**paul@example.com** (via Slack) · "), "{r_thread}");
+        let long_room = serde_json::json!({ "text": "t", "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" }, "room": { "id": "C".repeat(65) } });
+        let r_long = transcript_part(&Said { channel: "chat", seq: 15, at: 1_791_000_720_000, principal: &conn, author: Some("door"), body: &long_room }, &names).unwrap();
+        assert!(!r_long.contains("paul@example.com"), "{r_long}");
+        let accented = serde_json::json!({ "text": "t", "heard": { "via": "slack", "from": "U\u{e9}", "name": "Maple" }, "room": { "id": "C0123" } });
+        let r_accented = transcript_part(&Said { channel: "chat", seq: 16, at: 1_791_000_780_000, principal: &conn, author: Some("door"), body: &accented }, &names).unwrap();
+        assert!(!r_accented.contains("Maple"), "{r_accented}");
+        let named = serde_json::json!({ "text": "t", "heard": { "via": "slack", "from": "U1", "name": "M".repeat(70) }, "room": { "id": "C0123" } });
+        let r_named = transcript_part(&Said { channel: "chat", seq: 17, at: 1_791_000_840_000, principal: &conn, author: Some("door"), body: &named }, &names).unwrap();
+        assert!(r_named.contains(&format!("**{}…** (Slack · C0123)", "M".repeat(59))), "a name is cut at 60: {r_named}");
 
         let both = serde_json::json!({
             "text": "conflicting",

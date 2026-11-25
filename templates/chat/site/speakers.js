@@ -14,15 +14,18 @@
 // Kept free of platform imports so Node's tests import it directly
 // (cell/shell-tests/chat-speakers.test.mjs).
 
+// The record's own rules (docs/chat-records.md, "A message heard in a
+// room"), as the bridge reads them: a door's ids are `[A-Za-z0-9._-]`, a
+// room's at most 64, a speaker's at most 128; names are cut at 60. A room's
+// `thread` is the door's own, for its replies: read by no one here.
 const DOOR_ID = /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$/;
-const ROOM_ID = /^[A-Za-z0-9._-]{1,128}$/;
-const HEARD_FROM_MAX_BYTES = 128;
-const HEARD_NAME_MAX_CHARS = 80;
-const ROOM_NAME_MAX_CHARS = 80;
-const ROOM_THREAD_MAX_BYTES = 128;
+const ROOM_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const HEARD_FROM = /^[A-Za-z0-9._-]{1,128}$/;
+const HEARD_NAME_MAX_CHARS = 60;
+const ROOM_NAME_MAX_CHARS = 60;
 const CONTEXT_MAX_MESSAGES = 20;
 const CONTEXT_MAX_BYTES = 16 * 1024;
-const CONTEXT_NAME_MAX_CHARS = 80;
+const CONTEXT_NAME_MAX_CHARS = 60;
 const CONTEXT_TEXT_MAX_CHARS = 4000;
 const UTF8 = new TextEncoder();
 
@@ -36,8 +39,6 @@ const cut = (s, max) => {
   const chars = [...s];
   return chars.length <= max ? s : `${chars.slice(0, max - 1).join("")}…`;
 };
-const validDoorToken = (s, maxBytes) =>
-  typeof s === "string" && s.length > 0 && byteLen(s) <= maxBytes && !/[\s\u0000-\u001f\u007f]/.test(s);
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // Strictly parses optional `relayed`, `heard`, `room`, and `context` off a
@@ -55,12 +56,9 @@ export function parseDoorFields(body, principal, turn, code = false) {
   if (body.room !== undefined && body.room !== null) {
     const r = body.room;
     if (isObject(r) && typeof r.id === "string" && ROOM_ID.test(r.id)) {
-      const nameOk = r.name === undefined || r.name === null || typeof r.name === "string";
-      const threadOk = r.thread === undefined || r.thread === null || validDoorToken(r.thread, ROOM_THREAD_MAX_BYTES);
-      if (nameOk && threadOk) {
+      if (r.name === undefined || r.name === null || typeof r.name === "string") {
         const name = typeof r.name === "string" ? cut(oneLine(r.name), ROOM_NAME_MAX_CHARS) : "";
-        const thread = typeof r.thread === "string" ? r.thread : null;
-        room = { id: r.id, name, thread };
+        room = { id: r.id, name };
       } else {
         roomMalformed = true;
       }
@@ -80,7 +78,7 @@ export function parseDoorFields(body, principal, turn, code = false) {
   let heard = null;
   if (hasHeard && room) {
     const h = body.heard;
-    if (isObject(h) && doorId(h.via) && validDoorToken(h.from, HEARD_FROM_MAX_BYTES) && typeof h.name === "string") {
+    if (isObject(h) && doorId(h.via) && typeof h.from === "string" && HEARD_FROM.test(h.from) && typeof h.name === "string") {
       const name = oneLine(h.name);
       if (name) heard = { via: h.via, from: h.from, name: cut(name, HEARD_NAME_MAX_CHARS) };
     }
