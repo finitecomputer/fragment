@@ -886,13 +886,14 @@ impl Models {
     /// The book's rows for what a slot's API says a call cost (FIN-616):
     /// OpenRouter's (`Upstream::used`), whatever the slots, so a row queued
     /// before a deploy that moved its slot off OpenRouter is still priced;
-    /// and an OpenAI-compatible transcription slot's seconds, at its price
-    /// (`transcribe::key_price`).
+    /// and what a transcription on an OpenAI-compatible API cost
+    /// (`transcribe::cost_key`), the same way.
     pub fn cost_keys(&self) -> Vec<crate::price::KeyPrice> {
         let (micros, per) = OPENROUTER_COST_PRICE;
         let mut keys = vec![crate::price::KeyPrice { key: OPENROUTER_COST.to_string(), micros, per }];
-        // and what a transcription on an OpenAI-compatible API is metered in
-        keys.extend(self.transcription.as_ref().and_then(crate::transcribe::key_price));
+        // and what a transcription on an OpenAI-compatible API cost, also
+        // whatever the slots
+        keys.push(crate::transcribe::cost_key());
         keys
     }
 
@@ -3840,17 +3841,18 @@ mod tests {
         let t = m.transcription.as_ref().unwrap();
         assert_eq!((t.upstream.model(), t.price), ("@cf/openai/whisper-large-v3-turbo", crate::transcribe::Price::Neurons { milli_a_minute: 46_630 }));
         assert!(m.slots.iter().all(|s| s.name != crate::transcribe::TRANSCRIPTION), "no chat slot");
-        assert_eq!(m.cost_keys(), Models::defaults().cost_keys(), "neurons are the book's own");
+        assert_eq!(m.cost_keys(), Models::defaults().cost_keys(), "the same rows whatever the slots");
         let listed = legacy(&json!({ "transcription": whisper })).unwrap();
         assert_eq!(listed["transcription"], whisper, "the old shape's lifted, as embeddings'");
         let local = json!({ "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:18092/v1", "model": "whisper-large-v3", "price": { "audio_minute": 0.006 } } });
         let m = old_parse(&local.to_string(), &book, true).unwrap();
         let keys = m.cost_keys();
-        assert!(keys.contains(&crate::price::KeyPrice { key: crate::transcribe::SECONDS.into(), micros: 6_000, per: 60 }) && keys.len() == 2, "{keys:?}");
+        assert!(keys.contains(&crate::transcribe::cost_key()) && keys == Models::defaults().cost_keys(), "{keys:?}");
         let mut priced = m.priced(book.clone());
         priced.keys.extend(keys);
         assert_eq!(priced.validate(), Ok(()));
-        assert_eq!(priced.price(&Usage::Key { key: crate::transcribe::SECONDS.into(), units: 60 }).unwrap().list, 6_000, "a minute at $0.006");
+        let minute = crate::transcribe::usage_of(m.transcription.as_ref().unwrap(), &json!({ "duration": 60.0 })).unwrap();
+        assert_eq!(priced.price(&minute).unwrap().list, 6_000, "a minute at $0.006");
         let openai = |extra: Value| {
             let mut v = local.clone();
             v["transcription"].as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());

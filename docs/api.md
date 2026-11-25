@@ -1613,8 +1613,12 @@ model's count, else estimated).
 a Workers AI model, sent Whisper's catalog input (the audio as base64, its
 voice-activity filter on), or a model on an OpenAI-compatible API, sent
 OpenAI's form at `<base_url>/audio/transcriptions` with the slot's key and
-`response_format` `verbose_json`. Each names its price, a minute of audio
+`response_format` `verbose_json` (a model that answers no `verbose_json`,
+OpenAI's token-billed gpt-4o transcription models, refuses each call; its
+refusal is passed on). Each names its price, a minute of audio
 (docs/ledger.md). A deployment that names none transcribes nothing (404).
+A call to an OpenAI-compatible API, chat, embeddings or transcription,
+follows no redirect: one is the call not answered.
 `language` and `prompt` pass on, OpenAI's other fields do not. A form that
 is none, another model or format is 400; audio past
 `transcribe::BODY_MAX_BYTES` 413. Its payer is the agent's owner, under no

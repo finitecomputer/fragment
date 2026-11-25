@@ -221,8 +221,9 @@ shape, so any server that answers that API serves it.
 
 - **Transcription**, `transcription`: `POST <base_url>/audio/transcriptions`,
   OpenAI's form, asked for `verbose_json`, whose `duration` (or OpenAI's
-  `usage` of type `duration`) is the length charged; its `price` dollars a
-  minute of audio, by the second.
+  `usage` of type `duration`) is the length charged, so its server answers
+  that format (every Whisper server does); its `price` dollars a minute of
+  audio, by the second.
 
   ```jsonc
   "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:8082/v1", "key": "local-key",

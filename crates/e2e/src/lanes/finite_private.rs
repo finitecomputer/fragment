@@ -156,7 +156,7 @@ pub fn finite_private(s: &mut Suite, _: &Api) -> Result<()> {
 /// shape.
 fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
     use base64::Engine;
-    use fragment_core::transcribe::SECONDS;
+    use fragment_core::transcribe::COST;
     let wait = Duration::from_secs(40);
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
@@ -165,16 +165,18 @@ fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
     let aig = || entries(api, &owner_id, "aig:");
-    // the node's book: its slot's seconds at the dollars a minute it names
+    // the node's book, and what its slot's seconds cost at the dollars a
+    // minute it names, in nano-dollars
     let models = crate::private_tier_models(&s.ai.node().url).to_string();
     let parsed = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models");
     let mut book = parsed.priced(PriceBook::defaults());
     book.keys.extend(parsed.cost_keys());
-    let seconds = |units: u64| Usage::Key { key: SECONDS.into(), units };
-    let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its slot's seconds").charge;
-    let settled_at = |before: usize, units: u64| {
+    let nanos = |n: u64| (n as f64 * crate::TRANSCRIPTION_AUDIO_MINUTE * 1e9 / 60.0).round() as u64;
+    let seconds = |n: u64| Usage::Key { key: COST.into(), units: nanos(n) };
+    let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its slot's cost").charge;
+    let settled_at = |before: usize, n: u64| {
         let now = aig();
-        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(charge(&seconds(units))) && usage(e)["kind"] == "key" && usage(e)["key"] == SECONDS && usage(e)["units"] == units)
+        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(charge(&seconds(n))) && usage(e)["kind"] == "key" && usage(e)["key"] == COST && usage(e)["units"] == nanos(n))
     };
     let memo = fragment_fakes::workers_ai::spoken_wav("hello from a voice memo", 3);
     let slot_key = format!("Bearer {TRANSCRIPTION_KEY}");

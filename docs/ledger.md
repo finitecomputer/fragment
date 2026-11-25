@@ -81,7 +81,7 @@ the ledger queue under a batch id of its own until the ledger has them.
 
 | What | Usage | Reference | Payer |
 |---|---|---|---|
-| An agent's model call (the route, a decision, a transcription, embeddings) | `tokens`; a transcription `neurons` (Workers AI) or `key` (`transcription/second`) | `aig:` | the agent's owner |
+| An agent's model call (the route, a decision, a transcription, embeddings) | `tokens`; a transcription `neurons` (Workers AI) or `key` (`transcription/nanousd`) | `aig:` | the agent's owner |
 | An operator key's call the provider answered (under 500) | `key` | `key:<computer>:` | the agent's owner |
 | A computer's awake time | `awake` | `awake:<computer>:` | its owner |
 | A job's AI step | `tokens`, `neurons` | `step:<step's key>` | the fragment's owner |
@@ -217,11 +217,14 @@ informational. The fee is AI Gateway's on credits, so it applies to
   at the length of audio its model reports. On Workers AI, `neurons` at
   the neurons a minute the slot names (`price.neurons_a_minute`, Workers
   AI's unit for its speech models), with the fee. On an OpenAI-compatible
-  API, `key` units of `transcription/second`, its audio's seconds rounded
-  up, at the dollars a minute the slot names (`price.audio_minute`), as
-  OpenAI bills transcription (a minute's price, by the second); the margin
-  and no fee, as an operator key's (a vendor billing a card bills none).
-  An answer that says no length is charged nothing, said aloud.
+  API, its audio's seconds, rounded up, at the dollars a minute the slot
+  names (`price.audio_minute`), as OpenAI bills transcription (a minute's
+  price, by the second): that list cost, in nano-dollars, as `key` units of
+  `transcription/nanousd`, which every book prices at list whatever its
+  slots (so a row queued before a deploy changed the slot is charged as it
+  was made), then the margin and no fee, as an operator key's (a vendor
+  billing a card bills none). An answer that says no length is charged
+  nothing, said aloud.
 - **Finite Private's price** (decision 61; a decision for Paul): Workers
   AI's GLM-5.3 Flash's ($0.15 in, $0.50 out a million tokens), kept after
   Workers AI retired that model on 2026-11-20. It reports no cached

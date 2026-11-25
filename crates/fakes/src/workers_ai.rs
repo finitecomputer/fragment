@@ -1988,7 +1988,7 @@ mod tests {
         let call = s.calls.last().unwrap();
         assert_eq!((call.face, call.model.as_str(), call.body["filename"].clone(), call.body["file"].clone()), (Face::OpenAi, OPENAI_TRANSCRIBE_MODEL, json!("memo.wav"), json!(base64::engine::general_purpose::STANDARD.encode(&wav))));
         let slot = fragment_core::transcribe::slot_of(&mut json!({ "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:1/v1", "model": OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": 0.006 } } })).unwrap().unwrap();
-        assert_eq!(fragment_core::transcribe::usage_of(&slot, &v), Some(fragment_core::price::Usage::Key { key: fragment_core::transcribe::SECONDS.into(), units: 3 }));
+        assert_eq!(fragment_core::transcribe::usage_of(&slot, &v), Some(fragment_core::price::Usage::Key { key: fragment_core::transcribe::COST.into(), units: 300_000 }), "3 s at $0.006 a minute, in nano-dollars");
         let r = post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "text"), "Bearer tk");
         assert_eq!((r.status, r.body.as_slice()), (200, &b"hello from a voice memo"[..]));
         assert_eq!(post(&mut s, &form("whisper", "json"), "Bearer tk").status, 400, "the route's name is no model of the server's");

@@ -23,7 +23,9 @@
 //!   by the second, rounded up: as OpenAI's API bills transcription (a
 //!   minute's price, "rounded to the nearest second"), so a self-hosted
 //!   slot at zero and a vendor's at its list both read as the vendor's
-//!   price page does.
+//!   price page does. Its model answers `verbose_json` (every Whisper
+//!   server does; OpenAI's token-billed gpt-4o transcription models do not,
+//!   and refuse the call, which is passed on and charged nothing).
 //!
 //! The code names no model: a deployment that names no slot transcribes
 //! nothing (the route answers 404, saying so). A deploy of a config that
@@ -52,10 +54,13 @@ pub const WHISPER: &str = "whisper";
 /// The slot's key in a deployment's `models` (its key's binding is
 /// `secrets_store::model_key`'s of it).
 pub const TRANSCRIPTION: &str = "transcription";
-/// What a transcription on an OpenAI-compatible API is metered in: its
-/// audio's seconds, under a name with a `/`, which no catalog row's charge
-/// can take, priced at its slot's own price (`key_price`).
-pub const SECONDS: &str = "transcription/second";
+/// What a transcription on an OpenAI-compatible API is charged as: its
+/// list cost in nano-dollars (its audio's seconds at its slot's price,
+/// `usage_of`), under a name with a `/`, which no catalog row's charge can
+/// take, priced at list whatever the slots (`cost_key`), so a row queued
+/// before a deploy that changed its slot's price, or moved it, is charged
+/// as it was made, as OpenRouter's cost is (`models::OPENROUTER_COST`).
+pub const COST: &str = "transcription/nanousd";
 /// The most a Workers AI slot names a minute, in neurons: far past any
 /// speech model's in its catalog (Whisper large v3 turbo's 46.63 on
 /// 2026-10-07), so one higher is a typo, refused rather than charged.
@@ -106,7 +111,7 @@ pub enum Price {
     /// tiles and steps are: crate::media), which the book prices.
     Neurons { milli_a_minute: u64 },
     /// An OpenAI-compatible API's: micro-dollars at list, charged by the
-    /// second (`SECONDS`) with the margin, as an operator key's use is.
+    /// second (as `COST`) with the margin, as an operator key's use is.
     Usd { micros_a_minute: i64 },
 }
 
@@ -146,14 +151,11 @@ pub fn slot_of(models: &mut Value) -> Result<Option<Slot>, String> {
     Ok(Some(Slot { upstream, price }))
 }
 
-/// The book's row for what an OpenAI-compatible slot's calls are metered in
-/// (`SECONDS`), at its price; none for a Workers AI slot (the book prices
-/// neurons).
-pub fn key_price(slot: &Slot) -> Option<KeyPrice> {
-    match slot.price {
-        Price::Usd { micros_a_minute } => Some(KeyPrice { key: SECONDS.to_string(), micros: micros_a_minute, per: 60 }),
-        Price::Neurons { .. } => None,
-    }
+/// The book's row for `COST`: a micro-dollar a thousand nano-dollars, at
+/// list (an operator key's: the margin, no credits fee, which is
+/// Cloudflare's credits' and which a vendor billing a card bills none of).
+pub fn cost_key() -> KeyPrice {
+    KeyPrice { key: COST.to_string(), micros: 1, per: 1_000 }
 }
 
 /// Whether a transcription's first try, which answered `status` (`None`:
@@ -323,7 +325,9 @@ pub fn usage_of(slot: &Slot, answer: &Value) -> Option<Usage> {
         // a part of a thousandth of a neuron counted whole; at most a day
         // of audio at the highest price: far under QUANTITY_MAX
         Price::Neurons { milli_a_minute } => Usage::Neurons { milli: ((seconds * 1_000.0).ceil() as u64 * milli_a_minute).div_ceil(60_000) },
-        Price::Usd { .. } => Usage::Key { key: SECONDS.to_string(), units: seconds.ceil() as u64 },
+        // a part of a nano-dollar counted whole; a day at USD_A_MINUTE_MAX
+        // is under 10^14
+        Price::Usd { micros_a_minute } => Usage::Key { key: COST.to_string(), units: (seconds.ceil() as u64 * micros_a_minute as u64 * 1_000).div_ceil(60) },
     })
 }
 
@@ -386,11 +390,9 @@ mod tests {
         let w = slot_of(&mut models).unwrap().unwrap();
         assert_eq!((w.upstream.model(), w.price), ("@cf/openai/whisper-large-v3-turbo", Price::Neurons { milli_a_minute: 46_630 }));
         assert_eq!(models, json!({ "default": "cheap" }), "taken off models");
-        assert_eq!(key_price(&w), None, "the book prices neurons");
         let o = openai();
         assert!(matches!(&o.upstream, Upstream::Openai { base_url, model, body: None, price: None } if base_url == "http://127.0.0.1:8000/v1" && model == "local-whisper"));
         assert_eq!(o.price, Price::Usd { micros_a_minute: 6_000 });
-        assert_eq!(key_price(&o), Some(KeyPrice { key: SECONDS.into(), micros: 6_000, per: 60 }));
         let free = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0 } })).unwrap().unwrap();
         assert_eq!(free.price, Price::Usd { micros_a_minute: 0 }, "a box's own, at zero");
     }
@@ -481,8 +483,9 @@ mod tests {
     /// Goal: a call is charged at the length its model heard, at its slot's
     /// price: Whisper on Workers AI at 46.63 neurons a minute is its listed
     /// $0.0005 (before the fee and margin); an OpenAI-compatible API's at
-    /// its dollars a minute, by the second. Method: the book's price of a
-    /// minute on each, and answers that do and do not say how long.
+    /// its dollars a minute, by the second, its cost fixed as it is metered
+    /// (a book with no slot prices it the same). Method: the book's price
+    /// of a minute on each, and answers that do and do not say how long.
     #[test]
     fn a_minute_is_its_slots_price() {
         let book = PriceBook::defaults();
@@ -498,14 +501,23 @@ mod tests {
         }
         let o = openai();
         let mut keyed = book.clone();
-        keyed.keys.push(key_price(&o).unwrap());
+        keyed.keys.push(cost_key());
+        assert_eq!(keyed.validate(), Ok(()));
+        let cost = |nanos: u64| Usage::Key { key: COST.into(), units: nanos };
         let minute = usage_of(&o, &json!({ "text": "hi", "usage": { "type": "duration", "seconds": 60 } })).unwrap();
-        assert_eq!(minute, Usage::Key { key: SECONDS.into(), units: 60 }, "OpenAI's duration usage");
-        assert_eq!(keyed.price(&minute).unwrap().list, 6_000, "a minute at its $0.006");
+        assert_eq!(minute, cost(6_000_000), "OpenAI's duration usage: a minute at $0.006");
+        assert_eq!(keyed.price(&minute).unwrap().list, 6_000);
         assert_eq!(keyed.price(&minute).unwrap().charge, 9_000, "with the margin, no credits fee (a vendor billing a card bills none)");
-        assert_eq!(usage_of(&o, &json!({ "text": "hi", "duration": 2.04, "segments": [] })), Some(Usage::Key { key: SECONDS.into(), units: 3 }), "verbose_json's duration, a part of a second counted whole");
-        assert_eq!(keyed.price(&Usage::Key { key: SECONDS.into(), units: 3 }).unwrap().list, 300);
-        assert_eq!(usage_of(&o, &json!({ "duration": 5.0, "usage": { "type": "duration", "seconds": 2 } })), Some(Usage::Key { key: SECONDS.into(), units: 2 }), "its usage first");
+        assert_eq!(usage_of(&o, &json!({ "text": "hi", "duration": 2.04, "segments": [] })), Some(cost(300_000)), "verbose_json's duration, a part of a second counted whole");
+        assert_eq!(keyed.price(&cost(300_000)).unwrap().list, 300);
+        assert_eq!(usage_of(&o, &json!({ "duration": 5.0, "usage": { "type": "duration", "seconds": 2 } })), Some(cost(200_000)), "its usage first");
+        let odd = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0.0001 } })).unwrap().unwrap();
+        assert_eq!(usage_of(&odd, &json!({ "duration": 1.0 })), Some(cost(1_667)), "$0.0001 a minute is 1,666.7 nano-dollars a second, rounded up");
+        let free = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0 } })).unwrap().unwrap();
+        assert_eq!(usage_of(&free, &json!({ "duration": 30.0 })), Some(cost(0)), "a box's own, at zero");
+        let day = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": USD_A_MINUTE_MAX } })).unwrap().unwrap();
+        let most = usage_of(&day, &json!({ "duration": DURATION_MAX_SECONDS })).unwrap();
+        assert!(most.validate().is_ok() && keyed.price(&most).is_ok(), "a day at the dearest price is a charge the book takes: {most:?}");
         for bad in [json!({ "text": "hi" }), json!({ "usage": { "type": "tokens", "input_tokens": 10 } }), json!({ "duration": f64::NAN }), json!({ "duration": 90_000 }), json!({ "transcription_info": { "duration": 2.0 } })] {
             assert_eq!(usage_of(&o, &bad), None, "{bad}");
         }
