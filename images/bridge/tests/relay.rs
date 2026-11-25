@@ -588,10 +588,11 @@ async fn a_let_go_turn_hermes_never_took_is_not_handed_again() {
         s.away = false;
     });
     support::until(WAIT, "its interrupt at the next dial", || hermes.with(|s| s.dials >= 2 && s.interrupts_heard > heard)).await;
+    hermes.with(|s| assert_eq!(s.heard.iter().filter(|e| e["text"] == "never taken").count(), 0, "the let-go turn was never handed again"));
     fake.say(&chat, &person("paul"), json!({ "text": "and now?" }));
     fake.until(WAIT, "the next message answered", |w| replies(w, &chat).len() == 1).await;
     hermes.with(|s| {
-        assert_eq!(s.heard.iter().filter(|e| e["text"] == "never taken").count(), 0, "the let-go turn was never handed again");
+        assert_eq!(s.heard.iter().filter(|e| e["text"] == "never taken").count(), 0, "nor after");
         assert_eq!(s.heard.iter().filter(|e| e["text"] == "and now?").count(), 1);
     });
     bridge.stop().await;

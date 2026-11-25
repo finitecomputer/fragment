@@ -295,6 +295,21 @@ impl FragmentCell {
         }
     }
 
+    /// The computer the agent runs on from now (none: unassigned). Its
+    /// turns and its bridge's lives are that computer's, whose starts order
+    /// them (`mandate::heard`): on another, or none, they are forgotten,
+    /// and its bridge's first word takes the agent's turns.
+    fn ran_on(&self, computer: Option<&str>) -> CellResult<()> {
+        if self.meta(MetaKey::Computer)?.as_deref() != computer {
+            self.exec("DELETE FROM turns", vec![])?;
+            self.exec("DELETE FROM turn_lives", vec![])?;
+        }
+        match computer {
+            Some(c) => self.set_meta(MetaKey::Computer, c),
+            None => self.del_meta(MetaKey::Computer),
+        }
+    }
+
     /// Whether bridge `life`, of its computer's `start`, speaks for this
     /// agent's turns (`mandate::heard`): the newest does. A new one takes
     /// over, and every other life's turns are forgotten (its bridge is gone:
@@ -411,7 +426,7 @@ impl FragmentCell {
                         agent.id
                     }
                 };
-                self.set_meta(MetaKey::Computer, &b.computer)?;
+                self.ran_on(Some(&b.computer))?;
                 // the agent keeps its own state here (its SOUL.md, memories,
                 // skills, routines): it is an editor of its own fragment
                 if self.member_role(&identity)?.is_none() {
@@ -427,7 +442,7 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner moves it"));
                 }
                 if self.meta(MetaKey::Computer)?.as_deref() == Some(b.computer.as_str()) {
-                    self.del_meta(MetaKey::Computer)?;
+                    self.ran_on(None)?;
                     self.event("computer.unassigned", &format!("no longer runs on {}", b.computer), json!({ "computer": b.computer }));
                 }
                 Ok(json!({ "ok": true }))

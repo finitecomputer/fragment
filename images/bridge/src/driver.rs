@@ -1454,6 +1454,19 @@ impl Turns {
         told
     }
 
+    /// `send`, while this life holds `turn` open (told open, or being
+    /// told): under the hold `ended` takes, so it is not let go between the
+    /// look and the send. False, nothing sent, once it is not: a turn's
+    /// proof is its own, and a turn let go runs on no one's.
+    fn send_held(&self, turn: &str, send: impl FnOnce()) -> bool {
+        let open = self.open.lock().expect("turns");
+        if !open.contains_key(turn) {
+            return false;
+        }
+        send();
+        true
+    }
+
     /// Before a turn of `agent` reaches its runtime: each of its ended turns
     /// told ended (a close slow or refused, told again now), tried
     /// `SETTLE_TRIES` times. Past them it is not settled, and the turn does
@@ -2007,17 +2020,28 @@ impl RuntimeLane {
                 }
                 // room for it first, then no turn its agent ended still held
                 // open (whose mandate would sign this one's calls), then at
-                // once to its runtime: nothing waits between the two
+                // once to its runtime, while its own is held open: nothing
+                // waits between the two
                 let Ok(room) = to_runtime.reserve().await else { return };
-                if let Command::Start(ts) = &c {
-                    if !turns.settle(&api, &ts.agent.fragment).await {
-                        // not run: ended as its runtime would end it, saying why
-                        let end = Event::End { turn: ts.turn.clone(), outcome: records::Outcome::Error(UNSETTLED.into()) };
-                        let _ = inbox.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event: end })).await;
-                        continue;
-                    }
+                let Command::Start(ts) = &c else {
+                    room.send(c);
+                    continue;
+                };
+                let turn = ts.turn.clone();
+                if !turns.settle(&api, &ts.agent.fragment).await {
+                    // not run: ended as its runtime would end it, saying why
+                    let end = Event::End { turn, outcome: records::Outcome::Error(UNSETTLED.into()) };
+                    let _ = inbox.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event: end })).await;
+                    continue;
                 }
-                room.send(c);
+                if !turns.send_held(&turn, move || room.send(c)) {
+                    // let go while it was made ready (its agent gone from
+                    // its chat): its proof closed or closing, it never runs
+                    // (FIN-720). Its end is stale to the engine, which let it go.
+                    crate::ev!("turn.discarded", { "turn": turn, "why": "let go before it reached its runtime" });
+                    let end = Event::End { turn, outcome: records::Outcome::Stopped };
+                    let _ = inbox.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event: end })).await;
+                }
             }
         });
         RuntimeLane { tx }

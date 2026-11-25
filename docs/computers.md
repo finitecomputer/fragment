@@ -893,7 +893,8 @@ sleep answers within 14 minutes.
     takes the agent's turns (every other life's forgotten: one computer
     runs one bridge), and any other is retired, its word refused (409)
     and changing nothing, a late first word from a container gone among
-    them. The agent's
+    them. Lives and turns are the agent's computer's: assigned to another,
+    or none, they are forgotten. The agent's
     fragment holds at most `TURNS_HELD_MAX`, each for at most
     `TURN_HELD_MS`; a mandate that does not check holds that turn
     unproven, never refused. A platform from before sends it on to its

@@ -346,6 +346,40 @@ async fn a_new_life_takes_its_agents_turns() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): a turn let go while it is made ready never reaches its
+/// runtime: its proof is its own. Juniper's turn is told open, then, while
+/// its file downloads, Juniper leaves the chat: the turn is let go and told
+/// ended, and its download over, it is not run (its `fetch` never made),
+/// though no ended turn is held. Before, it ran as no one's ask. Juniper's
+/// next turn, in another chat, comes after it in its runtime's lane: once
+/// that one is answered, the let-go one would have run.
+#[tokio::test]
+async fn a_turn_let_go_while_made_ready_never_runs() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let other = fake.chat("other", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"hello file");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| {
+        w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("text/plain".into(), bytes.clone()));
+        w.blob_get_delay_ms = 3_000;
+    });
+    let dir = support::dir("let-go-made-ready");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 3).await;
+    let text = format!("fetch {}/ran-after-let-go with x in x-test", fake.url());
+    let said = fake.say(&chat, &person("paul"), json!({ "text": text, "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "text/plain", "name": "a.txt" }] }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "its turn told open, its file downloading", |w| w.turns_open.contains_key(&turn) && w.calls.iter().any(|c| c.contains("/blobs/"))).await;
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().members.retain(|m| m.principal != "npub1juniper"));
+    fake.drop_sockets();
+    fake.until(WAIT, "the turn let go and told ended", |w| !w.turns_open.contains_key(&turn) && w.turns.iter().any(|(_, m, v)| m == "DELETE" && v["turn"] == turn.as_str())).await;
+    fake.say(&other, &person("paul"), json!({ "text": "hi" }));
+    fake.until(WAIT * 2, "its next turn answered, behind the let-go one", |w| replies(w, &other).len() == 1).await;
+    fake.with(|w| assert!(!w.calls.iter().any(|c| c.contains("/ran-after-let-go")), "never run: {:?}", w.calls));
+    bridge.stop().await;
+}
+
 /// Goal (FIN-720): a retired bridge life runs no turn. A life of a newer
 /// start holds the agent's turns, so this one's word is refused (409), each
 /// naming its start: its own start's take, and its turn's open, the turn

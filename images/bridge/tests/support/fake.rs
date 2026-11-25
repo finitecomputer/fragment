@@ -122,6 +122,8 @@ pub struct World {
     /// A turn's open waits this long before the platform takes it (as the
     /// cell's waits on the mandate keys).
     pub turn_open_delay_ms: u64,
+    /// Each blob read answers this late (a slow download).
+    pub blob_get_delay_ms: u64,
     /// Pages read over the API give an agent a mandate beside each record
     /// a person other than its owner wrote (`fm1.<principal>.<seq>`, the
     /// fake's), as the platform gives one; live frames carry none.
@@ -608,6 +610,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
                 Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
                 Method::GET if path.ends_with("/__people") => w.people_delay_ms,
+                Method::GET if path.contains("/blobs/") => w.blob_get_delay_ms,
                 Method::GET if path.contains("/channels/") && query(&q, "limit") == [fragment_bridge::limits::RECAP_PAGE_RECORDS.to_string()] => w.recap_page_delay_ms,
                 _ => 0,
             }
