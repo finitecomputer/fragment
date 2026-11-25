@@ -41,10 +41,8 @@ pub const MARK: &str = "x-fragment-platform-refusal";
 
 /// `MARK`'s value on a refusal of `code`: the code's wire name.
 pub fn mark(code: ErrorCode) -> String {
-    match serde_json::to_value(code) {
-        Ok(serde_json::Value::String(name)) => name,
-        _ => unreachable!("an ErrorCode serializes as its name"),
-    }
+    let quoted = serde_json::to_string(&code).expect("an ErrorCode serializes");
+    quoted.trim_matches('"').to_string()
 }
 
 /// The code a marked answer's `MARK` names. Only the platform sets one,
@@ -52,7 +50,8 @@ pub fn mark(code: ErrorCode) -> String {
 /// docs/MODEL.md), so an unknown one is no answer to trust: `host_failed`,
 /// said as the platform's own failure is, none of its body.
 pub fn marked(mark: &str) -> ErrorCode {
-    serde_json::from_value(serde_json::Value::String(mark.to_string())).unwrap_or(ErrorCode::HostFailed)
+    // as a JSON string: a mark with a quote or a backslash in it is none
+    serde_json::from_slice(format!("\"{mark}\"").as_bytes()).unwrap_or(ErrorCode::HostFailed)
 }
 
 /// What a marked answer (`mark`, its `MARK`) says past the platform's
