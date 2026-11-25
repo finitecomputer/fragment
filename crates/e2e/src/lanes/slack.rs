@@ -128,8 +128,7 @@ pub(super) fn checks(s: &mut Suite, api: &Api, c: &Agent<'_>) -> Result<()> {
     let asked = "is the deploy green?";
     let mention = Slack::mention(DEPLOYS, MAPLE, asked, "1790000004.000100");
     let run = ran(&deliver(&mention, SIGNING.as_bytes())?);
-    let text = format!("@{BOT_NAME} {asked}");
-    let rec = chat().into_iter().find(|r| r["body"]["text"] == text.as_str()).unwrap_or_default();
+    let rec = chat().into_iter().find(|r| r["body"]["text"] == asked).unwrap_or_default();
     s.ok(
         "a teammate's mention in a channel is published as someone heard there, stamped the door's, with its room and what was said there just before",
         run["output"]["heard"] == true

@@ -185,7 +185,7 @@ export async function setup(root) {
       const p = state.pairing;
       if (p?.candidate) {
         return say(
-          el("p", "setup-now", `Is ${p.candidate.name} your Slack account?`),
+          el("p", "setup-now", `Is ${p.candidate.name} (${p.candidate.user}) your Slack account?`),
           row(button("Yes, it's me", "", act(() => fragment.call("confirm", { user: p.candidate.user }))), button("No", "quiet", act(() => fragment.call("unpair")))),
         );
       }

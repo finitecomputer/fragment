@@ -15,7 +15,7 @@ const HOOKS = `export async function resolve(specifier, context, next) {
   return next(specifier, context);
 }`;
 register("data:text/javascript," + encodeURIComponent(HOOKS));
-const { App, readable, taken } = await import(new URL("../../../templates/slack/app.mjs", import.meta.url).href);
+const { App, readable, taken, continuations } = await import(new URL("../../../templates/slack/app.mjs", import.meta.url).href);
 
 const TEAM = "T0TEAM";
 const BOT = "U0BOT";
@@ -28,7 +28,7 @@ const PEOPLE = { [PAUL]: "Paul", [MAPLE]: "Maple", U0SAM: "Sam" };
 
 // an app on a fresh store, connected to TEAM; Slack as it answers; and the
 // records its jobs publish
-function world({ history = [], replies = [] } = {}) {
+function world({ history = [], replies = [], failing = [] } = {}) {
   const db = new DatabaseSync(":memory:");
   const sql = { exec: (q, ...p) => { const st = db.prepare(q); const rows = /^\s*select\b|\breturning\b/i.test(q) ? st.all(...p) : (st.run(...p), []); return { toArray: () => rows }; } };
   const app = new App({ storage: { sql } }, {});
@@ -56,6 +56,7 @@ function world({ history = [], replies = [] } = {}) {
     door,
     call: async (op, input) => app[op](input, owner),
     fetch: async (url, init) => {
+      if (failing.some((m) => url.includes(`/api/${m}`))) throw new Error("fetch failed: its tries ran out");
       const answer = slack(url, init);
       return { ok: true, status: 200, json: () => answer };
     },
@@ -111,7 +112,7 @@ test("someone in a channel is heard, in its room, with what was said there just 
   assert.equal(out.heard, true);
   const [rec] = w.published;
   assert.deepEqual(rec.body, {
-    text: "@juniper is it green?",
+    text: "is it green?",
     to: ["npub1juniper"],
     heard: { via: "slack", from: MAPLE, name: "Maple" },
     room: { id: "C0DEPLOY", name: "#deploys", thread: "1790000004.000100" },
@@ -225,7 +226,7 @@ test("a question that asks its owner goes where their answer counts: its turn's 
   const card = (turn, asks = "npub1paul") => ({ channel: "work", principal: "npub1juniper", body: { kind: "turn.prompt", turn, prompt: "p1", text: "Deploy now?", asks, options: [{ id: "yes", label: "Yes" }, { id: "w", label: "Other", words: true }] } });
   assert.deepEqual(await w.app.mirror({ record: card(turnOf(1)) }, w.job()), { sent: 1 });
   assert.deepEqual(w.calls.map((c) => [c.method, c.body.channel, c.body.thread_ts]), [["chat.postMessage", "C0DEPLOY", "1790000400.000100"]], "in the room's thread, its 👀 kept: no answer yet");
-  assert.match(w.calls[0].body.markdown_text, /^Deploy now\?\n\n\(Answer with one of: Yes, or in your own words\.\)$/);
+  assert.match(w.calls[0].body.markdown_text, /^Deploy now\?\n\n\(Answer with one of: Yes, or in your own words\.\)\n\n\(Answer here by mentioning @juniper\.\)$/);
   w.calls.length = 0;
   await w.app.mirror({ record: card("cafe00000000000000000001") }, w.job());
   assert.deepEqual(w.calls.map((c) => c.body.channel), [`D${PAUL}`]);
@@ -233,6 +234,43 @@ test("a question that asks its owner goes where their answer counts: its turn's 
   assert.equal((await w.app.mirror({ record: card(turnOf(1), "slack:U0MAPLE") }, w.job())).why, "it asks someone else");
   assert.equal((await w.app.mirror({ record: { channel: "work", principal: "npub1juniper", body: { kind: "turn.step", turn: turnOf(1) } } }, w.job())).why, "not a question");
   assert.equal(w.calls.length, 0);
+});
+
+test("a turn a restart cut, continued, answers where it would have: its thread", async () => {
+  const w = await paired(await connected(world()));
+  await w.app.intake({ record: mention(MAPLE, "<@U0BOT> long job", "1790000500.000100") }, w.job());
+  const [next, after] = await continuations(turnOf(1));
+  assert.equal(next, createHash("sha256").update(`continue\0${turnOf(1)}`).digest("hex").slice(0, 24));
+  for (const turn of [next, after]) assert.deepEqual(w.app.thread({ turn }).to, { channel: "C0DEPLOY", thread: "1790000500.000100", ts: "1790000500.000100" });
+});
+
+test("a question in a channel's thread says to answer by mentioning the bot, and that answer comes in as its words alone", async () => {
+  const w = await paired(await connected(world()));
+  await w.app.intake({ record: mention(MAPLE, "<@U0BOT> deploy it?", "1790000600.000100") }, w.job());
+  w.calls.length = 0;
+  await w.app.mirror({ record: { channel: "work", principal: "npub1juniper", body: { kind: "turn.prompt", turn: turnOf(1), prompt: "p", text: "Sure?", asks: "npub1paul", options: [{ id: "w", label: "Other", words: true }] } } }, w.job());
+  assert.match(w.calls[0].body.markdown_text, /\(Answer here by mentioning @juniper\.\)$/);
+  await w.app.intake({ record: mention(PAUL, "<@U0BOT>: yes, go", "1790000601.000100", { thread_ts: "1790000600.000100" }) }, w.job());
+  assert.equal(w.published.at(-1).body.text, "yes, go");
+  await w.app.intake({ record: mention(PAUL, "ask <@U0BOT> later", "1790000602.000100") }, w.job());
+  assert.equal(w.published.at(-1).body.text, "ask @juniper later", "a mention past its start is its words");
+});
+
+test("what a message can do without (👀, its room's context, names) failing outright publishes it all the same", async () => {
+  const w = await connected(world({ failing: ["reactions.add", "conversations.history", "conversations.info", "users.info"] }));
+  const out = await w.app.intake({ record: mention(MAPLE, "<@U0BOT> still there?", "1790000700.000100") }, w.job());
+  assert.equal(out.heard, true);
+  assert.deepEqual(w.published.at(-1).body, { text: "still there?", to: ["npub1juniper"], heard: { via: "slack", from: MAPLE, name: "someone" }, room: { id: "C0DEPLOY", name: "#C0DEPLOY", thread: "1790000700.000100" } });
+});
+
+test("a thread's context is read up to its mention, its newest lines kept", async () => {
+  const replies = Array.from({ length: 30 }, (_, i) => ({ ts: `17900008${String(i).padStart(2, "0")}.000100`, user: "U0SAM", text: `line ${i}` }));
+  const w = await connected(world({ replies }));
+  await w.app.intake({ record: mention(MAPLE, "<@U0BOT> sum up", "1790000899.000100", { thread_ts: "1790000800.000100" }) }, w.job());
+  const read = w.calls.find((c) => c.method === "conversations.replies").body;
+  assert.deepEqual([read.latest, read.inclusive], ["1790000899.000100", "false"]);
+  const context = w.published.at(-1).body.context;
+  assert.deepEqual([context.length, context[0].text, context.at(-1).text], [20, "line 10", "line 29"]);
 });
 
 test("a long reply goes in at most 4 messages, the rest in the chat", async () => {

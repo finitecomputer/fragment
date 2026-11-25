@@ -66,6 +66,11 @@ const CONTEXT_LINES_MAX = 20;
 const CONTEXT_TEXT_MAX = 600;
 // A room's context in all, at most (the oldest lines let go first).
 const CONTEXT_MAX_BYTES = 16 * 1024;
+// A thread's replies read for its context, at most: Slack answers a
+// thread's oldest first, so a thread longer than this up to its mention
+// is told its first replies' newest 20 (each a few hundred bytes: within
+// a fetch's answer, FETCH_RESPONSE_MAX_BYTES, 1 MiB).
+const THREAD_READ_MAX = 200;
 // Names, one line, as the bridge cuts them.
 const NAME_MAX = 60;
 // Connect attempts whose answer is kept, the latest last.
@@ -134,11 +139,19 @@ const atOf = (ts) => {
   return Number.isFinite(s) ? Math.round(s * 1000) : undefined;
 };
 
+const sha24 = async (s) => hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))).slice(0, 24);
+
 /// A turn's id, as docs/chat-records.md defines it: the agent's, of the
 /// record that started it.
-export async function turnOf(agent, fragment, seq) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${agent}|${fragment}/chat/${seq}`));
-  return hex(new Uint8Array(digest)).slice(0, 24);
+export const turnOf = (agent, fragment, seq) => sha24(`${agent}|${fragment}/chat/${seq}`);
+
+/// The turns a restart's cut makes of `turn`, each continuing the one
+/// before (docs/chat-records.md, "Turns"): their replies go where its do.
+const CONTINUATIONS = 2;
+export async function continuations(turn) {
+  const out = [];
+  for (let t = turn; out.length < CONTINUATIONS; ) out.push((t = await sha24(`continue\0${t}`)));
+  return out;
 }
 
 /// A Web API call, the bot's token filled at the platform's egress point,
@@ -154,6 +167,17 @@ async function slack(job, api, method, { query, body } = {}) {
     answer = resp.json();
   } catch {}
   return { ok: resp.ok && answer.ok === true, answer, error: typeof answer.error === "string" ? answer.error : `Slack answered ${resp.status}` };
+}
+
+/// What a message wants of Slack but can do without (👀, a room's context,
+/// a name): asked, and its failure, however it fails, none of the
+/// message's.
+async function maybe(fn, otherwise) {
+  try {
+    return await fn();
+  } catch {
+    return otherwise;
+  }
 }
 
 async function post(job, api, channel, thread, text) {
@@ -178,7 +202,7 @@ async function names(job, api, ids) {
   const learned = {};
   for (const id of asked) {
     const room = /^[CG]/.test(id);
-    const r = room ? await slack(job, api, "conversations.info", { query: { channel: id } }) : await slack(job, api, "users.info", { query: { user: id } });
+    const r = await maybe(() => (room ? slack(job, api, "conversations.info", { query: { channel: id } }) : slack(job, api, "users.info", { query: { user: id } })), { ok: false, answer: {} });
     const p = r.answer.user?.profile;
     const name = oneLine(room ? r.answer.channel?.name : p?.display_name || p?.real_name || r.answer.user?.real_name || r.answer.user?.name);
     if (r.ok && name) learned[id] = name;
@@ -194,7 +218,7 @@ async function names(job, api, ids) {
 /// speakers named as `named` has them.
 async function contextOf(job, api, m, bot) {
   const r = m.thread
-    ? await slack(job, api, "conversations.replies", { query: { channel: m.channel, ts: m.thread, limit: "50" } })
+    ? await slack(job, api, "conversations.replies", { query: { channel: m.channel, ts: m.thread, latest: m.ts, inclusive: "false", limit: String(THREAD_READ_MAX) } })
     : await slack(job, api, "conversations.history", { query: { channel: m.channel, latest: m.ts, inclusive: "false", limit: String(CONTEXT_LINES_MAX) } });
   if (!r.ok || !Array.isArray(r.answer.messages)) return [];
   const before = r.answer.messages
@@ -420,14 +444,17 @@ export class App extends DurableObject {
     }
     // 👀 on it while the agent works (its reply takes it off); a room that
     // refuses it is no failure
-    await slack(job, api, "reactions.add", { body: { channel: m.channel, timestamp: m.ts, name: "eyes" } });
+    await maybe(() => slack(job, api, "reactions.add", { body: { channel: m.channel, timestamp: m.ts, name: "eyes" } }));
     // its owner's DM is the chat's own conversation; any other place, a room
     const inRoom = !(owner && m.dm);
-    const lines = inRoom && !m.dm ? await contextOf(job, api, m, bot) : [];
+    const lines = inRoom && !m.dm ? await maybe(() => contextOf(job, api, m, bot), []) : [];
     const ids = [m.user, ...(m.dm ? [] : [m.channel]), ...mentioned(m.text), ...lines.flatMap((x) => [x.user, ...mentioned(x.text)])];
     const known = await names(job, api, [...new Set(ids)].filter((id) => id !== bot.user));
     known.set(bot.user, bot.name);
-    const text = cut(readable(m.text, known).trim(), TEXT_IN_MAX);
+    // a mention of the bot that leads a channel's message only routes it
+    // here (Slack sends nothing else of a channel): its words are the rest
+    const said = m.dm ? m.text : m.text.replace(new RegExp(`^\\s*<@${bot.user}(?:\\|[^>]*)?>[\\s,:]*`), "");
+    const text = cut(readable(said, known).trim(), TEXT_IN_MAX);
     if (!text) return { ignored: "no text" };
     const body = { text, to: [job.door.to] };
     if (owner) body.relayed = job.door.relayed;
@@ -441,7 +468,7 @@ export class App extends DurableObject {
     const { seq } = await job.publish("chat", body, "message");
     // where its turn's replies go, known as soon as its record is
     const turn = await turnOf(job.door.relayed.agent, job.fragment, seq);
-    await job.call("took", { turn, channel: m.channel, thread, ts: m.ts });
+    for (const t of [turn, ...(await continuations(turn))]) await job.call("took", { turn: t, channel: m.channel, thread, ts: m.ts });
     return { relayed: owner, heard: !owner, room: inRoom ? m.channel : null, turn };
   }
 
@@ -469,7 +496,7 @@ export class App extends DurableObject {
       text = [said, files ? "(It sent a file, which stays in its owner's chat.)" : ""].filter(Boolean).join("\n\n");
       if (!text) return { sent: 0, why: "nothing said" };
     }
-    const { api, paired } = await job.call("route", {});
+    const { api, paired, bot } = await job.call("route", {});
     // the thread its turn answers; a reply in a room whose thread is not
     // known yet waits a moment for it (its intake keeps it as it
     // publishes), then goes to its room; any other, its owner's DM
@@ -481,6 +508,8 @@ export class App extends DurableObject {
     }
     if (!to && paired) to = { channel: paired.dm, thread: null, ts: null };
     if (!to) return { sent: 0, why: "nowhere to send it" };
+    // a channel sends the bot only what mentions it: an answer there must
+    if (record.channel === "work" && !to.channel.startsWith("D")) text = `${text}\n\n(Answer here by mentioning @${bot?.name ?? "me"}.)`;
     const chars = [...text];
     const size = TEXT_OUT_MAX - 64;
     let parts = 0;
@@ -491,7 +520,7 @@ export class App extends DurableObject {
       parts += 1;
     }
     // its answer (a question is none): 👀 off
-    if (to.ts && record.channel !== "work") await slack(job, api, "reactions.remove", { body: { channel: to.channel, timestamp: to.ts, name: "eyes" } });
+    if (to.ts && record.channel !== "work") await maybe(() => slack(job, api, "reactions.remove", { body: { channel: to.channel, timestamp: to.ts, name: "eyes" } }));
     return { sent: parts };
   }
 }
