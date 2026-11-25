@@ -245,11 +245,13 @@ impl FragmentCell {
         let Some(start) = body["generation"].as_u64().filter(|g| i64::try_from(*g).is_ok()) else {
             return Err(CellError::invalid("name the computer's start the bridge life is of (its generation)"));
         };
+        // its computer, the one the agent runs on (checked as it came)
+        let computer = text("computer");
         let op = text("op");
         if !matches!(op, "take" | "close" | "open") {
             return Err(CellError::invalid("a turn is opened or closed, or a life takes its agent's turns"));
         }
-        self.turn_life(life, start, now)?;
+        self.turn_life((life, computer, start), now)?;
         match op {
             "close" => {
                 self.exec("DELETE FROM turns WHERE turn = ?", vec![text("turn").into()])?;
@@ -273,8 +275,10 @@ impl FragmentCell {
                 if held >= limits::TURNS_HELD_MAX as u64 {
                     return Err(CellError::new(ErrorCode::RateLimited, format!("this agent holds {held} open turns, the most it may: end one first")));
                 }
-                // the life again after the await: a newer one may have taken over meanwhile
-                self.turn_life(life, start, now)?;
+                // its computer and life again after the await: the agent may
+                // run on another now, or a newer life have taken over
+                self.assigned_to(computer)?;
+                self.turn_life((life, computer, start), now)?;
                 self.exec(
                     "INSERT INTO turns (turn, place, asker, mandate, until, life, at) VALUES (?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, life = excluded.life, at = excluded.at",
@@ -295,41 +299,28 @@ impl FragmentCell {
         }
     }
 
-    /// The computer the agent runs on from now (none: unassigned). Its
-    /// turns and its bridge's lives are that computer's, whose starts order
-    /// them (`mandate::heard`): on another, or none, they are forgotten,
-    /// and its bridge's first word takes the agent's turns.
-    fn ran_on(&self, computer: Option<&str>) -> CellResult<()> {
-        if self.meta(MetaKey::Computer)?.as_deref() != computer {
-            self.exec("DELETE FROM turns", vec![])?;
-            self.exec("DELETE FROM turn_lives", vec![])?;
-        }
-        match computer {
-            Some(c) => self.set_meta(MetaKey::Computer, c),
-            None => self.del_meta(MetaKey::Computer),
-        }
-    }
-
-    /// Whether bridge `life`, of its computer's `start`, speaks for this
-    /// agent's turns (`mandate::heard`): the newest does. A new one takes
-    /// over, and every other life's turns are forgotten (its bridge is gone:
-    /// one computer runs one bridge at a time); any other is retired, its
+    /// Whether bridge `life`, of `computer`'s `start`, speaks for this
+    /// agent's turns (`mandate::heard`, among that computer's lives: its
+    /// starts order them, and only the computer the agent runs on speaks):
+    /// the newest does. A new one takes over, and every other life's turns
+    /// are forgotten (its bridge is gone: one computer runs one bridge at a
+    /// time), another computer's lives with them; any other is retired, its
     /// word refused, so a late call from a bridge before changes nothing,
     /// and its bridge runs no turn its fragment does not hold. The newest
     /// `TURN_LIVES_KEPT` lives are kept.
-    fn turn_life(&self, life: &str, start: u64, now: i64) -> CellResult<()> {
-        const NEWEST: &str = "ORDER BY generation DESC, at DESC, life LIMIT ?";
-        let kept = SqlStorageValue::Integer(TURN_LIVES_KEPT);
-        let lives = self.rows(&format!("SELECT life, generation FROM turn_lives {NEWEST}"), vec![kept.clone()])?;
+    fn turn_life(&self, (life, computer, start): (&str, &str, u64), now: i64) -> CellResult<()> {
+        const NEWEST: &str = "FROM turn_lives WHERE computer = ? ORDER BY generation DESC, at DESC, life LIMIT ?";
+        let kept = || vec![computer.into(), SqlStorageValue::Integer(TURN_LIVES_KEPT)];
+        let lives = self.rows(&format!("SELECT life, generation {NEWEST}"), kept())?;
         let lives: Vec<(&str, u64)> = lives.iter().filter_map(|r| Some((r["life"].as_str()?, r["generation"].as_u64()?))).collect();
         match mandate::heard(&lives, life, start) {
             mandate::Heard::Speaks => Ok(()),
             mandate::Heard::Retired => Err(CellError::new(ErrorCode::Conflict, "this bridge life was retired: a newer one runs this agent's turns")),
             mandate::Heard::TakesOver => {
                 let start = SqlStorageValue::Integer(i64::try_from(start).expect("checked as read"));
-                self.exec("INSERT INTO turn_lives (life, generation, at) VALUES (?, ?, ?)", vec![life.into(), start, SqlStorageValue::Integer(now)])?;
+                self.exec("INSERT INTO turn_lives (life, computer, generation, at) VALUES (?, ?, ?, ?)", vec![life.into(), computer.into(), start, SqlStorageValue::Integer(now)])?;
                 self.exec("DELETE FROM turns WHERE life != ?", vec![life.into()])?;
-                self.exec(&format!("DELETE FROM turn_lives WHERE life NOT IN (SELECT life FROM turn_lives {NEWEST})"), vec![kept])?;
+                self.exec(&format!("DELETE FROM turn_lives WHERE life NOT IN (SELECT life {NEWEST})"), kept())?;
                 Ok(())
             }
         }
@@ -426,7 +417,7 @@ impl FragmentCell {
                         agent.id
                     }
                 };
-                self.ran_on(Some(&b.computer))?;
+                self.set_meta(MetaKey::Computer, &b.computer)?;
                 // the agent keeps its own state here (its SOUL.md, memories,
                 // skills, routines): it is an editor of its own fragment
                 if self.member_role(&identity)?.is_none() {
@@ -442,7 +433,7 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner moves it"));
                 }
                 if self.meta(MetaKey::Computer)?.as_deref() == Some(b.computer.as_str()) {
-                    self.ran_on(None)?;
+                    self.del_meta(MetaKey::Computer)?;
                     self.event("computer.unassigned", &format!("no longer runs on {}", b.computer), json!({ "computer": b.computer }));
                 }
                 Ok(json!({ "ok": true }))

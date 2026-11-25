@@ -17,7 +17,7 @@ step Fragment 10 face_forward_only c83644ba432a03d7
 step Fragment 11 record_author 290ff9dff6040cbf
 step Fragment 12 pending_code a323b22a2f946eb7
 step Fragment 13 ended_doors 6b677d38c0350a38
-step Fragment 14 askers 3e21b7a91563cf5a
+step Fragment 14 askers 43eb1acc98f6a6d6
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -123,7 +123,7 @@ Fragment table sent: CREATE TABLE sent (key TEXT PRIMARY KEY, at INTEGER NOT NUL
 Fragment table steps: CREATE TABLE steps ( run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT, CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx))
 Fragment table subs: CREATE TABLE subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table tree: CREATE TABLE tree ( ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL, PRIMARY KEY (ref, path))
-Fragment table turn_lives: CREATE TABLE turn_lives (life TEXT PRIMARY KEY, generation INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table turn_lives: CREATE TABLE turn_lives (life TEXT PRIMARY KEY, computer TEXT NOT NULL, generation INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment table turns: CREATE TABLE turns ( turn TEXT PRIMARY KEY, place TEXT NOT NULL, asker TEXT NOT NULL, mandate TEXT, until INTEGER NOT NULL, life TEXT NOT NULL, at INTEGER NOT NULL)
 
 Registry table admin_log: CREATE TABLE admin_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, operator TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL)

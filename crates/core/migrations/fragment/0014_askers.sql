@@ -8,7 +8,7 @@
 -- it use of theirs for someone else's ask (the lend card); and, on an agent
 -- fragment, the turns its bridge runs, each with whose ask it is, its
 -- mandate and the bridge life that told it, and the lives heard, each
--- with its computer's start (`mandate::heard`). A row
+-- with its computer and that computer's start (`mandate::heard`). A row
 -- from before has none of them: no asker, as before, and a lend never set
 -- (`Lend::DEFAULT`).
 ALTER TABLE record_schedules ADD COLUMN asker TEXT;
@@ -19,4 +19,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS runs_asked ON runs (principal, call_id, COALES
 ALTER TABLE members ADD COLUMN lend INTEGER;
 CREATE TABLE IF NOT EXISTS turns (
   turn TEXT PRIMARY KEY, place TEXT NOT NULL, asker TEXT NOT NULL, mandate TEXT, until INTEGER NOT NULL, life TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS turn_lives (life TEXT PRIMARY KEY, generation INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS turn_lives (life TEXT PRIMARY KEY, computer TEXT NOT NULL, generation INTEGER NOT NULL, at INTEGER NOT NULL);

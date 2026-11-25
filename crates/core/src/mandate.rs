@@ -214,10 +214,11 @@ pub struct Held<'a> {
 }
 
 /// Whether a bridge life's word on its agent's turns is heard (cell
-/// runs_on.rs `turn_life`), given the lives heard, each with its
-/// computer's start (the Computer DO's generation, which its bridge read
-/// as it started), the newest first: by start, then, within one start, by
-/// when first heard. The newest's is; a life never heard of a start no
+/// runs_on.rs `turn_life`), given the lives heard on the computer the agent
+/// runs on, each with that computer's start (the Computer DO's generation,
+/// which its bridge read as it started), the newest first: by start, then,
+/// within one start, by when first heard. Another computer's starts are
+/// not comparable: none of its lives is among them. The newest's is; a life never heard of a start no
 /// older takes over (its bridge is the computer's one now: every other
 /// life's turns are forgotten); any other is retired, its word not heard:
 /// a late call from a bridge gone, its first among them (a container
