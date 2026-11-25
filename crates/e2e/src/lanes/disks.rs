@@ -43,7 +43,7 @@ const FILL_MIB: u32 = 64;
 const DISK_CHECKS: [&str; 9] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
-    "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
+    "a sleep is a signal and a wait: its owner's Storage read from its filesystem's own count, no walk of its files; its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
     "a wake mounts the disk as it slept: what it wrote is there, nothing restored, its line saying what its last sleep left unshipped",
     "every write is read after the wake that follows it, each sleep clean, each tenth a crash while a fill ships",
     "a crash while it runs loses no write it acknowledged: the start after it mounts the disk as that life left it",
@@ -86,6 +86,9 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let row = || lever(api, &id, "fpac").map(|r| r.body).unwrap_or(Value::Null);
     let made = row();
     s.ok(DISK_CHECKS[0], made["disk"] == true && made["volume"] == 20_000u64 << 20 && made["head"].is_null() && made["back"].is_null(), &made);
+    if local && std::env::var("FRAGMENT_E2E_DISK_GROWTH").is_ok() {
+        sleeps_as_it_grows(s, api)?;
+    }
     first_lives(s, api)?;
 
     // its agent, and a chat it is in: its join wakes the computer
@@ -111,10 +114,15 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let after = row();
     let sleep1 = lines(s).1.into_iter().find(|l| l["sleep"]["generation"] == 1).unwrap_or(Value::Null);
     let saves = lever(api, &id, "saves")?.body["saves"].clone();
+    // its Storage, as its sleep measured it: one `df` of /data, its used
+    // bytes its data, and no walk of its files (which grows with them)
+    let measured = measures_of(s, &id).into_iter().filter(|m| m["generation"] == 1).collect::<Vec<_>>();
+    let read = measured.iter().any(|m| m["disk"]["data"].as_u64().is_some_and(|d| d > 0));
+    let walked = measured.iter().any(|m| m.get("sizes").is_some());
     s.ok(
         DISK_CHECKS[2],
-        wrote == "wrote disk/first.txt" && slept && head_of(&after["head"]).is_some_and(|(epoch, clean)| epoch == 1 && clean) && (!local || (sleep1["sleep"]["clean"] == true && sleep1["sleep"]["exited"] == true)) && saves.as_array().is_some_and(Vec::is_empty),
-        json!({ "wrote": wrote, "row": after, "line": sleep1, "saves": saves }),
+        wrote == "wrote disk/first.txt" && slept && head_of(&after["head"]).is_some_and(|(epoch, clean)| epoch == 1 && clean) && (!local || (sleep1["sleep"]["clean"] == true && sleep1["sleep"]["exited"] == true && read && !walked)) && saves.as_array().is_some_and(Vec::is_empty),
+        json!({ "wrote": wrote, "row": after, "line": sleep1, "saves": saves, "measured": measured }),
     );
 
     let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
@@ -305,6 +313,76 @@ fn killed_and_back(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Value
     let head = row()["head"].clone();
     let own = head_of(&head).is_some_and(|(e, _)| e == now);
     json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "own": own })
+}
+
+/// What a sleep takes as its disk grows (`FRAGMENT_E2E_DISK_GROWTH`: a
+/// local run's measure, printed, no check): at each step (new; 1 GiB more;
+/// 10 GiB in all; 100,000 files more), one sleep and wake that ships what
+/// the step wrote, then three sleeps, each timed from its owner's ask to
+/// asleep, beside its line's drain and stop and what its measure read.
+fn sleeps_as_it_grows(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
+    let id = r.body["computer"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && id.starts_with("computer:"), "a computer: {r}");
+    let (agent, chat, identity) = agent_in_chat(s, api, &owner, &id, &[])?;
+    let talk = Talk { api, owner: &owner, chat: &chat, agent: &agent, identity: &identity, n: std::cell::Cell::new(0), bound: WAKE * 5 };
+    let view = || api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let woken = |s: &Suite| {
+        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+        s.eventually(WAKE, || phase(api, &owner, &id) == "awake")
+    };
+    // its owner's sleep, asked once, to asleep: what it wrote ships first
+    // (a step's gigabytes take their drain and their final flush)
+    let slept = |s: &Suite| {
+        let t0 = Instant::now();
+        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        (s.eventually(Duration::from_secs(600), || phase(api, &owner, &id) == "asleep"), t0.elapsed().as_millis() as u64)
+    };
+    let _ = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    let steps: [(&str, Vec<String>); 4] = [
+        ("new", vec![]),
+        ("1 GiB", (0..4).map(|i| format!("fill-data grow/a{i}.bin 256")).collect()),
+        ("10 GiB", (4..40).map(|i| format!("fill-data grow/a{i}.bin 256")).collect()),
+        ("100,000 files more", (0..4).map(|i| format!("fill-files grow/files{i} 25000")).collect()),
+    ];
+    for (step, says) in steps {
+        for text in &says {
+            let said = talk.said(s, text)?;
+            if !said.starts_with("filled") {
+                println!("      (growth: {text:?} answered {said:?})");
+            }
+        }
+        // what the step wrote, shipped: a sleep and a wake
+        std::thread::sleep(super::computers::QUEUE_DRAIN);
+        let _ = slept(s);
+        woken(s);
+        for k in 0..3 {
+            std::thread::sleep(super::computers::QUEUE_DRAIN);
+            let generation = view()["restored"]["generation"].as_u64().unwrap_or(0);
+            let (asleep, sleep_ms) = slept(s);
+            let line = lines_of(s, &id).1.into_iter().find(|l| l["sleep"]["generation"] == generation).unwrap_or(Value::Null);
+            let measured = measures_of(s, &id).into_iter().filter(|m| m["generation"] == generation).collect::<Vec<_>>();
+            let data = measured.iter().find_map(|m| m["disk"]["data"].as_u64());
+            let walked = measured.iter().any(|m| m.get("sizes").is_some());
+            println!("      GROWTH {}", json!({ "step": step, "k": k, "generation": generation, "asleep": asleep, "sleepMs": sleep_ms, "drainMs": line["sleep"]["drainMs"], "stopMs": line["sleep"]["stopMs"], "walked": walked, "data": data }));
+            woken(s);
+        }
+    }
+    let _ = slept(s);
+    Ok(())
+}
+
+/// The platform's lines of computer `id`'s Storage measures, as the node
+/// logs them: `{"disk": {total, free, data, room}, …}` for each read,
+/// `{"sizes": {folders, files}, …}` for each that walked its files.
+fn measures_of(s: &Suite, id: &str) -> Vec<Value> {
+    super::vault::logs(s)
+        .lines()
+        .filter_map(|l| l.find(r#"{"computer":"#).map(|at| l[at..].to_string()))
+        .filter_map(|l| serde_json::Deserializer::from_str(&l).into_iter::<Value>().next().and_then(Result::ok))
+        .filter(|v| v["computer"] == id && (v["disk"].is_object() || v["sizes"].is_object()))
+        .collect()
 }
 
 /// The platform's lines of the starts that found computer `id`'s head
