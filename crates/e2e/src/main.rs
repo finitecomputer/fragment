@@ -1666,23 +1666,21 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     finish(&mut s)
 }
 
-/// Removes what a run's nodes left on `project`: their containers and
-/// sidecars (on celld's krun `engine`, its VMs too), then the images they
-/// built (none on celld's engine that runs no computer), labeled for it (devstack::containers `remove_images`), so a
-/// run's images go with it: each run is a project of its own, whose
-/// images no later run uses. Answers how many containers and images.
+/// Removes what a run's nodes left on `project`. A wrangler node's: their
+/// containers and sidecars, then the images they built, labeled for it
+/// (devstack::containers `remove_images`), so a run's images go with it:
+/// each run is a project of its own, whose images no later run uses. A
+/// celld node's: the VMs it left on its krun `engine` (a node's own stop
+/// reaps them; one killed outright did not), and no image: it built them
+/// in that engine (docs/self-host.md, seam 2), under names by their
+/// content that the next run builds again, so Docker is never asked.
+/// Answers how many containers and images.
 fn remove_leftovers(project: &Path, engine: Option<&devstack::celld::Engine>) -> Result<(u32, u32)> {
-    // on celld's krun engine, the VMs a node killed outright left (a
-    // node's own stop reaps them)
-    let krun = engine.map_or(Ok(0), |e| e.remove(project))?;
-    let containers = devstack::containers::remove(project)?.containers + krun;
-    // a celld node whose engine runs no computer built no image, on a
-    // machine that may have no Docker (docs/self-host.md, seam 2)
-    let images = match engine {
-        Some(e) if !e.computers() => 0,
-        _ => devstack::containers::remove_images(project)?,
-    };
-    Ok((containers, images))
+    if let Some(engine) = engine {
+        return Ok((engine.remove(project)?, 0));
+    }
+    let containers = devstack::containers::remove(project)?.containers;
+    Ok((containers, devstack::containers::remove_images(project)?))
 }
 
 /// Where a local run runs (its node's, as `local` starts it, celld's

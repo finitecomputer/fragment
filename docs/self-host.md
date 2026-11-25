@@ -45,11 +45,21 @@ in the cell: a self-host change to master does not touch `cell/`,
 
 celld (github.com/finitecomputer/celld, its `selfhost` line: upstream's
 v0.6.3, still its latest, and the fork's parity fixes, among them V8
-15.2.124.45, far alarms, a forwarded body's length, facet aborts and
-Cloudflare's binding surface) runs the cell from the config a local
-wrangler node runs (`wrangler.local.jsonc`, its secrets bound by name),
-less `build` (`crates/devstack/src/celld.rs`, `DROPPED`), written beside
-the cell's own as `wrangler.celld.jsonc`. Its node's settings are celld's
+15.2.124.45, far alarms, a forwarded body's length, facet aborts,
+Cloudflare's binding surface, object bindings across scripts and a Cache
+API per node) runs the
+cell from the config a local wrangler node runs (`wrangler.local.jsonc`,
+its secrets bound by name), less `build` (`crates/devstack/src/celld.rs`,
+`DROPPED`), written beside the cell's own as `wrangler.celld.jsonc`; and
+beside it the operators' admin Worker, as on Cloudflare: its local config
+(`wrangler.admin.local.jsonc`) less the same, as
+`wrangler.admin.celld.jsonc`, co-hosted with `celld dev --with`. The
+cell's `ADMIN` binding reaches it, and its bindings of the cell's classes
+(`script_name`) reach the cell's objects; the admin hosts none and runs
+none of their code. The stack needs the fork's selfhost line with
+finitecomputer/celld#35 (`durable-object-script-name-v1`; a celld without
+it refuses to start the pair) and finitecomputer/celld#38 (the Cache API).
+Its node's settings are celld's
 own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and its container
 engine (`CELLD_CONTAINER_ENGINE`: `none`, or the box's krun engine, seam 2). One `devstack::Node` runs either runtime behind the
 node's front door (front.rs): celld listens on a port of its own, which
@@ -67,6 +77,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | `durable_objects`: Migrations, and R2 `STAGE` | yes | off | the finite.computer move: unconfigured (`FRAGMENT_MIGRATIONS_MOVER` unset), as on any deployment but finite.chat's |
 | `migrations` (`new_sqlite_classes`, v1 to v4) | yes | works | |
 | `durable_objects.code_update_strategy` | accepted, no effect | works | celld reads the bindings alone; `celld dev` deploys once (`--no-watch`), and the e2e's reload restarts the node |
+| `services` (`ADMIN`: the operators' admin Worker) | yes, `Fetcher`, to the admin co-hosted beside the cell (`celld dev --with`) | works | the admin binds every one of the cell's classes by `script_name` (crates/devstack `pair_admin`): the cell's objects, as on Cloudflare |
 | `worker_loaders` (`LOADER`) and facets (`ctx.facets`) | yes | works | apps' facets, their databases capped past the cell's own (`CELLD_FACET_MAX_BYTES`), loaded code locked down (`CELLD_DYNAMIC_LOCKDOWN`); `facets.abort` releases a brain's facet (found 51, fixed in the fork) |
 | `workflows` (`JOBS`) | yes, durable | works | a sleep is an alarm, so a job sleeping through a crash wakes (local workerd's does not) |
 | `queues` (`DELIVERIES`, `METERS`, the dead letters) | yes | works | |
@@ -88,7 +99,8 @@ Every binding and runtime API master's cell uses, against the fork's
 | `build` | refused | n/a | dropped by the render (`DROPPED`): worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length carried, as workerd's (found 47, fixed in the fork) | works | |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
-| Cache API, HTMLRewriter, cron triggers | | n/a | the cell uses none |
+| Cache API (`caches.default`) | yes, per node, in memory, per script (finitecomputer/celld#38): kept as Cloudflare's rules say, at most 64 MiB (`CELLD_CACHE_API_MAX_BYTES`) and 65,536 entries; a restart empties it; a `Range` or conditional request misses | works | the admin Worker's glance (cell/src/glance.rs) keeps its read of the logs for two minutes |
+| HTMLRewriter, cron triggers | | n/a | the cell uses none |
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
   worker-build's cache or `CELLD_ESBUILD`): the same fakes and settings as
@@ -120,11 +132,20 @@ WebSocket and a large body through one, a `monitor()` whose event had
 answered (its object now woken as the container stops), and an `exec()`
 during a start.
 
-- **Images:** `celld dev` builds the config's images with Docker, as it
-  does for its Docker engine, and loads each into the krun engine under
-  its content key (`celld-image:<sha256>` of its layers and config), so a
-  computer is pinned to an image by its digest. An unchanged image is not
-  loaded again.
+- **Images:** `celld dev` builds the config's images in the krun engine
+  itself, with no Docker on the box: BuildKit (pinned by digest) in a
+  microVM of the engine, its cache on a data disk of the engine's
+  (64 GiB, collected to at most 44 GB after each deploy's builds), each
+  image loaded from there (the fork's `krun_build`). An image's name is
+  its config digest (`celld-image:<sha256>`), built with
+  `SOURCE_DATE_EPOCH=0` so the same layers make the same name, and a
+  computer is pinned to an image by it. An unchanged image exports and
+  loads nothing. devstack labels a node's images for its project only on
+  wrangler, so every celld run builds the same images by name. A node
+  builds the images its config names: the stubs for a run that makes
+  computers, Hermes' two only when `--only` names the hermes lane, and
+  the door's for its lane. The engine keeps what it loaded
+  (docs/technical-debt-ledger.md).
 - **Egress:** each start's intercepts (the platform's API and model
   routes, a connection's hosts, `backups.sandbox.internal`) go from the
   engine's egress proxy to celld's socket and on to `ComputerEgress`, a
@@ -147,7 +168,8 @@ during a start.
   (a stub guest uses about 250 MB of its 6 GiB).
 - **Cleanup:** a node reaps its VMs when it stops and when it starts again
   on its project; a run killed outright has devstack destroy its node's by
-  celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
+  celld's naming, and celld's image builder when the celld that started it
+  is gone (`celld::Engine::remove`; docs/technical-debt-ledger.md).
 - **Skips on celld,** each a gap of celld's:
   - a turn's keepalive across a deploy: the e2e's reload of `celld dev`
     restarts its node, which reaps its VMs. A deploy to a running celld
