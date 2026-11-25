@@ -100,9 +100,10 @@ one made earlier, it skips them, and you make your own.
 - **Storage is yours, not an import's:** keep the rest in your own
   storage (step 3) even when an earlier import made it, in a notes
   folder of this import's own: what is kept there is never written over.
-- **Brains:** never push into a brain an earlier import made, or make a
-  second of one: keep a reference copy, and compare it with that brain
-  (the profile's "Once you are in the real one").
+- **Brains:** never copy into a brain an earlier import made by hand,
+  or make a second of one: keep a reference copy, and catch that brain
+  up from it (the profile's "Once you are in the real one"), which takes
+  only what changed since.
 - **Chats, memories, skills and routines** check themselves, below: the
   chats' import adds nothing twice, and you skip what you have.
 
