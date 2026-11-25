@@ -1109,6 +1109,9 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
 async fn real_hermes_keeps_a_conversation_per_room() {
     let (fake, model, chat, c) = hermes_running().await;
     let door = fake.connector("slack", "juniper", Some("slack"));
+    // announced on the agent's `tasks`, as the platform does a chat it joins
+    // (the image lists its chats again only every 5 minutes)
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", json!({ "kind": "joined", "fragment": door })));
     within(&fake, &chat, &c, 120_000, "the bridge follows the door's chat", |w| w.live_sockets() >= 3).await;
     let said = |room: &str, text: &str| {
         let body = json!({ "text": text, "to": ["npub1juniper"], "heard": { "via": "slack", "from": "U0456", "name": "Maple" }, "room": { "id": room, "name": format!("#{}", room.to_lowercase()) } });
