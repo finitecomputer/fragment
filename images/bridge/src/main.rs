@@ -181,17 +181,18 @@ fn on_signal(stop: tokio::sync::watch::Sender<bool>, disk: bool) {
 /// fragment_bridge::disk). A head that will not open is said to the
 /// platform, which destroys this start and starts again from the head
 /// before it; any other failure to mount, the bridge exits.
-async fn mount_disk(api: &str) {
+async fn mount_disk() {
     use fragment_bridge::disk::{self, Unmounted};
     let mounted = tokio::task::spawn_blocking(|| disk::start().map_err(Unmounted::Failed).and_then(disk::Mounting::wait)).await.unwrap_or_else(|e| Err(Unmounted::Failed(e.to_string())));
     match mounted {
         Ok(m) => ev!("bridge.disk_mounted", { "ms": m.ms, "misses": m.misses }),
         Err(Unmounted::Unusable(why)) => {
             ev!("bridge.disk_unusable", { "why": why });
-            match fragment_bridge::api::Api::new(api) {
+            match fragment_bridge::api::Api::new(disk::ROUTE) {
                 Ok(a) => match a.disk_unusable(&why).await {
                     // its start destroys it (`disk::TOLD_WAIT_MS`)
-                    Ok(()) => tokio::time::sleep(Duration::from_millis(disk::TOLD_WAIT_MS)).await,
+                    Ok(true) => tokio::time::sleep(Duration::from_millis(disk::TOLD_WAIT_MS)).await,
+                    Ok(false) => ev!("bridge.disk_unusable_untold", { "error": "not taken: this life is not the one running" }),
                     Err(e) => ev!("bridge.disk_unusable_untold", { "error": e.to_string() }),
                 },
                 Err(e) => ev!("bridge.disk_unusable_untold", { "error": e }),
@@ -224,7 +225,7 @@ async fn main() {
             on_signal(stop_tx, disk);
             let api = env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address"));
             if disk {
-                mount_disk(&api).await;
+                mount_disk().await;
             }
             let cfg = Config {
                 api,

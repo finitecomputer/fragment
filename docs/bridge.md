@@ -42,8 +42,7 @@ computer's own:
 
 - the computer's: `GET /api/computer` (`?simplex=1` from an image that
   names a SimpleX core; on a disk, what its mount did, until a read has
-  said it: `disk.rs`), `POST /api/computer/door`, `POST
-  /api/computer/disk` (a disk's head that would not open), and the WebSockets
+  said it: `disk.rs`), `POST /api/computer/door`, and the WebSockets
   `GET /api/computer/keepalive` and `GET /api/computer/relay`;
 - what an agent follows: `GET /api/fragments`, and on each fragment
   `GET …/channels`, `…/channels/{c}`, `…/members` and `…/subscriptions`
@@ -73,7 +72,8 @@ with its default. What an image sets:
 - `BRIDGE_MOUNTS_DISK=1`: the bridge is its image's PID 1 (the stub's),
   so with `FRAGMENT_DISK=fpac` it mounts `/data` from the computer's disk
   before anything else and waits for its final flush before it exits
-  (`disk.rs`; docs/computers.md, "A disk"). An image whose boot mounts it
+  (`disk.rs`; docs/computers.md, "A disk"); a head that will not open it
+  says on its disk's route (`POST /unusable`). An image whose boot mounts it
   (our Hermes image's) leaves it unset.
 - `BRIDGE_HOLD` and `BRIDGE_HELD`, the platform's hold before a save
   (docs/computers.md, "The hold"). The bridge claims no turn while the

@@ -86,7 +86,7 @@ pub const HOLD_DEADLINE_MS: i64 = 90_000;
 /// unshipped writes, read from `fpac status`): a wake meanwhile cancels the
 /// sleep, as during any hold. Past it the stop begins anyway, and the
 /// guest's final flush sends the rest.
-pub const DISK_DRAIN_MS: i64 = 60_000;
+pub const DISK_DRAIN_MS: i64 = 45_000;
 /// A disk's stop waits this long, at most, for its guest to exit after
 /// SIGTERM: its final flush ships what is left, up to FPAC's 4 GiB
 /// unshipped budget, about 85 s at the 50 MB/s a Cloudflare container

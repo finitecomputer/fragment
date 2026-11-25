@@ -21,6 +21,10 @@ use serde_json::{json, Value};
 
 /// What the disk is mounted on.
 pub const DATA: &str = "/data";
+/// Its disk's route (the platform's, by FPAC's contract and its own
+/// `POST /unusable`): what the daemon reaches, and where a boot says its
+/// head will not open (`Api::disk_unusable`).
+pub const ROUTE: &str = "http://fpac.fragment.internal";
 /// The daemon, as the images put it.
 pub const FPAC: &str = "/usr/local/bin/fpac";
 /// Its state (the daemon's default `--state`): a tmpfs of `STATE_BYTES`.

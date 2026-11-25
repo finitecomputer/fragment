@@ -109,6 +109,24 @@ test("gets stream the whole object with its sum, or exactly a range, to its end 
   assert.equal((await call(b, "GET", "/o/e6/s1")).status, 404, "an earlier life's name may be read");
 });
 
+test("a ranged get that fails for a reason that may pass is a 503, never the object's own 4xx", async () => {
+  const b = bucket();
+  const bytes = new TextEncoder().encode("0123456789");
+  await putOf(b, "/o/e7/s1", bytes);
+  const get = b.get;
+  // R2 failing for a moment, as it may: the daemon retries a 5xx, and takes a 4xx for good
+  b.get = async (key, opts) => {
+    if (opts && opts.range) throw new Error("We encountered an internal error. Please try again. (10001)");
+    return get(key, opts);
+  };
+  assert.equal((await call(b, "GET", "/o/e7/s1", { headers: { range: "bytes=2-4" } })).status, 503, "a moment's failure");
+  assert.equal((await call(b, "GET", "/o/e7/s9", { headers: { range: "bytes=0-1" } })).status, 404, "an absent name stays absent");
+  b.head = async () => {
+    throw new Error("We encountered an internal error. Please try again. (10001)");
+  };
+  assert.equal((await call(b, "GET", "/o/e7/s1", { headers: { range: "bytes=2-4" } })).status, 503, "its head failing too");
+});
+
 test("a name outside the grammar, another life's epoch, a body past its limit or unnamed are refused", async () => {
   const b = bucket();
   const bytes = new TextEncoder().encode("x");
@@ -123,6 +141,25 @@ test("a name outside the grammar, another life's epoch, a body past its limit or
   assert.equal(b.objects.size, 0, "nothing stored");
   assert.equal((await call(b, "DELETE", "/o/e7/s1")).status, 405, "no delete");
   assert.equal((await call(b, "GET", "/list")).status, 404, "no list");
+});
+
+test("a boot's word that its head will not open goes on with this life's epoch and that head alone", async () => {
+  const seen = [];
+  const told = async (epoch, head, why) => {
+    seen.push([epoch, head, why]);
+    return { taken: true };
+  };
+  const post = (body, disk = DISK) => {
+    const text = JSON.stringify(body);
+    return fpacRoute(new Request("http://fpac.fragment.internal/unusable", { method: "POST", body: text, headers: { "content-length": String(text.length) } }), bucket(), disk, RULES, async () => ({}), told);
+  };
+  const r = await post({ why: "the disk does not open: no such checkpoint" });
+  assert.deepEqual([r.status, await r.json()], [200, { taken: true }]);
+  assert.equal((await post({ why: "a new disk's" }, { ...DISK, head: null })).status, 200);
+  assert.deepEqual(seen, [[7, DISK.head, "the disk does not open: no such checkpoint"], [7, null, "a new disk's"]], "its props' life and head, never the guest's say");
+  assert.equal((await post({ nope: 1 })).status, 400, "it says why");
+  assert.equal((await post({ why: "x".repeat(5000) })).status, 413, "within its bound");
+  assert.equal(seen.length, 2, "neither refused one reached the DO");
 });
 
 test("a head post goes to the DO's rules with this life's epoch, its answer passed back", async () => {

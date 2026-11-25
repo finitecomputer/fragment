@@ -95,10 +95,11 @@ pub mod limits {
     pub const ATTEMPTS_MAX: u32 = 8;
     /// A computer on a disk keeps no save of its own: its export asks for
     /// one, taken awake (docs/computers.md, "A disk"), and looks again
-    /// every `COMPUTER_WAIT_MS`, at most `COMPUTER_WAITS_MAX` times (a
-    /// start's deadline and its save's), then goes on without it, saying so.
+    /// every `COMPUTER_WAIT_MS`, until `COMPUTER_WAIT_MAX_MS` from its first
+    /// look (about a start's deadline and its save's), then goes on without
+    /// it, saying so.
     pub const COMPUTER_WAIT_MS: i64 = 20_000;
-    pub const COMPUTER_WAITS_MAX: u32 = 60;
+    pub const COMPUTER_WAIT_MAX_MS: i64 = 20 * 60_000;
     /// Records read from a channel a page (the platform cuts a page at
     /// about 4 MiB of bodies, `limits::CHANNEL_HTTP_PAGE_MAX_BYTES`).
     pub const CHANNEL_PAGE: usize = 100;

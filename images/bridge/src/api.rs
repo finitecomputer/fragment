@@ -638,13 +638,15 @@ impl Api {
         Ok(c)
     }
 
-    /// `POST /api/computer/disk {unusable}`: its boot found its disk's head
-    /// would not mount (`disk::Unmounted::Unusable`), said before it exits,
-    /// so its start falls back past that head (docs/computers.md, "A disk").
-    pub async fn disk_unusable(&self, why: &str) -> Result<(), ApiError> {
+    /// `POST /unusable {why}` on its disk's route (an `Api` of
+    /// `disk::ROUTE`): its boot found the head it was handed would not
+    /// mount (`disk::Unmounted::Unusable`), so that start falls back past it
+    /// (docs/computers.md, "A disk"). The route names its life and the head,
+    /// so the word fails that start alone. Whether the platform took it.
+    pub async fn disk_unusable(&self, why: &str) -> Result<bool, ApiError> {
         let why: String = why.chars().take(500).collect();
-        let _: Value = self.json(Method::POST, "/api/computer/disk", None, Some(json!({ "unusable": why }))).await?;
-        Ok(())
+        let v: Value = self.json(Method::POST, "/unusable", None, Some(json!({ "why": why }))).await?;
+        Ok(v["taken"] == true)
     }
 
     /// `POST /api/computer/door {agent, door, nonce, key}`: a link's ticket

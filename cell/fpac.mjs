@@ -10,11 +10,16 @@
 // R2's body handed on, a put the request's body into R2, never read here.
 // The head is the Computer DO's, moved only by the head's rules
 // (`fragment_core::computer::fpac::decide`): `postHead` carries a post to
-// it. `rules` are the Rust side's, one source of each: the name's grammar
+// it. Beside FPAC's contract, the platform's own `POST /unusable {why}`:
+// its boot's word that the head it was handed will not open, carried by
+// `postUnusable` with this life's epoch and that head, so the start it
+// fails is this one alone. `rules` are the Rust side's, one source of each: the name's grammar
 // (`nameEpoch`) and the bounds.
 
 const RANGE = /^bytes=(\d{1,15})-(\d{1,15})$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+// a boot's report that its head will not open, at most
+const UNUSABLE_MAX_BYTES = 4096;
 
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -24,7 +29,7 @@ function text(status, body, headers = {}) {
 
 // Answers the guest's call `request` for `disk` ({ prefix, name, epoch,
 // volume, head }) from `bucket` (R2: ranged get, put-if-absent, head).
-export async function fpacRoute(request, bucket, disk, rules, postHead) {
+export async function fpacRoute(request, bucket, disk, rules, postHead, postUnusable) {
   const url = new URL(request.url);
   const route = `${request.method} ${url.pathname}`;
   if (route === "GET /open") {
@@ -39,6 +44,19 @@ export async function fpacRoute(request, bucket, disk, rules, postHead) {
     const a = await postHead(disk.epoch, line);
     if (a.answer) return text(200, "", { "x-fpac-head-answer": a.answer });
     return text(a.status || 409, `${a.refused || "refused"}\n`);
+  }
+  if (route === "POST /unusable") {
+    const declared = Number(request.headers.get("content-length"));
+    if (!(declared <= UNUSABLE_MAX_BYTES)) return text(413, "a report past its limit\n");
+    let why;
+    try {
+      why = JSON.parse(await request.text()).why;
+    } catch {
+      why = null;
+    }
+    if (typeof why !== "string" || why.length > UNUSABLE_MAX_BYTES) return text(400, "say why ({why})\n");
+    const a = await postUnusable(disk.epoch, disk.head || null, why);
+    return new Response(JSON.stringify(a), { status: 200, headers: { "content-type": "application/json" } });
   }
   const name = url.pathname.startsWith("/o/") ? url.pathname.slice(3) : null;
   if (name === null) return text(404, "no such route\n");
@@ -72,8 +90,18 @@ async function get(bucket, key, range) {
   try {
     o = await bucket.get(key, { range: { offset: first, length: Number(r[2]) - first + 1 } });
   } catch (e) {
-    // R2 refuses a range that starts past the end
-    return text(416, `the range: ${String((e && e.message) || e)}\n`);
+    // R2 refuses a range that starts past the end; any other failure may
+    // pass, and must never read as the object's own answer (a 4xx the
+    // daemon takes for good, and then the disk for unusable)
+    const why = String((e && e.message) || e);
+    let there;
+    try {
+      there = await bucket.head(key);
+    } catch {
+      return text(503, `the range: ${why}\n`);
+    }
+    if (there === null) return text(404, "absent\n");
+    return text(first >= there.size ? 416 : 503, `the range: ${why}\n`);
   }
   if (o === null) return text(404, "absent\n");
   if (first >= o.size && o.size > 0) return text(416, "the range starts past the end\n");

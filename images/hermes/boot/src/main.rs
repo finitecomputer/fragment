@@ -493,13 +493,14 @@ fn mount_disk(mounting: fragment_bridge::disk::Mounting, home: &Path) {
         Ok(m) => ev!("boot.disk_mounted", { "ms": m.ms, "misses": m.misses }),
         Err(Unmounted::Unusable(why)) => {
             ev!("boot.disk_unusable", { "why": why });
-            let told = Api::new(&env("FRAGMENT_API").unwrap_or_default()).map_err(|e| e.to_string()).and_then(|api| {
+            let told = Api::new(fragment_bridge::disk::ROUTE).map_err(|e| e.to_string()).and_then(|api| {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
                 rt.block_on(api.disk_unusable(&why)).map_err(|e| e.to_string())
             });
             match told {
                 // its start destroys it (`disk::TOLD_WAIT_MS`)
-                Ok(()) => std::thread::sleep(Duration::from_millis(fragment_bridge::disk::TOLD_WAIT_MS)),
+                Ok(true) => std::thread::sleep(Duration::from_millis(fragment_bridge::disk::TOLD_WAIT_MS)),
+                Ok(false) => ev!("boot.disk_unusable_untold", { "error": "not taken: this life is not the one running" }),
                 Err(e) => ev!("boot.disk_unusable_untold", { "error": e }),
             }
             std::process::exit(UNUSABLE);

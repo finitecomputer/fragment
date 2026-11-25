@@ -583,15 +583,13 @@ impl Lifecycle {
                     }
                 }
             }
-            // its owner's export asks a disk for a save: due now, taken at
-            // once while it runs with none under way, else once it does
-            // (the export wakes it); a computer with saves of its own has
-            // its newest, and asks none
+            // its owner's export asks a disk for a save: due now, or when
+            // one that failed may go again (asked again meanwhile, it waits
+            // its pause), taken by its alarm once it runs (the export wakes
+            // it), never in the ask's own step: the export only looks. A
+            // computer with saves of its own has its newest, and asks none
             (_, Event::ExportAsked) if self.disk => {
                 self.export_due_ms.get_or_insert(now_ms);
-                if let (Phase::Awake { generation, .. }, None) = (self.phase.clone(), self.saving) {
-                    self.hold_for_save(generation, now_ms, &mut step);
-                }
             }
             (_, Event::ExportAsked) => {}
             (Phase::Asleep { .. } | Phase::Failed { .. }, Event::SaveChosen) => {

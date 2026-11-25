@@ -1269,7 +1269,8 @@ fn an_export_saves_a_disk_once_awake() {
     l.set_disk();
     let g = started(&mut l, T);
     let s = l.apply(Event::ExportAsked, T + 5_000);
-    assert_eq!(s.actions, vec![Action::Hold { generation: g }], "awake, held at once");
+    assert!(s.actions.is_empty() && s.alarm_ms == Some(T + 5_000), "the ask only marks it due, its alarm at once: {s:?}");
+    assert_eq!(l.apply(Event::Alarm, T + 5_000).actions.iter().filter(|a| matches!(a, Action::Hold { .. })).count(), 1, "held by its alarm");
     assert!(l.apply(Event::ExportAsked, T + 5_100).actions.is_empty(), "asked again under way: the one save");
     let (_, held, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 5_500));
     assert!(held);
@@ -1281,6 +1282,7 @@ fn an_export_saves_a_disk_once_awake() {
     assert!(l.next_alarm().is_some_and(|at| at > failed && at <= again), "an alarm by its retry");
     let holds = |s: &Step| s.actions.iter().filter(|a| matches!(a, Action::Hold { .. })).count();
     assert_eq!(holds(&l.apply(Event::Alarm, again - 1)), 0, "not before its pause");
+    assert_eq!(holds(&l.apply(Event::ExportAsked, again - 1)), 0, "an ask meanwhile waits its pause too");
     assert_eq!(holds(&l.apply(Event::Alarm, again)), 1, "held again after it");
     let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, again + 100));
     assert_eq!(l.apply(Event::Saved { generation: g, seq }, again + 200).actions, vec![Action::Unhold { generation: g }]);

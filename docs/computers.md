@@ -544,20 +544,27 @@ put on disks.
   (20,000 MiB) and its head; `GET` and `PUT /o/<name>` read and put
   objects (bodies streamed, a put checked against its SHA-256 and refused
   over an existing name, only under its own epoch); `POST /head` goes to
-  the DO's rules. The guest names no disk and holds no credential.
+  the DO's rules. Beside the contract, the platform's own `POST /unusable
+  {why}`: its boot's word that the head it was handed will not open,
+  which the route sends on with that life's epoch and that head. The
+  guest names no disk and holds no credential.
 - **Its start.** No restore, no gate, no snapshot: `FRAGMENT_DISK=fpac`,
   and the image's boot mounts `/data` before anything reads it, its
   daemon's log and status on a tmpfs at `/run/fpac` (never on the disk
   its cache fills). The DO waits for its guest's first read of its view
   (`DISK_ALIVE_MS`, 2 minutes): that read says what its mount did. A head
-  that will not open, its boot says (`POST /api/computer/disk
-  {unusable}`) and then waits to be destroyed; the DO's start fails as
-  `unusable`, its head falls back to the one before, and it starts again
-  at once, no strike (that life's writes since lost, and logged). With
-  none before it, a strike as any failed start.
-- **Its sleep is a signal and a wait.** Its port tabs close; the DO reads
-  its daemon's status (`fpac status`) until nothing is unshipped, at
-  most `DISK_DRAIN_MS` (a minute), and a wake meanwhile cancels the sleep
+  that will not open, its boot says (`POST /unusable` on its disk's
+  route) and then waits to be destroyed; the DO takes it from the life
+  that runs alone, the start fails as `unusable`, and, while the head
+  stored is still the one that start was handed, the head falls back to
+  the one before it, and it starts again at once, no strike (that life's
+  writes since lost, and logged). With none before it, a strike as any
+  failed start; with the head moved since, it starts again on that one.
+- **Its sleep is a signal and a wait.** Its port tabs close; the DO
+  measures its `/data` for its owner's Storage (the `df` and the walk an
+  awake save's measure makes, of its own filesystem); it reads its
+  daemon's status (`fpac status`) until nothing is unshipped, at most
+  `DISK_DRAIN_MS` (45 s), and a wake meanwhile cancels the sleep
   as a hold's wake does; then SIGTERM, its image's boot stops its own
   programs and its daemon's final flush ships what is left and posts a
   clean head; the DO waits for the container to exit
@@ -961,8 +968,7 @@ sleep answers within 14 minutes.
   - On a disk (below, "A disk"): `GET /api/computer` with
     `diskMountMs`, `diskMisses` and `diskRefetches` (each a number, any
     left out), what its mount did, which the start's line takes from its
-    first read; `POST /api/computer/disk {unusable}`, its boot's word that
-    its disk's head would not open.
+    first read.
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.

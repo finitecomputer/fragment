@@ -133,6 +133,19 @@ pub fn reads_disk_after(event: &Event, life: &Lifecycle) -> Option<u64> {
 /// BusyBox's both print.
 pub const DISK_READ: &str = "df -P -B1 /";
 
+/// `DISK_READ` on a computer's disk (docs/computers.md, "A disk"): its
+/// `/data` is a filesystem of its own, not the container's.
+pub const DISK_READ_ON_DISK: &str = "df -P -B1 /data";
+
+/// A read (`DISK_READ`, or `sizes_read`'s, which runs it first) of a
+/// computer on a disk: its `df` of `/data`, the rest the same.
+pub fn read_on_disk(read: &str) -> String {
+    let at = read.find(DISK_READ).expect("a disk read runs its df");
+    let after = &read[at + DISK_READ.len()..];
+    assert!(after.is_empty() || after.starts_with(';'), "its df's path ends there");
+    format!("{}{DISK_READ_ON_DISK}{after}", &read[..at])
+}
+
 /// What reads a computer's disk and what its `/data` restores to after an
 /// awake save, run in its container (`disk_of_sizes` reads its answer):
 /// `DISK_READ`, then a line for each record its save takes, measured as
@@ -621,6 +634,11 @@ mod tests {
             format!("s=$(date +%s); df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi; {LISTING}")
         };
         assert_eq!(sizes_read(&[]), read(" ./work", ""));
+        // on a disk, its df is of its /data, and the rest is the same
+        let read_all = sizes_read(&[]);
+        assert_eq!(read_on_disk(&read_all), read_all.replacen("df -P -B1 /;", "df -P -B1 /data;", 1));
+        assert!(read_on_disk(&read_all).contains("s=$(date +%s); df -P -B1 /data; if du"));
+        assert_eq!(read_on_disk(DISK_READ), "df -P -B1 /data");
         assert_eq!(
             sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), "/x$(id)/".into(), String::new()]),
             read(" ./work ./hermes/state.db", " ./*/home/.cache/uv"),

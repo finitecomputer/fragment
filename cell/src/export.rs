@@ -273,10 +273,10 @@ struct Job {
     frag: Option<Frag>,
     #[serde(default)]
     comp: Option<Comp>,
-    /// Looks the current computer's export took for its disk's save
-    /// (`limits::COMPUTER_WAITS_MAX`).
+    /// When the current computer's export first looked for its disk's save
+    /// and found it on its way (`limits::COMPUTER_WAIT_MAX_MS` from then).
     #[serde(default)]
-    computer_waits: u32,
+    computer_waited_from: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -409,7 +409,7 @@ impl Job {
             wait_until: 0,
             frag: None,
             comp: None,
-            computer_waits: 0,
+            computer_waited_from: None,
         }
     }
 
@@ -1768,13 +1768,15 @@ impl PrincipalCell {
                 let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person, "since": run.job.made_at })).await?;
                 // a disk's save, taken awake for this export: looked for again
                 // after a wait, a bounded number of times, then without it
-                if v["pending"] == true && run.job.computer_waits < limits::COMPUTER_WAITS_MAX {
-                    run.job.computer_waits += 1;
-                    run.job.wait_until = js::now_ms() + limits::COMPUTER_WAIT_MS;
+                let now = js::now_ms();
+                let waited_from = *run.job.computer_waited_from.get_or_insert(now);
+                if v["pending"] == true && now - waited_from < limits::COMPUTER_WAIT_MAX_MS {
+                    run.job.wait_until = now + limits::COMPUTER_WAIT_MS;
                     return Ok(());
                 }
+                run.job.computer_waited_from = None;
                 if v["pending"] == true {
-                    skipped.push(core::Skipped { part: "save".into(), why: format!("its disk's save did not come within {} minutes", limits::COMPUTER_WAIT_MS * i64::from(limits::COMPUTER_WAITS_MAX) / 60_000) });
+                    skipped.push(core::Skipped { part: "save".into(), why: format!("its disk's save did not come within {} minutes", limits::COMPUTER_WAIT_MAX_MS / 60_000) });
                 } else if let Some(why) = v["unsaved"].as_str() {
                     skipped.push(core::Skipped { part: "save".into(), why: why.to_string() });
                 }
