@@ -65,9 +65,21 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "always on: {r}");
     let woke = api.patient(WAKE).signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let awake = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
-    // its bridge's SimpleX, through its screen port, as its owner signs
+    // its bridge's SimpleX, through its screen port, as its owner's page
+    // reaches it: a port ticket's session, from that port's own origin
+    let t = api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;
+    let signed_in = api.call(Call { method: "GET", url: t.body["url"].as_str().unwrap_or("").to_string(), ..Call::default() })?;
+    let cookie = signed_in.cookies().into_iter().find(|c| c.starts_with("fragment_computer=")).map(|c| c.split(';').next().unwrap_or("").to_string()).context("its port's session")?;
     let port = |method: &'static str, path: &str, body: Option<&Value>| {
-        api.call(Call { method, url: format!("{origin}/p/6080{path}"), body: body.map(|b| b.to_string().into_bytes()), content_type: body.map(|_| "application/json"), keys: Some(&owner), ..Call::default() })
+        api.call(Call {
+            method,
+            url: format!("{origin}/p/6080{path}"),
+            body: body.map(|b| b.to_string().into_bytes()),
+            content_type: body.map(|_| "application/json"),
+            cookie: Some(cookie.clone()),
+            extra: vec![("origin", origin.clone())],
+            ..Call::default()
+        })
     };
     let mut state = Value::Null;
     let up = s.eventually(SLOW, || {
