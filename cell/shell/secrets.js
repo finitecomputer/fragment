@@ -29,12 +29,20 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   // Keep the open detail sheet across reloads in the same settings visit
   // (leaving Settings closes it: connections.js closes every provider-sheet).
   let openSheet = null;
-  // the secret as the Vault holds it now, so a change made since its sheet
-  // was drawn (an agent's Allow) is never written back over
-  async function latest(name) {
-    const now = (await api("GET", "/api/vault")).secrets?.find((x) => x.name === name);
-    if (!now) throw new Error(`${name} is no longer saved.`);
-    return now;
+  // An edit of `name`, made to the secret as the Vault holds it now and
+  // only onto that one (`held`: a change since, an agent's Allow or another
+  // tab's edit, is refused, never written back over). This page's edits go
+  // one at a time, so each reads what the last one left.
+  let writing = Promise.resolve();
+  function edit(name, change) {
+    const run = writing.then(async () => {
+      const now = (await api("GET", "/api/vault")).secrets?.find((x) => x.name === name);
+      if (!now) throw new Error(`${name} is no longer saved.`);
+      const body = change(now);
+      await api("PUT", `/api/vault/${encodeURIComponent(name)}`, { ...body, held: now.revision });
+    });
+    writing = run.catch(() => {});
+    return run;
   }
 
   function secretsSection(vault) {
@@ -191,10 +199,11 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
           flip.disabled = true;
           openSheet = { secret: sec.name, visit };
           try {
-            const now = await latest(sec.name);
-            const next = allowed ? now.agents.filter((x) => x !== fragment) : [...new Set([...now.agents, fragment])];
-            if (!next.length) throw new Error("Keep at least one agent, or remove the secret instead.");
-            await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { hosts: now.hosts, place: now.place, agents: next });
+            await edit(sec.name, (now) => {
+              const next = allowed ? now.agents.filter((x) => x !== fragment) : [...new Set([...now.agents, fragment])];
+              if (!next.length) throw new Error("Keep at least one agent, or remove the secret instead.");
+              return { hosts: now.hosts, place: now.place, agents: next };
+            });
             await reopenSettings();
           } catch (e) {
             agentSaid.textContent = e.message || "That was not changed";
@@ -232,8 +241,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       hostsSave.disabled = true;
       openSheet = { secret: sec.name, visit };
       try {
-        const now = await latest(sec.name);
-        await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { hosts: parseHosts(hostsInput.value), place: now.place, agents: now.agents });
+        await edit(sec.name, (now) => ({ hosts: parseHosts(hostsInput.value), place: now.place, agents: now.agents }));
         await reopenSettings();
       } catch (err) {
         hostsSaid.textContent = err.message || "Could not update hosts";
@@ -274,8 +282,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       replaceSave.disabled = true;
       openSheet = { secret: sec.name, visit };
       try {
-        const now = await latest(sec.name);
-        await api("PUT", `/api/vault/${encodeURIComponent(sec.name)}`, { value: val, hosts: now.hosts, place: now.place, agents: now.agents });
+        await edit(sec.name, (now) => ({ value: val, hosts: now.hosts, place: now.place, agents: now.agents }));
         valueInput.value = "";
         await reopenSettings();
       } catch (err) {
@@ -308,7 +315,8 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   }
 
   // `kept`: the names already saved; a PUT sets a secret whole, so Add never
-  // takes one of them (its own sheet changes it)
+  // takes one of them (its own sheet changes it), nor one saved since
+  // (`held: "none"`, which the Vault refuses for a name it keeps)
   function addSecretControl(agents, kept) {
     const button = el("button", "quiet agent-add-open");
     button.type = "button";
@@ -434,6 +442,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
           value,
           hosts: parseHosts(hostsInput.value),
           agents: chosen,
+          held: "none",
         });
         valueInput.value = "";
         nameInput.value = "";

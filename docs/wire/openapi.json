@@ -2597,6 +2597,14 @@
             },
             "type": "array"
           },
+          "held": {
+            "default": null,
+            "description": "The secret as its writer last read it (`Secret::revision`), or\n`none` for a name not kept: one that changed since is refused (409)\nand nothing is written. None, it is set whatever is held.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hosts": {
             "description": "The only hosts it is ever sent to (exact DNS names); none, it is\nparked and fills nothing.",
             "items": {
@@ -2948,6 +2956,14 @@
           },
           "place": {
             "$ref": "#/components/schemas/Place"
+          },
+          "revision": {
+            "default": null,
+            "description": "Which one it is (a new value, or a change to its hosts, place or\nagents, makes another), as `GET /api/vault` lists it: what a\n`PutSecret::held` names.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "setAt": {
             "description": "When its value was set, in ms since the epoch.",
@@ -7068,6 +7084,17 @@
     "/api/notices": {
       "get": {
         "operationId": "notices.list",
+        "parameters": [
+          {
+            "description": "`1`: the client draws a notice's `field`, and every word of a notice before its actions (the shell's band). Otherwise a Vault ask's card comes with Open (its own page) in place of its field and its Save or Allow.",
+            "in": "query",
+            "name": "field",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {

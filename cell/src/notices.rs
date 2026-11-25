@@ -26,11 +26,15 @@ pub(crate) async fn route(req: &Request, env: &Env, cfg: &crate::config::Config,
         return Err(CellError::new(ErrorCode::Forbidden, "notices are a person's: an agent's owner is told of it"));
     }
     let person = who.identity.id;
+    // a client that draws a notice's field, and every word of a card before
+    // its actions (the shell's band), says so; any other is sent a Vault
+    // ask's link in place of its field and its grant (`vault::notices`)
+    let fields = url.query_pairs().any(|(k, v)| k == "field" && v == "1");
     let asked = serde_json::to_string(&NoticesOf { person: person.clone() }).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
     let (ledger, vault, computer, registry, moves) = join5(
         // its body is `{}` (`NoticesOf {}`): the ledger reads none of it
         crate::ledger::asked(env, &person, crate::ledger::NoticesOf::PATH, "{}".into()),
-        crate::vault::notices(env, &person),
+        crate::vault::notices(env, &person, fields),
         crate::computer::notices_for(env, &person),
         crate::registry_round_trip(env, NoticesOf::PATH, asked),
         crate::migrations::notices(env, cfg, &person),

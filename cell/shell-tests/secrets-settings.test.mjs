@@ -63,8 +63,9 @@ class Node {
 
 const walk = (n) => (n && typeof n === "object" ? [n, ...(n.children ?? []).flatMap(walk)] : []);
 
-// `vault`: what `GET /api/vault` answers (the secret as it is now)
-function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }]) {
+// `vault`: what `GET /api/vault` answers (the secret as it is now); `vaultApi`,
+// in its place, a Vault of the test's own
+function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }], vaultApi = null) {
   globalThis.MutationObserver ??= class {
     observe() {}
     disconnect() {}
@@ -79,11 +80,11 @@ function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { f
   };
   const calls = [];
   let reopened = 0;
-  const api = async (method, path, body) => {
+  const api = vaultApi ?? (async (method, path, body) => {
     if (method === "GET") return vault;
     calls.push({ method, path, body });
     return {};
-  };
+  });
   const ui = createSecrets({
     api,
     el: (tag, cls, text) => new Node(tag, cls, typeof text === "string" ? text : ""),
@@ -115,7 +116,7 @@ test("placeLabel and parseHosts format placements and normalize host lists", () 
   assert.deepEqual(parseHosts("   "), []);
 });
 
-const github = () => ({ name: "github", hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], setAt: 1700000000000 });
+const github = () => ({ name: "github", hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], setAt: 1700000000000, revision: "rev1" });
 
 test("toggling per-agent access sends PUT without value and refuses removing the last agent", async () => {
   const { secretsSection, calls, reopened } = setup({ secrets: [github()] });
@@ -151,6 +152,31 @@ test("an edit writes the secret as it is now: an agent's Allow since the sheet w
   await bea.onclick();
   assert.deepEqual(calls[0].body.agents, ["ada--k3x9", "cy--k3x9", "bea--k3x9"]);
   assert.deepEqual(calls[0].body.hosts, ["api.github.com", "uploads.github.com"]);
+  assert.equal(calls[0].body.held, "rev1", "only onto the secret it read");
+});
+
+test("two edits at once go one after the other, each onto what the last left", async () => {
+  // the Vault: each PUT makes a new revision, and refuses one read before it
+  let held = github();
+  let n = 1;
+  const refused = [];
+  const vaultApi = async (method, _path, body) => {
+    if (method === "GET") return { secrets: [structuredClone(held)] };
+    await new Promise((r) => setTimeout(r, 5));
+    if (body.held !== held.revision) {
+      refused.push(body);
+      throw new Error("changed");
+    }
+    held = { ...held, agents: body.agents, revision: `rev${++n}` };
+    return {};
+  };
+  const { secretsSection } = setup(null, [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }, { fragment: "cy--k3x9" }], vaultApi);
+  const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
+  const bea = walk(card).find((x) => x.dataset?.agent === "bea--k3x9");
+  const cy = walk(card).find((x) => x.dataset?.agent === "cy--k3x9");
+  await Promise.all([bea.onclick(), cy.onclick()]);
+  assert.deepEqual(refused, []);
+  assert.deepEqual(held.agents, ["ada--k3x9", "bea--k3x9", "cy--k3x9"], "neither grant lost");
 });
 
 test("updating hosts keeps value, replacing value clears masked input, and remove requires confirmation", async () => {
@@ -203,7 +229,7 @@ test("Add secret submits name, masked value, hosts, and selected agents, then cl
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, "PUT");
   assert.equal(calls[0].path, "/api/vault/stripe");
-  assert.deepEqual(calls[0].body, { value: "sk_test_123", hosts: ["api.stripe.com"], agents: ["ada--k3x9"] });
+  assert.deepEqual(calls[0].body, { value: "sk_test_123", hosts: ["api.stripe.com"], agents: ["ada--k3x9"], held: "none" }, "only as a new secret");
   assert.equal(valueInput.value, "", "value cleared after save");
   assert.equal(reopened(), 1);
 });

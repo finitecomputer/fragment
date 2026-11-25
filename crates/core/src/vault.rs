@@ -374,7 +374,7 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
             }
             let value = answer.value.as_deref().map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| VaultError::Ask("paste the secret first".into()))?;
             let hosts = join_unique(&[], &ask.hosts);
-            Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()] })
+            Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()], held: None })
         }
         Some(h) => {
             if !answer.allow {
@@ -391,7 +391,7 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
             if agents.len() > AGENTS_MAX {
                 return Err(VaultError::Agents(format!("at most {AGENTS_MAX}, not {}", agents.len())));
             }
-            Ok(PutSecret { value: None, hosts, place: h.place.clone(), agents })
+            Ok(PutSecret { value: None, hosts, place: h.place.clone(), agents, held: None })
         }
     }
 }
@@ -478,6 +478,19 @@ pub fn ask_notice(
     }
 }
 
+/// An ask's card (`ask_notice`) for a client that draws no field and may
+/// hide a card's words behind its main action (`GET /api/notices` without
+/// `field=1`: iOS today): no field, and in place of Save or Allow, Open,
+/// the ask's own page (`ask_url`), which draws the whole card. A grant is
+/// never pressed from a card that may not show what it grants.
+pub fn linked(mut notice: Notice, url: &str) -> Notice {
+    let decline = notice.actions.pop();
+    assert!(decline.as_ref().is_some_and(|d| d.label == "Decline"), "an ask's card ends with its Decline");
+    notice.field = None;
+    notice.actions = std::iter::once(NoticeAction::open("Open", url)).chain(decline).collect();
+    notice
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,7 +500,7 @@ mod tests {
     }
 
     fn put(value: &str, hosts: &[&str], place: Place, agents: &[&str]) -> PutSecret {
-        PutSecret { value: Some(value.into()), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect() }
+        PutSecret { value: Some(value.into()), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect(), held: None }
     }
 
     const AGENT: &str = "ada--k3x9";
@@ -772,6 +785,7 @@ mod tests {
             place,
             agents: agents.iter().map(|a| a.to_string()).collect(),
             set_at: 1,
+            revision: None,
         }
     }
 
@@ -794,7 +808,7 @@ mod tests {
     fn an_answer_makes_a_new_secret_or_allows_an_existing_one_without_overwriting() {
         let new_ans = AnswerAsk { held: "none".into(), value: Some(" ghp_abc \n".into()), allow: false };
         let new = answered(&ask("github", "push", &["uploads.github.com", "api.github.com"]), AGENT, None, &new_ans).expect("answered");
-        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into(), "uploads.github.com".into()], place: Place::default(), agents: vec![AGENT.into()] }, "trimmed as a paste ends");
+        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into(), "uploads.github.com".into()], place: Place::default(), agents: vec![AGENT.into()], held: None }, "trimmed as a paste ends");
         assert!(check("github", &new, None, &catalog()).is_ok());
 
         for blank in [None, Some(String::new()), Some("  \n".into())] {
@@ -816,6 +830,7 @@ mod tests {
             hosts: vec!["api.github.com".into(), "uploads.github.com".into()],
             place: custom_place.clone(),
             agents: vec![AGENT.into(), "bea--k3x9".into()],
+            held: None,
         });
         assert!(check("github", &shared, Some(&existing.place), &catalog()).is_ok());
 
@@ -853,6 +868,9 @@ mod tests {
         assert!(n.field.is_some() && n.actions[0].field && n.actions[0].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef"));
         assert!(!n.actions[1].field && n.actions[1].post.as_deref() == Some("/api/vault/asks/0123456789abcdef0123456789abcdef/decline"));
 
+        let open = linked(n.clone(), "https://finite.chat/vault/ask/a1");
+        assert!(open.field.is_none() && open.title == n.title && open.detail == n.detail, "{open:?}");
+        assert_eq!(open.actions.iter().map(|a| (a.label.as_str(), a.open.as_deref(), a.post.is_some())).collect::<Vec<_>>(), [("Open", Some("https://finite.chat/vault/ask/a1"), false), ("Decline", None, true)]);
         let parked = ask_notice(id, &ask("github", "Kept for later", &[]), AGENT, "Juniper", None, 9, (None, "none"));
         assert_eq!(parked.detail.as_deref(), Some("It goes nowhere until you say where, and Juniper never sees it."));
 

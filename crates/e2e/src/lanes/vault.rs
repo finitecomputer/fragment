@@ -141,6 +141,36 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("refused puts with no value leave the secret each named as it was", held(api, "nostr-kept")? == kept_before && held(api, "linear")?["place"] == json!({ "header": "x-api-key", "format": "{}" }), held(api, "nostr-kept")?);
 
+    // with `held`, a put lands only on the secret as its writer read it
+    // (Settings → Secrets): a new one for `none`
+    let read = held(api, "linear")?;
+    let rev = read["revision"].clone();
+    let place = json!({ "header": "x-api-key" });
+    let wider = json!({ "hosts": ["api.linear.app", "uploads.linear.app"], "place": place, "agents": agents, "held": rev });
+    let stale = put(api, &ada, "linear", &json!({ "hosts": ["api.linear.app", "uploads.linear.app"], "place": place, "agents": agents, "held": "0".repeat(64) }))?;
+    let taken = put(api, &ada, "linear", &json!({ "value": sentinel(), "hosts": [], "agents": agents, "held": "none" }))?;
+    let unchanged = held(api, "linear")? == read;
+    let onto = put(api, &ada, "linear", &wider)?;
+    let behind = put(api, &ada, "linear", &json!({ "hosts": ["api.linear.app"], "place": place, "agents": agents, "held": rev }))?;
+    let widened = held(api, "linear")?;
+    let fresh = put(api, &ada, "k-held", &json!({ "value": "v", "hosts": [], "agents": agents, "held": "none" }))?;
+    s.ok(
+        "a put that names the revision it read lands only on that one: a stale one, or `none` for a name kept, is refused (409) and nothing is written; `none` makes a new one",
+        rev.as_str().is_some_and(|r| r.len() == 64)
+            && stale.status == 409
+            && taken.status == 409
+            && unchanged
+            && onto.status == 200
+            && behind.status == 409
+            && widened["hosts"] == json!(["api.linear.app", "uploads.linear.app"])
+            && widened["revision"] != rev
+            && fresh.status == 200,
+        format!("{stale} {taken} {onto} {behind} {fresh}"),
+    );
+    // as it was, for the checks after
+    put(api, &ada, "linear", &json!({ "hosts": ["api.linear.app"], "place": place, "agents": agents, "held": widened["revision"] }))?;
+    api.signed(&ada, "DELETE", "/api/vault/k-held", None)?;
+
     // who: their own agent, and another person
     let a = api.signed(&agent, "GET", "/api/vault", None)?;
     let p = put(api, &agent, "mine", &json!({ "value": "v", "hosts": ["api.linear.app"], "agents": agents }))?;

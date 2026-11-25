@@ -109,6 +109,7 @@ bound Place.header default null
 bound Place.query default null
 bound Place.sign default null
 bound PutDraft.text default null
+bound PutSecret.held default null
 bound PutSecret.place default {}
 bound PutSecret.value default null
 bound Report.bytes default null
@@ -129,6 +130,7 @@ bound RosterAgent.picture_url default null
 bound RosterAgent.sites default []
 bound RosterTaken.bound range u32
 bound RosterTaken.withdrawn range u32
+bound Secret.revision default null
 bound Secret.setAt range i64
 bound SecretAsk.expiresAt range i64
 bound Seen.unread range u32
@@ -435,6 +437,7 @@ field Present.principal required string
 field PutDraft.text optional string|null
 field PutDraft.turn required string
 field PutSecret.agents required array<string>
+field PutSecret.held optional string|null
 field PutSecret.hosts required array<string>
 field PutSecret.place optional Place
 field PutSecret.value optional string|null
@@ -473,6 +476,7 @@ field Secret.agents required array<string>
 field Secret.hosts required array<string>
 field Secret.name required string
 field Secret.place required Place
+field Secret.revision optional string|null
 field Secret.setAt required integer
 field SecretAsk.expiresAt required integer
 field SecretAsk.id required string
@@ -556,6 +560,7 @@ field migrations.report.path.old required string
 field migrations.secrets.path.old required string
 field migrations.yes.path.old required string
 field migrations.zip.path.stage required string
+field notices.list.query.field optional string
 field search.find.query.q required string
 field vault.answer.path.ask required string
 field vault.asked.path.ask required string

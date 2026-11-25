@@ -1529,7 +1529,7 @@ pub(super) fn uses_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &st
 /// The checks `vault_ask_checks` makes (FIN-466, an agent asks), as a run
 /// without the stub or the fakes skips them.
 pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
-    "an agent's `fragment vault ask` is a card on its person's notices: who asks for what, why, where it goes, a masked field, Save and Decline, and its deep link serves the shell",
+    "an agent's `fragment vault ask` is a card on its person's notices: who asks for what, why, where it goes, a masked field, Save and Decline, and its deep link serves the shell; a client that draws no field is sent Open (that link) and Decline in their place",
     "no one else is shown it or answers it: another person's notices hold none, and their answer finds no ask",
     "an empty answer is refused and leaves it waiting",
     "its person's paste saves it: the agent's CLI is told so, with its stand-in, never the value; the card is gone",
@@ -1544,10 +1544,10 @@ pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
 ];
 
 /// The person's waiting card for `name` (a `vault_ask` notice), once
-/// their notices show it.
+/// their notices show it, as the shell's band reads it (`field=1`).
 fn ask_card(s: &Suite, api: &Api, owner: &crate::Keys, name: &str) -> Result<Value> {
     let card = || -> Option<Value> {
-        let r = api.signed(owner, "GET", "/api/notices", None).ok()?;
+        let r = api.signed(owner, "GET", "/api/notices?field=1", None).ok()?;
         r.body["notices"].as_array()?.iter().find(|n| n["kind"] == "vault_ask" && n["title"].as_str().is_some_and(|t| t.ends_with(&format!(" {name}")))).cloned()
     };
     s.eventually(Duration::from_secs(60), || card().is_some());
@@ -1577,6 +1577,12 @@ pub(super) fn vault_ask_checks(
     let save = actions.first().and_then(|a| a["post"].as_str()).unwrap_or("").to_string();
     let ask_id = card["id"].as_str().unwrap_or("").trim_start_matches("vault_ask:").to_string();
     let deep_page = api.unsigned("GET", &format!("/vault/ask/{ask_id}"), None)?;
+    // a client that draws no field (iOS) is sent the card's own page in its place
+    let plain = api.signed(w.owner, "GET", "/api/notices", None)?;
+    let linked = plain.body["notices"].as_array().and_then(|l| l.iter().find(|n| n["id"] == card["id"]).cloned()).unwrap_or_default();
+    let linked_ok = linked["field"].is_null()
+        && linked["title"] == card["title"]
+        && linked["actions"].as_array().is_some_and(|a| a.len() == 2 && a[0]["label"] == "Open" && a[0]["open"].as_str().is_some_and(|u| u.ends_with(&format!("/vault/ask/{ask_id}"))) && a[0]["post"].is_null() && a[1]["label"] == "Decline");
     let bad_deep_page = api.unsigned("GET", "/vault/ask/not-a-valid-ask-id", None)?;
     s.ok(
         VAULT_ASK_CHECKS[0],
@@ -1592,8 +1598,9 @@ pub(super) fn vault_ask_checks(
             && save.starts_with("/api/vault/asks/")
             && deep_page.status == 200
             && deep_page.text.contains("fragment-release")
-            && bad_deep_page.status == 404,
-        json!({ "card": card, "deep": deep_page.status, "bad": bad_deep_page.status }),
+            && bad_deep_page.status == 404
+            && linked_ok,
+        json!({ "card": card, "linked": linked, "deep": deep_page.status, "bad": bad_deep_page.status }),
     );
     let theirs = api.signed(w.stranger, "GET", "/api/notices", None)?;
     let stranger_answer = api.signed(w.stranger, "POST", &save, Some(&json!({ "held": "none", "value": value })))?;

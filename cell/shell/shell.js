@@ -2219,7 +2219,7 @@ async function shellRead(path) {
 async function load(changed = false) {
   const mine = ++reads.asked;
   const taken = asks.now("computer");
-  const [listRead, computerRead, told] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers"), shellRead("/api/notices")]);
+  const [listRead, computerRead, told] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers"), shellRead("/api/notices?field=1")]);
   // a release from before notices (FIN-458) has no such read (404: one going
   // out, or rolled back): nothing told, and no failure
   const noticesRead = told.error?.status === 404 ? { value: { notices: [] } } : told;

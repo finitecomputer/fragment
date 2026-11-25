@@ -172,8 +172,11 @@ way T3 Code's secret prompt does: the agent never sees what they give.
   draws above their chat, and at its own link on the platform
   (`SecretAsk.url`, `/vault/ask/{id}`): an agent chatting through Telegram
   or SimpleX asks with `--no-wait`, sends the link, and waits with
-  `fragment vault wait <id>`. A chat, an app or a fork of either draws no
-  part of the card, so no app code ever has the field.
+  `fragment vault wait <id>`. A client that draws no field (iOS today)
+  is sent that link (Open) in place of the field and the grant, so
+  nothing is granted from a card that may hide what it grants. A chat, an
+  app or a fork of either draws no part of the card, so no app code ever
+  has the field.
 - **The paste goes to the Vault alone**: from the shell's page to `POST
   /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's
   records, a log or an answer. The page keeps it in its input only while
@@ -190,8 +193,9 @@ way T3 Code's secret prompt does: the agent never sees what they give.
   carries the secret's revision as the card showed it (`held`); one that
   changed since is refused (409), checked again after a seal. An ask is
   taken the same either way, so an agent learns nothing of secrets it is
-  not given. The person changes or removes a secret in Settings → Secrets
-  (or `fragment vault set|list|rm`).
+  not given. The person changes or removes a secret in Settings → Secrets,
+  each change made only onto the secret as they read it (`held`, 409
+  otherwise), or with `fragment vault set|list|rm`.
 - **It ends**: saved, declined, or after ten minutes unanswered (or asked
   again by the same agent for the same name). At most 8 wait on a person,
   and their Vault keeps at most 64, ended ones an hour.
