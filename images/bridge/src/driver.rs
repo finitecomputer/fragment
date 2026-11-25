@@ -1264,6 +1264,10 @@ async fn ensure_wake(api: &Api, agent: &Agent, fragment: &str, channel: &str) ->
 /// question, its choices named, since a card shows only in the chat.
 /// Nothing else (a relayed message, the owner's own, is the phone's
 /// already).
+/// What their app is told of a card answered on the agent's computer
+/// (`for_simplex`), in place of its words.
+const COMPUTER_CARD: &str = "I need something from you on a card in our chat. Type it there, not here: from there it goes to your computer alone.";
+
 fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
     let text = body["text"].as_str().unwrap_or("");
     match channel {
@@ -1271,12 +1275,13 @@ fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
         records::WORK if body["kind"] == "turn.prompt" => {
             let options = body["options"].as_array()?;
             // an option answered on the agent's computer (a sign-in's code)
-            // is never typed in their app, where it would be a message kept
-            // in the chat: the engine takes no message for it
-            // (`Prompt::words` leaves it out), and the card in the chat
-            // sends it to the computer alone
+            // is never asked for in their app, nor the card's words sent
+            // (written for the card, they say to paste it "here"): typed
+            // there, it would be a message kept in the chat and no answer
+            // (`Prompt::words` leaves it out), so they are told to answer
+            // it on its card in the chat, which sends it to the computer alone
             if options.iter().any(|o| o["computer"] == true) {
-                return Some(format!("{text}\n\n(Answer this one in our chat, not here: what you type there goes to your computer alone.)"));
+                return Some(COMPUTER_CARD.to_string());
             }
             let words = options.iter().any(|o| o["words"] == true);
             let labels: Vec<&str> = options.iter().filter(|o| o["words"] != true).filter_map(|o| o["label"].as_str()).collect();
@@ -2516,7 +2521,7 @@ mod tests {
         assert!(for_simplex(records::WORK, &buttons, 0).is_some_and(|t| t.ends_with("answer it in our chat.)")));
         // Claude's sign-in: its code is answered on the computer, never here
         let code = records::turn_prompt("t1", "s-1", &crate::runtime::claude::sign_in_ask("https://claude.example/sign-in", false), &[records::PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }], "npub1paul", 1);
-        assert!(for_simplex(records::WORK, &code, 0).is_some_and(|t| t.ends_with("(Answer this one in our chat, not here: what you type there goes to your computer alone.)")), "{:?}", for_simplex(records::WORK, &code, 0));
+        assert_eq!(for_simplex(records::WORK, &code, 0).as_deref(), Some(COMPUTER_CARD), "never its words, which say to paste it here");
         assert_eq!(for_simplex(records::WORK, &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
     }
 

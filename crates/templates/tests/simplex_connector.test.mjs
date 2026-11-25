@@ -123,7 +123,7 @@ test("its bound agent's question to its owner goes through the door, worded as e
   // a code answered on its computer (Claude's sign-in) is never asked for here
   const code = world();
   await code.app.mirror(card(8, { options: [{ id: "code", label: "Paste the code", words: true, computer: true }] }), code.job("channel"));
-  assert.match(code.asked[0].body.text, /\(Answer this one in our chat, not here: what you type there goes to your computer alone\.\)$/);
+  assert.equal(code.asked[0].body.text, "I need something from you on a card in our chat. Type it there, not here: from there it goes to your computer alone.", "never its words, which say to paste it here");
 });
 
 test("only a question its bound agent asks its owner goes, and nothing else of its turns' work", async () => {

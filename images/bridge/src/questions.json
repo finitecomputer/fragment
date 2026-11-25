@@ -51,7 +51,7 @@
       "said": "Run `rm -rf ./scratch`?\n\n(This one needs a button: answer it in our chat.)"
     },
     {
-      "of": "a code answered on the agent's computer (Claude's sign-in): never typed here, where it would be a message",
+      "of": "a code answered on the agent's computer (Claude's sign-in): never asked for here, nor its words sent, which say to paste it here",
       "body": {
         "kind": "turn.prompt",
         "turn": "t1",
@@ -68,7 +68,7 @@
           }
         ]
       },
-      "said": "Claude Code needs you to sign in to your Claude account. [Open the sign-in](https://claude.example/sign-in) in your own browser, then paste the code it shows you here.\n\n(Answer this one in our chat, not here: what you type there goes to your computer alone.)"
+      "said": "I need something from you on a card in our chat. Type it there, not here: from there it goes to your computer alone."
     },
     {
       "of": "an option answered on the agent's computer, with no words",
@@ -87,7 +87,7 @@
           }
         ]
       },
-      "said": "Paste the code your browser shows you.\n\n(Answer this one in our chat, not here: what you type there goes to your computer alone.)"
+      "said": "I need something from you on a card in our chat. Type it there, not here: from there it goes to your computer alone."
     },
     {
       "of": "words alone: the question itself",
