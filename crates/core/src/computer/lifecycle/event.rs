@@ -142,6 +142,11 @@ pub enum Event {
     /// starts it. Nothing else: no start is made, and one begun since (a
     /// wake as it was chosen) restores the save chosen already.
     SaveChosen,
+    /// Its owner's export asks for a save of its disk (which keeps none of
+    /// its own: docs/computers.md, "A disk"), taken awake under the hold as
+    /// any awake save; the export wakes it. Nothing for a computer with
+    /// saves of its own.
+    ExportAsked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

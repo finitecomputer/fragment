@@ -35,7 +35,7 @@ fn cycles() -> u32 {
 }
 const CYCLES_MAX: u32 = 1_000;
 
-const DISK_CHECKS: [&str; 8] = [
+const DISK_CHECKS: [&str; 9] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
@@ -43,7 +43,8 @@ const DISK_CHECKS: [&str; 8] = [
     "every write is read after the wake that follows it, each of its sleeps clean",
     "a crash while it runs loses no write it acknowledged: the start after it mounts the disk as that life left it",
     "a head that will not open is fallen back past: that start fails as unusable, the next mounts the head before it, no strike",
-    "awake or asleep, no save of a disk is ever taken",
+    "awake or asleep, no save of a disk is taken for itself",
+    "its owner's export of it asleep wakes it and copies a save taken for that export, its files whole",
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
@@ -167,7 +168,43 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
 
     let saves = lever(api, &id, "saves")?.body;
     s.ok(DISK_CHECKS[7], saves["saves"].as_array().is_some_and(Vec::is_empty) && saves["aside"].as_array().is_none_or(Vec::is_empty), &saves["saves"]);
+
+    // its export, asleep: a save taken for it, awake
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    let exported = disk_exported(s, api, &owner, &id)?;
+    s.ok(DISK_CHECKS[8], slept && exported["ok"] == true, &exported);
     Ok(())
+}
+
+/// Its owner's export, pressed with the computer asleep: built (its disk's
+/// save taken awake for it on the way), its meta naming that save, taken
+/// after the press, each record's file whole in the archive.
+fn disk_exported(s: &Suite, api: &Api, keys: &crate::Keys, id: &str) -> Result<Value> {
+    use std::io::Read;
+    let pressed_at = super::computers::now_ms();
+    let pressed = api.signed(keys, "POST", "/api/export", None)?;
+    let mut export = Value::Null;
+    let built = s.eventually(WAKE * 4, || {
+        export = api.signed(keys, "GET", "/api/export", None).map(|r| r.body["export"].clone()).unwrap_or(Value::Null);
+        export["state"] != "building"
+    });
+    let download = api.signed(keys, "GET", &format!("/api/export/{}/download", export["id"].as_str().unwrap_or("")), None)?;
+    let mut files = std::collections::BTreeMap::new();
+    for entry in tar::Archive::new(download.bytes.as_slice()).entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().to_string();
+        let mut bytes = vec![];
+        entry.read_to_end(&mut bytes)?;
+        files.insert(path, bytes);
+    }
+    let hex = id.strip_prefix("computer:").unwrap_or("");
+    let meta: Value = files.get(&format!("{}/computers/{hex}/meta.json", fragment_core::export::ROOT)).and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
+    let save = &meta["save"];
+    let records = save["records"].as_array().cloned().unwrap_or_default();
+    let whole = !records.is_empty() && records.iter().all(|r| files.get(&fragment_core::export::save_path(id, r["dir"].as_str().unwrap_or("/data"))).is_some_and(|b| fragment_core::blob::sha256_hex(b) == r["sha256"].as_str().unwrap_or("-")));
+    let kept = lever(api, id, "saves")?.body["saves"].clone();
+    let ok = pressed.status == 200 && built && export["state"] == "ready" && save["at"].as_i64().is_some_and(|at| at >= pressed_at) && whole && kept[0]["id"] == save["id"];
+    Ok(json!({ "ok": ok, "export": export, "save": save, "whole": whole, "skipped": meta["skipped"], "kept": kept }))
 }
 
 /// Its agent's chat, as the stub's script answers it.

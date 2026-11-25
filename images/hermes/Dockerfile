@@ -462,6 +462,26 @@ export VIRTUAL_ENV
 PATH="$VIRTUAL_ENV/bin:$PATH"
 export PATH
 EOF
+# On a disk (docs/computers.md, "A disk"), what an agent installs with its
+# language's own tool is kept: npm's global prefix, pipx's and uv's tools,
+# cargo's and Go's homes, all under /data/work, their programs first on
+# PATH. Without a disk they stay the image's, as the save would carry them
+# at every sleep. The terminal's commands run in a login shell.
+COPY <<'EOF' /etc/profile.d/fragment-disk.sh
+# Install prefixes on a computer's disk (images/hermes/Dockerfile).
+if [ "$FRAGMENT_DISK" = fpac ]; then
+  npm_config_prefix=/data/work/.local
+  PIPX_HOME=/data/work/.local/share/pipx
+  PIPX_BIN_DIR=/data/work/.local/bin
+  UV_TOOL_DIR=/data/work/.local/share/uv/tools
+  UV_TOOL_BIN_DIR=/data/work/.local/bin
+  CARGO_HOME=/data/work/.cargo
+  GOPATH=/data/work/go
+  GOBIN=/data/work/.local/bin
+  PATH="/data/work/.local/bin:/data/work/.cargo/bin:$PATH"
+  export npm_config_prefix PIPX_HOME PIPX_BIN_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR CARGO_HOME GOPATH GOBIN PATH
+fi
+EOF
 # The image's global Node packages (Playwright) for an agent's own
 # `require()`, which reads no global folder unless NODE_PATH names it
 # (Node's "loading from the global folders").

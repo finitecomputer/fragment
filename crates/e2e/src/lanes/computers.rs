@@ -2129,7 +2129,7 @@ pub(super) fn cron_now(api: &Api, fragment: &str) -> Result<crate::api::Reply> {
     api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": fragment, "op": "cron-now" })))
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 

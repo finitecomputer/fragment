@@ -477,7 +477,9 @@ fragment decides their role and meters the request to its owner): who
 they are, their and their agents' lists, each fragment they or their
 agents own (a fragment shared with them is only named, `sharedWithMe`),
 and their computer's newest save, with the newest one set aside beside it
-(docs/computers.md, "Saves and what a wake restores"). What a fragment refuses or lacks is
+(docs/computers.md, "Saves and what a wake restores"); a computer on a
+disk keeps none, so the export has one taken for it, awake (docs/computers.md,
+"A disk"). What a fragment refuses or lacks is
 named in its `meta.json` (`skipped`). The archive is one uncompressed tar
 whose layout and formats its own README states
 (`fragment_core::export::README`); its bounds are

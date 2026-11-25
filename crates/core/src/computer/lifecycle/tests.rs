@@ -1257,6 +1257,53 @@ fn a_disk_is_never_saved_and_its_sleep_is_its_stop() {
     assert!(!read.disk());
 }
 
+/// Goal: a disk is saved for its owner's export alone, once, awake under
+/// the hold as any awake save; a failed one is tried again after its
+/// pause; one asked asleep is taken once it runs; a computer with saves of
+/// its own asks none. Method: the export's ask valid (awake), invalid (its
+/// save failed), replayed (asked again while one is under way, and after
+/// it), and across a restart (asked asleep, stored, read back, woken).
+#[test]
+fn an_export_saves_a_disk_once_awake() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    let s = l.apply(Event::ExportAsked, T + 5_000);
+    assert_eq!(s.actions, vec![Action::Hold { generation: g }], "awake, held at once");
+    assert!(l.apply(Event::ExportAsked, T + 5_100).actions.is_empty(), "asked again under way: the one save");
+    let (_, held, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 5_500));
+    assert!(held);
+    // its save fails: due again after its pause, not before
+    let failed = T + 6_000;
+    l.apply(Event::SaveFailed { generation: g, seq, why: "a backup failed".into() }, failed);
+    // its first failure's pause
+    let again = failed + SAVE_RETRY_MS;
+    assert!(l.next_alarm().is_some_and(|at| at > failed && at <= again), "an alarm by its retry");
+    let holds = |s: &Step| s.actions.iter().filter(|a| matches!(a, Action::Hold { .. })).count();
+    assert_eq!(holds(&l.apply(Event::Alarm, again - 1)), 0, "not before its pause");
+    assert_eq!(holds(&l.apply(Event::Alarm, again)), 1, "held again after it");
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, again + 100));
+    assert_eq!(l.apply(Event::Saved { generation: g, seq }, again + 200).actions, vec![Action::Unhold { generation: g }]);
+    // saved: nothing more is due, however long it runs
+    let (saves, _) = run_alarms(&mut l, again + IDLE_MS / 2);
+    assert!(saves.is_empty(), "{saves:?}");
+    // asked asleep: due, stored, and taken once it runs
+    let mut asleep = Lifecycle::new();
+    asleep.set_disk();
+    assert!(asleep.apply(Event::ExportAsked, T).actions.is_empty(), "asleep, its export wakes it");
+    let mut asleep: Lifecycle = serde_json::from_value(serde_json::to_value(&asleep).unwrap()).unwrap();
+    let g = started(&mut asleep, T + 1_000);
+    let at = asleep.next_alarm().expect("its save is due");
+    assert_eq!(at, T, "due since it was asked");
+    assert!(asleep.apply(Event::Alarm, T + 4_100).actions.contains(&Action::Hold { generation: g }));
+    // a computer with saves of its own asks none
+    let mut saves = Lifecycle::new();
+    started(&mut saves, T);
+    let before = serde_json::to_value(&saves).unwrap();
+    assert!(saves.apply(Event::ExportAsked, T + 5_000).actions.is_empty());
+    assert_eq!(serde_json::to_value(&saves).unwrap(), before, "nothing changed");
+}
+
 /// Goal: a computer goes on a disk only as it is made, never after its
 /// first start. Method: the mark set on a computer that started.
 #[test]

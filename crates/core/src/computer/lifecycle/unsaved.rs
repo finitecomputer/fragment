@@ -156,6 +156,10 @@ impl Lifecycle {
         self.saving = None;
         self.save_failed(why, now_ms);
         self.save_due_ms = Some(now_ms + self.retry_pause_ms());
+        // a disk's export's save, after the same pause
+        if self.export_due_ms.is_some() {
+            self.export_due_ms = self.save_due_ms;
+        }
         step.actions.push(Action::Unhold { generation });
     }
 

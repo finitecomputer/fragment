@@ -273,6 +273,10 @@ struct Job {
     frag: Option<Frag>,
     #[serde(default)]
     comp: Option<Comp>,
+    /// Looks the current computer's export took for its disk's save
+    /// (`limits::COMPUTER_WAITS_MAX`).
+    #[serde(default)]
+    computer_waits: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -405,6 +409,7 @@ impl Job {
             wait_until: 0,
             frag: None,
             comp: None,
+            computer_waits: 0,
         }
     }
 
@@ -957,7 +962,13 @@ impl PrincipalCell {
                     };
                 }
                 At::Fragment { i, step } => self.fragment_step(run, i, step, deadline).await?,
-                At::Computer { i, step } => self.computer_step(run, i, step).await?,
+                At::Computer { i, step } => {
+                    self.computer_step(run, i, step).await?;
+                    // its computer's save is on its way: the next slice looks again
+                    if run.job.wait_until > js::now_ms() {
+                        return Ok(Sliced::Paused);
+                    }
+                }
                 At::End => {
                     self.put(run, &core::END, false).await?;
                     run.job.at = At::Complete;
@@ -1754,10 +1765,22 @@ impl PrincipalCell {
                 };
                 // either may be missing: a save set aside is exported though
                 // none it may restore is usable (Codex on the no-room PR)
-                let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person })).await?;
+                let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person, "since": run.job.made_at })).await?;
+                // a disk's save, taken awake for this export: looked for again
+                // after a wait, a bounded number of times, then without it
+                if v["pending"] == true && run.job.computer_waits < limits::COMPUTER_WAITS_MAX {
+                    run.job.computer_waits += 1;
+                    run.job.wait_until = js::now_ms() + limits::COMPUTER_WAIT_MS;
+                    return Ok(());
+                }
+                if v["pending"] == true {
+                    skipped.push(core::Skipped { part: "save".into(), why: format!("its disk's save did not come within {} minutes", limits::COMPUTER_WAIT_MS * i64::from(limits::COMPUTER_WAITS_MAX) / 60_000) });
+                } else if let Some(why) = v["unsaved"].as_str() {
+                    skipped.push(core::Skipped { part: "save".into(), why: why.to_string() });
+                }
                 let save = v["save"].is_object().then(|| exported(&v["save"], core::save_path));
                 let set_aside = v["setAside"].is_object().then(|| exported(&v["setAside"], core::set_aside_path));
-                if save.is_none() && set_aside.is_none() {
+                if save.is_none() && set_aside.is_none() && skipped.is_empty() {
                     skipped.push(core::Skipped { part: "save".into(), why: "it was never saved".into() });
                 }
                 run.job.comp = Some(Comp { id: id.clone(), view, save, set_aside, skipped });

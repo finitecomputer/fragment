@@ -715,6 +715,10 @@ struct WakeBody {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExportAsk {
     owner: String,
+    /// When its export began: a disk's save from before it is not its
+    /// export's (`computer/export`).
+    #[serde(default)]
+    since: Option<i64>,
 }
 
 /// `computer/export-read`: a range of one of that save's records.
@@ -2338,9 +2342,9 @@ impl ComputerCell {
     /// One cancelled before it began does nothing.
     async fn hold(&self, generation: u64, sleeping: bool) -> Option<Event> {
         let asked = self.lifecycle().ok().and_then(|l| l.saving()).filter(|s| matches!(s, Saving::Hold { .. }))?;
-        let disk = self.lifecycle().is_ok_and(|l| l.disk());
-        assert!(sleeping || !disk, "a disk is never saved awake");
-        let answer = if disk { self.drain(generation, asked).await } else { self.hold_once(generation, sleeping).await };
+        // a disk's sleep waits for it to ship; its export's save is held as any
+        let drains = sleeping && self.lifecycle().is_ok_and(|l| l.disk());
+        let answer = if drains { self.drain(generation, asked).await } else { self.hold_once(generation, sleeping).await };
         let now = self.lifecycle().ok().and_then(|l| l.saving());
         (now == Some(asked) || now.is_none()).then_some(answer)
     }
@@ -3627,6 +3631,22 @@ impl ComputerCell {
                 // and, beside it, the newest set aside: its files may be
                 // newer, and the computer never goes back to it
                 let of = |s: &Save| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records });
+                let life = self.lifecycle()?;
+                if life.disk() {
+                    // a disk keeps no save of its own: one taken awake for this
+                    // export (docs/computers.md, "A disk"), it waking it; one
+                    // that won't wake has none to give
+                    let since = b.since.unwrap_or(0);
+                    if let Some(save) = saves.all().iter().find(|s| !s.unusable && s.at_ms >= since) {
+                        return json_response(&json!({ "save": of(save), "setAside": null }));
+                    }
+                    if matches!(life.phase, Phase::Failed { .. }) {
+                        return json_response(&json!({ "save": null, "setAside": null, "unsaved": "it would not wake" }));
+                    }
+                    self.drive(Event::ExportAsked).await?;
+                    self.wake(Wake::Owner).await?;
+                    return json_response(&json!({ "pending": true }));
+                }
                 let save = saves.all().iter().find(|s| !s.unusable);
                 let set_aside = saves.aside().iter().find(|s| !s.unusable);
                 json_response(&json!({ "save": save.map(of), "setAside": set_aside.map(of) }))

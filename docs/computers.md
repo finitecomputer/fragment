@@ -422,6 +422,7 @@ What every image may rely on, and must do.
 | `FRAGMENT_MODEL` | `http://model.fragment.internal` |
 | `FRAGMENT_IMAGE` | the pinned image's name and digest |
 | `RESTORE_PENDING` | `1` when `/data` is being restored |
+| `FRAGMENT_DISK` | `fpac` when it mounts `/data` from its disk (below, "A disk") |
 
 The guest holds no credential. Every request to those hosts, and to a
 provider's host (below, "Connections and operator keys"), goes through
@@ -454,7 +455,9 @@ Node's, and its Chromium's policy).
 - A snapshot keeps the files, not the processes: a start from one runs
   the entrypoint again.
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
-  before the signal; whatever is written after it may be lost.
+  before the signal; whatever is written after it may be lost. On a disk
+  it ends with its disk's final flush, which the DO waits for
+  (`DISK_EXIT_WAIT_MS`, 150 s; below, "A disk").
 
 ### What every image carries
 
@@ -516,6 +519,67 @@ the DO removes them from one started from a snapshot.
   may put back what it copied under the hold. Exit 0: whole. Exit 3: the
   save is unusable, and the DO starts again at once from the save before
   it. Any other: the check failed, a failed start like any.
+
+### A disk
+
+A computer made while its image is one its deployment puts on disks
+(`computers.disks`, `FRAGMENT_COMPUTER_DISKS`; preview's setting,
+production's off) is on a disk for good: its `/data` is ext4 on a lazy
+block device, FPAC (github.com/finitecomputer/fpac, at the v0.1.0 our
+images pin by its SHA-256), whose bytes are objects in the platform's
+bucket under `disks/<its id's hex>/`. Only new computers: one with saves
+never goes on a disk. Its pin refuses an image the deployment does not
+put on disks.
+
+- **What it keeps.** Its Computer DO keeps the disk's head (Computer
+  step 10, `disk`): the newest checkpoint its daemon posted, whether that
+  life ended clean, and the head before its newest life's, the one a
+  start falls back to. The head moves only by
+  `fragment_core::computer::fpac::decide`, FPAC's own rules, and only
+  from the life that runs. Everything else is files: objects named by
+  life, put once, never overwritten.
+- **Its route.** Each start registers `fpac.fragment.internal` beside
+  the platform's hosts (`cell/fpac.mjs`), by FPAC's contract: `GET
+  /open` names the disk, that life's epoch (its generation), its volume
+  (20,000 MiB) and its head; `GET` and `PUT /o/<name>` read and put
+  objects (bodies streamed, a put checked against its SHA-256 and refused
+  over an existing name, only under its own epoch); `POST /head` goes to
+  the DO's rules. The guest names no disk and holds no credential.
+- **Its start.** No restore, no gate, no snapshot: `FRAGMENT_DISK=fpac`,
+  and the image's boot mounts `/data` before anything reads it, its
+  daemon's log and status on a tmpfs at `/run/fpac` (never on the disk
+  its cache fills). The DO waits for its guest's first read of its view
+  (`DISK_ALIVE_MS`, 2 minutes): that read says what its mount did. A head
+  that will not open, its boot says (`POST /api/computer/disk
+  {unusable}`) and then waits to be destroyed; the DO's start fails as
+  `unusable`, its head falls back to the one before, and it starts again
+  at once, no strike (that life's writes since lost, and logged). With
+  none before it, a strike as any failed start.
+- **Its sleep is a signal and a wait.** Its port tabs close; the DO reads
+  its daemon's status (`fpac status`) until nothing is unshipped, at
+  most `DISK_DRAIN_MS` (a minute), and a wake meanwhile cancels the sleep
+  as a hold's wake does; then SIGTERM, its image's boot stops its own
+  programs and its daemon's final flush ships what is left and posts a
+  clean head; the DO waits for the container to exit
+  (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A crash
+  loses at most what its daemon had not shipped, about a second of
+  synced writes: the next mount replays the life's segments past its
+  last checkpoint.
+- **No saves of its own.** A disk is saved only for its owner's export:
+  the export asks its computer for a save taken after it began, which is
+  taken awake under the hold as any awake save (waking it, so an export
+  costs its awake time), and looks again every 20 s for at most 20
+  minutes, then goes on without it, saying so. Its view lists those
+  saves; no start restores one; `restored.from` is `disk`.
+- **What an image does.** It carries `/usr/local/bin/fpac` and `mke2fs`
+  1.47 or later (a new disk's ext4), and on `FRAGMENT_DISK=fpac` mounts
+  `/data` with it, waits for the mount, says what it did with its first
+  read of its view, and on SIGTERM waits for its daemon's final flush
+  before it exits (`fragment_bridge::disk`: our Hermes image's boot, and
+  the stub's bridge as its PID 1). The runtime gives its container FUSE
+  and a loop device: Cloudflare's does, and krun's on a self-hosted box;
+  workerd's Docker does not.
+- **A wipe** deletes its disk's objects with its saves'.
 
 ### Saves and what a wake restores
 
@@ -783,7 +847,7 @@ minute), or its life ends, whichever is first.
   crash, an always-on start, or an ask an earlier isolate heard). A wake's
   fallback and retries carry its first ask.
 - `path`: `snapshot`, `restore` (the image, then the save whole), `fresh`
-  (no save yet).
+  (no save yet), `disk` (its disk mounted: "A disk").
 - `why`, for a restore, the first that holds: `off` (no snapshots here),
   `restart`, `aside` (its newer saves were set aside: an operator's
   choice, or too big for its disk), `unusable`
@@ -805,8 +869,30 @@ minute), or its life ends, whichever is first.
   When its bridge follows its chats is not visible to the DO, so it is
   left out.
 
+- `disk`, a start on a disk: `mountMs` (its daemon's start to its
+  mount, as its boot saw it), `misses` (extents a read fetched by its
+  first view read), `refetches` (its fetches made again: a checksum that
+  did not match, or the remote unavailable), and `sleptUnshipped` (the
+  bytes its last sleep's wait left for the final flush), each left out
+  when unknown. A start whose head would not open fails `unusable`.
+
 The line is in memory until it is written: a deploy or a crash of the
 platform during a start, or before its first turn, loses that start's line.
+
+### The sleep line
+
+A disk's sleep logs one line too (`start_line::sleep_line`), as its stop
+ends, at most 512 bytes:
+
+```json
+{"sleep":{"generation":7,"unshipped":0,"misses":41,"refetches":0,"drainMs":180,"stopMs":2900,"exited":true,"clean":true},"computer":"computer:17c33cdf88c6d1d8f58b7a0f"}
+```
+
+`unshipped`, `misses` and `refetches` are its daemon's as its wait last
+read them (left out when unread); `drainMs` the wait, `stopMs` the
+signal to the container gone; `exited`, its guest exited within
+`DISK_EXIT_WAIT_MS`; `clean`, its head after it is that life's and marks
+a clean sleep (the next mount replays nothing).
 
 ### Bounds
 
@@ -872,6 +958,11 @@ sleep answers within 14 minutes.
     redeemed with its door's public key (docs/api.md, "An agent's
     doors").
   - `GET /api/computer/relay?host=&port=`: the XFTP relay, below.
+  - On a disk (below, "A disk"): `GET /api/computer` with
+    `diskMountMs`, `diskMisses` and `diskRefetches` (each a number, any
+    left out), what its mount did, which the start's line takes from its
+    first read; `POST /api/computer/disk {unusable}`, its boot's word that
+    its disk's head would not open.
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.
@@ -1349,7 +1440,11 @@ and their agents are not fenced from each other (decisions 13, 43, 44).
 An install outside `/data` lasts until the next start from the image (a
 crash, an update, a restart; a snapshot's wake keeps it). Nothing is
 installed under `/data` at run time but what its agents install into its
-Python environment (next) and the person's own Claude Code (below). The
+Python environment (next) and the person's own Claude Code (below). On a
+disk ("A disk"), what a language's own tool installs is kept too: a login
+shell's npm global prefix, pipx's and uv's tools, and cargo's and Go's
+homes are under `/data/work` (`/etc/profile.d/fragment-disk.sh`), their
+programs first on its PATH. apt's installs are still the image's. The
 bridge runs as root and keeps SimpleX's state from the agent's user,
 though not from its sudo.
 
