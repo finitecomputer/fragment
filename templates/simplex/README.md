@@ -54,8 +54,11 @@ file it loads are the chat template's, linked, so no copy drifts).
   platform knows which fragment publishes. Unbound, it tells their app
   so; another kind of message, that only text is carried for now.
   `mirror` sends each reply its bound agent posts here (not its interim
-  words) through the door, by its record, asking again until the door's
-  runner says it is sent, its link ended, or there is none.
+  words), and each question it asks its owner (a card on `work`, worded
+  by `applib/question.mjs` as the computer's own SimpleX words one),
+  through the door, by its record, asking again until the door's runner
+  says it is sent, its link ended, or there is none. Their next message
+  answers a question that takes words; one that needs a button says so.
 
 Settings makes one for an agent (`Set up`, bound as its door as it is
 made) on every seat, but where an always-on computer that does SimpleX

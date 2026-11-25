@@ -30,7 +30,8 @@
   },
   "triggers": [
     { "channel": "inbox", "run": "intake" },
-    { "channel": "chat", "from": "agent", "run": "mirror" }
+    { "channel": "chat", "from": "agent", "run": "mirror" },
+    { "channel": "work", "from": "agent", "kinds": ["turn.prompt"], "run": "mirror" }
   ],
   "meta": { "title": "SimpleX", "description": "A chat with your agent that you also reach from your SimpleX app: your messages there come here as yours, and its replies go back, end to end encrypted between your app and the platform's door." }
 }

@@ -2509,6 +2509,21 @@ mod tests {
         assert_eq!(for_simplex(records::WORK, &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
     }
 
+    /// Goal (FIN-747): every door words an agent's question as this one
+    /// does, so a person's app shows it one way whichever door they use.
+    /// Method: the cases the connectors' module is held to
+    /// (templates/simplex/applib/question.mjs, its test beside the
+    /// templates), here too, each as `for_simplex` words it on `work`.
+    #[test]
+    fn a_question_is_worded_as_every_door_words_it() {
+        let cases: Value = serde_json::from_str(include_str!("questions.json")).expect("the cases parse");
+        let cases = cases["cases"].as_array().expect("its cases");
+        assert!(cases.len() >= 8, "{} cases", cases.len());
+        for c in cases {
+            assert_eq!(for_simplex(records::WORK, &c["body"], 0), c["said"].as_str().map(str::to_string), "{}", c["of"]);
+        }
+    }
+
     /// Goal (Alex's review of #548): a post says how it ended, so what goes
     /// back over SimpleX, and an inbound file's deletion, wait for one on
     /// the chat: a refusal (403, 404) is no post; another life's under the

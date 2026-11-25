@@ -388,8 +388,9 @@ async fn person_got(person: &mut Api, seen: &mut Vec<String>, want: &[&str]) {
 /// by the one forced sync the door's "behind" asks; a planned restart
 /// (SIGTERM) as a burst arrives, its core stopped before its last save, so
 /// nothing is lost and the next start is in step with no sync; and a start
-/// superseded by a newer generation, whose save is refused, ending it.
-/// Method: the door's real image and SimpleX's real core, a person's real
+/// superseded by a newer generation, whose save is refused, ending it;
+/// and an agent's question, worded as every door words one, reaching the
+/// person whole, their answer coming back once. Method: the door's real image and SimpleX's real core, a person's real
 /// client, and a fake door on the host as its Durable Object would be.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Docker; run by hand"]
@@ -586,6 +587,23 @@ async fn the_door_against_the_real_core() {
     g5.reply(&door, "chat:10", "r10").await;
     person_got(&mut person, &mut got, &["r10"]).await;
     assert_eq!(got, (1..=10).map(|n| format!("r{n}")).collect::<Vec<_>>(), "every reply once, in order");
+
+    // its agent's question, as every door words one for its owner's app
+    // (src/questions.json, FIN-747): their app has it whole, and their
+    // answer comes back to the door, once
+    let cases: Value = serde_json::from_str(include_str!("../src/questions.json")).expect("the cases parse");
+    let question = cases["cases"][0]["said"].as_str().expect("a question").to_string();
+    assert!(question.contains("\n\n(Answer with one of: "), "{question}");
+    g5.reply(&door, "work:1", &question).await;
+    let mut asked = vec![];
+    person_got(&mut person, &mut asked, &[question.as_str()]).await;
+    say(&mut person, agent, "Mint").await;
+    sent.push("Mint".into());
+    let t0 = Instant::now();
+    while door.texts() != sent {
+        assert!(t0.elapsed() < Duration::from_secs(60), "its answer, once: {:?}", &door.texts()[door.texts().len().saturating_sub(3)..]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     assert!(door.with(|s| s.heads.iter().filter(|h| h.0 == "GET").all(|h| !h.2)), "no GET carried a length");
     drop(g5);
 }
