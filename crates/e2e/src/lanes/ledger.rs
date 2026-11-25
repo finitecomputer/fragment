@@ -1752,7 +1752,10 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// (`BROWSER_MEMOS`: WebM/Opus, MP4/AAC fragmented and plain, Ogg/Opus),
 /// which the route sends on as it came, printing what it heard, each
 /// charged at its length (`MEMO_SECONDS`; on the fakes, which decode no
-/// audio, its bytes at 16 kbps). Five paid calls.
+/// audio, its bytes at 16 kbps). Five paid calls. A deployment whose slot
+/// is an OpenAI-compatible API's (preview's, Tinfoil's Whisper) is charged
+/// at that slot's own price (`transcribe::COST`), which the lane does not
+/// know: it checks the charge was made, and prints it.
 pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("transcribe", &[crate::Need::Models, crate::Need::Levers]) {
         return Ok(());
@@ -1768,14 +1771,17 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
     let shape = r.headers.get("x-fragment-answer-shape").and_then(|v| v.to_str().ok()).unwrap_or("(none)").to_string();
     println!("      (transcribed: {} {}; Whisper's answer: {shape})", r.status, r.text.chars().take(200).collect::<String>());
-    let heard = |e: &Value| charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| (1_400..=1_700).contains(&m));
+    // Workers AI's Whisper at its neurons a minute, or an
+    // OpenAI-compatible slot at its own price
+    let own_price = |e: &Value| charged(e).is_some_and(|c| c > 0) && usage(e)["kind"] == "key" && usage(e)["key"] == fragment_core::transcribe::COST;
+    let heard = |e: &Value| own_price(e) || (charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| (1_400..=1_700).contains(&m)));
     s.eventually(Duration::from_secs(60), || !entries(api, &owner_id, "aig:").is_empty());
     let aig = entries(api, &owner_id, "aig:");
     for e in &aig {
         println!("      (its charge: usage {} charge {:?})", usage(e), charged(e));
     }
     s.ok(
-        "the model route transcribes a memo on the deployment's Whisper, answered in OpenAI's shape and charged at the 2 s it heard, in neurons",
+        "the model route transcribes a memo on the deployment's Whisper, answered in OpenAI's shape and charged at the 2 s it heard in neurons, or at its slot's own price",
         r.status == 200 && r.body["text"].is_string() && aig.len() == 1 && aig.iter().all(heard),
         json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "shape": shape, "entries": aig }),
     );
@@ -1797,7 +1803,7 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
             false => MEMO_SECONDS,
         };
         let newest = aig.iter().find(|e| !earlier.contains(e));
-        let charged_its_length = newest.is_some_and(|e| charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| charged_for(m, seconds)));
+        let charged_its_length = newest.is_some_and(|e| own_price(e) || (charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| charged_for(m, seconds))));
         s.ok(
             &format!("a memo in {browser} is heard on the deployment's Whisper, and charged at its length ({:.2} to {:.2} s)", seconds.0, seconds.1),
             r.status == 200 && r.body["text"].is_string() && aig.len() == before + 1 && charged_its_length,

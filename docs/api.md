@@ -1612,13 +1612,18 @@ model's count, else estimated).
 `models.transcription` slot (`fragment_core::transcribe`), no chat slot:
 a Workers AI model, sent Whisper's catalog input (the audio as base64, its
 voice-activity filter on), or a model on an OpenAI-compatible API, sent
-OpenAI's form at `<base_url>/audio/transcriptions` with the slot's key and
-`response_format` `verbose_json` (a model that answers no `verbose_json`,
-OpenAI's token-billed gpt-4o transcription models, refuses each call; its
-refusal is passed on). Each names its price, a minute of audio
-(docs/ledger.md). A deployment that names none transcribes nothing (404).
-A call to an OpenAI-compatible API, chat, embeddings or transcription,
-follows no redirect: one is the call not answered.
+OpenAI's form at `<base_url>/audio/transcriptions` with the slot's key.
+Each names its price (docs/ledger.md): Workers AI's a minute of audio, an
+OpenAI-compatible API's a minute, a request, or both. One priced by the
+minute is asked for `verbose_json`, whose length it is charged by (a model
+that answers none, OpenAI's token-billed gpt-4o transcription models,
+refuses each call; its refusal is passed on); one that is not, for
+`json`. A deployment that names none transcribes nothing (404). A slot may
+be private (`"private": true`; never Workers AI or OpenRouter): a
+deployment with a private route transcribes only on a private slot, else
+refuses each memo (403), never sending it to one that is not. A call to
+an OpenAI-compatible API, chat, embeddings or transcription, follows no
+redirect: a 3xx is that API's answer, passed on.
 `language` and `prompt` pass on, OpenAI's other fields do not. A form that
 is none, another model or format is 400; audio past
 `transcribe::BODY_MAX_BYTES` 413. Its payer is the agent's owner, under no

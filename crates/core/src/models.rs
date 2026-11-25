@@ -700,6 +700,9 @@ fn private_closed(models: &Models) -> Result<(), String> {
     if models.embeddings.private && open(&models.embeddings.upstream) {
         return Err("models.embeddings: Workers AI and OpenRouter are not private: only a confidential API (Finite Private's, Tinfoil's) is marked private".into());
     }
+    if models.transcription.as_ref().is_some_and(|t| t.private && open(&t.upstream)) {
+        return Err("models.transcription: Workers AI and OpenRouter are not private: only a confidential API (Finite Private's, Tinfoil's) is marked private".into());
+    }
     for (at, route) in models.routes.iter().enumerate() {
         if !models.slots[route.slot].private {
             continue;
@@ -865,8 +868,24 @@ impl Models {
     /// sent to one to be embedded either). Its deploy is not refused: its
     /// search answers by words alone.
     pub fn embeddings_refused(&self) -> Option<String> {
-        let private_route = self.routes.iter().any(|r| self.slots[r.slot].private);
-        (private_route && !self.embeddings.private).then(|| "a route of this deployment's is private and its embeddings slot is not: nothing is embedded rather than sent to a model that is not private (name a private embeddings slot)".to_string())
+        (self.private_route() && !self.embeddings.private).then(|| "a route of this deployment's is private and its embeddings slot is not: nothing is embedded rather than sent to a model that is not private (name a private embeddings slot)".to_string())
+    }
+
+    /// Why this deployment transcribes no memo on its slot, if it does not:
+    /// a route is private and its transcription slot is not (Paul's rule,
+    /// as for embeddings: a memo is never sent to a model that is not
+    /// private, nor falls back to one). The whole deployment's, as its
+    /// embeddings': an agent's speech client says no route (Hermes' `stt`
+    /// names a base URL, a key and a model alone), so no memo is known to
+    /// be a Standard agent's.
+    pub fn transcription_refused(&self) -> Option<String> {
+        let open = self.transcription.as_ref().is_some_and(|t| !t.private);
+        (self.private_route() && open).then(|| "a route of this deployment's is private and its transcription slot is not: no memo is transcribed rather than sent to a model that is not private (name a private transcription slot)".to_string())
+    }
+
+    /// Whether a route of this deployment's is private (its slot is).
+    fn private_route(&self) -> bool {
+        self.routes.iter().any(|r| self.slots[r.slot].private)
     }
 
     /// `book` with each slot's own price (`Upstream::own_price`: its list
@@ -3891,6 +3910,35 @@ mod tests {
         v["embeddings"] = json!({ "provider": "openai", "base_url": "https://embed.example/v1", "model": "BAAI/bge-m3", "dimensions": 1024, "private": true, "price": { "input": 0, "output": 0 } });
         let private = old_parse(&v.to_string(), &book, false).unwrap();
         assert_eq!(private.embeddings_refused(), None);
+    }
+
+    /// Goal: a deployment with a private route sends no memo to a model
+    /// that is not private, and never falls back to one (Paul, 2026-11-25:
+    /// "use tinfoil for transcription"); one without a private route takes
+    /// any slot. Method: Private and Standard's config with Workers AI's
+    /// Whisper, then with Tinfoil's marked private; the default config;
+    /// and a slot on Workers AI or OpenRouter marked private, refused.
+    #[test]
+    fn a_private_deployment_transcribes_privately_or_not_at_all() {
+        let book = PriceBook::defaults();
+        let whisper = json!({ "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 } });
+        let tinfoil = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "whisper-large-v3-turbo", "price": { "request": 0.01 }, "private": true });
+        let mut v = per_route();
+        v["transcription"] = whisper.clone();
+        let finite = old_parse(&v.to_string(), &book, false).unwrap();
+        assert!(finite.transcription_refused().is_some_and(|why| why.contains("not private")), "Private's tier is private, Workers AI is not");
+        v["transcription"] = tinfoil.clone();
+        let private = old_parse(&v.to_string(), &book, false).unwrap();
+        assert_eq!(private.transcription_refused(), None, "every memo on Tinfoil");
+        let mut plain = json!({});
+        plain["transcription"] = whisper.clone();
+        assert_eq!(old_parse(&plain.to_string(), &book, false).unwrap().transcription_refused(), None, "no private route: any slot");
+        assert_eq!(Models::defaults().transcription_refused(), None, "no slot: nothing to refuse (the route answers 404)");
+        for open in [json!({ "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 }, "private": true }), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "openai/whisper-1", "price": { "audio_minute": 0.006 }, "private": true })] {
+            plain["transcription"] = open;
+            let err = old_parse(&plain.to_string(), &book, false).unwrap_err();
+            assert!(err.contains("models.transcription: Workers AI and OpenRouter are not private"), "{err}");
+        }
     }
 }
 

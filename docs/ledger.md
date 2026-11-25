@@ -213,19 +213,20 @@ informational. The fee is AI Gateway's on credits, so it applies to
 - **A slot's own price**: a slot on any other OpenAI-compatible API may
   name its model's list price (`price`), which takes the fee and margin
   as every token row does (`Upstream::own_price`).
-- **A transcription's price** (`fragment_core::transcribe`): its slot's,
-  at the length of audio its model reports. On Workers AI, `neurons` at
-  the neurons a minute the slot names (`price.neurons_a_minute`, Workers
-  AI's unit for its speech models), with the fee. On an OpenAI-compatible
-  API, its audio's seconds, rounded up, at the dollars a minute the slot
-  names (`price.audio_minute`), as OpenAI bills transcription (a minute's
-  price, by the second): that list cost exactly, in sixtieths of a
-  micro-dollar, as `key` units of `transcription/sixtieth-microusd`, which
-  every book prices at list whatever its slots (so a row queued before a
-  deploy changed the slot is charged as it was made, rounded once), then
-  the margin and no fee, as an operator key's (a vendor billing a card
-  bills none). An answer that says no length is charged
-  nothing, said aloud.
+- **A transcription's price** (`fragment_core::transcribe`): its slot's.
+  On Workers AI, `neurons` at the neurons a minute the slot names
+  (`price.neurons_a_minute`, Workers AI's unit for its speech models), at
+  the length of audio its model reports, with the fee. On an
+  OpenAI-compatible API, its audio's seconds, rounded up, at the dollars a
+  minute the slot names (`price.audio_minute`), as OpenAI bills
+  transcription (a minute's price, by the second), and the dollars a
+  request it names (`price.request`, Tinfoil's Whisper's unit): that list
+  cost exactly, in sixtieths of a micro-dollar, as `key` units of
+  `transcription/sixtieth-microusd`, which every book prices at list
+  whatever its slots (so a row queued before a deploy changed the slot is
+  charged as it was made, rounded once), then the margin and no fee, as an
+  operator key's (a vendor billing a card bills none). An answer that says
+  no length, when the slot prices one, is charged nothing, said aloud.
 - **Finite Private's price** (decision 61; a decision for Paul): Workers
   AI's GLM-5.3 Flash's ($0.15 in, $0.50 out a million tokens), kept after
   Workers AI retired that model on 2026-11-20. It reports no cached

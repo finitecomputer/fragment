@@ -1318,7 +1318,8 @@ unfinished design, not debt.
   lands first and the configs follow.
 - **Risk:** a model named in tooling, not config, until the configs
   name it; a box's models file without the slot is given a model its node
-  cannot run.
+  cannot run; and a deployment with a private route refuses every memo on
+  it, as it is not private, until its config names a private slot.
 - **Delete when:** fragment-deploy's `preview.jsonc` and
   `production.jsonc` name `models.transcription`, and production runs a
   release that reads it (no rollback past it). Then `models_cell` adds
