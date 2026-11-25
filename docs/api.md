@@ -1865,8 +1865,10 @@ steps:
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
   page reads `__members`, `__people` and its presence.
 
-`job.principal`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
-`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which;
+`job.principal`, `job.agent`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
+`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which
+(`job.principal` and `job.agent` as `call.principal` and `call.agent`: an
+agent's run on someone else's ask is theirs, beside that agent);
 `job.door` is a connector's `{relayed, to}` while it is an open door (An
 agent's doors), else null.
 

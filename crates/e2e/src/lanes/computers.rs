@@ -77,6 +77,7 @@ const ASKER_CHECKS: &[&str] = &[
     "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the app is told them, at their own role; its owner's same ask is its owner's",
     "held to their role: what only editors may do (they a viewer) is refused, though its owner's same ask goes",
     "each asks it to post under one id: each post is their own record, keyed by whom it posts for, as a call's id is",
+    "they ask it to run a job (Calories' summary of their day): the job is told whose ask it runs, as an op is, and answers them",
     "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
     "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
     "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
@@ -140,6 +141,19 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let said = records(api, w.owner, &board, "said");
     let texts: Vec<&str> = said.iter().filter_map(|r| r["body"]["text"].as_str()).collect();
     s.ok(ASKER_CHECKS[2], owners.starts_with("fetched 200") && bens.starts_with("fetched 200") && texts == ["its owner's", "theirs"], json!({ "owner": owners, "ben": bens, "said": said }));
+    // its owner's Calories, Ben a viewer there: his summary is his
+    let calories = s.named(api, w.owner, "asker-calories")?;
+    let r = api.create_with(w.owner, json!({ "name": calories, "template": "calories" }))?;
+    anyhow::ensure!(r.status == 200, "the calories app: {r}");
+    s.owned(&r.body, w.owner);
+    let r = api.share(&calories, &ben_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "Ben on calories: {r}");
+    let summary = format!("fetch http://api.fragment.internal/api/f/{calories}/ops/summarize?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"sum-ben\",\"input\":{{}}}}", w.agent);
+    let started = asked_by_ben(s, 10, &summary)?;
+    let answered = || records(api, w.owner, &calories, "replies").into_iter().find(|r| r["body"]["text"].is_string());
+    s.eventually(wake, || answered().is_some());
+    let reply = answered().unwrap_or_default();
+    s.ok(ASKER_CHECKS[3], started.starts_with("fetched 200") && reply["body"]["for"] == ben_id.as_str(), json!({ "started": started, "reply": reply }));
 
     let schedules = format!("/api/f/{chat}/schedules");
     let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": op("whoami", "who-schedule") } })))?;
@@ -153,7 +167,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let said = reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
     let removed = api.signed(&ben, "DELETE", &format!("{schedules}/{}", made.body["schedule"]["id"]), None)?;
     s.ok(
-        ASKER_CHECKS[3],
+        ASKER_CHECKS[4],
         made.status == 200 && fire().is_some() && whose(&said) == json!({ "principal": ben_id, "role": "viewer" }) && removed.status == 200,
         json!({ "made": made.status, "fire": fire(), "said": said, "removed": removed.status }),
     );
@@ -165,7 +179,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let unlent = asked_by_ben(s, 4, &account)?;
     let unreached = s.upstream.seen().len() == seen;
     s.ok(
-        ASKER_CHECKS[4],
+        ASKER_CHECKS[5],
         spent.starts_with("fetched 200") && unlent.starts_with("fetched 403") && unlent.contains("hasn't lent it their accounts and keys") && unreached,
         json!({ "paid": spent, "account": unlent }),
     );
@@ -178,7 +192,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let back = lend(true, false)?;
     let again = asked_by_ben(s, 7, &account)?;
     s.ok(
-        ASKER_CHECKS[5],
+        ASKER_CHECKS[6],
         switched.status == 200
             && unpaid.starts_with("fetched 403")
             && unpaid.contains("hasn't lent it their credit")
@@ -191,7 +205,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let invites = format!("fetch http://api.fragment.internal/api/invites?for={owner_id} with {} in x-fragment-agent", w.agent);
     let owners = asked_by(s, w.owner, "owner3", &invites)?;
     let bens = asked_by_ben(s, 8, &invites)?;
-    s.ok(ASKER_CHECKS[6], owners.starts_with("fetched 200") && owners.contains("\"invites\"") && bens.starts_with("fetched 403"), json!({ "owner": owners, "ben": bens }));
+    s.ok(ASKER_CHECKS[7], owners.starts_with("fetched 200") && owners.contains("\"invites\"") && bens.starts_with("fetched 403"), json!({ "owner": owners, "ben": bens }));
     let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
     Ok(turns.get())

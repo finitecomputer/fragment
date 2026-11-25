@@ -70,6 +70,18 @@ pub(crate) fn callers_id(principal: &str, other: Option<&str>, id: &str) -> Stri
     }
 }
 
+/// Whom an app is told calls it (`call.principal`, `job.principal`), and
+/// the agent that calls for them (`call.agent`, `job.agent`): the asker an
+/// agent calls for, and that agent; else the caller, and none (decision
+/// R17, FIN-720). One rule for an op and a job; its signer stays the
+/// ledger's and the replay's.
+pub(crate) fn told(principal: &str, asker: Option<&str>) -> (String, Option<String>) {
+    match asker {
+        Some(asker) => (npub::display(asker), Some(npub::display(principal))),
+        None => (npub::display(principal), None),
+    }
+}
+
 /// One admitted call: who runs which operation, and how deep in a chain of
 /// triggered runs it is.
 pub(crate) struct Invocation<'a> {
@@ -324,11 +336,11 @@ impl FragmentCell {
         }
         let facet = self.facet()?;
         self.sweep(&facet).await?;
-        let agent = inv.asker.map(|_| npub::display(inv.principal));
+        let (told, agent) = told(inv.principal, inv.asker);
         match inv.decl.kind {
             OpKind::Query => {
                 // a query publishes nothing, so it is told no channels
-                let meta = json!({ "principal": npub::display(inv.asker.unwrap_or(inv.principal)), "agent": agent, "role": inv.role });
+                let meta = json!({ "principal": told, "agent": agent, "role": inv.role });
                 match facet.query(inv.op, &input_text, &meta).await? {
                     Answer::Ran(q) => bounded(Answered { result: q.result, replayed: false }),
                     Answer::Refused(why) => Err(refused(why, inv.op)),
@@ -336,7 +348,7 @@ impl FragmentCell {
             }
             OpKind::Mutation => {
                 let meta = json!({
-                    "principal": npub::display(inv.asker.unwrap_or(inv.principal)),
+                    "principal": told,
                     "agent": agent,
                     "role": inv.role,
                     "channels": self.declared_channel_names()?,

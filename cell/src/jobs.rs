@@ -677,8 +677,12 @@ impl FragmentCell {
             OpKind::Job => {
                 let facet = self.facet()?;
                 self.sweep(&facet).await?;
+                // told whose ask it runs, as an op is (`ops::told`): its
+                // asker, beside its agent; its signer stays the ledger's
+                let (told, agent) = crate::ops::told(&run.principal, run.asker.as_deref());
                 let meta = json!({
-                    "principal": npub::display(&run.principal),
+                    "principal": told,
+                    "agent": agent,
                     "role": run.role,
                     "run": run_id,
                     "attempt": attempt,
