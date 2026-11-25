@@ -388,6 +388,15 @@ fn image_on_disk(s: &mut Suite, api: &Api) -> Result<()> {
         let woke = s.eventually(WAKE * 5, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > generation) && phase(api, &keys, &id) == "awake");
         let up = view();
         generation = up["restored"]["generation"].as_u64().unwrap_or(generation);
+        if life == 0 {
+            // its agent follows its chat (the shell's ready) before it is told anything
+            let following = || {
+                api.signed(&keys, "GET", &format!("/api/f/{chat}/subscriptions"), None)
+                    .ok()
+                    .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["principal"] == identity.as_str() && x["channel"] == "chat")))
+            };
+            let _ = s.eventually(TURN, following);
+        }
         let mut l = json!({ "life": life + 1, "woke": woke, "from": up["restored"]["from"], "generation": generation });
         if EXPORTS_IN.contains(&life) {
             let e = held_state(s, api, &keys, &id, &said, &evidence.join(format!("state-{}.db", life + 1)))?;
