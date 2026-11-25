@@ -20,7 +20,9 @@
 //! **Too deep is kept, not refused** (FIN-755). A file whose own place,
 //! `home/<its path>`, would be past a repo path's length (an old export's
 //! run logs, folders deep) is a group alone, kept under a short place of
-//! its own (`LONG`). Its note is still where it was, and names that place.
+//! its own (`LONG`), or a shorter one still for a long name. Its note is
+//! still where it was, and names that place; a name too long for its
+//! note's own is named short (`offload::note_name`).
 //!
 //! **Proven before its note.** A group's parts are committed, then found
 //! at main, each the size it was written, and each blob in the store. Only
@@ -79,11 +81,15 @@ const _: () = assert!(NOTE_BYTES_MAX > 0 && NOTE_BYTES_MAX < fragment_core::comp
 
 /// Where a file too deep for its own place is kept (FIN-755): under
 /// `<root>/.long/`, in a folder named by its path's sha256 (the first
-/// `LONG_HEX` hex digits), as its own name. Its note is where the file was,
-/// as every note is, and names this place (a record's `at`), so `--back`
-/// brings it there unchanged.
+/// `LONG_HEX` hex digits), as its own name; or, its name too long for that
+/// (past 242 bytes under `home`), under `.long/` at the top, in a folder
+/// named by the first `SHORT_HEX` of the sha256 of `<root>/<its path>`,
+/// with room for any name a file system keeps (`offload::NAME_MAX`). Its
+/// note is where the file was, as every note is, and names this place (a
+/// record's `at`), so `--back` brings it there unchanged.
 const LONG: &str = ".long";
 const LONG_HEX: usize = 24;
+const SHORT_HEX: usize = 16;
 
 /// Whether `path` of the home has its own place in storage, `<root>/<path>`,
 /// for any part it could be in: a repo path, as `offload::record_of` checks
@@ -140,26 +146,36 @@ struct Group {
 }
 
 impl Group {
-    /// Its note's place, under `notes`.
+    /// Its note's place, under `notes`, where it was.
     fn note(&self, notes: &Path) -> PathBuf {
-        notes.join(format!("{}{NOTE_SUFFIX}", self.key))
+        notes.join(self.parent()).join(offload::note_name(self.name()))
     }
 
     /// Its place in storage, its note's `at`: where it is in the home, under
-    /// `root`; or, a file alone too deep for that, a short one (`LONG`).
-    /// None when neither is a place a note can name (its own name too long).
+    /// `root`; or, a file alone too deep for that, a short one (`LONG`), or
+    /// a shorter one for a name too long for that. None when none is a
+    /// place a note can name (its name past a file system's).
     fn at(&self, root: &str) -> Option<String> {
         let parent = self.parent();
         if self.folder || fits(root, &self.key) {
             return Some(if parent.is_empty() { root.to_string() } else { format!("{root}/{parent}") });
         }
-        let short = format!("{root}/{LONG}/{}", &blob::sha256_hex(self.key.as_bytes())[..LONG_HEX]);
-        fits(&short, self.key.rsplit('/').next().expect("a key names something")).then_some(short)
+        let long = format!("{root}/{LONG}/{}", &blob::sha256_hex(self.key.as_bytes())[..LONG_HEX]);
+        if fits(&long, self.name()) {
+            return Some(long);
+        }
+        let short = format!("{LONG}/{}", &blob::sha256_hex(format!("{root}/{}", self.key).as_bytes())[..SHORT_HEX]);
+        fits(&short, self.name()).then_some(short)
     }
 
     /// Its parent folder in the home ("" at the top).
     fn parent(&self) -> &str {
         self.key.rsplit_once('/').map_or("", |(d, _)| d)
+    }
+
+    /// Its own name.
+    fn name(&self) -> &str {
+        self.key.rsplit('/').next().expect("a key names something")
     }
 
     /// Its record, its files' sums as the zip names them, at `at` in the
@@ -232,8 +248,11 @@ fn groups(keep: Vec<Keep>, part_bytes: u64, root: &str) -> Vec<Group> {
 }
 
 /// Each note under `notes` (iterative), by its path, read: what it says is
-/// kept. A note that is not one a move or an import writes is refused.
-fn notes_under(notes: &Path) -> Result<Vec<(PathBuf, Record)>> {
+/// kept, its places held. Every file named as a note is
+/// (`<name>.offloaded.md`) whose record reads is one, whatever else holds
+/// its bytes. One whose record does not read is refused, but the home's
+/// own file `brought` back from its note (FIN-757), which holds no place.
+fn notes_under(notes: &Path, brought: &dyn Fn(&Path) -> bool) -> Result<Vec<(PathBuf, Record)>> {
     let mut out = Vec::new();
     let mut folders = vec![notes.to_path_buf()];
     while let Some(dir) = folders.pop() {
@@ -248,9 +267,15 @@ fn notes_under(notes: &Path) -> Result<Vec<(PathBuf, Record)>> {
             if t.is_dir() {
                 folders.push(e.path());
             } else if t.is_file() && e.file_name().to_str().is_some_and(|n| n.ends_with(NOTE_SUFFIX)) {
-                let text = std::fs::read_to_string(e.path()).with_context(|| format!("reading {}", e.path().display()))?;
-                let r = offload::record_of(&text).map_err(|why| coded(Code::Conflict, format!("{} is not a note this import or `fragment offload` wrote ({why:#}): move it aside, then run this again", e.path().display())))?;
-                out.push((e.path(), r));
+                // every record there is a note, its places held, whatever
+                // else holds its bytes; one that reads as none is refused,
+                // but a home's file brought back
+                let text = std::fs::read(e.path()).with_context(|| format!("reading {}", e.path().display()))?;
+                match String::from_utf8(text).map_err(anyhow::Error::new).and_then(|t| offload::record_of(&t)) {
+                    Ok(r) => out.push((e.path(), r)),
+                    Err(_) if brought(&e.path()) => {}
+                    Err(why) => bail!(coded(Code::Conflict, format!("{} is not a note this import or `fragment offload` wrote ({why:#}): move it aside, then run this again", e.path().display()))),
+                }
             }
         }
     }
@@ -299,15 +324,24 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     let list: fragment_proto::FragmentList = c.call_as(c.get("/api/fragments")?)?;
     let part_bytes = crate::session::upload_max(&list, c.agent().is_some());
 
-    // this notes folder's own place in storage: its name
-    let root = notes.file_name().and_then(|n| n.to_str()).filter(|n| RepoPath::parse(&format!("{n}/x")).is_ok()).map(str::to_string);
-    let root = root.ok_or_else(|| coded(Code::InvalidUsage, format!("{}: --notes names a folder whose name a fragment's folder can be (such as home)", notes.display())))?;
+    // this notes folder's own place in storage: its name, never `LONG`,
+    // where any notes folder's long names are kept
+    let root = notes.file_name().and_then(|n| n.to_str()).filter(|n| *n != LONG && RepoPath::parse(&format!("{n}/x")).is_ok()).map(str::to_string);
+    let root = root.ok_or_else(|| coded(Code::InvalidUsage, format!("{}: --notes names a folder whose name a fragment's folder can be (such as home), but {LONG}", notes.display())))?;
 
     // what the notes keep: each file as kept (its size and sums), and the
     // paths its parts hold, by fragment
     let mut covered: HashMap<String, Moved> = HashMap::new();
     let mut taken: HashMap<(String, String), String> = HashMap::new();
-    for (note, r) in notes_under(&notes)? {
+    // a file there named as a note is, reading as no note, the home's own
+    // with its bytes, was brought back from its note: it is that file
+    let brought = |at: &Path| -> bool {
+        let rel = at.strip_prefix(&notes).ok().and_then(Path::to_str);
+        let sums = rel.and_then(|rel| Some((src.get(rel)?.size, src.sums(rel).ok()??.0)));
+        sums.is_some_and(|(size, crc32)| brought_back(at, size, crc32))
+    };
+    let found = notes_under(&notes, &brought)?;
+    for (note, r) in &found {
         let dir = note.parent().expect("a note has a folder").strip_prefix(&notes).expect("found under the notes").to_string_lossy().to_string();
         for f in &r.files {
             let path = if dir.is_empty() { f.path.clone() } else { format!("{dir}/{}", f.path) };
@@ -365,13 +399,19 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     let records: Vec<Record> = groups
         .iter()
         .map(|g| {
-            let at = g.at(&root).ok_or_else(|| coded(Code::InvalidUsage, format!("{} cannot be kept: its name is too long for any place in storage. Nothing was written", g.key)))?;
+            let at = g.at(&root).ok_or_else(|| coded(Code::InvalidUsage, format!("{} cannot be kept: its name is longer than a file's can be ({} bytes), or one no fragment's file can have. Nothing was written", g.key, offload::NAME_MAX)))?;
             Ok(g.record(&into, at, &notes, part_bytes))
         })
         .collect::<Result<_>>()?;
     // every path a run writes is its file's alone: never another's, nor
-    // one a note keeps (a file named as another's part), checked first
+    // one a note keeps (a file named as another's part), and each note's
+    // place its own, never a note's there (a name named short, crafted to
+    // be another's), checked first
+    let mut noted: BTreeSet<PathBuf> = found.into_iter().map(|(note, _)| note).collect();
     for (g, r) in groups.iter().zip(&records) {
+        if !noted.insert(g.note(&notes)) {
+            bail!(coded(Code::InvalidRequest, format!("{}'s note would be {}, a note's place already: nothing was written", g.key, g.note(&notes).display())));
+        }
         for (k, f) in g.files.iter().zip(&r.files) {
             for (part, _) in r.parts(f) {
                 RepoPath::parse(&part).map_err(|e| coded(Code::InvalidUsage, format!("{} cannot be kept as {e}", k.path)))?;
@@ -451,15 +491,9 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
         let note = g.note(&notes);
         let dir = note.parent().expect("a note has a folder");
         std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
-        let name = g.key.rsplit('/').next().expect("a key names something");
         let when = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         let said = Said { title: "Kept in storage", came: format!("came from the old agent's home in its move here on {when}, and was kept off this disk") };
-        let text = offload::note_text(r, &note, name, said);
-        // a note that would not read back as this record is never written
-        match offload::record_of(&text) {
-            Ok(back) if back == *r => {}
-            read => bail!("{}'s note would not read back as kept ({:?}); its files are in {into}, under {}, but no note was written", g.key, read.err(), r.at),
-        }
+        let text = offload::readable_note(r, &note, g.name(), said).with_context(|| format!("{}'s files are in {into}, under {}, but no note was written", g.key, r.at))?;
         offload::publish(&note, &text)?;
         done.files += g.files.len();
         done.bytes += g.files.iter().map(|k| k.size).sum::<u64>();
@@ -638,7 +672,7 @@ mod tests {
         let left = String::from_utf8(s.mock.file_at(FILES, "main", "left-behind.md").unwrap()).unwrap();
         assert!(left.starts_with("# Kept in storage") && left.contains(STORE), "{left}");
         // a note for each group, which reads as a record of what it keeps
-        let notes = notes_under(&s.notes).unwrap();
+        let notes = notes_under(&s.notes, &|_| false).unwrap();
         let named: usize = notes.iter().map(|(_, r)| r.files.len()).sum();
         assert_eq!((named, stored.notes_written, notes.len()), (stored.files, notes.len(), notes.len()));
         assert!(notes.iter().all(|(_, r)| r.fragment == STORE && r.files.iter().all(|f| f.crc32.is_some())));
@@ -677,7 +711,7 @@ mod tests {
         s.mock.fail_stage_copies(1, 1);
         let e = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("503"), "{e}");
-        let cut: usize = notes_under(&s.notes).unwrap().iter().map(|(_, r)| r.files.len()).sum();
+        let cut: usize = notes_under(&s.notes, &|_| false).unwrap().iter().map(|(_, r)| r.files.len()).sum();
         let b = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
         let stored = b.stored.unwrap();
         assert_eq!(stored.already, cut, "what was proven before is kept already");
@@ -685,7 +719,7 @@ mod tests {
         for (path, want) in files.iter().filter(|(p, _)| !p.starts_with("work/notes") && !p.starts_with("work/photos") && !p.ends_with(".npmrc")) {
             assert_eq!(kept(&s.mock, STORE, &format!("home/{path}")).as_ref(), Some(want), "{path}");
         }
-        let named: usize = notes_under(&s.notes).unwrap().iter().map(|(_, r)| r.files.len()).sum();
+        let named: usize = notes_under(&s.notes, &|_| false).unwrap().iter().map(|(_, r)| r.files.len()).sum();
         assert_eq!(named, stored.files + stored.already, "each file named by one note");
     }
 
@@ -711,7 +745,7 @@ mod tests {
         let second = keep_within(&s.c, &s.src, rest.clone(), second_name, &s.notes, STORE_FILES_MAX).unwrap();
         assert!(second.more.is_none());
         assert_eq!((second.files, second.already), (more.files, first.files));
-        let fragments: BTreeSet<String> = notes_under(&s.notes).unwrap().into_iter().map(|(_, r)| r.fragment).collect();
+        let fragments: BTreeSet<String> = notes_under(&s.notes, &|_| false).unwrap().into_iter().map(|(_, r)| r.fragment).collect();
         assert_eq!(fragments, BTreeSet::from([STORE.to_string(), second_name.to_string()]));
     }
 
@@ -730,10 +764,16 @@ mod tests {
         s.mock.describe(STORE, "link", "app");
         let e = keep(&s.c, &s.src, rest.clone(), STORE, &s.notes).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("members-only"), "{e}");
-        assert!(s.mock.paths(STORE, "main").is_empty() && notes_under(&s.notes).unwrap().is_empty());
+        assert!(s.mock.paths(STORE, "main").is_empty() && notes_under(&s.notes, &|_| false).unwrap().is_empty());
         let folder = Source::open(&s.notes).unwrap();
         let e = keep(&s.c, &folder, vec![], STORE, &s.notes).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("zip the folder first"), "{e}");
+        // notes named as the place every notes folder's long names are kept
+        let other = "old-storage-4--h8j9";
+        s.mock.seed_repo(other, &[]);
+        let e = keep(&s.c, &s.src, rest.clone(), other, &s.notes.with_file_name(LONG)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains(&format!("but {LONG}")), "{e}");
+        assert!(s.mock.paths(other, "main").is_empty());
     }
 
     /// Goal: a copy whose blob is not what was kept never comes back as
@@ -742,7 +782,7 @@ mod tests {
     fn a_kept_file_that_changed_in_storage_is_not_brought_back() {
         let s = setup(&home());
         bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
-        let notes = notes_under(&s.notes).unwrap();
+        let notes = notes_under(&s.notes, &|_| false).unwrap();
         let (note, r) = notes.iter().find(|(_, r)| r.files.iter().any(|f| f.path.ends_with("w.gguf"))).expect("the weights' note");
         // its first part of two (3 MiB, in parts of 2)
         let at = format!("{}/{}.part-0001-of-0002", r.at, r.files.iter().find(|f| f.path.ends_with("w.gguf")).unwrap().path);
@@ -751,6 +791,32 @@ mod tests {
         let e = crate::offload::back(&s.c, note).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("not those stored") || e.contains("other bytes"), "{e}");
         assert!(note.exists(), "the note stays");
+    }
+
+    /// Goal (Codex on #1561): a note's place is never freed by a copy of the
+    /// note in the home. A home holding its own copy of a note this import
+    /// wrote, and other bytes for the file that note keeps, is refused
+    /// before anything is written, and the note still brings back its own.
+    #[test]
+    fn a_copy_of_a_note_in_the_home_never_frees_its_place() {
+        let mut files = home();
+        files.push(("model.gguf".into(), bytes(4096, 17)));
+        let s = setup(&files);
+        bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
+        let note = s.notes.join(format!("model.gguf{NOTE_SUFFIX}"));
+        let mut changed = files.clone();
+        changed.last_mut().unwrap().1[0] ^= 1;
+        changed.push((format!("model.gguf{NOTE_SUFFIX}"), std::fs::read(&note).unwrap()));
+        let zip = s._t.0.join("stage-copy.zip");
+        fragment_fakes::old_home::zip(&zip, &changed).unwrap();
+        s.mock.seed_stage("old1.p1.3", std::fs::read(&zip).unwrap());
+        let src2 = crate::home::open_from(Some(&s.c), Path::new("stage:old1.p1.3"), &layout()).unwrap();
+        let head = s.mock.branch(STORE, "main");
+        let e = bring(&s.c, &src2, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("other bytes than this home's") && e.contains("model.gguf"), "{e}");
+        assert_eq!(s.mock.branch(STORE, "main"), head, "nothing written");
+        crate::offload::back(&s.c, &note).unwrap();
+        assert_eq!(std::fs::read(s.notes.join("model.gguf")).unwrap(), files.last().unwrap().1, "the note brings back its own");
     }
 
     /// Goal (Codex on #1389): a home whose files differ from what its
@@ -804,7 +870,7 @@ mod tests {
         let src = crate::home::open_from(Some(&s.c), Path::new("stage:old1.p1.9"), &layout()).unwrap();
         let e = bring(&s.c, &src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("work/videos/big.mp4 in the stage is not the old file"), "{e}");
-        assert!(notes_under(&s.notes).unwrap().iter().all(|(_, r)| r.files.iter().all(|f| !f.path.ends_with("big.mp4"))), "no note names it");
+        assert!(notes_under(&s.notes, &|_| false).unwrap().iter().all(|(_, r)| r.files.iter().all(|f| !f.path.ends_with("big.mp4"))), "no note names it");
     }
 
     /// Goal (Codex on #1389): a file named as another's part never takes
@@ -819,7 +885,7 @@ mod tests {
         let e = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("would both be kept as home/agent/big.bin.part-0001-of-0003"), "{e}");
         assert_eq!(s.mock.branch(STORE, "main"), head);
-        assert!(notes_under(&s.notes).unwrap().is_empty());
+        assert!(notes_under(&s.notes, &|_| false).unwrap().is_empty());
     }
 
     /// Goal (FIN-755): a file whose own place in storage would be past a
@@ -840,7 +906,7 @@ mod tests {
         let b = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
         let stored = b.stored.expect("kept");
         assert_eq!(b.files + stored.files, files.len() - 1, "every file but the key brought or kept");
-        let notes = notes_under(&s.notes).unwrap();
+        let notes = notes_under(&s.notes, &|_| false).unwrap();
         for (path, want) in [(&log, &files[files.len() - 3].1), (&video, &files[files.len() - 2].1)] {
             let (note, r) = notes.iter().find(|(_, r)| r.files.iter().any(|f| path.ends_with(&format!("/{}", f.path)) && r.from.ends_with(path.as_str()))).expect("its own note");
             assert!(r.at.starts_with(&format!("home/{LONG}/")) && r.at.len() < 40, "a short place: {}", r.at);
@@ -866,18 +932,134 @@ mod tests {
         }
     }
 
-    /// Invalid: a deep file with no place a note can name, its own name too
-    /// long even for a short one, is refused before anything is written:
-    /// never kept without a note.
+    /// Goal (FIN-755; Codex on #1557): a file too deep for its own place
+    /// whose name is too long even for the short one (243 to 255 bytes, a
+    /// name a file system keeps) is kept whole under a shorter place still;
+    /// a file or a folder whose note's name would be past a file name's
+    /// most has a note named short, where it was. `--back`, by the note or
+    /// by where it was, brings each to its own name, byte for byte. Replay:
+    /// kept already, nothing committed; brought back, kept already.
+    #[test]
+    fn a_file_whose_name_is_too_long_for_its_place_or_its_note_is_kept() {
+        let deep = format!("work/x/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
+        let wide = format!("{}x", "é".repeat(127));
+        assert_eq!(wide.len(), 255, "the longest name a file system keeps, in letters of two bytes");
+        // too deep, its name 250 bytes (in parts) and 255; and at the top, its note's name too long
+        let long = [(format!("{deep}/{}", "n".repeat(250)), bytes(5 * MIB + 1, 21)), (format!("{deep}/{wide}"), b"wide".to_vec()), ("m".repeat(250), b"top".to_vec())];
+        // and a folder whose own name is too long for its note's
+        let folder = "f".repeat(250);
+        let mut files = home();
+        files.extend(long.iter().cloned());
+        files.push((format!("{folder}/inner.txt"), b"in".to_vec()));
+        let s = setup(&files);
+        let b = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
+        let stored = b.stored.expect("kept");
+        assert_eq!(b.files + stored.files, files.len() - 1, "every file but the key brought or kept");
+        let notes = notes_under(&s.notes, &|_| false).unwrap();
+        let note_of = |path: &str| notes.iter().find(|(_, r)| r.from.ends_with(path)).cloned().expect("its own note");
+        let (folder_note, r) = note_of(&folder);
+        let named = folder_note.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        assert!(named.len() <= 255 && named.ends_with(NOTE_SUFFIX) && r.at == "home" && r.dirs[0].path == folder, "{}", folder_note.display());
+        for (i, (path, want)) in long.iter().enumerate() {
+            let (note, r) = note_of(path);
+            let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+            let named = note.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            assert!(named.len() <= 255 && named.ends_with(NOTE_SUFFIX) && note.parent() == Some(&*s.notes.join(parent)), "a note a file system keeps, where it was: {}", note.display());
+            assert_eq!((r.files.len(), r.files[0].path.as_str()), (1, name), "its own name");
+            match i {
+                2 => assert_eq!(r.at, "home", "where it was"),
+                _ => assert!(r.at.starts_with(&format!("{LONG}/")) && r.at.len() <= 22, "a shorter place: {}", r.at),
+            }
+            assert_eq!(kept(&s.mock, STORE, &format!("{}/{name}", r.at)).as_ref(), Some(want), "{path}: whole");
+        }
+        assert!(s.mock.paths(STORE, "main").iter().all(|p| RepoPath::parse(p).is_ok()));
+
+        // replay: nothing kept twice, nothing committed
+        let head = s.mock.branch(STORE, "main");
+        let again = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
+        assert_eq!((again.files, again.already), (0, stored.files));
+        assert_eq!(s.mock.branch(STORE, "main"), head);
+
+        // back, by its note or by where it was: to its own name, as it was
+        for (i, (path, want)) in long.iter().enumerate() {
+            let (note, _) = note_of(path);
+            let by = if i == 2 { s.notes.join(path) } else { note.clone() };
+            crate::offload::back(&s.c, &by).unwrap();
+            assert_eq!(std::fs::read(s.notes.join(path)).unwrap(), *want, "{path}: back");
+            assert!(!note.exists());
+        }
+        crate::offload::back(&s.c, &s.notes.join(&folder)).unwrap();
+        assert_eq!(std::fs::read(s.notes.join(&folder).join("inner.txt")).unwrap(), b"in");
+        assert!(!folder_note.exists());
+        let after = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
+        assert_eq!((after.files, after.already), (0, stored.files), "brought back: kept already");
+    }
+
+    /// Goal (FIN-757): a kept file named as a note is (`<name>.offloaded.md`:
+    /// an old agent's own note, or a log), where it was or too deep for
+    /// that, has a note `--back` reads, and comes back by its own name,
+    /// byte for byte. Back, it is the home's file, not a note of this
+    /// import: a run again keeps it no more.
+    #[test]
+    fn a_kept_file_named_as_a_note_comes_back() {
+        let deep = format!("work/x/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
+        let theirs = Record {
+            fragment: "elsewhere--x1y2".into(),
+            at: "2026-01-02T030405Z-abcd/home/hermes".into(),
+            from: "/home/hermes/old".into(),
+            part_bytes: 4,
+            dirs: vec![],
+            files: vec![Moved { path: "old".into(), size: 3, sha256: Some("a".repeat(64)), crc32: None, mode: 0o644 }],
+        };
+        let said = offload::Said { title: "Moved to storage", came: "was moved off this disk".into() };
+        let theirs = offload::note_text(&theirs, Path::new("/home/hermes/old.offloaded.md"), "old", said).into_bytes();
+        let named = [(format!("{deep}/log{NOTE_SUFFIX}"), b"# a log, not a note\n".to_vec()), (format!("old{NOTE_SUFFIX}"), theirs)];
+        let mut files = home();
+        files.extend(named.iter().cloned());
+        let s = setup(&files);
+        let stored = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
+        // back by where it was (Codex on #1561), and by its note
+        for (i, (path, want)) in named.iter().enumerate() {
+            let note = s.notes.join(format!("{path}{NOTE_SUFFIX}"));
+            assert!(note.is_file(), "its note: {}", note.display());
+            crate::offload::back(&s.c, &if i == 0 { s.notes.join(path) } else { note.clone() }).unwrap();
+            assert_eq!(std::fs::read(s.notes.join(path)).unwrap(), *want, "{path}: back by its own name");
+            assert!(!note.exists());
+        }
+        let after = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
+        assert_eq!((after.files, after.already), (0, stored.files), "brought back: the home's own files, kept already");
+    }
+
+    /// Invalid: a deep file with no place a note can name, its own name
+    /// past what a file system keeps (no home on one held it), is refused
+    /// before anything is written: never kept without a note.
     #[test]
     fn a_file_with_no_place_in_storage_is_refused_before_anything_is_written() {
         let deep = format!("work/x/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
         let mut files = home();
-        files.push((format!("{deep}/{}", "n".repeat(250)), b"x".to_vec()));
+        files.push((format!("{deep}/{}", "n".repeat(offload::NAME_MAX + 1)), b"x".to_vec()));
         let s = setup(&files);
         let e = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(e.contains("too long for any place in storage. Nothing was written"), "{e}");
-        assert!(s.mock.paths(STORE, "main").is_empty() && notes_under(&s.notes).unwrap().is_empty());
+        assert!(e.contains("its name is longer than a file's can be (255 bytes)") && e.contains("Nothing was written"), "{e}");
+        assert!(s.mock.paths(STORE, "main").is_empty() && notes_under(&s.notes, &|_| false).unwrap().is_empty());
+    }
+
+    /// Invalid: a file whose note would be at a note's place already (a
+    /// name crafted as another's named short, or a note there) is refused
+    /// before anything is written, never after its parts.
+    #[test]
+    fn a_note_at_a_notes_place_is_refused_before_anything_is_written() {
+        let long = "n".repeat(250);
+        let crafted = offload::note_name(&long).strip_suffix(NOTE_SUFFIX).expect("a note's name").to_string();
+        let mut files = home();
+        files.push((long, b"long".to_vec()));
+        files.push((crafted, b"crafted".to_vec()));
+        let s = setup(&files);
+        let head = s.mock.branch(STORE, "main");
+        let e = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("a note's place already: nothing was written"), "{e}");
+        assert_eq!(s.mock.branch(STORE, "main"), head);
+        assert!(notes_under(&s.notes, &|_| false).unwrap().is_empty());
     }
 
     /// Goal: each group is a note's worth: a folder within the bounds is
@@ -910,11 +1092,20 @@ mod tests {
         let keys: Vec<(&str, bool)> = made.iter().map(|g| (g.key.as_str(), g.folder)).collect();
         assert_eq!(keys, [("run", true), (far.as_str(), false)]);
         assert_eq!(made[0].files.len(), 1);
-        // its place: where it was if that fits (a home's own `.long` file too), else short, else none
+        // its place: where it was if that fits (a home's own `.long` file too), else short,
+        // else shorter (a long name, under any notes folder's name), else none
         let alone = |key: &str| Group { key: key.into(), folder: false, files: vec![k(key, 1)] };
         assert_eq!(alone("run/a.txt").at("home").as_deref(), Some("home/run"));
         assert_eq!(alone(&format!("{LONG}/0123/v.bin")).at("home").as_deref(), Some(&*format!("home/{LONG}/0123")));
         assert_eq!(alone(&far).at("home"), Some(format!("home/{LONG}/{}", &blob::sha256_hex(far.as_bytes())[..LONG_HEX])));
-        assert_eq!(alone(&format!("run/{}/{}", "d".repeat(280), "n".repeat(250))).at("home"), None);
+        // under `home`, a name of 242 bytes is the longest the short place takes
+        let edge = |n: usize| alone(&format!("run/{}/{}", "d".repeat(280), "n".repeat(n))).at("home").map(|at| at.starts_with(&format!("home/{LONG}/")));
+        assert_eq!((edge(242), edge(243)), (Some(true), Some(false)));
+        let named = format!("run/{}/{}", "d".repeat(280), "n".repeat(offload::NAME_MAX));
+        assert_eq!(alone(&named).at("home"), Some(format!("{LONG}/{}", &blob::sha256_hex(format!("home/{named}").as_bytes())[..SHORT_HEX])));
+        let root = "h".repeat(200);
+        assert_eq!(alone(&named).at(&root), Some(format!("{LONG}/{}", &blob::sha256_hex(format!("{root}/{named}").as_bytes())[..SHORT_HEX])));
+        assert_ne!(alone(&named).at("home"), alone(&named).at("home-2"), "each notes folder its own");
+        assert_eq!(alone(&format!("run/{}/{}", "d".repeat(280), "n".repeat(offload::NAME_MAX + 1))).at("home"), None);
     }
 }
