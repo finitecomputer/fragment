@@ -40,16 +40,18 @@ const CYCLES_MAX: u32 = 1_000;
 const CRASH_EVERY: u32 = 10;
 const FILL_MIB: u32 = 64;
 
-const DISK_CHECKS: [&str; 9] = [
+const DISK_CHECKS: [&str; 11] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
-    "a sleep is a signal and a wait: its owner's Storage read from its filesystem's own count, no walk of its files; its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
+    "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
     "a wake mounts the disk as it slept: what it wrote is there, nothing restored, its line saying what its last sleep left unshipped",
     "every write is read after the wake that follows it, each sleep clean, each tenth a crash while a fill ships",
     "a crash while it runs loses no write it acknowledged: the start after it mounts the disk as that life left it",
     "a head that will not open is fallen back past: that start fails as unusable, the next mounts the head before it, no strike",
     "awake or asleep, no save of a disk is taken for itself",
     "its owner's export of it asleep wakes it and copies a save taken for that export, its files whole",
+    "a sleep reads its owner's Storage with one df of its /data, its used bytes its data, no walk of its files",
+    "after an export's walk and a sleep, its owner's Storage is the sleep's total at the sleep's time, the older breakdown not shown beside it",
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
@@ -114,16 +116,23 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let after = row();
     let sleep1 = lines(s).1.into_iter().find(|l| l["sleep"]["generation"] == 1).unwrap_or(Value::Null);
     let saves = lever(api, &id, "saves")?.body["saves"].clone();
-    // its Storage, as its sleep measured it: one `df` of /data, its used
-    // bytes its data, and no walk of its files (which grows with them)
-    let measured = measures_of(s, &id).into_iter().filter(|m| m["generation"] == 1).collect::<Vec<_>>();
-    let read = measured.iter().any(|m| m["disk"]["data"].as_u64().is_some_and(|d| d > 0));
-    let walked = measured.iter().any(|m| m.get("sizes").is_some());
     s.ok(
         DISK_CHECKS[2],
-        wrote == "wrote disk/first.txt" && slept && head_of(&after["head"]).is_some_and(|(epoch, clean)| epoch == 1 && clean) && (!local || (sleep1["sleep"]["clean"] == true && sleep1["sleep"]["exited"] == true && read && !walked)) && saves.as_array().is_some_and(Vec::is_empty),
-        json!({ "wrote": wrote, "row": after, "line": sleep1, "saves": saves, "measured": measured }),
+        wrote == "wrote disk/first.txt" && slept && head_of(&after["head"]).is_some_and(|(epoch, clean)| epoch == 1 && clean) && (!local || (sleep1["sleep"]["clean"] == true && sleep1["sleep"]["exited"] == true)) && saves.as_array().is_some_and(Vec::is_empty),
+        json!({ "wrote": wrote, "row": after, "line": sleep1, "saves": saves }),
     );
+    // its Storage, as its sleep measured it: one `df` of /data, its used
+    // bytes its data, no walk of its files (which grows with them). The node's
+    // logs say which read ran; hosted, none are read here (the command
+    // itself is core's `a_disks_sleep_reads_one_df_and_walks_nothing`)
+    if local {
+        let measured = measures_of(s, &id).into_iter().filter(|m| m["generation"] == 1).collect::<Vec<_>>();
+        let read = measured.iter().any(|m| m["disk"]["data"].as_u64().is_some_and(|d| d > 0));
+        let walked = measured.iter().any(|m| m.get("sizes").is_some());
+        s.ok(DISK_CHECKS[9], read && !walked, json!({ "measured": measured }));
+    } else {
+        s.skip(DISK_CHECKS[9], "it reads the node's logs, which a hosted run has none of; core's a_disks_sleep_reads_one_df_and_walks_nothing pins the command");
+    }
 
     let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
     let woke = awake(s);
@@ -208,6 +217,16 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let (slept, _) = put_to_sleep(s, api, &owner, &id);
     let exported = disk_exported(s, api, &owner, &id)?;
     s.ok(DISK_CHECKS[8], slept && exported["ok"] == true, &exported);
+
+    // its export walked it (a breakdown, its df the same moment); a sleep
+    // after reads its total alone, and its Storage shows that total and
+    // its time, the older breakdown not beside it
+    let walked = view();
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    let after = view();
+    let (disk_at, sizes_at) = (after["disk"]["at"].as_i64(), after["sizes"]["at"].as_i64());
+    let current = after["disk"]["data"].is_u64() && disk_at > walked["disk"]["at"].as_i64() && sizes_at.is_none_or(|at| disk_at.is_some_and(|d| at >= d));
+    s.ok(DISK_CHECKS[10], walked["sizes"].is_object() && slept && current, json!({ "exported": { "disk": walked["disk"], "sizesAt": walked["sizes"]["at"] }, "slept": { "disk": after["disk"], "sizesAt": sizes_at } }));
     Ok(())
 }
 
@@ -215,7 +234,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
 /// head its open posts): at once, before its first flush (a second after
 /// its daemon starts) can ship anything, or later, as its flushes ship.
 const FIRST_KILLS_MS: [u64; 14] = [0, 0, 250, 500, 600, 700, 800, 900, 1_000, 1_200, 1_500, 2_000, 4_000, 8_000];
-const FIRST_LIVES: &str = "a new disk's first life killed at once after its claim, or as its flushes ship: its next start mounts the disk, its head that start's own, each sleep after clean, and a write it acknowledged and shipped is there";
+const FIRST_LIVES: &str = "a new disk's first life killed as it starts, at once after its claim, or later as its flushes ship: one whose next start found its device blank fell back once to a new disk, one that shipped mounted what it shipped, both seen; each next start's head its own, each sleep after clean, and a write it acknowledged and shipped is there";
 
 /// Each kill of `FIRST_KILLS_MS`, on a new computer of its own, then a
 /// first life that wrote, its write shipped, killed. Which kills shipped
@@ -234,32 +253,51 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
         let id = r.body["computer"].as_str().unwrap_or("").to_string();
         anyhow::ensure!(r.status == 200 && id.starts_with("computer:"), "a computer: {r}");
         let t0 = Instant::now();
-        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
-        let mut claim = Value::Null;
-        let claimed = s.eventually(WAKE, || {
-            claim = row(&id)["head"].clone();
-            !claim.is_null()
+        // its wake answers once its start is up: its claim is looked for as
+        // it starts, so the kill lands as soon after the claim as it can
+        let shared: &Suite = s;
+        let (claim, claimed, claimed_ms, mut life) = std::thread::scope(|sc| {
+            let waking = sc.spawn(|| api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({}))).map(|r| r.status).ok());
+            let mut claim = Value::Null;
+            let claimed = shared.eventually(WAKE, || {
+                claim = row(&id)["head"].clone();
+                !claim.is_null()
+            });
+            let claimed_ms = t0.elapsed().as_millis() as u64;
+            std::thread::sleep(Duration::from_millis(after));
+            let life = killed_and_back(shared, api, &owner, &id);
+            let _ = waking.join();
+            (claim, claimed, claimed_ms, life)
         });
-        let claimed_ms = t0.elapsed().as_millis() as u64;
-        std::thread::sleep(Duration::from_millis(after));
-        let mut life = killed_and_back(s, api, &owner, &id);
         let (slept, _) = put_to_sleep(s, api, &owner, &id);
-        let generation = life["generation"].as_u64().unwrap_or(0);
-        let clean = head_of(&row(&id)["head"]).is_some_and(|(e, c)| e == generation && c);
+        let (killed, next) = (life["killed"].as_u64().unwrap_or(0), life["generation"].as_u64().unwrap_or(0));
+        let clean = head_of(&row(&id)["head"]).is_some_and(|(e, c)| e == next && c);
+        // its next start the one after its kill (what shipped, mounted), or
+        // the one after that: its first found the device blank and fell back
+        // once, to a new disk
+        let (kept, fell) = (next == killed + 1, next == killed + 2);
+        // the node's lines say which fell back, and why; a hosted run's are
+        // the bucket's (what that life shipped) and the platform's, read after
+        let told = !local || {
+            let fallen = unusable_of(s, &id);
+            let blank = fallen.iter().all(|u| u["fellBackTo"] == "none (a new disk)" && u["why"].as_str().is_some_and(|w| w.contains("blank")));
+            life["fellBack"] = json!(fallen);
+            blank && fallen.len() == usize::from(fell)
+        };
         life["n"] = json!(n);
         life["afterMs"] = json!(after);
         life["claimed"] = json!(claimed);
         life["claimedMs"] = json!(claimed_ms);
         life["claim"] = claim;
+        life["fell"] = json!(fell);
         life["slept"] = json!(slept);
         life["clean"] = json!(clean);
-        if local {
-            life["fellBack"] = json!(unusable_of(s, &id));
-        }
-        life["ok"] = json!(claimed && life["sent"] == true && life["woke"] == true && life["from"] == "disk" && life["own"] == true && slept && clean);
+        life["ok"] = json!(claimed && life["sent"] == true && life["woke"] == true && life["from"] == "disk" && life["own"] == true && (kept || fell) && told && slept && clean);
         println!("      FIRSTLIFE {life}");
         lives.push(life);
     }
+    // both ways seen: a blank device fallen back past, and what shipped kept
+    let both = lives.iter().any(|l| l["fell"] == true) && lives.iter().any(|l| l["fell"] == false);
     // a first life that acknowledged a write, shipped before its kill
     let owner = api.person()?;
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
@@ -282,10 +320,11 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
     if local {
         life["fellBack"] = json!(unusable_of(s, &id));
     }
-    life["ok"] = json!(wrote == "wrote disk/first-life.txt" && first_line(&read) == "read disk/first-life.txt: shipped" && life["sent"] == true && life["woke"] == true && life["own"] == true && slept && clean);
+    let kept = life["generation"].as_u64() == life["killed"].as_u64().map(|k| k + 1);
+    life["ok"] = json!(wrote == "wrote disk/first-life.txt" && first_line(&read) == "read disk/first-life.txt: shipped" && life["sent"] == true && life["woke"] == true && life["own"] == true && kept && (!local || life["fellBack"].as_array().is_some_and(Vec::is_empty)) && slept && clean);
     println!("      FIRSTLIFE {life}");
     lives.push(life);
-    s.ok(FIRST_LIVES, lives.iter().all(|l| l["ok"] == true), json!(lives));
+    s.ok(FIRST_LIVES, both && lives.iter().all(|l| l["ok"] == true), json!(lives));
     Ok(())
 }
 
@@ -347,16 +386,18 @@ fn sleeps_as_it_grows(s: &mut Suite, api: &Api) -> Result<()> {
         ("100,000 files more", (0..4).map(|i| format!("fill-files grow/files{i} 25000")).collect()),
     ];
     for (step, says) in steps {
+        let mut prepared = true;
         for text in &says {
             let said = talk.said(s, text)?;
             if !said.starts_with("filled") {
+                prepared = false;
                 println!("      (growth: {text:?} answered {said:?})");
             }
         }
         // what the step wrote, shipped: a sleep and a wake
         std::thread::sleep(super::computers::QUEUE_DRAIN);
-        let _ = slept(s);
-        woken(s);
+        prepared &= slept(s).0;
+        prepared &= woken(s);
         for k in 0..3 {
             std::thread::sleep(super::computers::QUEUE_DRAIN);
             let generation = view()["restored"]["generation"].as_u64().unwrap_or(0);
@@ -365,7 +406,7 @@ fn sleeps_as_it_grows(s: &mut Suite, api: &Api) -> Result<()> {
             let measured = measures_of(s, &id).into_iter().filter(|m| m["generation"] == generation).collect::<Vec<_>>();
             let data = measured.iter().find_map(|m| m["disk"]["data"].as_u64());
             let walked = measured.iter().any(|m| m.get("sizes").is_some());
-            println!("      GROWTH {}", json!({ "step": step, "k": k, "generation": generation, "asleep": asleep, "sleepMs": sleep_ms, "drainMs": line["sleep"]["drainMs"], "stopMs": line["sleep"]["stopMs"], "walked": walked, "data": data }));
+            println!("      GROWTH {}", json!({ "step": step, "prepared": prepared, "k": k, "generation": generation, "asleep": asleep, "sleepMs": sleep_ms, "drainMs": line["sleep"]["drainMs"], "stopMs": line["sleep"]["stopMs"], "walked": walked, "data": data }));
             woken(s);
         }
     }
@@ -445,28 +486,37 @@ const IMAGE_HELD: &str = "its databases stay live on a disk: each export's copy 
 /// back, its live databases being newer, so each export's copy of Hermes'
 /// `state.db` holds every message said before it.
 fn image_on_disk(s: &mut Suite, api: &Api) -> Result<()> {
-    let keys = crate::Keys::generate();
-    let (session, _) = api.e2e_sign_in(&Api::email_of(&keys), IMAGE_PAID_CALLS)?;
-    let me = api.approve(&session, &keys)?;
-    anyhow::ensure!(me.status == 200 && me.body["id"].is_string(), "an approved key works: {me}");
+    // its messages are its agent's turns, a model's: only where the run
+    // offers models and has the calls to lend; else its lives alone
+    let paid = s.meets(Need::Models) && api.paid_calls_left() >= IMAGE_PAID_CALLS;
+    let keys = if paid {
+        let keys = crate::Keys::generate();
+        let (session, _) = api.e2e_sign_in(&Api::email_of(&keys), IMAGE_PAID_CALLS)?;
+        let me = api.approve(&session, &keys)?;
+        anyhow::ensure!(me.status == 200 && me.body["id"].is_string(), "an approved key works: {me}");
+        keys
+    } else {
+        api.person()?
+    };
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(made.status == 200 && id.starts_with("computer:"), "a computer: {made}");
     let view = || api.signed(&keys, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
-    let (agent, chat, identity) = agent_in_chat(s, api, &keys, &id, &[("agent.json", Some(br#"{ "tier": "cheap" }"#))])?;
+    let talker = if paid { Some(agent_in_chat(s, api, &keys, &id, &[("agent.json", Some(br#"{ "tier": "cheap" }"#))])?) } else { None };
+    let (agent, chat, identity) = talker.clone().unwrap_or_default();
     let talk = Talk { api, owner: &keys, chat: &chat, agent: &agent, identity: &identity, n: std::cell::Cell::new(0), bound: TURN };
     let evidence = s.dir("disks-held");
     let (mut lives, mut exports, mut said) = (vec![], vec![], Vec::<String>::new());
     let mut generation = 0u64;
     for life in 0..LIVES {
-        // its join woke the first
-        if life > 0 {
+        // its agent's join woke the first, if it has one
+        if life > 0 || !paid {
             let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
         }
         let woke = s.eventually(WAKE * 5, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > generation) && phase(api, &keys, &id) == "awake");
         let up = view();
         generation = up["restored"]["generation"].as_u64().unwrap_or(generation);
-        if life == 0 {
+        if life == 0 && paid {
             // its agent follows its chat (the shell's ready) before it is told anything
             let following = || {
                 api.signed(&keys, "GET", &format!("/api/f/{chat}/subscriptions"), None)
@@ -476,13 +526,13 @@ fn image_on_disk(s: &mut Suite, api: &Api) -> Result<()> {
             let _ = s.eventually(TURN, following);
         }
         let mut l = json!({ "life": life + 1, "woke": woke, "from": up["restored"]["from"], "generation": generation });
-        if EXPORTS_IN.contains(&life) {
+        if paid && EXPORTS_IN.contains(&life) {
             let e = held_state(s, api, &keys, &id, &agent, &said, &evidence.join(format!("state-{}.db", life + 1)))?;
             println!("      (life {}'s export: {e})", life + 1);
             l["export"] = e["ok"].clone();
             exports.push(e);
         }
-        if SAID_IN.contains(&life) {
+        if paid && SAID_IN.contains(&life) {
             let token = format!("{}-{}", s.name("held"), life + 1);
             let reply = talk.said(s, &format!("Please answer with the single word ok. ({token})"))?;
             l["said"] = json!(token);
@@ -504,6 +554,10 @@ fn image_on_disk(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let ok = lives.iter().all(|l| l["woke"] == true && l["from"] == "disk" && (l["killed"] == true || (l["slept"] == true && l["head"][1] == true && l["head"][0] == l["generation"])));
     s.ok(IMAGE_ON_DISK, ok, json!({ "image": view()["image"], "lives": lives }));
+    if !paid {
+        s.skip(IMAGE_HELD, &format!("its messages are its agent's turns, {IMAGE_PAID_CALLS} paid calls lent, and this run offers no models or has fewer to lend"));
+        return Ok(());
+    }
     let counts: Vec<i64> = exports.iter().map(|e| e["messages"].as_i64().unwrap_or(-1)).collect();
     let answered = lives.iter().filter(|l| l["said"].is_string()).all(|l| l["answered"] == true);
     let held = exports.len() == EXPORTS_IN.len() && exports.iter().all(|e| e["ok"] == true) && counts.windows(2).all(|w| w[0] <= w[1]) && answered;
@@ -539,10 +593,8 @@ fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, agent: &str, s
     }
     let manifest: Value = held.get("held-copies/manifest.json").and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
     let copies = manifest["copies"].as_array().cloned().unwrap_or_default();
-    let profile = |p: &str| p.starts_with("/data/hermes/profiles/") && p.ends_with("/state.db");
-    let theirs = copies.iter().find(|c| c["path"].as_str().is_some_and(|p| profile(p) && p.contains(agent)));
-    let chosen = theirs.or_else(|| copies.iter().find(|c| c["path"].as_str().is_some_and(profile)));
-    let path = chosen.and_then(|c| c["path"].as_str()).unwrap_or("").to_string();
+    let path = format!("/data/hermes/profiles/{agent}/state.db");
+    let chosen = copies.iter().find(|c| c["path"] == path.as_str());
     let copy = chosen.and_then(|c| c["file"].as_str()).map(|f| format!("held-copies/{f}"));
     let (mut messages, mut found) = (-1i64, vec![]);
     if let Some(bytes) = copy.as_ref().and_then(|c| held.get(c)) {
@@ -554,7 +606,7 @@ fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, agent: &str, s
             found.push(n > 0);
         }
     }
-    let live_left_out = !path.is_empty() && !held.contains_key(path.trim_start_matches("/data/"));
+    let live_left_out = chosen.is_some() && !held.contains_key(path.trim_start_matches("/data/"));
     let ok = summary["ok"] == true && messages > 0 && found.len() == said.len() && found.iter().all(|f| *f) && live_left_out;
     let paths: Vec<&str> = copies.iter().filter_map(|c| c["path"].as_str()).collect();
     Ok(json!({ "ok": ok, "built": summary["ok"], "save": summary["save"]["id"], "path": path, "copy": copy, "copies": paths, "messages": messages, "said": said, "found": found, "liveLeftOut": live_left_out, "first": names }))

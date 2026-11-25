@@ -580,6 +580,12 @@ impl Suite {
     }
 
     /// Whether the cell's secrets are OpenBao's: celld's node reads them there.
+    /// Whether this run's rung offers `need` (`needs::unmet`), for a
+    /// section that runs a part of itself only where it is offered.
+    pub fn meets(&self, need: Need) -> bool {
+        needs::unmet(&[need], self.rung).is_none()
+    }
+
     pub fn has_openbao(&self) -> bool {
         self.openbao.is_some()
     }
