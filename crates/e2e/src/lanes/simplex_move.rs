@@ -78,13 +78,19 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
 
     // linked from its computer, by its owner's own ticket, as Settings links one
     let ticket = api.signed(&owner, "POST", &format!("/api/computers/{id}/agents/{agent}/door"), Some(&json!({ "door": "simplex", "act": "link" })))?;
+    anyhow::ensure!(ticket.status == 200, "its owner's link ticket: {ticket}");
     let nonce = ticket.body["nonce"].as_str().unwrap_or("").to_string();
     let linking = port("POST", &format!("/simplex/link?agent={agent}"), Some(&ticket.body))?;
+    anyhow::ensure!(linking.status == 200, "its link, asked of its bridge through its port: {linking}");
     let mut invite = Value::Null;
-    s.eventually(SLOW, || {
+    let invited = s.eventually(SLOW, || {
         invite = port("GET", &format!("/simplex/state?agent={agent}&s={nonce}"), None).map(|r| r.body).unwrap_or(Value::Null);
         invite["link"].is_string()
     });
+    if !invited {
+        s.ok("its computer's SimpleX shows its owner an invitation", false, &invite);
+        return Ok(());
+    }
     let phone_dir = s.dir("simplex-move-phone");
     let mut phone = Phone::start(&phone_dir, &s.name("phone"))?;
     phone.cmd(&format!("/c {}", invite["link"].as_str().unwrap_or("")))?;
