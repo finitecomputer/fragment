@@ -6,4 +6,5 @@
 -- a record's trigger matches its body's `kind` against (cell/src/plane.rs
 -- `channel_triggers`).
 CREATE TABLE IF NOT EXISTS code_trigger_kinds (
-  idx INTEGER NOT NULL, n INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (idx, n), UNIQUE (idx, kind));
+  idx INTEGER NOT NULL, n INTEGER NOT NULL CHECK (typeof(n) = 'integer' AND n >= 0), kind TEXT NOT NULL CHECK (typeof(kind) = 'text'),
+  PRIMARY KEY (idx, n), UNIQUE (idx, kind));
