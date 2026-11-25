@@ -230,7 +230,7 @@ struct RecordRow {
     /// `None` on a record stored before the stamp (Fragment step 11).
     author: Option<String>,
     /// Whose ask the platform wrote it for (a schedule's fire: Fragment
-    /// step 14); `None` on any other.
+    /// step 15); `None` on any other.
     asker: Option<String>,
     kind: String,
     body: String,

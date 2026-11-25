@@ -791,7 +791,7 @@ impl FragmentCell {
                 json!({ "visibility": v })
             }
             Some("legacy-schedule") => {
-                // a schedule kept from before askers (Fragment step 14,
+                // a schedule kept from before askers (Fragment step 15,
                 // 2026-11-25): its asker NULL, as such rows were left
                 let id = body["schedule"].as_i64().ok_or_else(|| CellError::invalid("legacy-schedule names a schedule's id"))?;
                 let n = self.rows("UPDATE record_schedules SET asker = NULL WHERE id = ? RETURNING id", vec![SqlStorageValue::Integer(id)])?.len();

@@ -51,7 +51,7 @@ struct Row {
     next_at: Option<i64>,
     last_at: Option<i64>,
     /// Whose ask it is: whoever its maker acted for, else its maker
-    /// (FIN-720). `None` on one made before (Fragment step 14): its maker's
+    /// (FIN-720). `None` on one made before (Fragment step 15): its maker's
     /// (`Row::asker`).
     asker: Option<String>,
 }

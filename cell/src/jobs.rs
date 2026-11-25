@@ -182,7 +182,7 @@ pub(crate) struct RunRow {
     /// Who it acts as: an identity, an anonymous visitor, or the fragment's own key.
     pub principal: String,
     /// Whose ask it is, when that is someone else than its agent's owner
-    /// (`NewRun::asker`; Fragment step 14).
+    /// (`NewRun::asker`; Fragment step 15).
     pub asker: Option<String>,
     /// Whom an agent's run acts for (`NewRun::acting_for`): read through
     /// `RunRow::acting_for`.

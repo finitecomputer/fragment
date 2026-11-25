@@ -236,6 +236,9 @@ pub mod limits {
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// Triggers per fragment.
     pub const TRIGGERS_MAX: usize = 32;
+    /// The kinds of record one channel trigger starts runs for, at most
+    /// (`TriggerDecl::kinds`): as many as a channel lists.
+    pub const TRIGGER_KINDS_MAX: usize = LISTED_KINDS_MAX;
     /// Paths a fragment.json names as kept for good (`immutable`).
     pub const IMMUTABLE_MAX: usize = 16;
     /// How many hops a chain of triggered runs may take (a mutation's record
@@ -2415,6 +2418,13 @@ pub struct TriggerDecl {
     /// "agent"`). None: every record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<IdentityKind>,
+    /// A channel trigger's kinds of record: only a record whose body's
+    /// `kind` is one of these starts a run (a chat's agents' questions:
+    /// `"kinds": ["turn.prompt"]` on `work`), at most
+    /// `limits::TRIGGER_KINDS_MAX`, each `valid_listed_kind`. Empty: every
+    /// record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

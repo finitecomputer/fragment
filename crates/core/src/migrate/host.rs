@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(same("legacy", "npub1ben", ""), None, "nor its maker's add on someone else's ask, which binds no maker");
     }
 
-    /// Goal (FIN-720, Fragment step 14): a run's call id is its caller's,
+    /// Goal (FIN-720, Fragment step 15): a run's call id is its caller's,
     /// and an agent's for someone else than its owner is theirs: Juniper's
     /// `sync` for Ana (no asker) and for Ben are two runs; the same again
     /// for either is refused, so a replay finds the one there, as a run

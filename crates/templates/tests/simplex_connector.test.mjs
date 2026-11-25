@@ -102,11 +102,41 @@ test("its bound agent's reply goes through the door by its record's key, asked a
 
 test("only its bound agent's replies go, never interim words, a member's call or another's", async () => {
   const w = world();
-  assert.deepEqual(await w.app.mirror(w.reply(1), w.job("call")), { sent: 0, why: "only the chat's trigger sends" });
+  assert.deepEqual(await w.app.mirror(w.reply(1), w.job("call")), { sent: 0, why: "only its triggers send" });
   assert.deepEqual(await w.app.mirror(w.reply(2), w.job("channel", null)), { sent: 0, why: "not linked" });
   assert.deepEqual(await w.app.mirror({ record: { seq: 3, principal: "npub1other", body: { text: "x", turn: "t" } } }, w.job("channel")), { sent: 0, why: "not its bound agent's" });
   assert.deepEqual(await w.app.mirror(w.reply(4, { interim: true }), w.job("channel")), { sent: 0, why: "not a reply" });
   assert.deepEqual(await w.app.mirror(w.reply(5, { text: " " }), w.job("channel")), { sent: 0, why: "nothing said" });
+  assert.deepEqual(w.asked, []);
+});
+
+// a card its bound agent posts on `work`, asking its owner
+const card = (seq, body) => ({
+  record: {
+    channel: "work",
+    seq,
+    principal: AGENT,
+    body: { kind: "turn.prompt", turn: "t1", prompt: "c-1", text: "What should I plant?", asks: "npub1paul", expiresAt: 1, options: [{ id: "c0", label: "Basil" }, { id: "c1", label: "Mint" }, { id: "other", label: "Something else", words: true }], ...body },
+  },
+});
+
+test("its bound agent's question to its owner goes through the door, worded as every door words one, by its record's key (FIN-747)", async () => {
+  const w = world({ reply: [[202, { done: false }], [200, { done: true }]] });
+  assert.deepEqual(await w.app.mirror(card(7), w.job("channel")), { sent: 1 });
+  assert.deepEqual(w.asked.map((a) => a.body), Array(2).fill({ key: "work:7", text: "What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)" }), "one key on every ask");
+  // a code answered on its computer (Claude's sign-in) is never asked for here
+  const code = world();
+  await code.app.mirror(card(8, { options: [{ id: "code", label: "Paste the code", words: true, computer: true }] }), code.job("channel"));
+  assert.equal(code.asked[0].body.text, "I need something from you on a card in our chat. Type it there, not here: from there it goes to your computer alone.", "never its words, which say to paste it here");
+});
+
+test("only a question its bound agent asks its owner goes, and nothing else of its turns' work", async () => {
+  const w = world();
+  assert.deepEqual(await w.app.mirror(card(1, { asks: "npub1someone" }), w.job("channel")), { sent: 0, why: "it asks someone else" });
+  assert.deepEqual(await w.app.mirror({ record: { ...card(2).record, principal: "npub1other" } }, w.job("channel")), { sent: 0, why: "not its bound agent's" });
+  assert.deepEqual(await w.app.mirror({ record: { channel: "work", seq: 3, principal: AGENT, body: { kind: "turn.start", turn: "t1" } } }, w.job("channel")), { sent: 0, why: "not a question" });
+  assert.deepEqual(await w.app.mirror(card(4), w.job("channel", null)), { sent: 0, why: "not linked" });
+  assert.deepEqual(await w.app.mirror(card(5), w.job("call")), { sent: 0, why: "only its triggers send" });
   assert.deepEqual(w.asked, []);
 });
 

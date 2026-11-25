@@ -1,4 +1,4 @@
--- Fragment, step 14: whose ask each thing is (FIN-720; docs/api.md, "Who
+-- Fragment, step 15: whose ask each thing is (FIN-720; docs/api.md, "Who
 -- asked: mandates"). A schedule's asker (whom its maker acted for, else its
 -- maker), checked again at each fire, and the record a fire appends for
 -- them; a run's asker when that is someone else than its agent's owner,

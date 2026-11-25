@@ -89,7 +89,7 @@ struct Sign {
 /// from one of them is known as a retired life's.
 const TURN_LIVES_KEPT: i64 = 8;
 
-/// An open turn as its row holds it (`turns`, Fragment step 14).
+/// An open turn as its row holds it (`turns`, Fragment step 15).
 #[derive(Deserialize)]
 struct TurnRow {
     place: String,

@@ -1098,6 +1098,34 @@ fn future_rows(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// A channel trigger's `kinds` (FIN-747): it starts a run for a record
+/// whose body's `kind` is one of them, a string, and for no other: not
+/// another kind, none, nor a number or a boolean that reads as one of
+/// them; listed in its manifest's order. A run is started as its record is
+/// appended, so the runs are there once the posts are answered.
+fn trigger_kinds(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let (name, _) = jobs_fragment(s, api, &owner, "kinds", |m| {
+        m["channels"]["pings"] = json!({ "read": "viewer", "post": "owner" });
+        m["triggers"].as_array_mut().expect("the fixture's triggers").push(json!({ "channel": "pings", "kinds": ["turn.prompt", "1"], "run": "tick" }));
+    })?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
+    let mine = listed.body["triggers"].as_array().and_then(|l| l.iter().find(|t| t["channel"] == "pings").cloned()).unwrap_or_default();
+    let mut posted = vec![];
+    for (i, body) in [json!({ "kind": 1 }), json!({ "kind": true }), json!({ "kind": "turn.start" }), json!({ "text": "no kind" }), json!({ "kind": "1" }), json!({ "kind": "turn.prompt" })].into_iter().enumerate() {
+        let r = api.signed(&owner, "POST", &format!("/api/f/{name}/channels/pings"), Some(&json!({ "id": format!("k{i}"), "body": body })))?;
+        posted.push(r.status);
+    }
+    let ticked: Vec<Value> = runs(api, &owner, &name, "&op=tick").into_iter().filter(|r| r["trigger"] == "pings").collect();
+    let seqs: Vec<i64> = records(api, &owner, &name, "pings").iter().filter(|r| r["body"]["kind"] == "1" || r["body"]["kind"] == "turn.prompt").filter_map(|r| r["seq"].as_i64()).collect();
+    s.ok(
+        "a channel trigger that names kinds starts a run for a record of one of them alone, by its body's kind as a string, and lists them in order",
+        mine["kinds"] == json!(["turn.prompt", "1"]) && posted.iter().all(|s| *s == 200) && ticked.len() == 2 && seqs.len() == 2,
+        json!({ "trigger": mine, "posted": posted, "runs": ticked, "matching": seqs }),
+    );
+    Ok(())
+}
+
 fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     let (owner, editor, viewer, stranger) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let (name, c) = jobs_fragment(s, api, &owner, "schedules", |m| {
@@ -1572,6 +1600,7 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     woke_trigger(s, api, long)?;
     future_rows(s, api)?;
     scheduled_records(s, api, long)?;
+    trigger_kinds(s, api)?;
 
     // cron, last: its fragment was deployed before the sections ahead of
     // this one, so a full run has passed a minute boundary by now; alone,
