@@ -3186,10 +3186,16 @@ impl ComputerCell {
             relay: None,
             relay_targets: None,
             disk: saves.disk_view(),
-            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| crate::json_text::<fragment_proto::computer::ComputerSizes>(&j).ok()).map(|mut s| {
-                s.kinds = fragment_core::computer::storage_kinds(&s);
-                s
-            }),
+            // a disk's breakdown as of its last read alone: its sleep reads
+            // its total by itself (Codex on #1552)
+            sizes: self
+                .meta(MetaKey::Sizes)?
+                .and_then(|j| crate::json_text::<fragment_proto::computer::ComputerSizes>(&j).ok())
+                .filter(|s| !life.disk() || fragment_core::computer::sizes_current(s.at, saves.disk_view().map(|d| d.at)))
+                .map(|mut s| {
+                    s.kinds = fragment_core::computer::storage_kinds(&s);
+                    s
+                }),
             room_first: saves.update_waits(),
         }))
     }
