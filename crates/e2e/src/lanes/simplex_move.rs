@@ -111,8 +111,7 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its computer's SimpleX linked to the phone, by its owner's ticket", linking.status == 200 && linked && contact > 0, json!({ "link": linking.status, "invite": invite["phase"] }));
     let old = s.eventually(SLOW, || simplex_chat(api, &owner, &agent).is_some()).then(|| simplex_chat(api, &owner, &agent)).flatten().unwrap_or_default();
     // its agent's answer: any word from it after the phone's (it may quote it)
-    let answered = |phone: &mut Phone, text: &str| phone.say(contact, text).and_then(|()| phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty() && !g.contains("You're linked"))));
-    let before = answered(&mut phone, "before the move");
+    let before = answered(s, api, &owner, &mut phone, contact, "before the move", &old);
     let relayed_before = relayed(api, &owner, &old);
     s.ok("the phone's message lands in its computer's SimpleX chat, and its agent's answer reaches the phone", before.is_ok() && relayed_before == ["before the move"], json!({ "chat": old, "relayed": relayed_before, "answer": format!("{before:?}") }));
 
@@ -139,7 +138,7 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
         went["record"]["step"] == "done" && !connector.is_empty() && computer_off && archived,
         json!({ "went": went, "computer_off": computer_off, "archived": archived, "secs": t0.elapsed().as_secs() }),
     );
-    let after = answered(&mut phone, "after the move");
+    let after = answered(s, api, &owner, &mut phone, contact, "after the move", &connector);
     let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
     // what its connector's chat and its door hold now, said when an answer does not come
     let door = went["record"]["door"].as_str().unwrap_or("").to_string();
@@ -159,7 +158,7 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let running = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
     let unbound = api.signed(&owner, "GET", &format!("/api/f/{connector}/door"), None).map(|r| r.body["bound"].is_null()).unwrap_or(false);
     let kept = listed(api, &owner).iter().any(|f| f["name"] == connector.as_str() && f["archived"] == true) && relayed(api, &owner, &connector).iter().any(|t| t == "after the move");
-    let again = answered(&mut phone, "after the way back");
+    let again = answered(s, api, &owner, &mut phone, contact, "after the way back", &old);
     let in_old = relayed(api, &owner, &old);
     s.ok(
         "back: its computer runs the link again, the phone's next message lands in its computer's chat, and the connector is unbound and archived, its history kept",
@@ -168,6 +167,16 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let _ = lever_with(api, &id, json!({ "op": "always-on", "on": false }));
     Ok(())
+}
+
+/// Its agent's answer to `text` in `chat`: the phone's earlier messages let
+/// go first, then `text` said and found in `chat` (relayed), then any word
+/// from it after that (it may quote it).
+fn answered(s: &Suite, api: &Api, owner: &crate::Keys, phone: &mut Phone, contact: i64, text: &str, chat: &str) -> Result<Vec<String>> {
+    phone.drain(Duration::from_secs(5))?;
+    phone.say(contact, text)?;
+    anyhow::ensure!(s.eventually(SLOW, || relayed(api, owner, chat).iter().any(|t| t == text)), "{text:?} never landed in {chat}");
+    phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty() && !g.contains("You're linked")))
 }
 
 /// The agent's SimpleX chat its computer made as it linked: its person's

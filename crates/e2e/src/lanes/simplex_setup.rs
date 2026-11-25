@@ -454,6 +454,20 @@ impl Phone {
         anyhow::bail!("no answer to `{cmd}` in 60 s")
     }
 
+    /// What it has said and not been read, read for `quiet` and let go: so
+    /// what it receives next is what came after.
+    pub(super) fn drain(&mut self, quiet: Duration) -> Result<()> {
+        let t0 = Instant::now();
+        // bounded by `quiet`
+        while t0.elapsed() < quiet {
+            if let Some(v) = self.read()? {
+                self.events.push(v["resp"].clone());
+            }
+        }
+        self.events.clear();
+        Ok(())
+    }
+
     /// The first thing it said that `pred` takes, within `within`.
     pub(super) fn wait(&mut self, within: Duration, pred: impl Fn(&Value) -> bool) -> Result<Value> {
         let t0 = Instant::now();
