@@ -19,9 +19,11 @@
 //   before (`context`). docs/chat-records.md, "A message heard in a room".
 //   The platform stamps what it publishes the door's only while its owner
 //   has bound this chat as that agent's `slack` door.
-// - `mirror` (each reply the agent posts here) sends it to Slack: in the
-//   thread of the message its turn answers, or, with none known, in its
-//   room or its owner's DM.
+// - `mirror` (each reply the agent posts here, and each question it asks
+//   its owner on `work`, as applib/question.mjs words it) sends it to
+//   Slack: in the thread of the message its turn answers, or, with none
+//   known, in its room or its owner's DM. A question goes where its
+//   owner's answer counts: the room its turn was asked in, or their DM.
 //
 // Anyone in a room the bot was added to, and anyone who DMs it, may ask
 // (decision 5), on its owner's computer and credits: a room takes at most
@@ -35,6 +37,7 @@
 // Slack carries it all as plain text to and from its servers, and every
 // member of a room reads what the agent says there. Text only, for now.
 import { DurableObject } from "cloudflare:workers";
+import { asked } from "./applib/question.mjs";
 
 const SLACK = "https://slack.com";
 const PAIRING_MS = 10 * 60_000;
@@ -443,19 +446,29 @@ export class App extends DurableObject {
   }
 
   async mirror({ record } = {}, job) {
-    // its trigger's runs alone: each reply an agent posts here
-    if (job.via !== "channel") return { sent: 0, why: "only the chat's trigger sends" };
+    // its triggers' runs alone: each reply an agent posts here, each
+    // question it asks
+    if (job.via !== "channel") return { sent: 0, why: "only its triggers send" };
     // unlinked, or its door shut: the agent's words stay in the chat; and
     // only the bound agent's replies reach Slack, never another's here
     if (!job.door) return { sent: 0, why: "not linked" };
     if (record?.principal !== job.door.to) return { sent: 0, why: "not its bound agent's" };
     const b = record?.body;
-    if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
-    const said = typeof b.text === "string" ? b.text.trim() : "";
-    // its files stay in the chat (Slack gets words alone, for now): said so
-    const files = Array.isArray(b.attachments) ? b.attachments.length : 0;
-    const text = [said, files ? "(It sent a file, which stays in its owner's chat.)" : ""].filter(Boolean).join("\n\n");
-    if (!text) return { sent: 0, why: "nothing said" };
+    let text;
+    if (record.channel === "work") {
+      // a question, only one that asks its owner (whom the door is theirs)
+      text = asked(b);
+      if (!text) return { sent: 0, why: "not a question" };
+      if (b.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
+      if (typeof b.turn !== "string") return { sent: 0, why: "not a turn's" };
+    } else {
+      if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
+      const said = typeof b.text === "string" ? b.text.trim() : "";
+      // its files stay in the chat (Slack gets words alone, for now): said so
+      const files = Array.isArray(b.attachments) ? b.attachments.length : 0;
+      text = [said, files ? "(It sent a file, which stays in its owner's chat.)" : ""].filter(Boolean).join("\n\n");
+      if (!text) return { sent: 0, why: "nothing said" };
+    }
     const { api, paired } = await job.call("route", {});
     // the thread its turn answers; a reply in a room whose thread is not
     // known yet waits a moment for it (its intake keeps it as it
@@ -477,8 +490,8 @@ export class App extends DurableObject {
       await post(job, api, to.channel, to.thread, chars.slice(at, at + size).join("") + (last ? "\n\n(The rest is in its owner's chat.)" : ""));
       parts += 1;
     }
-    // its answer: 👀 off
-    if (to.ts) await slack(job, api, "reactions.remove", { body: { channel: to.channel, timestamp: to.ts, name: "eyes" } });
+    // its answer (a question is none): 👀 off
+    if (to.ts && record.channel !== "work") await slack(job, api, "reactions.remove", { body: { channel: to.channel, timestamp: to.ts, name: "eyes" } });
     return { sent: parts };
   }
 }

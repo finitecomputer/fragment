@@ -218,6 +218,23 @@ test("a reply goes to the thread its turn answers, 👀 off; one whose turn it d
   assert.equal(w.calls.length, 0);
 });
 
+test("a question that asks its owner goes where their answer counts: its turn's thread, or their DM; one asking anyone else goes nowhere", async () => {
+  const w = await paired(await connected(world()));
+  await w.app.intake({ record: mention(MAPLE, "<@U0BOT> deploy it?", "1790000400.000100") }, w.job());
+  w.calls.length = 0;
+  const card = (turn, asks = "npub1paul") => ({ channel: "work", principal: "npub1juniper", body: { kind: "turn.prompt", turn, prompt: "p1", text: "Deploy now?", asks, options: [{ id: "yes", label: "Yes" }, { id: "w", label: "Other", words: true }] } });
+  assert.deepEqual(await w.app.mirror({ record: card(turnOf(1)) }, w.job()), { sent: 1 });
+  assert.deepEqual(w.calls.map((c) => [c.method, c.body.channel, c.body.thread_ts]), [["chat.postMessage", "C0DEPLOY", "1790000400.000100"]], "in the room's thread, its 👀 kept: no answer yet");
+  assert.match(w.calls[0].body.markdown_text, /^Deploy now\?\n\n\(Answer with one of: Yes, or in your own words\.\)$/);
+  w.calls.length = 0;
+  await w.app.mirror({ record: card("cafe00000000000000000001") }, w.job());
+  assert.deepEqual(w.calls.map((c) => c.body.channel), [`D${PAUL}`]);
+  w.calls.length = 0;
+  assert.equal((await w.app.mirror({ record: card(turnOf(1), "slack:U0MAPLE") }, w.job())).why, "it asks someone else");
+  assert.equal((await w.app.mirror({ record: { channel: "work", principal: "npub1juniper", body: { kind: "turn.step", turn: turnOf(1) } } }, w.job())).why, "not a question");
+  assert.equal(w.calls.length, 0);
+});
+
 test("a long reply goes in at most 4 messages, the rest in the chat", async () => {
   const w = await paired(await connected(world()));
   const out = await w.app.mirror({ record: { principal: "npub1juniper", body: { kind: "message", turn: "t", text: "x".repeat(60_000) } } }, w.job());

@@ -69,6 +69,10 @@ from Settings, its secrets theirs, a fork no door again.
   off once it goes; a reply whose turn it doesn't know, in its `room`, or
   else its owner's DM. As Markdown (`markdown_text`), at most 4 messages
   of 12,000 characters; the rest, and any file, stays in this chat.
+  A question the agent asks its owner (a card on `work`, worded by
+  `applib/question.mjs`, every connector's) goes where their answer
+  counts: its turn's thread (their words in a room answer only a question
+  asked there), or else their DM. One asking anyone else stays here.
 - **Remembered, each bounded:** messages taken (2000), names (2000, a
   day each), turns' threads (1000), and each room's count this hour.
 

@@ -37,7 +37,8 @@
   },
   "triggers": [
     { "channel": "inbox", "run": "intake" },
-    { "channel": "chat", "from": "agent", "run": "mirror" }
+    { "channel": "chat", "from": "agent", "run": "mirror" },
+    { "channel": "work", "from": "agent", "kinds": ["turn.prompt"], "run": "mirror" }
   ],
   "meta": { "title": "Slack", "description": "Your agent in your team's Slack: anyone in a channel it's in, or in a DM with it, may ask it, and it answers there; your own words there come here as yours. Slack carries them as plain text, and everyone in a room reads what it says there." }
 }
