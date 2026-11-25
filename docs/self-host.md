@@ -109,7 +109,9 @@ Every binding and runtime API master's cell uses, against the fork's
     removes it as it ends, its Ctrl-C handler as it is stopped, and the
     next run's start removes one a killed run left. A run needs 3 GiB free
     there to start, and says so when it lacks it. The run's logs stay in
-    its scratch, on disk; the state is not kept for a look. The cost: the
+    its scratch, on disk, OpenBao's copied there as its RAM goes; the
+    node's state is not kept for a look. The root must be this user's own
+    (a directory, mode 0700), and a sweep takes only runs' entries. The cost: the
     e2e no longer runs celld on a slow disk. The dev stack keeps its state
     on disk, where it survives a reboot.
 - **Master's path is unchanged:** nothing here branches on the runtime,

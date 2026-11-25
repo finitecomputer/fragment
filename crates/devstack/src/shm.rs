@@ -48,7 +48,8 @@ impl RunDir {
     /// whose run is gone. Refused, saying why, when `root`'s file system
     /// has less than `room` free.
     pub fn claim(root: &Path, run: &str, room: u64) -> Result<RunDir> {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(root).with_context(|| format!("make {}", root.display()))?;
+        anyhow::ensure!(is_run_name(run), "{run:?} is not a run's name (letters, digits and '-')");
+        trusted_root(root)?;
         // A claim and a sweep hold this alike: a sweep never sees a run's
         // lock file before its run holds it.
         let _claiming = hold(&root.join(".claims"), true)?.context("a claim's hold is waited for")?;
@@ -105,6 +106,7 @@ impl Remover {
     /// The directory, then its lock: a removal cut short between the two
     /// leaves a lock with nothing to hold, which the next sweep removes.
     pub fn remove(&self) -> Result<()> {
+        // remove_dir_all takes a link itself, never what it names
         remove_dir(&self.dir)?;
         match fs::remove_file(&self.lock) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e).with_context(|| format!("remove {}", self.lock.display())),
@@ -113,25 +115,60 @@ impl Remover {
     }
 }
 
+/// `root`, made if it is not there, and only if it is this user's own: a
+/// directory, not a link, owned by this user, that no one else may enter.
+/// `/dev/shm` is shared, and the root's name is known, so another user
+/// could make it first, as a link into this user's files or a directory
+/// they can write in, and the sweep would remove what they put there.
+fn trusted_root(root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    match fs::DirBuilder::new().mode(0o700).create(root) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e).with_context(|| format!("make {}", root.display())),
+        _ => {}
+    }
+    let meta = fs::symlink_metadata(root).with_context(|| format!("read {}", root.display()))?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !meta.file_type().is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        bail!(
+            "{} is not this user's private directory (a directory, not a link, owned by uid {uid}, mode 0700): \
+             the e2e keeps and removes run state there only when it is. Remove it, or see who made it",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
+/// A run's name, as the e2e makes them (`hosted::sweep::run_id`): nothing
+/// the sweep could read as a path, a hidden file, or a lock.
+fn is_run_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 /// Removes each run's directory under `root` whose run is gone: its lock
 /// is free, or it has none. Answers how many. Its caller holds `.claims`.
+/// Only a run's own entries count: a real directory named as a run, or a
+/// regular file named as its lock. Anything else, a link among them, is
+/// left as it is.
 fn sweep(root: &Path) -> Result<u32> {
     let mut removed = 0;
     for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        if name.starts_with('.') {
-            continue;
-        }
-        if let Some(run) = name.strip_suffix(".lock") {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        // the entry itself, never what a link names
+        let kind = entry.file_type()?;
+        if let Some(run) = name.strip_suffix(".lock").filter(|run| is_run_name(run)) {
+            if !kind.is_file() {
+                continue;
+            }
             // held while its run lives, by the kernel's count: free once
             // the run is gone, however it went
-            let Some(_free) = hold(&path, false)? else { continue };
-            Remover { dir: root.join(run), lock: path.clone() }.remove()?;
+            let Some(_free) = hold(&entry.path(), false)? else { continue };
+            Remover { dir: root.join(run), lock: entry.path() }.remove()?;
             removed += 1;
-        } else if path.is_dir() && !root.join(format!("{name}.lock")).exists() {
+        } else if is_run_name(&name) && kind.is_dir() && !root.join(format!("{name}.lock")).exists() {
             // its lock went first: a removal cut short
-            remove_dir(&path)?;
+            remove_dir(&entry.path())?;
             removed += 1;
         }
     }
@@ -297,6 +334,47 @@ mod tests {
         drop(RunDir::claim(root.path(), "next", 0).unwrap());
         assert!(!root.path().join("swept").exists());
         assert!(outside.path().join("pkg/index.js").is_file(), "the sweep followed the link");
+    }
+
+    /// Goal: a root this user does not own outright is refused before
+    /// anything in it is read or removed: a link (here into a directory
+    /// holding what a sweep would take), or a directory others may write.
+    #[test]
+    fn a_root_that_is_not_this_users_own_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let target = Root::new("untrusted-target");
+        fs::create_dir_all(target.path().join("victim")).unwrap();
+        let link = Root::new("untrusted-link");
+        std::os::unix::fs::symlink(target.path(), link.path()).unwrap();
+        let refused = RunDir::claim(link.path(), "run", 0).err().expect("a linked root is refused");
+        assert!(format!("{refused:#}").contains("not this user's private directory"), "{refused:#}");
+        assert!(target.path().join("victim").is_dir(), "a sweep through the link removed what it names");
+        fs::remove_file(link.path()).unwrap();
+
+        let open = Root::new("untrusted-open");
+        fs::create_dir(open.path()).unwrap();
+        fs::set_permissions(open.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        fs::create_dir(open.path().join("planted")).unwrap();
+        assert!(RunDir::claim(open.path(), "run", 0).is_err(), "a root others may write is refused");
+        assert!(open.path().join("planted").is_dir());
+    }
+
+    /// Goal: the sweep takes only a gone run's own entries. A link named as
+    /// a run (and what it names), a file that is not a lock, and a name that
+    /// is not a run's stay.
+    #[test]
+    fn the_sweep_takes_only_runs() {
+        let root = Root::new("only-runs");
+        let outside = Root::new("only-runs-outside");
+        fs::create_dir_all(outside.path().join("kept")).unwrap();
+        drop(RunDir::claim(root.path(), "first", 0).unwrap());
+        std::os::unix::fs::symlink(outside.path(), root.path().join("abc123")).unwrap();
+        fs::write(root.path().join("notes.txt"), b"x").unwrap();
+        fs::create_dir(root.path().join("not.a.run")).unwrap();
+        drop(RunDir::claim(root.path(), "next", 0).unwrap());
+        assert!(fs::symlink_metadata(root.path().join("abc123")).is_ok(), "the sweep took a link");
+        assert!(outside.path().join("kept").is_dir(), "the sweep followed a link");
+        assert!(root.path().join("notes.txt").is_file() && root.path().join("not.a.run").is_dir());
     }
 
     /// Goal: a run with no room for its state in RAM does not start, and
