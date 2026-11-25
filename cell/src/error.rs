@@ -51,12 +51,13 @@ impl CellError {
     }
 
     /// The refusal as one of the platform's objects answers the router,
-    /// its whole message kept, and marked as the platform's own
-    /// (`PLATFORM_REFUSAL`), so the edge tells it from an app's answer
-    /// (`public_answer`). Past the cell's edge, `public_response`.
+    /// its whole message kept, and marked as the platform's own with its
+    /// code (`PLATFORM_REFUSAL`), so the edge tells it from an app's answer
+    /// and says it from the mark (`public_answer`). Past the cell's edge,
+    /// `public_response`.
     pub fn response(&self) -> worker::Result<Response> {
         let mut resp = self.answered(self.message.clone())?;
-        resp.headers_mut().set(PLATFORM_REFUSAL, "1")?;
+        resp.headers_mut().set(PLATFORM_REFUSAL, &public_error::mark(self.code))?;
         Ok(resp)
     }
 
@@ -174,48 +175,62 @@ pub fn foreign(resp: Response) -> worker::Result<Response> {
     Ok(resp.with_headers(h))
 }
 
-/// The bytes an answer's refusal may hold for `public_answer` to read it
-/// (an `ErrorBody` is a code and a sentence); a longer body is no refusal
-/// of the platform's and passes as it is.
+/// The bytes of a marked refusal `public_answer` reads to log its message
+/// (an `ErrorBody` is a code and a sentence); a longer one is logged
+/// unread, and says the same sentence (`public_error::said`).
 const REFUSAL_READ_MAX_BYTES: usize = 64 * 1024;
 
 /// An answer on its way out of the cell, with a refusal some object of the
 /// platform's answered (and the router passed on as it was) said as
 /// `public_response` says one: only an answer the platform marked as its
-/// own (`PLATFORM_REFUSAL`), a JSON `ErrorBody` of a redacted code at its
-/// status (`public_error::rereads`); every other answer, an app's or a
-/// computer image's, keeps its body, unread, and loses only the mark.
+/// own (`PLATFORM_REFUSAL`), and only by its mark's code
+/// (`public_error::said`): a redacted one is answered as a fixed sentence
+/// and `reference` whatever its body held, read only (bounded) for the
+/// logs. Every other answer, an app's or a computer image's or a refusal
+/// its asker acts on, keeps its body, unread, and loses only the mark.
 pub async fn public_answer(mut resp: Response, reference: &str) -> worker::Result<Response> {
-    if !resp.headers().has(PLATFORM_REFUSAL)? {
-        return Ok(resp);
-    }
-    let status = resp.status_code();
-    let content_type = resp.headers().get("content-type")?.unwrap_or_default();
-    if !public_error::rereads(true, status, &content_type) {
+    let Some(mark) = resp.headers().get(PLATFORM_REFUSAL)? else { return Ok(resp) };
+    if public_error::said(&mark, None, reference).is_none() {
         return unmarked(resp);
     }
     let bytes = match resp.body() {
-        ResponseBody::Empty => return unmarked(resp),
-        ResponseBody::Body(b) if b.len() <= REFUSAL_READ_MAX_BYTES => b.clone(),
-        ResponseBody::Body(_) => return unmarked(resp),
-        // an object's answer: a copy read, bounded, and the answer kept whole
-        ResponseBody::Stream(_) => match crate::cs::read_answer(&mut resp.cloned()?, REFUSAL_READ_MAX_BYTES).await {
-            Ok((bytes, false)) => bytes,
-            _ => return unmarked(resp),
+        ResponseBody::Empty => None,
+        ResponseBody::Body(b) if b.len() <= REFUSAL_READ_MAX_BYTES => Some(b.clone()),
+        ResponseBody::Body(_) => None,
+        // an object's answer, read bounded: it is answered anew below
+        ResponseBody::Stream(_) => match crate::cs::read_answer(&mut resp, REFUSAL_READ_MAX_BYTES).await {
+            Ok((bytes, false)) => Some(bytes),
+            _ => None,
         },
     };
-    let Ok(body) = serde_json::from_slice::<ErrorBody>(&bytes) else { return unmarked(resp) };
-    if body.error.status() != status || public_error::redacted(body.error).is_none() {
-        return unmarked(resp);
+    let read = bytes.and_then(|b| serde_json::from_slice::<ErrorBody>(&b).ok());
+    let Some(said) = public_error::said(&mark, read.as_ref(), reference) else { return unmarked(resp) };
+    match read.as_ref().filter(|b| b.error == said.error) {
+        Some(body) => logged(said.error, &body.message, reference),
+        None => logged(said.error, &format!("(its body unread: over {REFUSAL_READ_MAX_BYTES} bytes, or no refusal of its mark's)"), reference),
     }
-    logged(body.error, &body.message, reference);
-    let said = ErrorBody { message: public_error::public_message(body.error, &body.message, reference), ..body };
     let h = resp.headers().clone();
-    h.delete(PLATFORM_REFUSAL)?;
-    h.delete("content-length")?;
-    h.delete("content-encoding")?;
-    h.delete("etag")?;
-    Ok(Response::from_json(&said)?.with_status(status).with_headers(h))
+    for name in [PLATFORM_REFUSAL, "content-length", "content-encoding", "etag"] {
+        h.delete(name)?;
+    }
+    h.set("content-type", "application/json")?;
+    Ok(Response::from_json(&said)?.with_status(said.error.status()).with_headers(h))
+}
+
+/// The message a refusal the fragment answered one of its app's
+/// capabilities (entry.mjs `Files`, `Search`) says to the app's code, which
+/// may pass it on to anyone (its visitor, through `app_failed`): the
+/// platform's own failure as the edge says it (`public_error::said`), its
+/// whole message logged under a reference of its own; `None` where its
+/// own message is the app's to read.
+pub fn app_said(mark: Option<&str>, body: &str) -> Option<String> {
+    let mark = mark?;
+    let reference = crate::js::random_hex::<8>();
+    let read = serde_json::from_slice::<ErrorBody>(body.as_bytes()).ok();
+    let said = public_error::said(mark, read.as_ref(), &reference)?;
+    let message = read.filter(|b| b.error == said.error).map(|b| b.message).unwrap_or_else(|| "(its body no refusal of its mark's)".to_string());
+    logged(said.error, &message, &reference);
+    Some(said.message)
 }
 
 /// `resp` without `PLATFORM_REFUSAL`: an object's answer has immutable

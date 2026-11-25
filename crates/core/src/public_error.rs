@@ -16,7 +16,7 @@
 //! Inside the platform (an object answering the router) a refusal keeps
 //! its whole message: it is cut at the edge (cell/src/lib.rs).
 
-use fragment_proto::ErrorCode;
+use fragment_proto::{ErrorBody, ErrorCode};
 
 /// The words a refusal of `code` says in place of its own past the edge,
 /// or `None` where its own message is the asker's to read.
@@ -30,24 +30,51 @@ pub fn redacted(code: ErrorCode) -> Option<&'static str> {
     }
 }
 
-/// Whether an answer leaving the cell is read as one of the platform's
-/// refusals, to say it as `public_message` would.
-/// Only one the platform marked as its own (`marked`: the cell's
-/// `error::PLATFORM_REFUSAL`, set on every refusal an object of the
-/// platform answers): an app's or a computer image's answer is theirs,
-/// and passes unread, whatever it holds. And only a JSON one at a
-/// redacted code's status.
-pub fn rereads(marked: bool, status: u16, content_type: &str) -> bool {
-    marked && content_type.starts_with("application/json") && REDACTED.iter().any(|c| c.status() == status)
+/// Marks a refusal one of the platform's objects answered (the cell's
+/// `CellError::response`), its value the refusal's code (`mark`), so the
+/// edge says it from the mark alone (`said`), whatever its body holds or
+/// however long it is. Never a foreign answer's: an app's, a computer
+/// image's or a vendor's is stripped of it where it enters the platform
+/// (`forged`), and every answer leaving the Worker is stripped of it (the
+/// cell's `error::public_answer`), so no one outside sends or reads it.
+pub const MARK: &str = "x-fragment-platform-refusal";
+
+/// `MARK`'s value on a refusal of `code`: the code's wire name.
+pub fn mark(code: ErrorCode) -> String {
+    match serde_json::to_value(code) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => unreachable!("an ErrorCode serializes as its name"),
+    }
 }
 
-/// Marks a refusal one of the platform's objects answered (the cell's
-/// `CellError::response`), so the edge rereads it (`rereads`). Never a
-/// foreign answer's: an app's, a computer image's or a vendor's is
-/// stripped of it where it enters the platform (`forged`), and every
-/// answer leaving the Worker is stripped of it (the cell's
-/// `error::public_answer`), so no one outside sends or reads it.
-pub const MARK: &str = "x-fragment-platform-refusal";
+/// The code a marked answer's `MARK` names. Only the platform sets one,
+/// in this release (an object refuses another release's call,
+/// docs/MODEL.md), so an unknown one is no answer to trust: `host_failed`,
+/// said as the platform's own failure is, none of its body.
+pub fn marked(mark: &str) -> ErrorCode {
+    serde_json::from_value(serde_json::Value::String(mark.to_string())).unwrap_or(ErrorCode::HostFailed)
+}
+
+/// What a marked answer (`mark`, its `MARK`) says past the platform's
+/// edge, or to an app's own code (its `env.FILES`, `env.SEARCH`: it may
+/// pass it on to anyone): a redacted code's fixed sentence and
+/// `reference`, at its code's status (`ErrorCode::status`); `None` where
+/// its own message is the asker's (`schema_refused`, a 500 too), and it
+/// passes as it came. The mark decides, never the body: `read` is its
+/// body when it could be read (bounded) as a refusal, and one too large,
+/// not JSON or of another code says the sentence all the same, never
+/// itself.
+pub fn said(mark: &str, read: Option<&ErrorBody>, reference: &str) -> Option<ErrorBody> {
+    let code = marked(mark);
+    redacted(code)?;
+    let read = read.filter(|b| b.error == code);
+    Some(ErrorBody {
+        error: code,
+        message: public_message(code, "", reference),
+        reason: read.and_then(|b| b.reason),
+        retry_after_ms: read.and_then(|b| b.retry_after_ms),
+    })
+}
 
 /// The names among a foreign answer's headers that it is stripped of
 /// where it enters the platform (an app's facet, a computer's port, a
@@ -190,19 +217,46 @@ mod tests {
         }
     }
 
-    /// Goal: only the platform's own refusal is reread on its way out; an
-    /// app's or a computer image's answer passes unread, whatever it
-    /// holds. Method: the platform's mark, or not, on each redacted
-    /// code's status, and the answers that are never refusals.
+    /// Goal: a refusal the platform marked as its own failure says only a
+    /// sentence and a reference, whatever its body: one too large to read
+    /// (a long runtime diagnostic), not JSON, or naming another code, as
+    /// much as a whole one. A marked refusal the asker acts on
+    /// (`schema_refused`, a 500 too) passes as it came. Method: each
+    /// redacted code's mark with each body, then every other code's mark.
     #[test]
-    fn only_the_platforms_marked_refusals_are_reread() {
-        for code in [ErrorCode::HostFailed, ErrorCode::RegistryUnavailable] {
-            assert!(rereads(true, code.status(), "application/json"), "{code:?}");
-            assert!(!rereads(false, code.status(), "application/json"), "an app's own {code:?}");
+    fn a_marked_refusal_is_said_from_its_mark_whatever_its_body() {
+        let diagnostic = format!("TypeError: storage.list failed: D1_ERROR {}", "at worker.js:1:2345 ".repeat(5000));
+        for code in REDACTED {
+            let whole = ErrorBody { error: code, message: diagnostic.clone(), reason: None, retry_after_ms: Some(2000) };
+            let other = ErrorBody { error: ErrorCode::InvalidRequest, message: "D1_ERROR".into(), reason: None, retry_after_ms: None };
+            for (read, retry) in [(Some(&whole), Some(2000)), (None, None), (Some(&other), None)] {
+                let said = said(&mark(code), read, "8c1e2f3a4b5c6d7e-SJC").expect("redacted");
+                assert_eq!((said.error, said.error.status(), said.retry_after_ms), (code, code.status(), retry), "{read:?}");
+                assert!(said.message.ends_with("(reference 8c1e2f3a4b5c6d7e-SJC)"), "{}", said.message);
+                assert!(!said.message.contains("D1_ERROR") && !said.message.contains("worker.js"), "{}", said.message);
+            }
         }
-        assert!(!rereads(true, 500, "text/html"));
-        assert!(!rereads(true, 404, "application/json"));
-        assert!(!rereads(true, 200, "application/json"));
+        let schema = ErrorBody { error: ErrorCode::SchemaRefused, message: "drop the column first".into(), reason: None, retry_after_ms: None };
+        assert_eq!(said(&mark(ErrorCode::SchemaRefused), Some(&schema), "r"), None);
+        assert_eq!(said(&mark(ErrorCode::SchemaRefused), None, "r"), None, "an unread schema refusal passes as it came");
+        for code in [ErrorCode::Unauthenticated, ErrorCode::Forbidden, ErrorCode::NotFound, ErrorCode::UpstreamFailed, ErrorCode::NodeFull] {
+            assert_eq!(said(&mark(code), None, "r"), None, "{code:?}");
+        }
+    }
+
+    /// Goal: the mark names its refusal's code, and a mark that names none
+    /// is said as the platform's own failure. Method: every code there,
+    /// then a mark of no code (an older release's `1`, a typo).
+    #[test]
+    fn a_mark_names_its_code() {
+        for code in REDACTED.into_iter().chain([ErrorCode::SchemaRefused, ErrorCode::NotFound, ErrorCode::AppFailed]) {
+            assert_eq!(marked(&mark(code)), code);
+        }
+        assert_eq!(mark(ErrorCode::HostFailed), "host_failed");
+        for unknown in ["1", "", "Host_Failed", "host failed"] {
+            assert_eq!(marked(unknown), ErrorCode::HostFailed, "{unknown:?}");
+            assert!(said(unknown, None, "r").is_some(), "{unknown:?}");
+        }
         for code in REDACTED {
             assert!(redacted(code).is_some(), "{code:?}");
         }
@@ -210,16 +264,15 @@ mod tests {
 
     /// Goal: an app (or a computer image, or a vendor) cannot pass its
     /// answer off as the platform's refusal: the mark it sent, in any
-    /// case, is dropped where its answer enters, so the edge never rereads
-    /// it nor logs its words under a reference. Method: an app's headers
+    /// case, is dropped where its answer enters, so the edge never says
+    /// it as its own nor logs its words under a reference. Method: an app's headers
     /// with the mark forged two ways among headers that stay.
     #[test]
     fn a_foreign_answer_cannot_forge_the_platforms_mark() {
         let sent = ["content-type", "X-Fragment-Platform-Refusal", "x-fragment-refusal", "x-fragment-platform-refusal", "x-fragment-platform-refusals", "set-cookie"];
         assert_eq!(forged(sent), ["X-Fragment-Platform-Refusal", "x-fragment-platform-refusal"]);
         let kept: Vec<&str> = sent.into_iter().filter(|n| !forged([*n]).contains(n)).collect();
-        let marked = kept.iter().any(|n| n.eq_ignore_ascii_case(MARK));
-        assert!(!rereads(marked, 500, "application/json"), "a forged refusal is reread: {kept:?}");
+        assert!(!kept.iter().any(|n| n.eq_ignore_ascii_case(MARK)), "a forged refusal is said as the platform's: {kept:?}");
         assert!(forged(["content-type", ""]).is_empty());
     }
 

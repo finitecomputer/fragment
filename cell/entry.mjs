@@ -117,6 +117,21 @@ export class Registry extends DurableObject {
   alarm(info) { return this.rs.alarm(info); }
 }
 
+// A refusal the fragment answered one of its app's capabilities (`Files`,
+// `Search`), as the app's code reads it: its body, but the platform's own
+// failure (`host_failed`) says a fixed sentence and a reference in place
+// of its message (error.rs `app_said`), since the app may pass it on to
+// anyone, a visitor of its pages among them.
+async function refusal(resp) {
+  const text = await resp.text().catch(() => "");
+  let body = {};
+  try {
+    body = JSON.parse(text) ?? {};
+  } catch {}
+  const said = rs.InternalRoute.refused(resp.headers, text);
+  return said === undefined ? body : { ...body, message: said };
+}
+
 // The app's read access to its files (files.rs), handed to its facet as
 // `env.FILES` bound to one fragment by `props`: the app cannot name another.
 // It, `Search` and the job driver make the fragment's typed calls
@@ -134,7 +149,7 @@ export class Files extends WorkerEntrypoint {
     const resp = await this.#ask(op, body);
     if (resp.status === 404 && op === "read") return null;
     if (!resp.ok) {
-      const e = await resp.json().catch(() => ({}));
+      const e = await refusal(resp);
       throw new Error(e.message || `files.${op} answered ${resp.status}`);
     }
     return op === "read" ? new Uint8Array(await resp.arrayBuffer()) : resp.json();
@@ -155,8 +170,8 @@ export class Search extends WorkerEntrypoint {
   async #answer(op, body) {
     const { fragment } = this.ctx.props;
     const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `call/search/${op}`, JSON.stringify(body)));
-    const answer = await resp.json().catch(() => ({}));
-    if (resp.ok) return { answer };
+    if (resp.ok) return { answer: await resp.json().catch(() => ({})) };
+    const answer = await refusal(resp);
     return {
       error: {
         message: answer.message || `search.${op} answered ${resp.status}`,
