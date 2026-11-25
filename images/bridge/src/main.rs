@@ -154,7 +154,7 @@ fn simplex_config() -> Option<fragment_bridge::simplex::run::Config> {
 
 /// SIGTERM (or SIGINT) turns `stop` true; the process is gone within
 /// `SHUTDOWN_MS_MAX` of it, whatever is left (docs/computers.md).
-fn on_signal(stop: tokio::sync::watch::Sender<bool>) {
+fn on_signal(stop: tokio::sync::watch::Sender<bool>, disk: bool) {
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate()).expect("a SIGTERM handler");
@@ -169,8 +169,44 @@ fn on_signal(stop: tokio::sync::watch::Sender<bool>) {
         ev!("bridge.forced_exit");
         // no SimpleX core outlives the bridge, even now
         fragment_bridge::simplex::run::kill_cores();
+        // nor is its disk's final flush cut short (`flush_disk`)
+        if disk {
+            flush_disk().await;
+        }
         std::process::exit(0);
     });
+}
+
+/// Its disk mounted on /data before anything reads it (the stub's:
+/// fragment_bridge::disk). A head that will not open is said to the
+/// platform, which destroys this start and starts again from the head
+/// before it; any other failure to mount, the bridge exits.
+async fn mount_disk(api: &str) {
+    use fragment_bridge::disk::{self, Unmounted};
+    let mounted = tokio::task::spawn_blocking(|| disk::start().map_err(Unmounted::Failed).and_then(disk::Mounting::wait)).await.unwrap_or_else(|e| Err(Unmounted::Failed(e.to_string())));
+    match mounted {
+        Ok(m) => ev!("bridge.disk_mounted", { "ms": m.ms, "misses": m.misses }),
+        Err(Unmounted::Unusable(why)) => {
+            ev!("bridge.disk_unusable", { "why": why });
+            match fragment_bridge::api::Api::new(api) {
+                Ok(a) => match a.disk_unusable(&why).await {
+                    // its start destroys it (`disk::TOLD_WAIT_MS`)
+                    Ok(()) => tokio::time::sleep(Duration::from_millis(disk::TOLD_WAIT_MS)).await,
+                    Err(e) => ev!("bridge.disk_unusable_untold", { "error": e.to_string() }),
+                },
+                Err(e) => ev!("bridge.disk_unusable_untold", { "error": e }),
+            }
+            std::process::exit(3);
+        }
+        Err(Unmounted::Failed(why)) => fail(&format!("its disk: {why}")),
+    }
+}
+
+/// Its disk's final flush, waited for (fragment_bridge::disk::flush).
+async fn flush_disk() {
+    if let Some((flushed, ms)) = tokio::task::spawn_blocking(fragment_bridge::disk::flush).await.ok().flatten() {
+        ev!("bridge.disk_flushed", { "flushed": flushed, "ms": ms });
+    }
 }
 
 #[tokio::main]
@@ -182,8 +218,14 @@ async fn main() {
             println!("fragment-bridge {}", env!("CARGO_PKG_VERSION"));
         }
         "run" => {
-            on_signal(stop_tx);
+            // the stub's PID 1 owns its disk (fragment_bridge::disk); an image
+            // whose boot does (Hermes') runs its bridge without
+            let disk = env("BRIDGE_MOUNTS_DISK").is_some_and(|v| v == "1") && fragment_bridge::disk::wanted();
+            on_signal(stop_tx, disk);
             let api = env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address"));
+            if disk {
+                mount_disk(&api).await;
+            }
             let cfg = Config {
                 api,
                 state_dir: PathBuf::from(env_or("BRIDGE_STATE_DIR", "/data/bridge")),
@@ -211,6 +253,9 @@ async fn main() {
             let ran = driver::run(cfg, runtimes(), stop).await;
             // its SimpleX cores stopped and reaped first, within the shutdown's bound
             fragment_bridge::simplex::run::stop_cores(Duration::from_millis(limits::SHUTDOWN_MS_MAX / 2)).await;
+            if disk {
+                flush_disk().await;
+            }
             match ran {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {

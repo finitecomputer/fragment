@@ -611,9 +611,16 @@ impl Api {
     /// SimpleX (it names its core), which the read says
     /// (`?simplex=1`), so its owner's Settings offer it (docs/bridge.md,
     /// "SimpleX").
+    /// A computer on a disk says what its mount did with it, until one read
+    /// has (`disk::query`: the start line's numbers).
     pub async fn computer(&self, simplex: bool) -> Result<Computer, ApiError> {
-        let path = if simplex { "/api/computer?simplex=1" } else { "/api/computer" };
-        let c: Computer = self.json(Method::GET, path, None, None).await?;
+        let disk = crate::disk::query();
+        let query: Vec<&str> = [if simplex { "simplex=1" } else { "" }, disk.as_str()].into_iter().filter(|q| !q.is_empty()).collect();
+        let path = if query.is_empty() { "/api/computer".to_string() } else { format!("/api/computer?{}", query.join("&")) };
+        let c: Computer = self.json(Method::GET, &path, None, None).await?;
+        if !disk.is_empty() {
+            crate::disk::said();
+        }
         if c.agents.len() > limits::AGENTS_MAX {
             return Err(ApiError::Decode(format!("{} agents; a computer runs at most {}", c.agents.len(), limits::AGENTS_MAX)));
         }
@@ -629,6 +636,15 @@ impl Api {
             }
         }
         Ok(c)
+    }
+
+    /// `POST /api/computer/disk {unusable}`: its boot found its disk's head
+    /// would not mount (`disk::Unmounted::Unusable`), said before it exits,
+    /// so its start falls back past that head (docs/computers.md, "A disk").
+    pub async fn disk_unusable(&self, why: &str) -> Result<(), ApiError> {
+        let why: String = why.chars().take(500).collect();
+        let _: Value = self.json(Method::POST, "/api/computer/disk", None, Some(json!({ "unusable": why }))).await?;
+        Ok(())
     }
 
     /// `POST /api/computer/door {agent, door, nonce, key}`: a link's ticket

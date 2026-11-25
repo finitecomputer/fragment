@@ -1217,3 +1217,52 @@ fn a_save_asked_again_after_a_cancel_overtakes_the_one_under_way() {
         assert!(saves.overtaken(g, began) && !saves.overtaken(g, seq), "the cancelled one, asked before it, is overtaken: {owner:?}");
     }
 }
+
+/// Goal (docs/computers.md, "A disk"): a computer on a disk is never saved.
+/// A turn held open for hours asks no awake save, nor does a turn's end;
+/// its sleep's hold (the cell's wait for its disk to ship) leads straight
+/// to its stop, saved, with no save between; a wake during that hold
+/// cancels the sleep as any hold's does; and a lifecycle stored before the
+/// mark reads as no disk. Method: a disk's day of alarms with a keepalive
+/// open, then closed; its sleep, cancelled once, then through.
+#[test]
+fn a_disk_is_never_saved_and_its_sleep_is_its_stop() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    assert!(l.disk());
+    let g = started(&mut l, T);
+    l.apply(Event::Opened { socket: Socket::Keepalive }, T + 1_000);
+    let (saves, slept) = run_alarms(&mut l, T + 6 * 3_600_000);
+    assert!(saves.is_empty() && slept.is_none(), "busy for hours, nothing saved: {saves:?} {slept:?}");
+    let closed = T + 6 * 3_600_000;
+    l.apply(Event::Closed { socket: Socket::Keepalive }, closed);
+    let (saves, slept) = run_alarms(&mut l, closed + 2 * IDLE_MS);
+    assert!(saves.is_empty(), "a turn's end saves nothing: {saves:?}");
+    let slept = slept.expect("it sleeps once idle");
+    assert_eq!(slept, closed + IDLE_MS);
+    // a wake during its hold cancels the sleep: awake on its container
+    let s = l.apply(Event::Wake { why: Wake::Record }, slept + 100);
+    assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g), "{s:?}");
+    // its next idle sleep, through: the hold answered, then its stop
+    let (_, slept) = run_alarms(&mut l, slept + 2 * IDLE_MS);
+    let slept = slept.expect("it sleeps again");
+    let s = l.apply(Event::Held { generation: g, held: true }, slept + 500);
+    assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }], "no save between its hold and its stop");
+    let ended = l.apply(Event::Asleep { generation: g }, slept + 2_000).ended.expect("its life ends");
+    assert_eq!((ended.by, ended.saved), (LifeEnd::Sleep, true));
+    // stored before the mark: no disk
+    let stored = serde_json::to_value(Lifecycle::new()).unwrap();
+    assert!(stored.get("disk").is_none(), "no disk writes no mark");
+    let read: Lifecycle = serde_json::from_value(stored).unwrap();
+    assert!(!read.disk());
+}
+
+/// Goal: a computer goes on a disk only as it is made, never after its
+/// first start. Method: the mark set on a computer that started.
+#[test]
+#[should_panic(expected = "a computer is put on a disk as it is made")]
+fn a_disk_is_chosen_as_it_is_made() {
+    let mut l = Lifecycle::new();
+    started(&mut l, T);
+    l.set_disk();
+}

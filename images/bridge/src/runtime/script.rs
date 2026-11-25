@@ -185,15 +185,20 @@ fn data_path(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
     (parts.len() <= 8 && parts.iter().all(part_ok)).then(|| root.join(rel))
 }
 
-/// `write <path> <text>`: the text in a file under the data root.
+/// `write <path> <text>`: the text in a file under the data root, synced
+/// before it says so (a write a computer's disk acknowledged: what its
+/// lane's crashes must never lose).
 async fn write_data(root: &std::path::Path, rest: &str) -> String {
+    use tokio::io::AsyncWriteExt;
     let (rel, text) = rest.split_once(' ').unwrap_or((rest, ""));
     let Some(path) = data_path(root, rel) else { return format!("write refused: {rel:?} is no path under the data") };
     let wrote = async {
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
-        tokio::fs::write(&path, text.as_bytes()).await
+        let mut f = tokio::fs::File::create(&path).await?;
+        f.write_all(text.as_bytes()).await?;
+        f.sync_all().await
     };
     match wrote.await {
         Ok(()) => format!("wrote {rel}"),

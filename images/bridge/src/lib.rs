@@ -12,6 +12,7 @@
 pub mod answer;
 pub mod api;
 pub mod cards;
+pub mod disk;
 pub mod driver;
 pub mod engine;
 pub mod history;

@@ -81,6 +81,28 @@ pub const HOLD_WAIT_MS: i64 = 20_000;
 /// A hold (the touch, the wait, the answer) reports within this, or it is
 /// asked again.
 pub const HOLD_DEADLINE_MS: i64 = 90_000;
+/// A disk's sleep (docs/computers.md, "A disk") holds as long as this, at
+/// most, for its disk to ship what it holds before its stop (fpac's
+/// unshipped writes, read from `fpac status`): a wake meanwhile cancels the
+/// sleep, as during any hold. Past it the stop begins anyway, and the
+/// guest's final flush sends the rest.
+pub const DISK_DRAIN_MS: i64 = 60_000;
+/// A disk's stop waits this long, at most, for its guest to exit after
+/// SIGTERM: its final flush ships what is left, up to FPAC's 4 GiB
+/// unshipped budget, about 85 s at the 50 MB/s a Cloudflare container
+/// ships (Paul, 2026-11-20: after a burst a sleep may take as long as
+/// shipping that takes). Our images bound their flush under it
+/// (images/hermes/boot: `DISK_FLUSH_MS`).
+pub const DISK_EXIT_WAIT_MS: i64 = 150_000;
+/// A disk's start waits this long, at most, for its guest's first read of
+/// its view, which its boot makes once `/data` is mounted (its open, its
+/// pack's head, a replay after a crash): one unheard by then failed, its
+/// container destroyed. Our images bound their mount under it
+/// (images/hermes/boot: `DISK_MOUNT_MS`).
+pub const DISK_ALIVE_MS: i64 = 120_000;
+const _: () = assert!(DISK_ALIVE_MS < START_DEADLINE_MS, "a disk's wait for its guest fits a start's deadline");
+const _: () = assert!(DISK_DRAIN_MS < HOLD_DEADLINE_MS, "a disk's hold fits a hold's deadline");
+const _: () = assert!(DISK_EXIT_WAIT_MS < SLEEP_DEADLINE_MS, "a disk's stop fits a stop's deadline");
 /// A save reports within this, or it failed, as one that says so did. The
 /// cell's own bounds on a save's steps end it sooner (cell/src/computer.rs,
 /// `SAVE_STEPS_MS`: 12 minutes 10 seconds, its backups what a Durable

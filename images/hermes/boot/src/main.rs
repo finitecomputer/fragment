@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! hermes-boot pre-init     the ENTRYPOINT: preload the gateway, wait for the
-//!                          restore gate, then exec s6's /init with `main`
+//!                          restore gate (or mount /data from its disk), then
+//!                          exec s6's /init with `main`
 //! hermes-boot main         /init's main program: config, profiles from the
 //!                          computer's agents and their repos, the bridge,
 //!                          the gateway, its answer to the hold; then, until
@@ -421,6 +422,9 @@ fn pre_init() -> ! {
     ev!("boot.pre_init");
     let _ = std::fs::remove_dir_all(RUN);
     std::fs::create_dir_all(RUN).unwrap_or_else(|e| fail(&format!("{RUN}: {e}")));
+    // A disk's mount first, beside everything else here (docs/computers.md,
+    // "A disk"): nothing reads /data before it is waited for, below
+    let disk = fragment_bridge::disk::wanted().then(|| fragment_bridge::disk::start().unwrap_or_else(|e| fail(&format!("its disk: {e}"))));
     // What Hermes would guess from whether it sees a container, the same
     // on every runtime (hermes::RUNTIME_ENV); s6 hands it on to `main`.
     for (name, value) in hermes::RUNTIME_ENV {
@@ -461,6 +465,9 @@ fn pre_init() -> ! {
         }
         ev!("boot.gate_open", { "waitedMs": gate.elapsed().as_millis() as u64 });
     }
+    if let Some(mounting) = disk {
+        mount_disk(mounting, &home);
+    }
     // What the last hold copied goes back before anything opens a database
     // (the gateway waits for go): after a restore the platform's check has
     // done it already; from a snapshot it is done here, so both wakes leave
@@ -473,6 +480,34 @@ fn pre_init() -> ! {
     ev!("boot.init", { "ms": t0.elapsed().as_millis() as u64 });
     let err = Command::new("/init").args(["/command/with-contenv", &format!("{OPT}/bin/hermes-boot"), "main"]).exec();
     fail(&format!("exec /init: {err}"));
+}
+
+/// Waits for its disk's mount (`fragment_bridge::disk`), then makes its
+/// home on it, Hermes' (the one made above is the image's, under the
+/// mount). A head that will not open is said to the platform, which
+/// destroys this start and starts again from the head before it; any other
+/// failure fails the boot.
+fn mount_disk(mounting: fragment_bridge::disk::Mounting, home: &Path) {
+    use fragment_bridge::disk::Unmounted;
+    match mounting.wait() {
+        Ok(m) => ev!("boot.disk_mounted", { "ms": m.ms, "misses": m.misses }),
+        Err(Unmounted::Unusable(why)) => {
+            ev!("boot.disk_unusable", { "why": why });
+            let told = Api::new(&env("FRAGMENT_API").unwrap_or_default()).map_err(|e| e.to_string()).and_then(|api| {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+                rt.block_on(api.disk_unusable(&why)).map_err(|e| e.to_string())
+            });
+            match told {
+                // its start destroys it (`disk::TOLD_WAIT_MS`)
+                Ok(()) => std::thread::sleep(Duration::from_millis(fragment_bridge::disk::TOLD_WAIT_MS)),
+                Err(e) => ev!("boot.disk_unusable_untold", { "error": e }),
+            }
+            std::process::exit(UNUSABLE);
+        }
+        Err(Unmounted::Failed(why)) => fail(&format!("its disk: {why}")),
+    }
+    let _ = std::fs::create_dir_all(home);
+    chown(home, hermes_ids());
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -1838,6 +1873,11 @@ async fn boot_main() {
     }
     ev!("boot.signal");
     stop(gateway, bridge.as_mut()).await;
+    // its disk's final flush, once nothing of ours writes /data: before the
+    // exit, after which s6 kills whatever is left within a second
+    if let Some((flushed, ms)) = tokio::task::spawn_blocking(fragment_bridge::disk::flush).await.ok().flatten() {
+        ev!("boot.disk_flushed", { "flushed": flushed, "ms": ms });
+    }
     std::process::exit(0);
 }
 

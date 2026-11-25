@@ -572,6 +572,11 @@ pub struct Fleet {
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
     /// bound run out.
     pub computer_unsaved_max_ms: Option<u64>,
+    /// The images whose new computers go on a disk
+    /// (`FRAGMENT_COMPUTER_DISKS`, docs/computers.md "A disk"): an e2e
+    /// run's disk lane's node, on a runtime that gives a container FUSE
+    /// and loop devices (krun's).
+    pub computer_disks: Option<String>,
     /// What a computer's swap offers: the provider catalog
     /// (`FRAGMENT_PROVIDERS`, `fragment_core::catalog`'s JSON: connections,
     /// operator keys and own keys, each with its hosts, placements,
@@ -803,6 +808,9 @@ impl Fleet {
         }
         if !self.door_internet {
             vars.push(("FRAGMENT_DOOR_INTERNET", "off"));
+        }
+        if let Some(d) = &self.computer_disks {
+            vars.push(("FRAGMENT_COMPUTER_DISKS", d.as_str()));
         }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {

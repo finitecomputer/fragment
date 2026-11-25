@@ -2166,7 +2166,7 @@ fn last_start_destroying(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) ->
 
 /// The computer put to sleep, asked until it is (a turn's last record may
 /// wake it again): whether it slept, and its last view.
-fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, Value) {
+pub(super) fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, Value) {
     std::thread::sleep(QUEUE_DRAIN);
     let mut last = Value::Null;
     let slept = s.eventually(Duration::from_secs(90), || {

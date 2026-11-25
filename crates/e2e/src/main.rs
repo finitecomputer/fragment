@@ -89,6 +89,10 @@ enum Shape {
     /// client and key bound as `WORKOS_CLIENT` and `WORKOS_KEY`, and no
     /// Pipes connection in its catalog (Pipes stay absent on self-host).
     Door,
+    /// As `Plain`, each new computer of its stub on a disk
+    /// (`FRAGMENT_COMPUTER_DISKS`; docs/computers.md, "A disk"): the disk
+    /// lane's, on a runtime that gives a container FUSE (krun's).
+    Disks,
 }
 
 /// The identity door's client, as a node shaped `Shape::Door` is bound to it.
@@ -889,6 +893,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with its stub's new computers on disks
+    /// (`Shape::Disks`).
+    pub fn start_on_disks(&mut self) -> Result<Api> {
+        self.shape = Shape::Disks;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -937,7 +950,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door | Shape::Disks => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -982,7 +995,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door | Shape::Disks => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -1010,6 +1023,7 @@ impl Suite {
             computer_internet: false,
             door_internet: self.links_simplex(),
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
+            computer_disks: (self.shape == Shape::Disks).then(|| "stub".into()),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
                 // the identity door has no Pipes: a self-hosted box's catalog
@@ -1064,7 +1078,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door | Shape::Disks => SUFFIX,
         }
     }
 
@@ -1666,7 +1680,7 @@ fn local_rung(celld: Option<&devstack::celld::CelldTools>, rehearse: Option<u64>
         (None, None) => needs::Rung::Local,
         // its computers answer through the scripted model: no real agent
         (Some(paid_calls), _) => {
-            needs::Rung::Hosted(needs::Offers { levers: true, computers: true, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true })
+            needs::Rung::Hosted(needs::Offers { levers: true, computers: true, disks: false, doors: false, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true })
         }
     }
 }

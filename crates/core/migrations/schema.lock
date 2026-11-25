@@ -45,6 +45,7 @@ step Computer 6 grants_owed a3e6ebc05fade9e1
 step Computer 7 uses_owed 0c7771bd82064913
 step Computer 8 key_hour_gone ef34ecfeb9814b7f
 step Computer 9 key_calls d0b9981c9fb6d1b7
+step Computer 10 disk f91a687125df91f6
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
@@ -225,6 +226,7 @@ Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL)
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
+Computer table disk: CREATE TABLE disk ( id INTEGER PRIMARY KEY CHECK (id = 0), volume_bytes INTEGER NOT NULL, head_epoch INTEGER, head_ck_epoch INTEGER, head_ck_seq INTEGER, head_ck_sum TEXT, head_clean INTEGER NOT NULL DEFAULT 0, back_epoch INTEGER, back_ck_epoch INTEGER, back_ck_seq INTEGER, back_ck_sum TEXT, back_clean INTEGER NOT NULL DEFAULT 0, slept_unshipped INTEGER )
 Computer table key_calls: CREATE TABLE key_calls (provider TEXT PRIMARY KEY, hour INTEGER NOT NULL, used INTEGER NOT NULL)
 Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL)

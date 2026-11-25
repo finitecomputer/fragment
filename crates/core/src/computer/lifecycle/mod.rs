@@ -218,6 +218,13 @@ pub struct Lifecycle {
     /// or as a wake or a restart counts its strikes anew.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blocked_since_ms: Option<i64>,
+    /// Its `/data` is a disk (docs/computers.md, "A disk"; `fpac`): written
+    /// to R2 as it goes, so it is never saved. A sleep's hold waits for the
+    /// disk to ship what it holds (the cell's), and its stop follows at
+    /// once; no save is ever due awake. Set as it is made, for good: false
+    /// in every lifecycle stored before it was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    disk: bool,
 }
 
 impl Default for Lifecycle {
@@ -231,6 +238,18 @@ impl Lifecycle {
     /// as its owner's seat says: the registry tells it).
     pub fn always_on(&self) -> bool {
         self.always_on
+    }
+
+    /// Whether its `/data` is a disk (`disk`'s doc).
+    pub fn disk(&self) -> bool {
+        self.disk
+    }
+
+    /// It is made on a disk: before its first start, never after (a
+    /// computer with saves keeps them; moving one is not this).
+    pub fn set_disk(&mut self) {
+        assert!(self.generation == 0 && matches!(self.phase, Phase::Asleep { .. }), "a computer is put on a disk as it is made");
+        self.disk = true;
     }
 
     /// Whether this wake fell back from a snapshot that would not start
@@ -269,6 +288,7 @@ impl Lifecycle {
             tab_used_ms: 0,
             changed_ms: None,
             blocked_since_ms: None,
+            disk: false,
         }
     }
 
@@ -429,6 +449,8 @@ impl Lifecycle {
                 };
                 match self.saving {
                     Some(s) => at = at.min(s.deadline_ms()),
+                    // a disk is never saved awake
+                    None if self.disk => {}
                     None => {
                         if let Some(due) = self.save_due_ms.filter(|_| self.keepalives == 0) {
                             at = at.min(due);
@@ -693,6 +715,13 @@ impl Lifecycle {
                 self.end_life(LifeEnd::Exit, now_ms, &mut step);
                 self.gone(now_ms, &mut step);
             }
+            (Phase::Sleeping { generation, .. }, Event::Held { generation: g, .. }) if g == generation && self.disk && matches!(self.saving, Some(Saving::Hold { .. })) => {
+                // a disk's hold waited for it to ship what it held: nothing
+                // to save, its stop now (its final flush sends the rest)
+                self.saved(now_ms, &mut step);
+                self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
+                step.actions.push(Action::Stop { generation, saved: true });
+            }
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
@@ -887,7 +916,7 @@ impl Lifecycle {
                     if now_ms >= s.deadline_ms() {
                         self.overdue(generation, s, now_ms, rules, &mut step);
                     }
-                } else {
+                } else if !self.disk {
                     let settled = self.keepalives == 0 && self.save_due_ms.is_some_and(|due| now_ms >= due);
                     let busy = self.busy_save_due_ms().is_some_and(|due| now_ms >= due);
                     if settled || busy {
