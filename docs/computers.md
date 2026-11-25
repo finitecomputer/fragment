@@ -590,8 +590,7 @@ put on disks.
   again every 20 s for at most 20 minutes from its first look, then goes on
   without it, saying so. The ask is for a computer that runs (one whose
   start or life ended has none) and the export's last look drops it; the
-  export
-  asks again while it waits. On a disk, Hermes' boot never puts a hold's
+  export asks again while it waits. On a disk, Hermes' boot never puts a hold's
   copies back: the live databases are newer. Its view lists those
   saves; no start restores one; `restored.from` is `disk`.
 - **What an image does.** It carries `/usr/local/bin/fpac` and `mke2fs`
