@@ -1,8 +1,9 @@
 //! The security headers every answer of the cell carries, by the host it
 //! answers on (docs/security/http-headers.md, for the CASA assessment):
 //! HSTS on every host reached over HTTPS, and a `frame-ancestors` floor
-//! on the platform's host and on every fragment's. Pure: the cell sets
-//! them (cell/src/lib.rs `fetch` and `route`'s `framing_floor`).
+//! on the platform's answers, on its own host and on every fragment's
+//! (`floor`); a fragment app's own answers are left to the app. Pure: the
+//! cell sets them (cell/src/lib.rs `fetch` and `route`'s `framing_floor`).
 //!
 //! The floor goes only on an answer that names no `frame-ancestors` of
 //! its own, and into that answer's own policy (`with_frame_floor`): a
@@ -35,13 +36,42 @@ pub fn hsts(scheme: &str) -> Option<&'static str> {
 pub const PLATFORM_FRAME_ANCESTORS: &str = "frame-ancestors 'self'";
 pub const PLATFORM_FRAME_OPTIONS: &str = "SAMEORIGIN";
 
-/// A fragment's host: its own pages and the platform's (the shell shows
-/// every fragment in a frame), the policy a stranger's answer to a frame
-/// already gets (`frames::ancestors`), now on every answer, so a browser
-/// without Fetch Metadata, or a scan, sees it too. No `X-Frame-Options`:
+/// The platform's answers on a fragment's host: the fragment's own pages
+/// and the platform's (the shell shows every fragment in a frame), the
+/// policy a stranger's answer to a frame already gets (`frames::ancestors`),
+/// so a browser without Fetch Metadata, or a scan, sees it too. No `X-Frame-Options`:
 /// it cannot name a second origin, and `SAMEORIGIN` would break the shell.
 pub fn fragment_frame_ancestors(platform: &str) -> String {
     format!("frame-ancestors {}", frames::ancestors(Framed::Stranger, platform))
+}
+
+/// Who made an answer, by its host and, on a fragment's, by its maker:
+/// the floor is chosen for each (`floor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    /// The platform's host, or any host that is no fragment's or computer's.
+    Platform,
+    /// A fragment's host (its own, a claimed address), the platform's own
+    /// answer there: a sign-in hop, a refusal, an error.
+    FragmentPlatform,
+    /// A fragment's host, its app's own answer: a page, a file.
+    FragmentApp,
+    /// A computer's host (`computer::framed_by` frames its every answer).
+    Computer,
+}
+
+/// The `frame-ancestors` floor an answer gets when it names none, and the
+/// `X-Frame-Options` beside it. `None` for an app's own answer: who may
+/// frame a published page is its app's to say, so a publisher's page may
+/// embed it wherever it could before this floor; a frame's
+/// navigation, with Fetch Metadata, still gets the cell's own policy
+/// beside the app's (`bound`). `None` for a computer's, framed already.
+pub fn floor(answered: Answered, platform: &str) -> Option<(String, Option<&'static str>)> {
+    match answered {
+        Answered::Platform => Some((PLATFORM_FRAME_ANCESTORS.to_string(), Some(PLATFORM_FRAME_OPTIONS))),
+        Answered::FragmentPlatform => Some((fragment_frame_ancestors(platform), None)),
+        Answered::FragmentApp | Answered::Computer => None,
+    }
 }
 
 /// The `Content-Security-Policy` value an answer leaves with, given the
@@ -183,6 +213,19 @@ mod tests {
     #[should_panic(expected = "the platform is named by its origin")]
     fn fragment_policy_refuses_a_non_origin() {
         fragment_frame_ancestors("https://*.finite.place");
+    }
+
+    /// Goal: a published fragment's own page keeps its framing to its app,
+    /// so a publisher's embed of it works as it did before the floor, while
+    /// the platform's answers, on its host or a fragment's, get theirs.
+    /// Method: each kind of answer.
+    #[test]
+    fn an_apps_own_answer_gets_no_floor() {
+        let platform = "https://finite.chat";
+        assert_eq!(floor(Answered::FragmentApp, platform), None);
+        assert_eq!(floor(Answered::Computer, platform), None);
+        assert_eq!(floor(Answered::FragmentPlatform, platform), Some((fragment_frame_ancestors(platform), None)));
+        assert_eq!(floor(Answered::Platform, platform), Some((PLATFORM_FRAME_ANCESTORS.to_string(), Some(PLATFORM_FRAME_OPTIONS))));
     }
 
     /// Goal: the platform's floor lets only its own pages frame it.

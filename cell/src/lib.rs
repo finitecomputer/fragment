@@ -1201,7 +1201,8 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     let extra = identity.map(|id| vec![(address::IDENTITY_HEADER.to_string(), id.to_string())]).unwrap_or_default();
     let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
-    if resp.headers().has(serve::REFUSAL)? {
+    let app = !resp.headers().has(serve::REFUSAL)?;
+    if !app {
         resp = match page {
             true => {
                 let e: ErrorBody = resp.read_json().await?;
@@ -1210,10 +1211,30 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
             false => unmarked(resp)?,
         };
     }
-    match fetched.navigation {
-        true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref()),
+    let resp = match fetched.navigation {
+        true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref())?,
+        false => resp,
+    };
+    match app {
+        true => app_answer(resp),
         false => Ok(resp),
     }
+}
+
+/// The mark `site` puts on its app's own answer, so `route`'s
+/// `framing_floor` leaves its framing to the app
+/// (`answer_headers::Answered::FragmentApp`). A header rather than a value
+/// passed back, since `serve`'s answer goes through `updating::answer`
+/// before the floor; `framing_floor` takes it off every answer, so it never
+/// leaves `route`, and an app that sends it gains nothing: its own answers
+/// are marked anyway.
+const APP_ANSWER: &str = "x-fragment-app-answer";
+
+/// An app's own answer, marked (`APP_ANSWER`). Cloned, as `bound` does.
+fn app_answer(resp: Response) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    h.set(APP_ANSWER, "1")?;
+    Ok(resp.with_headers(h))
 }
 
 /// A URL's path and query, as a redirect to another host keeps them.
@@ -1254,39 +1275,45 @@ pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<
     framing_floor(resp, cfg, &host)
 }
 
-/// Who may frame an answer that names no one itself, by the host it
-/// answers on, told apart as `route_inner` tells them: a fragment's (its
-/// own host, a claimed address's) its own pages and the platform's
-/// (`answer_headers::fragment_frame_ancestors`: the shell shows every
-/// fragment in a frame); a computer's, nothing here (`computer::framed_by`
-/// frames its every answer); the platform's, and any other host, the
-/// platform's own pages (`PLATFORM_FRAME_ANCESTORS`, and
-/// `X-Frame-Options` where the answer sent none). Last, after the
-/// updating notice (`updating::answer`) has its own policy, so each
+/// Who may frame an answer that names no one itself
+/// (`answer_headers::floor`), by the host it answers on, told apart as
+/// `route_inner` tells them, and on a fragment's (its own host, a claimed
+/// address's) by who made it: the platform's answer there may be framed by
+/// the fragment's own pages and the platform's (the shell shows every
+/// fragment in a frame); an app's own answer (`APP_ANSWER`) is the app's to
+/// frame, so a published page stays embeddable as it was. A computer's
+/// gets nothing here (`computer::framed_by` frames its every answer). The
+/// platform's, and any other host's, may be framed by the platform's own
+/// pages, with `X-Frame-Options` where the answer sent none. Last, after
+/// the updating notice (`updating::answer`) has its own policy, so each
 /// answer carries one: the floor joins the answer's policy, and an answer
-/// whose policy names `frame-ancestors` (a frame's `bound`, a page any
-/// page may frame, an app's own) keeps it as it came
+/// whose policy names `frame-ancestors` (a frame's `bound`, a page any page
+/// may frame, an app's own) keeps it as it came
 /// (`answer_headers::with_frame_floor`). Cloned, as `platform_origin`
 /// does, which keeps a socket's 101 and its WebSocket.
 fn framing_floor(resp: Response, cfg: &Config, host: &str) -> CellResult<Response> {
-    use fragment_core::answer_headers::{fragment_frame_ancestors, with_frame_floor, PLATFORM_FRAME_ANCESTORS, PLATFORM_FRAME_OPTIONS};
-    let own = Some(host).filter(|h| !cfg.is_platform_host(h));
-    let (floor, options) = if own.is_some_and(|h| cfg.fragment_of_host(h).is_some()) {
-        (fragment_frame_ancestors(&cfg.platform()), None)
-    } else if own.is_some_and(|h| cfg.computer_of_host(h).is_some()) {
-        return Ok(resp);
-    } else if own.is_some_and(|h| cfg.address_of_host(h).is_some()) {
-        (fragment_frame_ancestors(&cfg.platform()), None)
-    } else {
-        (PLATFORM_FRAME_ANCESTORS.to_string(), Some(PLATFORM_FRAME_OPTIONS))
-    };
+    use fragment_core::answer_headers::{floor, with_frame_floor, Answered};
     let h = resp.headers().clone();
-    if let Some(policy) = with_frame_floor(h.get("content-security-policy")?.as_deref(), &floor) {
-        h.set("content-security-policy", &policy)?;
-    }
-    if let Some(options) = options {
-        if !h.has("x-frame-options")? {
-            h.set("x-frame-options", options)?;
+    let app = h.has(APP_ANSWER)?;
+    h.delete(APP_ANSWER)?;
+    let own = Some(host).filter(|h| !cfg.is_platform_host(h));
+    let fragment = |app: bool| if app { Answered::FragmentApp } else { Answered::FragmentPlatform };
+    let answered = if own.is_some_and(|h| cfg.fragment_of_host(h).is_some()) {
+        fragment(app)
+    } else if own.is_some_and(|h| cfg.computer_of_host(h).is_some()) {
+        Answered::Computer
+    } else if own.is_some_and(|h| cfg.address_of_host(h).is_some()) {
+        fragment(app)
+    } else {
+        Answered::Platform
+    };
+    if let Some((ancestors, options)) = floor(answered, &cfg.platform()) {
+        if let Some(policy) = with_frame_floor(h.get("content-security-policy")?.as_deref(), &ancestors) {
+            h.set("content-security-policy", &policy)?;
+        }
+        match options {
+            Some(options) if !h.has("x-frame-options")? => h.set("x-frame-options", options)?,
+            _ => {}
         }
     }
     Ok(resp.with_headers(h))
