@@ -139,10 +139,12 @@ def assets(root, path):
         if line.strip() == "---":
             break
         if line.startswith("resource:"):
-            # a YAML value: quoted whole, or plain up to a comment
+            # A YAML value, read only in the forms it can't be misread in:
+            # plain up to a comment, or quoted with no escape in it. Any
+            # other names nothing, so its asset stops `start`.
             value = line[len("resource:"):].strip()
-            quoted = value[:1] in ("'", '"') and value[0] in value[1:]
-            name = value[1:value.index(value[0], 1)] if quoted else re.split(r"\s#", value, 1)[0].strip()
+            read = re.fullmatch(r"""'([^']*)'(?:\s+#.*)?|"([^"\\]*)"(?:\s+#.*)?|([^'"\s].*?)(?:\s+#.*)?""", value)
+            name = next((g for g in read.groups() if g is not None), "") if read else ""
             asset = path.split("/", 1)[0] + "/" + name
             if name.startswith("raw/assets/") and clean(asset):
                 found.append(asset)

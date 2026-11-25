@@ -317,6 +317,23 @@ fn what_the_brain_doesnt_share_never_comes_in() {
     let after = d.files("brain");
     let changed: Vec<_> = after.keys().filter(|p| before.get(*p) != after.get(*p)).collect();
     assert_eq!(changed, ["Notes/a.md", "imported-from-finite.json"], "only the shared folder it could read, and the record");
+
+    // a quoted name it can't read exactly names nothing, never another
+    // file: here a left-out note's asset whose name starts the same
+    let q = Dir::new("quoted");
+    let at10 = Old {
+        sequence: 10,
+        folders: vec![("Notes", "n", true), ("Notes/Private", "np", true)],
+        pages: vec![
+            ("Notes/a.md", "a", 1, "---\nresource: 'raw/assets/report.pdf''s notes.pdf'\n---\na1"),
+            ("Notes/b.md", "b", 1, "---\nresource: raw/assets/report.pdf's notes.pdf\n---\nb1"),
+            ("Notes/Private/p.md", "p", 1, "---\nresource: raw/assets/report.pdf\n---\np1"),
+        ],
+    };
+    q.copy("founder", &at10, &[]);
+    q.put("founder/Notes/raw/assets/report.pdf", "the private folder's");
+    q.put("founder/Notes/raw/assets/report.pdf's notes.pdf", "a shared note's");
+    assert_eq!(q.make(&["Notes/Private"]), json!({"recorded": 2, "shared": ["Notes"], "not shared": ["Notes/Private"], "removed": ["Notes/raw/assets/report.pdf"], "refused": []}));
 }
 
 /// Goal: "changed" is by the old brain's revisions, never by bytes. An
