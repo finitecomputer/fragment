@@ -23,7 +23,7 @@
 # at an earlier commit nor `main`'s commit messages (FIN-780). Once it
 # can, the import's own commit is the base, and the file goes (technical
 # debt ledger, "A team brain's catch-up keeps its base in a file").
-import hashlib, json, os, shutil, sys
+import hashlib, json, os, shutil, sys, tempfile
 
 RECORD = "imported-from-finite.json"
 MISSING = object()
@@ -87,19 +87,17 @@ def blocked(root, path):
 
 
 def whole(path, write):
-    # Written whole beside it under a dot name (which never syncs), then
-    # moved over it: a link there is replaced, never followed, and a write
-    # that fails leaves what was there.
-    part = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".partial")
+    # Written whole beside it, under a dot name of its own that never syncs,
+    # then moved over it: a link there is replaced, never followed, and a
+    # write that fails leaves what was there.
+    fd, part = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".", suffix=".fragment-partial")
     try:
-        if os.path.lexists(part):
-            os.unlink(part)
-        with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644), "wb") as f:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o644)
             write(f)
         os.replace(part, path)
     except OSError:
-        if os.path.lexists(part):
-            os.unlink(part)
+        os.unlink(part)
         raise
 
 
@@ -143,7 +141,7 @@ def assets(root, path):
         if line.startswith("resource:"):
             name = line[len("resource:"):].strip().strip("\"'")
             asset = path.split("/", 1)[0] + "/" + name
-            if name.startswith("raw/assets/") and carried(asset):
+            if name.startswith("raw/assets/") and clean(asset):
                 found.append(asset)
     return found
 
@@ -229,37 +227,50 @@ if record is not MISSING:
 if mode == "start":
     # From a reference copy, `copied` checked its staged pages already.
     staged, exact = other, named.get("exact")
-    pages, refused = {}, sorted(p for p in listed if not carried(p) and sha(work, p) is not None)
-    for path, (id_, revision, old_sha) in listed.items():
-        here = sha(work, path) if carried(path) else None
-        if here is not None:
-            # Staged as other text than its revision's: an edit the old brain
-            # never got. Nothing is recorded as written, so any later change
-            # to it in the old brain is for a person.
-            exact_text = path in exact if isinstance(exact, list) else sha(staged, path) == old_sha
-            pages[path] = {"id": id_, "revision": revision, "written": here if exact_text else None}
+    here = {p: h for p in listed if (h := sha(work, p)) is not None}
     # The folders it shares: each the old agent could read, with a page
     # here (or, with no pages, a folder here). One left out stays out.
-    held = {folder_of(p, folders) for p in pages}
+    held = {folder_of(p, folders) for p in here}
     empty = set(folders) - {folder_of(p, folders) for p in listed}
     shared = {
         f: {"id": id_, "sequence": sequence}
         for f, (id_, read) in folders.items()
         if read and (f in held or (f in empty and os.path.isdir(at(work, f) or "")))
     }
+
+    def outside(rel):
+        return folder_of(rel, folders) not in (None, *shared)
+
+    pages, refused = {}, []
+    for path, h in sorted(here.items()):
+        id_, revision, old_sha = listed[path]
+        if outside(path):
+            continue
+        if not carried(path):
+            refused.append(path)  # sync never carries it
+            continue
+        # Staged as other text than its revision's: an edit the old brain
+        # never got. Nothing is recorded as written, so any later change
+        # to it in the old brain is for a person.
+        exact_text = path in exact if isinstance(exact, list) else sha(staged, path) == old_sha
+        pages[path] = {"id": id_, "revision": revision, "written": h if exact_text else None}
     new = {"from": "finite.computer", "old": old, "folders": shared, "pages": pages}
     if record is not MISSING and record != new:
         stop(f"{RECORD} is there already, and isn't this brain's start: push nothing")
     # Out of the push goes what would show a folder it doesn't share: the
-    # files of one (left out, or one the old agent couldn't read), and the
-    # assets only its notes name (they sit in its wiki's `raw/assets/`).
-    def outside(rel):
-        return folder_of(rel, folders) not in (None, *shared)
+    # files of one (left out, or one the old agent couldn't read), and any
+    # asset no note it shares names (a left-out folder's notes keep theirs
+    # in their wiki's `raw/assets/`).
     kept = {a for rel in files_in(work) if not outside(rel) for a in assets(work, rel)}
-    theirs = {a for rel in files_in(staged) if outside(rel) for a in assets(staged, rel)}
-    removed = sorted({rel for rel in files_in(work) if outside(rel)} | {a for a in theirs - kept if a not in pages and sha(work, a)})
+    removed = sorted(
+        rel for rel in files_in(work)
+        if outside(rel) or (rel.split("/")[1:3] == ["raw", "assets"] and rel.count("/") > 2 and rel not in kept and rel not in listed)
+    )
     for rel in removed:
-        os.unlink(os.path.join(work, *rel.split("/")))  # a link itself, never what it names
+        try:
+            os.unlink(os.path.join(work, *rel.split("/")))  # a link itself, never what it names
+        except OSError as e:
+            stop(f"{rel} can't be taken out of the push ({e}): push nothing")
     save(record_path, new)
     print(json.dumps({"recorded": len(pages), "shared": sorted(shared), "not shared": sorted(set(folders) - set(shared)), "removed": removed, "refused": refused}))
     sys.exit(0)
@@ -291,8 +302,8 @@ def asset_plan(names):
     plan = []
     for asset in names:
         there, here = sha(copy_dir, asset), sha(work, asset)
-        if blocked(copy_dir, asset) or blocked(work, asset):
-            return None  # a link or a folder there
+        if not carried(asset) or blocked(copy_dir, asset) or blocked(work, asset):
+            return None  # one sync never carries, or a link or a folder there
         if there is None and here is None or None not in (there, here) and there != here:
             return None  # in neither, or different here
         if here is None:
@@ -324,7 +335,7 @@ for path, (id_, revision, _) in sorted(listed.items()):
     if here == there:
         # Here already, byte for byte: settled once its assets are. Recorded
         # when the record lost it, or holds an older version.
-        heal = path in exact and (base["revision"] < revision if base else seen is None or not older(folder))
+        heal = path in exact and (base["revision"] < revision or base["written"] is None if base else seen is None or not older(folder))
         if plan is None:
             held["both"].append(path)
         else:
@@ -333,7 +344,7 @@ for path, (id_, revision, _) in sorted(listed.items()):
     if path not in exact:
         held["unsynced"].append(path)  # an edit the old brain never got
         continue
-    if base is not None and revision <= base["revision"]:
+    if base is not None and (revision < base["revision"] or revision == base["revision"] and base["written"] is not None):
         continue  # not changed in the old brain since: what is here stays
     if older(folder):
         held["older"].append(path)

@@ -134,13 +134,18 @@ impl Dir {
 
     /// The brain made from the founder's copy as it stands (`found`).
     fn make(&self, left_out: &[&str]) -> Value {
+        self.lay(left_out);
+        self.start().unwrap()
+    }
+
+    /// The brain's work folder made from the founder's copy, before `start`.
+    fn lay(&self, left_out: &[&str]) {
         for (path, text) in self.files("founder") {
             self.put(&format!("brain/{path}"), &text);
         }
         for folder in left_out {
             self.rm(&format!("brain/{folder}"));
         }
-        self.start().unwrap()
     }
 
     fn start(&self) -> Result<Value, String> {
@@ -251,19 +256,39 @@ fn what_the_brain_doesnt_share_never_comes_in() {
     let (private, shared) = ("---\nresource: raw/assets/private.pdf\n---\np1", "---\nresource: raw/assets/shared.png\n---\na1");
     let at10 = Old {
         sequence: 10,
-        folders: vec![("Notes", "n", true), ("Notes/Private", "np", true), ("Board", "b", true), ("Team", "t", true), ("Team/Public", "tp", true), ("Archive", "ar", false)],
-        pages: vec![("Notes/a.md", "a", 1, shared), ("Notes/Private/p.md", "p", 1, private), ("Board/k.md", "k", 1, "k1"), ("Team/t.md", "t", 1, "t1"), ("Team/Public/u.md", "u", 1, "u1")],
+        folders: vec![("Notes", "n", true), ("Notes/Private", "np", true), ("Board", "b", true), ("Team", "t", true), ("Team/Public", "tp", true), ("Archive", "ar", false), ("Drafts", "dr", true)],
+        pages: vec![
+            ("Notes/a.md", "a", 1, shared),
+            ("Notes/Private/p.md", "p", 1, private),
+            ("Board/k.md", "k", 1, "k1"),
+            ("Team/t.md", "t", 1, "t1"),
+            ("Team/Public/u.md", "u", 1, "u1"),
+            ("Archive/listed.md", "al", 1, "al1"),
+            ("Drafts/y.conflict-1.md", "y", 1, "y1"),
+        ],
     };
     d.copy("founder", &at10, &[]);
     d.put("founder/Notes/raw/assets/private.pdf", "the private folder's");
+    d.put("founder/Notes/raw/assets/stray.png", "no note names it");
     d.put("founder/Notes/raw/assets/shared.png", "a shared note's");
     d.put("founder/Archive/old.md", "from before the old agent lost it");
-    assert_eq!(
-        d.make(&["Notes/Private"]),
-        json!({"recorded": 4, "shared": ["Board", "Notes", "Team", "Team/Public"], "not shared": ["Archive", "Notes/Private"], "removed": ["Archive/old.md", "Notes/raw/assets/private.pdf"], "refused": []})
-    );
+    d.put("founder/Drafts/draft.md", "a draft never synced");
+    d.lay(&["Notes/Private"]);
+    d.rm("founder/Notes/Private");
+    let started = json!({
+        "recorded": 4,
+        "shared": ["Board", "Drafts", "Notes", "Team", "Team/Public"],
+        "not shared": ["Archive", "Notes/Private"],
+        "removed": ["Archive/listed.md", "Archive/old.md", "Notes/raw/assets/private.pdf", "Notes/raw/assets/stray.png"],
+        "refused": ["Drafts/y.conflict-1.md"],
+    });
+    assert_eq!(d.start(), Ok(started.clone()), "an asset goes only with a note it shares, wherever the left-out note is");
     let made = d.files("brain");
-    assert!(made.contains_key("Notes/raw/assets/shared.png") && !made.keys().any(|p| p.contains("private") || p.starts_with("Archive")), "{made:?}");
+    assert!(made.contains_key("Notes/raw/assets/shared.png") && made.contains_key("Drafts/draft.md"), "{made:?}");
+    assert!(!made.keys().any(|p| p.contains("private") || p.contains("stray") || p.starts_with("Archive")), "{made:?}");
+    let mut again = started;
+    again["removed"] = json!([]);
+    assert_eq!(d.start(), Ok(again), "replay: the same record, nothing more to take out");
     let note = "---\nresource: raw/assets/v.png\n---\nv1";
     let at20 = Old {
         sequence: 20,
@@ -296,10 +321,10 @@ fn what_the_brain_doesnt_share_never_comes_in() {
 #[test]
 fn versions_decide_never_bytes() {
     let d = Dir::new("versions");
-    let pages = ["a", "u", "w", "d", "e", "p", "h"].map(|x| (format!("Notes/{x}.md"), x, format!("{x}1")));
+    let pages = ["a", "u", "v", "w", "d", "e", "p", "h"].map(|x| (format!("Notes/{x}.md"), x, format!("{x}1")));
     let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true)], pages: pages.iter().map(|(p, id, t)| (p.as_str(), *id, 1, t.as_str())).collect() };
-    // the founder's old agent edited u and w, and never synced them
-    d.found(&at10, &[("Notes/u.md", "u, never synced"), ("Notes/w.md", "w, never synced")], &[]);
+    // the founder's old agent edited u, v and w, and never synced them
+    d.found(&at10, &[("Notes/u.md", "u, never synced"), ("Notes/v.md", "v, never synced"), ("Notes/w.md", "w, never synced")], &[]);
     assert_eq!(d.record()["pages"]["Notes/u.md"]["written"], Value::Null);
     for deleted in ["w", "d", "e"] {
         d.rm(&format!("brain/Notes/{deleted}.md"));
@@ -311,11 +336,12 @@ fn versions_decide_never_bytes() {
     let at20 = Old {
         sequence: 20,
         folders: vec![("Notes", "n", true)],
-        pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/u.md", "u", 2, "u2"), ("Notes/w.md", "w", 2, "w2"), ("Notes/d.md", "d", 1, "d1"), ("Notes/e.md", "e", 2, "e2"), ("Notes/p.md", "q", 1, "q1"), ("Notes/h.md", "h", 1, "h1")],
+        pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/u.md", "u", 2, "u2"), ("Notes/v.md", "v", 1, "v1"), ("Notes/w.md", "w", 2, "w2"), ("Notes/d.md", "d", 1, "d1"), ("Notes/e.md", "e", 2, "e2"), ("Notes/p.md", "q", 1, "q1"), ("Notes/h.md", "h", 1, "h1")],
     };
     // this teammate's old agent edited a, and never synced it
     d.copy("t20", &at20, &[("Notes/a.md", "a, never synced")]);
-    assert_eq!(d.catch_up("t20"), answer(json!({"both": ["Notes/e.md", "Notes/p.md", "Notes/u.md", "Notes/w.md"], "unsynced": ["Notes/a.md"]})));
+    // v: the brain took the founder's edit, never revision 1's text, which only this copy holds
+    assert_eq!(d.catch_up("t20"), answer(json!({"both": ["Notes/e.md", "Notes/p.md", "Notes/u.md", "Notes/v.md", "Notes/w.md"], "unsynced": ["Notes/a.md"]})));
     let brain = d.files("brain");
     assert_eq!((brain["Notes/a.md"].as_str(), brain["Notes/u.md"].as_str(), brain["Notes/p.md"].as_str()), ("a1", "u, never synced", "p1"));
     assert!(["w", "d", "e"].iter().all(|x| !brain.contains_key(&format!("Notes/{x}.md"))), "deleted here: never back");
@@ -358,11 +384,12 @@ fn paths_and_assets_stay_in_the_brain() {
             ("Notes/../../escape.md", "esc", 1, "esc1"),
             ("Notes/sym.md", "sym", 1, "sym1"),
             ("Notes/x.conflict-1.md", "conflict", 1, "c1"),
+            ("Notes/scan.md", "scan", 1, "---\nresource: raw/assets/scan.conflict-1.png\n---\nscan"),
             (long.as_str(), "long", 1, "l1"),
         ],
     };
     d.copy("t20", &at20, &[]);
-    for (asset, text) in [("s", "s-png"), ("q", "q-png"), ("diff", "diff there")] {
+    for (asset, text) in [("s", "s-png"), ("q", "q-png"), ("diff", "diff there"), ("scan.conflict-1", "never synced")] {
         d.put(&format!("t20/Notes/raw/assets/{asset}.png"), text);
     }
     d.link("t20/Notes/raw/assets/link.png", "outside/secret");
@@ -371,9 +398,9 @@ fn paths_and_assets_stay_in_the_brain() {
         d.catch_up("t20"),
         answer(json!({
             "added": 1, "updated": 1, "assets": 1,
-            "both": ["Notes/diff.md", "Notes/dir.md", "Notes/file/x.md", "Notes/link.md"],
+            "both": ["Notes/diff.md", "Notes/dir.md", "Notes/file/x.md", "Notes/link.md", "Notes/scan.md"],
             "refused": ["Notes/../../escape.md", long, "Notes/sym.md", "Notes/x.conflict-1.md"],
-            "extra": ["Notes/raw/assets/diff.png", "Notes/raw/assets/link.png"],
+            "extra": ["Notes/raw/assets/diff.png", "Notes/raw/assets/link.png", "Notes/raw/assets/scan.conflict-1.png"],
         }))
     );
     let brain = d.files("brain");
@@ -394,16 +421,21 @@ fn paths_and_assets_stay_in_the_brain() {
 #[test]
 fn a_write_that_fails_leaves_the_page_as_it_was() {
     let d = Dir::new("full");
-    let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true)], pages: vec![("Notes/big.md", "big", 1, "small")] };
+    // a name as long as a file's may be, less its `.md`
+    let long = format!("Notes/{}.md", "n".repeat(252));
+    let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true)], pages: vec![("Notes/big.md", "big", 1, "small"), (long.as_str(), "long", 1, "l1")] };
     d.found(&at10, &[], &[]);
+    d.put("brain/Notes/.big.md.partial", "someone else's, never synced");
     let big = "b".repeat(8192);
-    d.copy("t20", &Old { sequence: 20, folders: vec![("Notes", "n", true)], pages: vec![("Notes/big.md", "big", 2, &big)] }, &[]);
+    d.copy("t20", &Old { sequence: 20, folders: vec![("Notes", "n", true)], pages: vec![("Notes/big.md", "big", 2, &big), (long.as_str(), "long", 2, "l2")] }, &[]);
     let args = ["catch-up", OLD, "t20.json", "brain", "t20"];
-    assert_eq!(d.run_capped("4", &args).unwrap(), answer(json!({"both": ["Notes/big.md"]})));
-    assert_eq!(d.files("brain").keys().collect::<Vec<_>>(), ["Notes/big.md", "imported-from-finite.json"], "nothing partial left beside it");
-    assert_eq!(d.read("brain/Notes/big.md").as_deref(), Some("small"));
+    assert_eq!(d.run_capped("4", &args).unwrap(), answer(json!({"updated": 1, "both": ["Notes/big.md"]})));
+    let brain = d.files("brain");
+    assert!(!brain.keys().any(|p| p.contains("fragment-partial")), "nothing partial left beside it: {brain:?}");
+    assert_eq!((brain["Notes/big.md"].as_str(), brain[&long].as_str()), ("small", "l2"));
     assert_eq!(d.run(&args).unwrap(), answer(json!({"updated": 1, "settled": true})));
     assert_eq!(d.read("brain/Notes/big.md"), Some(big));
+    assert_eq!(d.read("brain/Notes/.big.md.partial").as_deref(), Some("someone else's, never synced"), "another file is never touched");
 }
 
 /// Goal: an import that can't tell versions compares by hand, as before
@@ -449,4 +481,18 @@ fn without_versions_or_a_record_it_compares_by_hand() {
     d.put("brain/Notes/a.md", "a1, edited here");
     assert!(d.start().unwrap_err().starts_with("STOP"), "start over a brain that changed");
     assert_eq!(d.read(RECORD).unwrap(), record);
+
+    // what it must take out of the push, and can't: it stops, recording nothing
+    let e = Dir::new("stuck");
+    e.copy("founder", &Old { sequence: 10, folders: vec![("Notes", "n", true), ("Archive", "ar", false)], pages: vec![("Notes/a.md", "a", 1, "a1")] }, &[]);
+    e.put("founder/Archive/old.md", "from before the old agent lost it");
+    e.lay(&[]);
+    let archive = e.0.join("brain/Archive");
+    let mode = |m: u32| std::fs::set_permissions(&archive, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
+    mode(0o555);
+    if std::fs::write(archive.join("probe"), "").is_err() {
+        assert!(e.start().unwrap_err().starts_with("STOP"));
+        assert!(e.read(RECORD).is_none());
+    }
+    mode(0o755);
 }
