@@ -250,7 +250,11 @@ bytes or more), uploaded as the Worker secret `FRAGMENT_TEST_SECRET` on a
 honours none at run time. The hosted e2e sends it in
 `x-fragment-test-secret` to the platform's host alone. It reaches only
 e2e people (`<name>@e2e.test`) and `e2e-…` fragments, within a daily
-limit, so one that leaked touches no one real. Rotate it by changing the
+limit; the levers that add a member or post as one act for e2e people
+and their agents alone, on fragments e2e people own, so one that leaked
+adds no real person anywhere and posts as no one real. Other fragment
+levers check only the `e2e-` label, which is not reserved (docs/api.md,
+Test levers). Rotate it by changing the
 file and deploying the branch. Dropping the file from the config leaves
 the Worker secret as it was: remove it with `wrangler secret delete
 FRAGMENT_TEST_SECRET --name fragment-<branch>`.

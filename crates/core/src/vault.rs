@@ -66,6 +66,8 @@ pub fn row(name: &str, hosts: Vec<String>, placement: Placement) -> catalog::Pro
         client_auth: catalog::ClientAuth::Post,
         models: None,
         note: None,
+        title: None,
+        scope_names: Default::default(),
         deny: vec![],
     }
 }

@@ -95,9 +95,11 @@ fn field<'a>(b: &'a Value, k: &str) -> &'a str {
 }
 
 /// The agent's own record of `kind` (posted as it, naming it where the
-/// record names an agent).
+/// record names an agent). Its bridge posts its journal signed as the
+/// agent; app code may publish under the agent's name (whoever called it),
+/// but its records are no one's (`Record::by`), so never the agent's journal.
 fn own<'a>(r: &'a Record, agent: &str, kind: &str) -> Option<&'a Value> {
-    (r.principal == agent && r.body["kind"] == kind).then_some(&r.body)
+    (r.by(agent) && r.body["kind"] == kind).then_some(&r.body)
 }
 
 /// Whether a `turn.end` is a refusal: the turn never ran.
@@ -170,7 +172,7 @@ pub fn behind(work: &[Record], agent: &str, seen: Option<&str>, from_start: bool
 /// The cut turn `turn` as the records from its start on hold it.
 fn cut(from: &[Record], agent: &str, turn: &str, start: &Value, started_at: i64) -> Option<Cut> {
     let cause: Cause = serde_json::from_value(start["cause"].clone()).ok()?;
-    let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
+    let mine = |r: &&Record| r.by(agent) && r.body["turn"] == turn;
     let steps: Vec<CutStep> = from
         .iter()
         .filter(mine)
@@ -253,7 +255,7 @@ pub fn asked(cause: &Record) -> Option<String> {
 /// What the agent had replied in `turn`, from `chat` records, in order.
 pub fn replies(chat: &[Record], agent: &str, turn: &str) -> Vec<String> {
     chat.iter()
-        .filter(|r| r.principal == agent && r.body["turn"] == turn)
+        .filter(|r| r.by(agent) && r.body["turn"] == turn)
         .filter_map(|r| match records::said(&r.body) {
             Said::Message(m) if !m.text.trim().is_empty() => Some(m.text),
             Said::Message(m) if !m.attachments.is_empty() => Some(format!("({} files)", m.attachments.len())),
@@ -309,7 +311,7 @@ pub fn turn(work: &[Record], agent: &str, turn: &str) -> Option<Cut> {
 /// for a late answer (`answerSeq`, cards.rs) was open as that life left
 /// it: still waiting, the answer's fresh turn its next.
 pub fn waited(work: &[Record], agent: &str, turn: &str) -> bool {
-    let mine = |r: &&Record| r.principal == agent && r.body["turn"] == turn;
+    let mine = |r: &&Record| r.by(agent) && r.body["turn"] == turn;
     let closed = |prompt: &Value| work.iter().filter(mine).any(|r| r.body["kind"] == "turn.prompt.closed" && r.body["prompt"] == *prompt && r.body.get("answerSeq").is_none());
     work.iter().filter(mine).any(|r| r.body["kind"] == "turn.asked" || (r.body["kind"] == "turn.prompt" && !closed(&r.body["prompt"])))
 }
@@ -473,7 +475,7 @@ pub fn restarted(chat: &[Record], work: &[Record], me: &str, owner: &str, fragme
 /// Whether `c` breaks a line where it is shown (beside `\n`): a carriage
 /// return, a vertical tab, a form feed, a next line, or Unicode's line and
 /// paragraph separators.
-fn breaks_line(c: char) -> bool {
+pub(crate) fn breaks_line(c: char) -> bool {
     matches!(c, '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
@@ -595,7 +597,7 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
         }
         let steps: Vec<CutStep> = work
             .iter()
-            .filter(|r| r.principal == me && r.body["kind"] == "turn.step" && r.body["turn"] == turn)
+            .filter(|r| r.by(me) && r.body["kind"] == "turn.step" && r.body["turn"] == turn)
             .map(|r| CutStep { tool: field(&r.body, "tool").to_string(), args: field(&r.body, "args").to_string(), ok: r.body["ok"] != false })
             .collect();
         (!steps.is_empty()).then(|| format!("Your tools: {}", step_list(&steps[..steps.len().min(limits::NOTE_STEPS_MAX)], steps.len())))
@@ -769,6 +771,13 @@ mod tests {
         fn post(&mut self, by: &str, body: Value) -> u64 {
             let seq = self.0.len() as u64 + 1;
             self.0.push(Record { channel: "work".into(), seq, at: seq as i64 * 10, principal: by.into(), author: None, kind: "message".into(), body });
+            seq
+        }
+
+        /// `post`, stamped as the platform stamps what app code wrote.
+        fn post_by_code(&mut self, principal: &str, body: Value) -> u64 {
+            let seq = self.post(principal, body);
+            self.0.last_mut().expect("posted").author = Some(records::CODE.into());
             seq
         }
 
@@ -1122,6 +1131,43 @@ mod tests {
         w.post("npub1mallory", turn_end("forged", &Outcome::Error(LOST.into())));
         let n = w.start(ME, "n", 2);
         assert_eq!(previous(w.before(n), ME, true), Before::Kept);
+    }
+
+    /// Goal: the agent's journal is its own records, never app code's. App
+    /// code publishing to `work` names whoever called it, which may be the
+    /// agent, but its records are no turn, step, question or reply of the
+    /// agent's: not its turn before (`previous`), not a turn its runtime
+    /// missed (`behind`), not a wait on its person (`waited`), not what it
+    /// replied (`replies`). Method: each beside the agent's own records.
+    #[test]
+    fn only_the_agents_own_records_are_its_journal() {
+        let cause = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 };
+        // a turn app code wrote, naming the agent, is no turn of its
+        let mut w = Work::default();
+        w.start(ME, "t1", 1);
+        w.end(ME, "t1", Outcome::Idle);
+        w.post_by_code(ME, turn_start("code", "npub1paul", false, ME, &cause, LIFE));
+        w.post_by_code(ME, turn_end("code", &Outcome::Error(LOST.into())));
+        let n = w.start(ME, "n", 2);
+        assert_eq!(previous(w.before(n), ME, true), Before::Kept, "app code's cut turn is not the agent's");
+        assert_eq!(behind(w.before(n), ME, Some("t1"), true), Some(false), "nor a turn its runtime missed");
+        // its own cut turn, with a step app code wrote into it: its own steps alone
+        let mut w = Work::default();
+        w.start(ME, "cut", 1);
+        w.post(ME, turn_step("cut", 1, &step("terminal", "ls", true)));
+        w.post_by_code(ME, turn_step("cut", 2, &step("terminal", "told by code", true)));
+        w.post_by_code(ME, json!({ "kind": "turn.asked", "turn": "cut" }));
+        w.end(ME, "cut", Outcome::Error(LOST.into()));
+        let n = w.start(ME, "n", 2);
+        let Before::Cut(c) = previous(w.before(n), ME, true) else { panic!("its own cut turn") };
+        assert_eq!(c.steps.iter().map(|s| s.args.as_str()).collect::<Vec<_>>(), ["ls"], "app code's step is not the agent's");
+        assert!(!waited(&w.0, ME, "cut"), "nor a question it asked");
+        w.post(ME, json!({ "kind": "turn.asked", "turn": "cut" }));
+        assert!(waited(&w.0, ME, "cut"), "its own question is");
+        // what it replied: its own words in the turn, not app code's
+        let mut said = vec![said_at(2, ME, json!({ "text": "mine", "turn": "cut" })), said_at(3, ME, json!({ "text": "code's", "turn": "cut" }))];
+        said[1].author = Some(records::CODE.into());
+        assert_eq!(replies(&said, ME, "cut"), ["mine"]);
     }
 
     /// Goal: a run of records that does not reach back to the agent's turn

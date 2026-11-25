@@ -28,6 +28,7 @@ pub mod node;
 mod node_release;
 pub mod openbao;
 mod openbao_release;
+pub mod rows;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -204,7 +205,7 @@ const ADMIN_BUCKET: &str = "STAGE";
 /// it imports from beside it, and theirs (a deploy runs it from the source
 /// tree, so only a staged copy can miss one:
 /// `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 5] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "door.mjs", "door-rules.mjs"];
+pub const SHIM_FILES: [&str; 6] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "relay.mjs", "door.mjs", "door-rules.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -493,7 +494,7 @@ pub struct Fleet {
     pub ai_gateway: Option<String>,
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
-    /// every one on Workers AI), and the key of each that runs on an
+    /// every route on Workers AI, and no transcription), and the key of each that runs on an
     /// OpenAI-compatible API (`ModelKey`).
     pub models: Option<String>,
     pub model_keys: Vec<ModelKey>,
