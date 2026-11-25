@@ -83,10 +83,12 @@ def ask(args, session_id=None, **_):
     question = str(args.get('question') or '').strip()
     if not target or not question:
         return error('name the teammate (agent) and what to ask it (question)')
+    # `<chat>/<agent>`, and a room of an agent's door after them: an ask's
+    # answer comes back to its chat, never a room, so none is asked there
     parts = get_session_env('HERMES_SESSION_CHAT_ID', '').split('/')
     if len(parts) > 2:
-        return error('fragment_ask is not available from a shared room yet')
-    chat, agent = (parts[0], parts[1]) if len(parts) == 2 else ('', '')
+        return error('fragment_ask asks from a chat of yours, not from a room others share')
+    chat, agent = (parts + ['', ''])[:2]
     # the turn's profile's home, as Hermes scopes it, else by its name
     root = Path(os.environ.get('HERMES_HOME', '/data/hermes'))
     homes = [get_hermes_home(), root / 'profiles' / (get_session_env('HERMES_SESSION_PROFILE', '') or agent)]

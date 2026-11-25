@@ -490,40 +490,22 @@ pub struct Turn {
     /// lands as that life's own (`posted`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continue_after: bool,
-    /// The room this turn's message came from (a hosted door's:
-    /// docs/chat-records.md, "A message heard in a room"): each room gets a
-    /// runtime session of its own. A state from before rooms holds none.
+    /// Said in a room of the agent's door (docs/chat-records.md, "A message
+    /// heard in a room"): the room's id, its runtime's conversation there
+    /// (`TurnStart::room`), and what it is told of it (`place`). A state
+    /// from before rooms holds none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub room: Option<records::Room>,
-    /// The door id (`slack`, …) this turn's room came through, used to
-    /// format the shared-room note when handed. A state from before rooms
-    /// holds none.
+    pub room: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub room_door: Option<String>,
-    /// The outside speaker's id on their door (`heard.from`), when this turn
-    /// was started by a `heard` message: paired with `asker` (the door's
-    /// principal) so a question in words takes only that speaker's next
-    /// message in that room. A state from before rooms holds none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heard_from: Option<String>,
-    /// Whether the causing `chat` record carries prior room `context` for
-    /// the driver to fetch and render when handing the turn (never stored
-    /// inline in `State`, so queued room turns stay well under
-    /// `STATE_FILE_MAX_BYTES`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub has_context: bool,
+    pub place: Option<String>,
+    /// What was said in its room just before its message (note.rs,
+    /// `said_before`), told after `place`: in memory alone, as each is up
+    /// to `PLACE_NOTE_MAX_BYTES` and a state holds `TURNS_OPEN_MAX` turns. A
+    /// turn queued across a restart runs told its room and asker, not this.
+    #[serde(skip)]
+    pub before: Option<String>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
-}
-
-/// Room metadata parsed from a trusted hosted-door message (`record` ->
-/// `said` -> `admit`). Empty for every non-room message.
-#[derive(Debug, Clone, Default)]
-struct RoomCall {
-    via: Option<String>,
-    heard: Option<records::Heard>,
-    room: Option<records::Room>,
-    has_context: bool,
 }
 
 /// What a turn is asked (`Engine::admit`).
@@ -1188,57 +1170,11 @@ impl Engine {
             return;
         }
         match record.channel.as_str() {
-            // its owner's words through one of its doors (docs/chat-records.md,
-            // "A relayed message") are their message, as theirs, whichever
-            // door: the platform takes such a record only through a door its
-            // owner opened, so no door need be linked on this computer. Only
-            // a carrier that is that door counts (`relayed_for`); from any
-            // other it is the record without the mark: another agent of the
-            // chat carrying them is a hand-off from that agent at most, never
-            // its owner.
-            records::CHAT if self.relayed_for(&agent, fragment, &record) => {
-                let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
-                let rc = if self.hosted_door(&agent, fragment, &record) == Some(via.as_str()) {
-                    let has_room_field = record.body.get("room").is_some_and(|v| !v.is_null());
-                    let room = records::room(&record.body);
-                    if has_room_field && room.is_none() {
-                        crate::ev!("relayed.invalid_room", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via, "why": "malformed room metadata on a relayed record is dropped rather than run in the connector-wide session" });
-                        return;
-                    }
-                    let has_context = room.is_some() && !records::context(&record.body).is_empty();
-                    RoomCall { via: Some(via.clone()), heard: None, room, has_context }
-                } else {
-                    RoomCall::default()
-                };
-                crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via, "room": rc.room.as_ref().map(|r| &r.id) });
-                let as_owner = Record { principal: agent.owner.clone(), ..record };
-                self.said(&agent, fragment, &as_owner, rc);
-            }
-            // the agent's own words are not for it
-            records::CHAT if record.principal != agent.identity => {
-                let has_heard = record.body.get("heard").is_some_and(|v| !v.is_null());
-                let hosted = self.hosted_door(&agent, fragment, &record).map(str::to_string);
-                let rc = match (hosted.as_deref(), records::heard(&record.body)) {
-                    (Some(door), Some(h)) if door == h.via => {
-                        let Some(room) = records::room(&record.body) else {
-                            crate::ev!("heard.invalid_room", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": h.via, "from": h.from, "why": "a heard message requires a valid room and is never dumped into the connector-wide session" });
-                            return;
-                        };
-                        let has_context = !records::context(&record.body).is_empty();
-                        crate::ev!("heard", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": h.via, "from": h.from, "room": room.id });
-                        RoomCall { via: Some(h.via.clone()), heard: Some(h), room: Some(room), has_context }
-                    }
-                    (Some(door), _) if has_heard => {
-                        crate::ev!("heard.invalid", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "door": door, "why": "malformed or mismatched heard metadata on a hosted door is dropped rather than run in the connector-wide session" });
-                        return;
-                    }
-                    (_, Some(h)) => {
-                        crate::ev!("heard.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": h.via, "door": self.views.get(fragment).and_then(|v| v.door.as_deref()), "why": "only a hosted door's non-member carrier in a chat naming that door carries heard messages" });
-                        RoomCall::default()
-                    }
-                    _ => RoomCall::default(),
-                };
-                self.said(&agent, fragment, &record, rc);
+            records::CHAT => {
+                // the agent's own words are not for it
+                if let Some(record) = self.whose(&agent, fragment, record).filter(|r| r.principal != agent.identity) {
+                    self.said(&agent, fragment, &record);
+                }
             }
             records::TASKS if fragment == agent.fragment => {
                 // Only the agent's own fragment (its cron, the platform's
@@ -1282,9 +1218,8 @@ impl Engine {
             self.views.insert(fragment.to_string(), v.clone());
         }
         let names = self.views.get(fragment).map(|v| v.names.clone()).unwrap_or_default();
-        let door = self.views.get(fragment).and_then(|v| v.door.clone());
         let name = |p: &str| names.get(p).cloned().unwrap_or_else(|| "someone".into());
-        let resolved = history.and_then(|j| crate::cards::resolve(&a, &record, &j.work, &j.chat, j.cause.as_ref(), door.as_deref(), name, self.now));
+        let resolved = history.and_then(|j| crate::cards::resolve(&a, &record, &j.work, &j.chat, j.cause.as_ref(), name, self.now));
         let (seq, at, asker) = (record.seq, record.at, record.principal.clone());
         self.record(agent, fragment, record, view, since);
         match resolved {
@@ -1303,13 +1238,8 @@ impl Engine {
                 // a question another turn asks meanwhile
                 let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
                 let id = records::turn_id(agent, fragment, records::CHAT, seq);
-                let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None, return_to: None, attachments_in: None };
-                let asker_name = match (fresh.via.as_deref(), fresh.room.as_ref()) {
-                    (Some(via), Some(room)) => crate::note::owner_in_room(via, room),
-                    _ => name(&asker),
-                };
-                let rc = RoomCall { via: fresh.via, heard: None, room: fresh.room, has_context: false };
-                self.admit(&a, fragment, cause, at, &asker, asker_name, &m, 0, Ask::Message, &rc);
+                let m = Message { text: fresh.text, to: vec![a.identity.clone()], ..Message::default() };
+                self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
                     t.late = Some(fresh.late);
@@ -1346,40 +1276,88 @@ impl Engine {
     /// took until it refused relaying schedules; or one no one holds)
     /// speaks for no one: the record is its carrier's, without the mark,
     /// and is logged as such.
-    /// If `principal` is a hosted door's carrier for `agent` in `fragment`
-    /// (none of the chat's members, and the agent's row marks an open door),
-    /// returns that door's id.
-    fn hosted_door(&self, agent: &Agent, fragment: &str, record: &Record) -> Option<&str> {
-        if record.by_code() || record.principal == agent.identity {
-            return None;
-        }
-        let v = self.views.get(fragment)?;
-        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
-            return None;
-        }
-        v.door.as_deref()
-    }
-
     fn relayed_for(&self, agent: &Agent, fragment: &str, record: &Record) -> bool {
-        if record.by_code() {
-            return false;
-        }
         let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) else { return false };
         if record.principal == agent.identity {
             return true;
         }
-        let Some(v) = self.views.get(fragment) else { return false };
-        if v.agents.contains(&record.principal) || v.people.contains(&record.principal) {
-            return false;
-        }
-        let door = v.door.as_deref() == Some(r.via.as_str());
+        let door = self.door_carried(fragment, record, &r.via);
         if !door {
-            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "door": v.door, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
+            crate::ev!("relayed.untrusted", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "principal": record.principal, "via": r.via, "why": "carried by a key none of the chat's members, in a chat whose members mark no such door on its agent's row: its carrier's, never its owner's" });
         }
         door
     }
 
-    fn said(&mut self, agent: &Agent, fragment: &str, record: &Record, rc: RoomCall) {
+    /// Whether `record` was carried by the agent's hosted door `via`: a key
+    /// none of the chat's members (a connector publishes as its own
+    /// fragment), in a chat whose members mark the agent's row as that door
+    /// (`ChatView::door`).
+    fn door_carried(&self, fragment: &str, record: &Record, via: &str) -> bool {
+        let Some(v) = self.views.get(fragment) else { return false };
+        let member = v.agents.contains(&record.principal) || v.people.contains(&record.principal);
+        !member && v.door.as_deref() == Some(via)
+    }
+
+    /// Whether this chat is the agent's door `via`, as its members list
+    /// marks the agent's row (`ChatView::door`).
+    fn door_here(&self, fragment: &str, via: &str) -> bool {
+        self.views.get(fragment).is_some_and(|v| v.door.as_deref() == Some(via))
+    }
+
+    /// Whose words a `chat` record is, as the agent's door says
+    /// (docs/chat-records.md):
+    ///
+    /// - **its owner's**, relayed through one of its doors ("A relayed
+    ///   message"), whichever door: the platform takes such a record only
+    ///   through a door its owner opened, so no door need be linked on this
+    ///   computer. Only a carrier that is that door counts (`relayed_for`);
+    ///   another agent of the chat carrying them is a hand-off from that
+    ///   agent at most, never its owner.
+    /// - **someone outside the platform**, heard in a room of its hosted
+    ///   door ("A message heard in a room"): asked as them
+    ///   (`Heard::asker`), never as the door's key.
+    ///
+    /// Who spoke, and in which room, is honored by one rule: the platform
+    /// stamped the record a door's (`Record::by_door`: what an open hosted
+    /// door's own release publishes, never app code, a schedule or a
+    /// person's post), relaying no one, in a chat that is the agent's door
+    /// `heard.via` names. A relayed message keeps its room only when so
+    /// stamped too. From anyone else, a record is read without them: its
+    /// carrier's own words. One a door wrote naming someone heard, but in
+    /// no room it can read, is none: never run in the chat's own
+    /// conversation, which is its owner's.
+    fn whose(&self, agent: &Agent, fragment: &str, mut record: Record) -> Option<Record> {
+        let relayed = self.relayed_for(agent, fragment, &record);
+        // (the agent's own words are never someone it heard: it carries
+        // its owner's alone, as their door: `relayed_for`)
+        let door = record.by_door() && record.principal != agent.identity;
+        let heard = records::heard(&record.body).filter(|h| door && records::relayed(&record.body).is_none() && self.door_here(fragment, &h.via));
+        if door && record.body.get("heard").is_some() && (heard.is_none() || records::room(&record.body).is_none()) {
+            crate::ev!("heard.dropped", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "why": "a door's message naming someone heard, in no room the bridge can read: never its owner's conversation" });
+            return None;
+        }
+        if let Value::Object(o) = &mut record.body {
+            if !(door && (relayed || heard.is_some())) {
+                o.remove("room");
+                o.remove("context");
+            }
+            if heard.is_none() {
+                o.remove("heard");
+            }
+        }
+        if relayed {
+            let via = records::relayed(&record.body).map(|r| r.via).unwrap_or_default();
+            crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": via });
+            record.principal = agent.owner.clone();
+        }
+        if let Some(h) = heard {
+            crate::ev!("heard", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": h.via });
+            record.principal = h.asker();
+        }
+        Some(record)
+    }
+
+    fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
         let said = records::said(&record.body);
         // App code's words (docs/chat-records.md, "Who wrote a record") are
         // heard as a message alone, and as no one's: they answer no
@@ -1393,27 +1371,44 @@ impl Engine {
             Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
                 let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
-                let asker_name = if code {
-                    records::CODE_SAYS.to_string()
-                } else if let Some(h) = &rc.heard {
-                    crate::note::room_speaker(h, rc.room.as_ref())
-                } else if let (Some(via), Some(r)) = (rc.via.as_deref(), rc.room.as_ref()) {
-                    crate::note::owner_in_room(via, r)
-                } else {
-                    view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into())
-                };
-                if hop == Some(0) && !code && self.told(agent, fragment, &record.principal, &asker_name, rc.heard.as_ref().map(|h| h.from.as_str()), rc.room.as_ref().map(|r| r.id.as_str()), &m, record.seq) {
+                if hop == Some(0) && !code && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
                     return;
                 }
                 if let Some(hop) = hop {
+                    let (asker_name, place) = self.speaker(agent, &view, record, &m);
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message }, &rc);
+                    let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
+                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message });
+                    // said in a room (its room the message's: `admit`): told
+                    // where, once handed, after this
+                    if let (Some((line, before)), Some(t)) = (place, self.state.turns.get_mut(&id)) {
+                        t.place = Some(line);
+                        t.before = before;
+                    }
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
             Said::PromptResponse { prompt, option, text, card } => self.answer(agent, fragment, &record.principal, &prompt, &option, text, card.as_ref(), record.seq),
             Said::Command(c) => self.command(agent, fragment, record, c),
             Said::Other => {}
+        }
+    }
+
+    /// What a message's asker is called (`whose` said whose it is), and,
+    /// said in a room of the agent's door, what its turn is told of it
+    /// (note.rs, `place`). App code's words are no one's, and in no room.
+    fn speaker(&self, agent: &Agent, view: &ChatView, record: &Record, m: &Message) -> (String, Option<(String, Option<String>)>) {
+        if record.by_code() {
+            return (records::CODE_SAYS.to_string(), None);
+        }
+        let name = m.heard.as_ref().map(|h| h.name.clone()).or_else(|| view.names.get(&record.principal).cloned()).unwrap_or_else(|| "someone".into());
+        let via = m.heard.as_ref().map(|h| h.via.clone()).or_else(|| records::relayed(&record.body).map(|r| r.via));
+        match (&m.room, via) {
+            (Some(room), Some(via)) => {
+                let place = crate::note::place(&name, record.principal == agent.owner, &via, room);
+                (crate::note::speaker(&name, &via, room), Some((place, crate::note::said_before(room))))
+            }
+            _ => (name, None),
         }
     }
 
@@ -1445,14 +1440,14 @@ impl Engine {
         let has_args = !c.args.is_empty();
         let running = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.active()).map(|t| t.id.clone());
         match item.how {
-            _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default()), &RoomCall::default()),
-            How::Stop => self.stop_all(&agent.fragment, fragment, false),
+            _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default())),
+            How::Stop => self.stop_all(&agent.fragment, fragment),
             How::Restart => {
-                self.stop_all(&agent.fragment, fragment, true);
-                self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command, &RoomCall::default());
+                self.stop_all(&agent.fragment, fragment);
+                self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command);
             }
-            How::Message if has_args => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message, &RoomCall::default()),
-            How::Steer if has_args && running.is_none() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message, &RoomCall::default()),
+            How::Message if has_args => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message),
+            How::Steer if has_args && running.is_none() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message),
             How::Steer | How::Aside if has_args => {
                 let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                 let turn = running.filter(|_| item.how == How::Steer);
@@ -1462,22 +1457,15 @@ impl Engine {
                 let runtime = self.runtime_of(&agent.fragment);
                 self.out.push(Effect::Runtime { runtime, command: Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), simplex, turn, id, by: record.principal.clone(), by_name: asker_name, text } });
             }
-            _ => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command, &RoomCall::default()),
+            _ => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command),
         }
     }
 
     /// The agent's owner stopped it in this chat (`How::Stop`): its turn
     /// running there is stopped, whoever asked it, and its waiting ones end
-    /// stopped, never run. When `root_only` is set (`How::Restart`, `/new`),
-    /// only root-session turns are stopped; room sessions keep running.
-    fn stop_all(&mut self, agent: &str, fragment: &str, root_only: bool) {
-        let mut mine: Vec<(u64, String, Phase)> = self
-            .state
-            .turns
-            .values()
-            .filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended && (!root_only || t.room.is_none()))
-            .map(|t| (t.order, t.id.clone(), t.phase))
-            .collect();
+    /// stopped, never run.
+    fn stop_all(&mut self, agent: &str, fragment: &str) {
+        let mut mine: Vec<(u64, String, Phase)> = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended).map(|t| (t.order, t.id.clone(), t.phase)).collect();
         mine.sort_by_key(|(order, _, _)| *order);
         for (_, id, phase) in mine {
             crate::ev!("turn.stopped", { "turn": id, "phase": format!("{phase:?}").to_lowercase(), "by": "command" });
@@ -1494,7 +1482,7 @@ impl Engine {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 let m = Message { text, ..Message::default() };
                 let owner = agent.owner.clone();
-                self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, Ask::Routine, &RoomCall::default());
+                self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, Ask::Routine);
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
             // Only its own bridge answers it (as itself, `owe_answer`): a
@@ -1516,7 +1504,7 @@ impl Engine {
                 // end saying why: no runtime hears it, so nothing asks again
                 let ask = if refused { Ask::Refused(&text) } else { Ask::Message };
                 let hop = if refused { 0 } else { hop.clamp(1, limits::HOPS_MAX) };
-                self.admit(agent, &chat, cause, record.at, &by, name, &m, hop, ask, &RoomCall::default());
+                self.admit(agent, &chat, cause, record.at, &by, name, &m, hop, ask);
             }
             Task::Answer { .. } => crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "only the agent's own bridge posts its answers" }),
             Task::Other => {}
@@ -1619,7 +1607,7 @@ impl Engine {
     /// platform's time); `hop` past zero is a hand-off from another agent,
     /// which the chat's budget counts.
     #[allow(clippy::too_many_arguments)]
-    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, asker: &str, asker_name: String, m: &Message, hop: u32, ask: Ask, rc: &RoomCall) {
+    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, asker: &str, asker_name: String, m: &Message, hop: u32, ask: Ask) {
         let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
         if self.state.turns.contains_key(&id) {
             // The cursor makes this impossible; a state that says otherwise
@@ -1651,7 +1639,6 @@ impl Engine {
             let name = self.views.get(fragment).and_then(|v| v.names.get(&agent.identity)).cloned().unwrap_or_else(|| agent.name.clone());
             Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
         });
-        let room_door = if rc.heard.is_some() || rc.room.is_some() { rc.via.clone() } else { None };
         self.state.admitted += 1;
         let turn = Turn {
             id: id.clone(),
@@ -1687,10 +1674,11 @@ impl Engine {
             ret,
             continues: None,
             continue_after: false,
-            room: rc.room.clone(),
-            room_door,
-            heard_from: rc.heard.as_ref().map(|h| h.from.clone()),
-            has_context: rc.has_context,
+            // said in a room of its door (`whose` kept it): its own
+            // conversation there
+            room: m.room.as_ref().map(|r| r.id.clone()),
+            place: None,
+            before: None,
             open: None,
         };
         self.dirty = true;
@@ -1707,7 +1695,7 @@ impl Engine {
                 // refused) are posted and not kept: a crash before they land
                 // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
-                let start = records::turn_start_in(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life, turn.room.as_ref().map(|r| r.id.as_str()));
+                let start = records::turn_start_in(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life, turn.room.as_deref());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
                 if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
@@ -1737,7 +1725,7 @@ impl Engine {
         let life = self.life.clone();
         let t = self.state.turns.get_mut(id).expect("held");
         assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
-        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start_in(id, &t.asker, t.by_code, &identity, &t.cause, &life, t.room.as_ref().map(|r| r.id.as_str())), to: None };
+        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start_in(id, &t.asker, t.by_code, &identity, &t.cause, &life, t.room.as_deref()), to: None };
         let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![start.clone(), end.clone()];
@@ -1957,10 +1945,10 @@ impl Engine {
             ret: None,
             continues: Some(cut.id),
             continue_after: false,
+            // in its cut turn's room: the same conversation
             room: cut.room,
-            room_door: cut.room_door,
-            heard_from: cut.heard_from,
-            has_context: false,
+            place: cut.place,
+            before: cut.before,
             open: None,
         };
         self.state.turns.insert(id, turn);
@@ -1995,7 +1983,7 @@ impl Engine {
         let Some(id) = next else { return };
         let identity = self.agent(agent).expect("a held turn's agent is on this computer").identity.clone();
         let t = &self.state.turns[&id];
-        let body = records::turn_start_in(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life, t.room.as_ref().map(|r| r.id.as_str()));
+        let body = records::turn_start_in(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life, t.room.as_deref());
         let fragment = t.fragment.clone();
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });
@@ -2167,14 +2155,11 @@ impl Engine {
             _ => None,
         };
         let t = self.state.turns.get_mut(id).expect("checked");
-        let door_chat = self.views.get(&t.fragment).and_then(|v| v.door.as_ref()).is_some() || t.room_door.is_some();
-        let chat_name = t.room.as_ref().map(|r| r.name.as_str()).filter(|n| !n.is_empty()).unwrap_or_else(|| label(&t.fragment)).to_string();
-        let room_note = t.room_door.as_deref().map(|via| crate::note::room_note(via, t.room.as_ref()));
         let start = TurnStart {
             turn: id.to_string(),
             agent: a,
             fragment: t.fragment.clone(),
-            chat_name,
+            chat_name: label(&t.fragment).to_string(),
             seq: t.cause.seq,
             asker: t.asker.clone(),
             asker_name: t.asker_name.clone(),
@@ -2193,12 +2178,11 @@ impl Engine {
             quote: None,
             simplex,
             continues,
-            door_chat,
             room: t.room.clone(),
-            heard_from: t.heard_from.clone(),
-            room_note,
-            has_context: t.has_context,
-            room_context: None,
+            place: t.place.as_ref().map(|line| match &t.before {
+                Some(before) => format!("{line}\n{before}"),
+                None => line.clone(),
+            }),
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment, "command": t.command, "runtime": runtime });
         self.handed.insert(id.to_string(), runtime.clone());
@@ -2223,24 +2207,21 @@ impl Engine {
     /// goes only to the life that claimed its turn. Read by a later life, it
     /// asks nothing, and the message is a turn of its own, claimed and run
     /// as any other.
-    #[allow(clippy::too_many_arguments)]
-    fn told(&mut self, agent: &Agent, fragment: &str, principal: &str, asker_name: &str, heard_from: Option<&str>, room_id: Option<&str>, m: &Message, seq: u64) -> bool {
+    fn told(&mut self, agent: &Agent, fragment: &str, principal: &str, view: &ChatView, m: &Message, seq: u64) -> bool {
         if m.text.trim().is_empty() && m.attachments.is_empty() {
             return false;
         }
         let text = records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES);
-        let by_name = asker_name.to_string();
+        let by_name = m.heard.as_ref().map(|h| h.name.clone()).or_else(|| view.names.get(principal).cloned()).unwrap_or_else(|| "someone".into());
         let attached = (!m.attachments.is_empty()).then(|| Attached { agent: agent.fragment.clone(), fragment: fragment.to_string(), by_name: by_name.clone(), refs: m.attachments.clone() });
         let mine = |t: &&Turn| t.agent == agent.fragment && t.fragment == fragment;
-        if let Some((id, answers, t_heard, t_room)) = self
-            .state
-            .turns
-            .values()
-            .filter(mine)
-            .find(|t| t.asking && t.active())
-            .map(|t| (t.id.clone(), self.who_answers(t), t.heard_from.clone(), t.room.as_ref().map(|r| r.id.clone())))
-        {
-            if answers != principal || t_heard.as_deref() != heard_from || t_room.as_deref() != room_id {
+        // words said in one room answer only a question asked in it: a turn
+        // in a room is told nothing of another's, nor of the chat's own
+        // (docs/chat-records.md, "A message heard in a room")
+        let room = m.room.as_ref().map(|r| r.id.as_str());
+        let here = |t: &&Turn| t.room.as_deref() == room;
+        if let Some((id, answers, here)) = self.state.turns.values().filter(mine).find(|t| t.asking && t.active()).map(|t| (t.id.clone(), self.who_answers(t), here(&t))) {
+            if answers != principal || !here {
                 return false;
             }
             // a voice memo alone: no words, every file audio (Austin,
@@ -2255,24 +2236,15 @@ impl Engine {
             t.hearing = voice;
             t.last_ms = self.now;
             self.dirty = true;
-            let by = heard_from.map_or_else(|| principal.to_string(), |f| format!("{principal}:{f}"));
             crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len(), "voice": voice });
-            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by, by_name, text, attached, files: Vec::new(), voice });
+            self.tell_runtime(&id, Command::Tell { turn: id.clone(), seq, by: principal.to_string(), by_name, text, attached, files: Vec::new(), voice });
             return true;
         }
         // its card that takes words, the oldest open one: its owner's alone
-        // to answer, as its options are (never an outside speaker's, and
-        // when in a room, only from that room or directly in the chat)
-        let carded = self
-            .state
-            .turns
-            .values()
-            .filter(mine)
-            .filter(|t| t.phase == Phase::Waiting)
-            .filter(|t| t.room.as_ref().map(|r| r.id.as_str()) == room_id)
-            .find_map(|t| t.prompts.iter().find(|p| !p.closed && !p.words.is_empty()).map(|p| (t.id.clone(), p.id.clone(), p.words[0].clone())));
+        // to answer, as its options are, in words said where it was asked
+        let carded = self.state.turns.values().filter(mine).filter(|t| t.phase == Phase::Waiting).filter(here).find_map(|t| t.prompts.iter().find(|p| !p.closed && !p.words.is_empty()).map(|p| (t.id.clone(), p.id.clone(), p.words[0].clone())));
         let Some((id, prompt, option)) = carded else { return false };
-        if principal != agent.owner || heard_from.is_some() {
+        if principal != agent.owner {
             return false;
         }
         // what the card shows it was answered with: the words, or the files' names
@@ -2293,17 +2265,13 @@ impl Engine {
         }
     }
 
-    /// Whether `principal` may stop `t` in `fragment`: for an outside
-    /// speaker's `heard` turn, the agent's owner in the door chat alone
-    /// (preventing a connector principal from stopping arbitrary speakers);
-    /// otherwise its asker (or owner for a routine/answer), or the agent's
-    /// owner in any chat where the agent is a door's viewer (`view.door.is_some()`).
-    fn can_stop(&self, agent: &Agent, fragment: &str, t: &Turn, principal: &str) -> bool {
-        let owner_in_door = principal == agent.owner && self.views.get(fragment).and_then(|v| v.door.as_deref()).is_some();
-        if t.heard_from.is_some() {
-            return owner_in_door;
-        }
-        self.who_answers(t) == principal || owner_in_door
+    /// Whether `principal` stops turn `t`: whoever its question waits for
+    /// (`who_answers`), and, in a chat that is one of the agent's doors
+    /// (where people outside the platform ask it, on its owner's
+    /// computer), the agent's owner, whoever asked.
+    fn stops(&self, agent: &Agent, t: &Turn, principal: &str) -> bool {
+        let door = self.views.get(&t.fragment).is_some_and(|v| v.door.is_some());
+        self.who_answers(t) == principal || (door && principal == agent.owner)
     }
 
     fn stop(&mut self, agent: &Agent, fragment: &str, principal: &str, named: Option<&str>) {
@@ -2319,14 +2287,14 @@ impl Engine {
                 None => t.active(),
             })
             .min_by_key(|t| t.phase == Phase::Ended)
-            .map(|t| (t.id.clone(), self.can_stop(agent, fragment, t, principal), t.phase));
-        let Some((id, allowed, phase)) = target else {
+            .map(|t| (t.id.clone(), self.stops(agent, t, principal), t.phase));
+        let Some((id, stops, phase)) = target else {
             // a cut turn another life ran whose journal is being read
             // (`ReadCut`), its lost end this life's: stopped, it is never
             // continued, whatever the read says
             if let Some((id, cut)) = named.and_then(|id| self.reading_cuts.get(id).filter(|t| t.agent == agent.fragment && t.fragment == fragment).map(|t| (id.to_string(), t))) {
-                if !self.can_stop(agent, fragment, cut, principal) {
-                    crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker (its owner, for a routine's, an answer's, or a door chat) stops it" });
+                if !self.stops(agent, cut, principal) {
+                    crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker (its owner, for a routine's or an answer's, or in its door) stops it" });
                     return;
                 }
                 self.reading_cuts.remove(&id);
@@ -2339,8 +2307,8 @@ impl Engine {
             crate::ev!("stop.ignored", { "agent": agent.fragment, "fragment": fragment, "why": "no such turn" });
             return;
         };
-        if !allowed {
-            crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker (its owner, for a routine's, an answer's, or a door chat) stops it" });
+        if !stops {
+            crate::ev!("stop.ignored", { "turn": id, "why": "only the turn's asker (its owner, for a routine's or an answer's, or in its door) stops it" });
             return;
         }
         match phase {
@@ -2666,7 +2634,7 @@ impl Engine {
                 }
             }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),
-            Event::Say { agent, fragment, text, files } => {
+            Event::Say { agent, fragment, text, files, room } => {
                 if self.agent(&agent).is_none() || (text.trim().is_empty() && files.is_empty()) {
                     return;
                 }
@@ -2674,7 +2642,13 @@ impl Engine {
                 self.dirty = true;
                 let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
-                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), files);
+                let mut body = records::reply(&text, &turn, &[], 0, false);
+                // said in a room's conversation: the room's, as its turns'
+                // replies are (docs/chat-records.md, "An agent's reply")
+                if let Some(room) = room.filter(|r| records::valid_token(r, 64)) {
+                    body["room"] = Value::String(room);
+                }
+                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), body, files);
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
             Event::Child { child, change: ChildChange::Started { turn, goal } } => self.child_started(&turn, &child, &goal),
@@ -2851,11 +2825,20 @@ impl Engine {
             }
         }
         self.dirty = true;
-        let (agent, fragment, n, hop) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop);
-        // A reply that names another agent of the chat hands off to it.
+        let (agent, fragment, n, hop, room) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop, t.room.clone());
+        // A reply that names another agent of the chat hands off to it; one
+        // in a room hands off to no one, whom the room does not hold
         let words = records::mentions(&open.text);
-        let to: Vec<String> = self.agents.iter().filter(|a| a.fragment != agent && view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).map(|a| a.identity.clone()).collect();
-        let body = records::reply(&open.text, id, &to, hop + 1, interim);
+        let to: Vec<String> = match room {
+            Some(_) => Vec::new(),
+            None => self.agents.iter().filter(|a| a.fragment != agent && view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).map(|a| a.identity.clone()).collect(),
+        };
+        let mut body = records::reply(&open.text, id, &to, hop + 1, interim);
+        // said in a room: which, so a quote of it is told only there
+        // (driver.rs, `quote_of`)
+        if let Some(room) = room {
+            body["room"] = Value::String(room);
+        }
         crate::ev!("reply.posted", { "turn": id, "n": n, "files": open.files.len(), "to": to.len(), "interim": interim });
         self.post(&agent, &fragment, records::CHAT, records::reply_id(id, n), body, open.files);
         self.draft(&agent, &fragment, id, None);
@@ -3063,15 +3046,6 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         }
         if t.note.as_ref().is_some_and(|n| n.len() > limits::NOTE_MAX_BYTES) {
             return Err(Corrupt(format!("turn {id}'s note is past a note's bound")));
-        }
-        if t.room.as_ref().is_some_and(|r| !records::valid_token(&r.id, limits::ROOM_ID_MAX_BYTES) || r.thread.as_deref().is_some_and(|th| !records::valid_door_token(th, limits::ROOM_THREAD_MAX_BYTES))) {
-            return Err(Corrupt(format!("turn {id}'s room is invalid")));
-        }
-        if t.room_door.as_ref().is_some_and(|d| !records::door_ok(d)) {
-            return Err(Corrupt(format!("turn {id}'s room_door is invalid")));
-        }
-        if t.heard_from.as_ref().is_some_and(|f| !records::valid_door_token(f, limits::HEARD_FROM_MAX_BYTES)) {
-            return Err(Corrupt(format!("turn {id}'s heard_from is invalid")));
         }
         let ended = t.phase == Phase::Ended;
         if ended == t.owed.is_empty() {

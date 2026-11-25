@@ -723,12 +723,8 @@ async fn an_agents_model_and_effort_are_its_sessions_flags() {
             continues: None,
             age: None,
             disk: None,
-            door_chat: false,
             room: None,
-            heard_from: None,
-            room_note: None,
-            has_context: false,
-            room_context: None,
+            place: None,
         };
         to_runtime.send(Command::Start(Box::new(ts))).await.expect("the runtime runs");
         // bounded by `wait()`: its events until its end
@@ -1066,17 +1062,19 @@ async fn a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced(
     s.done();
 }
 
-/// Goal (Codex finding #6, FIN-508): running sequential turns across more
-/// than `SESSIONS_MAX` (8) rooms in one workspace evicts idle sessions
-/// cleanly rather than refusing the 9th room, and returning to an evicted
-/// room resumes its deterministic `room_session_id`.
+/// Goal (FIN-508, a session per room): a door's rooms are many, each a
+/// session, and past `SESSIONS_MAX` of them the least lately used idle one
+/// stops for the next, never refusing it. Returning to a room stopped so
+/// resumes its own session (its id is derived: `session_id`), its
+/// transcript on disk. Method: turns in nine rooms of one chat, one after
+/// another, then the first room's again; the session ids `claude` was
+/// started with.
 #[tokio::test]
-async fn more_than_eight_sequential_rooms_evict_idle_sessions_and_resume() {
-    use fragment_bridge::records::Room;
-    use fragment_bridge::runtime::claude::{room_session_id, SESSIONS_MAX};
+async fn past_its_sessions_a_room_stops_an_idle_one_and_resumes_after() {
+    use fragment_bridge::runtime::claude::{session_id, SESSIONS_MAX};
     use fragment_bridge::runtime::{Agent, ClaudeSettings, Command, Event, Runtime, RuntimeIo, TurnStart};
 
-    let dir = support::dir("claude-nine-rooms");
+    let dir = support::dir("claude-rooms");
     let bin = dir.join("bin/claude");
     std::fs::create_dir_all(bin.parent().expect("its bin")).expect("its bin");
     std::fs::copy(env!("CARGO_BIN_EXE_fake-claude"), &bin).expect("fake-claude copied");
@@ -1101,23 +1099,20 @@ async fn more_than_eight_sequential_rooms_evict_idle_sessions_and_resume() {
     let (_hold, held) = tokio::sync::watch::channel(false);
     let running = tokio::spawn(Box::new(claude).run(RuntimeIo { commands, events, shutdown, held, unquiet: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }));
 
-    // 10 sequential turns: rooms 0..=8 (9 distinct rooms > SESSIONS_MAX = 8),
-    // then back to room 0 to verify it resumes cleanly.
-    let mut seq_rooms: Vec<usize> = (0..=SESSIONS_MAX).collect();
-    seq_rooms.push(0);
-    for (n, room_idx) in seq_rooms.into_iter().enumerate() {
-        let room_id = format!("C{room_idx:04}");
+    let mut rooms: Vec<usize> = (0..=SESSIONS_MAX).collect();
+    rooms.push(0);
+    for (n, room) in rooms.into_iter().enumerate() {
         let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: ClaudeSettings::default() };
         let id = format!("t{n}");
         let ts = TurnStart {
             turn: id.clone(),
             agent,
             fragment: "slack--k3x9".into(),
-            chat_name: format!("#room-{room_idx}"),
+            chat_name: "slack".into(),
             seq: n as u64 + 1,
-            asker: "npub1slack".into(),
-            asker_name: format!("Maple · Slack · #room-{room_idx}"),
-            text: format!("hi room {room_idx}"),
+            asker: "slack:U0456".into(),
+            asker_name: format!("Maple · Slack · #room-{room}"),
+            text: format!("hi room {room}"),
             attachments: vec![],
             attachments_in: None,
             late: None,
@@ -1132,14 +1127,11 @@ async fn more_than_eight_sequential_rooms_evict_idle_sessions_and_resume() {
             continues: None,
             age: None,
             disk: None,
-            door_chat: true,
-            room: Some(Room { id: room_id, name: format!("#room-{room_idx}"), thread: None }),
-            heard_from: Some("U0456".into()),
-            room_note: None,
-            has_context: false,
-            room_context: None,
+            room: Some(format!("C{room:04}")),
+            place: None,
         };
-        to_runtime.send(Command::Start(Box::new(ts))).await.expect("send start");
+        to_runtime.send(Command::Start(Box::new(ts))).await.expect("the runtime runs");
+        // bounded by `wait()`: its events until its end
         let ended = tokio::time::timeout(Duration::from_millis(wait()), async {
             while let Some(e) = from_runtime.recv().await {
                 if let Event::End { turn, outcome } = e {
@@ -1151,29 +1143,23 @@ async fn more_than_eight_sequential_rooms_evict_idle_sessions_and_resume() {
             None
         })
         .await;
-        assert!(matches!(ended, Ok(Some(fragment_bridge::records::Outcome::Idle))), "turn {n} (room {room_idx}): {ended:?}");
-        // Wait briefly for the session task to flip its busy flag to false
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(matches!(ended, Ok(Some(fragment_bridge::records::Outcome::Idle))), "turn {n} (room {room}): {ended:?}");
     }
     let _ = stop.send(true);
     drop(to_runtime);
     let _ = running.await;
 
-    // Verify all 9 distinct room session IDs were spawned, and room 0 was
-    // spawned a second time resuming with the same deterministic room_session_id.
-    let heard = std::fs::read_to_string(bin.with_file_name("heard.jsonl")).expect("heard args");
+    let heard = std::fs::read_to_string(bin.with_file_name("heard.jsonl")).expect("what claude was started with");
     let started: Vec<Vec<String>> = heard
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter_map(|v| v["args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
         .collect();
     let flag = |a: &[String], k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
-    let sids: Vec<String> = started.iter().filter_map(|a| flag(a, "--session-id").or_else(|| flag(a, "--resume"))).collect();
-    assert_eq!(sids.len(), SESSIONS_MAX + 2, "9 rooms + resumed room 0: {sids:?}");
-    let room0_sid = room_session_id("juniper--k3x9", "slack--k3x9", Some("C0000"), 0);
-    assert_eq!(sids[0], room0_sid);
-    assert_eq!(sids[sids.len() - 1], room0_sid, "room 0 resumed with the same deterministic session id");
-    assert!(started.last().unwrap().iter().any(|x| x == "--resume"), "room 0 used --resume after eviction: {:?}", started.last());
-    let unique: std::collections::BTreeSet<&String> = sids.iter().collect();
-    assert_eq!(unique.len(), SESSIONS_MAX + 1, "9 distinct room sessions: {sids:?}");
+    let ids: Vec<String> = started.iter().filter_map(|a| flag(a, "--session-id").or_else(|| flag(a, "--resume"))).collect();
+    assert_eq!(ids.len(), SESSIONS_MAX + 2, "a process a room, and the first room's again: {ids:?}");
+    assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), SESSIONS_MAX + 1, "a session a room: {ids:?}");
+    let first = session_id("juniper--k3x9", "slack--k3x9/C0000", 0);
+    assert_eq!((ids[0].as_str(), ids[ids.len() - 1].as_str()), (first.as_str(), first.as_str()), "the first room's own, again");
+    assert!(started.last().expect("started").iter().any(|x| x == "--resume"), "resumed: {:?}", started.last());
 }

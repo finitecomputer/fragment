@@ -1133,9 +1133,10 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // a writer the view has no name for (a person or another agent past
         // the last read's bound, or new): read again, with it first
         let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
-        // its owner's words carried by another key: whether this chat is a
-        // door of the agent's, as its row says now (the engine takes them
-        // as its owner's only through that door: `relayed_for`), read again
+        // its owner's words carried by another key, or someone's its door
+        // heard in a room: whether this chat is a door of the agent's, as
+        // its row says now (the engine takes them as its owner's, or as
+        // their speaker's, only through that door: `whose`), read again
         // whenever its view names none, so a door bound since it was read
         // (an unlink and a link again, its agent a member throughout, which
         // no join announces) is seen at its first record. One read a
@@ -1143,26 +1144,12 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // failing in a way asking again may pass ends the follow, which
         // reads the record again from the cursor, so an owner's message is
         // never taken for its carrier's for a blip.
-        let has_door_meta = record.at >= view.since
-            && record.principal != agent.identity
-            && (record.body.get("relayed").is_some_and(|v| !v.is_null())
-                || record.body.get("heard").is_some_and(|v| !v.is_null())
-                || record.body.get("room").is_some_and(|v| !v.is_null())
-                || record.body.get("context").is_some_and(|v| !v.is_null()));
-        let door_via = if record.at >= view.since && record.principal != agent.identity {
-            records::relayed(&record.body)
-                .filter(|r| r.for_ == agent.owner && r.agent == agent.fragment)
-                .map(|r| r.via)
-                .or_else(|| records::heard(&record.body).map(|h| h.via))
-        } else {
-            None
-        };
-        let door = door_via.as_deref().is_some_and(|via| view.view.door.as_deref() != Some(via));
-        let must_read_door = door || (has_door_meta && (unknown || !view.fresh(shared.joined_at(fragment))));
+        let relays = record.at >= view.since && record.principal != agent.identity && (records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment) || records::heard(&record.body).is_some());
+        let door = relays && view.view.door.is_none();
         if !view.fresh(shared.joined_at(fragment)) || unknown || door {
             match view.read(api, agent, fragment, Some(&record.principal)).await {
                 Ok(()) => {}
-                Err(e) if must_read_door && e.retryable() => return Some(Ended::Again(format!("its members did not read for its door (seq {}): {e}", record.seq))),
+                Err(e) if door && e.retryable() => return Some(Ended::Again(format!("its members did not read for its door (seq {}): {e}", record.seq))),
                 Err(e) => crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() }),
             }
         }
@@ -1808,12 +1795,10 @@ impl RuntimeLane {
                     _ => {}
                 }
                 if let Command::Start(ts) = &mut c {
-                    // what its runtime last took in this session (chat, or
-                    // chat + room): its marker, or one a hold keeps from its
-                    // memory still (`Marks::seen`)
+                    // what its runtime last took here: its marker, or one a
+                    // hold keeps from its memory still (`Marks::seen`)
                     let memory = memory.as_ref().map(|m| m(&ts.agent.fragment));
-                    let seen_key = crate::seen::key(&ts.fragment, ts.room.as_ref().map(|r| r.id.as_str()));
-                    let seen = memory.as_ref().map(|m| marks.seen(m, &seen_key));
+                    let seen = memory.as_ref().map(|m| marks.seen(m, &ts.fragment));
                     let note = async {
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts, seen)).await;
                         read.unwrap_or_else(|_| {
@@ -1829,36 +1814,22 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let room_context = async {
-                        if !ts.has_context || ts.room_context.is_some() {
-                            return ts.room_context.clone();
-                        }
-                        let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), context_of(&api, ts)).await;
-                        read.unwrap_or_else(|_| {
-                            crate::ev!("room_context.unread", { "turn": ts.turn, "seq": ts.seq, "why": "the chat answered too slowly" });
-                            None
-                        })
-                    };
-                    let (files, (note, due), quote, room_context) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote, room_context);
+                    let (files, (note, due), quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
                     // due before its runtime hears of it, which may say at once
                     if let (Some(m), Some(told)) = (memory, due) {
-                        marks.due(&ts.turn, m, &seen_key, told);
+                        marks.due(&ts.turn, m, &ts.fragment, told);
                     }
                     keep(&ts.turn, &files);
                     ts.files = files;
-                    ts.room_context = room_context;
-                    // keep `ts.room_note` intact on `ts` (`ts.turn_note()` renders
-                    // it first), so Claude's late install-card replay clears only
-                    // the card recap (`note: None`) without dropping the shared-room
-                    // warning; fold disk, age, late/cut/recap note, and room context
-                    // into `ts.note`.
-                    let notes: Vec<String> = [ts.disk.take(), ts.age.take(), ts.note.take(), note, ts.room_context.take()].into_iter().flatten().collect();
+                    // its disk first (filling: make room), its age (a late
+                    // message's), then a late card answer's turn's own note
+                    // (engine.rs `hand`), then its room (where, and what was
+                    // said there just before), then the journal's
+                    let notes: Vec<String> = [ts.disk.take(), ts.age.take(), ts.note.take(), ts.place.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
-                    // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(
-                        ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + limits::ROOM_CONTEXT_MAX_BYTES + 10),
-                        "a turn's notes are bounded"
-                    );
+                    // (its own, a card's turn, in the cut note's place; a
+                    // room's in a history's or a recap's: `note_for`)
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 8), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 if to_runtime.send(c).await.is_err() {
@@ -1988,56 +1959,6 @@ impl Marks {
 async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
     let page = api.records(&ts.agent.fragment, &ts.fragment, records::CHAT, seq.saturating_sub(1), 1).await.map_err(|e| crate::ev!("quote.unread", { "turn": ts.turn, "seq": seq, "error": e.to_string() })).ok()?;
     let r = page.records.into_iter().find(|r| r.seq == seq)?;
-    // Never quote across room boundaries (durably, even after a connector is
-    // unlinked and `ts.door_chat` is false):
-    // - An agent's own reply carries `turn` without `room`/`heard`, so verify
-    //   its room from our own `turn.start` on `work`, failing closed whenever
-    //   this turn is in a room, in a door chat, or `work` has any room turn.
-    // - Any other record must match `want_room` (and a root turn never quotes
-    //   a record carrying `room` or `heard`).
-    let want_room = ts.room.as_ref().map(|rm| rm.id.as_str());
-    let is_own = own_words(&r.principal, &r.body, &ts.agent);
-    if is_own {
-        let reply_turn = r.body["turn"].as_str();
-        if let (Some(reply_turn), Some(claim)) = (reply_turn, ts.claim_seq) {
-            let me = ts.agent.identity.as_str();
-            let found = |rs: &[Record]| rs.iter().any(|w| w.principal == me && w.body["kind"] == "turn.start" && w.body["turn"] == reply_turn);
-            match read_back(api, &ts.agent.fragment, &ts.fragment, records::WORK, claim, found, &mut Budget::default()).await {
-                Ok((work, _)) => {
-                    if let Some(start) = work.iter().find(|w| w.principal == me && w.body["kind"] == "turn.start" && w.body["turn"] == reply_turn) {
-                        let reply_room = start.body.get("room").and_then(Value::as_str);
-                        if reply_room != want_room {
-                            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "reply_room": reply_room });
-                            return None;
-                        }
-                    } else if want_room.is_some() || ts.door_chat || work.iter().any(|w| w.principal == me && w.body["kind"] == "turn.start" && w.body.get("room").is_some_and(|v| !v.is_null())) {
-                        crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "reply turn.start not reached within budget" });
-                        return None;
-                    }
-                }
-                Err(_) if want_room.is_some() || ts.door_chat => {
-                    crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "work unread for reply quote" });
-                    return None;
-                }
-                Err(_) => {}
-            }
-        } else if want_room.is_some() || ts.door_chat {
-            crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want_room, "why": "cannot verify reply room" });
-            return None;
-        }
-    } else {
-        match want_room {
-            Some(want) if records::room(&r.body).as_ref().map(|rm| rm.id.as_str()) != Some(want) => {
-                crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq, "room": want });
-                return None;
-            }
-            None if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) => {
-                crate::ev!("quote.cross_room", { "turn": ts.turn, "seq": seq });
-                return None;
-            }
-            _ => {}
-        }
-    }
     let text = match records::said(&r.body) {
         records::Said::Message(m) if !m.text.trim().is_empty() => m.text,
         records::Said::Message(m) => m.attachments.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "),
@@ -2049,21 +1970,29 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
         crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes no message" });
         return None;
     }
+    // a room's words are told only in it, and the chat's only outside any
+    // room: what the record itself says, so nothing else need be read
+    if room_of(&r, &ts.agent) != ts.room {
+        crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes another room's words" });
+        return None;
+    }
     let id = records::turn_id(&ts.agent.fragment, &ts.fragment, records::CHAT, seq);
     Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: own_words(&r.principal, &r.body, &ts.agent) })
 }
 
-/// Prior room `context` on the turn's causing `chat` record, read when the
-/// turn is handed (`TurnStart::has_context`) so 16 KiB contexts are never
-/// retained inline in `State`.
-async fn context_of(api: &Api, ts: &TurnStart) -> Option<String> {
-    let page = api
-        .records(&ts.agent.fragment, &ts.fragment, records::CHAT, ts.seq.saturating_sub(1), 1)
-        .await
-        .map_err(|e| crate::ev!("room_context.unread", { "turn": ts.turn, "seq": ts.seq, "error": e.to_string() }))
-        .ok()?;
-    let r = page.records.into_iter().find(|r| r.seq == ts.seq)?;
-    note::room_context(&records::context(&r.body))
+/// The room of the agent's door a `chat` record was said in, as the record
+/// itself says (docs/chat-records.md, "A message heard in a room"): the
+/// agent's own reply names its turn's (`room`), and a record the platform
+/// stamped a door's names its `room`. Any other record is the chat's own,
+/// in no room, whatever it claims.
+fn room_of(r: &Record, agent: &crate::runtime::Agent) -> Option<String> {
+    if r.by(&agent.identity) {
+        return r.body.get("room").and_then(Value::as_str).filter(|id| records::valid_token(id, 64)).map(str::to_string);
+    }
+    match records::said(&r.body) {
+        records::Said::Message(m) if r.by_door() => m.room.map(|room| room.id),
+        _ => None,
+    }
 }
 
 /// Whether a record `principal` posted is `agent`'s own words (a quote of
@@ -2192,6 +2121,18 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
 /// far enough to say, or what it missed did not read: its marker stays, and
 /// the next turn is asked again.
 async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (Option<String>, Option<bool>) {
+    // a turn in a room (`TurnStart::room`) is told its room alone (`place`):
+    // never the chat's history or recap, nor another turn's cut, which may
+    // be another room's talk; only, continuing its own cut turn, that turn.
+    // Its marker (the chat's own conversation's) stays as it is: a room's
+    // turn says nothing of what that conversation holds
+    if ts.room.is_some() {
+        let cut = match ts.continues {
+            Some(_) => cut_note(api, ts, None).await,
+            None => None,
+        };
+        return (cut, None);
+    }
     let (before, history) = tokio::join!(before(api, ts, seen.as_ref().map(Option::as_deref)), history_note(api, ts));
     let (before, behind) = before.map_or((None, None), |(b, behind)| (Some(b), behind));
     if behind == Some(true) {
@@ -2213,9 +2154,6 @@ async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (O
 /// channel's start), and the chat's first records hold its owner's
 /// `history`. `None` otherwise, or when the chat did not answer.
 async fn history_note(api: &Api, ts: &TurnStart) -> Option<String> {
-    if ts.room.is_some() {
-        return None;
-    }
     let claim = ts.claim_seq?;
     let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
     let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "history": true, "error": e.why() });
@@ -2264,43 +2202,13 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<Option<String>> {
             api.channels(agent, chat).await.map_err(|e| unread(e.into())).ok()?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq).saturating_add(1)
         }
     };
-    let want_room = ts.room.as_ref().map(|r| r.id.as_str());
     let full = |rs: &[Record]| {
-        let (said, begins) = note::exchanges_in(rs, me, owner, want_room, since, until);
-        if begins {
-            return true;
-        }
-        // Only count bytes that belong to this session so busy sibling-room
-        // agent replies (which omit `room` on `chat`) cannot fill the 24 KiB
-        // cutoff and stop pagination before this session's messages are read.
-        let scoped = want_room.is_some() || ts.door_chat || rs.iter().any(|r| r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()));
-        if !scoped {
-            return note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES;
-        }
-        let known_turns: BTreeSet<String> = said
-            .iter()
-            .filter(|r| !note::own_words(&r.principal, &r.body, me, owner))
-            .filter(|r| match want_room {
-                Some(_) => true,
-                None => r.body.get("room").is_none_or(Value::is_null) && r.body.get("heard").is_none_or(Value::is_null),
-            })
-            .map(|r| records::turn_id(agent, chat, records::CHAT, r.seq))
-            .collect();
-        let confirmed: Vec<&Record> = said
-            .into_iter()
-            .filter(|r| {
-                if note::own_words(&r.principal, &r.body, me, owner) {
-                    r.body["turn"].as_str().is_some_and(|t| known_turns.contains(t))
-                } else {
-                    want_room.is_some() || (r.body.get("room").is_none_or(Value::is_null) && r.body.get("heard").is_none_or(Value::is_null))
-                }
-            })
-            .collect();
-        note::recap_bytes(&confirmed) >= limits::HISTORY_NOTE_MAX_BYTES
+        let (said, begins) = note::exchanges(rs, me, owner, since, until);
+        begins || note::recap_bytes(&said) >= limits::HISTORY_NOTE_MAX_BYTES
     };
     // small pages: a page of the chat's longest records is one answer still
     let (read, from_start) = read_pages(api, agent, chat, records::CHAT, before, (limits::RECAP_PAGE_RECORDS, limits::RECAP_SCAN_RECORDS), full, &mut budget).await.map_err(unread).ok()?;
-    let (mut said, mut begins) = note::exchanges_in(&read, me, owner, want_room, since, until);
+    let (mut said, mut begins) = note::exchanges(&read, me, owner, since, until);
     let Some(oldest) = said.first().map(|r| r.at) else {
         crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here before it to tell" });
         return Some(None);
@@ -2327,76 +2235,16 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<Option<String>> {
         })
     };
     let (work, names) = tokio::join!(read_back(api, agent, chat, records::WORK, claim, started, &mut budget), names);
-    let mut work = work.map_err(unread).ok()?.0;
-    // Scope recap strictly to this turn's room (`None` = root chat alone)
-    // using the agent's own verified `turn.start` records on `work`, so no
-    // private room's messages or tool steps ever leak into another room's
-    // prompt.
-    let mut same_turns: BTreeSet<String> = BTreeSet::new();
-    let mut same_seqs: BTreeSet<u64> = BTreeSet::new();
-    let mut other_turns: BTreeSet<String> = BTreeSet::new();
-    let mut other_seqs: BTreeSet<u64> = BTreeSet::new();
-    for r in &work {
-        if r.principal == me && r.body["kind"] == "turn.start" && r.body["agent"] == me {
-            let Some(tid) = r.body["turn"].as_str() else { continue };
-            let r_room = r.body.get("room").and_then(Value::as_str);
-            let cause_seq = (r.body["cause"]["fragment"] == chat && r.body["cause"]["channel"] == records::CHAT).then(|| r.body["cause"]["seq"].as_u64()).flatten();
-            if r_room == want_room {
-                same_turns.insert(tid.to_string());
-                if let Some(s) = cause_seq {
-                    same_seqs.insert(s);
-                }
-            } else {
-                other_turns.insert(tid.to_string());
-                if let Some(s) = cause_seq {
-                    other_seqs.insert(s);
-                }
-            }
-        }
-    }
-    let has_rooms = ts.door_chat
-        || !other_turns.is_empty()
-        || read.iter().any(|r| r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()));
-    if want_room.is_some() {
-        said.retain(|r| {
-            same_seqs.contains(&r.seq)
-                || (note::own_words(&r.principal, &r.body, me, owner) && r.body["turn"].as_str().is_some_and(|t| same_turns.contains(t)))
-                || (!r.by_code()
-                    && !note::own_words(&r.principal, &r.body, me, owner)
-                    && records::room(&r.body).as_ref().map(|rm| rm.id.as_str()) == want_room
-                    && (records::heard(&r.body).is_some() || records::relayed(&r.body).is_some()))
-        });
-        work.retain(|r| r.principal != me || r.body["turn"].as_str().is_some_and(|t| same_turns.contains(t)));
-    } else if has_rooms {
-        // On any chat that has (or ever had, even after unlink) room traffic,
-        // fail closed for agent replies and `work` records: a reply omits
-        // `room`/`heard`, so keep it only when its `turn.start` was positively
-        // seen without a room.
-        said.retain(|r| {
-            if r.body.get("room").is_some_and(|v| !v.is_null()) || r.body.get("heard").is_some_and(|v| !v.is_null()) || other_seqs.contains(&r.seq) {
-                return false;
-            }
-            if let Some(t) = r.body["turn"].as_str() {
-                return same_turns.contains(t);
-            }
-            !note::own_words(&r.principal, &r.body, me, owner)
-        });
-        work.retain(|r| r.principal != me || r.body["turn"].as_str().is_some_and(|t| same_turns.contains(t)));
-    } else {
-        said.retain(|r| !other_seqs.contains(&r.seq) && !r.body["turn"].as_str().is_some_and(|t| other_turns.contains(t)));
-        work.retain(|r| r.principal != me || !r.body["turn"].as_str().is_some_and(|t| other_turns.contains(t)));
-    }
+    let work = work.map_err(unread).ok()?.0;
     // a `/new` it ran began its runtime's conversation again (one naming no
     // agent was the lead's then): nothing before it is told, nor what it
     // said of the `/new` itself (a new conversation is behind nothing)
-    if want_room.is_none() {
-        if let Some(seq) = note::restarted(&read, &work, me, owner, chat) {
-            let new = records::turn_id(agent, chat, records::CHAT, seq);
-            said.retain(|r| r.seq > seq && r.body["turn"] != new.as_str());
-            begins = true;
-        }
+    if let Some(seq) = note::restarted(&read, &work, me, owner, chat) {
+        let new = records::turn_id(agent, chat, records::CHAT, seq);
+        said.retain(|r| r.seq > seq && r.body["turn"] != new.as_str());
+        begins = true;
     }
-    let Some(text) = note::recap_in(&said, &work, me, owner, &names, chat, begins || from_start, want_room.is_some()) else {
+    let Some(text) = note::recap(&said, &work, me, owner, &names, chat, begins || from_start) else {
         crate::ev!("note.none", { "turn": ts.turn, "forgotten": true, "why": "nothing said here since its /new to tell" });
         return Some(None);
     };
@@ -2413,16 +2261,15 @@ async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<Option<String>> {
 async fn before(api: &Api, ts: &TurnStart, seen: Option<Option<&str>>) -> Option<(note::Before, Option<bool>)> {
     let claim = ts.claim_seq?;
     let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
-    let room = ts.room.as_ref().map(|r| r.id.as_str());
     let unread = |e: Unavailable| crate::ev!("note.unread", { "turn": ts.turn, "error": e.why() });
-    let known = |rs: &[Record]| note::previous_in(rs, me, room, false) != note::Before::Unread && seen.is_none_or(|s| note::behind_in(rs, me, s, room, false).is_some());
+    let known = |rs: &[Record]| note::previous(rs, me, false) != note::Before::Unread && seen.is_none_or(|s| note::behind(rs, me, s, false).is_some());
     let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, known, &mut Budget::default()).await.map_err(unread).ok()?;
-    let before = note::previous_in(&work, me, room, from_start);
+    let before = note::previous(&work, me, from_start);
     if before == note::Before::Unread {
         crate::ev!("note.unread", { "turn": ts.turn, "why": "the agent's turn before is further back than a note reads", "read": work.len() });
     }
     let behind = match seen {
-        Some(s) => note::behind_in(&work, me, s, room, from_start),
+        Some(s) => note::behind(&work, me, s, from_start),
         None => Some(false),
     };
     Some((before, behind))

@@ -321,7 +321,7 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
                         let _ = tx.send(Heard::Steered(words.to_string())).await;
                     }
                     None => {
-                        let _ = io.events.send(Event::Say { agent, fragment, text: format!("aside: {text}"), files: Vec::new() }).await;
+                        let _ = io.events.send(Event::Say { agent, fragment, text: format!("aside: {text}"), files: Vec::new(), room: None }).await;
                     }
                 }
             }
@@ -1048,12 +1048,8 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let names: Vec<&str> = ts.files.iter().map(|f| f.name.as_str()).collect();
         reply = format!("{reply} [got {}: {}]", ts.files.len(), names.join(", "));
     }
-    if let Some(r) = &ts.room {
-        reply = format!("{reply} (room: {})", r.id);
-    }
-    // what it was told first (a turn after a cut one, or a room's note and
-    // context), echoed after the reply
-    if let Some(note) = ts.turn_note() {
+    // what it was told first (a turn after a cut one), echoed after the reply
+    if let Some(note) = &ts.note {
         reply = format!("{reply}\n\n(told: {note})");
     }
     if text.split_whitespace().any(|w| w == "notice") {

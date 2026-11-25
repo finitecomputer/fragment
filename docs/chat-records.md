@@ -66,7 +66,8 @@ A **turn** is what one agent does about one record. Its id is the first
 24 hex digits of SHA-256 of `<agent fragment>|<fragment>/<channel>/<seq>`.
 So a record read twice is one turn, and two agents answering one message
 are two turns. When the runtime says something with no turn running, that
-is a turn of its own, numbered by the bridge's life and counter.
+is a turn of its own, numbered by the bridge's life and counter; said in a
+room's conversation, its reply names that room.
 
 A turn a restart cut may be followed by its **continuation**, a turn of
 its own: its id is the first 24 hex digits of SHA-256 of `continue`, a
@@ -131,6 +132,8 @@ until a reply of that turn replaces it.
   an interim reply out; a page shows it as any reply. A turn posts at
   most 64 replies that are not interim and, counted apart, 200 interim
   ones, so narration never costs the answer.
+- `room` names the room of the agent's door its turn was said in ("A
+  message heard in a room"); a reply in a room is no hand-off.
 - `to` and `hop` are set on a hand-off: a reply that `@mentions` another
   agent of the chat. An agent answers another agent's record (a reply,
   or a message an agent posts itself: `fragment ask`) only when its `to`
@@ -176,53 +179,63 @@ mirrors:
   record an editor scheduled, say).
 - A page shows it as the owner's, "via" its door, once the members say
   its poster is their agent or none of the chat's members.
+- A hosted door's may name the room it was said in, and what was said
+  there just before (`room`, `context`: below).
 
-**A message heard in a room**: an outside speaker's words from a shared
-room on a hosted door (e.g. a Slack channel or DM), posted by that
-door's connector in its connector chat:
+**A message heard in a room**: words of someone outside the platform, in
+a room of one of the agent's doors (a Slack channel or DM), published by
+the connector's own app in its own `chat`, as a hosted door's relayed
+message is:
 
 ```json
-{
-  "text": "@Juniper is the deploy green?",
-  "to": ["npub1<agent>"],
+{ "text": "@Juniper is the deploy green?", "to": ["npub1<agent>"],
   "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
   "room": { "id": "C0123", "name": "#deploys", "thread": "1790000000.000100" },
-  "context": [{ "name": "Sam", "text": "deploy started", "at": 1790000000000 }],
-  "attachments": [ATTACHMENT]
-}
+  "context": [{ "name": "Sam", "text": "deploy started", "at": 1790000000000 }] }
 ```
 
-- `heard` names an outside speaker: `via` is the door's id (`door_ok`),
-  `from` is the speaker's id on that door (at most 128 bytes, no
-  whitespace or control characters), and `name` is their display name.
-  An outside speaker speaks for no one on finite.chat and carries no
-  owner authority: they never answer cards and never run commands. A
-  `heard` record requires a valid `room` and cannot also carry `relayed`.
-- `room` names where the message came from: `id` is the room's id on
-  that door (`^[A-Za-z0-9._-]{1,128}$`), `name` is an optional display
-  name (e.g. `#deploys`, `DM`), and `thread` is an optional thread id
-  (at most 128 bytes, no whitespace or control characters). The owner's
-  own words in a room stay a `relayed` record, with `room` (and
-  optional `context`) added; a `relayed` record with a malformed `room`
-  is dropped rather than run in the connector-wide session.
-- `context` is optional recent room or thread history, oldest first, at
-  most 20 messages and 16 KiB (`[{ name, text, at? }]`), handed to the
-  runtime as quoted lines before the message.
-- On a connector fragment, the platform refuses `heard`, `room`, and
-  `context` on external `POST /channels/*` posts and scheduled records;
-  only the connector's own app effects publish them while bound as an
-  open door. In the bridge, `heard`, `room`, and `context` are honored
-  only when the poster is none of the chat's members in a chat whose
-  members list marks that agent's row as that door (`door`). From any
-  member or on any other chat, those fields are ignored and the record
-  is read as the poster's own plain message.
-- Each `room.id` gets a runtime session of its own; `turn.start` on
-  `work` records `"room": "<room.id>"` so last-seen markers, cut-turn
-  notes, journal recaps, late card recovery, and quotes stay scoped to
-  that room and never leak across rooms. Concurrency stays one active
-  turn of an agent per chat across rooms (up to 16 queued). A question
-  in words (`turn.asked`) on a `heard` turn takes only that speaker's
-  (`principal` + `heard.from`) next message in that room.
+- `heard` says who spoke: `via` the door's id, `from` their id there
+  (`^[A-Za-z0-9._-]{1,128}$`), `name` what they are called there. They
+  speak for no one on the platform. Their asker is `<via>:<from>`
+  (`slack:U0456`), never an npub: their words answer no card and command
+  nothing, and a question the agent asks them takes only their next
+  words, in the same room. The platform gives them no mandate (docs/api.md,
+  "Who asked: mandates").
+- `room` says where: `id` the door's id for it (`^[A-Za-z0-9._-]{1,64}$`),
+  `name` what it is called, `thread` the door's own, for its replies. The
+  agent keeps a conversation (its runtime's session) per room of a chat:
+  one room's talk never sits in another's. Its owner's own words in a
+  room are a relayed message with a `room`.
+- `context`: what was said in the room just before, oldest first, each
+  `{name, text, at?}`. The bridge reads the newest 20, each text cut to
+  640 bytes, and tells them before the message.
+- Names are one line, at most 60 characters (more is cut).
+- Only the agent's own bridge honors these, by one rule: the platform
+  stamped the record a door's (`author: door`, "Who wrote a record": what
+  an open hosted door's own release code publishes, never app code, a
+  schedule, or a person's or another agent's post), it relays no one, and
+  its chat's members list marks that agent's row as the door `heard.via`
+  names. A relayed message's `room` and `context` are honored when so
+  stamped too. From anyone else, the record is read without them. A
+  door's record that names someone heard but in no room the bridge can
+  read (or one of another shape) is never run: never in the chat's own
+  conversation, which is its owner's.
+- A turn in a room is told where it is and who asks, by name, door and
+  room (`Maple · Slack · #deploys`), whether that is its owner, and the
+  room's context. It is never told the chat's other notes (a recap, a
+  history, another turn's cut, any of which may be another room's), only
+  its own cut turn as that turn's continuation. One turn of an agent runs
+  in a chat at a time, whichever room.
+- What the agent says in a room stays there. Its `turn.start` and each
+  reply name the room (`"room": "C0123"`). A reply in a room hands off to
+  no other agent of the chat, whom the room does not hold. A message's
+  quote (`reply_to`) is told only in the room its words were said in, as
+  the quoted record itself says (the agent's reply its `room`, a door's
+  message its `room`; any other record is the chat's own). Words said in
+  one room answer only a question or a card asked there.
+- The door routes the agent's replies back to the room: by turn, as it
+  remembers which record it posted for which turn (the turn's id is the
+  record's: "Turns"), or by the reply's `room`.
 
 **An ask** (`fragment ask --return-to`): an agent's message to another
 agent of its computer whose answer comes back to it, as a turn of its
@@ -251,11 +264,10 @@ own, in the chat it asked from:
 ```
 
 A page posts it with the id `stop:<turn>`. Only the turn's asker stops a
-turn (for a routine or an ask's answer, the agent's owner; in a chat
-where the agent is a door's viewer, the agent's owner may stop any turn
-of that agent there). Without `turn`, it stops the asker's running turn
-(or, for the owner in a door chat, the agent's running turn). A waiting
-turn it names never runs.
+turn (for a routine or an ask's answer, the agent's owner). In a chat that
+is one of the agent's doors, its owner stops any of its turns, whoever
+asked: they run on the owner's computer. Without `turn`, it stops the
+asker's running turn. A waiting turn it names never runs.
 
 **A prompt's answer:**
 
@@ -337,7 +349,10 @@ a step posted again is the same record. A chat's helpers set
   "life": "<32 lowercase hex>" }
 ```
 
-`asker` may stop the turn. `agent` is the agent's identity. `life` is the
+`asker` may stop the turn: an npub, or someone a door heard
+(`<via>:<from>`, "A message heard in a room"). `room`, for a turn said in
+a room of the agent's door, names it. `agent` is the agent's identity.
+`life` is the
 bridge process that claims the turn. The record is the claim, "this life
 runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
 wrote the message that started it ("Who wrote a record"): its asker is

@@ -128,9 +128,6 @@ impl FragmentCell {
         self.writable().await?;
         // after the standing's wait, everything to the insert is one turn
         let checked = schedule::check(&body)?;
-        if fragment_core::door::room_fields(&body.record) && self.is_door_fragment()? {
-            return Err(CellError::new(ErrorCode::Forbidden, "a scheduled record on a connector carries no door room metadata (`heard`, `room`, `context`)"));
-        }
         let builtin = BUILTIN_CHANNELS.contains(&checked.channel.as_str());
         let decl = if builtin { None } else { self.declared_channel(&checked.channel)? };
         schedule::admit_channel(&checked.channel, decl.as_ref(), builtin, role)?;
@@ -230,18 +227,7 @@ impl FragmentCell {
             // records at all; and its record relays no one (one kept by a
             // release before `check` refused it)
             // a skipped fire moves on without claiming it fired (`lastAt` keeps the last real one)
-            let door_forbidden = fragment_core::door::room_fields(&record) && self.is_door_fragment()?;
-            let admitted = schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner)
-                .and_then(|()| schedule::fires(&record))
-                .map_err(|e| e.to_string())
-                .and_then(|()| {
-                    if door_forbidden {
-                        Err("a scheduled record on a connector carries no door room metadata (`heard`, `room`, `context`)".into())
-                    } else {
-                        Ok(())
-                    }
-                });
-            let fired = match admitted {
+            let fired = match schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner).and_then(|()| schedule::fires(&record)) {
                 Ok(()) => {
                     self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at)).await?;
                     true

@@ -557,13 +557,6 @@ impl FragmentCell {
         self.declared_channel(channel)?.map(|d| d.read).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))
     }
 
-    /// Whether this fragment is a hosted door or created from a door template
-    /// (where `heard`/`room`/`context` on `chat` are reserved for the
-    /// connector's own app, never external HTTP posts or scheduled records).
-    pub(crate) fn is_door_fragment(&self) -> CellResult<bool> {
-        Ok(self.hosted_door()?.is_some() || self.meta(MetaKey::DoorTemplate)?.is_some())
-    }
-
     /// A post to a channel its fragment.json declares postable: the
     /// platform appends the record as the poster, and no app code runs.
     /// `principal` is who the record names (an identity, or an anonymous
@@ -597,9 +590,6 @@ impl FragmentCell {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
         self.door_checked(caller, &facts.name, channel, id, body).await?;
-        if door::post_room_forbidden(channel, body) && self.is_door_fragment()? {
-            return Err(CellError::new(ErrorCode::Forbidden, "a record carrying `heard`, `room`, or `context` is published only by a connector's own app"));
-        }
         // where the post waited, step by step: one line a post
         let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
@@ -783,9 +773,6 @@ impl FragmentCell {
         // this is the floor beneath them.
         if door::relays(body) {
             return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own relays no one (`relayed`)"));
-        }
-        if door::room_fields(body) && self.is_door_fragment()? {
-            return Err(CellError::new(ErrorCode::Forbidden, "a record the platform appends as the fragment's own carries no door room metadata (`heard`, `room`, `context`)"));
         }
         // nor answers a question: the fragment's own key is asked nothing
         // (`schedule::fires` checks first; docs/api.md, Questions and answers)

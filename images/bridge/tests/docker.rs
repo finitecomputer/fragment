@@ -1098,6 +1098,43 @@ async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, 
     (fake, model, chat, c)
 }
 
+/// Goal (FIN-508, a session per room): real Hermes keeps a conversation
+/// per room of an agent's door. What the door heard in one room is never
+/// in another room's conversation, and the same room's next message is in
+/// its own, with what was said there before. Method: a word said in one
+/// room, then each room asked; the model's requests say what each
+/// conversation held.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn real_hermes_keeps_a_conversation_per_room() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let door = fake.connector("slack", "juniper", Some("slack"));
+    // announced on the agent's `tasks`, as the platform does a chat it joins
+    // (the image lists its chats again only every 5 minutes)
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", json!({ "kind": "joined", "fragment": door })));
+    within(&fake, &chat, &c, 120_000, "the bridge follows the door's chat", |w| w.live_sockets() >= 3).await;
+    let said = |room: &str, text: &str| {
+        let body = json!({ "text": text, "to": ["npub1juniper"], "heard": { "via": "slack", "from": "U0456", "name": "Maple" }, "room": { "id": room, "name": format!("#{}", room.to_lowercase()) } });
+        fragment_bridge::records::turn_id("juniper--k3x9", &door, "chat", fake.say_as_door(&door, "npub1slack", body)["seq"].as_u64().unwrap())
+    };
+    for (room, text) in [("C0123", "remember the word persimmon"), ("D0789", "which word did I ask you to remember"), ("C0123", "say that word again")] {
+        let t = said(room, text);
+        within(&fake, &door, &c, 180_000, text, |w| w.bodies(&door, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    }
+    let calls = model.calls.lock().unwrap().clone();
+    // every message of the model's request that answered `asked`
+    let held = |asked: &str| -> String {
+        let call = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).find(|c| c.body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| content_text(m).contains(asked)));
+        let call = call.unwrap_or_else(|| panic!("a request answered {asked:?}"));
+        call.body["messages"].as_array().into_iter().flatten().filter(|m| m["role"] != "system").map(content_text).collect::<Vec<_>>().join("\n")
+    };
+    let other = held("which word did I ask you to remember");
+    assert!(!other.contains("persimmon"), "another room's conversation holds nothing of the first's: {other}");
+    assert!(other.contains("Maple · Slack · #d0789") && other.contains("You are in Slack #d0789"), "said by its speaker, told where: {other}");
+    let same = held("say that word again");
+    assert!(same.contains("remember the word persimmon"), "the same room's conversation holds what was said there: {same}");
+}
+
 /// Goal (M17, FIN-542): nothing of a Claude agent's self is the computer's
 /// alone. Its `SOUL.md` reaches its working folder, which its `AGENTS.md`
 /// imports, and what it writes of itself (Claude Code's auto memory, its

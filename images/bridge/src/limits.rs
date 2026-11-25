@@ -49,6 +49,23 @@ pub const MESSAGE_TEXT_MAX_BYTES: usize = 32 * 1024;
 /// past it.
 pub const QUOTE_TEXT_MAX_BYTES: usize = 4096;
 
+/// A room's context (docs/chat-records.md, "A message heard in a room"):
+/// what was said there just before a message, as the agent's door sends
+/// it. Its newest lines are read, at most this many, each one's text cut
+/// to `ROOM_CONTEXT_LINE_MAX_BYTES`: a turn in a room is told them all
+/// (note.rs, `place`), within `PLACE_NOTE_MAX_BYTES`.
+pub const ROOM_CONTEXT_LINES_MAX: usize = 20;
+pub const ROOM_CONTEXT_LINE_MAX_BYTES: usize = 640;
+/// A name a door gives (a room's, a speaker's), at most this many
+/// characters, on one line.
+pub const ROOM_NAME_MAX_CHARS: usize = 60;
+/// What a turn in a room is told of it (note.rs, `place`), at most: where
+/// it is, whose words they are, and the room's context.
+pub const PLACE_NOTE_MAX_BYTES: usize = 20 * 1024;
+/// Where it is and whose words they are, at most: the line a queued turn
+/// keeps in the state (engine.rs, `Turn::place`; its context it does not).
+pub const PLACE_LINE_MAX_BYTES: usize = 1024;
+
 /// A reply's text posted as one record, at most: under the platform's
 /// 64 KiB body cap with room for the turn, attachments, and `to`.
 pub const REPLY_TEXT_MAX_BYTES: usize = 56 * 1024;
@@ -192,21 +209,6 @@ pub const AGE_NOTE_MAX_BYTES: usize = 256;
 /// The line telling an agent its computer's disk is filling (note.rs,
 /// `disk`), at most.
 pub const DISK_NOTE_MAX_BYTES: usize = 400;
-/// A room's fields and outside-speaker identity on a hosted door's message
-/// (docs/chat-records.md, "A message heard in a room"): bounded so room
-/// ids fit session keys and names stay on one line.
-pub const ROOM_ID_MAX_BYTES: usize = 128;
-pub const ROOM_NAME_MAX_CHARS: usize = 80;
-pub const ROOM_THREAD_MAX_BYTES: usize = 128;
-pub const HEARD_FROM_MAX_BYTES: usize = 128;
-pub const HEARD_NAME_MAX_CHARS: usize = 80;
-/// Prior room messages carried on a room's message (`context`), oldest
-/// first: at most this many messages and this many bytes rendered.
-pub const ROOM_CONTEXT_MAX_MESSAGES: usize = 20;
-pub const ROOM_CONTEXT_MAX_BYTES: usize = 16 * 1024;
-/// The one-line note telling an agent a message came from a shared room
-/// (note.rs, `room_note`), at most.
-pub const ROOM_NOTE_MAX_BYTES: usize = 384;
 pub const NOTE_ASKED_MAX_CHARS: usize = 300;
 pub const NOTE_LATE_ASKED_MAX_CHARS: usize = 1500;
 pub const NOTE_TOOL_MAX_CHARS: usize = 40;
@@ -449,14 +451,19 @@ const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
 const _: () = assert!(CARD_READ_MS_MAX > HTTP_TIMEOUT_MS, "one hung call fits a card's read");
 const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
-const _: () = assert!(DISK_NOTE_MAX_BYTES + AGE_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + 6 <= MESSAGE_TEXT_MAX_BYTES, "a non-room turn's notes together fit in one message");
-const _: () = assert!(DISK_NOTE_MAX_BYTES + AGE_NOTE_MAX_BYTES + ROOM_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + ROOM_CONTEXT_MAX_BYTES + 10 <= REPLY_TEXT_MAX_BYTES, "a room turn's notes together fit in one 64 KiB frame");
+const _: () = assert!(DISK_NOTE_MAX_BYTES + AGE_NOTE_MAX_BYTES + NOTE_MAX_BYTES + HISTORY_NOTE_MAX_BYTES + 6 <= MESSAGE_TEXT_MAX_BYTES, "a turn's notes together (its disk, its age, a cut turn's or a card's, a chat's history or a recap) are told in no more than a message holds");
 const _: () = assert!(RECAP_MESSAGE_MAX_BYTES + 1024 < HISTORY_NOTE_MAX_BYTES, "a recap's newest line fits beside its head and where the rest is (under 1 KiB: note.rs, `recap`)");
 const _: () = assert!(RECAP_PAGE_RECORDS as usize * (2 * REPLY_TEXT_MAX_BYTES + 1024) < ANSWER_MAX_BYTES, "a page of the longest replies is one answer");
 const _: () = assert!(RECAP_PAGE_RECORDS <= NOTE_PAGE_RECORDS && RECAP_PAGE_RECORDS as usize <= RECAP_SCAN_RECORDS && RECAP_SCAN_RECORDS + NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX);
 const _: () = assert!(RECAP_SCAN_RECORDS.div_ceil(RECAP_PAGE_RECORDS as usize) + NOTE_SCAN_RECORDS_MAX / (NOTE_PAGE_RECORDS as usize) < HISTORY_PAGES_MAX, "a recap's reads (the chat, `work`, and the channel list's one page) are one budget");
 const _: () = assert!(NAMES_READ_MS_MAX < NOTE_READ_MS_MAX && RECAP_SPARE_MS < NOTE_READ_MS_MAX, "names are a note's detail");
 const _: () = assert!(HISTORY_NOTE_MAX_BYTES <= MESSAGE_TEXT_MAX_BYTES, "a chat's history is told in no more than a message holds");
+// a line: "> ", its name (at most 4 bytes a character, and a mark of
+// 11: note.rs `sayer`), ": ", its text, a newline; and its header
+const _: () = assert!(ROOM_CONTEXT_LINES_MAX * (ROOM_CONTEXT_LINE_MAX_BYTES + 4 * ROOM_NAME_MAX_CHARS + 20) + 1024 <= PLACE_NOTE_MAX_BYTES, "a room's context is told whole");
+const _: () = assert!(2 * 4 * ROOM_NAME_MAX_CHARS + 4 * 32 + 160 <= PLACE_LINE_MAX_BYTES, "a room's line holds both names and a door's at their bound");
+const _: () = assert!(TURNS_OPEN_MAX * PLACE_LINE_MAX_BYTES <= STATE_FILE_MAX_BYTES / 8, "every open turn's room line is a small part of the state");
+const _: () = assert!(PLACE_NOTE_MAX_BYTES <= HISTORY_NOTE_MAX_BYTES, "a turn in a room is told its room in place of a chat's history or recap (driver.rs, `note_for`)");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(2 * NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX && 2 * NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 2 <= HISTORY_PAGES_MAX, "a read's bounds hold both scans");
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
@@ -467,4 +474,3 @@ const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
 const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");
 const _: () = assert!(HERMES_MEDIA_MAX_BYTES < ATTACHMENT_MAX_BYTES && ATTACHMENT_MAX_BYTES <= SCRATCH_MAX_BYTES, "a file past Hermes' cap still fits, and so does the largest file in scratch");
 const _: () = assert!(DOWNLOAD_TRIES_MAX >= 2, "a cut download resumes");
-const _: () = assert!(ROOM_CONTEXT_MAX_MESSAGES > 0 && ROOM_CONTEXT_MAX_BYTES < FRAME_MAX_BYTES && ROOM_NOTE_MAX_BYTES < NOTE_MAX_BYTES, "a room's note and context stay well under a frame");

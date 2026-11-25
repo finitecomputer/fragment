@@ -380,48 +380,25 @@ pub struct TurnStart {
     /// `continue_turn`): its note is that turn's, by its id (driver.rs,
     /// `cut_note`); said by the computer, never as its asker's words.
     pub continues: Option<String>,
-    /// Whether this turn's chat is a hosted door chat (where room-scoped turns
-    /// may coexist with root turns on the same `chat` channel, so quote and
-    /// recap provenance must fail closed when a reply's `turn.start` is unread).
-    pub door_chat: bool,
-    /// The room this turn's message came from (a hosted door's:
-    /// docs/chat-records.md, "A message heard in a room"): each room gets a
-    /// runtime session of its own.
-    pub room: Option<crate::records::Room>,
-    /// The outside speaker's id on their door (`heard.from`), when this turn
-    /// was started by a `heard` message.
-    pub heard_from: Option<String>,
-    /// One-line shared-room note (`note::room_note`): the driver folds it
-    /// into `note` before handing the turn.
-    pub room_note: Option<String>,
-    /// Whether the causing `chat` record carries prior room `context` for
-    /// the driver to read and render when handing the turn (kept out of
-    /// bridge `State` so queued room turns stay well under
-    /// `STATE_FILE_MAX_BYTES`).
-    pub has_context: bool,
-    /// Quoted prior room messages (`note::room_context`, oldest first, at
-    /// most 20 messages and 16 KiB): read by the driver when `has_context`
-    /// is set, and folded into `note` before handing the turn.
-    pub room_context: Option<String>,
+    /// The room of the agent's door it was said in (docs/chat-records.md,
+    /// "A message heard in a room"), by the door's id for it: a runtime
+    /// keeps a conversation per room of a chat (`conversation`), so one
+    /// room's talk never sits in another's.
+    pub room: Option<String>,
+    /// What it is told of that room (note.rs, `place`): where it is, whose
+    /// words they are, and what was said there just before. The driver
+    /// puts it in `note`, before the journal's.
+    pub place: Option<String>,
 }
 
 impl TurnStart {
-    /// The speaker id handed to runtimes: `asker:heard_from` for an outside
-    /// speaker on a door, else `asker`.
-    pub fn speaker_id(&self) -> String {
-        match &self.heard_from {
-            Some(from) => format!("{}:{from}", self.asker),
-            None => self.asker.clone(),
+    /// The conversation its runtime keeps it in: its chat's, or, said in a
+    /// room of the agent's door, that room's (`<chat>/<room>`).
+    pub fn conversation(&self) -> String {
+        match &self.room {
+            Some(room) => format!("{}/{room}", self.fragment),
+            None => self.fragment.clone(),
         }
-    }
-
-    /// All read-only notes carried before the message: when the driver
-    /// already folded `room_note` and `room_context` into `note`, returns
-    /// `note` as-is; when a runtime is handed a `TurnStart` directly, joins
-    /// any remaining room note, note, and room context.
-    pub fn turn_note(&self) -> Option<String> {
-        let parts: Vec<&str> = [self.room_note.as_deref(), self.note.as_deref(), self.room_context.as_deref()].into_iter().flatten().filter(|s| !s.trim().is_empty()).collect();
-        (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 }
 
@@ -510,8 +487,9 @@ pub enum Event {
     /// The turn is over.
     End { turn: String, outcome: crate::records::Outcome },
     /// Something the runtime said with no turn running (a reminder it set):
-    /// posted as a turn of its own in that chat.
-    Say { agent: String, fragment: String, text: String, files: Vec<LocalFile> },
+    /// posted as a turn of its own in that chat, in the room of the agent's
+    /// door its conversation is (`TurnStart::room`), if one.
+    Say { agent: String, fragment: String, text: String, files: Vec<LocalFile>, room: Option<String> },
     /// A notice of the runtime's about the agent's work in a chat, neither a
     /// step nor a reply (it seems stuck, its context was compressed, it
     /// updated its memory): the agent's turn running there, or, with none,
@@ -561,11 +539,6 @@ pub struct LateCard {
     pub option: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
-    /// Original speaker label when a room turn's request is replayed (e.g.
-    /// `Maple · Slack · #deploys`), so approving an install card never replays
-    /// an outside speaker's request under the owner's label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asker_name: Option<String>,
 }
 
 /// A runtime's two queues, the bridge's shutdown signal, and the hold.

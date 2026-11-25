@@ -29,26 +29,18 @@ pub struct Fresh {
     pub note: String,
     /// The answer as its runtime reads it (`runtime::LateCard`).
     pub late: crate::runtime::LateCard,
-    /// The verified room of the originating turn, when the card came from a
-    /// hosted door's room: carried onto the fresh turn so it resumes in the
-    /// same room with the shared-room note.
-    pub room: Option<records::Room>,
-    /// The door id (`slack`, …) when the originating turn came from a room.
-    pub via: Option<String>,
 }
 
 /// `answer`, an owner's `prompt_response` on `chat`, against the agent's
 /// records on `work` back to its card's turn's start and `chat` back to
 /// the card, both from the answer on; `cause`, the record that started the
-/// card's turn, when it was read; `door`, the open door on this chat when
-/// it is a hosted door; `name`, what the chat calls a principal.
+/// card's turn, when it was read; `name`, what the chat calls a principal.
 /// `None`: nothing to do (not the owner's, not its card's option, or the
 /// card closed already). Only a closure this path wrote (`answerSeq`, the
 /// answer's seq) lets its answer rebuild the fresh turn again (a retry
 /// after a restart, whose claim is the same): a card answered live, then
 /// rolled back past, never runs again.
-#[allow(clippy::too_many_arguments)]
-pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record], cause: Option<&Record>, door: Option<&str>, name: impl Fn(&str) -> String, now: u64) -> Result<Option<Resolved>, Unavailable> {
+pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record], cause: Option<&Record>, name: impl Fn(&str) -> String, now: u64) -> Result<Option<Resolved>, Unavailable> {
     let Said::PromptResponse { prompt, option, text, card } = records::said(&answer.body) else { return Ok(None) };
     if !answer.by(&agent.owner) || card.as_ref().is_some_and(|c| c.agent != agent.identity) {
         return Ok(None);
@@ -93,38 +85,7 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
-    // Recover the originating turn's verified room solely from our own
-    // `turn.start["room"]` record on `work`. Never fall back to raw `cause`
-    // metadata when `turn.start` has no `room`: a missing `room` means a root
-    // or ordinary chat turn, and raw member-written fields must not move a
-    // root card into a room or strip the asker's Stop authority.
-    let (room, via) = match start.body.get("room") {
-        Some(Value::String(rid)) => {
-            if !records::valid_token(rid, limits::ROOM_ID_MAX_BYTES) {
-                return Err(Unavailable::Corrupt);
-            }
-            let full = cause.and_then(|c| records::room(&c.body)).filter(|r| r.id == *rid).unwrap_or_else(|| records::Room { id: rid.clone(), name: String::new(), thread: None });
-            let via = door
-                .map(str::to_string)
-                .or_else(|| cause.and_then(|c| records::heard(&c.body).map(|h| h.via).or_else(|| records::relayed(&c.body).map(|r| r.via))))
-                .ok_or(Unavailable::Missing)?;
-            (Some(full), Some(via))
-        }
-        Some(Value::Null) | None => (None, None),
-        Some(_) => return Err(Unavailable::Corrupt),
-    };
-    // Match `engine::can_stop`: a non-owner room turn in a door chat (where
-    // `asker` is the connector principal) is stoppable only by the owner in
-    // that door chat, never by the connector itself.
-    let heard_turn = room.is_some() && door.is_some() && asker != agent.owner;
-    let can_stop = |r: &Record| {
-        if heard_turn {
-            door.is_some() && r.by(&agent.owner)
-        } else {
-            r.by(asker) || (door.is_some() && r.by(&agent.owner))
-        }
-    };
-    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && can_stop(r) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
+    if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && r.by(asker) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
         return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
     }
     let cut = note::turn(work, &agent.identity, turn).ok_or(Unavailable::Corrupt)?;
@@ -139,21 +100,12 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     // the turn app code's words started was asked by no one, whoever they
     // name: as its start says, or its cause, should the start be older
     let by_code = start.body["code"] == true || cause.is_some_and(Record::by_code);
-    let asker_label = if by_code {
-        records::CODE_SAYS.to_string()
-    } else if room.is_some() {
-        cause
-            .and_then(|c| records::heard(&c.body))
-            .map(|h| note::room_speaker(&h, room.as_ref()))
-            .unwrap_or_else(|| name(asker))
-    } else {
-        name(asker)
-    };
-    let note = note::late(&cut, &asker_label, cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
+    let asker_name = if by_code { records::CODE_SAYS.to_string() } else { name(asker) };
+    let note = note::late(&cut, &asker_name, cause.and_then(note::asked).as_deref(), &note::replies(chat, &agent.identity, turn));
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
-    let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked), asker_name: room.is_some().then(|| asker_label.clone()) };
-    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late, room, via }) }))
+    let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked) };
+    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late }) }))
 }
 
 #[cfg(test)]
@@ -196,7 +148,7 @@ mod tests {
     }
 
     fn late(work: &[Record], chat: &[Record], answer: &Record, now: u64) -> Result<Option<Resolved>, Unavailable> {
-        resolve(&agent(), answer, work, chat, Some(&chat[0]), None, name, now)
+        resolve(&agent(), answer, work, chat, Some(&chat[0]), name, now)
     }
 
     /// Goal: a realistic turn's late answer starts a fresh turn whose
@@ -224,66 +176,19 @@ mod tests {
         let words = rec("chat", 3, 20, OWNER, json!({ "kind": "prompt_response", "prompt": "p", "option": "other", "text": "only the summary", "agent": ME, "turn": "old" }));
         let r = late(&work, &[chat[0].clone(), chat[1].clone(), words.clone()], &words, 20).unwrap().unwrap();
         assert_eq!(r.fresh.unwrap().text, "Answer to your earlier question “Publish?”: only the summary");
-        let no_cause = resolve(&agent(), &chat[2], &work, &chat, None, None, name, 20).unwrap().unwrap();
+        let no_cause = resolve(&agent(), &chat[2], &work, &chat, None, name, 20).unwrap().unwrap();
         let no_cause = no_cause.fresh.unwrap();
         assert!(no_cause.note.contains("It was answering Robin; what they asked is not in this chat's record."));
         assert_eq!(no_cause.late.request, None, "no request it was not told");
         // FIN-615: a turn app code's words started was asked by no one, whoever they name
         let code = Record { author: Some(records::CODE.into()), ..chat[0].clone() };
-        let by_code = resolve(&agent(), &chat[2], &work, &chat, Some(&code), None, name, 20).unwrap().unwrap().fresh.unwrap();
+        let by_code = resolve(&agent(), &chat[2], &work, &chat, Some(&code), name, 20).unwrap().unwrap().fresh.unwrap();
         assert!(by_code.note.contains("It was answering app code: “Publish my draft") && !by_code.note.contains("Robin"), "{}", by_code.note);
         // and its start says so when its cause cannot be read (round two of #1444)
         let mut coded = work.clone();
         coded[0].body["code"] = json!(true);
-        let unread = resolve(&agent(), &chat[2], &coded, &chat, None, None, name, 20).unwrap().unwrap().fresh.unwrap();
+        let unread = resolve(&agent(), &chat[2], &coded, &chat, None, name, 20).unwrap().unwrap().fresh.unwrap();
         assert!(unread.note.contains("It was answering app code; what they asked is not in this chat's record.") && !unread.note.contains("Robin"), "{}", unread.note);
-    }
-
-    /// Goal (FIN-508): a late answer to a card from a room turn recovers the
-    /// verified room and door, and refuses recovery when a connector card's
-    /// room cannot be established.
-    #[test]
-    fn late_room_card_recovers_room_or_refuses_when_unknown() {
-        let (mut work, mut chat) = history();
-        work[0].body["asker"] = json!("npub1slackconn");
-        work[0].body["room"] = json!("C0123");
-        chat[0] = rec(
-            "chat",
-            1,
-            9,
-            "npub1slackconn",
-            json!({
-                "text": "Publish my draft",
-                "to": [ME],
-                "heard": { "via": "slack", "from": "U0456", "name": "Maple" },
-                "room": { "id": "C0123", "name": "#deploys" }
-            }),
-        );
-        let r = resolve(&agent(), &chat[2], &work, &chat, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
-        let fresh = r.fresh.unwrap();
-        assert_eq!(fresh.room, Some(records::Room { id: "C0123".into(), name: "#deploys".into(), thread: None }));
-        assert_eq!(fresh.via.as_deref(), Some("slack"));
-        assert!(fresh.note.contains("Maple · Slack · #deploys"), "{}", fresh.note);
-        assert_eq!(fresh.late.asker_name.as_deref(), Some("Maple · Slack · #deploys"), "late install replay keeps original speaker label");
-        // A Stop from the connector principal on a `heard` turn is ignored during
-        // late card recovery (matching live `can_stop`), whereas the owner's Stop closes it.
-        let conn_stop = rec("chat", 2, 19, "npub1slackconn", json!({ "kind": "stop", "turn": "old" }));
-        let answer_after_stop = rec("chat", 3, 20, OWNER, response("yes"));
-        let with_conn_stop = vec![chat[0].clone(), conn_stop, answer_after_stop.clone()];
-        let r_conn = resolve(&agent(), &answer_after_stop, &work, &with_conn_stop, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
-        assert!(r_conn.fresh.is_some(), "connector Stop on a heard turn must not discard the owner's answer");
-        let owner_stop = rec("chat", 2, 19, OWNER, json!({ "kind": "stop", "turn": "old" }));
-        let with_owner_stop = vec![chat[0].clone(), owner_stop, answer_after_stop.clone()];
-        let r_owner = resolve(&agent(), &answer_after_stop, &work, &with_owner_stop, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
-        assert_eq!((r_owner.closed["outcome"].as_str(), r_owner.fresh), (Some("stopped"), None), "owner Stop in door chat closes the card");
-        // Without `room` on turn.start (root / ordinary chat turn), raw `room`/`heard`
-        // on `cause` is never trusted: it stays root and honors the asker's Stop.
-        let mut unscoped = work.clone();
-        unscoped[0].body.as_object_mut().unwrap().remove("room");
-        let r_root = resolve(&agent(), &chat[2], &unscoped, &chat, Some(&chat[0]), Some("slack"), name, 20).unwrap().unwrap();
-        assert_eq!(r_root.fresh.as_ref().unwrap().room, None, "unscoped turn.start never moves into a room from raw cause");
-        let r_root_stopped = resolve(&agent(), &answer_after_stop, &unscoped, &with_conn_stop, Some(&chat[0]), None, name, 20).unwrap().unwrap();
-        assert_eq!((r_root_stopped.closed["outcome"].as_str(), r_root_stopped.fresh), (Some("stopped"), None), "unscoped turn honors its asker's Stop even if cause carries raw heard");
     }
 
     /// Goal (the rollback's double run): only a closure the late path wrote

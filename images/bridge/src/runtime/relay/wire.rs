@@ -293,32 +293,25 @@ pub fn valid_profile(p: &str) -> bool {
 
 /// The chat id Hermes is given: the chat fragment and the agent, so two
 /// agents in one chat are two chats to Hermes (its adapter keeps per-chat
-/// state by this id alone).
-pub fn chat_id(fragment: &str, agent_fragment: &str) -> String {
-    format!("{fragment}/{agent_fragment}")
-}
-
-/// The chat id Hermes is given for a turn in an optional room: each room of
-/// a door's chat gets its own Hermes session (`{fragment}/{agent}/{room}`),
-/// while a non-room chat keeps `{fragment}/{agent}`.
-pub fn room_chat_id(fragment: &str, agent_fragment: &str, room: Option<&str>) -> String {
+/// state by this id alone), and the room of the agent's door it was said
+/// in, if any (`TurnStart::room`): a session of its own each.
+pub fn chat_id(fragment: &str, agent_fragment: &str, room: Option<&str>) -> String {
     match room {
-        Some(r) => format!("{fragment}/{agent_fragment}/{r}"),
-        None => chat_id(fragment, agent_fragment),
+        Some(room) => format!("{fragment}/{agent_fragment}/{room}"),
+        None => format!("{fragment}/{agent_fragment}"),
     }
 }
 
-/// The chat fragment and agent of a chat id (with or without a room suffix).
+/// The chat fragment and agent of a chat id (its room aside).
 pub fn split_chat_id(chat: &str) -> Option<(&str, &str)> {
     let mut parts = chat.splitn(3, '/');
-    let f = parts.next().filter(|s| !s.is_empty())?;
-    let a = parts.next().filter(|s| !s.is_empty())?;
-    if let Some(r) = parts.next() {
-        if r.is_empty() || r.contains('/') {
-            return None;
-        }
-    }
-    Some((f, a))
+    let (f, a) = (parts.next()?, parts.next()?);
+    (!f.is_empty() && !a.is_empty()).then_some((f, a))
+}
+
+/// The room of a chat id, if it names one (`chat_id`).
+pub fn room_of_chat_id(chat: &str) -> Option<&str> {
+    chat.splitn(3, '/').nth(2).filter(|room| crate::records::valid_token(room, 64))
 }
 
 /// The session Hermes keeps for one agent's chat: one per chat, shared by
@@ -1026,17 +1019,16 @@ mod tests {
         let p = profile(&long);
         assert!(p.len() <= 64 && valid_profile(&p), "{p}");
         assert_ne!(p, profile(&format!("{}--k3x9", "a".repeat(81))), "two long names, two profiles");
-        assert_eq!(split_chat_id(&chat_id("talk--k3x9", "juniper--k3x9")), Some(("talk--k3x9", "juniper--k3x9")));
-        assert_eq!(room_chat_id("talk--k3x9", "juniper--k3x9", None), chat_id("talk--k3x9", "juniper--k3x9"));
-        let r1 = room_chat_id("talk--k3x9", "juniper--k3x9", Some("C0123"));
-        let r2 = room_chat_id("talk--k3x9", "juniper--k3x9", Some("C0456"));
-        assert_eq!(r1, "talk--k3x9/juniper--k3x9/C0123");
-        assert_ne!(r1, r2);
-        assert_ne!(session_key("juniper--k3x9", &r1), session_key("juniper--k3x9", &r2));
-        assert_eq!(split_chat_id(&r1), Some(("talk--k3x9", "juniper--k3x9")));
-        for bad in ["nochat", "", "a/", "/b", "a/b/", "a/b/c/d"] {
-            assert_eq!(split_chat_id(bad), None, "{bad}");
-        }
+        assert_eq!(split_chat_id(&chat_id("talk--k3x9", "juniper--k3x9", None)), Some(("talk--k3x9", "juniper--k3x9")));
+        // a room's: a session of its own, in the same chat of the same agent
+        assert_eq!(chat_id("slack--k3x9", "juniper--k3x9", Some("C0123")), "slack--k3x9/juniper--k3x9/C0123");
+        assert_eq!(split_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), Some(("slack--k3x9", "juniper--k3x9")));
+        assert_ne!(session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("D0456"))));
+        assert_ne!(session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", None)));
+        assert_eq!(room_of_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), Some("C0123"));
+        assert_eq!(room_of_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", None)), None);
+        assert_eq!(room_of_chat_id("slack--k3x9/juniper--k3x9/../x"), None);
+        assert_eq!(split_chat_id("nochat"), None);
     }
 
     /// A step is a tool call's observed end, its outcome as observed: a
