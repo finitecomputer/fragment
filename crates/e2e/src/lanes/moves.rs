@@ -1555,11 +1555,11 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
         agent_back.status.success() && std::fs::read(notes.join("agent/hermes-home/SOUL.md")).ok() == Some(soul) && !note_of("agent").exists() && !too_big.status.success() && weights.is_file(),
         format!("{} | {}", String::from_utf8_lossy(&agent_back.stdout), String::from_utf8_lossy(&too_big.stdout)),
     );
-    // each back: by its note, but the long name's by where it was
+    // each back: trace.bin by its note, the others by where they were
     let mut deep_backs = Vec::new();
     for (p, note) in deeps.iter().zip(&deep_notes) {
         let want = files.iter().find(|(f, _)| f.as_str() == *p).map(|(_, b)| b.clone());
-        let out = back(s, &if *p == deep_long { notes.join(p) } else { note.clone().unwrap_or_default() });
+        let out = back(s, &if *p == deep { note.clone().unwrap_or_default() } else { notes.join(p) });
         let ok = out.status.success() && want.is_some() && std::fs::read(notes.join(p)).ok() == want && note.as_ref().is_some_and(|n| !n.exists());
         deep_backs.push(json!({ "ok": ok, "note": note.as_ref().map(|n| n.display().to_string()), "out": String::from_utf8_lossy(&out.stdout), "err": String::from_utf8_lossy(&out.stderr) }));
     }

@@ -484,15 +484,9 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
         let note = g.note(&notes);
         let dir = note.parent().expect("a note has a folder");
         std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
-        let name = g.key.rsplit('/').next().expect("a key names something");
         let when = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         let said = Said { title: "Kept in storage", came: format!("came from the old agent's home in its move here on {when}, and was kept off this disk") };
-        let text = offload::note_text(r, &note, name, said);
-        // a note that would not read back as this record is never written
-        match offload::record_of(&text) {
-            Ok(back) if back == *r => {}
-            read => bail!("{}'s note would not read back as kept ({:?}); its files are in {into}, under {}, but no note was written", g.key, read.err(), r.at),
-        }
+        let text = offload::readable_note(r, &note, g.name(), said).with_context(|| format!("{}'s files are in {into}, under {}, but no note was written", g.key, r.at))?;
         offload::publish(&note, &text)?;
         done.files += g.files.len();
         done.bytes += g.files.iter().map(|k| k.size).sum::<u64>();
@@ -991,10 +985,11 @@ mod tests {
         files.extend(named.iter().cloned());
         let s = setup(&files);
         let stored = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
-        for (path, want) in &named {
+        // back by where it was (Codex on #1561), and by its note
+        for (i, (path, want)) in named.iter().enumerate() {
             let note = s.notes.join(format!("{path}{NOTE_SUFFIX}"));
             assert!(note.is_file(), "its note: {}", note.display());
-            crate::offload::back(&s.c, &note).unwrap();
+            crate::offload::back(&s.c, &if i == 0 { s.notes.join(path) } else { note.clone() }).unwrap();
             assert_eq!(std::fs::read(s.notes.join(path)).unwrap(), *want, "{path}: back by its own name");
             assert!(!note.exists());
         }

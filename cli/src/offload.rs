@@ -239,6 +239,18 @@ pub(crate) fn note_text(r: &Record, note: &Path, name: &str, said: Said) -> Stri
     out
 }
 
+/// The note of `r` at `note`, its text, only if it reads back as `r` the
+/// way `--back` reads one (`record_of`): no move removes a file, and no
+/// store writes a note, that `--back` can't bring back.
+pub(crate) fn readable_note(r: &Record, note: &Path, name: &str, said: Said) -> Result<String> {
+    let text = note_text(r, note, name, said);
+    match record_of(&text) {
+        Ok(back) if back == *r => Ok(text),
+        Ok(_) => bail!("its note would not read back as written"),
+        Err(why) => bail!("its note would not read back ({why:#})"),
+    }
+}
+
 /// A note's record (`note_text`).
 pub(crate) fn record_of(text: &str) -> Result<Record> {
     let start = text.rfind(RECORD_OPEN).ok_or_else(|| anyhow!("it holds no record"))? + RECORD_OPEN.len();
@@ -613,6 +625,11 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
             }
         }
     }
+    // its note reads back as `--back` reads one, before anything is written
+    // (a stand-in for each file's sum, which only its read makes)
+    let files = p.files.iter().map(|l| Moved { path: l.rel.clone(), size: l.size, sha256: Some("0".repeat(64)), crc32: None, mode: l.mode }).collect();
+    readable_note(&Record { files, ..r.clone() }, &p.note, &p.name, Said::offloaded(&when))
+        .map_err(|e| coded(Code::InvalidUsage, format!("{} cannot be moved: {e:#}. Nothing was written: move it from a folder nearer the top, or under a shorter name", r.from)))?;
 
     let mut held = Held::new(&into, Wants::Write);
     if !held.get(c)?.writes() {
@@ -660,7 +677,8 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     if let Some(l) = p.files.iter().find(|l| !unchanged(l)) {
         bail!(coded(Code::Conflict, format!("{} changed while it was moved; nothing was removed (a copy of it as it was is in {into}, under {}/): move it once it is done changing", l.abs.display(), r.at)));
     }
-    publish(&p.note, &note_text(&r, &p.note, &p.name, Said::offloaded(&when)))?;
+    let text = readable_note(&r, &p.note, &p.name, Said::offloaded(&when)).with_context(|| format!("{} is in {into}, under {}/, but nothing was removed", r.from, r.at))?;
+    publish(&p.note, &text)?;
     let kept = remove(&p)?;
     Ok(Offloaded { fragment: into, at: r.at.clone(), note: p.note.display().to_string(), files: r.files.len(), bytes: r.bytes(), resumed: false, kept })
 }
@@ -705,13 +723,15 @@ pub struct Back {
 }
 
 /// A note's path, from it or from the path it is the note of (that name,
-/// which only its own note brings back).
+/// which only its own note brings back). A path named as a note is that
+/// note while it is there, else a file's of that name (FIN-757).
 fn note_of(path: &Path) -> Result<(PathBuf, Option<String>)> {
     let (dir, name) = place(path)?;
-    Ok(match name.ends_with(NOTE_SUFFIX) {
-        true => (dir.join(name), None),
-        false => (note_at(&dir, &name), Some(name)),
-    })
+    let given = dir.join(&name);
+    if name.ends_with(NOTE_SUFFIX) && fs::symlink_metadata(&given).is_ok() {
+        return Ok((given, None));
+    }
+    Ok((note_at(&dir, &name), Some(name)))
 }
 
 /// Brings back what the note at (or for) `path` moved, beside the note.
@@ -1197,6 +1217,25 @@ mod tests {
         assert!(cjk.len() == 252 && is_note_of(&format!("{cjk}{NOTE_SUFFIX}"), &cjk) && is_note_of(&note_name(&cjk), &cjk));
         assert!(is_note_of("log.offloaded.md.offloaded.md", "log.offloaded.md") && !is_note_of("log.offloaded.md", "log.offloaded.md"));
         assert!(!is_note_of(&note_name(&cjk), "長い題名") && !is_note_of("a.offloaded.md", "b"));
+    }
+
+    /// Goal (Codex on #1561): a move removes nothing unless its note reads
+    /// back as `--back` reads one (`record_of`). A file whose one part fits
+    /// in the fragment, but whose note would not read back (a long name,
+    /// folders deep), is refused before anything is written, and stays.
+    #[test]
+    fn a_move_whose_note_would_not_read_back_is_refused_before_anything_is_written() {
+        let (mock, c) = host();
+        let root = tempdir("unread");
+        // its one part, `<when>/<folder>/<name>`, ten bytes within a repo
+        // path; a part's longest name (`.part-…-of-…`) past it
+        let (at, _) = at_now(&root);
+        let name = "n".repeat(fragment_proto::limits::PATH_MAX_BYTES - at.len() - 1 - 10);
+        let file = root.join(&name);
+        fs::write(&file, b"kept here").unwrap();
+        let e = offload(&c, &file, NAME).unwrap_err();
+        assert!(format!("{e:#}").contains("its note would not read back"), "{e:#}");
+        assert!(file.exists() && mock.paths(NAME, "main").is_empty() && fs::read_dir(&root).unwrap().count() == 1, "nothing written, nothing removed");
     }
 
     /// Goal: a folder replaced by a link before its back is refused, and
