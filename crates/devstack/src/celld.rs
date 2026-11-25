@@ -239,11 +239,17 @@ fn orphan_builder(builder: &serde_json::Value, start: impl Fn(u32) -> Option<u64
     }
 }
 
-/// A process's start time, in clock ticks since boot: `/proc/<pid>/stat`'s
-/// field 22, after its command's parenthesis.
+/// A running process's start time, in clock ticks since boot:
+/// `/proc/<pid>/stat`'s field 22, after its command's parenthesis. None
+/// for one that has exited, a zombie (`Z`) or dead (`X`) included: a
+/// celld a run killed and has not reaped yet still has its start there.
 fn proc_start(pid: u32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X") {
+        return None;
+    }
+    fields.nth(18)?.parse().ok()
 }
 
 /// The name `celld dev` gives its node on `project` (the fork's dev.rs):
@@ -535,6 +541,25 @@ mod tests {
         assert!(super::orphan_builder(&builder("4194305-1"), super::proc_start), "past pid_max: gone");
         assert!(!super::orphan_builder(&serde_json::json!({ "labels": {} }), super::proc_start), "no owner");
         assert!(!super::orphan_builder(&builder("x"), super::proc_start));
+    }
+
+    /// Goal: a celld killed and not yet reaped (a zombie, its start time
+    /// still in `/proc`) is gone: a run's Ctrl-C kills its node, then
+    /// reaps the builder before it waits for the node.
+    #[test]
+    fn a_zombie_owner_is_gone() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let stat = || fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let t0 = std::time::Instant::now();
+        // bounded: `true` exits at once
+        while !stat().rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the child is a zombie");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(super::proc_start(pid), None, "a zombie runs no more");
+        child.wait().unwrap();
+        assert_eq!(super::proc_start(pid), None);
     }
 
     /// Goal: devstack takes the builder's lock where celld does, so a
