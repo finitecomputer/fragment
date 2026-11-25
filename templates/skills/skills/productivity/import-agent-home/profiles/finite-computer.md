@@ -221,8 +221,8 @@ It leaves the rest as it is, for a person, and lists it:
 - **unsynced:** pages your old agent edited and never synced: the old
   brain never had that text;
 - **missing:** pages your copy should hold and doesn't;
-- **older:** pages a newer copy than yours already caught that folder up
-  past, which the real one doesn't hold as yours does (one the old brain
+- **older:** pages in a folder the real one took from a newer copy than
+  yours, which it doesn't hold as yours does (a page the old brain
   deleted since, say);
 - **extra:** files your copy holds that the old brain didn't list (a
   page made and never synced, say): only the copy has them;
