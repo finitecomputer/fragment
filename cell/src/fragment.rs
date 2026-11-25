@@ -955,6 +955,8 @@ impl FragmentCell {
             beside_person: person_role.is_some_and(|r| r != Role::Owner),
             connector: row.door.is_some(),
             owner_in_person,
+            // read only on a connector, of an agent signing as itself
+            door_agent: row.door.is_some() && signed.acting_for.is_none() && signed.kind == fragment_proto::IdentityKind::Agent && self.door_member()?.is_some_and(|(id, _)| id == fragment_core::npub::display(&signed.id)),
         })
     }
 

@@ -32,7 +32,7 @@ import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
-import { createConnections, createAgentHomes, createSimplex, createConnectors } from "./connections.js";
+import { createConnections, createAgentHomes, createSimplex, createConnectors, TELEGRAM, SIMPLEX } from "./connections.js";
 import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -821,10 +821,10 @@ function animateMenu(opening) {
   const id = menuMotionId;
   // a hero's menu hangs over the rows below it: it scales, never fades, so
   // they never show through it
-  const solid = (node) => node === menuFor.button || (node === menu && menu.classList.contains("agent-menu"));
+  const solid = (node) => node === menuFor.anchor || (node === menu && menu.classList.contains("agent-menu"));
   menuAnimations = menuParts.map(({ node, origin }, i) => node.animate(opening
     ? springFrames(t => ({ opacity: solid(node) ? 1 : Math.min(1, t), transform: `scale(${.97 + .03 * t})`, transformOrigin: origin }))
-    : [{ ...current[i], transformOrigin: origin }, { opacity: solid(node) ? 1 : 0, transform: node === menuFor.button ? "scale(1)" : "scale(.97)", transformOrigin: origin }],
+    : [{ ...current[i], transformOrigin: origin }, { opacity: solid(node) ? 1 : 0, transform: node === menuFor.anchor ? "scale(1)" : "scale(.97)", transformOrigin: origin }],
   { duration: opening ? 280 : 160, easing: opening ? "linear" : "cubic-bezier(.4, 0, 1, 1)", fill: "both" }));
   Promise.all(menuAnimations.map(a => a.finished)).then(() => {
     if (id !== menuMotionId) return;
@@ -849,7 +849,9 @@ function openMenu(button, items) {
   const again = menuFor?.button === button && !menuClosing;
   if (again) return closeMenu();
   closeMenu(true);
-  menuFor = { button };
+  // what it hangs from: an agent's hero, for its face and name; else the button
+  const hero = button.closest("#chats .agent-hero");
+  menuFor = { button, anchor: hero ?? button };
   menu.replaceChildren(...items.map((it) => {
     const b = el("button");
     b.type = "button";
@@ -862,10 +864,10 @@ function openMenu(button, items) {
     return b;
   }));
   button.setAttribute("aria-expanded", "true");
-  const attached = button.classList.contains("agent-hero");
+  const attached = !!hero;
   menu.classList.toggle("agent-menu", attached);
   menu.hidden = false;
-  const r = button.getBoundingClientRect();
+  const r = menuFor.anchor.getBoundingClientRect();
   if (attached) {
     menu.style.width = `${r.width}px`;
     menu.style.maxHeight = `${Math.max(0, innerHeight - r.bottom - 8)}px`;
@@ -883,7 +885,7 @@ function openMenu(button, items) {
   menu.querySelector("button")?.focus();
   edgeAgain();
   const bounds = attached ? menuEdge.getBoundingClientRect() : menu.getBoundingClientRect();
-  menuParts = (attached ? [menu, button, menuEdge] : [menu]).map((node) => {
+  menuParts = (attached ? [menu, hero, menuEdge] : [menu]).map((node) => {
     const rect = node.getBoundingClientRect();
     return { node, origin: `${bounds.left + bounds.width / 2 - rect.left}px ${bounds.top + bounds.height / 2 - rect.top}px` };
   });
@@ -918,9 +920,9 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,
     onScreen: () => making.shownChat(state.making, state.current, state.page),
     reading: () => making.readChat(state.making, state.current, state.page) },
-  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
+  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem, deleteItems },
   navigation: { newChat, rename: (name) => rename(name), openChat: pickChat, openApp, openScreen, leaveSidebar, seg },
-  listLive, load,
+  listLive, load, store,
 });
 // Continue: a conversation (an import, an archived chat) as a new chat with
 // an agent of the person's choosing (continue.js)
@@ -1264,6 +1266,75 @@ async function setPinned(name, pinned) {
     notice(pinned ? "It was not pinned" : "It was not unpinned", e.message);
   }
 }
+// ---- deleting a chat (FIN-722): the owner's `DELETE /api/f/{name}`, gone
+// for everyone in it. Offered on a chat of theirs alone, never one someone
+// shared with them, nor one an agent of theirs needs: its own chat
+// (`agentsOwnChat`), a connector's (`connectorLabel`'s, its door's:
+// Settings removes it), or any chat with reach (its row's `sharing.reach`:
+// it holds a key or is bound as a door, whatever its label; the Apps page
+// and Settings manage those), nor an agents' pair chat (`threads.isPair`,
+// which the list never shows). An agent's home is one of those (connections.js
+// `homeChatOf`), so this is known from the list alone, before any door is
+// read. Asked once more in the shell's dialog, which names it, and asked
+// again as it is confirmed. ----
+const DOOR_CHAT = new RegExp(`-(?:${[TELEGRAM.door, SIMPLEX.door].join("|")})(?:-\\d+)?$`);
+function deleteItems(name) {
+  const f = byName(name);
+  if (!f || f.kind !== "chat" || !own(f) || f.sharing?.reach === true || DOOR_CHAT.test(labelOf(name)) || threads.isPair(f)) return [];
+  if (state.fragments.some((a) => a.kind === "agent" && own(a) && agentsOwnChat(a.name)?.name === name)) return [];
+  return [{ icon: "trash", text: "Delete…", onClick: () => askDelete(name) }];
+}
+const deleteDialog = $("delete-chat-dialog");
+// the chat whose delete is on its way: until it answers, the dialog stays
+let deleting = null;
+function askDelete(name) {
+  if (deleting) return;
+  deleteDialog.dataset.fragment = name;
+  named($("delete-chat-title"), name, (t) => `Delete ${t}?`);
+  $("delete-chat-error").hidden = true;
+  $("delete-chat-go").textContent = "Delete";
+  deleteDialog.showModal();
+  $("delete-chat-cancel").focus();
+}
+$("delete-chat-cancel").onclick = () => { if (!deleting) deleteDialog.close(); };
+deleteDialog.addEventListener("cancel", (e) => { if (deleting) e.preventDefault(); });
+$("delete-chat-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const name = deleteDialog.dataset.fragment;
+  if (!name || deleting) return;
+  if (!deleteItems(name).length) return deleteDialog.close();
+  deleting = name;
+  for (const id of ["delete-chat-go", "delete-chat-cancel"]) $(id).disabled = true;
+  $("delete-chat-go").textContent = "Deleting…";
+  $("delete-chat-error").hidden = true;
+  try {
+    await api("DELETE", `/api/f/${seg(name)}`);
+  } catch (err) {
+    $("delete-chat-error").textContent = err.message;
+    $("delete-chat-error").hidden = false;
+    $("delete-chat-go").textContent = "Delete";
+    return;
+  } finally {
+    deleting = null;
+    for (const id of ["delete-chat-go", "delete-chat-cancel"]) $(id).disabled = false;
+  }
+  deleteDialog.close();
+  // the open chat, deleted, gives its place to another the list shows: the
+  // newest shown, else the newest archived one; never an agents' pair chat,
+  // which has no row
+  const others = chats().filter((f) => f.name !== name && !threads.isPair(f));
+  const newest = (list) => [...list].sort(newestChat)[0];
+  const next = (newest(shown(others)) ?? newest(others))?.name ?? null;
+  if (state.current === name) {
+    if (next && !state.page) openChat(next);
+    else {
+      state.current = next;
+      store.set(CURRENT, next);
+    }
+  }
+  dropFrame(name);
+  await load().catch(() => {});
+};
 function archiveItem(name) {
   const archived = !!byName(name)?.archived;
   return { icon: "archive", text: archived ? "Unarchive" : "Archive", onClick: () => setArchived(name, !archived) };

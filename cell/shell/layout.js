@@ -4,7 +4,9 @@
 // it had. Below 760 px the sides become overlays instead of columns.
 import Split from "./vendor/split-grid.js";
 
-const KEY = "finite.layout.v2";
+// v3 (FIN-722): a squeezed window's Show sidebar saved v2's sidebar closed
+// with nothing shown, so it stayed gone; each person starts open once.
+const KEY = "finite.layout.v3";
 const MIN = { left: 200, chat: 380, right: 300 };
 const MAX_LEFT = 420;
 const COLLAPSE_LEFT = 120;
@@ -42,6 +44,12 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
   const s = { ...DEFAULTS, ...store.get(KEY, {}) };
   const narrow = matchMedia("(max-width: 760px)");
   let overlay = null; // "left" | "right" while narrow
+  // The side kept where the window has no room for both (`fitted`): the
+  // chat list, unless the person asked for the viewer there. Never saved.
+  let kept = "left";
+  // whether both sides fit beside the chat at their least (a grid that
+  // measures nothing has no window to fit)
+  const bothFit = () => !grid.clientWidth || grid.clientWidth - MIN.chat - 2 >= MIN.left + MIN.right;
   let motion = null;
   let sheetMotions = [];
   let resetRight = false;
@@ -68,18 +76,26 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
     gutter.addEventListener("touchstart", interrupt, { capture: true, passive: true });
   }
 
-  // Fit the saved widths into the window without persisting the squeeze.
+  // Fit the saved widths into the window without persisting the squeeze:
+  // the viewer narrows first, then the sidebar; with no room for both at
+  // their least, one stays (`kept`: the chat list, unless the person asked
+  // for the viewer there) and the other gives way, its saved open kept, so
+  // it comes back as the window widens (FIN-722).
   // A grid that measures nothing (hidden, as the page starts) has no window
   // to fit: its sides stay as saved, so the sidebar is there the moment it
   // is shown, and its first measure (the ResizeObserver) fits them.
   function fitted() {
-    let left = s.leftOpen ? s.left : 0;
-    let right = s.rightOpen ? s.right : 0;
-    if (!grid.clientWidth) return { left, right, hideLeft: false };
-    const room = grid.clientWidth - MIN.chat - (s.leftOpen ? 1 : 0) - (s.rightOpen ? 1 : 0);
-    if (left + right > room && right) right = Math.max(MIN.right, room - left);
-    if (left + right > room && left) left = Math.max(MIN.left, room - right);
-    return { left, right, hideLeft: s.leftOpen && left + right > room };
+    let showLeft = s.leftOpen, showRight = s.rightOpen;
+    let left = showLeft ? s.left : 0;
+    let right = showRight ? s.right : 0;
+    if (!grid.clientWidth) return { left, right, showLeft, showRight };
+    if (showLeft && showRight && !bothFit()) {
+      if (kept === "right") { showLeft = false; left = 0; } else { showRight = false; right = 0; }
+    }
+    const room = () => grid.clientWidth - MIN.chat - (showLeft ? 1 : 0) - (showRight ? 1 : 0);
+    if (left + right > room() && right) right = Math.max(MIN.right, room() - left);
+    if (left + right > room() && left) left = Math.max(MIN.left, room() - right);
+    return { left, right, showLeft, showRight };
   }
 
   function write(animate = false) {
@@ -92,8 +108,8 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
     stopMotion();
     const wide = !narrow.matches;
     const f = fitted();
-    const leftShown = wide && s.leftOpen && !f.hideLeft;
-    const rightShown = wide && s.rightOpen;
+    const leftShown = wide && f.showLeft;
+    const rightShown = wide && f.showRight;
     grid.style.gridTemplateColumns = [
       leftShown ? `${f.left}px` : "0px", leftShown ? "1px" : "0px", "1fr",
       rightShown ? "1px" : "0px", rightShown ? `${f.right}px` : "0px",
@@ -128,12 +144,18 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
     }
   }
 
+  // A side asked for is shown, and hidden only when the person hides the
+  // one they see: a side the window squeezed out (`fitted`) is shown by its
+  // toggle, the other giving way while there is no room for both, and is
+  // never saved closed by it (FIN-722).
   function toggle(side, open) {
     if (narrow.matches) {
       const want = open ?? overlay !== side;
       overlay = want ? side : overlay === side ? null : overlay;
     } else {
-      s[`${side}Open`] = open ?? !s[`${side}Open`];
+      const want = open ?? !grid.classList.contains(`${side}-open`);
+      s[`${side}Open`] = want;
+      kept = want && !bothFit() ? side : "left";
       store.set(KEY, s);
     }
     write(true);

@@ -15,5 +15,4 @@ ignore = [
     # both also in the shipped workspaces, tracked there: here only in the
     # benchmark, which runs on a developer's machine on its own data
     { id = "RUSTSEC-2026-0387", reason = "benchmark only; FIN-636" },
-    { id = "RUSTSEC-2026-0459", reason = "benchmark only; FIN-637" },
 ]
