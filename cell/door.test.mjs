@@ -981,6 +981,28 @@ test("a save kept before its SHA-256 was (the door's step 9) is handed back with
   assert.equal(d.st.sql.exec("SELECT sha FROM saves").one().sha, sha, "kept");
 });
 
+test("a save kept before its SHA-256 was, its door ended (unlinked) as it is hashed on its way back: refused as ended, no hash written (Codex's round on #1541)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "a save from before");
+  d.st.sql.exec("UPDATE saves SET sha = NULL");
+  d.c.signal = async () => void (d.c.running = false);
+  // its owner's unlink lands as the door reads the save to hash it
+  const get = d.blobs.get;
+  let first = true;
+  d.blobs.get = async (k) => {
+    const o = await get(k);
+    if (first && o) {
+      first = false;
+      await d.end();
+    }
+    return o;
+  };
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, (await r.json()).error], [410, "ended"]);
+});
+
 test("an ended door has no way back: refused (410), never a save of nothing that would run its computer's old copy, now or after a restart (Codex's round on #1541)", async () => {
   const { d } = await saved();
   await d.end();

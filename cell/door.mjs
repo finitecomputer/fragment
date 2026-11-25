@@ -432,11 +432,18 @@ export class SimplexDoor extends DurableObject {
         // back carries one
         let sha = r.save.sha;
         if (!sha) {
+          // its end (its owner's unlink) may land as it reads: then its
+          // link went with it, as any ended door's did, and no hash is
+          // written, nor bytes another door saved since handed back
+          const ends = this.#ends;
+          const ended = () => this.#ends !== ends || this.#ended || this.#over;
           const hashed = hashing();
           await obj.body.pipeThrough(hashed.stream).pipeTo(new WritableStream());
           sha = await hashed.digest;
-          this.ctx.storage.sql.exec("UPDATE saves SET sha = ? WHERE generation = ? AND seq = ?", sha, r.save.generation, r.save.seq);
+          if (ended()) return refusal(410, "ended", "this door ended as its save was read: its link went with it");
+          this.ctx.storage.sql.exec("UPDATE saves SET sha = ? WHERE generation = ? AND seq = ? AND sha IS NULL", sha, r.save.generation, r.save.seq);
           obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
+          if (ended()) return refusal(410, "ended", "this door ended as its save was read: its link went with it");
           if (!obj) continue;
         }
         const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: sha, "content-type": "application/octet-stream" };
