@@ -1,9 +1,11 @@
 // The SimpleX connector (templates/simplex/app.mjs), against an in-memory
 // SQLite (as a Durable Object's) and a fake of its door behind `job.fetch`,
 // as the platform hands a job its door. Valid (its owner's message
-// published to the bound agent as theirs; a reply asked until sent, by
-// one key), invalid (unbound, a member's call, another's reply, a kind not
-// text), replay (a message delivered again taken once), and the
+// published to the bound agent as theirs, its file kept as one of the
+// chat's blobs and attached; a reply asked until sent, by one key, its
+// files given to the door first), invalid (unbound, a member's call,
+// another's reply, nothing to carry, a file kept by none, a door that
+// sends no files), replay (a message delivered again taken once), and the
 // invitation kept for its owner alone, never in a run's output, with its
 // QR code; then whom it linked, watched for and checked, and why a step
 // failed, for its setup page.
@@ -39,11 +41,13 @@ function world(answers = {}) {
     call: async (op, input) => (w.calls.push(op), app[op](input, { agent: null })),
     publish: async (channel, body, kind) => void w.published.push({ channel, body, kind }),
     sleep: async (ms) => void w.slept.push(ms),
-    fetch: async (url, init) => {
+    fetch: async (url, init = {}) => {
       const ask = new URL(url).pathname.slice(1);
-      w.asked.push({ url, ask, headers: init.headers, body: JSON.parse(init.body) });
-      const [status, body] = answers[ask]?.shift() ?? [200, {}];
-      return { ok: status < 300, status, json: () => body };
+      w.asked.push({ url, ask, method: init.method ?? "GET", headers: init.headers, body: init.body ? JSON.parse(init.body) : null, ...(init.blob ? { blob: init.blob } : {}), ...(init.keep ? { keep: true } : {}) });
+      const next = answers[ask]?.shift() ?? [200, {}];
+      if (next instanceof Error) throw next;
+      const [status, body, blob] = next;
+      return { ok: status < 300, status, json: () => body, blob: blob ?? null };
     },
   });
   w.delivered = (payload) => ({ record: { body: { source: "simplex", payload } } });
@@ -55,7 +59,7 @@ const message = (id, text = `text of ${id}`, kind = "text", door = DOOR) => ({ i
 
 test("its owner's message is published to its bound agent as theirs, once however often the door delivers it", async () => {
   const w = world();
-  assert.deepEqual(await w.app.intake(w.delivered(message("m1", "  hello from simplex ")), w.job("channel")), { relayed: true });
+  assert.deepEqual(await w.app.intake(w.delivered(message("m1", "  hello from simplex ")), w.job("channel")), { relayed: true, file: false });
   assert.deepEqual(w.published, [{ channel: "chat", body: { text: "hello from simplex", to: [AGENT], relayed: BOUND.relayed }, kind: "message" }]);
   assert.deepEqual(await w.app.intake(w.delivered(message("m1")), w.job("channel")), { ignored: "taken already" });
   assert.equal(w.published.length, 1);
@@ -69,9 +73,9 @@ test("nothing is relayed but its inbox's own message, while bound, of text", asy
   assert.deepEqual(await w.app.intake(w.delivered(message("m0", "from before", "text", "juniper-sx--k3x9--fedcba987654")), w.job("channel")), { ignored: "not its door's" });
   assert.deepEqual(await w.app.intake(w.delivered({ text: "no id" }), w.job("channel")), { ignored: "not a message" });
   assert.deepEqual(await w.app.intake(w.delivered(message("m2")), w.job("channel", null)), { ignored: "not linked" });
-  assert.deepEqual(await w.app.intake(w.delivered(message("m3", "", "voice")), w.job("channel")), { ignored: "not text" });
+  assert.deepEqual(await w.app.intake(w.delivered(message("m3", "", "voice")), w.job("channel")), { ignored: "nothing to carry" });
   assert.deepEqual(w.published, []);
-  assert.deepEqual(w.asked.map((a) => [a.ask, a.body]), [["reply", { key: "unlinked:m2", text: "This chat isn't linked to your agent." }], ["reply", { key: "only-text:m3", text: "Only text reaches your agent from SimpleX for now." }]], "its owner's app told why, once a message");
+  assert.deepEqual(w.asked.map((a) => [a.ask, a.body]), [["reply", { key: "unlinked:m2", text: "This chat isn't linked to your agent." }], ["reply", { key: "nothing:m3", text: "That message didn't reach your agent: only text and files do." }]], "its owner's app told why, once a message");
   // a door that fetches nothing (shut) fails no intake over a word unsent
   const shut = world();
   const job = shut.job("channel", null);
@@ -260,4 +264,53 @@ test("an invitation found after an unlink was asked is kept by no one", async ()
   };
   assert.deepEqual(await w.app.link({}, job), { invited: false, why: "unlinked since" });
   assert.equal(w.app.state().invitation, null);
+});
+
+const SHA = "ab".repeat(32);
+const voice = (id, text = "") => ({ ...message(id, text, "voice"), file: { sha256: SHA, name: "memo.m4a", type: "audio/mp4", size: 300000 } });
+
+test("its owner's voice message: its file kept as one of this chat's blobs, then published as its attachment", async () => {
+  const w = world({ [`file/${SHA}`]: [[200, {}, { sha256: SHA, size: 300000, type: "audio/mp4" }]] });
+  assert.deepEqual(await w.app.intake(w.delivered(voice("v1")), w.job("channel")), { relayed: true, file: true });
+  assert.deepEqual(w.asked.map((a) => [a.ask, a.method, a.keep ?? null, a.body]), [[`file/${SHA}`, "GET", true, null], ["kept", "POST", null, { id: "v1" }]], "kept from its own door, then said kept, by its message");
+  assert.deepEqual(w.published, [{ channel: "chat", body: { text: "", to: [AGENT], relayed: BOUND.relayed, attachments: [{ sha256: SHA, size: 300000, type: "audio/mp4", name: "memo.m4a" }] }, kind: "message" }]);
+  // a photo with its caption: its words and its file
+  const p = world({ [`file/${SHA}`]: [[200, {}, { sha256: SHA, size: 9, type: "image/jpeg" }]] });
+  await p.app.intake(p.delivered({ ...voice("v2", "my cat"), kind: "image", file: { sha256: SHA, name: "cat.jpg", type: "image/jpeg", size: 9 } }), p.job("channel"));
+  assert.deepEqual([p.published[0].body.text, p.published[0].body.attachments[0].name], ["my cat", "cat.jpg"]);
+});
+
+test("a file kept by none (gone from its door, not what it names, a step that fails for good) goes as a note in its words", async () => {
+  for (const answer of [[404, { error: "no_file" }], [200, {}, { sha256: "cd".repeat(32), size: 1, type: null }], new Error("StepError: hashes to something else")]) {
+    const w = world({ [`file/${SHA}`]: [answer] });
+    assert.deepEqual(await w.app.intake(w.delivered(voice("v1", "listen")), w.job("channel")), { relayed: true, file: false });
+    assert.deepEqual(w.published[0].body, { text: "listen\n\n(I sent a file over SimpleX that did not arrive.)", to: [AGENT], relayed: BOUND.relayed }, String(answer));
+    assert.ok(!w.asked.some((a) => a.ask === "kept"), "a file it does not have is never said kept");
+  }
+  const bad = world();
+  await bad.app.intake(bad.delivered({ ...voice("v2"), file: { sha256: "nope" } }), bad.job("channel"));
+  assert.deepEqual([bad.asked.length, bad.published[0].body.text], [0, "(I sent a file over SimpleX that did not arrive.)"], "a file named by no SHA-256 is asked of no one");
+});
+
+test("its agent's reply's files are given to the door first, then sent with its text; one the door does not take stays in the chat, said so", async () => {
+  const one = { sha256: "01".repeat(32), name: "plan.pdf", type: "application/pdf", size: 8 };
+  const two = { sha256: "02".repeat(32), name: "photo.png", type: "image/png", size: 9 };
+  const w = world({ [`file/${two.sha256}`]: [[503, { error: "files_full" }]], reply: [[200, { done: true }]] });
+  assert.deepEqual(await w.app.mirror(w.reply(41, { attachments: [one, two] }), w.job("channel")), { sent: 1 });
+  assert.deepEqual(w.asked.slice(0, 2).map((a) => [a.ask, a.method, a.blob, a.headers["content-type"], a.headers["x-door-for"]]), [[`file/${one.sha256}`, "PUT", one.sha256, "application/pdf", "chat:41"], [`file/${two.sha256}`, "PUT", two.sha256, "image/png", "chat:41"]], "each given as one of the chat's blobs, for its reply");
+  assert.deepEqual(w.asked[2].body, { key: "chat:41", text: "It'll be sunny.\n\n(I sent a file in our chat.)", files: [one] });
+  // files alone, no words
+  const f = world({ reply: [[200, { done: true }]] });
+  await f.app.mirror(f.reply(42, { text: "", attachments: [one] }), f.job("channel"));
+  assert.deepEqual(f.asked[1].body, { key: "chat:42", text: "", files: [one] });
+  // a door that sends no files (its runner older), or lost one: its text alone, said so
+  for (const error of ["no_files", "no_file"]) {
+    const o = world({ reply: [[409, { error }], [200, { done: true }]] });
+    assert.deepEqual(await o.app.mirror(o.reply(43, { attachments: [one] }), o.job("channel")), { sent: 1 });
+    assert.deepEqual(o.asked.slice(1).map((a) => a.body), [{ key: "chat:43", text: "It'll be sunny.", files: [one] }, { key: "chat:43", text: "It'll be sunny.\n\n(I sent a file in our chat.)" }], error);
+  }
+  // at most a message's files
+  const many = world({ reply: [[200, { done: true }]] });
+  await many.app.mirror(many.reply(44, { attachments: Array.from({ length: 12 }, (_, n) => ({ ...one, sha256: String(n).padStart(2, "0").repeat(32) })) }), many.job("channel"));
+  assert.equal(many.asked.filter((a) => a.method === "PUT").length, 8);
 });

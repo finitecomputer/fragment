@@ -105,6 +105,19 @@ struct DoorState {
     /// Where each life's newest save is written as it is taken (the lab's
     /// folder: a failure's evidence).
     keep: Option<PathBuf>,
+    /// Each delivery whole, as it came.
+    deliveries: Vec<Value>,
+    /// The files it holds, by their SHA-256 (each checked as it came), and
+    /// how many each way: given by its runner, read by it.
+    files: BTreeMap<String, Bytes>,
+    given: u64,
+    read: u64,
+    /// Its XFTP relay (`GET /relay`): each host it carries on 443 and the
+    /// address it stands for; any other is 403. The bytes carried, up (from
+    /// the core) and down.
+    relay_to: BTreeMap<String, std::net::SocketAddr>,
+    relay_up: u64,
+    relay_down: u64,
 }
 
 #[derive(Clone)]
@@ -156,7 +169,46 @@ impl FakeDoor {
         })
     }
 
+    /// Its XFTP relay, as the cell's (entry.mjs `DoorEgress`, relay.mjs):
+    /// a WebSocket piped to the host it names, if it carries it.
+    fn relay(&self, mut req: Request<Incoming>) -> Response<fragment_bridge::net::Body> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let q = req.uri().query().unwrap_or("").to_string();
+        let param = |k: &str| q.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}="))).unwrap_or("").to_string();
+        let to = self.with(|s| s.relay_to.get(&param("host")).copied().filter(|_| param("port") == "443"));
+        let refused = |status: u16| Response::builder().status(status).body(Full::new(Bytes::new())).unwrap();
+        let Some(to) = to else { return refused(403) };
+        let Some((response, socket)) = fragment_bridge::net::accept_ws(&mut req) else { return refused(400) };
+        let door = self.clone();
+        tokio::spawn(async move {
+            let Some(ws) = socket.await else { return };
+            let Ok(mut tcp) = tokio::net::TcpStream::connect(to).await else { return };
+            let (mut rd, mut wr) = tcp.split();
+            let (mut sink, mut stream) = ws.split();
+            let mut buf = vec![0u8; 16 * 1024];
+            // bounded by either side's end
+            loop {
+                tokio::select! {
+                    n = tokio::io::AsyncReadExt::read(&mut rd, &mut buf) => match n {
+                        Ok(0) | Err(_) => { let _ = sink.send(Message::Close(None)).await; break; }
+                        Ok(n) => { door.with(|s| s.relay_down += n as u64); if sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() { break; } }
+                    },
+                    m = stream.next() => match m {
+                        Some(Ok(Message::Binary(b))) => { door.with(|s| s.relay_up += b.len() as u64); if tokio::io::AsyncWriteExt::write_all(&mut wr, &b).await.is_err() { break; } }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
+                    },
+                }
+            }
+        });
+        response
+    }
+
     async fn answer(self, req: Request<Incoming>) -> Response<fragment_bridge::net::Body> {
+        if req.uri().path() == "/relay" {
+            return self.relay(req);
+        }
         let method = req.method().to_string();
         let path = req.uri().path().to_string();
         let query = req.uri().query().unwrap_or("").to_string();
@@ -164,6 +216,7 @@ impl FakeDoor {
         let generation: u64 = header("x-door-generation").and_then(|g| g.parse().ok()).expect("each call carries its generation");
         let sized = header("content-length").is_some();
         let mark: Option<u64> = header("x-door-mark").and_then(|m| m.parse().ok());
+        let content_type = header("content-type");
         let body = req.into_body().collect().await.unwrap().to_bytes();
         self.with(|s| s.heads.push((method.clone(), path.clone(), sized, generation)));
         let answer = |status: u16, headers: &[(&str, String)], body: Bytes| {
@@ -204,11 +257,27 @@ impl FakeDoor {
                 answer(200, &[], Bytes::new())
             }),
             ("POST", "/unreadable") => answer(200, &[], Bytes::new()),
+            ("PUT", p) if p.starts_with("/file/") => self.with(|s| {
+                let sha = &p["/file/".len()..];
+                assert_eq!(sha256_hex(&body), sha, "a file given is the one it names");
+                assert_eq!(content_type.as_deref(), Some("audio/mp4"), "a voice message's file, typed as SimpleX's apps record one");
+                s.files.insert(sha.to_string(), body.clone());
+                s.given += 1;
+                answer(200, &[], Bytes::new())
+            }),
+            ("GET", p) if p.starts_with("/file/") => self.with(|s| match s.files.get(&p["/file/".len()..]) {
+                Some(b) => {
+                    s.read += 1;
+                    answer(200, &[("x-door-sha256", p["/file/".len()..].to_string())], b.clone())
+                }
+                None => answer(404, &[], Bytes::new()),
+            }),
             ("POST", "/deliver") => self.with(|s| {
                 if s.closed {
                     return answer(503, &[], Bytes::new());
                 }
                 let v: Value = serde_json::from_slice(&body).expect("a delivery is JSON");
+                s.deliveries.push(v.clone());
                 s.delivered.push((v["id"].as_str().expect("its id").into(), v["text"].as_str().expect("its text").into()));
                 s.marks += 1;
                 answer(200, &[("x-door-mark", s.marks.to_string())], Bytes::new())
@@ -240,7 +309,13 @@ fn start(lab: &Lab, door: &FakeDoor, generation: u64) -> Start {
     let _ = docker(&["rm", "-f", &ctr]);
     let (net, api, gen) = (format!("{}-net", lab.prefix), format!("DOOR_API=http://door.test:{}", door.port), format!("DOOR_GENERATION={generation}"));
     let smp = format!("DOOR_SMP={}", lab.server);
-    docker(&["run", "-d", "--platform", "linux/amd64", "--name", &ctr, "--network", &net, "--add-host", "door.test:host-gateway", "-e", &api, "-e", &gen, "-e", &smp, "-e", "DOOR_NAME=Juniper", "-p", "127.0.0.1::8080", DOOR_IMAGE]).expect("the door starts");
+    let xftp = format!("DOOR_XFTP={}", lab.xftp.as_deref().unwrap_or(""));
+    let mut args = vec!["run", "-d", "--platform", "linux/amd64", "--name", &ctr, "--network", &net, "--add-host", "door.test:host-gateway", "-e", &api, "-e", &gen, "-e", &smp, "-e", "DOOR_NAME=Juniper", "-p", "127.0.0.1::8080"];
+    if lab.xftp.is_some() {
+        args.extend(["-e", &xftp]);
+    }
+    args.push(DOOR_IMAGE);
+    docker(&args).expect("the door starts");
     let port = docker(&["port", &ctr, "8080/tcp"]).expect("its port");
     Start { ctr, api: format!("http://{}", port.lines().next().expect("a port")), keep: lab.dir.clone() }
 }
@@ -315,6 +390,11 @@ impl Start {
         }
     }
 
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One file of a save, read as the runner packs it: gzip, `SXD1`, then
@@ -697,4 +777,93 @@ async fn a_burst_against_the_real_core() {
     let reply = came(&person, "after").then(|| t2.elapsed());
     let (sends, slow) = waiting(&lab, &door);
     println!("BURST n={n} pace={pace}ms read={read}: sent in {sent_in:?}; receipts {receipts}/{n} in {receipts_in:?}; the reply after: {reply:?}; the door's newest save: {sends} sends waiting, slowest retry {slow:?} µs");
+}
+
+/// Goal (S1): a door carries files both ways, against the real core: a
+/// person's voice message (past what goes inline: over XFTP) is received
+/// by the door's core, given whole to its door (its SHA-256, typed as the
+/// apps record one) and delivered naming it; a reply's file, which its
+/// door holds, reaches the person whole after the reply's text, the reply
+/// done once the core took it. The core's XFTP traffic goes only through
+/// its door's relay (a container on Cloudflare reaches no XFTP server on
+/// 443 itself): the fake door's relay is the lab's XFTP server's one way
+/// in from the door, and it carried more than both files. Lower rung,
+/// labeled so: the lab's SMP and XFTP servers, a fake door's relay (a
+/// byte pipe), not the cell's. Needs the host's ffmpeg.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker and ffmpeg; run by hand"]
+async fn files_against_the_real_core() {
+    build_image();
+    let mut lab = Lab::up_with("door-files", true);
+    let door = FakeDoor::start().await;
+    door.with(|s| s.keep = Some(lab.dir.clone()));
+    let ip = docker(&["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", &lab.container("xftp")]).expect("the XFTP server's address");
+    let to: std::net::SocketAddr = format!("{}:443", ip.trim()).parse().expect("an address");
+    door.with(|s| s.relay_to.insert(XFTP_HOST.into(), to));
+
+    let g1 = start(&lab, &door, 1);
+    g1.until(Duration::from_secs(60), |s| s["ready"] == true && s["files"] == true).await;
+    let (code, _) = g1.call("POST", "/link", Some(door.mark()), None).await;
+    assert_eq!(code, 202);
+    let s = g1.until(Duration::from_secs(60), |s| s["phase"] == "inviting").await;
+    let mut person = lab.start("person", false).await;
+    let r = person.cmd(&format!("/connect {}", s["link"].as_str().expect("its invitation"))).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    g1.until(Duration::from_secs(90), |s| s["phase"] == "linked").await;
+    let agent = person.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the door, at the person's");
+
+    // the person's voice message, over XFTP (past 255 KB), then a word
+    let name = "memo.m4a";
+    let voice = lab.db_dir("person").join("files").join(name);
+    voice_file(&voice, 120, true);
+    let bytes = std::fs::read(&voice).expect("made");
+    assert!(bytes.len() > 255 * 1024, "past what goes inline: {}", bytes.len());
+    let body = json!([{ "msgContent": { "type": "voice", "text": "", "duration": 120 }, "filePath": format!("/data/files/{name}") }]);
+    let r = person.cmd(&format!("/_send @{agent} json {body}")).await;
+    assert_eq!(tag(&r), "newChatItems", "the person's voice message: {r}");
+    say(&mut person, agent, "after the memo").await;
+    let t0 = Instant::now();
+    while door.with(|s| s.deliveries.len()) < 2 {
+        assert!(t0.elapsed() < Duration::from_secs(180), "the voice message and the word after it are delivered: {:?}\n{}", door.with(|s| s.deliveries.clone()), logs(&g1.ctr));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let (first, second) = door.with(|s| (s.deliveries[0].clone(), s.deliveries[1].clone()));
+    println!("the voice message delivered in {} ms: {first}", t0.elapsed().as_millis());
+    assert_eq!(first["kind"], "voice");
+    assert_eq!(first["file"]["sha256"], sha256_hex(&bytes), "its file whole, named by its SHA-256");
+    assert_eq!((first["file"]["type"].as_str(), first["file"]["size"].as_u64(), first["file"]["name"].as_str()), (Some("audio/mp4"), Some(bytes.len() as u64), Some(name)));
+    assert_eq!(door.with(|s| s.files.get(&sha256_hex(&bytes)).cloned()), Some(Bytes::from(bytes.clone())), "its door holds it whole");
+    assert_eq!(second["text"], "after the memo", "deliveries stay in order: the word after the memo comes after it");
+    let up_in = door.with(|s| s.relay_down);
+    assert!(up_in > bytes.len() as u64, "the voice message came through the door's relay: {up_in} bytes down");
+
+    // a reply's file, which its door holds: after its text, whole
+    let file: Vec<u8> = (0..400_000u32).map(|n| (n % 251) as u8).collect();
+    let sha = sha256_hex(&file);
+    door.with(|s| s.files.insert(sha.clone(), Bytes::from(file.clone())));
+    let ask = json!({ "key": "chat:9", "text": "here is the file", "files": [{ "sha256": sha, "name": "notes.bin", "type": "application/octet-stream", "size": file.len() }] });
+    let t0 = Instant::now();
+    // bounded: 120 s
+    loop {
+        let (code, v) = g1.call("POST", "/reply", Some(door.mark()), Some(ask.clone())).await;
+        if code == 200 {
+            assert_eq!(v, json!({ "done": true }));
+            break;
+        }
+        assert!(code == 202 || code == 503, "the reply with a file: {code} {v}");
+        assert!(t0.elapsed() < Duration::from_secs(120), "the reply with a file is done: {}", logs(&g1.ctr));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(door.with(|s| s.read), 1, "its file read from its door once");
+    // its file first (the words' wait would take its message's event too)
+    let (content, path) = received_file(&mut person, &lab.db_dir("person").join("files"), "file", Duration::from_secs(120)).await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "here is the file")).await;
+    assert_eq!(sha256_of(&path), sha, "the reply's file reaches the person whole: {content}");
+    let (up, down) = door.with(|s| (s.relay_up, s.relay_down));
+    println!("the reply's file whole at the person's in {} ms; the relay carried {up} bytes up, {down} down", t0.elapsed().as_millis());
+    assert!(up > file.len() as u64, "the reply's file went through the door's relay: {up} bytes up");
+    let s = g1.until(Duration::from_secs(60), |s| s["sending"] == 0).await;
+    assert_eq!(s["replies"], 0, "nothing waits");
+    let left = docker(&["exec", &g1.ctr, "sh", "-c", "ls -A /data/door/out | wc -l"]).expect("its copies");
+    assert_eq!(left.trim(), "0", "its copy let go once uploaded");
 }
