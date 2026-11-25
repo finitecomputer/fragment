@@ -1381,10 +1381,17 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     let pattern = |n: usize, seed: u32| -> Vec<u8> { (0..n as u32).map(|i| (i.wrapping_mul(2_654_435_761) ^ seed).rotate_right(11) as u8).collect() };
     let zip_at = s.dir("move-big-stage").join("stage.zip");
     // a file too deep for its own place in storage (FIN-755): an old
-    // export's run logs, past a repo path's 300 bytes where it was
-    let deep = format!("workspace/finite-export-v2/run-1/stage/{}/trace.bin", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
+    // export's run logs, past a repo path's 300 bytes where it was; one
+    // whose name is too long even for the short place (250 bytes); one
+    // named as a note is (FIN-757); and the old agent's own note, kept in
+    // its folder
+    let deep_dir = format!("workspace/finite-export-v2/run-1/stage/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
+    let (deep, deep_long, deep_noted) = (format!("{deep_dir}/trace.bin"), format!("{deep_dir}/{}", "n".repeat(250)), format!("{deep_dir}/log.offloaded.md"));
     let extra = [
         (deep.as_str(), pattern(3 * MIB, 6)),
+        (deep_long.as_str(), pattern(4096, 7)),
+        (deep_noted.as_str(), b"# a run's log, named as a note is\n".to_vec()),
+        ("agent/hermes-home/old.offloaded.md", b"# Moved to storage\n\nthe old agent's own note\n".to_vec()),
         ("workspace/videos/trip.mp4", pattern(40 * MIB, 1)),
         ("workspace/photos/garden.jpg", pattern(3 * MIB, 2)),
         ("workspace/datasets/readings.csv", pattern(6 * MIB, 3)),
@@ -1455,7 +1462,7 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     for (path, want) in &files {
         let Some(rel) = path.strip_prefix("workspace/") else { continue };
         // past a repo path in the files too: left for storage, never asked for here
-        if *path == deep {
+        if path.starts_with(&deep_dir) {
             continue;
         }
         match file(&format!("files/{rel}"))? {
@@ -1484,15 +1491,27 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
     let all = store(s)?;
     let stored = &all["stored"];
     let note_of = |p: &str| notes.join(format!("{p}.offloaded.md"));
-    // where a note says its first file is in storage: its record's `at`, and the file's path from it
-    let kept_at = |p: &str| -> Option<String> {
-        let text = std::fs::read_to_string(note_of(p)).ok()?;
+    let record = |note: &std::path::Path| -> Option<Value> {
+        let text = std::fs::read_to_string(note).ok()?;
         let start = text.rfind("\n```json\n")? + "\n```json\n".len();
         let end = text[start..].find("\n```\n")? + start;
-        let r: Value = serde_json::from_str(&text[start..end]).ok()?;
+        serde_json::from_str(&text[start..end]).ok()
+    };
+    // a file's own note, where it was, found by its record (a name too
+    // long for `<name>.offloaded.md` has one named short)
+    let note_for = |p: &str| -> Option<std::path::PathBuf> {
+        let from = format!("/{p}");
+        let dir = notes.join(p.rsplit_once('/').map_or("", |(d, _)| d));
+        std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|n| n.to_string_lossy().ends_with(".offloaded.md") && record(n).is_some_and(|r| r["from"].as_str().is_some_and(|f| f.ends_with(&from))))
+    };
+    // where a note says its first file is in storage: its record's `at`, and the file's path from it
+    let kept_at = |p: &str| -> Option<String> {
+        let r = record(&note_for(p)?)?;
         Some(format!("{}/{}", r["at"].as_str()?, r["files"][0]["path"].as_str()?))
     };
-    let deep_at = kept_at(&deep).unwrap_or_default();
+    let deeps = [deep.as_str(), deep_long.as_str(), deep_noted.as_str()];
+    let deep_at: std::collections::BTreeMap<&str, String> = deeps.iter().map(|p| (*p, kept_at(p).unwrap_or_default())).collect();
+    let deep_notes: Vec<Option<std::path::PathBuf>> = deeps.iter().map(|p| note_for(p)).collect();
     // count and hash every file of the stage: each in one place, whole, but those never read
     let read = |fragment: &str, path: &str| api.signed(&owner, "GET", &format!("/api/f/{fragment}/file?path={}", crate::api::url_enc(path)), None);
     let (mut here, mut there, mut unread, mut wrong) = (0, 0, 0, vec![]);
@@ -1501,7 +1520,7 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
             Some(rel) => Some(read(&name, &format!("files/{rel}"))?),
             None => None,
         };
-        let in_storage = read(&storage, &if *path == deep { deep_at.clone() } else { format!("home/{path}") })?;
+        let in_storage = read(&storage, &deep_at.get(path.as_str()).cloned().unwrap_or_else(|| format!("home/{path}")))?;
         let files_status = in_files.as_ref().map_or(404, |r| r.status);
         match (in_files.is_some_and(|r| r.status == 200 && r.bytes == *want), in_storage.status == 200 && in_storage.bytes == *want) {
             (true, false) => here += 1,
@@ -1536,12 +1555,19 @@ pub fn move_big(s: &mut Suite, api: &Api) -> Result<()> {
         agent_back.status.success() && std::fs::read(notes.join("agent/hermes-home/SOUL.md")).ok() == Some(soul) && !note_of("agent").exists() && !too_big.status.success() && weights.is_file(),
         format!("{} | {}", String::from_utf8_lossy(&agent_back.stdout), String::from_utf8_lossy(&too_big.stdout)),
     );
-    let deep_want = files.iter().find(|(p, _)| *p == deep).map(|(_, b)| b.clone()).unwrap_or_default();
-    let deep_back = back(s, &note_of(&deep));
+    // each back: by its note, but the long name's by where it was
+    let mut deep_backs = Vec::new();
+    for (p, note) in deeps.iter().zip(&deep_notes) {
+        let want = files.iter().find(|(f, _)| f.as_str() == *p).map(|(_, b)| b.clone());
+        let out = back(s, &if *p == deep_long { notes.join(p) } else { note.clone().unwrap_or_default() });
+        let ok = out.status.success() && want.is_some() && std::fs::read(notes.join(p)).ok() == want && note.as_ref().is_some_and(|n| !n.exists());
+        deep_backs.push(json!({ "ok": ok, "note": note.as_ref().map(|n| n.display().to_string()), "out": String::from_utf8_lossy(&out.stdout), "err": String::from_utf8_lossy(&out.stderr) }));
+    }
+    let short = |p: &str, under: &str, most: usize| deep_at[p].strip_prefix(under).is_some_and(|rest| rest.len() <= most + 1 + p.rsplit('/').next().unwrap_or_default().len());
     s.ok(
-        "a file too deep for its own place is kept whole under a short one, its note where it was, and comes back there, checked against the old one",
-        deep_at.starts_with("home/.long/") && deep_at.len() < 60 && deep_back.status.success() && std::fs::read(notes.join(&deep)).ok() == Some(deep_want) && !note_of(&deep).exists(),
-        format!("{deep_at} | {}", String::from_utf8_lossy(&deep_back.stdout)),
+        "a file too deep for its own place is kept whole under a short one (a shorter one for a long name, its note named short), its note where it was, and comes back there by its own name (one named as a note is too), checked against the old one",
+        short(&deep, "home/.long/", 24) && short(&deep_noted, "home/.long/", 24) && short(&deep_long, ".long/", 16) && deep_backs.iter().all(|b| b["ok"] == true),
+        json!({ "at": deep_at, "backs": deep_backs }),
     );
     let again = store(s)?;
     s.ok(

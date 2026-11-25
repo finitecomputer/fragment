@@ -59,8 +59,13 @@ use crate::codestorage::{Author, Change, CsError, Held, Wants, MAIN};
 use crate::home::files::{commit, manifest, BATCH_BYTES, BATCH_FILES};
 use crate::home::survey::size;
 
-/// The note left in a moved file's or folder's place, after its name.
+/// The note left in a moved file's or folder's place, after its name
+/// (`note_name`).
 pub const NOTE_SUFFIX: &str = ".offloaded.md";
+/// A file's name, at most, in bytes: a file system's (Linux's, macOS's).
+pub(crate) const NAME_MAX: usize = 255;
+/// The hex digits of its sha256 a name too long for its note's names it by.
+const NOTE_HEX: usize = 16;
 /// The files one move takes, at most: a folder of more is moved a
 /// subfolder at a time (and one of dependencies or a cache, which its tools
 /// make again, is deleted instead).
@@ -149,6 +154,20 @@ impl Record {
     pub(crate) fn bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
+}
+
+/// The name of `name`'s note, beside it: `<name>.offloaded.md`; or, that
+/// past a file name's most (`NAME_MAX`), as much of `name` as leaves room,
+/// then `~` and the first `NOTE_HEX` hex digits of its sha256. A note
+/// brings back only what its record names under the name it is the note
+/// of (`back`).
+pub(crate) fn note_name(name: &str) -> String {
+    if name.len() + NOTE_SUFFIX.len() <= NAME_MAX {
+        return format!("{name}{NOTE_SUFFIX}");
+    }
+    let room = NAME_MAX - NOTE_SUFFIX.len() - 1 - NOTE_HEX;
+    let cut = (0..=room).rev().find(|&i| name.is_char_boundary(i)).expect("a name's start is a boundary");
+    format!("{}~{}{NOTE_SUFFIX}", &name[..cut], &blob::sha256_hex(name.as_bytes())[..NOTE_HEX])
 }
 
 /// A path quoted for a shell.
@@ -334,7 +353,7 @@ fn plan(path: &Path, keep: Option<&Path>) -> Result<Planned> {
     if let Some(keep) = keep.filter(|k| abs.starts_with(k) || k.starts_with(&abs)) {
         bail!(coded(Code::InvalidUsage, format!("{} is in your runtime's own home ({}), or holds it: what it keeps there (memory, skills, sessions, settings) is never moved", abs.display(), keep.display())));
     }
-    let note = dir.join(format!("{name}{NOTE_SUFFIX}"));
+    let note = dir.join(note_name(&name));
     let m = match fs::symlink_metadata(&abs) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && note.exists() => bail!(coded(Code::InvalidUsage, format!("{} was moved already: its note is {}", abs.display(), note.display()))),
         m => m.with_context(|| format!("reading {}", abs.display()))?,
@@ -673,7 +692,7 @@ fn note_of(path: &Path) -> Result<PathBuf> {
     let (dir, name) = place(path)?;
     Ok(match name.ends_with(NOTE_SUFFIX) {
         true => dir.join(name),
-        false => dir.join(format!("{name}{NOTE_SUFFIX}")),
+        false => dir.join(note_name(&name)),
     })
 }
 
@@ -688,7 +707,14 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
         Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", note.display()))),
     };
     let r = record_of(&text).with_context(|| format!("reading {}", note.display()))?;
-    let name = name_of(&note)?.trim_end_matches(NOTE_SUFFIX).to_string();
+    // the name it brings back: its record's (each path's first part), whose
+    // note this is by name (`note_name`; FIN-757: a name may end as a
+    // note's does)
+    let first = &r.files[0].path;
+    let name = Path::new(first).components().next().and_then(|c| c.as_os_str().to_str()).expect("a record's paths are plain").to_string();
+    if note_name(&name) != name_of(&note)? {
+        bail!("{} names {first}, which is not under the name it is the note of", note.display());
+    }
     // each path under the name the note is for; each file's folders, the
     // note's own, or ones it names
     let named: std::collections::BTreeSet<&str> = r.dirs.iter().map(|d| d.path.as_str()).collect();
@@ -1099,7 +1125,10 @@ mod tests {
         let note = root.join("a.offloaded.md");
         let folder = |path: &str| Folder { path: path.into(), mode: 0o755 };
         for (dirs, files, says) in [
-            (vec![folder("a")], vec![file("b")], "not under a"),
+            (vec![folder("a")], vec![file("b")], "not under the name it is the note of"),
+            (vec![folder("b")], vec![file("a")], "not under a"),
+            // its own note's name (`a`'s is a.offloaded.md.offloaded.md)
+            (vec![], vec![file("a.offloaded.md")], "not under the name it is the note of"),
             (vec![folder("a")], vec![file("a/x/y")], "does not name"),
             // a folder whose own folder it leaves out (a link, there)
             (vec![folder("a"), folder("a/link/new")], vec![file("a/f")], "does not name"),
@@ -1110,6 +1139,27 @@ mod tests {
             assert!(format!("{e:#}").contains(says), "{e:#}");
         }
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "nothing made");
+    }
+
+    /// Goal (FIN-755): a note's name is one a file system keeps, whatever
+    /// the name it is the note of: as before while that fits, else named
+    /// short, by as much of the name as fits (never half a letter) and its
+    /// hash, the same each time and another for another name.
+    #[test]
+    fn a_notes_name_fits_a_file_system() {
+        assert_eq!(note_name("talk.mp4"), "talk.mp4.offloaded.md");
+        assert_eq!(note_name("log.offloaded.md"), "log.offloaded.md.offloaded.md");
+        let fits = "n".repeat(NAME_MAX - NOTE_SUFFIX.len());
+        assert_eq!(note_name(&fits), format!("{fits}{NOTE_SUFFIX}"), "the longest kept as before");
+        let wide = format!("{}x", "é".repeat(127));
+        for long in [format!("{fits}n"), "n".repeat(NAME_MAX), wide.clone()] {
+            let short = note_name(&long);
+            let (start, hex) = short.strip_suffix(NOTE_SUFFIX).and_then(|s| s.rsplit_once('~')).expect("named short");
+            assert!(short.len() <= NAME_MAX && long.starts_with(start) && start.len() + 3 > NAME_MAX - NOTE_SUFFIX.len() - 1 - NOTE_HEX, "{short}");
+            assert_eq!(hex, &blob::sha256_hex(long.as_bytes())[..NOTE_HEX]);
+            assert_eq!(note_name(&long), short, "the same each time");
+        }
+        assert_ne!(note_name(&format!("{fits}a")), note_name(&format!("{fits}b")), "another for another name");
     }
 
     /// Goal: a folder replaced by a link before its back is refused, and
