@@ -352,7 +352,7 @@ const EXPORTS_IN: [usize; 3] = [1, 4, 9];
 const SAID_IN: [usize; 4] = [0, 1, 4, 7];
 const CRASHED_IN: usize = 4;
 /// What the run lends its person: its turns' calls, with room.
-const IMAGE_PAID_CALLS: u64 = 14;
+const IMAGE_PAID_CALLS: u64 = 9;
 /// A turn of the cheap tier's, on a computer that just woke.
 const TURN: Duration = Duration::from_secs(6 * 60);
 const IMAGE_ON_DISK: &str = "the deployment's own image on a disk: each of ten wakes mounts it, each sleep's final flush posts that life's head, clean, and the start after a crash mounts it";
@@ -399,7 +399,7 @@ fn image_on_disk(s: &mut Suite, api: &Api) -> Result<()> {
         }
         let mut l = json!({ "life": life + 1, "woke": woke, "from": up["restored"]["from"], "generation": generation });
         if EXPORTS_IN.contains(&life) {
-            let e = held_state(s, api, &keys, &id, &said, &evidence.join(format!("state-{}.db", life + 1)))?;
+            let e = held_state(s, api, &keys, &id, &agent, &said, &evidence.join(format!("state-{}.db", life + 1)))?;
             println!("      (life {}'s export: {e})", life + 1);
             l["export"] = e["ok"].clone();
             exports.push(e);
@@ -433,11 +433,13 @@ fn image_on_disk(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// Its owner's export, and Hermes' `state.db` as it holds it: the copy its
-/// hold made (`/data/held-copies`, as its manifest names it, kept at
-/// `keep`), the live file left out of the save, and each message of `said`
-/// in that copy.
-fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, said: &[String], keep: &std::path::Path) -> Result<Value> {
+/// Its owner's export, and its agent's Hermes `state.db` as it holds it
+/// (each agent's sessions are its own profile's,
+/// `/data/hermes/profiles/<agent>/state.db`: images/hermes/boot agents.rs;
+/// Hermes' own home's stays empty): the copy its hold made
+/// (`/data/held-copies`, as its manifest names it, kept at `keep`), the
+/// live file left out of the save, and each message of `said` in that copy.
+fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, agent: &str, said: &[String], keep: &std::path::Path) -> Result<Value> {
     use std::io::Read;
     let (summary, files) = exported(s, api, keys, id)?;
     let record = files.get(&fragment_core::export::save_path(id, "/data")).cloned().unwrap_or_default();
@@ -448,7 +450,7 @@ fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, said: &[String
         let path = entry.path()?.to_string_lossy().to_string();
         let path = path.trim_start_matches("./").trim_start_matches('/');
         let path = path.strip_prefix("data/").unwrap_or(path).to_string();
-        if path.starts_with("held-copies/") || path.starts_with("hermes/state.db") {
+        if path.starts_with("held-copies/") || (path.starts_with("hermes/") && path.contains("state.db")) {
             let mut bytes = vec![];
             entry.read_to_end(&mut bytes)?;
             held.insert(path.clone(), bytes);
@@ -458,7 +460,12 @@ fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, said: &[String
         }
     }
     let manifest: Value = held.get("held-copies/manifest.json").and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(Value::Null);
-    let copy = manifest["copies"].as_array().and_then(|c| c.iter().find(|c| c["path"] == "/data/hermes/state.db")).and_then(|c| c["file"].as_str()).map(|f| format!("held-copies/{f}"));
+    let copies = manifest["copies"].as_array().cloned().unwrap_or_default();
+    let profile = |p: &str| p.starts_with("/data/hermes/profiles/") && p.ends_with("/state.db");
+    let theirs = copies.iter().find(|c| c["path"].as_str().is_some_and(|p| profile(p) && p.contains(agent)));
+    let chosen = theirs.or_else(|| copies.iter().find(|c| c["path"].as_str().is_some_and(profile)));
+    let path = chosen.and_then(|c| c["path"].as_str()).unwrap_or("").to_string();
+    let copy = chosen.and_then(|c| c["file"].as_str()).map(|f| format!("held-copies/{f}"));
     let (mut messages, mut found) = (-1i64, vec![]);
     if let Some(bytes) = copy.as_ref().and_then(|c| held.get(c)) {
         std::fs::write(keep, bytes)?;
@@ -469,9 +476,10 @@ fn held_state(s: &Suite, api: &Api, keys: &crate::Keys, id: &str, said: &[String
             found.push(n > 0);
         }
     }
-    let live_left_out = !held.contains_key("hermes/state.db");
-    let ok = summary["ok"] == true && messages >= 0 && found.len() == said.len() && found.iter().all(|f| *f) && live_left_out;
-    Ok(json!({ "ok": ok, "built": summary["ok"], "save": summary["save"]["id"], "copy": copy, "copies": manifest["copies"].as_array().map(Vec::len), "messages": messages, "said": said, "found": found, "liveLeftOut": live_left_out, "first": names }))
+    let live_left_out = !path.is_empty() && !held.contains_key(path.trim_start_matches("/data/"));
+    let ok = summary["ok"] == true && messages > 0 && found.len() == said.len() && found.iter().all(|f| *f) && live_left_out;
+    let paths: Vec<&str> = copies.iter().filter_map(|c| c["path"].as_str()).collect();
+    Ok(json!({ "ok": ok, "built": summary["ok"], "save": summary["save"]["id"], "path": path, "copy": copy, "copies": paths, "messages": messages, "said": said, "found": found, "liveLeftOut": live_left_out, "first": names }))
 }
 
 /// A save's record, its zstd undone (the box's `zstd`).
