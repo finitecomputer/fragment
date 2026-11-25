@@ -145,12 +145,12 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let idx = SqlStorageValue::Integer(i64::try_from(i).expect("triggers are few"));
         let from = t.from.map_or(SqlStorageValue::Null, |k| k.as_str().into());
         sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx.clone(), kind.into(), target.into(), t.run.as_str().into(), from])?;
-        // the kinds of record it starts runs for, a table of its own (as a
-        // channel's newest: crates/core/migrations/fragment)
-        if !t.kinds.is_empty() {
-            assert!(matches!(t.on, TriggerOn::Channel(_)) && t.kinds.len() <= limits::TRIGGER_KINDS_MAX, "a checked manifest names a channel trigger's kinds, a bounded number");
-            let kinds = serde_json::to_string(&t.kinds).expect("names serialize");
-            sql.exec("INSERT INTO code_trigger_kinds (idx, kinds) VALUES (?, ?)", vec![idx, kinds.into()])?;
+        // the kinds of record it starts runs for, a row each in a table of
+        // its own, in their manifest's order (crates/core/migrations/fragment)
+        assert!(t.kinds.is_empty() || matches!(t.on, TriggerOn::Channel(_)) && t.kinds.len() <= limits::TRIGGER_KINDS_MAX, "a checked manifest names a channel trigger's kinds, a bounded number");
+        for (n, k) in t.kinds.iter().enumerate() {
+            let n = SqlStorageValue::Integer(i64::try_from(n).expect("kinds are few"));
+            sql.exec("INSERT INTO code_trigger_kinds (idx, n, kind) VALUES (?, ?, ?)", vec![idx.clone(), n, k.as_str().into()])?;
         }
     }
     // what is kept of a kind no channel keeps now goes (one kept again
@@ -170,7 +170,7 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     assert_eq!(count("code_channel_listed")?, code.channels.values().filter(|d| d.listed.is_some()).count(), "every channel's listed is stored");
     assert_eq!(count("code_channel_newest")?, code.channels.values().filter(|d| !d.newest.is_empty()).count(), "every channel's newest is stored");
     assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
-    assert_eq!(count("code_trigger_kinds")?, code.triggers.iter().filter(|t| !t.kinds.is_empty()).count(), "every trigger's kinds are stored");
+    assert_eq!(count("code_trigger_kinds")?, code.triggers.iter().map(|t| t.kinds.len()).sum::<usize>(), "every trigger's kinds are stored");
     Ok(())
 }
 
@@ -280,8 +280,12 @@ struct TriggerRow {
     target: String,
     run: String,
     from_kind: Option<String>,
-    /// From `code_trigger_kinds`, joined (`triggers`): a JSON array of kinds.
-    kinds: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TriggerKindRow {
+    idx: i64,
+    kind: String,
 }
 
 /// A pin's move, every read done (`refresh_pin`): what its publish writes.
@@ -1352,8 +1356,16 @@ impl FragmentCell {
 
     /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
-        let rows: Vec<TriggerRow> =
-            self.typed("SELECT t.idx, t.kind, t.target, t.run, t.from_kind, k.kinds FROM code_triggers t LEFT JOIN code_trigger_kinds k ON k.idx = t.idx ORDER BY t.idx", vec![])?;
+        let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
+        // each trigger's kinds of record, in their manifest's order: bounded,
+        // `TRIGGER_KINDS_MAX` a trigger of `TRIGGERS_MAX`
+        let mut kinds_of: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        for k in self.typed::<TriggerKindRow>("SELECT idx, kind FROM code_trigger_kinds ORDER BY idx, n", vec![])? {
+            if !rows.iter().any(|r| r.idx == k.idx) {
+                return Err(stored(&format!("trigger {}", k.idx), "kinds of a trigger it does not hold"));
+            }
+            kinds_of.entry(k.idx).or_default().push(k.kind);
+        }
         let mut out = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
             if row.idx != i64::try_from(i).expect("triggers are few") {
@@ -1371,17 +1383,11 @@ impl FragmentCell {
                 None => None,
                 Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),
             };
-            let kinds = match row.kinds.as_deref() {
-                None => vec![],
-                Some(text) => {
-                    let kinds = crate::json_text::<Vec<String>>(text).map_err(|e| stored(&format!("trigger {i}"), format!("kinds: {e}")))?;
-                    // written from a checked manifest: anything else is corruption
-                    if kinds.is_empty() || kinds.len() > limits::TRIGGER_KINDS_MAX || !kinds.iter().all(|k| valid_listed_kind(k)) || !matches!(on, TriggerOn::Channel(_)) {
-                        return Err(stored(&format!("trigger {i}"), "its kinds"));
-                    }
-                    kinds
-                }
-            };
+            let kinds = kinds_of.remove(&row.idx).unwrap_or_default();
+            // written from a checked manifest: anything else is corruption
+            if !kinds.is_empty() && (kinds.len() > limits::TRIGGER_KINDS_MAX || !kinds.iter().all(|k| valid_listed_kind(k)) || !matches!(on, TriggerOn::Channel(_))) {
+                return Err(stored(&format!("trigger {i}"), "its kinds"));
+            }
             out.push(TriggerDecl { on, run: row.run, from, kinds });
         }
         Ok(out)
@@ -1407,8 +1413,8 @@ impl FragmentCell {
             "SELECT run FROM code_triggers t WHERE t.kind = ? AND t.target = ?
                AND (t.from_kind IS NULL OR t.from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
                AND (NOT EXISTS (SELECT 1 FROM code_trigger_kinds k WHERE k.idx = t.idx)
-                 OR EXISTS (SELECT 1 FROM code_trigger_kinds k, json_each(k.kinds) e WHERE k.idx = t.idx
-                   AND e.value = (SELECT json_extract(body, '$.kind') FROM records WHERE channel = ? AND seq = ?)))
+                 OR EXISTS (SELECT 1 FROM code_trigger_kinds k WHERE k.idx = t.idx
+                   AND k.kind = (SELECT json_extract(body, '$.kind') FROM records WHERE channel = ? AND seq = ?)))
              GROUP BY run ORDER BY MIN(t.idx)",
             vec![kind.into(), target.into(), record.channel.as_str().into(), seq.clone(), record.channel.as_str().into(), seq],
         )?;
