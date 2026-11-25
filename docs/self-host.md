@@ -43,10 +43,11 @@ in the cell: a self-host change to master does not touch `cell/`,
 
 ## 1. The runtime: celld
 
-celld (github.com/futurepaul/celld, its `selfhost` line: upstream's
+celld (github.com/finitecomputer/celld, its `selfhost` line: upstream's
 v0.6.3, still its latest, and the fork's parity fixes, among them V8
 15.2.124.45, far alarms, a forwarded body's length, facet aborts,
-Cloudflare's binding surface and object bindings across scripts) runs the
+Cloudflare's binding surface, object bindings across scripts and a Cache
+API per node) runs the
 cell from the config a local wrangler node runs (`wrangler.local.jsonc`,
 its secrets bound by name), less `build` (`crates/devstack/src/celld.rs`,
 `DROPPED`), written beside the cell's own as `wrangler.celld.jsonc`; and
@@ -55,9 +56,10 @@ beside it the operators' admin Worker, as on Cloudflare: its local config
 `wrangler.admin.celld.jsonc`, co-hosted with `celld dev --with`. The
 cell's `ADMIN` binding reaches it, and its bindings of the cell's classes
 (`script_name`) reach the cell's objects; the admin hosts none and runs
-none of their code. A celld older than the fork's
-`durable-object-script-name-v1` (futurepaul/celld#35) refuses to start
-the pair. Its node's settings are celld's
+none of their code. The stack needs the fork's selfhost line with
+finitecomputer/celld#35 (`durable-object-script-name-v1`; a celld without
+it refuses to start the pair) and finitecomputer/celld#38 (the Cache API).
+Its node's settings are celld's
 own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and its container
 engine (`CELLD_CONTAINER_ENGINE`: `none`, or the box's krun engine, seam 2). One `devstack::Node` runs either runtime behind the
 node's front door (front.rs): celld listens on a port of its own, which
@@ -97,7 +99,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | `build` | refused | n/a | dropped by the render (`DROPPED`): worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length carried, as workerd's (found 47, fixed in the fork) | works | |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
-| Cache API (`caches.default`) | always misses: `put()` keeps nothing | degraded | the admin Worker's glance (cell/src/glance.rs) keeps no read of the logs, so each load reads them again |
+| Cache API (`caches.default`) | yes, per node, in memory, per script (finitecomputer/celld#38): kept as Cloudflare's rules say, at most 64 MiB (`CELLD_CACHE_API_MAX_BYTES`) and 65,536 entries; a restart empties it; a `Range` or conditional request misses | works | the admin Worker's glance (cell/src/glance.rs) keeps its read of the logs for two minutes |
 | HTMLRewriter, cron triggers | | n/a | the cell uses none |
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
