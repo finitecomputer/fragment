@@ -112,14 +112,17 @@ in its `imported-from-finite.json`, so a teammate who moves later brings
 in only what changed since ("Once you are in the real one"):
 
 ```sh
-W="$HOME/home-import/work/brains/<id>" N="$HOME/home-import/home/workspace/finitebrain/<id>.json" && \
+W="$HOME/home-import/work/brains/<id>" H="$HOME/home-import/home/workspace/finitebrain/<id>" && \
 { fragment home extract <source> workspace/finitebrain/<id>.json --to "$HOME/home-import/home" --layout <L> || true; } && \
-python3 -I "${HERMES_SKILL_DIR}/profiles/finite-computer.brains.py" start <id> "$N" "$W"
+python3 -I "<profiles>/finite-computer.brains.py" start <id> "$H.json" "$W" "$H"
 ```
 
-If it says `NO VERSIONS` (an export, a stage from before versions, or no
-name file), there is nothing to record: go on. If it says `STOP`, push nothing, and
-say in the report what it said.
+It shares only the folders the brain holds now: a folder made later in
+the old brain, or one left out, never comes in by a catch-up. Running it
+again before the push is safe. If it says `NO VERSIONS` (an export, a
+stage from before versions, or no name file), there is nothing to
+record: go on. If it says `STOP`, push nothing, and say in the report
+what it said.
 
 Then push it, only if its folder holds nothing but the brain: the old
 brain's own top level, `fragment.json` and its record. Anything else
@@ -158,12 +161,14 @@ C="$HOME/old-finite-brains/<id>" H="$HOME/home-import/home/workspace/finitebrain
 fragment home extract <source> workspace/finitebrain/<id> --to "$HOME/home-import/home" --layout <L> && \
 mkdir -p "$C" && \
 tar -C "$H" --exclude=AGENTS.md --exclude=_index.md --exclude=.keep --exclude=_wiki --exclude='*/.*' -cf - . | tar -C "$C" -xf - && \
-{ fragment home extract <source> workspace/finitebrain/<id>.json --to "$HOME/home-import/home" --layout <L> && cp "$H.json" "$C.json" || echo "no name file: this copy has no versions"; } && \
+{ fragment home extract <source> workspace/finitebrain/<id>.json --to "$HOME/home-import/home" --layout <L> && cp "$H.json" "$C.json" && python3 -I "<profiles>/finite-computer.brains.py" copied <id> "$C.json" "$H" || echo "no versions: this copy is compared by hand"; } && \
 ls "$C" && find "$C" -type f | wc -l
 ```
 
 The copy's `<id>.json` beside it (`$HOME/old-finite-brains/<id>.json`)
-says which version of each page it holds: keep it as long as the copy.
+says which version of each page it holds, and which were staged as that
+version's text (`copied`, before any asset note is rewritten): keep it
+as long as the copy.
 
 In a move, its files are kept whole in your storage too (`SKILL.md`,
 step 3). A copy that won't fit your disk's room comfortably, keep none
@@ -191,41 +196,50 @@ it. Sync the real one into a folder of its own, and catch it up:
 ```sh
 W="$HOME/old-finite-brains/<id>.real" C="$HOME/old-finite-brains/<id>" && \
 mkdir -p "$W" && fragment sync <its name> --dir "$W" && \
-python3 -I "${HERMES_SKILL_DIR}/profiles/finite-computer.brains.py" catch-up <id> "$C.json" "$W" "$C"
+python3 -I "<profiles>/finite-computer.brains.py" catch-up <id> "$C.json" "$W" "$C"
 ```
 
 It changes only what is safe to change, page by page, by the old brain's
-own versions:
+own versions, and only in the folders the real one shares. It brings in:
 - **added:** pages the real one doesn't have yet;
 - **updated:** pages the old brain changed after the real one's copy was
   taken, which nobody here has changed since;
-- **assets:** the files those pages name, when the real one lacks them;
-- **both:** pages changed here and in the old brain since. It leaves
-  them as they are: a person decides;
-- **gone:** pages the old brain deleted since. It deletes nothing.
-- **unread folders:** folders you couldn't read on the old Finite: your
-  copy has none of them, so someone who could brings those;
-- **left out here:** folders whoever made the real one kept out of it, for
-  only some to read. It never brings them in: they belong in a brain of
-  their own.
+- **assets:** the files those pages' frontmatter names, when the real one
+  lacks them.
 
-Then push it, and read the list it named (`$W.catch-up.json`):
+It leaves the rest as it is, for a person, and lists it:
+- **both:** pages changed here and in the old brain since, another page
+  the old brain moved onto a page's path, or a page whose asset differs
+  here;
+- **gone:** pages the old brain deleted since. It deletes nothing;
+- **unsynced:** pages your old agent edited and never synced: the old
+  brain never had that text;
+- **missing:** pages your copy should hold and doesn't;
+- **unshared:** folders the real one doesn't share: left out when it
+  was made, for only some to read, or made since in the old brain. Never
+  bring one in yourself;
+- **refused:** a page's path that climbs out of the brain or through a
+  link.
+
+It never changes **unread folders** (folders you couldn't read on the old
+Finite, so your copy has none of them). Push it, then run both blocks
+once more: a teammate catching it up at the same moment is taken in, and
+otherwise nothing changes. Read the list it named (`$W.catch-up.json`):
 
 ```sh
 W="$HOME/old-finite-brains/<id>.real" && fragment sync <its name> --dir "$W" && fragment call <its name> index_status && cat "$W.catch-up.json"
 ```
 
-- **Nothing in `both` or `gone`:** the real one holds what your copy
-  does. Delete the copy, its line in the README, and the memory once no
-  copy is left:
+- **`settled` is true:** the real one holds what your copy does. Delete
+  the copy, its line in the README, and the memory once no copy is left:
 
   ```sh
   rm -rf -- "$HOME/old-finite-brains/<id>" "$HOME/old-finite-brains/<id>.json" "$HOME/old-finite-brains/<id>.real" "$HOME/old-finite-brains/<id>.real.catch-up.json"
   ```
-- **Some in `both` or `gone`:** keep the copy. In the report (step 8),
-  list them for your owner and ask them, or the brain's owner, which to
-  keep: never pick one yourself. Say in the README line what is left,
-  and why.
+- **`settled` is false:** keep the copy. In the report (step 8), list
+  what it left for your owner and ask them, or the brain's owner, what
+  to do with each: never pick yourself. Say in the README line what is
+  left, and why.
 - **It says `NO VERSIONS` or `NO RECORD`** (a copy from before versions,
   or a real one made without a record): compare by hand. Compare its
   pages and assets with the copy's, and read a few of each. If it holds
@@ -233,8 +247,8 @@ W="$HOME/old-finite-brains/<id>.real" && fragment sync <its name> --dir "$W" && 
   only those in the copy, note which in the report, and suggest someone
   on the team adds them. If you can't tell, keep the copy and ask your
   owner in the report.
-- **It says `STOP`:** the real one's record is another brain's. Change
-  nothing, and say so in the report.
+- **It says `STOP`:** the real one's record is another brain's, or not
+  one the catch-up wrote. Change nothing, and say so in the report.
 
 Every teammate who moves later does the same, so the real one comes
 together one move at a time. The last to move leaves it holding all of
@@ -255,11 +269,11 @@ wait for each answer:
    brain into a wider one.
 
 Then make it as above, from the copy: the same steps, with `H` the
-copy's folder and no `fragment home extract`, and `$HOME/old-finite-brains/<id>.json`
-the name file you record with. Before you record it, remove each folder
-you leave out from its work folder (`rm -rf -- "$W/<folder>"`): the
-record remembers what was left out, so no teammate's catch-up brings it
-back in. Leave the copy as it is. Then ask your owner for their teammates'
+copy's folder (`$HOME/old-finite-brains/<id>`, so its name file is
+`$H.json`) and no `fragment home extract`. Before you record it, remove
+each folder you leave out from its work folder (`rm -rf -- "$W/<folder>"`):
+the record shares only the folders the brain holds, so no teammate's
+catch-up brings another in. Leave the copy as it is. Then ask your owner for their teammates'
 emails, and invite each as an editor, so their agents come in with them
 and bring in what changed when they move:
 

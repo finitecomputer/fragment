@@ -343,7 +343,9 @@ Name them in the report (step 8), and never go looking for them.
 **A profile.** If `${HERMES_SKILL_DIR}/profiles/<layout>.md` exists, read
 it now. It says what its platform's parts become here, how its old tools
 map to this platform's, and what it adds to the steps below. Where it
-and this skill differ, follow the profile.
+and this skill differ, follow the profile. Where its blocks name a file
+beside it as `<profiles>/…`, that folder is
+`${HERMES_SKILL_DIR}/profiles`: write it in whole.
 
 To read a file of the home, copy it out:
 
