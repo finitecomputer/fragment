@@ -1039,7 +1039,7 @@ impl Visibility {
     /// keys: FIN-352); anything else anyone with its share link (decision 48).
     pub fn made_from(template: Option<&str>) -> Visibility {
         match template {
-            Some("chat" | "agent" | "sessions" | "telegram" | "simplex") => Visibility::Members,
+            Some("chat" | "agent" | "sessions" | "telegram" | "simplex" | "slack") => Visibility::Members,
             _ => Visibility::Link,
         }
     }
@@ -3009,7 +3009,7 @@ mod tests {
         }
         assert!(!old.reach && value(&Sharing { reach: false, ..private }).get("reach").is_none());
         // a chat and an agent are made members only; the rest by link
-        assert_eq!([Some("chat"), Some("agent"), Some("sessions"), Some("telegram"), Some("simplex")].map(Visibility::made_from), [Visibility::Members; 5]);
+        assert_eq!([Some("chat"), Some("agent"), Some("sessions"), Some("telegram"), Some("simplex"), Some("slack")].map(Visibility::made_from), [Visibility::Members; 6]);
         assert_eq!([None, Some("todo"), Some("brain"), Some("blank"), Some("skills")].map(Visibility::made_from), [Visibility::Link; 5]);
         // a share is the person's and their agents' (Paul, 2026-10-13): no
         // field says otherwise, and one that tries is refused

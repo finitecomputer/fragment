@@ -32,7 +32,7 @@ import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
-import { createConnections, createAgentHomes, createSimplex, createConnectors, TELEGRAM, SIMPLEX } from "./connections.js";
+import { createConnections, createAgentHomes, createSimplex, createConnectors, TELEGRAM, SLACK, SIMPLEX } from "./connections.js";
 import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -1277,7 +1277,7 @@ async function setPinned(name, pinned) {
 // `homeChatOf`), so this is known from the list alone, before any door is
 // read. Asked once more in the shell's dialog, which names it, and asked
 // again as it is confirmed. ----
-const DOOR_CHAT = new RegExp(`-(?:${[TELEGRAM.door, SIMPLEX.door].join("|")})(?:-\\d+)?$`);
+const DOOR_CHAT = new RegExp(`-(?:${[TELEGRAM.door, SLACK.door, SIMPLEX.door].join("|")})(?:-\\d+)?$`);
 function deleteItems(name) {
   const f = byName(name);
   if (!f || f.kind !== "chat" || !own(f) || f.sharing?.reach === true || DOOR_CHAT.test(labelOf(name)) || threads.isPair(f)) return [];
@@ -1534,7 +1534,7 @@ const { computerRow, computerKey, nameSimplex } = createSimplex({
   api, el, actionLine, named, seg, computer: () => state.computer,
   titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh: () => refreshConnectors(),
 });
-const { telegramSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
+const { telegramSection, slackSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
   connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow, computerKey,
   doorsRead: () => (forgetDoors(), renderChats()),
@@ -2157,7 +2157,7 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readConnectors },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, slackSection, readConnectors },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,

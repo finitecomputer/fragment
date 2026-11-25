@@ -1,0 +1,43 @@
+{
+  "kind": "chat",
+  "channels": {
+    "chat": { "read": "viewer", "post": "viewer" },
+    "work": {
+      "read": "viewer", "post": "viewer", "from": "agent",
+      "listed": {
+        "kinds": ["turn.start", "turn.step", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"],
+        "fields": ["asks", "outcome"]
+      },
+      "newest": ["turn.helpers"]
+    }
+  },
+  "inbox": {
+    "hmac": { "secret": "SLACK_SIGNING_SECRET", "header": "x-slack-signature", "prefix": "v0=", "signed": "v0:{x-slack-request-timestamp}:{body}", "fresh": "x-slack-request-timestamp", "within_s": 300 },
+    "answer": "handshake"
+  },
+  "operations": {
+    "state": { "kind": "query", "role": "owner", "description": "The app (its bot's name and workspace), whether Slack has checked this chat's address, the Slack account paired, a pairing waiting, and the connect attempts answered lately: {bot, error, verified, paired, pairing, answered}." },
+    "connect": { "kind": "job", "role": "owner", "input": { "type": "object", "properties": { "api": { "type": "string", "maxLength": 200 }, "attempt": { "type": "string", "maxLength": 64 } }, "additionalProperties": false }, "description": "Checks the app's bot token (SLACK_BOT_TOKEN) and keeps its workspace and bot." },
+    "pair": { "kind": "mutation", "role": "owner", "description": "Starts pairing: a code to send the app's bot in a Slack DM, good for ten minutes." },
+    "confirm": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["user"], "properties": { "user": { "type": "string", "maxLength": 128 } }, "additionalProperties": false }, "description": "Its owner, in person, says the Slack account that sent the pairing code is theirs." },
+    "unpair": { "kind": "mutation", "role": "owner", "description": "Forgets the Slack account paired." },
+    "known": { "kind": "mutation", "role": "owner", "input": { "type": "object", "properties": { "bot": { "type": "object" }, "api": { "type": "string" }, "error": { "type": "string" }, "attempt": { "type": "string", "maxLength": 64 } } } },
+    "propose": { "kind": "mutation", "input": { "type": "object", "required": ["code", "user", "dm", "name"], "properties": { "code": { "type": "string" }, "user": { "type": "string" }, "dm": { "type": "string" }, "name": { "type": "string" } } } },
+    "seen": { "kind": "mutation", "input": { "type": "object", "required": ["key"], "properties": { "key": { "type": "string" } } } },
+    "verified": { "kind": "mutation" },
+    "named": { "kind": "query", "role": "editor", "input": { "type": "object", "required": ["ids"], "properties": { "ids": { "type": "array", "items": { "type": "string" } } } } },
+    "remember": { "kind": "mutation", "input": { "type": "object", "required": ["names"], "properties": { "names": { "type": "object" } } } },
+    "room": { "kind": "mutation", "input": { "type": "object", "required": ["room"], "properties": { "room": { "type": "string" } } } },
+    "took": { "kind": "mutation", "input": { "type": "object", "required": ["turn", "channel", "ts"], "properties": { "turn": { "type": "string" }, "channel": { "type": "string" }, "thread": { "type": ["string", "null"] }, "ts": { "type": "string" } } } },
+    "thread": { "kind": "query", "role": "editor", "input": { "type": "object", "required": ["turn"], "properties": { "turn": { "type": "string" } } } },
+    "route": { "kind": "query", "role": "editor" },
+    "handshake": { "kind": "query", "role": "editor" },
+    "intake": { "kind": "job" },
+    "mirror": { "kind": "job" }
+  },
+  "triggers": [
+    { "channel": "inbox", "run": "intake" },
+    { "channel": "chat", "from": "agent", "run": "mirror" }
+  ],
+  "meta": { "title": "Slack", "description": "Your agent in your team's Slack: anyone in a channel it's in, or in a DM with it, may ask it, and it answers there; your own words there come here as yours. Slack carries them as plain text, and everyone in a room reads what it says there." }
+}

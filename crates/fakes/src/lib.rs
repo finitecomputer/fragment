@@ -5,7 +5,8 @@
 //! code.storage, Workers AI (the model route's lower rung, text and
 //! images), Email Sending (the platform's mail), a web push service, WorkOS
 //! (AuthKit and Pipes), an OpenID Connect provider (sign-in on self-host),
-//! OpenRouter (an own key's sign-in and its models), the platform's search
+//! OpenRouter (an own key's sign-in and its models), Slack's and Telegram's
+//! bot APIs (their connectors' lanes), the platform's search
 //! write API (until the cell serves it), the
 //! finite.computer mover (a client the platform is called by), and the
 //! provider APIs a computer's swap sends to.
@@ -20,6 +21,7 @@ pub mod old_home;
 pub mod openrouter;
 pub mod push;
 pub mod search;
+pub mod slack;
 pub mod stripe;
 pub mod telegram;
 pub mod upstream;

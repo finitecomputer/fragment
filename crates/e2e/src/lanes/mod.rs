@@ -67,6 +67,7 @@ pub(crate) mod simplex_setup;
 mod site;
 mod slides;
 mod sync;
+mod slack;
 mod telegram_settings;
 mod templates;
 mod trials;

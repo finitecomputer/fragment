@@ -650,6 +650,7 @@ app's own trust and tailnet).
 | Feature | Inbound need | Alternative |
 |---|---|---|
 | A fragment's inbox (apps' webhooks, the `inbox` template) | `POST /api/f/<name>/inbox` | poll from a cron trigger, or expose that path alone through a tunnel (not checked) |
+| Slack connector | its events into the chat's inbox | **off on self-host**, as Telegram's is (below) |
 | Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`), and its door is refused. `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy: with computers on celld (seam 2) Settings still shows the row, and hiding it is a wire change, not made |
 | Public and "anyone with the link" sharing | visitors outside the tailnet | "public" means the tailnet |
 | Stripe | `/api/stripe/webhook` | left out |

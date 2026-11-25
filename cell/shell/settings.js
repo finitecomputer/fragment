@@ -48,7 +48,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
-  const { computerSection, connectionsSection, simplexSection, telegramSection, readConnectors } = sections;
+  const { computerSection, connectionsSection, simplexSection, telegramSection, slackSection, readConnectors } = sections;
   const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
@@ -341,7 +341,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
     if (lost()) return;
     drawnAgents = { section: agents, linked, roster: rosterOf(), cards: drawn.cards };
     returnSaid(back);
-    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), telegramSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
+    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), telegramSection(), slackSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
     renderAgentFaces();
     // a home read that answered while these were built shown now they are in
     paintHomes();

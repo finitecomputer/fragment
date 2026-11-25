@@ -101,7 +101,7 @@ fn unhashed_takes_out_a_hash_of_any_length_the_bundler_names() {
 fn a_built_page_names_its_hashed_files() {
     let root = PathBuf::from("../..");
     let pages: Vec<(&str, &str)> = fragment_templates::BUILT.iter().copied().filter(|(_, p)| p.ends_with("index.html")).collect();
-    assert_eq!(pages.len(), 5, "the shell's page and the chat's four: {pages:?}");
+    assert_eq!(pages.len(), 6, "the shell's page and the chat's five: {pages:?}");
     for (at, _) in pages {
         // its release's files beside it, by name
         let (files, prefix, link, dir) = if at == "shell" {
