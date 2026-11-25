@@ -290,15 +290,15 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     // the binding makes its agent a member of the connector, whose join is
     // told, and its computer woken for it, after the binding answers
     // (cell/src/runs_on.rs, `joined_outbox`): a wake that lands as it sleeps
-    // starts it again, so once it is up it is slept again, until it answers
-    // asleep
+    // starts it again (its sleep answers starting): once that start is up,
+    // it is slept again, and never otherwise
     let sleep = || api.signed(owner, "POST", &format!("/api/computers/{}/sleep", a.computer), Some(&json!({})));
     let up = || api.signed(owner, "GET", &format!("/api/computers/{}", a.computer), None).is_ok_and(|r| r.body["phase"] == "awake");
-    let t0 = Instant::now();
+    let deadline = Instant::now() + a.wake;
     let mut slept = sleep()?;
-    // bounded by its wake: each pass waits for a start the last sleep owed
-    while slept.body["phase"] != "asleep" && t0.elapsed() < a.wake {
-        s.eventually(a.wake, &up);
+    // bounded by its wake, one deadline for every pass
+    while slept.status == 200 && slept.body["phase"] == "starting" && Instant::now() < deadline {
+        ensure!(s.eventually(deadline.saturating_duration_since(Instant::now()), &up), "the start a late wake owed comes up: {slept}");
         slept = sleep()?;
     }
     ensure!(slept.body["phase"] == "asleep", "the agent's computer asleep first: {slept}");
