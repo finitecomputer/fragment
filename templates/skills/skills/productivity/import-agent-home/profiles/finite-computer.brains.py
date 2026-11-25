@@ -259,8 +259,12 @@ known = set(folders) | set(shared)
 
 
 def shared_here(folder):
-    # Shared, and the same folder in this copy, not another at its path.
-    return folder in shared and folder in folders and folders[folder][0] == shared[folder]
+    # Shared, the same folder in this copy (not another at its path), and
+    # one this copy could read.
+    return (
+        folder in shared and folder in folders
+        and folders[folder][0] == shared[folder] and folders[folder][1]
+    )
 
 
 def asset_plan(names):
@@ -269,8 +273,6 @@ def asset_plan(names):
     plan = []
     for asset in names:
         there, here = sha(copy_dir, asset), sha(work, asset)
-        if not shared_here(folder_of(asset, known) or ""):
-            return False, []  # in a folder the brain doesn't share
         if occupied(copy_dir, asset) or occupied(work, asset):
             return False, []  # a link or a folder there
         if here is None and there is None:
@@ -278,6 +280,8 @@ def asset_plan(names):
         if here is not None and there is not None and here != there:
             return False, []
         if here is None:
+            if not shared_here(folder_of(asset, known) or ""):
+                return False, []  # would come into a folder the brain doesn't share
             plan.append(asset)
     return True, plan
 
@@ -296,9 +300,6 @@ for path, (id_, revision, old_sha) in sorted(listed.items()):
     there = sha(copy_dir, path)
     if there is None:
         out["missing"].append(path)  # listed, but not in this copy
-        continue
-    if occupied(work, path):
-        out["both"].append(path)  # a folder or such where the page goes
         continue
     seen, here = record["pages"].get(path), sha(work, path)
     fine, plan = asset_plan(assets(copy_dir, path))
@@ -324,6 +325,9 @@ for path, (id_, revision, old_sha) in sorted(listed.items()):
         continue  # the brain has this version, or a newer one
     if older:
         out["older"].append(path)  # this copy is older than the brain's
+        continue
+    if occupied(work, path):
+        out["both"].append(path)  # a folder or such where the page goes
         continue
     if seen is None and here is None:
         kind = "added"
