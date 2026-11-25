@@ -717,6 +717,7 @@ async fn an_agents_model_and_effort_are_its_sessions_flags() {
             claim_seq: None,
             note: None,
             command: false,
+            hop: 0,
             reply_to: None,
             quote: None,
             simplex: false,

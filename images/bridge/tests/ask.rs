@@ -58,8 +58,10 @@ fn posts_to(w: &World, path: &str) -> usize {
 
 /// Goal: juniper's question is rowan's turn in their chat, like any
 /// message; once that turn is over, juniper (whose own turn, and CLI, are
-/// long gone) is woken at home by an answer on its own `tasks`: a turn of
-/// its owner's business, told what rowan said. One run each.
+/// long gone) is woken at home by an answer on its own `tasks`, signed by
+/// rowan acting for their owner and taken once juniper's question vouches
+/// for it: a turn of its owner's business, told what rowan said. One run
+/// each.
 #[tokio::test]
 async fn an_answer_wakes_its_asker_after_it_has_gone() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
@@ -76,7 +78,7 @@ async fn an_answer_wakes_its_asker_after_it_has_gone() {
         assert_eq!(w.bodies(&pair, "chat", "reply"), vec![json!({ "text": "echo: [Juniper] What is the weather?", "turn": asked })], "rowan answers where it was asked");
         let a = answers(w);
         assert_eq!(a.len(), 1);
-        assert_eq!(a[0]["principal"], person("juniper"), "posted by juniper's own bridge");
+        assert_eq!(a[0]["principal"], person("rowan"), "signed by rowan, the agent asked (a computer per agent), which juniper's question vouches for");
         let text = format!("Rowan answered your question in {pair} (\"What is the weather?\"):\n\necho: [Juniper] What is the weather?");
         assert_eq!(a[0]["body"], json!({ "kind": "answer", "chat": home, "text": text, "by": person("rowan"), "name": "Rowan", "asked": { "fragment": pair, "seq": said["seq"] }, "turn": asked, "outcome": "idle", "hop": 3 }), "rowan called by its name");
         let woke = woke(&a[0]);

@@ -178,11 +178,47 @@ impl FragmentCell {
     pub(crate) async fn runs_on(&self, route: &str, body: &[u8]) -> CellResult<Value> {
         self.created()?;
         match route {
+            // its own computer's making (a computer per agent): its owner's
+            // alone, named by its key, which its agent is named by
+            "own" => {
+                let body: Value = crate::json_body(body)?;
+                if self.must(MetaKey::Owner)? != body["owner"].as_str().unwrap_or("") {
+                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner makes its computer"));
+                }
+                let npub = self.must(MetaKey::Npub)?;
+                let own = fragment_core::computer::default_computer_of(&npub);
+                // named from its making, before its assign: an Add cut short
+                // between the two leaves no computer its end cannot find
+                // (ended.rs); one on another computer already keeps that
+                match self.meta(MetaKey::Computer)? {
+                    Some(other) if other != own => return Err(CellError::new(ErrorCode::Conflict, format!("{} runs on {other}: it is moved there, never given a second computer", self.name()?))),
+                    Some(_) => {}
+                    None => self.set_meta(MetaKey::Computer, &own)?,
+                }
+                Ok(json!({ "identity": npub }))
+            }
             "assign" => {
                 let b: Assign = crate::json_body(body)?;
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
                 }
+                // their computer from before, or its own: never another's,
+                // nor another agent's own (fragment_core::computer::may_run)
+                let npub = self.must(MetaKey::Npub)?;
+                if fragment_core::computer::may_run(&b.computer, &b.owner, &npub) == fragment_core::computer::Runs::Neither {
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{} runs on its owner's computer or its own, never {}", self.name()?, b.computer)));
+                }
+                // one computer runs it at a time: on another, it is unassigned
+                // there first, so no computer keeps running it beside this one
+                // (asked again after the registry's answer below: an assign
+                // there, or its own computer's making, may have come meanwhile)
+                let elsewhere = || -> CellResult<()> {
+                    match self.meta(MetaKey::Computer)?.filter(|c| *c != b.computer) {
+                        Some(other) => Err(CellError::new(ErrorCode::Conflict, format!("{} runs on {other}: unassign it there first", self.name()?))),
+                        None => Ok(()),
+                    }
+                };
+                elsewhere()?;
                 let identity = match self.meta(MetaKey::AgentIdentity)? {
                     Some(id) => id,
                     None => {
@@ -200,6 +236,7 @@ impl FragmentCell {
                         agent.id
                     }
                 };
+                elsewhere()?;
                 self.set_meta(MetaKey::Computer, &b.computer)?;
                 // the agent keeps its own state here (its SOUL.md, memories,
                 // skills, routines): it is an editor of its own fragment

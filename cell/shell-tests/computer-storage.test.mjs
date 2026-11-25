@@ -185,3 +185,50 @@ test("Delete: never on a path with a ?, asked once; a view that changes nothing 
   assert.deepEqual(walk(row("work/a/talk.mp4")).filter((n) => n.className === "muted").map((n) => n.textContent), ["Deleted"], "said, never left at Deleting…");
   ui.dispose();
 });
+
+// A computer per agent: Settings builds each agent's Computer card before
+// any is on the page (settings.js, an agent's card at a time), then shows
+// them. A view landing for the first agent's computer draws its Storage
+// again, as one for the second's does its; neither card is dropped for
+// having been built before the other was shown.
+test("each agent's Computer card, built before any is shown, is drawn again as its own computer changes", () => {
+  const box = new Node("div", "computer-notices");
+  const cover = Object.assign(new Node("dialog", "must-answer"), { open: false, showModal() {}, close() {} });
+  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => ({ "computer-notices": box, "must-answer": cover })[id] ?? null, createElementNS: (_, tag) => new Node(tag) };
+  globalThis.MutationObserver ??= class {
+    observe() {}
+    disconnect() {}
+  };
+  const view = (computer, room) => ({ computer, phase: "awake", generation: 3, notices: [], disk: { total: 20e9, free: 9e9, data: 14e9, room, filling: false, at: 10 }, sizes: { at: 12, total: 14e9, folders: [], files: [], kinds: [{ kind: "downloads", bytes: 3e9 }] } });
+  let views = [view("computer:aa", 5e9), view("computer:bb", 6e9)];
+  const el = (tag, cls, text) => new Node(tag, cls, text);
+  const line = (key, value) => {
+    const l = el("div", "settings-line");
+    l.append(el("span", "settings-key", key), el("span", "settings-value", value));
+    return l;
+  };
+  const section = (title, ...rows) => {
+    const s = el("section", "settings-section");
+    s.append(el("h2", "", title), ...rows);
+    return s;
+  };
+  const reads = { updating: false, listFailed: false, noticesFailed: false };
+  const ui = createComputer({
+    api: () => new Promise(() => {}), el, seg: (s) => s, named: (n) => n, section, line, actionLine: line,
+    computer: () => views[0], computers: () => views, notices: () => [], agents: () => new Map(), computerFailed: () => false, setupPending: () => false,
+    made: () => {}, computerIs: () => {}, openScreen: () => {}, markOffer: (n) => n, reads: () => reads, load: async () => {}, openPage: () => {},
+  });
+  // both built, then shown
+  const cards = [ui.computerSection(views[0], "ann--aaaa"), ui.computerSection(views[1], "bob--bbbb")];
+  const page = Object.assign(new Node("main"), { root: true });
+  page.append(...cards);
+  const left = (at) => walk(cards[at]).find((n) => n.dataset.storage === "").querySelector(".storage-left").textContent;
+  assert.deepEqual([left(0), left(1)], ["5.0 GB left", "6.0 GB left"]);
+  views = [view("computer:aa", 2e9), views[1]];
+  ui.renderComputer();
+  assert.deepEqual([left(0), left(1)], ["2.0 GB left", "6.0 GB left"], "the first agent's card, drawn again");
+  views = [views[0], view("computer:bb", 1e9)];
+  ui.renderComputer();
+  assert.deepEqual([left(0), left(1)], ["2.0 GB left", "1.0 GB left"], "and the second's");
+  ui.dispose();
+});

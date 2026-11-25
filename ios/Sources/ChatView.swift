@@ -431,7 +431,7 @@ private struct HintRow: View {
     let hint: WorkingHint
     var body: some View {
         WorkingIndicator(hints: [hint], library: library, principal: session.principal,
-                         phase: library.computerPhase, present: Set(session.presence.values))
+                         phase: library.phase(of: hint.id.agent), present: Set(session.presence.values))
     }
 }
 
@@ -441,7 +441,7 @@ private struct WorkingLine: View {
     let library: Library
     var body: some View {
         WorkingIndicator(hints: session.workingHints, library: library, principal: session.principal,
-                         phase: library.computerPhase, present: Set(session.presence.values))
+                         phase: session.workingHints.first.map { library.phase(of: $0.id.agent) } ?? library.computerPhase, present: Set(session.presence.values))
     }
 }
 

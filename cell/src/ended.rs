@@ -256,7 +256,7 @@ impl FragmentCell {
         self.exec(
             "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (incarnation) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone()],
+            vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.as_str().into(), facet.as_str().into(), now.clone(), now.clone()],
         )?;
         // its search index, if it may have written one, ends with it
         // (searchable.rs); recorded where step 5 made the column (an object
@@ -289,10 +289,21 @@ impl FragmentCell {
             )?;
         }
         // an agent fragment's agent, whose key was this life's alone: it
-        // ran on its owner's one computer (decision 13), named while it is
-        // assigned. Unassigned since, that computer is asked all the same
-        // (a no-op): nothing else reaches its row once this life is gone
-        if let (End::Delete, Some(identity)) = (by, identity) {
+        // ran on the computer its fragment names while it is assigned, its
+        // own or its owner's from before. Unassigned since, its owner's is
+        // asked all the same (a no-op): nothing else reaches its row once
+        // this life is gone
+        // Its own computer (a computer per agent), named by its fragment from
+        // its making (runs_on.rs `own`), ends with it on a delete and a wipe
+        // alike, though its making stopped short of the assign that named its
+        // agent (whose identity is its key's): a wipe's computer step knows
+        // only the agents the registry names
+        let own = fragment_core::computer::default_computer_of(&npub);
+        let identity = match (by, identity) {
+            (End::Delete, identity) => identity.or_else(|| (computer.as_deref() == Some(own.as_str())).then(|| npub.clone())),
+            (End::Wipe, _) => (computer.as_deref() == Some(own.as_str())).then(|| npub.clone()),
+        };
+        if let Some(identity) = identity {
             let computer = computer.unwrap_or_else(|| fragment_core::computer::default_computer_of(&owner));
             self.exec(
                 "INSERT INTO ended_agents (incarnation, identity, computer, next_at) VALUES (?, ?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
@@ -629,6 +640,17 @@ impl FragmentCell {
             let asked = json!({ "fragment": a.name, "identity": a.identity });
             if let Err(e) = crate::computer::ask(&self.env, computer, "computer/unassign", &asked).await {
                 rules::agent_left(e.code, &format!("its computer {computer}: {}", e.message))?;
+            }
+            // its own computer ends with it (a computer per agent; Paul,
+            // 2026-11-23: a delete deletes its computer and its files at
+            // once): its container, its saves and its storage, as a wipe
+            // ends one, a call's pages at a time, the rest the next pass's
+            if *computer == fragment_core::computer::default_computer_of(&a.identity) {
+                match crate::computer::ask(&self.env, computer, "computer/wipe", &json!({})).await {
+                    Ok(w) if w["more"] == true => return Err(Failure::Transient(format!("its computer {computer}'s saves hold more: the next pass deletes on"))),
+                    Ok(_) => {}
+                    Err(e) => rules::agent_left(e.code, &format!("its computer {computer}'s end: {}", e.message))?,
+                }
             }
             self.exec("UPDATE ended_agents SET computer = NULL WHERE incarnation = ?", vec![SqlStorageValue::Integer(a.incarnation)]).map_err(here)?;
         }

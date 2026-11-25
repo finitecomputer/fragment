@@ -403,16 +403,25 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     let relay = mirrored.then(|| for_simplex(channel, &body, files.len())).flatten();
                     // an asked turn's files go with its answer too (#721)
                     let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
-                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
+                    // a refused question's answer, posted unkept past the
+                    // turns' bound, on its asker's own `tasks`: as an answer is
+                    let for_ = (channel == records::TASKS && agent != fragment).then(|| engine.agent(&agent).map(|a| a.owner.clone())).flatten();
+                    lanes.push(&fragment, Job::Post { agent, for_, channel, id, body, files, relay, answers })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
-                Effect::Owed { agent, fragment, channel, turn, id, body } => match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
-                    // an answer goes from its question's chat's lane, after
-                    // the turn's replies, with their files (#721)
-                    Some(asked) if channel == records::TASKS && asked != fragment => lanes.push(&asked, Job::Answer { agent, to: fragment, turn, id, body }),
-                    _ => lanes.push(&fragment, Job::Owed { agent, channel, turn, id, body }),
-                },
+                Effect::Owed { agent, fragment, channel, turn, id, body } => {
+                    // an answer on another agent's own `tasks` (its asker's,
+                    // signed by the agent asked) acts for their owner, who
+                    // owns both: an editor there (permit rule 3)
+                    let for_ = (channel == records::TASKS && agent != fragment).then(|| engine.agent(&agent).map(|a| a.owner.clone())).flatten();
+                    match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
+                        // an answer goes from its question's chat's lane, after
+                        // the turn's replies, with their files (#721)
+                        Some(asked) if channel == records::TASKS && asked != fragment => lanes.push(&asked, Job::Answer { agent, for_, to: fragment, turn, id, body }),
+                        _ => lanes.push(&fragment, Job::Owed { agent, for_, channel, turn, id, body }),
+                    }
+                }
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::ComputerAnswered { reply, taken: t } => {
                     if let Some(post) = taken.lock().expect("answers").remove(&reply) {
@@ -900,24 +909,9 @@ impl ViewCache {
         // the door this chat is of this agent's, as its own row says (the
         // connector's binding, while open: docs/api.md, "An agent's doors")
         self.view.door = members.iter().find(|m| m.principal == agent.identity).and_then(|m| m.door.clone()).filter(|d| records::door_ok(d));
-        // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
-        // record asked first, then its people, then its other agents (an
-        // agent's message, a hand-off, is told by its name: its title, as
-        // `__people` says it now).
-        let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w) && *w != agent.identity).map(str::to_string).into_iter().collect();
-        // the agent itself too: an answer names the agent that gave it
-        // (engine.rs, `owe_answer`) from whichever agent's view it holds
-        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
-        for m in people.into_iter().chain(agents) {
-            if ids.len() >= api::PEOPLE_MAX {
-                break;
-            }
-            if !ids.contains(&m.principal) {
-                ids.push(m.principal.clone());
-            }
-        }
-        match api.people(&agent.fragment, fragment, &ids).await {
-            Ok(names) => self.view.names = names,
+        let ids = to_name(writer.filter(|w| *w != agent.identity), &members);
+        match api.profiles(&agent.fragment, fragment, &ids).await {
+            Ok((names, fragments)) => (self.view.names, self.view.fragments) = (names, fragments),
             Err(e) => crate::ev!("people.unread", { "fragment": fragment, "error": e.to_string() }),
         }
         // A writer asked of and not named is "someone" until the next read,
@@ -1122,6 +1116,24 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
             h.set_aside_first(&agent.fragment, &stage).await;
         }
     }
+    // An answer the agent it asked signed (a computer per agent: it may run
+    // on another computer) is taken only once the question it names says
+    // this agent asked it, of that agent, back to that chat: then it is
+    // handed on as the agent's own, as one its own key posted is. A read
+    // that fails in a way asking again may pass ends the follow, which
+    // reads the record again from the cursor; one that does not vouch is
+    // handed on as it is, and passed over.
+    let mut record = record;
+    if let (true, records::Task::Answer { by, chat, .. }) = (tasks && !code_task && record.principal != agent.identity, records::task(&record.body)) {
+        if record.principal == by {
+            match vouched(api, agent, &record.body, &by, &chat).await {
+                Ok(true) => record.principal = agent.identity.clone(),
+                Ok(false) => crate::ev!("answer.unvouched", { "agent": agent.fragment, "seq": record.seq, "by": by }),
+                Err(e) if e.retryable() => return Some(Ended::Again(format!("the question an answer names did not read (seq {}): {e}", record.seq))),
+                Err(e) => crate::ev!("answer.unvouched", { "agent": agent.fragment, "seq": record.seq, "by": by, "error": e.to_string() }),
+            }
+        }
+    }
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
         // is skipped, as cron skips a missed run; an answer never is (its
@@ -1194,6 +1206,16 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     };
     let fed = inbox.send(Msg::Input(input)).await;
     fed.is_err().then_some(Ended::Stopped)
+}
+
+/// Whether the question an answer's `body` names vouches for it, an answer
+/// by `by` back to `chat` (`records::vouches`): read as the asking agent,
+/// from the chat it asked in, by its sequence number. One the answer names
+/// none of, or that is not there, vouches for nothing.
+async fn vouched(api: &Api, agent: &Agent, body: &Value, by: &str, chat: &str) -> Result<bool, ApiError> {
+    let Some((asked, seq)) = records::answers(body) else { return Ok(false) };
+    let page = api.records(&agent.fragment, &asked, records::CHAT, seq.saturating_sub(1), 1).await?;
+    Ok(page.records.iter().find(|r| r.seq == seq).is_some_and(|q| records::vouches(q, &agent.identity, by, chat)))
 }
 
 /// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
@@ -1290,7 +1312,7 @@ enum Job {
     /// a post in its owner's SimpleX chat (`for_simplex`), with its files.
     /// `answers`: its turn answers an ask, and its files go with that
     /// answer (`Answer`).
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
+    Post { agent: String, for_: Option<String>, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String>, answers: bool },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// A live card answer's closure on `work`, whose answer the engine
@@ -1298,12 +1320,12 @@ enum Job {
     Fence { agent: String, turn: String, prompt: String, id: String, body: Value },
     /// One of a turn's last records (on `work`, or an answer on `tasks`):
     /// the engine hears when the lane is done with it.
-    Owed { agent: String, channel: &'static str, turn: String, id: String, body: Value },
+    Owed { agent: String, for_: Option<String>, channel: &'static str, turn: String, id: String, body: Value },
     /// An asked turn's answer, in its question's chat's lane, so it goes
     /// after the turn's replies there: it takes their files (the blobs this
     /// lane uploaded for them, which its asker reads from this chat), then
     /// goes to its asker's lane (`to`) as the turn's last record, `Owed`.
-    Answer { agent: String, to: String, turn: String, id: String, body: Value },
+    Answer { agent: String, for_: Option<String>, to: String, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -1457,10 +1479,10 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files, relay, answers } => {
+            Job::Post { agent, for_, channel, id, body, files, relay, answers } => {
                 let turn = body["turn"].as_str().map(str::to_string);
                 // what goes back over SimpleX goes only once it is on the chat
-                let (sent, refs, _) = post_attached(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
+                let (sent, refs, _) = post_attached(&api, &fragment, &agent, for_.as_deref(), channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
                 if let (Some(text), true, Some(sx)) = (relay, sent.on_chat(), claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }
@@ -1476,7 +1498,7 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                     }
                 }
             }
-            Job::Answer { agent, to, turn, id, mut body } => {
+            Job::Answer { agent, for_, to, turn, id, mut body } => {
                 // the files of its turn's replies, all posted before it in
                 // this lane: its asker reads them from this chat, as itself
                 if let Some(i) = answer_files.iter().position(|(t, _)| *t == turn) {
@@ -1485,16 +1507,16 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                     crate::ev!("answer.files", { "turn": turn, "files": refs.len() });
                     body["files"] = json!(refs);
                 }
-                lanes.push(&to, Job::Owed { agent, channel: records::TASKS, turn, id, body });
+                lanes.push(&to, Job::Owed { agent, for_, channel: records::TASKS, turn, id, body });
             }
-            Job::Owed { agent, channel, turn, id, body } => {
+            Job::Owed { agent, for_, channel, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
                 // bridge is stopping: then the turn keeps owing it, and the
                 // next life posts it again. An answer (on `tasks`) is never
                 // given up: it is its question's only delivery, so it is
                 // tried until the platform answers it.
                 let tries = if channel == records::TASKS { u32::MAX } else { limits::POST_TRIES_MAX };
-                let sent = post(&api, &fragment, &agent, channel, &id, body, &[], None, tries, stop.clone()).await;
+                let sent = post(&api, &fragment, &agent, for_.as_deref(), channel, &id, body, &[], None, tries, stop.clone()).await;
                 if sent.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id, kept: sent == Sent::Posted })).await;
                 }
@@ -1624,24 +1646,25 @@ impl Sent {
 /// A post, tried until the platform answers it, or `tries` times on a
 /// transport error, 429 or 5xx (a jittered backoff between: lesson 5), or
 /// refused at once. A relayed record is signed by its `door` at each try,
-/// its files' refs in it (simplex/door.rs).
+/// its files' refs in it (simplex/door.rs). `for_`: acting for that person
+/// (an answer on a teammate's own `tasks`: `Api::post_for`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
-    post_seq(api, fragment, agent, channel, id, body, files, door, tries, stop).await.0
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, for_: Option<&str>, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
+    post_attached(api, fragment, agent, for_, channel, id, body, files, door, tries, stop).await.0
 }
 
 /// `post`, and the record's seq on its channel when `Posted`: what a
 /// SimpleX link shows its agent working on is named by it (simplex/link.rs).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn post_seq(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Option<u64>) {
-    let (sent, _, seq) = post_attached(api, fragment, agent, channel, id, body, files, door, tries, stop).await;
+    let (sent, _, seq) = post_attached(api, fragment, agent, None, channel, id, body, files, door, tries, stop).await;
     (sent, seq)
 }
 
 /// `post`, the refs its files went as on the record posted (none when it
 /// was not posted, or they were refused), and its seq (when `Posted`).
 #[allow(clippy::too_many_arguments)]
-async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Vec<AttachmentRef>, Option<u64>) {
+async fn post_attached(api: &Api, fragment: &str, agent: &str, for_: Option<&str>, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Vec<AttachmentRef>, Option<u64>) {
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
     // its files refused here (an agent that is a viewer of a connector's
@@ -1693,7 +1716,7 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
                 if let Some(door) = door {
                     door.seal(&mut body, fragment, channel, id, crate::log::now_ms() as i64);
                 }
-                api.post(agent, fragment, channel, id, &body).await
+                api.post_for(agent, for_, fragment, channel, id, &body).await
             }
             Err(e) => Err(e),
         };
@@ -2416,10 +2439,51 @@ pub(crate) async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: 
     }
 }
 
+/// Who a chat's view names, at most `PEOPLE_MAX` (one `__people`): the
+/// writer whose record asked first, then its agents (the reading agent
+/// itself too: an answer names the agent that gave it, engine.rs
+/// `owe_answer`, from whichever agent's view it holds), then its people (an
+/// agent's message, a hand-off, is told by its name: its title, as
+/// `__people` says it now). Agents before people: an agent's fragment, read
+/// with its name, is where it is asked and answered (`ChatView::fragments`),
+/// so a chat of many people still finds a teammate on another computer; a
+/// person past the bound is only unnamed.
+fn to_name(writer: Option<&str>, members: &[api::Member]) -> Vec<String> {
+    let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w)).map(str::to_string).into_iter().collect();
+    let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
+    for m in agents.into_iter().chain(people) {
+        if ids.len() >= api::PEOPLE_MAX {
+            break;
+        }
+        if !ids.contains(&m.principal) {
+            ids.push(m.principal.clone());
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Goal (a computer per agent): a chat of more people than one
+    /// `__people` names still names its agents, so a teammate on another
+    /// computer is found there (its fragment, `ChatView::fragments`): the
+    /// writer first, then the agents, then the people, to the bound.
+    /// Invalid: a principal that is no identity is never asked for.
+    #[test]
+    fn a_crowded_chat_still_names_its_agents() {
+        let member = |principal: String, kind: &str, at: i64| -> api::Member { serde_json::from_value(json!({ "principal": principal, "kind": kind, "addedAt": at })).expect("a member") };
+        let mut members: Vec<api::Member> = (0..api::PEOPLE_MAX as i64 + 6).map(|i| member(format!("npub1person{i}"), "person", i)).collect();
+        members.push(member("npub1juniper".into(), "agent", 900));
+        members.push(member("npub1rowan".into(), "agent", 901));
+        members.push(member("link:abc".into(), "person", 902));
+        let ids = to_name(Some("npub1person3"), &members);
+        assert_eq!(ids.len(), api::PEOPLE_MAX);
+        assert_eq!(ids[..3], ["npub1person3", "npub1juniper", "npub1rowan"], "the writer, then the agents");
+        assert!(!ids.iter().any(|i| i == "link:abc"), "no identity, never asked for");
+    }
 
     /// Goal (M17; Codex on #1358): a marker moves to a turn only once its
     /// runtime has it (`Event::Taken`), or ended it untaken when that memory
@@ -2526,7 +2590,7 @@ mod tests {
             };
             tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
             let api = Api::new(&format!("http://{addr}")).expect("an address");
-            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", None, records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
             assert_eq!(sent, want, "{status}");
             assert!(sent.ended());
             assert_eq!(sent.on_chat(), status == 200 || status == 409, "on the chat, ours or another life's: {status}");

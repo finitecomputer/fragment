@@ -2397,6 +2397,108 @@ fn answer_task(seq: u64, principal: &str, body: Value) -> Record {
     Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), author: None, kind: "message".into(), body }
 }
 
+/// Goal (a computer per agent): a teammate on another computer asks as
+/// one of this computer's would. Its question, naming the turn it asks from
+/// and its depth, is a turn of the asked agent at that depth (one at least,
+/// whatever it claims); its answer is owed on the asker's own `tasks`, by
+/// the fragment the chat's people name it by, signed by the agent asked.
+/// Invalid: past the hops it is refused and answered so; an agent the
+/// chat's people name no fragment of is never answered back (a plain
+/// message); one claiming no depth counts one.
+#[test]
+fn a_teammate_on_another_computer_is_answered_on_its_own_tasks() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let mut talk = view(&[&rowan, &juniper]);
+    talk.names.insert("npub1rowan".into(), "Rowan".into());
+    talk.fragments.insert(juniper.identity.clone(), juniper.fragment.clone());
+    // rowan alone runs here: juniper runs on its own computer
+    let mut e = engine(std::slice::from_ref(&rowan));
+    let asked = |seq: u64, turn: Option<&str>, hop: u32| rec(seq, "npub1juniper", json!({ "text": "Weather?", "to": ["npub1rowan"], "return_to": HOME, "turn": turn, "hop": hop }));
+    let s = read(&mut e, &rowan, "talk--k3x9", asked(1, Some("t-juniper"), 2), Some(&talk), T0);
+    let t = started(&s).expect("rowan's turn");
+    assert_eq!(e.state().turns[&t.turn].hop, 2, "as deep as the ask says");
+    assert_eq!(e.state().turns[&t.turn].ret.as_ref().map(|r| r.agent.as_str()), Some(juniper.fragment.as_str()), "back to juniper, on another computer");
+    ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Sunny.".into() }, T0 + 1);
+    let end = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 2);
+    let owed = answers(&end);
+    assert_eq!(owed.len(), 1, "{:?}", end.effects);
+    let (by, on, body) = &owed[0];
+    assert_eq!((by.as_str(), on.as_str()), (rowan.fragment.as_str(), juniper.fragment.as_str()), "signed by rowan, on juniper's own tasks");
+    assert_eq!((&body["by"], &body["hop"], &body["asked"]), (&json!("npub1rowan"), &json!(3), &json!({ "fragment": "talk--k3x9", "seq": 1 })));
+    // claiming no depth: one
+    let s = read(&mut e, &rowan, "talk--k3x9", rec(2, "npub1juniper", json!({ "text": "And now?", "to": ["npub1rowan"], "return_to": HOME })), Some(&talk), T0 + 3);
+    assert_eq!(e.state().turns[&started(&s).expect("a turn").turn].hop, 1);
+    // past the hops: refused, and answered so
+    let s = read(&mut e, &rowan, "talk--k3x9", asked(3, Some("t-deep"), limits::HOPS_MAX + 1), Some(&talk), T0 + 4);
+    assert!(started(&s).is_none(), "{:?}", s.effects);
+    let refused = answers(&s);
+    assert_eq!(refused.len(), 1, "{:?}", s.effects);
+    assert_eq!((refused[0].0.as_str(), refused[0].1.as_str(), &refused[0].2["refused"]), (rowan.fragment.as_str(), juniper.fragment.as_str(), &json!(true)));
+    // an agent the chat names no fragment of: a plain message, not an ask
+    let mut unnamed = talk.clone();
+    unnamed.fragments.clear();
+    let s = read(&mut e, &rowan, "chat2--k3x9", asked(1, None, 1), Some(&unnamed), T0 + 5);
+    let t = started(&s).expect("a turn still");
+    assert_eq!(e.state().turns[&t.turn].ret, None, "no one to answer back");
+}
+
+/// Goal (a computer per agent): a person's @mention of a teammate on
+/// another computer is that teammate's alone: the lead here does not answer
+/// it as the chat's lead. Invalid: a mention of no agent of the chat falls
+/// to the lead, as ever.
+#[test]
+fn a_mention_of_a_teammate_elsewhere_is_not_the_leads() {
+    let (rowan, juniper) = (agent("rowan"), agent("juniper"));
+    let mut talk = view(&[&rowan, &juniper]);
+    talk.fragments.insert(juniper.identity.clone(), juniper.fragment.clone());
+    let mut e = engine(std::slice::from_ref(&rowan));
+    let s = read(&mut e, &rowan, "talk--k3x9", rec(1, "npub1paul", json!({ "text": "@juniper what do you think" })), Some(&talk), T0);
+    assert!(started(&s).is_none(), "juniper's, on its own computer: {:?}", s.effects);
+    let s = read(&mut e, &rowan, "talk--k3x9", rec(2, "npub1paul", json!({ "text": "@nobody what do you think" })), Some(&talk), T0 + 1);
+    assert!(started(&s).is_some(), "named no agent of the chat: the lead's");
+}
+
+/// Goal (a computer per agent): one answer a question from each agent asked
+/// it. A second answer to the same question by the same agent (another
+/// record, vouched for all the same) starts no second turn, after a restart
+/// too (the state keeps what it took); another agent's answer to it does.
+#[test]
+fn a_question_takes_one_answer() {
+    let juniper = agent("juniper");
+    let mut e = engine(std::slice::from_ref(&juniper));
+    let asked = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 7 };
+    let body = |text: &str| records::answer(HOME, text, "npub1rowan", "Rowan", &asked, "t-rowan", &Outcome::Idle, 2, false);
+    let s = read(&mut e, &juniper, &juniper.fragment, answer_task(1, &juniper.identity, body("Sunny.")), None, T0);
+    assert!(started(&s).is_some(), "the first answer: a turn");
+    let s = read(&mut e, &juniper, &juniper.fragment, answer_task(2, &juniper.identity, body("Sunny, really.")), None, T0 + 1);
+    assert!(started(&s).is_none() && posts(&s).is_empty(), "the same question again: nothing: {:?}", s.effects);
+    // the same question answered by another agent asked it (one message
+    // naming two): its answer is its own, taken
+    let by_fern = records::answer(HOME, "Rainy.", "npub1fern", "Fern", &asked, "t-fern", &Outcome::Idle, 2, false);
+    let turns = e.state().turns.len();
+    let _ = read(&mut e, &juniper, &juniper.fragment, answer_task(3, &juniper.identity, by_fern), None, T0 + 2);
+    assert_eq!(e.state().turns.len(), turns + 1, "another agent's answer to it: a turn (after the first's)");
+    let state = e.state().clone();
+    assert_eq!(state.answered.len(), 2);
+    let back: State = serde_json::from_str(&serde_json::to_string(&state).expect("a state")).expect("read back");
+    assert_eq!(back.answered, state.answered, "kept across a restart");
+}
+
+/// Goal (a computer per agent): an answer is taken as the agent's own key's
+/// or once its own question vouched for it (the driver hands that on as
+/// the agent's own: driver.rs `vouched`). Invalid: one signed by another
+/// agent that nothing vouched for is passed over, and wakes no turn.
+#[test]
+fn an_answer_nothing_vouched_for_is_passed_over() {
+    let juniper = agent("juniper");
+    let mut e = engine(std::slice::from_ref(&juniper));
+    let body = records::answer(HOME, "Sunny.", "npub1rowan", "Rowan", &Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 1 }, "t-rowan", &Outcome::Idle, 2, false);
+    let s = read(&mut e, &juniper, &juniper.fragment, answer_task(1, "npub1rowan", body.clone()), None, T0);
+    assert!(started(&s).is_none() && posts(&s).is_empty(), "not vouched for: {:?}", s.effects);
+    let s = read(&mut e, &juniper, &juniper.fragment, answer_task(2, &juniper.identity, body), None, T0 + 1);
+    assert!(started(&s).is_some(), "vouched for (handed on as its own): a turn");
+}
+
 /// Goal: an agent's question to another, with a chat to return to, is a
 /// turn of the asked agent like any message; once it is over, the asked
 /// agent's turn owes its answer as the asking agent, on that agent's own
@@ -2432,7 +2534,7 @@ fn a_question_is_answered_back_where_it_was_asked() {
     let owed = answers(&end);
     assert_eq!(owed.len(), 1, "one answer: {:?}", end.effects);
     let (by, on, body) = &owed[0];
-    assert_eq!((by.as_str(), on.as_str()), (juniper.fragment.as_str(), juniper.fragment.as_str()), "posted as juniper, on its own tasks");
+    assert_eq!((by.as_str(), on.as_str()), (rowan.fragment.as_str(), juniper.fragment.as_str()), "posted as rowan, the agent asked, on juniper's own tasks");
     let text = "Rowan answered your question in talk--k3x9 (\"What is the weather?\"):\n\nSunny, 21°C.\n\n(Rowan sent 1 file there.)";
     assert_eq!(*body, json!({ "kind": "answer", "chat": HOME, "text": text, "by": "npub1rowan", "name": "Rowan", "asked": { "fragment": "talk--k3x9", "seq": 1 }, "turn": t.turn, "outcome": "idle", "hop": 2 }), "called by its name, as its chat shows it");
     assert!(e.state().turns.is_empty(), "let go once its end and its answer are posted");
@@ -2606,7 +2708,7 @@ fn a_question_refused_past_the_turns_bound_is_answered() {
         _ => None,
     });
     let (by, on, channel, id, body) = answer.unwrap_or_else(|| panic!("its answer: {:?}", s.effects));
-    assert_eq!((by.as_str(), on.as_str(), channel, id), (juniper.fragment.as_str(), juniper.fragment.as_str(), records::TASKS, records::answer_id(&refused)), "as juniper, on its own tasks");
+    assert_eq!((by.as_str(), on.as_str(), channel, id), (rowan.fragment.as_str(), juniper.fragment.as_str(), records::TASKS, records::answer_id(&refused)), "as rowan, the agent asked, on juniper's own tasks");
     assert_eq!((&body["refused"], &body["error"]), (&json!(true), &json!(REFUSED_BUSY)), "{body}");
     assert_eq!(kinds(&s), vec!["turn.start", "turn.end", "answer"]);
     assert_eq!(e.state.turns.len(), limits::TURNS_OPEN_MAX, "none kept");
@@ -3233,11 +3335,25 @@ impl World {
                 // the chat, and its own `tasks` (where its answers come)
                 let (fragment, view) = if channel == records::CHAT { (CHAT.to_string(), Some(self.view.clone())) } else { (a.fragment.clone(), None) };
                 let cursor = self.engine().cursor(&a.fragment, &fragment, channel);
-                let unread: Vec<Record> = self.journal.channel(&fragment, channel).iter().filter(|r| r.seq > cursor).cloned().collect();
+                let unread: Vec<Record> = self.journal.channel(&fragment, channel).iter().filter(|r| r.seq > cursor).cloned().map(|r| self.vouched(&a, r)).collect();
                 for r in unread {
                     self.step(Input::Record { agent: a.fragment.clone(), fragment: fragment.clone(), record: r, view: view.clone(), since: 0 });
                 }
             }
+        }
+    }
+
+    /// An answer on `a`'s `tasks` as its driver hands it on (driver.rs
+    /// `vouched`): signed by the agent asked, it is the agent's own once the
+    /// question it names, in the journal, vouches for it.
+    fn vouched(&self, a: &Agent, r: Record) -> Record {
+        let records::Task::Answer { by, chat, .. } = records::task(&r.body) else { return r };
+        let Some((asked, seq)) = records::answers(&r.body).filter(|_| r.channel == records::TASKS && r.principal == by && r.principal != a.identity) else { return r };
+        let vouches = self.journal.channel(&asked, records::CHAT).iter().find(|q| q.seq == seq).is_some_and(|q| records::vouches(q, &a.identity, &by, &chat));
+        if vouches {
+            Record { principal: a.identity.clone(), ..r }
+        } else {
+            r
         }
     }
 
@@ -3662,7 +3778,8 @@ impl World {
             }
         }
         for r in answers {
-            if r.principal != juniper.identity || r.body["chat"] != HOME {
+            // signed by the agent asked (a computer per agent), back home
+            if r.body["by"].as_str() != Some(r.principal.as_str()) || r.principal == juniper.identity || r.body["chat"] != HOME {
                 return Err(format!("A2: an answer by {} for {}", r.principal, r.body["chat"]));
             }
             let woke = records::turn_id(&juniper.fragment, &juniper.fragment, records::TASKS, r.seq);

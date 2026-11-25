@@ -389,10 +389,12 @@ impl Lifecycle {
         }
     }
 
-    /// Awake time `[from, to)`, but what falls in the unsaved window, and
-    /// none while always on.
+    /// Awake time `[from, to)`, but what falls in the unsaved window. An
+    /// always-on computer's too: its seat's ledger lets off a computer-month
+    /// a month, all its person's computers together (a computer per agent),
+    /// so its hours count in that bound (`ledger::SEAT_AWAKE_INCLUDED_MS`).
     fn meter_span(&self, from: i64, to: i64, step: &mut Step) {
-        if from < to && !self.always_on {
+        if from < to {
             let (free_from, free_to) = self.unmetered.unwrap_or((to, to));
             assert!(free_from <= free_to, "a window runs forward");
             if from < free_from.min(to) {

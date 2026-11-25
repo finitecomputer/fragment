@@ -178,7 +178,9 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
         if (!agent) continue;
         const tasks = await newest(agent.fragment, "tasks", TASK_RECORDS);
         for (const t of ours.filter((x) => x.asker === asker)) {
-          const answer = tasks.find((r) => r.principal === asker && r.body?.kind === "answer" && r.body?.turn === t.turn);
+          // signed by its asker's computer, or by the asked agent's own (a
+          // computer per agent: docs/chat-records.md, "An ask's answer")
+          const answer = tasks.find((r) => (r.principal === asker || r.principal === t.asked) && r.body?.kind === "answer" && r.body?.turn === t.turn);
           const start = answer && work.find((r) => r.principal === asker && r.body?.kind === "turn.start" && r.body?.cause?.fragment === agent.fragment && r.body?.cause?.channel === "tasks" && r.body?.cause?.seq === answer.seq);
           if (start && work.some((r) => r.principal === asker && r.body?.kind === "turn.end" && r.body?.turn === start.body.turn)) answeredTurns.add(t.turn);
         }

@@ -98,19 +98,21 @@ struct Change {
     agent_turns: BTreeMap<String, Option<Vec<i64>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     children: Option<Vec<Helper>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    answered: BTreeMap<String, Option<i64>>,
 }
 
 impl Change {
     fn is_empty(&self) -> bool {
-        let Change { version, boot, cursors, turns, admitted, said, agent_turns, children } = self;
-        version.is_none() && boot.is_none() && cursors.is_empty() && turns.is_empty() && admitted.is_none() && said.is_none() && agent_turns.is_empty() && children.is_none()
+        let Change { version, boot, cursors, turns, admitted, said, agent_turns, children, answered } = self;
+        version.is_none() && boot.is_none() && cursors.is_empty() && turns.is_empty() && admitted.is_none() && said.is_none() && agent_turns.is_empty() && children.is_none() && answered.is_empty()
     }
 }
 
 /// What changed from `was` to `now`. Every field of the state is named (no
 /// `..`): one added to it fails to compile here until its change is.
 fn changed(was: &State, now: &State) -> Change {
-    let State { version, boot, cursors, turns, admitted, said, agent_turns, children } = now;
+    let State { version, boot, cursors, turns, admitted, said, agent_turns, children, answered } = now;
     Change {
         version: (*version != was.version).then_some(*version),
         boot: (*boot != was.boot).then_some(*boot),
@@ -120,6 +122,7 @@ fn changed(was: &State, now: &State) -> Change {
         said: (*said != was.said).then_some(*said),
         agent_turns: entries(&was.agent_turns, agent_turns),
         children: (*children != was.children).then(|| children.clone()),
+        answered: entries(&was.answered, answered),
     }
 }
 
@@ -132,7 +135,7 @@ fn entries<V: Clone + PartialEq>(was: &BTreeMap<String, V>, now: &BTreeMap<Strin
 
 /// `change` made to `state`.
 fn apply(state: &mut State, change: Change) {
-    let Change { version, boot, cursors, turns, admitted, said, agent_turns, children } = change;
+    let Change { version, boot, cursors, turns, admitted, said, agent_turns, children, answered } = change;
     if let Some(v) = version {
         state.version = v;
     }
@@ -151,6 +154,7 @@ fn apply(state: &mut State, change: Change) {
     if let Some(c) = children {
         state.children = c;
     }
+    put(&mut state.answered, answered);
 }
 
 fn put<V>(map: &mut BTreeMap<String, V>, entries: BTreeMap<String, Option<V>>) {

@@ -77,7 +77,7 @@ const POLL: Duration = Duration::from_secs(3);
 
 /// Asks `f` every `POLL` until it answers, or `bound` passes.
 #[track_caller]
-fn within<T>(bound: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
+pub(super) fn within<T>(bound: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
     let at = std::panic::Location::caller();
     let t0 = Instant::now();
     loop {
@@ -126,7 +126,7 @@ fn paid(api: &Api, identity: &str) -> usize {
 }
 
 /// The owner's message in `chat`: the turn it starts for `agent`, and its seq.
-fn say(api: &Api, keys: &Keys, chat: &str, agent: &str, id: &str, text: &str) -> Result<(String, i64)> {
+pub(super) fn say(api: &Api, keys: &Keys, chat: &str, agent: &str, id: &str, text: &str) -> Result<(String, i64)> {
     let r = api.signed(keys, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })))?;
     anyhow::ensure!(r.status == 200, "the owner's message {id}: {r}");
     let seq = r.body["record"]["seq"].as_i64().context("a post answers its record's seq")?;

@@ -1462,13 +1462,15 @@ impl FragmentCell {
                     }
                     laps.lap("manifest");
                     let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
-                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
+                    Some((kind, body.title.as_deref().map(str::trim).or(title).map(str::to_string)))
                 }
                 None => None,
             };
             // its own key, this life's alone, which names its repo
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             let fragment_npub = npub::encode(&pubkey);
+            // an agent's face names its agent: its key (members.rs `face`)
+            let face = face.map(|(kind, title)| crate::members::face(kind, title.as_deref(), None, None, Some(&fragment_npub)));
             laps.lap("key");
             // its repo, unless its template's seed makes it after the answer
             let repo = match making.repo_first() {

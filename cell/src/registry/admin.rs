@@ -357,10 +357,24 @@ impl RegistryCell {
                 "SELECT i.id, (SELECT email FROM subjects WHERE identity = i.id ORDER BY signed_in_at DESC LIMIT 1) AS email FROM identities i WHERE i.kind = 'person'",
                 vec![],
             )?;
-            for p in people {
+            for p in &people {
                 let computer = fragment_core::computer::default_computer_of(&p.id);
                 if b.computers.contains(&computer) {
-                    owners.push((computer, p.id, p.email));
+                    owners.push((computer, p.id.clone(), p.email.clone()));
+                }
+            }
+            // an agent's own computer (a computer per agent) is its owner's
+            #[derive(Deserialize)]
+            struct Agent {
+                id: String,
+                owner: String,
+            }
+            let agents = self.rows::<Agent>("SELECT i.id, i.owner FROM identities i JOIN agent_fragments a ON a.identity = i.id WHERE i.kind = 'agent' AND i.owner IS NOT NULL", vec![])?;
+            for a in agents {
+                let computer = fragment_core::computer::default_computer_of(&a.id);
+                if b.computers.contains(&computer) {
+                    let email = people.iter().find(|p| p.id == a.owner).and_then(|p| p.email.clone());
+                    owners.push((computer, a.owner, email));
                 }
             }
         }

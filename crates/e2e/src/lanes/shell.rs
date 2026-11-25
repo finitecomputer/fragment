@@ -1570,9 +1570,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // bridge never says its image does
     const CONNECTOR_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for]:not([data-simplex-computer])";
     const COMPUTER_ROW: &str = "#settings-simplex:not([hidden]) [data-simplex-for][data-simplex-computer]";
+    // their first agent's computer (its own: a computer per agent), the
+    // Reader's another
+    let first_agent = own_named(api, &session, &first_label)?;
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
-    let said = computers.body["computers"][0].get("simplex").cloned();
-    let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let firsts = computer_running(&computers.body, &first_agent);
+    let said = firsts.get("simplex").cloned();
+    let simplex_id = firsts["computer"].as_str().unwrap_or("").to_string();
     s.ok(
         "settings offer SimpleX's connector on a computer whose image does not do it (the stub's, as every agent's own computer's): its section and nav link shown, each agent's Set up its connector's, and the computer's view says nothing of SimpleX",
         computers.status == 200 && said.is_none() && has(CONNECTOR_ROW) && !has(COMPUTER_ROW) && has(".settings-nav-link[data-section=settings-simplex]:not([hidden])"),
@@ -1587,18 +1591,25 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         &tags,
     );
     // its bridge says its image does (the lever, as `?simplex=1` would) on a
-    // $200 seat, its computer kept on: its computer's row; its holder lets it
-    // sleep (Billing's box, Settings left open): its connector's; kept on
-    // again, its computer's; its image no longer doing it, its connector's,
-    // through the list's socket, with what was typed elsewhere on them kept
-    // (Alex's review), and nothing else redrawn
+    // $200 seat, its computer kept on: its agent's row its computer's, the
+    // Reader's (on a computer of its own, which does not) its connector's
+    // still; its holder lets it sleep (Billing's box, Settings left open):
+    // its connector's; kept on again, its computer's; its image no longer
+    // doing it, its connector's, through the list's socket, with what was
+    // typed elsewhere on them kept (Alex's review), and nothing else redrawn
     let op_session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&op_session, &s.operator);
     let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
     let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
     b.eval(&page, "(document.getElementById('settings').click(), true)")?;
     let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
-    let row_is = |which: &str| format!("!!document.querySelector({which:?}) && !document.querySelector({other:?})", other = if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW });
+    // the first agent's row is `which`, the Reader's its connector's
+    let of_first = |row: &str| row.replacen("[data-simplex-for]", &format!("[data-simplex-for={first_agent:?}]"), 1);
+    let readers = CONNECTOR_ROW.replacen("[data-simplex-for]", &format!("[data-simplex-for={:?}]", own_named(api, &session, "reader").unwrap_or_default()), 1);
+    let row_is = |which: &str| {
+        let (mine, other) = (of_first(which), of_first(if which == CONNECTOR_ROW { COMPUTER_ROW } else { CONNECTOR_ROW }));
+        format!("!!document.querySelector({mine:?}) && !document.querySelector({other:?}) && !!document.querySelector({readers:?})")
+    };
     let kept_on = b.until(&page, &format!("!!({box_}) && !({box_}).checked && {}", row_is(COMPUTER_ROW)), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
     let sleeps = b.until(&page, &row_is(CONNECTOR_ROW), std::time::Duration::from_secs(30));
@@ -1610,7 +1621,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
     b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
     s.ok(
-        "an always-on computer whose image does SimpleX keeps each agent's SimpleX (its computer's Set up); let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
+        "an always-on computer whose image does SimpleX keeps its agent's SimpleX (its computer's Set up), another agent's on its own computer its connector's still; let sleep from Billing with Settings left open, its connector's; kept on again, its computer's; its image no longer doing it, its connector's, with nothing else on the page redrawn",
         on.status == 200 && comped.status == 200 && kept_on && sleeps && back && off.status == 200 && off.body["simplex"] == false && followed && kept == json!(true),
         json!({ "on": on.body, "comped": comped.status, "keptOn": kept_on, "sleeps": sleeps, "back": back, "off": off.body, "followed": followed, "kept": kept, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
     );
@@ -2708,6 +2719,29 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     b.eval(page, &format!("(document.querySelector({face})?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("settings-agent-face.png"));
+    // a computer per agent: its computer is on its card in Settings' Agents,
+    // its own (made for it by Add's making), with its state, version and
+    // Restart; Settings has no Computer of its own any more
+    let own = js(&format!(".agent-setting[data-agent={}] .agent-computer", js(&agent)));
+    let carded = b.until(page, &format!("(() => {{ const c = document.querySelector({own}); return !!c && /State/.test(c.innerText) && !!c.querySelector('[data-action=restart-ask]'); }})()"), wait);
+    let seen = b.eval(page, &format!("({{ id: document.querySelector({own})?.dataset.computer ?? null, headings: [...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent) }})"))?;
+    let computers = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let mine = computers.body["computers"].as_array().and_then(|l| l.iter().find(|c| c["agents"].as_array().is_some_and(|a| a.iter().any(|x| x["fragment"] == agent.as_str())))).cloned().unwrap_or(Value::Null);
+    for (width, height, mobile, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+        b.viewport(page, width, height, mobile)?;
+        b.color_scheme(page, scheme)?;
+        // its heading in view, under the phone's sticky tabs too
+        b.eval(page, &format!("(document.querySelector({own})?.querySelector('h3')?.scrollIntoView({{ block: 'center' }}), true)"))?;
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = b.screenshot(page, &shots.join(format!("agent-computer-{width}-{scheme}.png")));
+    }
+    b.viewport(page, 1280, 800, false)?;
+    b.color_scheme(page, "light")?;
+    s.ok(
+        "a computer per agent: Add's agent runs on its own computer, whose card is on the agent's own in Settings (its state and Restart), and Settings has no Computer section of its own",
+        carded && seen["id"] == mine["computer"] && mine["agents"].as_array().map(Vec::len) == Some(1) && seen["headings"].as_array().is_some_and(|h| !h.contains(&json!("Computer"))),
+        json!({ "seen": seen, "computer": mine }),
+    );
     // the chat: its header in the shell (the chat's own title), and its page
     open_row(b, page, chat, wait)?;
     let headed = b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(FIRST_CHAT)), wait);
@@ -3670,7 +3704,7 @@ fn disk_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=disk_filling]')";
     // its words, over settings once they have loaded (what the shots show)
-    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && [...document.querySelectorAll('#settings-page h2')].some((h) => h.textContent === 'Computer')");
+    let words = format!("{shown}?.checkVisibility() && {shown}.innerText.includes('Your computer is almost full (2.4 GB left)') && {shown}.innerText.includes('Ask your agent to move big files to storage.') && !!document.querySelector('#settings-page .agent-computer h3')");
     let filling = super::computers::lever_with(api, &id, json!({ "op": "disk", "total": 20_000_002_048u64, "free": 9_000_000_000u64, "data": 14_200_000_000u64 }))?;
     // its update waits for room while it is told filling (docs/computers.md,
     // "An image's share of the disk"; Codex on #1422)
@@ -3842,8 +3876,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let shown = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=update]')";
     let settings_text = |b: &mut Browser| b.eval(page, "document.getElementById('settings-page').innerText").ok().and_then(|t| t.as_str().map(str::to_string)).unwrap_or_default();
     let idle = |s: &Suite| s.eventually(std::time::Duration::from_secs(15), || super::computers::lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
-    // settings' Computer section, in view for its screenshot
-    let to_computer = "([...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Computer')?.scrollIntoView({ block: 'start' }), true)";
+    // its agent's Computer card in settings, in view for its screenshot
+    let to_computer = &format!("(document.querySelector({})?.scrollIntoView({{ block: 'start' }}), true)", js(&format!("#settings-page .agent-computer[data-computer={id:?}]")));
     let first = view();
     let running = first["version"].as_str().unwrap_or("").to_string();
     idle(s);
@@ -3896,9 +3930,12 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let before = view()["generation"].as_u64().unwrap_or(0);
     b.eval(page, RESTART_STEPS)?;
     b.eval(page, &format!("(window.__restartFails = false, {RESTART_ROW}.querySelector('button[data-action=restart]').click(), true)"))?;
+    // its agent's card's Restart (the Reader's, on a computer of its own,
+    // keeps its own)
+    let its_restart_ask = format!("#settings-page .agent-computer[data-computer={id:?}] [data-action=restart-ask]");
     let starting = b.until(
         page,
-        &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…' && document.querySelector('#settings-page .restart-status')?.textContent === 'Starting…' && !document.querySelector('#settings-page [data-action=restart-ask]') && document.getElementById('settings-page').innerText.includes('Starting')"),
+        &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…' && document.querySelector('#settings-page .restart-status')?.textContent === 'Starting…' && !document.querySelector({}) && document.getElementById('settings-page').innerText.includes('Starting')", js(&its_restart_ask)),
         hold,
     );
     let _ = b.screenshot(page, &shots.join("computer-restart-starting.png"));
@@ -4034,8 +4071,12 @@ const READ_AGAIN: &str = "(window.__failComputers = false, document.querySelecto
 /// What the page made and said, under `FAIL_COMPUTERS`.
 const MADE: &str = "({ path: location.pathname, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').innerText, band: document.getElementById('computer-notices').innerText, \
     makingSaid: window.__makingSaid, makingAt: window.__makingAt ?? null, makes: window.__makes, reads: window.__computerReads })";
-/// Settings' Computer section, as shown (null before it is).
-const COMPUTER_SECTION: &str = "[...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Computer')?.parentElement.innerText ?? null";
+/// Settings' Computer card of their (first) agent, as shown (null before
+/// it is): a computer per agent, each agent's on its page.
+const COMPUTER_SECTION: &str = "document.querySelector('#settings-page .agent-computer')?.innerText ?? null";
+/// Settings' Agents, as shown (null before it is): their agents are read
+/// from their computers, so a failed read says so there.
+const AGENTS_SECTION: &str = "[...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Agents')?.parentElement.innerText ?? null";
 
 /// The shell at `path` under `FAIL_COMPUTERS` from its first document,
 /// its first run's makes held, after `before` (a script setting it).
@@ -4416,12 +4457,12 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
 
     // at Settings: what is true of their computer, then the computer itself
     let page = open_failing(b, api, "/settings", "")?;
-    let loaded = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
-    let said = b.eval(&page, COMPUTER_SECTION)?;
+    let loaded = b.until(&page, &format!("location.pathname === '/settings' && /Couldn't load/.test({AGENTS_SECTION}) && {REFRESH_LINE}"), wait);
+    let said = b.eval(&page, AGENTS_SECTION)?;
     let _ = b.screenshot(&page, &shots.join("settings-refresh-failed.png"));
     s.ok(
-        "their computer unread, Settings' Computer section says it couldn't be loaded, never that it starts with their first agent, under the line",
-        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load your computer") && !t.contains("starts with your first agent")),
+        "their computers unread, Settings' Agents says their agents couldn't be loaded (they are read from their computers), never that they have none, under the line",
+        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load your agents") && !t.contains("None yet")),
         &said,
     );
     b.eval(&page, READ_AGAIN)?;
@@ -4511,7 +4552,7 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     let page = open_failing(b, api, "/", "")?;
     let shown = b.until(&page, &chat_open, wait);
     b.eval(&page, TO_SETTINGS)?;
-    let settings = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
+    let settings = b.until(&page, &format!("location.pathname === '/settings' && ({AGENTS_SECTION}) !== null && {REFRESH_LINE}"), wait);
     b.eval(&page, READ_AGAIN)?;
     let read = b.until(&page, &format!("{NO_REFRESH_LINE} && location.pathname === '/settings'"), wait);
     std::thread::sleep(settle);
@@ -4618,7 +4659,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let wait = std::time::Duration::from_secs(30);
     let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
     let computer = computers.body["computers"][0].clone();
-    let agents: Vec<(String, String)> = computer["agents"].as_array().map(|l| l.iter().map(|a| (a["fragment"].as_str().unwrap_or("").to_string(), a["identity"].as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
+    let agents: Vec<(String, String)> = all_agents(&computers.body).iter().map(|a| (a["fragment"].as_str().unwrap_or("").to_string(), a["identity"].as_str().unwrap_or("").to_string())).collect();
     let Some((lead, lead_id)) = agents.first().cloned() else {
         s.ok("the Connections page has agents to show", false, &computers);
         return Ok(());
@@ -5506,7 +5547,7 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // it is kept on: Settings' SimpleX row is then the computer's own
     // (`data-simplex-computer`), shown once the shell's view of it says so
     // (every seat's Settings shows SimpleX, its connector's elsewhere)
-    let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let computer = computer_running(&shell(api, me.session, "GET", "/api/computers", None, &[])?.body, &agent)["computer"].as_str().unwrap_or("").to_string();
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
     super::computers::lever_with(api, &computer, json!({ "op": "always-on", "on": true }))?;
     const ITS_OWN: &str = "!!document.querySelector('#settings-simplex:not([hidden]) [data-simplex-computer]')";
@@ -5727,7 +5768,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let options = options.as_array().cloned().unwrap_or_default();
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
-    let view = || shell(api, session, "GET", "/api/computers", None, &[]).map(|r| r.body["computers"][0].clone()).unwrap_or(Value::Null);
+    let view = || shell(api, session, "GET", "/api/computers", None, &[]).map(|r| computer_running(&r.body, &lead)).unwrap_or(Value::Null);
     let runs_on = |v: &Value| v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["modelProviders"].clone()).unwrap_or(Value::Null);
     let connected = view();
     let cheap = connected["models"]["cheap"].as_str().unwrap_or("").to_string();
@@ -6461,7 +6502,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
     let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
-    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agents = all_agents(&r.body);
     let id_of = |label: &str| agents.iter().find(|a| a["fragment"].as_str().map(label_of) == Some(label)).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let first_label = me.first;
     let (lead, other) = (id_of("reader"), id_of(first_label));
@@ -9908,18 +9949,20 @@ fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
     Ok(())
 }
 
-/// Another agent of the person's, made through the public API as the CLI
-/// or an agent makes one (the shell makes only the first): its fragment,
-/// its job, assigned to their computer, its own chat with it in it, and
-/// its hello. Its fragment, its chat and its identity.
+/// Another agent of the person's, made through the public API in the order
+/// the shell's Add makes one (cell/shell/onboarding.js `makeAgent`): its
+/// fragment, its job, a computer of its own and the assign there, its own
+/// chat with it in it, its hello, and the wake. Its fragment, its chat and
+/// its identity.
 fn extra_agent(api: &Api, session: &str, label: &str, title: &str, job: &str) -> Result<(String, String, String)> {
     let call = |method: &'static str, path: &str, body: Value| shell(api, session, method, path, Some(&body), &[]);
     let name = |r: &Reply| r.body["name"].as_str().unwrap_or("").to_string();
     let made = call("POST", "/api/fragments", json!({ "label": label, "template": "agent", "title": title }))?;
     anyhow::ensure!(made.status == 200, "the agent: {made}");
     let agent = name(&made);
-    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
-    let computer = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let own = call("POST", "/api/computers", json!({ "agent": agent }))?;
+    let computer = own.body["computer"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(own.status == 200 && !computer.is_empty(), "its own computer: {own}");
     let assigned = call("PUT", &format!("/api/computers/{computer}/agents/{agent}"), json!({}))?;
     let id = assigned.body["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == agent.as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     anyhow::ensure!(fragment_core::npub::is_identity(&id), "its computer took it: {assigned}");
@@ -9933,7 +9976,21 @@ fn extra_agent(api: &Api, session: &str, label: &str, title: &str, job: &str) ->
     let joined = call("PUT", &format!("/api/f/{chat}/members/{id}"), json!({ "role": "editor" }))?;
     let hello = call("POST", &format!("/api/f/{agent}/channels/tasks"), json!({ "id": "hello", "body": { "kind": "routine", "chat": chat, "text": "You were just made: say hello." } }))?;
     anyhow::ensure!(joined.status == 200 && hello.status == 200, "it joins its chat: {joined} {hello}");
+    let woke = call("POST", &format!("/api/computers/{computer}/wake"), json!({}))?;
+    anyhow::ensure!(woke.status == 200, "its computer wakes: {woke}");
     Ok((agent, chat, id))
+}
+
+/// Every agent on the person's computers (`GET /api/computers`), in the
+/// computers' order: an agent made since a computer per agent is on its own.
+fn all_agents(view: &Value) -> Vec<Value> {
+    view["computers"].as_array().into_iter().flatten().flat_map(|c| c["agents"].as_array().cloned().unwrap_or_default()).collect()
+}
+
+/// The computer that runs an agent (`agent`: its fragment or its identity),
+/// from the person's computers' view.
+fn computer_running(view: &Value, agent: &str) -> Value {
+    view["computers"].as_array().into_iter().flatten().find(|c| c["agents"].as_array().is_some_and(|l| l.iter().any(|a| a["fragment"] == agent || a["identity"] == agent))).cloned().unwrap_or(Value::Null)
 }
 
 /// The sidebar's sections (Paul, 2026-10-31: one per agent of theirs, its
@@ -10243,7 +10300,7 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     let wait = std::time::Duration::from_secs(30);
     let agent = own_named(api, session, "wren")?;
     let chat = own_named(api, session, "wren-chat")?;
-    let before = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["agents"].as_array().map(Vec::len).unwrap_or(0);
+    let before = all_agents(&shell(api, session, "GET", "/api/computers", None, &[])?.body).len();
     b.click(page, "#settings")?;
     let ask = format!("document.querySelector({})", js(&format!("[data-remove-agent={}]", js(&agent))));
     let offered = b.until(page, &format!("!!{ask}"), wait);
@@ -10296,7 +10353,7 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     b.eval(page, "(document.getElementById('edit-agent').close(), true)")?;
     let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
     // off its computer a moment after its list (agent-settings.js `liveOwn`)
-    let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().and_then(|r| r.body["computers"][0]["agents"].as_array().map(Vec::len)).unwrap_or(0);
+    let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().map(|r| all_agents(&r.body).len()).unwrap_or(0);
     let left = s.eventually(wait, || on_computer() + 1 == before);
     let after = on_computer();
     let archived = own_row_of(api, session, &chat)["archived"] == true;
@@ -10434,19 +10491,21 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
         json!({ "start": start, "stoppable": stoppable, "ended": ended, "byOwner": by_owner }),
     );
 
-    // cut by a restart: Lost, said until the answer is in (its asker's turn
-    // that asked was cut too, its card closed: its answer's turn's alone)
+    // cut by a restart: Lost, said until the answer is in. The Reader's own
+    // computer is restarted (a computer per agent: its turn runs there, its
+    // asker's on another), which cuts its turn; its asker's turn that asked
+    // waits on its own card still (its words hold "approve"), answered after,
+    // and then its answer's turn's
     say("thread-2", json!({ "text": "ask reader approve once more" }))?;
     let needs = state_is(b, "you");
-    let computer = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
-    // the first agent's turns here as it is killed: its own that asked,
-    // whose card waits too. The restarted computer ends each as lost once
-    // it reaches it, after a rollback only once it has claimed again every
-    // turn before it, which may be after the Reader's is (the line's Lost):
-    // until then its card looks open, and answering it answers no one
+    let computer = computer_running(&shell(api, session, "GET", "/api/computers", None, &[])?.body, reader_id)["computer"].as_str().unwrap_or("").to_string();
+    // the Reader's turns in the pair chat as it is killed. The restarted
+    // computer ends each as lost once it reaches it, after a rollback only
+    // once it has claimed again every turn before it
+    let pair_work = || shell(api, session, "GET", &format!("/api/f/{pair}/channels/work?before={}&limit=200", i64::MAX), None, &[]).map(|r| r.body["records"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
     let ended = |w: &[Value], turn: &Value| w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == *turn);
-    let before = work();
-    let open: Vec<Value> = before.iter().filter(|r| r["principal"] == first_id.as_str() && r["body"]["kind"] == "turn.start" && !ended(&before, &r["body"]["turn"])).map(|r| r["body"]["turn"].clone()).collect();
+    let before = pair_work();
+    let open: Vec<Value> = before.iter().filter(|r| r["principal"] == reader_id && r["body"]["kind"] == "turn.start" && !ended(&before, &r["body"]["turn"])).map(|r| r["body"]["turn"].clone()).collect();
     let view = || shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let generation = view()["generation"].as_u64().unwrap_or(0);
     let killed = super::computers::lever(api, &computer, "kill")?;
@@ -10465,10 +10524,11 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     let lost = killed.status == 200 && heard && state_is(b, "lost");
     let _ = b.screenshot(page, &shots.join("desktop-thread-lost.png"));
     let cut = !open.is_empty() && s.eventually(agent_wait, || {
-        let w = work();
+        let w = pair_work();
         open.iter().all(|t| ended(&w, t))
     });
-    let answered = cut && answer_own(s)?;
+    // its asker's card (the turn that asked), then its answer's turn's
+    let answered = cut && answer_own(s)? && answer_own(s)?;
     let then_gone = gone(b);
     s.ok(
         "cut by a restart, its line says Lost (never dropped) until its asker has answered in the chat, then goes",
@@ -10486,10 +10546,10 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     Ok(())
 }
 
-/// The person's agents (the computer's), by fragment label: their identities.
+/// The person's agents (their computers'), by fragment label: their identities.
 fn agent_ids(api: &Api, session: &str, labels: &[&str]) -> Result<Vec<String>> {
     let r = shell(api, session, "GET", "/api/computers", None, &[])?;
-    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let agents = all_agents(&r.body);
     let ids: Vec<String> = labels
         .iter()
         .map(|l| agents.iter().find(|a| a["fragment"].as_str().map(label_of) == Some(*l)).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string())
@@ -10560,12 +10620,14 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         "new Promise((done) => { addEventListener('message', (e) => { if (e.data?.fragment === 'agents') done(e.data.agents.map((a) => [a.identity, a.phase ?? null])); }); \
          parent.postMessage({ fragment: 'agents?' }, '*'); setTimeout(() => done(null), 5000); })",
     )?;
-    let phase = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["phase"].clone();
-    let mut want_phases = vec![json!([reader, phase]), json!([first, phase])];
+    let view = shell(api, me.session, "GET", "/api/computers", None, &[])?.body;
+    let phase_of = |identity: &str| view["computers"].as_array().into_iter().flatten().find(|c| c["agents"].as_array().is_some_and(|l| l.iter().any(|a| a["identity"] == identity))).map(|c| c["phase"].clone()).unwrap_or(Value::Null);
+    let phase = json!([phase_of(&reader), phase_of(&first)]);
+    let mut want_phases = vec![json!([reader, phase[0]]), json!([first, phase[1]])];
     let mut got_phases = phases.as_array().cloned().unwrap_or_default();
     want_phases.sort_by_key(Value::to_string);
     got_phases.sort_by_key(Value::to_string);
-    s.ok("the shell's roster names each agent with its computer's phase (awake)", phase == "awake" && got_phases == want_phases, json!({ "roster": phases, "computer": phase }));
+    s.ok("the shell's roster names each agent with its own computer's phase (awake)", phase == json!(["awake", "awake"]) && got_phases == want_phases, json!({ "roster": phases, "computers": phase }));
 
     // a page's own add (no click in the shell) asks its person in the
     // shell's dialog, and adds no one while it waits, nor on Cancel

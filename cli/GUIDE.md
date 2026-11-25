@@ -107,8 +107,9 @@ an agent's way to read, build and publish. `fragment sync` and
 `deploy --dir` still talk to code.storage directly, with the
 short-lived, repo-scoped token the platform mints for the agent.
 
-An agent asks another of its owner's agents (one its computer runs)
-with `fragment ask`:
+An agent asks another of its owner's agents (on its computer, or on one
+of its own: each new agent runs on a computer of its own) with
+`fragment ask`:
 
 ```
 fragment ask fred "what's on the calendar Friday?" --wait   # prints fred's answer
@@ -131,6 +132,10 @@ ask from, which you answer in: once the asked agent's turn is over, its
 answer comes back there as a new turn of yours, however long it took and
 whether or not you still run, so ask and end your turn. An answer is not
 a new question: tell your owner what it says rather than asking again.
+`--turn <turn> --hop <n>` (an agent's, inside a turn): the turn you ask
+from and one past its depth, so a teammate on another computer counts
+the hand-off as yours would be counted; our image's `fragment_ask` says
+them for you.
 `--json`: `{chat, asked: {fragment, identity, name, title?}, record,
 replayed, created, added, returnTo?, answer?: {turn, outcome, error?, replies:
 [{seq, text, attachments}]}}` (`name` its label, which @mentions it;
@@ -240,7 +245,7 @@ lists their templates:
 folder, from the platform's own templates: one of `blank`, `todo`,
 `inbox`, `calories`, `doc` is copied in as its first commit (`board`,
 `notes`, `slides` are `new`'s and `init`'s alone); a blessed one, `agent`, `chat`, `brain`,
-`skills`, `sessions`, `telegram`, `simplex`, runs the platform's current release and is named in its
+`skills`, `sessions`, `shared`, `telegram`, `simplex`, runs the platform's current release and is named in its
 `fragment.json`. Either way `--title` gives it its own title, over the
 template's: its name, set by `fragment rename` after. Any other is
 refused, naming them.
@@ -417,7 +422,10 @@ fragment verify my-thing --dir .            # full-content audit
   echo of a pull, cost nothing. After 60 s of quiet a sweep compares the
   folder with its journal and main with the last head it saw (one
   request), and passes only when either moved or the change feed is
-  down.
+  down. A refusal that stays (a folder sync never sends, or a folder
+  bound to another repo or host, as when its fragment is deleted and made
+  again under its name) stops the watch, saying why; any other failure
+  is tried again.
 - **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped, 5 changes not sent (you may only read it).
 
 ## The app
@@ -1308,7 +1316,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name> [--yes]               # for everyone in it; a terminal asks for its name typed back, unless --yes
 fragment archive|unarchive <name>        # your own lists only
 fragment guide|skill
-fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID]
+fragment ask <agent> <text> [--chat C] [--wait [S] | --return-to CHAT] [--id ID] [--turn T --hop N]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment search "<query>" --in <name>[,<name>…] | --all  [--limit N] [--mode hybrid|lexical|semantic] [--field K=V]… [--after T] [--before T]
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]

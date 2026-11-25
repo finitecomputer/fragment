@@ -18,7 +18,9 @@ const SUFFIX = "abcdefghjkmnpqrstuvwxyz23456789";
 const labelOf = (name) => name.replace(/--[a-km-np-z2-9]{4}$/, "");
 
 // The platform: fragments as the list says them, files at main, members,
-// one computer, and each agent's `tasks`. `first`: their first agent made
+// their computers (theirs from before, `c1`, and each agent's own since a
+// computer per agent, made by its agent fragment's name), and each agent's
+// `tasks`. `first`: their first agent made
 // and talked to already (none: a mover's account, whose first agent is the
 // move's).
 function platform({ first: seeded = true } = {}) {
@@ -27,6 +29,8 @@ function platform({ first: seeded = true } = {}) {
   const members = new Map();
   const tasks = new Map();
   const computer = { computer: "c1", phase: "awake", agents: [] };
+  const computers = [computer];
+  const computerById = (id) => computers.find((c) => c.computer === id);
   let made = 0;
   let cut = null;
   const writes = [];
@@ -46,12 +50,21 @@ function platform({ first: seeded = true } = {}) {
   const answer = (method, path, body) => {
     let m;
     if (method === "POST" && path === "/api/fragments") return { name: make(body.label, body.template, body.title) };
-    if (method === "GET" && path === "/api/computers") return { computers: [computer] };
-    if ((m = path.match(/^\/api\/computers\/c1\/agents\/([^/]+)$/)) && method === "PUT") {
-      if (!computer.agents.some((a) => a.fragment === m[1])) computer.agents.push({ fragment: m[1], identity: `npub1${labelOf(m[1])}` });
-      return { agents: computer.agents };
+    if (method === "GET" && path === "/api/computers") return { computers };
+    // an agent's own computer, made by its fragment's name; again, the same
+    if (method === "POST" && path === "/api/computers") {
+      assert.ok(row(body.agent)?.kind === "agent", `an agent's computer names its agent fragment: ${JSON.stringify(body)}`);
+      const id = `c-${labelOf(body.agent)}`;
+      if (!computerById(id)) computers.push({ computer: id, phase: "awake", agents: [] });
+      return computerById(id);
     }
-    if (path === "/api/computers/c1/wake") return computer;
+    if ((m = path.match(/^\/api\/computers\/([^/]+)\/agents\/([^/]+)$/)) && method === "PUT") {
+      const c = computerById(m[1]);
+      assert.ok(c, `no computer ${m[1]}`);
+      if (!c.agents.some((a) => a.fragment === m[2])) c.agents.push({ fragment: m[2], identity: `npub1${labelOf(m[2])}` });
+      return c;
+    }
+    if ((m = path.match(/^\/api\/computers\/([^/]+)\/wake$/))) return computerById(m[1]);
     if (!(m = path.match(/^\/api\/f\/([^/]+)\/([^?]+)(?:\?(.*))?$/))) throw new Error(`no route: ${method} ${path}`);
     const [, name, rest, query] = m;
     assert.ok(row(name), `${method} ${path}: no such fragment`);
@@ -114,6 +127,9 @@ function platform({ first: seeded = true } = {}) {
     api,
     rows: () => structuredClone(rows),
     computer: () => structuredClone(computer),
+    computers: () => structuredClone(computers),
+    // the computer an agent runs on
+    computerOf: (fragment) => structuredClone(computers.find((c) => c.agents.some((a) => a.fragment === fragment)) ?? null),
     files: (name) => files.get(name),
     tasks: (name) => tasks.get(name),
     members: (name) => members.get(name),
@@ -129,12 +145,12 @@ function platform({ first: seeded = true } = {}) {
 // onboarding made as shell.js makes it; `at` the page open (Settings'
 // "settings"), or none (home), and the notices it drew.
 function page(world, { at = null } = {}) {
-  const state = { fragments: [], computer: null, agents: new Map(), frames: new Set() };
+  const state = { fragments: [], computers: [], agents: new Map(), frames: new Set() };
   const notices = [];
   const load = async () => {
     state.fragments = world.rows();
-    state.computer = world.computer();
-    state.agents = new Map(state.computer.agents.map((a) => [a.identity, a]));
+    state.computers = world.computers();
+    state.agents = new Map(state.computers.flatMap((c) => c.agents.map((a) => [a.identity, a])));
   };
   const node = () => ({ style: { setProperty() {} }, classList: { add() {}, remove() {} }, addEventListener() {}, replaceChildren() {}, append() {}, remove() {}, hidden: false });
   const own = (f) => f.role === "owner";
@@ -165,11 +181,12 @@ function page(world, { at = null } = {}) {
       slug: (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
       seg: (s) => encodeURIComponent(s),
     },
-    computer: { computerView: () => state.computer, computerFailed: () => false, agents: () => state.agents, computerOf: async () => state.computer, computerIs() {} },
+    computer: { computers: () => state.computers, computerFailed: () => false, agents: () => state.agents, computerOf: (agent) => world.api("POST", "/api/computers", { agent }), computerIs() {} },
     navigation: { start() {}, openChat: (name) => state.frames.add(name), atHome: () => !at, hasFrame: (name) => state.frames.has(name), page: () => at, welcomePath: "/welcome" },
     reads: () => ({ listFailed: false, updating: false }),
     load,
     skillsFragment: async () => ({}),
+    sharedFragment: async () => ({}),
     rosterChanged() {},
   });
   // A page as the shell opens it: read, then a making owed or cut short
@@ -194,8 +211,12 @@ function madeWhole(world) {
   const chats = rows.filter((f) => f.kind === "chat" && labelOf(f.name).startsWith("wren"));
   assert.deepEqual(chats.map((f) => labelOf(f.name)), ["wren-chat"], "one chat of Wren's");
   assert.equal(rows.length, world.before + 2, "nothing else made");
-  const id = world.computer().agents.find((a) => a.fragment === wren.name)?.identity;
-  assert.ok(id, "Wren is on the computer");
+  // a computer per agent: Wren's own, never the one from before
+  const own = world.computerOf(wren.name);
+  assert.equal(own?.computer, "c-wren", "Wren is on its own computer");
+  assert.equal(world.computer().agents.some((a) => a.fragment === wren.name), false, "not on the one from before");
+  const id = own.agents.find((a) => a.fragment === wren.name)?.identity;
+  assert.ok(id, "Wren is on its computer");
   assert.ok(world.members(chats[0].name).has(id), "Wren is in its chat");
   assert.equal(wren.agentRole, "Researcher", "its role, its face's");
   assert.match(world.files(wren.name).get("SOUL.md"), /one of kim@e2e\.test's agents/, "its job");
@@ -310,9 +331,9 @@ for (const stray of [false, true]) {
     await adding(p);
     if (stray) world.make("wren-chat", "chat", "Your first chat");
     world.writes();
-    const before = JSON.stringify([world.rows(), world.computer()]);
+    const before = JSON.stringify([world.rows(), world.computers()]);
     await page(world).opened();
-    assert.equal(JSON.stringify([world.rows(), world.computer()]), before);
+    assert.equal(JSON.stringify([world.rows(), world.computers()]), before);
     assert.deepEqual(world.writes().map((w) => w.replace(/--[a-z0-9]{4}/g, "")), ["POST /api/f/wren/channels/tasks"]);
   });
 }
@@ -481,7 +502,7 @@ for (const [where, when, done] of [
       const again = await p.onboarding.addAgent({ name, role: "Researcher", quiet: true, from: "old1", agent });
       madeWhole(world);
       const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren");
-      assert.equal(again?.id, world.computer().agents.find((a) => a.fragment === wren.name)?.identity, "Add answers the one it made");
+      assert.equal(again?.id, world.computerOf(wren.name)?.agents.find((a) => a.fragment === wren.name)?.identity, "Add answers the one it made");
     });
   }
 }

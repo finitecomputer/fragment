@@ -501,12 +501,15 @@ const CLI: &str = "/usr/local/bin/fragment";
 const ASK_WAIT: Duration = Duration::from_secs(60);
 
 /// `ask <agent> <words>`: the module's list.
-async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest: &str) -> String {
+async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, hop: u32, rest: &str) -> String {
     let Some((who, words)) = rest.trim().split_once(char::is_whitespace) else {
         return "say `ask <agent> <words>`".into();
     };
+    // the turn it asks from and one past its depth, as our Hermes image's
+    // `fragment_ask` says them: a teammate on another computer counts it
+    let hop = hop.saturating_add(1).to_string();
     let run = tokio::process::Command::new(CLI)
-        .args(["--json", "ask", "--return-to", chat, "--id", &format!("ask-{turn}"), "--", who, words.trim()])
+        .args(["--json", "ask", "--return-to", chat, "--id", &format!("ask-{turn}"), "--turn", turn, "--hop", &hop, "--", who, words.trim()])
         .env("FRAGMENT_AS_AGENT", &agent.fragment)
         .env("FRAGMENT_FOR", &agent.owner)
         .kill_on_drop(true)
@@ -919,7 +922,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
     }
     if let Some(rest) = ts.text.strip_prefix("ask ") {
-        reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;
+        reply = ask_another(&ts.agent, &ts.fragment, &id, ts.hop, rest).await;
     }
     if let Some(rest) = ts.text.strip_prefix("sync ") {
         reply = sync_big(&ts.agent, &id, rest).await;

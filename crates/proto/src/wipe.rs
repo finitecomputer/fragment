@@ -71,6 +71,10 @@ pub struct Found {
     /// as `<fragment> (<role>, <identity>)`.
     pub memberships: Listed,
     pub computer: Option<ComputerFound>,
+    /// Their agents' own computers (a computer per agent), each as a wipe
+    /// finds it; none from a platform before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computers: Vec<ComputerFound>,
     /// Whether their ledger holds anything.
     pub ledger: bool,
     /// Whether their Vault holds a secret (the ledger's step empties it).
@@ -106,7 +110,8 @@ pub struct OrgFound {
 impl Found {
     /// Nothing of theirs is left.
     pub fn is_empty(&self) -> bool {
-        let computer = self.computer.as_ref().is_none_or(|c| c.phase.is_none() && c.saves == 0 && c.backups == 0 && !c.snapshot);
+        let gone = |c: &ComputerFound| c.phase.is_none() && c.saves == 0 && c.backups == 0 && !c.snapshot;
+        let computer = self.computer.as_ref().is_none_or(gone) && self.computers.iter().all(gone);
         self.sign_ins == 0
             && self.keys == 0
             && self.sessions == 0

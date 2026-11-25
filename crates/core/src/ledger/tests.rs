@@ -781,6 +781,193 @@ fn an_always_on_seats_awake_time_is_not_charged() {
     assert_eq!(answer, Outcome::Metered(Metered { charged: 96_336, rows_new: 1, rows_before: 0, refused: vec![] }));
 }
 
+/// A row of `ms` awake on computer `computer`, at `at_ms`.
+fn awake_row(reference: &str, computer: &str, ms: i64, at_ms: i64) -> MeterRow {
+    MeterRow { computer: Some(computer.into()), ..row(reference, Usage::Awake { instance: "2vcpu-6gib".into(), ms: ms as u64 }, None, at_ms) }
+}
+
+/// What a batch of `rows` charged.
+fn charged_by(w: &mut World, batch: &str, rows: Vec<MeterRow>) -> i64 {
+    let Outcome::Metered(m) = w.ok(meter(batch, rows)) else { panic!("a batch answers Metered") };
+    assert!(m.refused.is_empty(), "{batch}: {:?}", m.refused);
+    m.charged
+}
+
+/// Paul, 2026-11-20 and 11-23: the $200 seat includes up to one computer-
+/// month awake, pooled across its person's computers; past it, awake time
+/// is charged at the book's price, from credit. Method: two computers' rows
+/// fill the bound to its last hour, a row straddling it is charged only
+/// for its part past it, then every row is charged whole; the status says
+/// what was used. Invalid: the same on a $100 seat is charged from the
+/// first hour.
+#[test]
+fn a_seats_included_awake_time_is_pooled_and_bounded() {
+    let mut w = World::seat();
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    w.now = T0 + 20 * DAY_MS;
+    let hours = |n: i64| n * HOUR_MS;
+    // two computers, 371.5 hours each: the bound less an hour, let off
+    let (one, two) = ("computer:0a1b", "computer:2c3d");
+    let now = w.now;
+    assert_eq!(charged_by(&mut w, "b1", vec![awake_row("a:1", one, hours(371) + HOUR_MS / 2, now), awake_row("a:2", two, hours(371) + HOUR_MS / 2, now)]), 0);
+    let used = |w: &World| w.status().awake.map(|a| (a.used_ms, a.included_ms));
+    assert_eq!(used(&w), Some((hours(743), SEAT_AWAKE_INCLUDED_MS)));
+    // two hours across the bound: one let off, one charged at the book's price
+    let hour = w.book.price(&Usage::Awake { instance: "2vcpu-6gib".into(), ms: HOUR_MS as u64 }).expect("priced").charge;
+    assert_eq!(charged_by(&mut w, "b2", vec![awake_row("a:3", one, hours(2), now)]), hour);
+    assert_eq!(used(&w), Some((SEAT_AWAKE_INCLUDED_MS, SEAT_AWAKE_INCLUDED_MS)), "the bound is used to its end");
+    // past it, each hour is charged whole, from credit, with no refusal
+    assert_eq!(charged_by(&mut w, "b3", vec![awake_row("a:4", two, hours(1), now)]), hour);
+    // a new month includes its hours again
+    w.now = NOVEMBER + HOUR_MS;
+    assert_eq!(used(&w), Some((0, SEAT_AWAKE_INCLUDED_MS)));
+    let now = w.now;
+    assert_eq!(charged_by(&mut w, "b4", vec![awake_row("a:5", one, hours(1), now)]), 0);
+    // a $100 seat's awake time is charged from its first hour, and says no bound
+    let mut seat = World::seat();
+    let at = seat.now;
+    assert_eq!(charged_by(&mut seat, "b1", vec![awake_row("a:1", one, hours(1), at)]), hour);
+    assert_eq!(seat.status().awake, None);
+}
+
+/// Goal: a replayed row never spends the seat's included hours twice.
+/// Method: rows that bring the month to an hour short of the bound, sent
+/// again in their batch and in another batch; the next hour is still let
+/// off, and only the one after is charged. Invalid: another body under a
+/// row's reference is refused and spends nothing.
+#[test]
+fn a_replayed_row_never_spends_included_hours_twice() {
+    let mut w = World::seat();
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    let rows = vec![awake_row("a:1", "computer:0a1b", 700 * HOUR_MS, T0), awake_row("a:2", "computer:2c3d", 43 * HOUR_MS, T0)];
+    assert_eq!(charged_by(&mut w, "b1", rows.clone()), 0);
+    let before = w.status().awake;
+    assert_eq!(charged_by(&mut w, "b1", rows.clone()), 0, "the same batch answers as it did");
+    let Outcome::Metered(again) = w.ok(meter("b2", rows)) else { panic!() };
+    assert_eq!((again.charged, again.rows_before, again.rows_new), (0, 2, 0), "the same rows in another batch charge nothing new");
+    let Outcome::Metered(forged) = w.ok(meter("b3", vec![awake_row("a:1", "computer:0a1b", 1, T0)])) else { panic!() };
+    assert_eq!(forged.refused, [RowRefused { index: 0, why: Refused::ConflictingBody }]);
+    assert_eq!(w.status().awake, before, "nothing replayed or refused spent the bound");
+    assert_eq!(charged_by(&mut w, "b4", vec![awake_row("a:3", "computer:0a1b", HOUR_MS, T0)]), 0, "the last included hour is still there");
+    assert!(charged_by(&mut w, "b5", vec![awake_row("a:4", "computer:0a1b", HOUR_MS, T0)]) > 0);
+}
+
+/// Goal: a person with one computer is never charged for its awake time,
+/// even one never asleep for the longest month. Method: October whole
+/// (31 days) in five-minute rows from one computer, its last rows heard
+/// after November began (late past the month's end: counted in October's
+/// bound, kept for them), then November whole the same way.
+#[test]
+fn one_computer_is_never_charged_for_being_awake() {
+    let mut w = World::seat();
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    let five = 5 * 60_000;
+    let rows_from = |start: i64, n: i64| -> Vec<MeterRow> { (0..n).map(|i| awake_row(&format!("awake:0a1b:{}", start + i * five), "computer:0a1b", five, start + i * five)).collect() };
+    let month_rows = |start: i64, days: i64| rows_from(start, days * DAY_MS / five);
+    let october = month_rows(T0, 31);
+    let (heard, late) = october.split_at(october.len() - 3);
+    for (i, batch) in heard.chunks(BATCH_ROWS_MAX).enumerate() {
+        w.now = batch.last().expect("a batch has rows").at_ms;
+        assert_eq!(charged_by(&mut w, &format!("oct:{i}"), batch.to_vec()), 0);
+    }
+    w.now = NOVEMBER + 60_000;
+    assert_eq!(charged_by(&mut w, "oct:late", late.to_vec()), 0, "October's last rows, heard in November");
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(0), "late rows count in their own month's bound, not this one's");
+    for (i, batch) in month_rows(NOVEMBER, 30).chunks(BATCH_ROWS_MAX).enumerate() {
+        w.now = batch.last().expect("a batch has rows").at_ms;
+        assert_eq!(charged_by(&mut w, &format!("nov:{i}"), batch.to_vec()), 0);
+    }
+    // November's first row began in October: its five minutes count there
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(30 * DAY_MS - five));
+    assert_eq!(w.ledger.totals().charged, 0);
+}
+
+/// Goal: a row across a month's start counts each part in its own month,
+/// so one computer awake the whole of a 31-day month and the next is never
+/// charged, and a late row of the month before counts in that month's
+/// bound, not the new one's. Method: December 2026 then January 2027, both
+/// 31 days, in rows of an hour ending at a quarter past each hour (each row
+/// across midnight of New Year's Eve split in two), the last of December's
+/// heard after January began; then a second computer's late December hour,
+/// past December's bound, is charged whole, and January's bound is untouched.
+/// Invalid: a part older than the month before is let off and counts in none.
+#[test]
+fn a_row_counts_in_the_months_its_time_falls_in() {
+    let december = Month::parse("2026-12").expect("a month").start_ms();
+    let january = Month::parse("2027-01").expect("a month").start_ms();
+    assert_eq!((january - december) / DAY_MS, 31);
+    let mut w = World::seat();
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    let quarter = 15 * 60_000;
+    // rows of an hour, each ending at a quarter past, from December's first quarter past
+    let rows_until = |from: i64, to: i64| -> Vec<MeterRow> { (0..).map(|i| from + quarter + i * HOUR_MS).take_while(|at| *at <= to).map(|at| awake_row(&format!("a:{at}"), "computer:0a1b", HOUR_MS, at)).collect() };
+    let december_rows = rows_until(december, january - 1);
+    for (i, batch) in december_rows.chunks(BATCH_ROWS_MAX).enumerate() {
+        w.now = batch.last().expect("rows").at_ms;
+        assert_eq!(charged_by(&mut w, &format!("d:{i}"), batch.to_vec()), 0);
+    }
+    // the row across midnight, heard in January: 45 minutes of December's, 15 of January's
+    w.now = january + quarter + 60_000;
+    assert_eq!(charged_by(&mut w, "nye", vec![awake_row("a:nye", "computer:0a1b", HOUR_MS, january + quarter)]), 0, "one computer, never charged");
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(quarter), "January's bound holds its part alone");
+    assert_eq!(w.ledger.money.awake_waived_before_ms, SEAT_AWAKE_INCLUDED_MS, "December's 31 days whole, each row's part of it (its first row's November part counted in November's)");
+    // a second computer's late December hour: December's bound is spent, so
+    // it is charged whole; January's untouched
+    let hour = w.book.price(&Usage::Awake { instance: "2vcpu-6gib".into(), ms: HOUR_MS as u64 }).expect("priced").charge;
+    assert_eq!(charged_by(&mut w, "late", vec![awake_row("a:late", "computer:2c3d", HOUR_MS, january - 60_000)]), hour);
+    assert_eq!(w.status().awake.map(|a| a.used_ms), Some(quarter), "a late row spends its own month's bound");
+    // the rest of January, one computer: never charged
+    for (i, batch) in rows_until(january + HOUR_MS, january + 31 * DAY_MS - HOUR_MS).chunks(BATCH_ROWS_MAX).enumerate() {
+        w.now = batch.last().expect("rows").at_ms;
+        assert_eq!(charged_by(&mut w, &format!("j:{i}"), batch.to_vec()), 0);
+    }
+    assert_eq!(w.ledger.totals().charged, hour, "only the second computer's hour past December's bound");
+    // a part older than the month before: let off, in no month's count
+    assert_eq!(awake_parts(january + HOUR_MS, 40 * DAY_MS, Month::of(january)), [HOUR_MS, 31 * DAY_MS, 9 * DAY_MS - HOUR_MS]);
+    for at in [0, december, january, january + 17] {
+        assert_eq!(Month::of(at).start_ms(), Month::of(Month::of(at).start_ms()).start_ms(), "a month's start is in it");
+    }
+}
+
+/// A row's clock may run up to `CLOCK_SKEW_MS` ahead of the ledger's: its
+/// minutes past the month's end are next month's, never charged against
+/// this month's spent bound (let off, as an older month's are). Invalid:
+/// the same row's minutes inside the month are charged as before.
+#[test]
+fn a_rows_minutes_ahead_of_the_month_are_not_charged_against_it() {
+    let january = Month::parse("2027-01").expect("a month").start_ms();
+    let february = Month::parse("2027-02").expect("a month").start_ms();
+    let mut w = World::seat();
+    // the ledger in January's last minutes
+    w.now = february - 3 * 60_000;
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    assert_eq!(w.ledger.money.month, Month::of(january));
+    let minutes = |n: i64| w.book.price(&Usage::Awake { instance: "2vcpu-6gib".into(), ms: (n * 60_000) as u64 }).expect("priced").charge;
+    let (eight, ten) = (minutes(8), minutes(10));
+    assert!(eight < ten, "the book prices minutes");
+    // January's bound spent, its last minutes
+    w.ledger.money.awake_waived_ms = SEAT_AWAKE_INCLUDED_MS;
+    // ten minutes, two of them past January's end by the row's clock (within its skew)
+    let ahead = february + 2 * 60_000;
+    assert!(ahead <= w.now + CLOCK_SKEW_MS, "a row the ledger takes");
+    assert_eq!(charged_by(&mut w, "skew", vec![awake_row("a:skew", "computer:0a1b", 10 * 60_000, ahead)]), eight, "January's eight minutes alone");
+    assert_eq!(awake_parts(ahead, 10 * 60_000, Month::of(january)), [8 * 60_000, 0, 2 * 60_000]);
+}
+
+/// A head kept before the bound (no `awake_waived_ms`) reads as a month
+/// with none of it used yet.
+#[test]
+fn a_head_from_before_the_bound_reads() {
+    let mut w = World::seat();
+    w.ok(plan("p2", Plan::SeatAlwaysOn));
+    let mut head = serde_json::to_value(&w.ledger).expect("a head serializes");
+    let money = head["money"].as_object_mut().expect("its money");
+    assert!(money.remove("awake_waived_ms").is_some(), "a head keeps the count");
+    let read: Ledger = serde_json::from_value(head).expect("an older head reads");
+    read.assert_valid();
+    assert_eq!(read.status(&w.store, w.now, &w.book).awake.map(|a| a.used_ms), Some(0));
+}
+
 // Sweeps
 
 #[test]

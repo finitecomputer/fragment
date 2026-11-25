@@ -16,6 +16,9 @@
 //!   was left expires, and a month grants its plan's credit once;
 //! - a retry answers as its first delivery did, and a conflicting body
 //!   changes nothing;
+//! - a $200 seat's awake time is let off up to its monthly bound, all its
+//!   computers together, each new row of this month once: a replayed or
+//!   duplicated row never spends included hours twice;
 //! - a twin fed the same operations at the same times, never restarted,
 //!   answers the same and ends in the same state.
 
@@ -209,6 +212,10 @@ struct Model {
     included_granted: i64,
     read_only: bool,
     purchased: i64,
+    /// The seat's awake time let off this month and the month before, as
+    /// the rows sent say.
+    awake_waived_ms: i64,
+    awake_waived_before_ms: i64,
 }
 
 /// What the runs exercised, so a run that tested nothing fails.
@@ -227,6 +234,9 @@ pub(super) struct Stats {
     agents_stopped: u64,
     forgotten: u64,
     cap_reached: u64,
+    /// Rows of a seat's awake time let off, and charged past its bound.
+    awake_waived: u64,
+    awake_over: u64,
 }
 
 struct Sim {
@@ -266,6 +276,8 @@ impl Sim {
             included_granted: 0,
             read_only: false,
             purchased: 0,
+            awake_waived_ms: 0,
+            awake_waived_before_ms: 0,
         };
         let mut sim = Sim {
             rng: Rng::new(seed),
@@ -407,17 +419,27 @@ impl Sim {
             // the rollover the ledger makes first: the month's credit, for
             // the plan and seat as they are
             self.stats.rollovers += 1;
+            self.model.awake_waived_before_ms = if month.0 == self.model.month.0 + 1 { self.model.awake_waived_ms } else { 0 };
             self.model.month = month;
             self.model.included_granted = included(self.model.plan, self.model.seat);
+            self.model.awake_waived_ms = 0;
         }
         // a replayed batch answers from its record, as of its first time
         let replayed = matches!(op, Op::Meter(m) if self.store.batch(&m.batch).is_some());
+        let waives = match op {
+            Op::Meter(m) if !replayed => self.awake_waives(m),
+            _ => (0, 0),
+        };
         let answer = apply(&mut self.ledger, &mut self.store, op, self.now, &mut self.book);
         let twin = apply(&mut self.twin, &mut self.twin_store, op, self.now, &mut self.book);
         assert_eq!(answer, twin, "the twin answers {op:?} the same");
         let overdraft_set = self.learn(op, &answer);
         if !replayed {
             self.justify(op, &answer, &before);
+        }
+        if matches!(answer, Ok(Outcome::Metered(_))) {
+            self.model.awake_waived_ms += waives.0;
+            self.model.awake_waived_before_ms += waives.1;
         }
         let after = self.ledger.money;
         // included credit never carries past its month
@@ -517,7 +539,39 @@ impl Sim {
         assert_eq!((m.plan, m.seat, m.seat_seq, m.overdraft), (model.plan, model.seat, model.seat_seq, model.overdraft));
         assert_eq!((m.month, m.included_granted, m.read_only), (model.month, model.included_granted, model.read_only));
         assert!(m.included_left <= m.included_granted, "included credit never carries past its month");
+        assert_eq!((m.awake_waived_ms, m.awake_waived_before_ms), (model.awake_waived_ms, model.awake_waived_before_ms), "the seat's awake time is let off once a row, up to each month's bound");
         assert_eq!(l.standing(self.now), standing_of(model.plan, model.seat, m.balance(), model.read_only), "the standing is a pure function");
+    }
+
+    /// What a batch not applied before lets off of the seat's awake time,
+    /// this month's and the month before's, from the rows alone: each new
+    /// one (a reference not charged yet, this batch's first of it, priced
+    /// and in time) on a $200 seat, each part of its time in the month it
+    /// falls in (`awake_parts`), up to what that month's bound has left; a
+    /// part in an older month is let off and counts in none.
+    fn awake_waives(&mut self, m: &Meter) -> (i64, i64) {
+        if self.model.plan != Plan::SeatAlwaysOn {
+            return (0, 0);
+        }
+        let mut seen = BTreeSet::new();
+        let (mut now, mut before) = (0, 0);
+        for row in &m.rows {
+            let new = seen.insert(row.reference.clone()) && self.store.entry(&row.reference).is_none();
+            let counted = new && row.usage.validate().is_ok() && row.at_ms >= self.now - REF_KEEP_MS && self.book.price(&row.usage).is_ok();
+            let Usage::Awake { ms, .. } = row.usage else { continue };
+            if !counted {
+                continue;
+            }
+            let [this, last, _] = awake_parts(row.at_ms, ms as i64, self.model.month);
+            let (this_off, last_off) = (this.min(SEAT_AWAKE_INCLUDED_MS - self.model.awake_waived_ms - now), last.min(SEAT_AWAKE_INCLUDED_MS - self.model.awake_waived_before_ms - before));
+            now += this_off;
+            before += last_off;
+            match this_off < this || last_off < last {
+                true => self.stats.awake_over += 1,
+                false => self.stats.awake_waived += 1,
+            }
+        }
+        (now, before)
     }
 
     fn new_row(&mut self) -> MeterRow {
@@ -723,7 +777,7 @@ pub(super) fn simulate(seed: u64, steps: u64) -> Stats {
 }
 
 impl Stats {
-    fn named(&self) -> [(&'static str, u64); 13] {
+    fn named(&self) -> [(&'static str, u64); 15] {
         [
             ("steps", self.steps),
             ("rollovers", self.rollovers),
@@ -738,6 +792,8 @@ impl Stats {
             ("agents stopped", self.agents_stopped),
             ("references forgotten", self.forgotten),
             ("caps reached", self.cap_reached),
+            ("awake rows let off", self.awake_waived),
+            ("awake rows past the seat's bound", self.awake_over),
         ]
     }
 }

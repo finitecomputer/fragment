@@ -9,7 +9,7 @@ import { closeOnOutsidePress } from "./dialog.js";
 export const providerLabel = (p) => p.name || p.provider;
 
 // Provider/account UI keeps failed removals for the current settings visit.
-export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, asks, isOpen, reopenSettings }) {
+export function createConnections({ api, el, section, named, seg, computer, computerFor, getAgents, computerIs, asks, isOpen, reopenSettings }) {
   // ---- connections (decisions 22, 37 and 44): every provider the platform
   // offers, one row each: what it is, its state, which of the person's agents
   // may use it (all by default; a list narrows one agent), and this month's
@@ -209,7 +209,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       const account = pick.value || null;
       let refused = null;
       try {
-        computerIs(await api("PUT", `/api/computers/${seg(computer().computer)}/agents/${seg(a.fragment)}/accounts/${encodeURIComponent(p.provider)}`, { account }));
+        computerIs(await api("PUT", `/api/computers/${seg(computerFor(a.fragment).computer)}/agents/${seg(a.fragment)}/accounts/${encodeURIComponent(p.provider)}`, { account }));
       } catch (e) {
         refused = e;
       }
@@ -252,7 +252,8 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       return s;
     }
     s.append(el("p", "muted", "Your agents use these to act, but can't see the credentials."));
-    const agents = computer()?.agents ?? [];
+    // every agent of theirs, on whichever of their computers it runs
+    const agents = [...getAgents().values()];
     const month = monthName(uses?.month);
     const groups = [
       ["Your accounts", null, offered.filter((p) => p.kind !== "operator")],
@@ -506,7 +507,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
           const list = all.every((x) => next.includes(x)) ? null : next;
           let refused = null;
           try {
-            computerIs(await api("PUT", `/api/computers/${seg(computer().computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
+            computerIs(await api("PUT", `/api/computers/${seg(computerFor(a.fragment).computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
           } catch (e) {
             refused = e;
           }
@@ -785,7 +786,9 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
 }
 
 // The computer port UI owns its frame-message listener and origin checks.
-export function createSimplex({ api, el, actionLine, named, seg, computer, titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh }) {
+// `getAgents`, `computerFor`: every agent of theirs and the computer each
+// runs on (a computer per agent; one computer's, where a page has one)
+export function createSimplex({ api, el, actionLine, named, seg, computer, getAgents = () => new Map((computer()?.agents ?? []).map((a) => [a.identity, a])), computerFor = () => computer(), titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh }) {
   // ---- an agent's SimpleX: its link page, a port of its computer's own
   // origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
   // the one-time QR code, and whom it is linked to. Shown in the connector
@@ -797,7 +800,7 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
     opening.add(agent);
     const pressed = pressSetup();
     try {
-      const t = await api("POST", `/api/computers/${seg(computer().computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
+      const t = await api("POST", `/api/computers/${seg(computerFor(agent).computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
       const frame = named(frameOf(t.url, `${titleOf(agent)} on SimpleX`), agent, (n) => `${n} on SimpleX`, "aria-label");
       frame.dataset.simplex = agent;
       frame.addEventListener("load", () => nameSimplex(frame));
@@ -834,7 +837,7 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
     if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
     const reply = { fragment: KIND.simplex, agent: m.agent, for: m.want };
     try {
-      reply.ticket = await api("POST", `/api/computers/${seg(computer().computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
+      reply.ticket = await api("POST", `/api/computers/${seg(computerFor(m.agent).computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
     } catch (err) {
       reply.error = err.message;
     }
@@ -854,9 +857,10 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
   // computer makes one as its link is made: the list says so, never a
   // guess). Anywhere else, none: Settings' SimpleX is its connector's
   // (createConnector's `SIMPLEX`), on every seat.
-  const onComputer = () => !!(computer()?.simplex && computer()?.alwaysOn);
+  // each agent's own computer's (a computer per agent)
+  const onComputer = (a) => !!(computerFor(a.fragment)?.simplex && computerFor(a.fragment)?.alwaysOn);
   function computerRow(a) {
-    if (!onComputer()) return null;
+    if (!onComputer(a)) return null;
     const go = el("button", "row", "Set up");
     go.type = "button";
     go.dataset.simplexFor = a.fragment;
@@ -874,7 +878,7 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
     return markOffer(actionLine(named(el("span"), a.fragment), ...actions), a.fragment, "doors");
   }
   // what its rows are drawn from: a change redraws the section
-  const computerKey = () => JSON.stringify([onComputer(), (computer()?.agents ?? []).map((a) => [a.fragment, simplexChatOf(a.fragment)?.name ?? null])]);
+  const computerKey = () => JSON.stringify([...getAgents().values()].map((a) => [a.fragment, onComputer(a), simplexChatOf(a.fragment)?.name ?? null]));
   return { computerRow, computerKey, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
 }
 
@@ -925,7 +929,7 @@ export const SIMPLEX = {
   tall: true,
 };
 
-export function createConnectors({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow = () => null, computerKey = () => "", doorsRead = () => {} }) {
+export function createConnectors({ api, el, section, actionLine, named, seg, computer, getAgents = () => new Map((computer()?.agents ?? []).map((a) => [a.identity, a])), fragments, listed, own, connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow = () => null, computerKey = () => "", doorsRead = () => {} }) {
   // each read connector's door by its name ({door, agent}, or null), as the
   // latest read says; null while it has not answered whole
   let doors = null;
@@ -935,7 +939,7 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
   let asked = "";
   // each Set up under way: its door and its agent
   const making = new Set();
-  const agentsNow = () => computer()?.agents ?? [];
+  const agentsNow = () => [...getAgents().values()];
   const reaching = () => [...new Set([...fragments().filter((f) => own(f) && f.kind === "chat" && f.sharing?.reach === true).map((f) => f.name), ...bound])].sort();
   // Its doors read now; whether that read answered whole (and is the latest).
   async function readDoors() {

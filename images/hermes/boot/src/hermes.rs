@@ -580,15 +580,17 @@ pub fn told_home(agent_fragment: &str, home: Home) -> String {
     format!("Your owner's home is {at}: a routine you schedule without --chat (a reminder, a check to report on) runs there.")
 }
 
-/// One of an agent's teammates: another agent of its owner's on this
-/// computer, by its name (its agent fragment's title), its fragment, and
-/// its role (its fragment's role, else its job's first line: bots.rs,
-/// `about`).
+/// One of an agent's teammates: another agent of its owner's, on this
+/// computer or one of its own, by its name (its agent fragment's title),
+/// its fragment, and its role (its fragment's role, else its job's first
+/// line: bots.rs, `about`); and whether it keeps the owner's team folder
+/// with this one (`~/shared`, shared.rs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Teammate {
     pub name: String,
     pub fragment: String,
     pub role: String,
+    pub shared: bool,
 }
 
 /// What tells an agent its teammates, at every turn (as `told_name`, so a
@@ -601,10 +603,14 @@ pub fn told_team(team: &[Teammate]) -> String {
         return String::new();
     }
     let listed: Vec<String> = team.iter().map(|t| if t.role.is_empty() { format!("{} ({})", t.name, t.fragment) } else { format!("{} ({}): {}", t.name, t.fragment, t.role) }).collect();
-    let told = format!(
+    let mut told = format!(
         "Your teammates, your owner's other agents: {}. Ask one something with fragment_ask: its answer comes back to you here as a new message, so ask, then end your turn. An answer that comes back is not a new question: tell your owner what it says. When a teammate asks you something, answer it where it asked: your answer goes back to it on its own, so don't ask it back.",
         listed.join("; ")
     );
+    // the team folder (shared.rs): each runs on a computer of its own
+    if team.iter().any(|t| t.shared) {
+        told.push_str(" Your teammates see what you put in ~/shared, and you see theirs there, within moments: put a file there to hand it over, and say where.");
+    }
     told.replace("${", "$ {")
 }
 
@@ -1678,7 +1684,7 @@ mod tests {
     /// broken apart, as its own name's is.
     #[test]
     fn an_agent_is_told_its_teammates() {
-        let mate = |name: &str, fragment: &str, role: &str| Teammate { name: name.into(), fragment: fragment.into(), role: role.into() };
+        let mate = |name: &str, fragment: &str, role: &str| Teammate { name: name.into(), fragment: fragment.into(), role: role.into(), shared: false };
         let team = [mate("Juniper", "juniper--k3x9", "You tend the garden."), mate("Maple", "maple--k3x9", "You keep the books."), mate("Fern", "fern--k3x9", "")];
         let said = told("Juniper", None, "juniper--k3x9", Home::Chat, &team);
         assert!(said.starts_with(&told("Juniper", None, "juniper--k3x9", Home::Chat, &[])), "its name and home first: {said}");
@@ -1687,6 +1693,10 @@ mod tests {
         assert!(said.contains("An answer that comes back is not a new question") && said.contains("don't ask it back"), "{said}");
         assert!(!told("Juniper", None, "juniper--k3x9", Home::Chat, &team[..1]).contains("teammates"), "alone, no teammates");
         assert!(!told_team(&[mate("${X}", "x--k3x9", "${Y}")]).contains("${"), "no `${{` Hermes would expand");
+        // a team folder kept in step (a computer per agent) is told; none, not
+        assert!(!said.contains("~/shared"), "{said}");
+        let sharing: Vec<Teammate> = team.iter().cloned().map(|t| Teammate { shared: true, ..t }).collect();
+        assert!(told("Juniper", None, "juniper--k3x9", Home::Chat, &sharing).contains("Your teammates see what you put in ~/shared"));
         let c = profile_config(&agent(), "Juniper", None, Home::Chat, &team, &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(c.contains(&format!("\nagent:\n  system_prompt: {}\n", q(&said))), "in its ephemeral system prompt, read at every turn: {c}");
     }

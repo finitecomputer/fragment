@@ -203,29 +203,18 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
     let cfg = Config::from_env(env);
     let offered = || cfg.providers.providers().iter().map(|p| p.name.clone()).collect::<Vec<_>>();
     let provider_of = |name: &str| cfg.providers.get(name).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no provider {name:?} here (this deployment offers {:?})", offered())));
-    let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
         (Method::Get, []) => {
             let mut listed = BTreeMap::new();
             let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
-            // the person's computer keeps them, for its guest's next read; one
-            // not made yet has nothing to tell
+            // each of the person's computers keeps them, for its guest's next
+            // read (a computer per agent: every agent's own); their own keys
+            // are their Vault's, read once each computer has handed over any
+            // it kept, so one handed meanwhile by another touch is read too
+            // (Codex, #1345); with the hand-over gone, the two may be asked
+            // at once
             let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
-            /// `computer/own-keys`' answer: the own keys it kept before the
-            /// move (M16) and could not hand to their Vault, still owed.
-            #[derive(serde::Deserialize)]
-            struct OwnKeys {
-                providers: Vec<String>,
-            }
-            // their own keys are their Vault's, read once the computer has
-            // handed over any it kept, so one handed meanwhile by another
-            // touch is read too (Codex, #1345); with the hand-over gone, the
-            // two may be asked at once
-            let mut own: Vec<String> = match crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", &computer, "computer/own-keys", &told).await {
-                Ok(keys) => keys.providers,
-                Err(e) if e.code == ErrorCode::NotFound => vec![],
-                Err(e) => return Err(e),
-            };
+            let mut own = told_computers(env, who, &told).await?;
             own.extend(crate::vault::names(env, who, &[]).await?.1);
             let providers = cfg
                 .providers
@@ -367,7 +356,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 (Some(u), Some(Going::Held(..)) | None) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u, id.as_deref()).await?,
                 _ => false,
             };
-            let states = disconnected_told(env, cfg, &computer, provider, user).await?;
+            let states = disconnected_told(env, cfg, who, provider, user).await?;
             let state = states.get(*provider).copied().unwrap_or(ProviderState::NotConnected);
             json_response(&json!({ "provider": provider, "account": id, "state": state, "revoked": revoked }))
         }
@@ -460,17 +449,39 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
 /// not made yet has no guest. One not told is the disconnect's failure,
 /// which the person asks again (each step of it may be asked twice).
 /// Answers the states it told.
-async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) -> CellResult<BTreeMap<String, ProviderState>> {
+async fn disconnected_told(env: &Env, cfg: &Config, who: &str, provider: &str, user: Option<String>) -> CellResult<BTreeMap<String, ProviderState>> {
     let mut listed = BTreeMap::new();
     let states = connection_states(env, cfg, std::future::ready(Ok(user)), Some(&mut listed)).await?;
-    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states, "accounts": held_of(cfg, &listed) })).await {
+    match told_computers(env, who, &json!({ "connections": states, "accounts": held_of(cfg, &listed) })).await {
         Ok(_) => Ok(states),
-        Err(e) if e.code == ErrorCode::NotFound => Ok(states),
         Err(e) => {
             console_error!("{}", json!({ "connection-disconnect": provider, "computer-not-told": e.message }));
             Err(CellError::new(e.code, format!("{provider} is disconnected, but your computer could not be told yet: disconnect again ({})", e.message)))
         }
     }
+}
+
+/// Tells each of `who`'s computers their connections' states (`told`, as
+/// `computer/own-keys` takes them), all at once: one not made has nothing
+/// to tell. The own keys any kept from before the move (M16) and could not
+/// hand to their Vault, still owed (their computer from before's alone).
+async fn told_computers(env: &Env, who: &str, told: &serde_json::Value) -> CellResult<Vec<String>> {
+    /// `computer/own-keys`' answer.
+    #[derive(serde::Deserialize)]
+    struct OwnKeys {
+        providers: Vec<String>,
+    }
+    let computers = crate::computer::theirs(env, who).await?;
+    let asked = futures_util::future::join_all(computers.iter().map(|c| crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", c, "computer/own-keys", told))).await;
+    let mut owed = Vec::new();
+    for answer in asked {
+        match answer {
+            Ok(keys) => owed.extend(keys.providers),
+            Err(e) if e.code == ErrorCode::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(owed)
 }
 
 /// Their own keys changed (M16: their Vault's): their open pages read

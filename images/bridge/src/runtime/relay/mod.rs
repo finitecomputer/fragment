@@ -353,18 +353,33 @@ async fn run(cfg: RelayConfig, listener: std::net::TcpListener, mut io: RuntimeI
     let listener = listener.set_nonblocking(true).and_then(|()| tokio::net::TcpListener::from_std(listener)).map_err(|e| RuntimeError::Setup(format!("listen {}: {e}", cfg.listen)))?;
     crate::ev!("relay.listening", { "listen": cfg.listen.to_string() });
     let media = Arc::new(Mutex::new(MediaTable::default()));
+    let hops = Arc::new(Mutex::new(Hops::default()));
     let (wire_tx, mut wire_rx) = mpsc::channel::<Wire>(256);
     let conns = Arc::new(std::sync::atomic::AtomicU64::new(0));
     {
-        let (cfg, media, scratch, wire_tx, conns) = (cfg.clone(), media.clone(), scratch.clone(), wire_tx.clone(), conns.clone());
+        let (cfg, media, scratch, wire_tx, conns, hops) = (cfg.clone(), media.clone(), scratch.clone(), wire_tx.clone(), conns.clone(), hops.clone());
         let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
-            let (cfg, media, scratch, wire_tx, conns) = (cfg.clone(), media.clone(), scratch.clone(), wire_tx.clone(), conns.clone());
-            async move { handle(req, cfg, media, scratch, wire_tx, conns).await }
+            let (cfg, media, scratch, wire_tx, conns, hops) = (cfg.clone(), media.clone(), scratch.clone(), wire_tx.clone(), conns.clone(), hops.clone());
+            async move {
+                // a running turn's depth, for an ask its agent makes in it
+                // (the image's `fragment_ask`): its owner's teammate on
+                // another computer counts the ask one past it
+                if let Some(turn) = req.uri().path().strip_prefix("/relay/turns/") {
+                    if bearer_ok(&req, &cfg).is_err() {
+                        return net::refusal(StatusCode::UNAUTHORIZED, "unauthenticated", "the relay's token");
+                    }
+                    return match hops.lock().expect("the hops").of(turn) {
+                        Some(hop) => net::json_answer(StatusCode::OK, &json!({ "turn": turn, "hop": hop })),
+                        None => net::refusal(StatusCode::NOT_FOUND, "not_found", "no turn running by that id"),
+                    };
+                }
+                handle(req, cfg, media, scratch, wire_tx, conns).await
+            }
         };
         tokio::spawn(net::serve(listener, handler, io.shutdown.clone()));
     }
 
-    let mut st = Loop { cfg, events: io.events.clone(), media, scratch, wire_tx, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), activity: std::collections::BTreeSet::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
+    let mut st = Loop { cfg, events: io.events.clone(), media, scratch, wire_tx, hops, inflight: HashMap::new(), by_chat: HashMap::new(), answers: Vec::new(), asides: VecDeque::new(), activity: std::collections::BTreeSet::new(), conn: None, greeted: false, next_message: 0, next_order: 0 };
     let mut shutdown = io.shutdown.clone();
     // bounded by the bridge's life: one input per pass, ended by shutdown
     loop {
@@ -604,10 +619,41 @@ async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, con
     let _ = wire_tx.send(Wire::Activity { conn, working: false, child: None }).await;
 }
 
+/// The turns handed to Hermes, by id, and how many hand-offs deep each is
+/// (`TurnStart::hop`), the newest last: what `/relay/turns/<turn>` answers.
+/// Bounded: past `HOPS_KEPT`, the oldest go (a turn running that long has
+/// its depth asked of it once, early).
+#[derive(Default)]
+struct Hops(VecDeque<(String, u32)>);
+
+/// Turns whose depth is kept: more than a computer holds open at once.
+const HOPS_KEPT: usize = 2 * limits::TURNS_OPEN_MAX;
+
+impl Hops {
+    fn started(&mut self, turn: &str, hop: u32) {
+        self.0.retain(|(t, _)| t != turn);
+        self.0.push_back((turn.to_string(), hop));
+        while self.0.len() > HOPS_KEPT {
+            self.0.pop_front();
+        }
+        assert!(self.0.len() <= HOPS_KEPT, "the hops kept are bounded");
+    }
+
+    fn ended(&mut self, turn: &str) {
+        self.0.retain(|(t, _)| t != turn);
+    }
+
+    fn of(&self, turn: &str) -> Option<u32> {
+        self.0.iter().find(|(t, _)| t == turn).map(|(_, h)| *h)
+    }
+}
+
 struct Loop {
     cfg: RelayConfig,
     events: mpsc::Sender<Event>,
     media: Arc<Mutex<MediaTable>>,
+    /// Each turn's depth, for `/relay/turns/<turn>`.
+    hops: Arc<Mutex<Hops>>,
     /// Where uploads and fetched files land, bounded (scratch.rs).
     scratch: Arc<Scratch>,
     /// A file sent by URL comes back here, fetched.
@@ -769,6 +815,7 @@ impl Loop {
     }
 
     fn forget(&mut self, turn: &str) {
+        self.hops.lock().expect("the hops").ended(turn);
         if let Some(f) = self.inflight.remove(turn) {
             if self.by_chat.get(&f.chat).is_some_and(|t| t == turn) {
                 self.by_chat.remove(&f.chat);
@@ -777,6 +824,7 @@ impl Loop {
     }
 
     fn start(&mut self, ts: TurnStart) {
+        self.hops.lock().expect("the hops").started(&ts.turn, ts.hop);
         let chat = wire::chat_id(&ts.fragment, &ts.agent.fragment);
         let profile = wire::profile(&ts.agent.fragment);
         if let Some(old) = self.by_chat.get(&chat).cloned() {

@@ -178,16 +178,20 @@ mirrors:
   its poster is their agent or none of the chat's members.
 
 **An ask** (`fragment ask --return-to`): an agent's message to another
-agent of its computer whose answer comes back to it, as a turn of its
-own, in the chat it asked from:
+of its owner's agents, on its computer or another, whose answer comes
+back to it, as a turn of its own, in the chat it asked from:
 
 ```json
-{ "text": "What's on Friday?", "to": ["npub1<asked>"], "return_to": "<chat it asked from>" }
+{ "text": "What's on Friday?", "to": ["npub1<asked>"], "return_to": "<chat it asked from>", "turn": "<turn asked from>", "hop": 2 }
 ```
 
 - The question is a message like any; `return_to` is the whole of the
-  return. Only another agent of the answering bridge's computer asks so;
-  anyone else's is a plain message, as it is to a bridge before asks.
+  return. Another agent asks so: one of the answering bridge's computer,
+  or one the chat's people name an agent fragment of (`__people`); a
+  person's is a plain message, as it is to a bridge before asks.
+- `turn` and `hop`, when an agent asks inside a turn: that turn and one
+  past its depth, so a bridge on another computer, which cannot see it,
+  counts the ask (docs/bridge.md, "Agents asking each other").
 - Once the asked turn is over, its bridge posts the **answer** on the
   asking agent's `tasks` (below), however long that takes and whether or
   not the asking agent still runs. Its outcome is the turn's end's: a
@@ -562,11 +566,15 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
   "files": [{ "sha256": "<64 hex>", "size": 22, "type": "text/plain", "name": "drawing.txt" }] }
 ```
 
-- Posted by the asking agent's own bridge, as that agent, with the id
-  `an:<asked turn>`, so one question has one answer whatever life posts
-  it. Only the agent's own key's answer is taken, and only as its bridge
-  posted it: a record the platform appended under the fragment's key
-  (`author: platform`, a schedule firing) answers nothing.
+- Posted by the asked agent's bridge, as the asked agent (acting for
+  their owner on the asking agent's fragment), with the id `an:<asked
+  turn>`, so one question has one answer whatever life posts it; as the
+  asking agent when the asked one left its computer (#722). The asking
+  agent's bridge takes it as its own key's, or once the question at
+  `asked` vouches for it: posted by that agent itself, naming `by` in its
+  `to`, with this `chat` as its `return_to`; any other is passed over,
+  and so is a record the platform appended under the fragment's key
+  (`author: platform`, a schedule firing), which no bridge posted.
 - The agent takes it as a turn in `chat`, asked as the agent that
   answered (`by`, called `name`), and its owner's to stop as a routine
   is. `text` names the question and carries what the asked turn said
@@ -589,8 +597,9 @@ id `hello`, asking the agent to say hello. So the agent speaks first.
   a routine never skips an answer.
 
 Only the agent fragment itself (its cron, the platform's `joined`) and
-the agent's owner ask anything on `tasks`, and the agent's own bridge
-posts its answers; any other poster is passed over. Another of the
+the agent's owner ask anything on `tasks`, and the agents it asked post
+its answers, each taken once its own question vouches for it; any other
+poster is passed over. Another of the
 owner's agents may post there, but its routine would be a hand-off no
 hop count holds: it asks in a chat instead.
 

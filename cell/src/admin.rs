@@ -166,7 +166,21 @@ async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
         Err(e) if e.code == ErrorCode::NotFound => (serde_json::Value::Null, serde_json::Value::Null),
         Err(e) => return Err(e),
     };
-    Ok(serde_json::json!({ "person": row, "ledger": ledger, "computer": computer, "references": references }))
+    // each of their agents' own computers (a computer per agent), named by
+    // its agent, whose npub the computer routes below take in place of
+    // theirs: none for an agent on their computer from before
+    let on_theirs = |a: &str| computer["agents"].as_array().is_some_and(|l| l.iter().any(|x| x["identity"] == a));
+    let agents = ask_registry(env, &crate::registry::calls::AgentsOf { person: person.to_string() }).await?.agents;
+    let mut own = vec![];
+    // bounded: their agents are
+    for agent in agents.into_iter().filter(|a| !on_theirs(a)) {
+        match crate::computer::ask(env, &fragment_core::computer::default_computer_of(&agent), "computer/view", &serde_json::json!({})).await {
+            Ok(v) => own.push(serde_json::json!({ "agent": agent, "computer": for_operators(v) })),
+            Err(e) if e.code == ErrorCode::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(serde_json::json!({ "person": row, "ledger": ledger, "computer": computer, "references": references, "agentComputers": own }))
 }
 
 /// An operator pins a person's computer to another of the deployment's

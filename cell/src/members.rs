@@ -222,7 +222,13 @@ impl FragmentCell {
     /// sent to every member's list (at most `MEMBERS_MAX`) and its owner's,
     /// as an agent's joining or leaving is.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> CellResult<()> {
-        let face = face(kind, title, role, picture);
+        // an agent's names its agent (its fragment's key): an agent's face
+        // kept before says it at its next change, its main's next move
+        let npub = match kind {
+            FragmentKind::Agent => self.meta(MetaKey::Npub)?,
+            _ => None,
+        };
+        let face = face(kind, title, role, picture, npub.as_deref());
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
@@ -1502,16 +1508,21 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
 }
 
 /// A fragment's face as its members' lists keep it (`MetaKey::Face`): its
-/// picture's address when it has one, and an agent's role. Its kind is a
-/// manifest's, which names only kinds this release knows: the fallback a
-/// newer platform's kind reads as is never stored as one.
-pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> String {
+/// picture's address when it has one, and an agent's role and identity
+/// (`npub`, its fragment's key: who its owner's other agents ask, on any
+/// computer). Its kind is a manifest's, which names only kinds this release
+/// knows: the fallback a newer platform's kind reads as is never stored as
+/// one.
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>, npub: Option<&str>) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     // a title of nothing but spaces is none: every reader then falls back alike
     let mut face = json!({ "kind": kind, "title": fragment_core::face::title(title) });
     // a role is an agent's alone: the tag beside its name
     if let Some(r) = fragment_core::face::role(role).filter(|_| kind == FragmentKind::Agent) {
         face["role"] = json!(r);
+    }
+    if let Some(npub) = npub.filter(|_| kind == FragmentKind::Agent) {
+        face["identity"] = json!(npub);
     }
     if let Some(p) = picture {
         face["picture"] = json!(p);

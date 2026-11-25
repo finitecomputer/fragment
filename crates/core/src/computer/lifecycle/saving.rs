@@ -488,7 +488,7 @@ mod tests {
             for _ in 0..64 {
                 let Some(at) = l.next_alarm().filter(|at| *at < until) else { return saves };
                 let s = l.apply(Event::Alarm, at);
-                assert!(!s.actions.iter().any(|a| matches!(a, Action::Sleep { .. } | Action::Meter { .. })), "it never sleeps, nor is metered: {s:?}");
+                assert!(!s.actions.iter().any(|a| matches!(a, Action::Sleep { .. })), "it never sleeps (its awake time is metered, as any computer's): {s:?}");
                 if s.actions.contains(&Action::Hold { generation: 1 }) {
                     let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: 1, held: true }, at + 500));
                     assert_eq!(l.apply(Event::Saved { generation: 1, seq }, at + 1_000).actions, vec![Action::Unhold { generation: 1 }]);

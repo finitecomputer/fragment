@@ -165,6 +165,24 @@ impl Call for ForgetAgent {
     type Answer = AgentForgotten;
 }
 
+/// `POST /agents/of`: a person's agents whose fragments live, the first
+/// made first (at most `AGENTS_PER_OWNER_MAX`): whose own computers are
+/// theirs too (fragment_core::computer::computers_of).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AgentsOf {
+    pub person: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Agents {
+    pub agents: Vec<String>,
+}
+
+impl Call for AgentsOf {
+    const PATH: &'static str = "/agents/of";
+    type Answer = Agents;
+}
+
 /// `POST /held`: an agent held below its owner, or let go (`held: None`),
 /// by its owner (decision 36).
 #[derive(Serialize, Deserialize)]

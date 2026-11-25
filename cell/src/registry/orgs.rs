@@ -541,7 +541,7 @@ impl RegistryCell {
         Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer })
     }
 
-    fn sync_seat(&self, b: SyncSeat) -> CellResult<()> {
+    pub(super) fn sync_seat(&self, b: SyncSeat) -> CellResult<()> {
         if self.member_of(&b.person)?.is_some_and(|m| m.seat.is_some()) {
             self.queue_sync(&b.person)?;
         }
@@ -592,13 +592,37 @@ impl RegistryCell {
                 told.map_err(refused)?;
             }
         }
-        let computer = fragment_core::computer::default_computer_of(person);
-        match crate::computer::ask(&self.env, &computer, "computer/always-on", &json!({ "on": d.always_on })).await {
-            // no computer yet: its making asks for a push, and fails (to be
-            // made again) when it cannot (cell/src/orgs.rs, `computer_made`)
-            Err(e) if e.code == ErrorCode::NotFound => Ok(()),
-            answered => answered.map(|_| ()),
+        // the seat's computer: theirs from before, else their first agent's
+        // own (a computer per agent: the seat keeps one computer always on,
+        // as before, and its other agents' sleep when idle). Which is the
+        // seat's is read first (its `agents`, which changes nothing), then
+        // the other is told off before the seat's is told on, so a push cut
+        // short (or a computer from before made after the first agent's own)
+        // never leaves two always on: at worst none, until the next
+        let first = self.live_agents_of(super::calls::AgentsOf { person: person.to_string() })?.agents.into_iter().next();
+        let made = |computer: String, route: &'static str, body: Value| async move {
+            match crate::computer::ask(&self.env, &computer, route, &body).await {
+                // none made: no computer yet, whose making (or its agent's
+                // assigning) asks for a push, and fails (to be made again)
+                // when it cannot (cell/src/orgs.rs, `computer_made`)
+                Err(e) if e.code == ErrorCode::NotFound => Ok(false),
+                Err(e) => Err(e),
+                Ok(_) => Ok(true),
+            }
+        };
+        let mut computers = fragment_core::computer::computers_of(person, first.as_slice());
+        let theirs = computers.remove(0);
+        let (seats, others) = match made(theirs.clone(), "computer/agents", json!({ "owner": person })).await? {
+            true => (Some(theirs), computers),
+            false => (computers.first().cloned(), computers.into_iter().skip(1).collect()),
+        };
+        for computer in others {
+            made(computer, "computer/always-on", json!({ "on": false })).await?;
         }
+        if let Some(computer) = seats {
+            made(computer, "computer/always-on", json!({ "on": d.always_on })).await?;
+        }
+        Ok(())
     }
 
     /// The alarm's pushes: a batch of the queued ones that are due, each
@@ -665,7 +689,7 @@ impl RegistryCell {
 
     /// A change in one turn, then the alarm armed for what it queued: its
     /// plan pushes, and its seats' counts (a comp ended may empty an org).
-    async fn armed<T>(&self, change: impl FnOnce() -> CellResult<T>) -> CellResult<T> {
+    pub(super) async fn armed<T>(&self, change: impl FnOnce() -> CellResult<T>) -> CellResult<T> {
         let answer = change()?;
         self.arm_syncs().await?;
         self.arm_quantities().await?;

@@ -27,7 +27,8 @@ routes are docs/api.md, Ledger; seats and Stripe are docs/billing.md.
   is charged nothing (`ledger.unknown-usage`).
 - **Plans** (decision 25): `guest`, for someone who never had a seat;
   `seat` (`SEAT_INCLUDED` a month); `seat_always_on`
-  (`SEAT_ALWAYS_ON_INCLUDED`, its awake time not metered), the one seat
+  (`SEAT_ALWAYS_ON_INCLUDED`, its awake time included up to a bound:
+  "Who pays"), the one seat
   sold. Included credit arrives each UTC month while the seat is
   `active` and expires at the month's end; a seat that becomes active or
   a plan that grows mid-month gets the difference once, and nothing is
@@ -109,6 +110,26 @@ the open minute's unconfirmed counts, in the owner's favour.
 A self-hosted node's celld honors `allowUnconfirmed` the same way from
 finitecomputer/celld#33 (no gate waits on such a write); one without it holds
 the answer for the count as for any write.
+
+**A $200 seat's awake time** (decision 25) is included up to one
+computer-month a month, all its person's computers together (Paul,
+2026-11-20 and 11-23; a computer per agent): `SEAT_AWAKE_INCLUDED_MS`,
+744 hours, a 31-day month of one computer, so one computer that never
+sleeps is never charged. An always-on computer's hours are metered and
+counted too (decision 25's waiver is this bound now), so no other
+computer's ride free beside it. The head counts what this month let off
+(`awake_waived_ms`) and what the month before did (`awake_waived_before_ms`,
+kept as the month rolls, for rows heard late), after a row's reference
+is checked, so a replayed row never spends the included hours twice. A
+row counts in each month its time falls in (`awake_parts`: it ends at its
+`at` and lasted its `ms`, so one across a month's start is two parts); a
+part in an older month, or in the next (a row's clock up to
+`CLOCK_SKEW_MS` ahead), is let off whole and counts in none, in the
+person's favour. The bound is read at the plan the ledger has as a row
+is metered: a row heard after a seat ends is priced as the plan after it
+(at most one five-minute meter span a computer, as for any row). What is past a month's bound is charged at the book's
+price, from credit, with no cap or question. Its status says what this
+month used (`awake: {usedMs, includedMs}`), Billing's line.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
 bills them); a computer's time kept for its failed saves (the platform's:
@@ -246,9 +267,14 @@ left this month, okay to proceed?"), and reads the balance rather than
 guessing after a refusal. Each item is a row's usage times its calls,
 charged by `ledger::row_charge`, the function a ledger's own rows are
 charged by, with the book the answering release charges with: so it
-prices every key and unit the book has (`Catalog::key_prices`), the always-on
-seat's awake time at nothing, and a name the book does not price is
-unknown, never guessed. Its payer is the one a charge resolves to (an
+prices every key and unit the book has (`Catalog::key_prices`), and a name
+the book does not price is unknown, never guessed. A $200 seat's awake
+time is quoted against the hours its month still includes: its ledger's
+status's `awake` (what its rows have used of `SEAT_AWAKE_INCLUDED_MS`,
+the figure they are metered against), spent once across the whole
+quote, in its order, as its rows would spend it (`quote::awake_left`).
+Within them a call is quoted nothing; an item's `eachMicros` is a call's
+charge past them, and its `chargeMicros` what its calls come to. Its payer is the one a charge resolves to (an
 agent's owner). It is as accurate as the units it is given: a unit its
 vendor's answer counts (speech's characters, Grok's ticks:
 `Catalog::counted`) must be said, a model's tokens are an estimate,

@@ -11,13 +11,29 @@ between a runtime and the platform is the bridge (docs/bridge.md).
 
 ## What a computer is
 
-- One per person for now (decision 13): `computer:<24 hex>`, its id
-  derived from its owner, made asleep by `POST /api/computers`. It runs
-  one image, pinned per computer (decision 19), at the price book's
-  instance (`fragment_core::price::INSTANCE`).
-- Its agents are fragments of kind `agent` assigned to it (decision 14),
-  at most 16. An agent's identity is its agent fragment's npub (decision
-  45); the computer signs as an agent only while it is assigned there.
+- One per agent (a computer per agent, 2026-11-24): Add agent and the
+  first run make each new agent a computer of its own, `computer:<24
+  hex>`, its id derived from the agent's identity by the function that
+  derives a person's (`fragment_core::computer::default_computer_of`), so
+  a name deleted and made again gets another. It is made asleep by `POST
+  /api/computers {agent}`, owned by the agent's person, and runs that
+  agent alone (`AGENTS_ON_OWN_MAX`): its fragment takes no other computer
+  but its owner's from before (`may_run`), and the computer asserts it.
+  Its fragment names it from its making, before its assign, so an Add cut
+  between them leaves none its delete cannot end; and one computer runs
+  an agent at a time (another's assign is 409 until it is unassigned).
+  A person's computer from before (decision 13), its id derived from
+  them, runs the agents put on it then, at most 16, until they move (the
+  debt ledger, "Computers from before a computer per agent run several
+  agents"). Either runs one image, pinned per computer (decision 19), at
+  the price book's instance (`fragment_core::price::INSTANCE`).
+- "A person's computers" is stored nowhere: their computer from before
+  (when made) and each of their live agents' own (the registry's
+  `AgentsOf`), which the computers list, the notices, an export, a wipe
+  and the operators' pages walk.
+- Its agents are fragments of kind `agent` assigned to it (decision 14).
+  An agent's identity is its agent fragment's npub (decision 45); the
+  computer signs as an agent only while it is assigned there.
   The guest acts *as* its agents, with at most their grants, never as its
   owner (decision 36). An agent fragment deleted leaves its computer as
   an unassign does.
@@ -25,11 +41,14 @@ between a runtime and the platform is the bridge (docs/bridge.md).
   starts and stops it, saves and restores `/data`, runs its egress
   intercepts, proxies its ports, and wakes it. It never reads what the
   image runs.
-- Its owner's export holds its view, its newest save that restores, and,
-  beside it, the newest save set aside, if it keeps one (docs/api.md,
-  Export). It is deleted only with its owner, by an
-  operator's wipe (docs/api.md, "Operators: wiping a person"), saves
-  included. Cloudflare has no delete for a container snapshot: a wiped
+- Its owner's export holds each of their computers' view, its newest
+  save that restores, and, beside it, the newest save set aside, if it
+  keeps one (docs/api.md, Export). An agent's own computer is deleted
+  with its agent (Paul, 2026-11-23: a delete deletes its computer and its
+  files at once), its container, saves and storage, as a wipe ends one
+  (cell/src/ended.rs); its owner unassigns it from it never (409). Every
+  computer of a person is deleted with them, by an operator's wipe
+  (docs/api.md, "Operators: wiping a person"), saves included. Cloudflare has no delete for a container snapshot: a wiped
   computer's is forgotten, never restored, and expires within 30 days.
 
 ## Lifecycle
@@ -1308,25 +1327,82 @@ nothing restarted.
 
 ### Teammates in our Hermes image
 
-A person's agents on one computer are each other's teammates, on the
-platform's records (docs/bridge.md, "Agents asking each other"). Hermes'
-own Bot Mode protocol is off in every profile
-(`agent.bot_mode_protocol: false`): no roster, no `message_agent`.
+A person's agents are each other's teammates, on one computer or on
+computers of their own, on the platform's records (docs/bridge.md,
+"Agents asking each other"). Hermes' own Bot Mode protocol is off in
+every profile (`agent.bot_mode_protocol: false`): no roster, no
+`message_agent`.
 
 - **Each agent is told its teammates** at every turn (`hermes::told_team`):
   each one's name, fragment and what it does (its role, else its job's
-  first line), and how asking goes. Read again every 10 s.
+  first line), and how asking goes: the computer's own agents, and its
+  owner's others on computers of their own, as the owner's list names
+  them (an agent row names its agent: a row kept before it does is left
+  out until its fragment's next change, as nothing could ask it). Read
+  again every 10 s, with the team folder (below).
 - **`fragment_ask`** (`images/hermes/plugins/fragment-ask`, a Hermes
   plugin tool in every profile) asks as `fragment ask --return-to <this
   chat>` does, as the agent whose turn calls it: the agent and chat are
   its session's, never the model's words, and its post id is the tool
-  call's, so a retry posts once. It returns at once; the answer comes
-  back to the asking chat as a new turn.
+  call's, so a retry posts once. It says the turn it asks from and one
+  past that turn's depth (`--turn`, `--hop`), read from the bridge's
+  Relay (`/relay/turns/<turn>`), so a teammate on another computer counts
+  it. It returns at once; the answer comes back to the asking chat as a
+  new turn.
 - **Each `profile.yaml`** names its agent and what it does, for Hermes'
   own lists, and marks no profile a Bot Mode bot. It is the boot's alone.
 - **Each agent is routed to its profile** in the gateway's config
   (`profile_routes`) by one chat, so a session read back from disk has an
   adapter for a background job's completion.
+
+### The team folder in our Hermes image
+
+Since a computer per agent no two of a person's agents share a disk, so
+their shared work is files in a fragment (Paul, 2026-11-23: git, never a
+shared read-write disk). Each Hermes agent keeps `~/shared` (in its home,
+its terminal's and its file tools' `~`: `hermes::home_dir`) in step with
+its owner's team folder: their fragment of kind `shared` (the blessed
+`shared` template, which the shell makes with an agent, as it makes their
+skills fragment), one labelled `shared` first, else the first by name
+(`images/hermes/boot/src/shared.rs`).
+
+- **What runs it** is the CLI's own `fragment sync <folder> --dir
+  ~/shared --watch`, one process an agent, as that agent, for its owner,
+  as the agents' user: a save sent within moments, a teammate's change
+  arriving through the fragment's change feed (with the sync's sweep as
+  its backstop), a file both changed kept as a conflict copy beside it, a
+  pass that would delete more than the sync's bound refused until someone
+  confirms. Hermes sees a folder: no habit to learn.
+- **Found as the agents are read**, every 10 s; started at boot beside
+  Hermes' own start, so a teammate's latest is coming in as Hermes boots.
+  A sync that ended starts again at most once a minute
+  (`shared::RESTART_MS`). An agent gone ends its sync; its folder stays.
+- **A team folder replaced** keeps the old folder beside it, unsent
+  edits and journal and all, as `~/shared-<that fragment>`, and the new
+  one's sync starts in a clean `~/shared` (`shared::prepare`). Replaced
+  means another chosen while a sync runs (its journal written or not
+  yet), or found so at a boot: `~/shared`'s sync journal names another
+  fragment, or names this one but binds it to an earlier life of the name
+  (deleted and made again: its repo another than the life's, or none yet)
+  or to another host than the syncs reach. The CLI refuses a folder bound
+  elsewhere, so handing over files would stop, and one it never bound it
+  would send to the new one. The folder's repo (its status's, read as the
+  first agent for its owner) is read only when a sync is about to start:
+  a folder made again while its sync runs ends that sync (the CLI's
+  watch stops on a folder bound to another repo), and the boot starts it
+  again within `shared::RESTART_MS`, keeping the earlier life's folder.
+  The journal is read as the CLI reads it (schema 3; another it rebuilds
+  in place, binding nothing), never waited on (a FIFO at its path is
+  none) and at most 64 MiB of it.
+- **A hold stops every sync** (SIGSTOP) before the boot answers it, as a
+  round under way is waited for, and they go on after it: nothing under
+  `/data` changes while a save is taken.
+- **Each agent is told** that its teammates see what it puts in
+  `~/shared` (`hermes::told_team`), once there is a folder to keep.
+- **Its limits** are the sync's: every computer holds a full copy on its
+  own disk (documents and outputs, not 80 GB of footage), a teammate's
+  file arrives in seconds, not at once, dot folders (`.git`) and a
+  top-level `node_modules` are not synced, and each file is one upload.
 
 ### Skills and the CLI in our Hermes image
 
@@ -1481,7 +1557,15 @@ gates it.
 ## Billing
 
 Awake time, operator keys' calls and model calls are metered to the
-computer's owner, and its saves are not (docs/ledger.md, "Who pays").
+computer's owner, and its saves are not (docs/ledger.md, "Who pays"). A
+$200 seat's awake time is included up to one computer-month (744 hours)
+a month, all its person's computers together, its always-on one's hours
+metered and counted too; past it, it is charged from their credit
+(`fragment_core::ledger::SEAT_AWAKE_INCLUDED_MS`). The seat's always-on
+computer is their computer from before, else their first agent's own,
+each push telling the other it is not before it tells the seat's it is
+(so a push cut short leaves at most one always on, at worst none until
+the next): their other agents' sleep when idle.
 Awake time is time the computer was shown up: from its start's `Ready`
 (or, for a start put to sleep before it, that sleep), in the intervals
 the DO hears, each alarm's at least every five minutes and each step of

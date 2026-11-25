@@ -95,8 +95,9 @@ function world({ cut = Infinity, legacy = false } = {}) {
   // of it; the first's answer turn in the asking chat.
   const ask = (text) => post(PAIR, "chat", ANN.identity, { text, to: [BOB.identity], return_to: ASKING });
   const work = (name, who, kind, turn, more = {}) => post(name, "work", who.identity, { kind, turn, ...more });
-  const answer = (turn) => {
-    const a = post(ANN.fragment, "tasks", ANN.identity, { kind: "answer", turn, text: "found it" });
+  // posted by the asking agent's computer, or (`by`) the asked agent's own
+  const answer = (turn, by = ANN) => {
+    const a = post(ANN.fragment, "tasks", by.identity, { kind: "answer", turn, text: "found it", by: BOB.identity });
     work(ASKING, ANN, "turn.start", `answer-${turn}`, { cause: { fragment: ANN.fragment, channel: "tasks", seq: a.seq } });
     work(ASKING, ANN, "turn.end", `answer-${turn}`, { outcome: "idle" });
   };
@@ -152,6 +153,32 @@ test("an answer that came before its thread's end was read still takes its line 
     w.publish(PAIR);
     assert.deepEqual(await w.lines(), [], "the second's end read, its answer is found");
     assert.deepEqual(await w.lines(), [], "and stays found");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// A computer per agent: the asked agent on a computer of its own posts its
+// answer on its asker's `tasks` itself (docs/chat-records.md, "An ask's
+// answer"), signed by it; that answer, its asker's turn of it ended, takes
+// the line away as one its asker's computer posted does. Invalid: an answer
+// signed by an agent the thread did not ask is not its answer.
+test("an answer the asked agent posted from its own computer takes its line away", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const w = world();
+    const q = w.ask("look it up");
+    w.work(PAIR, BOB, "turn.start", "t1", { cause: { channel: "chat", seq: q.seq } });
+    w.work(PAIR, BOB, "turn.end", "t1", { outcome: "stopped" });
+    w.publish(PAIR);
+    w.publish(ASKING);
+    assert.deepEqual(await w.lines(), ["stopped"]);
+    w.answer("t1", { identity: "npub1someoneelse" });
+    w.publish(ASKING);
+    assert.deepEqual(await w.lines(), ["stopped"], "signed by another: not its answer");
+    w.answer("t1", BOB);
+    w.publish(ASKING);
+    assert.deepEqual(await w.lines(), [], "the asked agent's own answer, its asker's turn ended: gone");
   } finally {
     mock.timers.reset();
   }

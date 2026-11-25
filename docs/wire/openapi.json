@@ -530,6 +530,11 @@
             "type": "string"
           },
           {
+            "const": "shared",
+            "description": "A person's team folder (the blessed `shared` template): files all\ntheir agents share, kept in step as `~/shared` on each agent's own\ncomputer (docs/computers.md, \"The team folder in our Hermes image\").",
+            "type": "string"
+          },
+          {
             "const": "other",
             "description": "A kind this build does not know: one a newer platform's list,\nstatus or access view names (#587's), read as this so that one new\nkind breaks no shipped CLI or pinned image. It is only ever read:\n`parse` never answers it, so no `fragment.json` names it (the cell\nrefuses its install, as any kind it does not know), and it is\nwritten only as `other`, a name no kind may take, never as a kind\nit is not. Last: serde's `other` must be.",
             "type": "string"
@@ -862,6 +867,14 @@
             "default": true,
             "description": "On the signer's dock: their own choice, not the fragment's (`PUT\n/api/fragments/{name}/dock`), true until they take it off (the\nshell's dock shows apps and brains, less these and the archived).\nLeft out while true, so a row from before the choice, or from an\nolder platform, reads as on it.",
             "type": "boolean"
+          },
+          "identity": {
+            "default": null,
+            "description": "An agent fragment's agent: its identity (an npub), which a message's\n`to` names, so its owner's other agents ask it on any computer.\nNever any other fragment's; none from a row kept before it, until\nits fragment's next change.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "kind": {
             "$ref": "#/components/schemas/FragmentKind",

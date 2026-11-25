@@ -19,6 +19,30 @@ const WAIT: u64 = 8_000;
 /// The scripted agent's pace between drafts, as `support::script`'s.
 const PACE: Duration = Duration::from_millis(15);
 
+/// Goal (Alex on #1537): a team folder's repo, its life's, is read from
+/// its status as the agent acting for its owner (`GET
+/// /api/f/{name}/status?for=`, the route the platform answers), `""` before
+/// its first file; another person's is refused. Method: the bridge's
+/// client against the fake, its request's path as the fake heard it.
+#[tokio::test]
+async fn a_team_folders_repo_is_read_from_its_status_for_its_owner() {
+    use fragment_bridge::api::Api;
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.fragments.insert("shared--z9z9".into(), support::fake::Frag { kind: "shared".into(), repo: "e2e--shared--z9z9--a1b2c3d4e5f6".into(), ..Default::default() });
+        w.fragments.insert("shared--w4w4".into(), support::fake::Frag { kind: "shared".into(), ..Default::default() });
+    });
+    fake.add_member("shared--z9z9", "npub1paul", "owner");
+    fake.add_member("shared--w4w4", "npub1paul", "owner");
+    let api = Api::new(&fake.url()).unwrap();
+    assert_eq!(api.repo_for("juniper--k3x9", "npub1paul", "shared--z9z9").await.ok().as_deref(), Some("e2e--shared--z9z9--a1b2c3d4e5f6"));
+    assert_eq!(api.repo_for("juniper--k3x9", "npub1paul", "shared--w4w4").await.ok().as_deref(), Some(""), "none before its first file");
+    assert!(api.repo_for("juniper--k3x9", "npub1skyler", "shared--z9z9").await.is_err(), "acting for someone not its owner: refused");
+    let asked: Vec<(String, String)> = fake.with(|w| w.requests.iter().filter(|r| r.0.contains("shared--")).map(|r| (r.0.clone(), r.1.clone())).collect());
+    assert_eq!(asked.first().map(|r| r.0.as_str()), Some("GET /api/f/shared--z9z9/status"), "its status's route: {asked:?}");
+    assert!(asked.first().is_some_and(|r| r.1.contains("for=npub1paul")), "for its owner: {asked:?}");
+}
+
 /// New modes are optional on the wire; when present, every model id and
 /// effort must be safe before the boot writes a profile from the view.
 #[tokio::test]

@@ -237,6 +237,11 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
             }
             // a folder sync refuses stays refused: stop, as a fresh sync would
             Err(SyncError::Refused(e)) => return Err(crate::api::CodedError::from(e).into()),
+            // so does one bound to another repo (its fragment made again
+            // under its name, or another host's): stop, saying how to rebind,
+            // so whatever runs the watch (a computer's boot: images/hermes/
+            // boot `shared::prepare`) keeps the folder and starts one clean
+            Err(SyncError::Repo(e)) => return Err(anyhow::anyhow!(e)),
             Err(e) => {
                 let at = now_utc();
                 eprintln!("{at} sync failed (retrying in {err_backoff}s): {e}");
@@ -453,6 +458,35 @@ mod tests {
         let err = run(&c, "garden", &dir, &SyncOptions { mode: Mode::Mirror, ..Default::default() }).unwrap_err();
         assert_eq!(err.downcast_ref::<crate::api::CodedError>().map(|e| e.code), Some(crate::api::Code::NotFound), "{err:#}");
         assert!(!dir.join(".fragment").exists(), "the folder is not taken");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal (Alex on #1537): a watched folder bound to another repo (its
+    /// fragment deleted and made again under its name, or another host's)
+    /// stops the watch, saying how to rebind, as `sync` does, rather than
+    /// retrying a refusal that never passes: whatever runs it (a computer's
+    /// boot, images/hermes/boot `shared::prepare`) then keeps the folder and
+    /// starts one clean. Method: `run` on a folder whose journal names this
+    /// fragment, another host and repo, waited on in a thread of its own.
+    #[test]
+    fn a_watch_of_a_folder_bound_to_another_repo_stops() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let dir = tmpdir("other-world");
+        fs::create_dir_all(dir.join(".fragment")).unwrap();
+        let journal = serde_json::json!({ "schemaVersion": 3, "name": "t--k3x9", "host": "http://elsewhere.test", "repo": "an-earlier-life", "files": {} });
+        fs::write(dir.join(".fragment/state.json"), journal.to_string()).unwrap();
+        fs::write(dir.join("handover.txt"), "unsent").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (url, at) = (mock.url.clone(), dir.clone());
+        std::thread::spawn(move || {
+            let c = Client::new(&url, auth::fixed(7));
+            let _ = tx.send(run(&c, "t--k3x9", &at, &opts()).map_err(|e| format!("{e:#}")));
+        });
+        let ended = rx.recv_timeout(Duration::from_secs(30));
+        assert!(matches!(&ended, Ok(Err(e)) if e.contains("this folder is bound to") && e.contains("rm ")), "the watch ends with the refusal: {ended:?}");
+        assert_eq!(fs::read_to_string(dir.join("handover.txt")).ok().as_deref(), Some("unsent"), "nothing touched");
+        assert_eq!(mock.file_at("t--k3x9", "main", "handover.txt"), None, "nothing sent");
         fs::remove_dir_all(&dir).ok();
     }
 

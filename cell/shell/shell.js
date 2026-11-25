@@ -83,15 +83,18 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // me: the signed-in person; guest: whether they are a guest (`GET /api/seat`), who
 // makes nothing (decision 49); fragments: their list (name, role, kind,
 // title, agents, preview, sharing, archived: a chat's agents the lead
-// first, and its newest message); computer: theirs, with its agents;
-// agents: by identity; computerFailed: whether the last read of their computer
+// first, and its newest message); computers: theirs, each with its agents
+// (since a computer per agent, each new agent's own, and their computer from
+// before, if any, first: `GET /api/computers`); computer: the first of them;
+// agents: by identity, each with the id of the computer it runs on
+// (`computer`); computerFailed: whether the last read of their computers
 // failed (what an earlier one said stays: a failure is not "none");
 // notices: what they are told, in the server's words (`GET /api/notices`):
 // their computer's, and the invites waiting on their emails;
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
 // What a late answer may still do: one latest ask a kind (asks.js)
 const asks = createAsks();
-const state = { me: null, guest: false, fragments: [], limits: null, notices: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
+const state = { me: null, guest: false, fragments: [], limits: null, notices: [], computers: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -494,8 +497,9 @@ const ADD_CONFIRM_MS = 90_000;
 const ADD_ARM_MS = 800;
 const rosterTo = new Map(); // a frame's window -> its fragment's origin
 const roster = () => {
-  const phase = state.computer?.phase;
   return [...state.agents.values()].map((a) => {
+    // its own computer's phase: a chat says getting ready while its agent's starts
+    const phase = state.computers.find((c) => c.computer === a.computer)?.phase;
     const picture = agentFace(a.fragment, a.identity).picture;
     return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}), ...(a.modelProviders?.length ? { modelProviders: a.modelProviders } : {}) };
   });
@@ -915,6 +919,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
+    phaseOf: (identity) => state.computers.find((c) => c.computer === state.agents.get(identity)?.computer)?.phase,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
     offers: (agent, what) => offers(agent, what) },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,
@@ -1454,7 +1459,7 @@ addEventListener("message", async (event) => {
   const agent = to.agent;
   let ticket;
   try {
-    ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/answer/?agent=${encodeURIComponent(agent)}` });
+    ticket = await api("POST", `/api/computers/${seg(computerFor(agent).computer)}/ports/6080/ticket`, { path: `/answer/?agent=${encodeURIComponent(agent)}` });
   } catch {
     return reply(false, "Your computer could not be reached: try again.");
   }
@@ -1490,9 +1495,10 @@ addEventListener("message", async (event) => {
 // ---- an agent's screen: its own desktop, a port of its computer's own
 // origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
 async function openScreen(agent) {
-  if (!state.computer || !agent) return;
+  const c = agent && computerFor(agent);
+  if (!c) return;
   try {
-    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
+    const t = await api("POST", `/api/computers/${seg(c.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
     frame.dataset.screen = agent;
     frame.addEventListener("load", () => nameScreen(frame));
@@ -1531,11 +1537,11 @@ const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
 // of Settings' SimpleX (`computerRow`); the connectors' sections, each
 // agent's Telegram and SimpleX
 const { computerRow, computerKey, nameSimplex } = createSimplex({
-  api, el, actionLine, named, seg, computer: () => state.computer,
+  api, el, actionLine, named, seg, computer: () => state.computer, getAgents: () => state.agents, computerFor,
   titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh: () => refreshConnectors(),
 });
 const { telegramSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
-  api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
+  api, el, section, actionLine, named, seg, computer: () => state.computer, getAgents: () => state.agents, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
   connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow, computerKey,
   doorsRead: () => (forgetDoors(), renderChats()),
 });
@@ -1889,14 +1895,39 @@ const { computerOf, prewake, renderComputer, restartComputer, computerSection } 
   api, el, seg, named, section, line, actionLine, computer: () => state.computer,
   notices: () => state.notices, agents: () => state.agents, computerFailed: () => state.computerFailed,
   setupPending: () => onboarding.setupPending(),
-  made: (c) => { asks.ask("computer"); state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
+  computers: () => state.computers,
+  wakeTarget,
+  made: (c) => computerIs(c), computerIs, reopenSettings, openScreen, markOffer,
   reads: () => reads, load, openPage: (url) => openPage(url),
 });
-// The computer as the platform last answered: shown at once.
+// The person's computers as read: each agent by identity, with the id of
+// the computer it runs on (one agent on two would be a bug: the first wins).
+function setComputers(list) {
+  state.computers = list;
+  state.computer = list[0] ?? null;
+  const agents = new Map();
+  for (const c of list) for (const a of c.agents ?? []) if (!agents.has(a.identity)) agents.set(a.identity, { ...a, computer: c.computer });
+  state.agents = agents;
+}
+// The computer an agent (its fragment) runs on, as last read: none for one
+// on no computer of theirs.
+function computerFor(fragment) {
+  const id = [...state.agents.values()].find((a) => a.fragment === fragment)?.computer;
+  return state.computers.find((c) => c.computer === id) ?? null;
+}
+// The computer the person is about to use (computer.js `prewake`): the
+// open chat's first agent of theirs', else their first computer.
+function wakeTarget() {
+  const id = state.current ? agentsOf(state.current).find((i) => state.agents.has(i)) : null;
+  return (id && state.computers.find((c) => c.computer === state.agents.get(id).computer)) || state.computer;
+}
+// A computer as the platform last answered: shown at once, in its place
+// among theirs (one made meanwhile, last).
 function computerIs(v) {
   if (!v?.computer) return;
   asks.ask("computer");
-  state.computer = v;
+  const at = state.computers.findIndex((c) => c.computer === v.computer);
+  setComputers(at < 0 ? [...state.computers, v] : state.computers.map((c, i) => (i === at ? v : c)));
   renderComputer();
   renderChats();
   rosterChanged();
@@ -2158,7 +2189,7 @@ const settings = createSettings({
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readConnectors },
-  agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
+  agents: { getComputer: () => state.computer, computerFor, getAgents: () => state.agents, computerFailed: () => state.computerFailed, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
 });
@@ -2166,14 +2197,12 @@ function openSettings(push = true, failed = null) { return settings.openSettings
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
 function settingsAgentsChanged() { settings.agentsChanged(); }
 function skillsFragment() { return settings.skillsFragment(); }
+function sharedFragment() { return settings.sharedFragment(); }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
 const { connectionsSection } = createConnections({
-  api, el, section, named, seg, computer: () => state.computer, getAgents: () => state.agents,
-  computerIs: (v) => {
-    computerIs(v);
-    state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
-  },
+  api, el, section, named, seg, computer: () => state.computer, computerFor, getAgents: () => state.agents,
+  computerIs,
   asks, isOpen: () => state.page === "Settings", reopenSettings,
 });
 
@@ -2181,9 +2210,9 @@ const onboarding = createOnboarding({
   api, ui: { $, el, notice },
   account: { person: () => state.me, isGuest: () => state.guest, setGuest, told: () => state.notices.length },
   fragments: { allFragments: () => state.fragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg },
-  computer: { computerView: () => state.computer, computerFailed: () => state.computerFailed, agents: () => state.agents, computerOf, computerIs },
+  computer: { computers: () => state.computers, computerFailed: () => state.computerFailed, agents: () => state.agents, computerOf, computerIs },
   navigation: { start, openChat, atHome: () => location.pathname === "/" && !state.page, hasFrame: (name) => state.frames.has(name), page: () => state.page, welcomePath: WELCOME },
-  reads: () => reads, load, skillsFragment, rosterChanged,
+  reads: () => reads, load, skillsFragment, sharedFragment, rosterChanged,
 });
 const { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent } = onboarding;
 
@@ -2246,10 +2275,7 @@ async function load(changed = false) {
   if (computers) {
     // a view taken in while this read was out (an action's answer) is
     // newer than the one it brings: the next read brings the computer on
-    if (asks.current(taken)) {
-      state.computer = computers.computers?.[0] ?? null;
-      state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
-    }
+    if (asks.current(taken)) setComputers(computers.computers ?? []);
     state.support = computers.support ?? null;
   }
   // what they are told (FIN-458): failed, what the last read said stays,

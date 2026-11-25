@@ -70,6 +70,9 @@ pub(crate) struct Face {
     /// Its agent members, the first added first (`limits::LISTED_AGENTS_MAX`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+    /// An agent fragment's agent (its key's npub); none kept before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
 }
 
 /// `GET /api/fragments`'s answer, whole: the router passes it on. An

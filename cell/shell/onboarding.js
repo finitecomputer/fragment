@@ -2,11 +2,11 @@ import { seatOffer } from "./billing.js";
 import { DEFAULT_AGENT_TIER } from "./agent-settings.js";
 import { PHASE } from "./computer.js";
 
-export function createOnboarding({ api, ui, account, fragments, computer, navigation, reads, load, skillsFragment, rosterChanged }) {
+export function createOnboarding({ api, ui, account, fragments, computer, navigation, reads, load, skillsFragment, sharedFragment, rosterChanged }) {
   const { $, el, notice } = ui;
   const { person, isGuest, setGuest, told } = account;
   const { allFragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg } = fragments;
-  const { computerView, computerFailed, agents, computerOf, computerIs } = computer;
+  const { computers, computerFailed, agents, computerOf, computerIs } = computer;
   const { start, openChat, atHome, hasFrame, page, welcomePath: WELCOME } = navigation;
   // A new agent's name, when its maker names none (Paul, 2026-10-03): the
   // beige boxes of an alternate 1990s, never a real one's.
@@ -290,11 +290,13 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const made = allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === setup.label);
     const t = made ? titleOf(made.name) : setup.title;
     const step = (text, done, now) => ({ text, state: done ? "done" : !now ? "todo" : setup.error ? "failed" : "doing" });
+    // its own computer (a computer per agent), as last read
+    const its = computers().find((c) => c.computer === setup.computer);
     return {
       steps: [
         step(setup.made ? `${t} is made` : `Making ${t}`, setup.made, !setup.made),
         step(setup.joined ? `${t} is in this chat` : `Adding ${t} to this chat`, setup.joined, setup.made && !setup.joined),
-        step(setup.ready ? `${t} is ready` : computerView()?.phase === "awake" ? `${t} is starting on its computer` : `Its computer: ${PHASE[computerView()?.phase] ?? "not made yet"}`, setup.ready, setup.joined && !setup.ready),
+        step(setup.ready ? `${t} is ready` : its?.phase === "awake" ? `${t} is starting on its computer` : `Its computer: ${PHASE[its?.phase] ?? "not made yet"}`, setup.ready, setup.joined && !setup.ready),
       ],
       error: setup.error,
     };
@@ -466,13 +468,20 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     await load();
     if (!setup.quiet && !hasFrame(chatName)) openChat(chatName);
 
-    // These can run together once the chat is on screen. The computer is
-    // assigned before it wakes, with the agent's configuration deployed.
-    const prepared = await Promise.allSettled([skillsFragment(), computerOf()]);
-    // Finish both before offering Retry: no previous create is left in flight.
-    for (const result of prepared) if (result.status === "rejected") throw result.reason;
-    const computer = prepared[1].value;
+    // These can run together once the chat is on screen: the agent's own
+    // computer (a computer per agent), made by its agent fragment's name;
+    // their skills; and the team folder all their agents keep in step as
+    // ~/shared (made once, as the skills are). The computer is assigned
+    // before it wakes, with the agent's configuration deployed.
     const agent = await agentWritten();
+    // one already on a computer (an Add from before a computer per agent,
+    // cut short after its assign) goes on there: one computer runs it
+    const runs = [...agents().values()].find((a) => a.fragment === agent)?.computer;
+    const prepared = await Promise.allSettled([skillsFragment(), sharedFragment(), runs ? Promise.resolve({ computer: runs }) : computerOf(agent)]);
+    // Finish them all before offering Retry: no previous create is left in flight.
+    for (const result of prepared) if (result.status === "rejected") throw result.reason;
+    const computer = prepared[2].value;
+    setupChanged({ computer: computer.computer });
     const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent)}`, {});
     const id = assigned.agents.find((a) => a.fragment === agent)?.identity;
     if (!id) throw new Error("its computer did not take it");

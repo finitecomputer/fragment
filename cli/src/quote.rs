@@ -160,7 +160,17 @@ pub fn said(asked: &[Planned], q: &Quote) -> Vec<String> {
     }];
     for (item, quoted) in asked.iter().zip(&q.items) {
         match (quoted.charge_micros, quoted.unknown) {
-            (Some(c), _) if asked.len() > 1 => lines.push(format!("  {}\t{} × {}", named(item), quoted.calls, dollars(quoted.each_micros.unwrap_or(c)))),
+            // its calls at their price; less when a $200 seat's included
+            // awake hours cover some of them (its charge, then)
+            (Some(c), _) if asked.len() > 1 => {
+                let each = quoted.each_micros.unwrap_or(c);
+                let at = format!("{} × {}", quoted.calls, dollars(each));
+                let whole = i64::try_from(quoted.calls).ok().and_then(|n| each.checked_mul(n));
+                lines.push(match whole == Some(c) {
+                    true => format!("  {}\t{at}", named(item)),
+                    false => format!("  {}\t{} ({at}, less your seat's included hours)", named(item), dollars(c)),
+                })
+            }
             (None, Some(u)) => lines.push(format!("  {}: {}", named(item), why(u))),
             _ => {}
         }
@@ -266,6 +276,7 @@ mod tests {
             standing,
             price_book: 9,
             fragments: vec![],
+            awake: None,
         }
     }
 
@@ -289,6 +300,11 @@ mod tests {
         assert_eq!(lines[1], "  elevenlabs:character\t300 × $0.024");
         assert!(lines[2].starts_with("  nope: not priced here"), "{lines:?}");
         assert_eq!(lines[3], "(now: agents and AI are stopped (no_credit))");
+        // a $200 seat's awake hours, some of them included: the item's charge, then why it is less
+        let asked = [key("elevenlabs:character", Some(200), Some(300)), key("awake", None, Some(3))];
+        let hours = Quoted { priced_as: None, each_micros: Some(96_336), calls: 3, charge_micros: Some(144_504), unknown: None };
+        let q = Quote { items: vec![priced(24_000, 300), hours], total_micros: 7_344_504, left_micros: 50_000_000, ledger: ledger(50_000_000, Standing::Ok) };
+        assert_eq!(said(&asked, &q)[2], "  awake\t$0.144504 (3 × $0.096336, less your seat's included hours)");
         // nothing asked: what is left, alone, in cents never above it
         let q = Quote { items: vec![], total_micros: 0, left_micros: 49_996_801, ledger: ledger(49_996_801, Standing::Ok) };
         assert_eq!(said(&[], &q), ["you have $49.99 left this month"]);

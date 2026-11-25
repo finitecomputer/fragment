@@ -66,7 +66,7 @@ use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, MakeComputer, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -2953,6 +2953,12 @@ impl ComputerCell {
     /// part is idempotent: a wipe cut anywhere is done by the next call.
     async fn wipe(&self) -> CellResult<Value> {
         let id = self.meta(MetaKey::Id)?;
+        // wiped already, to its end (its record emptied, the mark kept): done
+        // at once, so a person's wipe over many computers (a computer per
+        // agent) gets past those its earlier calls finished
+        if self.wiped.get() && id.is_none() && self.saves()?.every_record().is_empty() {
+            return Ok(json!({ "destroyed": true, "records": 0, "objects": 0, "more": false }));
+        }
         if !self.wiped.get() {
             self.sql().exec("INSERT INTO wiped (at) VALUES (?)", vec![js::now_ms().into()])?;
             self.wiped.set(true);
@@ -3385,6 +3391,16 @@ impl ComputerCell {
             }
             "computer/wipe" => json_response(&self.wipe().await?),
             "computer/wipe-view" => json_response(&self.wipe_view().await?),
+            // the agents it runs, for its owner's list of their computers
+            // (`theirs`): none made, or another's, 404
+            "computer/agents" => {
+                let b: ExportAsk = body_json(&mut req).await?;
+                self.owned_by(&b.owner)?;
+                let rows = self.rows("SELECT identity FROM agents ORDER BY added_at, fragment", vec![])?;
+                assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
+                let agents: Vec<&str> = rows.iter().filter_map(|r| r["identity"].as_str()).collect();
+                json_response(&json!({ "agents": agents }))
+            }
             // its owner's export (export.rs): the newest save that restores,
             // and a range of one of its records, read here so its saves have
             // one reader (and one place to open them, were they sealed)
@@ -3579,8 +3595,12 @@ impl ComputerCell {
         let path = req.path();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         let rest = match (req.method(), segments.as_slice()) {
-            // the person's own computer (the router found it by them): made
-            (Method::Post, ["api", "computers"]) => return self.make(&who).await,
+            // the person's own computer, or their agent's own (the router
+            // found it by them, or by the agent its fragment named): made
+            (Method::Post, ["api", "computers"]) => {
+                let agent = req.url()?.query_pairs().find(|(k, _)| k == "agent").map(|(_, v)| v.into_owned());
+                return self.make(&who, agent.as_deref()).await;
+            }
             // what its owner is told, in words (`notices::route`): theirs,
             // or none while it is not made, a deploy since its last look news
             (Method::Get, ["api", "notices"]) => {
@@ -3711,6 +3731,18 @@ impl ComputerCell {
                     "INSERT INTO agents (fragment, identity, owner, added_at) VALUES (?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
                     vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into()],
                 )?;
+                let id = self.must(MetaKey::Id)?;
+                if id != fragment_core::computer::default_computer_of(&who) {
+                    // an agent's own computer runs that agent alone: its
+                    // fragment refused any other (runs_on.rs, `may_run`)
+                    assert_eq!(id, fragment_core::computer::default_computer_of(identity), "an agent's own computer runs its own agent");
+                    let n = self.rows("SELECT COUNT(*) AS n FROM agents", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+                    assert!(n <= fragment_core::computer::AGENTS_ON_OWN_MAX, "an agent's own computer runs one agent");
+                    // a seat's computer may be its person's first agent's own:
+                    // the push says whether this one stays awake, or fails the
+                    // assign, which is asked again
+                    crate::orgs::computer_made(&self.env, &who).await?;
+                }
                 let view = self.view().await?;
                 // it comes in where its person is (decision 64), once both the
                 // fragment and the computer hold it, so its computer hears each
@@ -3719,6 +3751,12 @@ impl ComputerCell {
                 json_response(&view)
             }
             (Method::Delete, ["agents", fragment]) => {
+                // an agent's own computer runs it for its whole life: its
+                // delete ends both (ended.rs), so no agent is left with no
+                // computer, nor a computer with no agent
+                if self.must(MetaKey::Id)? != fragment_core::computer::default_computer_of(&who) {
+                    return Err(CellError::new(ErrorCode::Conflict, "this is its agent's own computer: it runs that agent until the agent is deleted"));
+                }
                 // what it may use stays its fragment's: a row still owed from
                 // before the move is handed over before the agent goes
                 self.hand_over(fragment).await?;
@@ -3812,10 +3850,12 @@ impl ComputerCell {
         }
     }
 
-    /// Made, for `who`, whose computer this is (`default_computer_of`):
-    /// asleep on the deployment's image, its view; made again, the same.
-    async fn make(&self, who: &str) -> CellResult<Response> {
-        let id = fragment_core::computer::default_computer_of(who);
+    /// Made, for `who`, whose computer this is: their own from before
+    /// (`default_computer_of` of them), or their agent `agent`'s own (of its
+    /// key, which its fragment named to the router): asleep on the
+    /// deployment's image, its view; made again, the same.
+    async fn make(&self, who: &str, agent: Option<&str>) -> CellResult<Response> {
+        let id = fragment_core::computer::default_computer_of(agent.unwrap_or(who));
         match self.meta(MetaKey::Owner)? {
             Some(owner) if owner != who => return Err(CellError::new(ErrorCode::Forbidden, "this computer is someone else's")),
             Some(_) => {}
@@ -4217,21 +4257,114 @@ pub(crate) fn image_named(body: &[u8]) -> CellResult<String> {
 }
 
 /// `/api/computers…` (the router has resolved the signer `who`): found
-/// and forwarded. The list and the making ask the person's own computer.
+/// and forwarded. The list asks each of the person's computers (`theirs`);
+/// a making names the agent fragment whose own computer it is, which says
+/// whose it is and what its agent will be (its key), or none, for the
+/// person's own from before a computer per agent.
 pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     if kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "computers are people's: an agent runs on its owner's"));
     }
-    match rest {
-        [] => forward(env, who, method, &fragment_core::computer::default_computer_of(who), rest, body).await,
-        [id, ..] => forward(env, who, method, id, rest, body).await,
+    match (&method, rest) {
+        (Method::Get, []) => listed(env, who).await,
+        (Method::Post, []) => {
+            let asked: MakeComputer = if body.iter().all(u8::is_ascii_whitespace) { MakeComputer::default() } else { crate::json_body(body)? };
+            let Some(fragment) = asked.agent else { return forward(env, who, method, &fragment_core::computer::default_computer_of(who), rest, &[]).await };
+            if !fragment_proto::valid_fragment_name(&fragment) {
+                return Err(CellError::invalid("agent: an agent fragment of yours, by its name"));
+            }
+            // its fragment says it is theirs, and the key its agent will be:
+            // the computer's id is that key's, never a body's word
+            let own: OwnComputer = crate::routed::ask_object(env, "FRAGMENT", &fragment, "computer/own", &json!({ "owner": who })).await?;
+            let id = fragment_core::computer::default_computer_of(&own.identity);
+            send_api(env, who, Method::Post, &id, format!("https://computer.internal/api/computers?agent={}", own.identity), &[]).await
+        }
+        (_, []) => forward(env, who, method, &fragment_core::computer::default_computer_of(who), rest, body).await,
+        (_, [id, ..]) => forward(env, who, method, id, rest, body).await,
     }
 }
 
-/// `GET /api/notices`, the computer's part (`notices::route`): handed to
-/// the person's own computer, which answers what it tells them.
+/// An agent fragment's answer to its own computer's making: the key its
+/// agent is named by.
+#[derive(Deserialize)]
+struct OwnComputer {
+    identity: String,
+}
+
+/// A computer's agents as its internal call answers them.
+#[derive(Deserialize)]
+struct Runs {
+    agents: Vec<String>,
+}
+
+/// The person's computers, the order their list shows them: their own
+/// from before (when made), then each of their agents' own that runs on no
+/// computer of theirs from before, in their agents' order (the registry's:
+/// the first made first). Not stored anywhere (docs/computers.md, "What a
+/// computer is"): read from the registry and their computer from before at
+/// once. An agent's own computer not made yet answers none where asked.
+pub(crate) async fn theirs(env: &Env, who: &str) -> CellResult<Vec<String>> {
+    let own = fragment_core::computer::default_computer_of(who);
+    let (agents, on_own) = futures_util::future::join(
+        crate::ask_registry(env, &crate::registry::calls::AgentsOf { person: who.to_string() }),
+        crate::routed::ask_object::<Runs>(env, "COMPUTER", &own, "computer/agents", &json!({ "owner": who })),
+    )
+    .await;
+    let on_own = match on_own {
+        Ok(r) => Some(r.agents),
+        Err(e) if e.code == ErrorCode::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let agents = agents?.agents;
+    assert!(agents.len() as u64 <= fragment_proto::limits::AGENTS_PER_OWNER_MAX, "a person's agents are bounded");
+    let elsewhere: Vec<String> = agents.into_iter().filter(|a| on_own.as_ref().is_none_or(|on| !on.contains(a))).collect();
+    let mut ids = fragment_core::computer::computers_of(who, &elsewhere);
+    if on_own.is_none() {
+        ids.remove(0);
+    }
+    Ok(ids)
+}
+
+/// `GET /api/computers`: each of the person's computers' own view as its
+/// owner reads it (`GET /api/computers/{id}`), passed on as it answered
+/// (`fragment_core::computer::views_joined`), with where they get help.
+/// One not made is left out; a refusal (a deploy under way) is the list's
+/// answer, as it came.
+async fn listed(env: &Env, who: &str) -> CellResult<Response> {
+    let ids = theirs(env, who).await?;
+    let asked = futures_util::future::join_all(ids.iter().map(|id| send_api(env, who, Method::Get, id, format!("https://computer.internal/api/computers/{id}"), &[]))).await;
+    let mut views = Vec::with_capacity(ids.len());
+    for answer in asked {
+        let mut resp = answer?;
+        match resp.status_code() {
+            200 => views.push(resp.bytes().await?),
+            404 => {}
+            _ => return Ok(resp),
+        }
+    }
+    let cfg = Config::from_env(env);
+    let views: Vec<&[u8]> = views.iter().map(Vec::as_slice).collect();
+    let joined = fragment_core::computer::views_joined(&views, cfg.support_url.as_deref());
+    Ok(Response::builder().with_header("content-type", "application/json")?.fixed(joined))
+}
+
+/// `GET /api/notices`, the computers' part (`notices::route`): each of the
+/// person's computers answers what it tells them, joined in their order; a
+/// refusal (a deploy under way) is the part's answer, as it came.
 pub(crate) async fn notices_for(env: &Env, who: &str) -> CellResult<Response> {
-    send_api(env, who, Method::Get, &fragment_core::computer::default_computer_of(who), "https://computer.internal/api/notices".into(), &[]).await
+    let ids = theirs(env, who).await?;
+    let asked = futures_util::future::join_all(ids.iter().map(|id| send_api(env, who, Method::Get, id, "https://computer.internal/api/notices".into(), &[]))).await;
+    let mut lists = Vec::with_capacity(ids.len());
+    for answer in asked {
+        let mut resp = answer?;
+        if resp.status_code() != 200 {
+            return Ok(resp);
+        }
+        lists.push(resp.bytes().await?);
+    }
+    let lists: Vec<&[u8]> = lists.iter().map(Vec::as_slice).collect();
+    let joined = fragment_core::notice::joined(&lists).ok_or_else(|| CellError::host("a computer's notices are not a notice list"))?;
+    Ok(Response::builder().with_header("content-type", "application/json")?.fixed(joined))
 }
 
 /// Hands `/api/computers/{rest}` to computer `id`, as `/api/f/{name}/…` is

@@ -74,16 +74,24 @@ export function platformImage(img, path) {
     .catch(() => img.remove?.());
 }
 
-export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
-  // ---- the computer: awake while the person is here, and its updates ----
-  // The person's computer, made once (making it again is the same one:
-  // docs/api.md).
-  let making = null;
-  function computerOf() {
-    making ??= api("POST", "/api/computers", {}).then((c) => { made(c); return c; });
-    making.catch(() => { making = null; });
-    return making;
+// `computers`: every computer of theirs (the shell's; one, `computer`'s,
+// where a page has one); `wakeTarget`: the one a sign of use wakes.
+export function createComputer({ api, el, seg, named, section, line, actionLine, computer, computers = () => (computer() ? [computer()] : []), wakeTarget = computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
+  // ---- the computers: each awake while the person uses its agent, and
+  // their updates ----
+  // An agent's own computer (a computer per agent), made once, by its agent
+  // fragment's name (making it again is the same one: docs/api.md).
+  const making = new Map();
+  function computerOf(agent) {
+    if (!making.has(agent)) {
+      const m = api("POST", "/api/computers", { agent }).then((c) => { made(c); return c; });
+      m.catch(() => making.delete(agent));
+      making.set(agent, m);
+    }
+    return making.get(agent);
   }
+  // a computer of theirs, as last read
+  const viewOf = (id) => computers().find((c) => c.computer === id) ?? null;
   // The pre-wake races the computer's start against what the person is
   // about to ask of it. Each sign that they mean to use their agent (a
   // chat picked, shell.js `pickChat`, from an alert with the shell open or
@@ -99,14 +107,16 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // starts kept failing, so the next is theirs to ask for (Restart, in its
   // notice), never one every visit pays for unasked. While the first run
   // makes the agent, its computer starts once it is in its chat (the
-  // platform's `joined`), with the agent assigned, not before.
+  // platform's `joined`), with the agent assigned, not before. The computer
+  // woken is the one the person is about to use: the open chat's agent's
+  // (a computer per agent), else their first agent's (`wakeTarget`).
   const PREWAKE_AGAIN_MS = 60_000;
-  let woke = -Infinity;
+  const woke = new Map();
   function prewake() {
     if (setupPending()) return;
-    const c = computer();
-    if (!c || document.hidden || c.phase === "wont_wake" || now() - woke < PREWAKE_AGAIN_MS) return;
-    woke = now();
+    const c = wakeTarget();
+    if (!c || document.hidden || c.phase === "wont_wake" || now() - (woke.get(c.computer) ?? -Infinity) < PREWAKE_AGAIN_MS) return;
+    woke.set(c.computer, now());
     api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
   }
   // ---- what the person is told (FIN-458, `GET /api/notices`): each
@@ -121,19 +131,28 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // notice was as the phase the computer reports; past `SLOW_MS` a line
   // says a big one takes minutes. Hidden, the page reads nothing.
   const SLOW_MS = 30_000;
-  const follow = createRestartFollow({
-    read: () => (computer() ? api("GET", `/api/computers/${seg(computer().computer)}`) : Promise.reject(new Error("no computer"))),
-    ask: (asked) => api("POST", `/api/computers/${seg(computer().computer)}/restart`, { generation: asked }),
-    view: () => computer(),
-    // a view unchanged draws only the restart's line (its slow line comes)
-    take: (v) => (v?.computer && JSON.stringify(v) !== JSON.stringify(computer()) ? computerIs(v) : renderComputer()),
-    changed: () => renderComputer(),
-    hidden: () => document.hidden,
-  });
-  const followVisibility = () => follow.visibility();
+  // each computer's restart, followed on its own (a computer per agent)
+  const follows = new Map();
+  function followOf(id) {
+    if (!follows.has(id)) {
+      follows.set(id, createRestartFollow({
+        read: () => api("GET", `/api/computers/${seg(id)}`),
+        ask: (asked) => api("POST", `/api/computers/${seg(id)}/restart`, { generation: asked }),
+        view: () => viewOf(id),
+        // a view unchanged draws only the restart's line (its slow line comes)
+        take: (v) => (v?.computer && JSON.stringify(v) !== JSON.stringify(viewOf(id)) ? computerIs(v) : renderComputer()),
+        changed: () => renderComputer(),
+        hidden: () => document.hidden,
+      }));
+    }
+    return follows.get(id);
+  }
+  // the computers whose restart is followed now
+  const restarting = () => [...follows].filter(([, f]) => f.op()).map(([id]) => id);
+  const followVisibility = () => { for (const f of follows.values()) f.visibility(); };
   document.addEventListener("visibilitychange", followVisibility);
-  // whether the last drawing showed a restart: one gone since is done
-  let drewRestart = false;
+  // the computers whose restart the last drawing showed: one gone since is done
+  let drewRestart = new Set();
   // what the restart is doing, as the computer last said
   function restartStep(c, op) {
     if (c?.phase === "sleeping") return "Saving…";
@@ -142,15 +161,21 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (c?.phase === "asleep" && c.generation > op.asked) return "Starting again…";
     return "Restarting…";
   }
-  // A notice's action that restarts the computer is its restart, followed
-  // (its progress is the page's own row, not a notice's): the one route
-  // the band knows, never a kind.
-  const restarts = (a) => !!computer() && a.post === `/api/computers/${seg(computer().computer)}/restart`;
-  // Settings' Computer as last built: its State's words, and its Restart's
-  // buttons, painted again as the computer changes (`paintSettings`); its
-  // buttons only when the restart's step changed, so a Restart now asked
-  // stays until pressed or cancelled.
-  const shown = { section: null, state: null, asks: null, said: null, painted: null, storage: null, storageDrawn: null };
+  // A notice's action that restarts a computer of theirs is its restart,
+  // followed (its progress is the page's own row, not a notice's): the one
+  // route the band knows, never a kind. The computer it restarts, else none.
+  const restarts = (a) => computers().find((c) => a.post === `/api/computers/${seg(c.computer)}/restart`)?.computer ?? null;
+  // Each computer card as last built, by its computer and its agent (an
+  // agent's page shows its computer's: two agents on one computer from
+  // before, two of the same): its State's words, and its Restart's buttons,
+  // painted again as the computer changes while it is on the page
+  // (`paintSettings`); its buttons only when the restart's step changed, so
+  // a Restart now asked stays until pressed or cancelled. A card built
+  // again replaces its own alone: Settings builds every agent's before it
+  // shows any. Bounded by their agents.
+  const cards = new Map();
+  const cardKey = (id, agent) => `${id ?? ""}|${agent ?? ""}`;
+  const shownCards = () => [...cards.values()].filter((k) => k.section?.isConnected);
   // a button with its icon before its words; `words`, the span its words
   // are in (a named one: renderNames rewrites only its text)
   const iconed = (name, words, cls = "quiet") => {
@@ -301,7 +326,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // 2026-11-09: an invite's app, a checkout), opened once that read has it.
   async function act(n, a) {
     // the start the server named, so a stale row's press restarts nothing newer
-    if (restarts(a)) return restartComputer(a.body?.generation);
+    const restarted = restarts(a);
+    if (restarted) return restartComputer(a.body?.generation, restarted);
     if (pending.has(n.id)) return;
     pending.add(n.id);
     failed.delete(n.id);
@@ -337,7 +363,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (next.length) tick = timers.setTimeout(countdown, Math.min(...next));
   }
   // the page's own rows: a deploy, a read that failed, a restart under way
-  function pageRow(kind) {
+  function pageRow(kind, id = null) {
     const row = el("div", "computer-notice");
     row.dataset.kind = kind;
     const copy = el("div", "notice-copy");
@@ -350,17 +376,18 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       actions.append(b);
     };
     if (kind === "restart") {
-      const op = follow.op();
+      const op = followOf(id).op();
+      row.dataset.computer = id;
       if (op.state === FAILED) {
         row.classList.add("warn");
         copy.append(el("strong", null, "Your computer didn't restart"), el("p", null, op.error));
-        button("Try again", "restart", () => restartComputer());
+        button("Try again", "restart", () => restartComputer(undefined, id));
       } else if (op.state === READ_FAILED) {
         // a read that failed: no news of the restart, which may go on
         copy.append(el("strong", null, "Couldn't check on the restart"), el("p", "notice-detail", op.error));
-        button("Check again", "restart-read", () => follow.readAgain());
+        button("Check again", "restart-read", () => followOf(id).readAgain());
       } else {
-        const step = restartStep(computer(), op);
+        const step = restartStep(viewOf(id), op);
         copy.append(el("strong", null, "Restarting your computer"));
         if (Date.now() - op.at >= SLOW_MS) copy.append(el("p", null, step === "Saving…" ? "A big save can take a few minutes." : "A big restore can take a few minutes."));
         const status = el("span", "restart-status", step);
@@ -384,16 +411,16 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // read said, with Try again; a confirmed deploy waits by itself
   function renderComputer() {
     // a view taken from elsewhere (the list's read) may say it is done
-    follow.check();
-    const restart = !!follow.op();
-    if (drewRestart && !restart) redrawSection();
-    drewRestart = restart;
+    for (const f of follows.values()) f.check();
+    const now_ = restarting();
+    for (const id of drewRestart) if (!now_.includes(id)) redrawSection(id);
+    drewRestart = new Set(now_);
     const box = document.getElementById("computer-notices");
     const t = now();
     const all = notices() ?? [];
 
     // a notice a restart answers waits while it runs; one whose time passed is gone
-    const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
+    const told = all.filter((n) => !(n.until && n.until.at <= t) && !(n.actions ?? []).some((a) => now_.includes(restarts(a))));
     // a failure whose notice is not drawn (the read has it no more, or its
     // time passed): a refusal stays, a line of its own; a call that never
     // reached the server goes with it
@@ -403,7 +430,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // a read that failed, its notices' too: what the last said stays, under its line
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
     const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
-    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
+    const rows = [...own.map((k) => pageRow(k)), ...now_.map((id) => pageRow("restart", id)), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
     drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
@@ -454,21 +481,23 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       }
     };
     cover.setAttribute("aria-label", n.title);
-    cover.replaceChildren(...own.map(pageRow), noticeRow(n));
+    cover.replaceChildren(...own.map((k) => pageRow(k)), noticeRow(n));
     if (!cover.open) reshow(cover);
     focusChosen(cover, fresh);
   }
   // The restart, done: awake on a newer start, or a newer start that won't
-  // (its notice then says so, with Try again). Settings' Computer, shown,
-  // is drawn again in place (its version, the latest), under its heading,
-  // which settings' links name: nothing else read again, nothing moved.
-  function redrawSection() {
-    const old = shown.section;
-    const c = computer();
-    if (!old?.isConnected || !c) return;
-    const fresh = computerSection(c);
-    old.replaceChildren(old.querySelector(":scope > h2"), ...[...fresh.children].slice(1));
-    shown.section = old;
+  // (its notice then says so, with Try again). Each card of that computer
+  // shown is drawn again in place (its version, the latest), under its
+  // heading: nothing else read again, nothing moved.
+  function redrawSection(id) {
+    const c = viewOf(id);
+    if (!c) return;
+    for (const card of shownCards().filter((k) => k.id === id)) {
+      const old = card.section;
+      const fresh = computerSection(c, card.agent);
+      old.replaceChildren(...fresh.children);
+      cards.get(cardKey(id, card.agent)).section = old;
+    }
   }
   // Try again: the list and the computer read again (`load`, which goes on
   // with what the failure put off). The list's read failing too, the line
@@ -485,21 +514,27 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // else the view's), so pressed twice (or in two tabs, or on a stale row)
   // it restarts once. Its progress shows where its notice was (`follow`),
   // and so does its ask's failure, with Try again.
-  function restartComputer(asked) {
-    follow.press(asked);
+  function restartComputer(asked, id = computer()?.computer) {
+    if (id) followOf(id).press(asked);
   }
 
-  function computerSection(c) {
+  // An agent's computer, on its page in Settings (a computer per agent):
+  // its state, version, storage, its agent's screen and Restart. `agent`,
+  // the agent fragment whose page it is on.
+  function computerSection(c, agent) {
     // the version it runs (asleep: the one it starts on), and the latest when
     // it runs an older one (docs/computers.md, "What its owner is told")
     const behind = !!(c?.version && c.latest && c.version !== c.latest);
-    const computer = section(
-      "Computer",
+    const card = { id: c?.computer ?? null, agent, section: null, state: null, asks: null, said: null, painted: null, storage: null, storageDrawn: null };
+    const computer = el("div", "agent-computer");
+    computer.dataset.computer = card.id ?? "";
+    computer.append(el("h3", null, "Computer"));
+    computer.append(
       ...(c
         ? [
-            stateLine(c),
+            stateLine(c, card),
             line("Version", c.version ?? c.latest ?? c.image),
-            storageBlock(c),
+            storageBlock(c, card),
             ...(behind
               ? [
                   line("Latest version", c.latest),
@@ -511,7 +546,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
             ...(c.why ? [el("p", "settings-warning", c.why)] : []),
           ]
         : // never read: a failed read is not "none" (shown again once one answers: `load`)
-          [el("p", "muted", computerFailed() ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
+          [el("p", "muted", computerFailed() ? "Couldn't load its computer." : "Its computer starts with its first message.")]),
     );
     // a row of Computer: its label, a short line under it, and its buttons
     // on the right
@@ -524,45 +559,43 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       line.append(info, control);
       return line;
     };
-    // each agent's own desktop, where its runtime offers one (`markOffer`:
-    // agent-runtimes.js), and the line gone with the last
-    const screens = [];
-    for (const a of c ? agents().values() : []) {
-      const screen = iconed("screen", named(el("span"), a.fragment, (t) => `Open ${t}'s screen`));
-      screen.dataset.screenFor = a.fragment;
-      screen.onclick = () => openScreen(a.fragment);
-      screens.push(markOffer(screen, a.fragment, "screen"));
-    }
-    if (screens.length) {
-      const shown = row("Screens", "Watch your agent work on its own desktop, and take over.", ...screens);
+    // its agent's own desktop, where its runtime offers one (`markOffer`:
+    // agent-runtimes.js)
+    if (c && agent) {
+      const screen = iconed("screen", named(el("span"), agent, (t) => `Open ${t}'s screen`));
+      screen.dataset.screenFor = agent;
+      screen.onclick = () => openScreen(agent);
+      const offered = markOffer(screen, agent, "screen");
+      const shown = row("Screen", "Watch your agent work on its own desktop, and take over.", offered);
       shown.dataset.offers = "";
-      shown.hidden = screens.every((s) => s.hidden);
+      shown.hidden = offered.hidden;
       computer.append(shown);
     }
     // the way back to working when something is wrong with it: asked once
     // more before it cuts what its agents are doing
     if (c) {
       const asks = el("span", "settings-actions");
-      const restartRow = row("Restart", "Saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops.", asks);
+      const restartRow = row("Restart", "Saves its computer if it can, then starts it fresh from that save. Anything it is doing stops.", asks);
       // why its ask failed, under its words (never beside its button, which
       // would squeeze them)
       const said = el("p", "form-error");
       restartRow.querySelector(".settings-info").append(said);
-      Object.assign(shown, { asks, said });
-      paintAsks(asks);
+      Object.assign(card, { asks, said });
+      paintAsks(card);
       computer.append(restartRow);
     }
-    shown.section = computer;
+    card.section = computer;
+    cards.set(cardKey(card.id, agent), card);
     return computer;
   }
   // Storage: a bar of what takes its disk by kind, the room left, the
   // biggest files; asleep, awake or not waking alike (its view keeps it)
   // (drawn again by `paintSettings` once a view that says otherwise lands)
-  function storageBlock(c) {
+  function storageBlock(c, card) {
     const parts = storageParts(c);
-    shown.storageDrawn = storageKey(c);
-    shown.storage = parts ? storageDrawn(c, parts) : line("Storage", "Measured after your computer next saves.");
-    return shown.storage;
+    card.storageDrawn = storageKey(c);
+    card.storage = parts ? storageDrawn(c, parts) : line("Storage", "Measured after your computer next saves.");
+    return card.storage;
   }
   // what its Storage is drawn from: its parts, and whether it is awake
   // (its Delete buttons)
@@ -642,30 +675,35 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     box.append(ask);
     return box;
   }
-  function stateLine(c) {
-    const l = line("State", stateSaid(c, active(follow.op())));
-    shown.state = l.querySelector(".settings-value");
+  function stateLine(c, card) {
+    const l = line("State", stateSaid(c, active(followOf(c.computer).op())));
+    card.state = l.querySelector(".settings-value");
     return l;
   }
   function paintSettings() {
-    const c = computer();
-    if (shown.state?.isConnected && c) shown.state.textContent = stateSaid(c, active(follow.op()));
-    if (shown.asks?.isConnected && restartSaid() !== shown.painted) paintAsks(shown.asks);
-    // its Storage, as the view that landed says it (Codex on #1428)
-    if (shown.storage?.isConnected && c && storageKey(c) !== shown.storageDrawn) shown.storage.replaceWith(storageBlock(c));
+    for (const card of shownCards()) {
+      const c = viewOf(card.id);
+      if (!c) continue;
+      if (card.state?.isConnected) card.state.textContent = stateSaid(c, active(followOf(c.computer).op()));
+      if (card.asks?.isConnected && restartSaid(card.id) !== card.painted) paintAsks(card);
+      // its Storage, as the view that landed says it (Codex on #1428)
+      if (card.storage?.isConnected && storageKey(c) !== card.storageDrawn) card.storage.replaceWith(storageBlock(c, card));
+    }
   }
-  // what settings' Restart says now: nothing but its button, the restart's
+  // what a card's Restart says now: nothing but its button, the restart's
   // step, or why its ask failed
-  function restartSaid() {
-    const op = follow.op();
-    return !op ? "" : op.state === FAILED || op.state === READ_FAILED ? `${op.state}: ${op.error}` : restartStep(computer(), op);
+  function restartSaid(id) {
+    const op = followOf(id).op();
+    return !op ? "" : op.state === FAILED || op.state === READ_FAILED ? `${op.state}: ${op.error}` : restartStep(viewOf(id), op);
   }
-  function paintAsks(asks) {
-    const step = restartSaid();
+  function paintAsks(card) {
+    const { asks, id } = card;
+    const follow = followOf(id);
+    const step = restartSaid(id);
     const op = follow.op();
-    shown.painted = step;
-    shown.said.textContent = op?.state === FAILED ? `It didn't restart: ${op.error}` : op?.state === READ_FAILED ? `Couldn't check on the restart: ${op.error}` : "";
-    shown.said.hidden = !shown.said.textContent;
+    card.painted = step;
+    card.said.textContent = op?.state === FAILED ? `It didn't restart: ${op.error}` : op?.state === READ_FAILED ? `Couldn't check on the restart: ${op.error}` : "";
+    card.said.hidden = !card.said.textContent;
     if (op?.state === READ_FAILED) {
       const check = iconed("reload", "Check again");
       check.dataset.action = "restart-read";
@@ -684,7 +722,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     go.onclick = () => {
       const sure = iconed("reload", "Restart now");
       sure.dataset.action = "restart";
-      sure.onclick = () => restartComputer();
+      sure.onclick = () => restartComputer(undefined, id);
       const cancel = el("button", "quiet", "Cancel");
       cancel.type = "button";
       cancel.onclick = () => asks.replaceChildren(go);
@@ -696,6 +734,6 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     document.removeEventListener("visibilitychange", followVisibility);
     if (tick !== null) timers.clearTimeout(tick);
     raised.disconnect();
-    follow.dispose();
+    for (const f of follows.values()) f.dispose();
   } };
 }

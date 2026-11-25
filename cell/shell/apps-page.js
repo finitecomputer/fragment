@@ -53,7 +53,7 @@ const dockable = (f) => f.kind === "app" || f.kind === "brain";
 // its door), so what reaches them is in one place (Paul, 2026-11-01). An
 // agent with a door (its SimpleX link) is not: that door is opened and
 // closed in Settings, from its own page (Alex on #918).
-export const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || (f.kind === "chat" && f.sharing?.reach === true);
+export const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions" && f.kind !== "shared") || (f.kind === "chat" && f.sharing?.reach === true);
 // The two pages of what is listed: a brain is a knowledge base, not a tool,
 // so it is kept on a page of its own; everything else is an app. One
 // module, so both pages act on a row the same way. `ask`, each visit's

@@ -229,6 +229,14 @@ pub struct State {
     /// `until` (`limits::HELPERS_LEASE_MS`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Helper>,
+    /// The questions its agents took an answer to, by `agent|<chat>/<seq>`
+    /// (the question's record), with the answer's time: one answer a
+    /// question, however many a teammate on another computer posts (it
+    /// signs its own: a computer per agent). The newest
+    /// `limits::ANSWERED_KEPT`. A state without it (an earlier bridge's)
+    /// holds none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub answered: BTreeMap<String, i64>,
 }
 
 /// A helper running (`State::children`): the chat its set goes to (its
@@ -248,7 +256,7 @@ pub struct Helper {
 
 impl Default for State {
     fn default() -> State {
-        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new() }
+        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new(), answered: BTreeMap::new() }
     }
 }
 
@@ -528,6 +536,9 @@ pub struct ChatView {
     pub people: Vec<String>,
     /// What to call its writers, by identity.
     pub names: BTreeMap<String, String>,
+    /// Its agents' own fragments, by identity, as `__people` names them:
+    /// where an answer to one on another computer goes (`Return::agent`).
+    pub fragments: BTreeMap<String, String>,
     /// The door this chat is of the agent reading it, as the agent's own row
     /// of its members says (`door`: a connector bound as the agent's door,
     /// while open: docs/api.md, "An agent's doors"): `telegram`, …. None for
@@ -1035,7 +1046,7 @@ impl Engine {
         Step { effects: std::mem::take(&mut self.out), dirty: self.dirty }
     }
 
-    fn agent(&self, fragment: &str) -> Option<&Agent> {
+    pub fn agent(&self, fragment: &str) -> Option<&Agent> {
         self.agents.iter().find(|a| a.fragment == fragment)
     }
 
@@ -1070,7 +1081,12 @@ impl Engine {
     /// on its chat's `work` as its agent, or an answer as the agent it is for.
     fn owe(&mut self, agent: &str, fragment: &str, turn: &str, o: Owed) {
         let (agent, fragment, channel) = match &o.to {
-            Some(to) => (to.as_str(), to.as_str(), records::TASKS),
+            // an answer, on its asker's own `tasks`, as the agent that
+            // answered, on whatever computer its asker runs (its bridge takes
+            // it once its own question vouches for it: driver.rs `vouched`);
+            // as its asker, which its own bridge takes as ever, when the
+            // asked agent left this computer and its asker stays (#722)
+            Some(to) => (if self.agent(agent).is_some() { agent } else { to.as_str() }, to.as_str(), records::TASKS),
             None => (agent, fragment, records::WORK),
         };
         self.out.push(Effect::Owed { agent: agent.to_string(), fragment: fragment.to_string(), channel, turn: turn.to_string(), id: o.id, body: o.body });
@@ -1394,17 +1410,37 @@ impl Engine {
                 self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, Ask::Routine);
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
-            // Only its own bridge answers it (as itself, `owe_answer`): a
+            // An answer it takes is its own key's, or one its own question
+            // vouched for (the agent asked, signed by the agent it asked,
+            // back to this chat: the driver checks it before the engine
+            // reads it, `vouched`, and hands it on as the agent's own): a
             // turn asked as the agent that answered (its identity and name,
             // which the runtime is told it is from: Paul, 2026-10-30), its
             // owner's business in that chat still (`who_answers`: their
             // Stop, their words to a question it asks), and no fewer hops
             // deep than the turn that answered, so a callback resets no
-            // depth and spends that chat's budget. Its bridge posts it
-            // signed as the agent; what the platform appends under the
-            // fragment's key (a schedule firing) names the agent too, but
-            // no bridge wrote it, so it answers nothing.
+            // depth and spends that chat's budget. A bridge posts it signed
+            // as an agent (the asked one's, vouched for here); what the
+            // platform appends under the fragment's key (a schedule firing)
+            // names the agent too, but no bridge wrote it, so it answers
+            // nothing.
             Task::Answer { chat, text, by, name, hop, refused, files, asked } if record.principal == agent.identity && !record.by_platform() => {
+                // one answer a question from each agent asked it: another
+                // from the same agent is passed over (a message may ask two)
+                if let Some((fragment, seq)) = records::answers(&record.body) {
+                    let key = format!("{}|{fragment}/{seq}|{by}", agent.fragment);
+                    if self.state.answered.contains_key(&key) {
+                        crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "its question took an answer already" });
+                        return;
+                    }
+                    self.state.answered.insert(key, record.at);
+                    // bounded: the oldest go past ANSWERED_KEPT
+                    while self.state.answered.len() > limits::ANSWERED_KEPT {
+                        let oldest = self.state.answered.iter().min_by_key(|(k, at)| (**at, (*k).clone())).map(|(k, _)| k.clone()).expect("over the bound, so not empty");
+                        self.state.answered.remove(&oldest);
+                    }
+                    self.dirty = true;
+                }
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 // what the asked agent sent: blobs of the chat it was asked
                 // in, which this agent, its asker, reads as itself (#721)
@@ -1415,7 +1451,7 @@ impl Engine {
                 let hop = if refused { 0 } else { hop.clamp(1, limits::HOPS_MAX) };
                 self.admit(agent, &chat, cause, record.at, &by, name, &m, hop, ask);
             }
-            Task::Answer { .. } => crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "only the agent's own bridge posts its answers" }),
+            Task::Answer { .. } => crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "an answer is taken only as the agent's own, or vouched for by its own question" }),
             Task::Other => {}
         }
     }
@@ -1429,8 +1465,9 @@ impl Engine {
             }
             let hop = self.hop_of(fragment, principal, m.turn.as_deref(), m.hop);
             // an ask past the cap is still a turn, refused (`admit`), so its
-            // answer says why; any other hand-off past it is let go
-            let asks = m.return_to.is_some() && self.agents.iter().any(|a| a.identity == principal);
+            // answer says why, to an agent of this computer or another;
+            // any other hand-off past it is let go
+            let asks = m.return_to.is_some();
             if hop > limits::HOPS_MAX && !asks {
                 crate::ev!("handoff.too_deep", { "agent": agent.fragment, "fragment": fragment, "from": principal, "hop": hop, "claimed": m.hop });
                 return None;
@@ -1441,9 +1478,17 @@ impl Engine {
             return m.to.iter().any(|t| t == &agent.identity).then_some(0);
         }
         let words = records::mentions(&m.text);
-        let named: Vec<&Agent> = self.agents.iter().filter(|a| view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).collect();
+        // every agent of the chat a mention names, this computer's or one on
+        // another (a computer per agent: by its label, of the fragment the
+        // chat's people name it by), so one mentioned elsewhere is no
+        // reason for the lead here to answer too
+        let names = |id: &str, w: &str| match self.agents.iter().find(|a| a.identity == id) {
+            Some(a) => answers_to(a, w),
+            None => view.fragments.get(id).is_some_and(|f| crate::api::label(f).eq_ignore_ascii_case(w)),
+        };
+        let named: Vec<&String> = view.agents.iter().filter(|id| words.iter().any(|w| names(id, w))).collect();
         if !named.is_empty() {
-            return named.iter().any(|a| a.identity == agent.identity).then_some(0);
+            return named.iter().any(|id| **id == agent.identity).then_some(0);
         }
         (view.lead() == Some(agent.identity.as_str())).then_some(0)
     }
@@ -1539,14 +1584,17 @@ impl Engine {
         } else {
             None
         };
-        // an ask's answer goes back only to another agent of this computer,
-        // whose own `tasks` its bridge posts it on; a refused one's too,
-        // which says why and wakes no one (`owe_answer`)
+        // an ask's answer goes back to the asking agent, on its own `tasks`:
+        // one of this computer's, or a teammate on another (a computer per
+        // agent), by the fragment the chat's people name it by; a refused
+        // one's too, which says why and wakes no one (`owe_answer`)
         let ret = m.return_to.as_ref().and_then(|chat| {
-            let asking = self.agents.iter().find(|a| a.identity == asker && a.fragment != agent.fragment)?;
+            let here = self.agents.iter().find(|a| a.identity == asker).map(|a| a.fragment.clone());
+            let elsewhere = || self.views.get(fragment).filter(|v| v.agents.iter().any(|a| a == asker)).and_then(|v| v.fragments.get(asker)).cloned();
+            let asking = here.or_else(elsewhere).filter(|f| *f != agent.fragment)?;
             // as its chat shows it, else its label while that is unread
             let name = self.views.get(fragment).and_then(|v| v.names.get(&agent.identity)).cloned().unwrap_or_else(|| agent.name.clone());
-            Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
+            Some(Return { agent: asking, chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
         });
         self.state.admitted += 1;
         let turn = Turn {
@@ -1604,7 +1652,8 @@ impl Engine {
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
                 if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
                     let asker = answer.to.expect("an answer's asker");
-                    self.post(&asker, &asker, records::TASKS, answer.id, answer.body, Vec::new());
+                    // as the agent asked, which is here (it is being admitted)
+                    self.post(&agent.fragment, &asker, records::TASKS, answer.id, answer.body, Vec::new());
                 }
             }
             return;
@@ -1667,8 +1716,10 @@ impl Engine {
     /// names any more (a turn from before `by`, its agent gone).
     fn answer_of(&self, id: &str, t: &Turn, outcome: &Outcome, refused: bool) -> Option<Owed> {
         let r = t.ret.as_ref()?;
-        if self.agent(&r.agent).is_none() {
-            crate::ev!("answer.dropped", { "turn": id, "why": "its asking agent left this computer" });
+        // posted as the agent asked, on any computer its asker runs; as the
+        // asker when the asked agent left (`owe`): one of the two is here
+        if self.agent(&t.agent).is_none() && self.agent(&r.agent).is_none() {
+            crate::ev!("answer.dropped", { "turn": id, "why": "neither the asked agent nor its asker runs on this computer" });
             return None;
         }
         let Some(by) = Some(r.by.clone()).filter(|b| !b.is_empty()).or_else(|| self.agent(&t.agent).map(|a| a.identity.clone())) else {
@@ -2074,6 +2125,7 @@ impl Engine {
             age,
             disk,
             command: t.command,
+            hop: t.hop,
             reply_to: t.reply_to,
             quote: None,
             simplex,
