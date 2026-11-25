@@ -487,8 +487,9 @@ pub enum Event {
     /// The turn is over.
     End { turn: String, outcome: crate::records::Outcome },
     /// Something the runtime said with no turn running (a reminder it set):
-    /// posted as a turn of its own in that chat.
-    Say { agent: String, fragment: String, text: String, files: Vec<LocalFile> },
+    /// posted as a turn of its own in that chat, in the room of the agent's
+    /// door its conversation is (`TurnStart::room`), if one.
+    Say { agent: String, fragment: String, text: String, files: Vec<LocalFile>, room: Option<String> },
     /// A notice of the runtime's about the agent's work in a chat, neither a
     /// step nor a reply (it seems stuck, its context was compressed, it
     /// updated its memory): the agent's turn running there, or, with none,

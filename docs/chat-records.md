@@ -66,7 +66,8 @@ A **turn** is what one agent does about one record. Its id is the first
 24 hex digits of SHA-256 of `<agent fragment>|<fragment>/<channel>/<seq>`.
 So a record read twice is one turn, and two agents answering one message
 are two turns. When the runtime says something with no turn running, that
-is a turn of its own, numbered by the bridge's life and counter.
+is a turn of its own, numbered by the bridge's life and counter; said in a
+room's conversation, its reply names that room.
 
 A turn a restart cut may be followed by its **continuation**, a turn of
 its own: its id is the first 24 hex digits of SHA-256 of `continue`, a

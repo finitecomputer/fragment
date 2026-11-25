@@ -367,7 +367,7 @@ fn a_background_file_is_posted_without_a_caption() {
     let a = agent("juniper");
     let mut e = engine(std::slice::from_ref(&a));
     let file = LocalFile { path: "/data/result.txt".into(), media_type: "text/plain".into(), name: "result.txt".into(), size: 27, pin: Default::default() };
-    let event = |agent: &str, files: Vec<LocalFile>| Event::Say { agent: agent.into(), fragment: "talk--k3x9".into(), text: String::new(), files };
+    let event = |agent: &str, files: Vec<LocalFile>| Event::Say { agent: agent.into(), fragment: "talk--k3x9".into(), text: String::new(), files, room: None };
     assert!(posts(&ev(&mut e, event("unknown--k3x9", vec![file.clone()]), T0)).is_empty());
     assert!(posts(&ev(&mut e, event(&a.fragment, Vec::new()), T0)).is_empty());
     let s = ev(&mut e, event(&a.fragment, vec![file.clone()]), T0 + 1);
@@ -3438,7 +3438,7 @@ impl World {
     /// The lead's runtime says something with no turn running.
     fn say_unasked(&mut self, text: &str) {
         let agent = self.lead().fragment.clone();
-        self.step(heard(Event::Say { agent, fragment: CHAT.into(), text: text.into(), files: Vec::new() }));
+        self.step(heard(Event::Say { agent, fragment: CHAT.into(), text: text.into(), files: Vec::new(), room: None }));
     }
 
     fn runs_of(&self, turn: &str) -> usize {
@@ -5376,9 +5376,10 @@ fn its_owner_stops_any_turn_in_its_door_and_a_speaker_answers_only_their_own_que
 }
 
 /// Goal (restart): a turn heard in a room keeps its room across a
-/// restart: the state reads back whole, and a cut one's continuation runs
-/// in the same room's conversation, told where it is. A state from before
-/// rooms holds none, and reads.
+/// restart: the state reads back whole but for the room's context, which
+/// it never keeps (`Turn::before`), and a cut one's continuation runs in
+/// the same room's conversation, told where it is and who asks. A state
+/// from before rooms holds none, and reads.
 #[test]
 fn a_rooms_turn_keeps_its_room_across_a_restart() {
     let a = agent("juniper");
@@ -5387,7 +5388,11 @@ fn a_rooms_turn_keeps_its_room_across_a_restart() {
     let first = started(&said_by_door(&mut e, &a, &door, 1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "deploy"), T0)).expect("a turn");
     let saved = serde_json::to_string(e.state()).expect("serializes");
     let state: State = serde_json::from_str(&saved).expect("deserializes");
-    assert_eq!(&state, e.state(), "a round trip changes nothing");
+    let mut kept = e.state().clone();
+    for t in kept.turns.values_mut() {
+        assert!(t.before.take().is_some(), "its context, in memory");
+    }
+    assert_eq!(state, kept, "a round trip changes nothing else");
     let mut older = serde_json::to_value(e.state()).expect("a value");
     for t in older["turns"].as_object_mut().expect("turns").values_mut() {
         let t = t.as_object_mut().expect("a turn");
@@ -5401,7 +5406,9 @@ fn a_rooms_turn_keeps_its_room_across_a_restart() {
     e2.step(heard(Event::Connected(true)), T0 + 10);
     let landed = e2.step(Input::Posted { turn: first.turn.clone(), id: records::work_id(&first.turn, "end"), kept: true }, T0 + 10);
     let cont = started(&answered(&mut e2, landed, T0 + 10)).expect("the continuation runs");
-    assert_eq!((cont.continues.as_deref(), cont.conversation(), cont.place), (Some(first.turn.as_str()), "talk--k3x9/C0123".to_string(), first.place));
+    let line = first.place.as_deref().and_then(|p| p.lines().next()).map(str::to_string);
+    assert!(line.as_deref().is_some_and(|l| l.starts_with("You are in Slack #deploys")), "{line:?}");
+    assert_eq!((cont.continues.as_deref(), cont.conversation(), cont.place), (Some(first.turn.as_str()), "talk--k3x9/C0123".to_string(), line));
 }
 
 /// Goal (security, Alex on #1500: room isolation for implicit answers):
@@ -5458,4 +5465,35 @@ fn a_reply_in_a_room_names_it_and_hands_off_to_no_one() {
     e.step(heard(Event::Reply { turn: t.clone(), part: 1, text: "@rowan can take this".into() }), T0 + 4);
     let end = e.step(heard(Event::End { turn: t.clone(), outcome: Outcome::Idle }), T0 + 5);
     assert_eq!(posts(&end)[0], (records::reply_id(&t, 1), json!({ "text": "@rowan can take this", "turn": t, "to": ["npub1rowan"], "hop": 1 })));
+}
+
+/// Goal (limits, restart): a room's context is told its turn, never kept in
+/// the state: every agent's queue full of messages heard with their whole
+/// context (20 lines at their bound) fits the state file and is written,
+/// each turn keeping only where it is and who asks (`Turn::place`).
+#[test]
+fn a_rooms_context_is_never_kept_in_the_state() {
+    let agents: Vec<_> = (0..16).map(|i| agent(&format!("agent{i}"))).collect();
+    let mut e = engine(&agents);
+    let dir = std::env::temp_dir().join(format!("fin508-room-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let gate = std::sync::Arc::new(crate::store::Gate::default());
+    let (mut store, _) = crate::store::Store::open(&dir, gate.clone()).expect("open");
+    let line = json!({ "name": "𝔸".repeat(limits::ROOM_NAME_MAX_CHARS), "text": "x".repeat(limits::ROOM_CONTEXT_LINE_MAX_BYTES) });
+    for (i, a) in agents.iter().enumerate() {
+        let chat = format!("slack{i}--k3x9");
+        for seq in 1..=limits::QUEUED_PER_CHAT_MAX as u64 {
+            let mut body = heard_in(a, "C0001", "deploys", "U123", "Maple", "ping");
+            body["context"] = json!(vec![line.clone(); limits::ROOM_CONTEXT_LINES_MAX]);
+            let record = Record { author: Some(records::DOOR.into()), ..rec(seq, SLACK, body) };
+            e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.clone(), record, view: Some(door_view(a)), since: 0 }, T0);
+            store.write(e.state()).expect("write");
+        }
+    }
+    assert_eq!(e.state().turns.len(), 16 * limits::QUEUED_PER_CHAT_MAX);
+    let bytes = serde_json::to_vec(e.state()).expect("a state").len();
+    assert!(bytes < limits::STATE_FILE_MAX_BYTES / 4, "the state keeps no room's context: {bytes} bytes");
+    gate.holding.store(true, std::sync::atomic::Ordering::SeqCst);
+    store.settle().expect("the queued turns written");
+    std::fs::remove_dir_all(dir).expect("cleaned");
 }

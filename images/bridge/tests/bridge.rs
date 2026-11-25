@@ -2992,3 +2992,37 @@ async fn a_quote_is_told_only_in_the_room_its_words_were_said_in() {
     });
     bridge.stop().await;
 }
+
+/// Goal (restart): a turn in a room never marks the chat's own
+/// conversation current. Its runtime's memory lost, a room's message first
+/// leaves the owner's next message still told what it missed, and the
+/// room is told none of it.
+#[tokio::test]
+async fn a_room_turn_never_spares_the_chats_own_conversation_its_recap() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.connector("slack", "juniper", Some("slack"));
+    let dir = support::dir("room-marker");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let owner = said_and_ended(&fake, &chat, "remember the private codeword zebra").await;
+    assert_eq!(marker(&dir, &chat).as_deref(), Some(owner.as_str()));
+    bridge.kill().await;
+    fake.until(WAIT, "the old sockets closed", |w| w.live_sockets() == 0).await;
+    support::lose_memory(&dir);
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    let heard = fake.say_as_door(&chat, "npub1slack", json!({
+        "text": "slack says hi", "to": ["npub1juniper"],
+        "heard": { "via": "slack", "from": "U123", "name": "Maple" }, "room": { "id": "C0001", "name": "#public" }
+    }));
+    let room = turn_of("juniper", &chat, seq(&heard));
+    fake.until(WAIT, "the room turn's end", |w| !ends_of(w, &chat, &room).is_empty()).await;
+    let ask = said_and_ended(&fake, &chat, "what was the codeword?").await;
+    fake.with(|w| {
+        assert!(!reply_text(w, &chat, &room).contains("zebra"), "the room is told none of the chat's own");
+        let reply = reply_text(w, &chat, &ask);
+        assert!(reply.contains("remember the private codeword zebra"), "the chat's own conversation is told what it missed (marker {:?}): {reply}", marker(&dir, &chat));
+    });
+    bridge.stop().await;
+}

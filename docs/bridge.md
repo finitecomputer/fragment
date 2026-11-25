@@ -270,8 +270,11 @@ alone is noticed. In the end state the agent fragment compares, and the
 marker stays where it is.
 
 - **A turn in a room** of the agent's door is told no recap: a recap
-  is the whole chat's, every room's. Its runtime is current once it has
-  it, behind or not.
+  is the whole chat's, every room's. Its marker, the chat's own
+  conversation's, stays where it is, so that conversation's next turn
+  is still told what it missed. What was said in the room just before
+  is held in memory, never in the state: a turn queued across a
+  restart is told its room and who asks, not that.
 - **A read that failed** (the journal, or the recap, answered too
   slowly or not at all), or one that does not reach back far enough to
   say, leaves the marker as it was, so the next turn asks again.
@@ -831,7 +834,10 @@ the bridge serves `/relay`, `/relay/media` and `/relay/activity` on
 `<chat fragment>/<agent fragment>`, so two agents in one chat are two
 chats to Hermes, and `/<room>` after it for a turn said in a room of the
 agent's door (docs/chat-records.md, "A message heard in a room"): a
-session of its own each. A `/steer` goes into its running turn's. Its message id is the turn's id. A message's files are
+session of its own each. A `/steer` goes into its running turn's,
+a room's too: the owner steers what runs, wherever it runs. What Hermes
+sends from a room's session with no turn running (a background file) is
+a reply in that room. Its message id is the turn's id. A message's files are
 downloaded first to `<BRIDGE_MEDIA_DIR>/<sha256>`, a scratch no save
 keeps, and named after its words (name, type, path); no name from a
 record becomes a path. Only those within Hermes' 25 MiB are also hosted

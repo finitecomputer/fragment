@@ -498,6 +498,12 @@ pub struct Turn {
     pub room: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<String>,
+    /// What was said in its room just before its message (note.rs,
+    /// `said_before`), told after `place`: in memory alone, as each is up
+    /// to `PLACE_NOTE_MAX_BYTES` and a state holds `TURNS_OPEN_MAX` turns. A
+    /// turn queued across a restart runs told its room and asker, not this.
+    #[serde(skip)]
+    pub before: Option<String>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -1375,8 +1381,9 @@ impl Engine {
                     self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message });
                     // said in a room (its room the message's: `admit`): told
                     // where, once handed, after this
-                    if let (Some(note), Some(t)) = (place, self.state.turns.get_mut(&id)) {
-                        t.place = Some(note);
+                    if let (Some((line, before)), Some(t)) = (place, self.state.turns.get_mut(&id)) {
+                        t.place = Some(line);
+                        t.before = before;
                     }
                 }
             }
@@ -1390,7 +1397,7 @@ impl Engine {
     /// What a message's asker is called (`whose` said whose it is), and,
     /// said in a room of the agent's door, what its turn is told of it
     /// (note.rs, `place`). App code's words are no one's, and in no room.
-    fn speaker(&self, agent: &Agent, view: &ChatView, record: &Record, m: &Message) -> (String, Option<String>) {
+    fn speaker(&self, agent: &Agent, view: &ChatView, record: &Record, m: &Message) -> (String, Option<(String, Option<String>)>) {
         if record.by_code() {
             return (records::CODE_SAYS.to_string(), None);
         }
@@ -1399,7 +1406,7 @@ impl Engine {
         match (&m.room, via) {
             (Some(room), Some(via)) => {
                 let place = crate::note::place(&name, record.principal == agent.owner, &via, room);
-                (crate::note::speaker(&name, &via, room), Some(place))
+                (crate::note::speaker(&name, &via, room), Some((place, crate::note::said_before(room))))
             }
             _ => (name, None),
         }
@@ -1671,6 +1678,7 @@ impl Engine {
             // conversation there
             room: m.room.as_ref().map(|r| r.id.clone()),
             place: None,
+            before: None,
             open: None,
         };
         self.dirty = true;
@@ -1940,6 +1948,7 @@ impl Engine {
             // in its cut turn's room: the same conversation
             room: cut.room,
             place: cut.place,
+            before: cut.before,
             open: None,
         };
         self.state.turns.insert(id, turn);
@@ -2170,7 +2179,10 @@ impl Engine {
             simplex,
             continues,
             room: t.room.clone(),
-            place: t.place.clone(),
+            place: t.place.as_ref().map(|line| match &t.before {
+                Some(before) => format!("{line}\n{before}"),
+                None => line.clone(),
+            }),
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment, "command": t.command, "runtime": runtime });
         self.handed.insert(id.to_string(), runtime.clone());
@@ -2622,7 +2634,7 @@ impl Engine {
                 }
             }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),
-            Event::Say { agent, fragment, text, files } => {
+            Event::Say { agent, fragment, text, files, room } => {
                 if self.agent(&agent).is_none() || (text.trim().is_empty() && files.is_empty()) {
                     return;
                 }
@@ -2630,7 +2642,13 @@ impl Engine {
                 self.dirty = true;
                 let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
-                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), files);
+                let mut body = records::reply(&text, &turn, &[], 0, false);
+                // said in a room's conversation: the room's, as its turns'
+                // replies are (docs/chat-records.md, "An agent's reply")
+                if let Some(room) = room.filter(|r| records::valid_token(r, 64)) {
+                    body["room"] = Value::String(room);
+                }
+                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), body, files);
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
             Event::Child { child, change: ChildChange::Started { turn, goal } } => self.child_started(&turn, &child, &goal),

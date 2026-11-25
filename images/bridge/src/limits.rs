@@ -62,6 +62,9 @@ pub const ROOM_NAME_MAX_CHARS: usize = 60;
 /// What a turn in a room is told of it (note.rs, `place`), at most: where
 /// it is, whose words they are, and the room's context.
 pub const PLACE_NOTE_MAX_BYTES: usize = 20 * 1024;
+/// Where it is and whose words they are, at most: the line a queued turn
+/// keeps in the state (engine.rs, `Turn::place`; its context it does not).
+pub const PLACE_LINE_MAX_BYTES: usize = 1024;
 
 /// A reply's text posted as one record, at most: under the platform's
 /// 64 KiB body cap with room for the turn, attachments, and `to`.
@@ -458,6 +461,8 @@ const _: () = assert!(HISTORY_NOTE_MAX_BYTES <= MESSAGE_TEXT_MAX_BYTES, "a chat'
 // a line: "> ", its name (at most 4 bytes a character, and a mark of
 // 11: note.rs `sayer`), ": ", its text, a newline; and its header
 const _: () = assert!(ROOM_CONTEXT_LINES_MAX * (ROOM_CONTEXT_LINE_MAX_BYTES + 4 * ROOM_NAME_MAX_CHARS + 20) + 1024 <= PLACE_NOTE_MAX_BYTES, "a room's context is told whole");
+const _: () = assert!(2 * 4 * ROOM_NAME_MAX_CHARS + 4 * 32 + 160 <= PLACE_LINE_MAX_BYTES, "a room's line holds both names and a door's at their bound");
+const _: () = assert!(TURNS_OPEN_MAX * PLACE_LINE_MAX_BYTES <= STATE_FILE_MAX_BYTES / 8, "every open turn's room line is a small part of the state");
 const _: () = assert!(PLACE_NOTE_MAX_BYTES <= HISTORY_NOTE_MAX_BYTES, "a turn in a room is told its room in place of a chat's history or recap (driver.rs, `note_for`)");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(2 * NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX && 2 * NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 2 <= HISTORY_PAGES_MAX, "a read's bounds hold both scans");

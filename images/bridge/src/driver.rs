@@ -2124,14 +2124,14 @@ async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (O
     // a turn in a room (`TurnStart::room`) is told its room alone (`place`):
     // never the chat's history or recap, nor another turn's cut, which may
     // be another room's talk; only, continuing its own cut turn, that turn.
-    // Its runtime is current once it has it, behind or not: a recap is the
-    // whole chat's, every room's
+    // Its marker (the chat's own conversation's) stays as it is: a room's
+    // turn says nothing of what that conversation holds
     if ts.room.is_some() {
         let cut = match ts.continues {
             Some(_) => cut_note(api, ts, None).await,
             None => None,
         };
-        return (cut, Some(false));
+        return (cut, None);
     }
     let (before, history) = tokio::join!(before(api, ts, seen.as_ref().map(Option::as_deref)), history_note(api, ts));
     let (before, behind) = before.map_or((None, None), |(b, behind)| (Some(b), behind));

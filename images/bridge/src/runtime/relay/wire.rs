@@ -309,6 +309,11 @@ pub fn split_chat_id(chat: &str) -> Option<(&str, &str)> {
     (!f.is_empty() && !a.is_empty()).then_some((f, a))
 }
 
+/// The room of a chat id, if it names one (`chat_id`).
+pub fn room_of_chat_id(chat: &str) -> Option<&str> {
+    chat.splitn(3, '/').nth(2).filter(|room| crate::records::valid_token(room, 64))
+}
+
 /// The session Hermes keeps for one agent's chat: one per chat, shared by
 /// everyone in it (`group_sessions_per_user: false`), in its profile's
 /// namespace (Hermes' `build_session_key`).
@@ -1020,6 +1025,9 @@ mod tests {
         assert_eq!(split_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), Some(("slack--k3x9", "juniper--k3x9")));
         assert_ne!(session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("D0456"))));
         assert_ne!(session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), session_key("juniper--k3x9", &chat_id("slack--k3x9", "juniper--k3x9", None)));
+        assert_eq!(room_of_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", Some("C0123"))), Some("C0123"));
+        assert_eq!(room_of_chat_id(&chat_id("slack--k3x9", "juniper--k3x9", None)), None);
+        assert_eq!(room_of_chat_id("slack--k3x9/juniper--k3x9/../x"), None);
         assert_eq!(split_chat_id("nochat"), None);
     }
 

@@ -1553,3 +1553,26 @@ async fn a_stop_after_a_voice_answer_and_a_call_says_no_skip() {
     let heard = stop_while_a_call_runs_after_an_answer(true).await;
     assert!(!heard.iter().any(|e| e["text"] == wire::STOP_WORDS), "a stray `skip` reached Hermes after its clarify was answered: {:?}", heard.iter().map(|e| e["text"].clone()).collect::<Vec<_>>());
 }
+
+/// Goal: what Hermes sends from a room's conversation once its turn is
+/// done (a background file) is a reply in that room, as its turn's were,
+/// so the door routes it there and no other conversation quotes it.
+#[tokio::test]
+async fn a_rooms_background_file_is_a_reply_in_that_room() {
+    let (fake, bridge, _hermes, _dir) = setup("room-background-file", &["juniper"]).await;
+    let chat = fake.connector("slack", "juniper", Some("slack"));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say_as_door(&chat, "npub1slack", json!({
+        "text": "send media outside turn", "to": ["npub1juniper"],
+        "heard": { "via": "slack", "from": "U123", "name": "Maple" },
+        "room": { "id": "D0001", "name": "DM" }
+    }));
+    let parent = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().expect("a seq"));
+    fake.until(WAIT, "the room's turn to end", |w| !work_of(w, &chat, &parent, "turn.end").is_empty()).await;
+    fake.until(WAIT, "the room's background file", |w| replies(w, &chat).iter().any(|r| r.get("attachments").is_some())).await;
+    fake.with(|w| {
+        let r = replies(w, &chat).into_iter().find(|r| r.get("attachments").is_some()).expect("the file");
+        assert_eq!(r["room"], "D0001", "a background file stays in its room: {r:?}");
+    });
+    bridge.stop().await;
+}

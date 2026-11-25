@@ -381,23 +381,32 @@ pub fn speaker(name: &str, via: &str, room: &records::Room) -> String {
 }
 
 /// What a turn in a room is told before its message (docs/chat-records.md,
-/// "A message heard in a room"): where it is, that everyone there reads
-/// what the agent says, whether its asker (`name`) is its owner, and what
-/// was said there just before, oldest first. At most
-/// `PLACE_NOTE_MAX_BYTES`; the `team-rooms` skill says what it means.
+/// "A message heard in a room"), first: where it is, that everyone there
+/// reads what the agent says, and whether its asker (`name`) is its owner.
+/// One line, at most `PLACE_LINE_MAX_BYTES`: a queued turn keeps it in the
+/// state (`Turn::place`). The `team-rooms` skill says what it means.
 pub fn place(name: &str, owner: bool, via: &str, room: &records::Room) -> String {
     let whose = if owner { "your owner" } else { "not your owner" };
-    let mut note = format!("You are in {} {}, a room others share: everyone in it reads what you say there. {} is {whose}.", door(via), room.name, sayer(name));
-    if !room.context.is_empty() {
-        note.push_str("\nSaid there just before, oldest first:");
-        // a line each, so no words read as a line of their own
-        for l in &room.context {
-            let text = l.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            note.push_str(&format!("\n> {}: {text}", sayer(&l.name)));
-        }
+    let line = format!("You are in {} {}, a room others share: everyone in it reads what you say there. {} is {whose}.", door(via), room.name, sayer(name));
+    assert!(line.len() <= limits::PLACE_LINE_MAX_BYTES && !line.contains('\n'), "where a turn is, one short line: {}", line.len());
+    line
+}
+
+/// Then what was said in its room just before, oldest first, if anything:
+/// held in memory alone (`Turn::before`), never in the state. With `place`,
+/// at most `PLACE_NOTE_MAX_BYTES`.
+pub fn said_before(room: &records::Room) -> Option<String> {
+    if room.context.is_empty() {
+        return None;
     }
-    assert!(note.len() <= limits::PLACE_NOTE_MAX_BYTES, "a room's note is bounded: {}", note.len());
-    note
+    let mut note = "Said there just before, oldest first:".to_string();
+    // a line each, so no words read as a line of their own
+    for l in &room.context {
+        let text = l.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        note.push_str(&format!("\n> {}: {text}", sayer(&l.name)));
+    }
+    assert!(note.len() + 1 + limits::PLACE_LINE_MAX_BYTES <= limits::PLACE_NOTE_MAX_BYTES, "a room's note is bounded: {}", note.len());
+    Some(note)
 }
 
 /// How long ago a turn's message was said, in plain words, when it is
@@ -805,7 +814,9 @@ mod tests {
         let big = "𝔸".repeat(limits::ROOM_NAME_MAX_CHARS);
         let line = records::Line { name: big.clone(), text: "𝔸\n".repeat(limits::ROOM_CONTEXT_LINE_MAX_BYTES / 5) };
         let room = records::Room { id: "C0123".into(), name: big.clone(), context: vec![line; limits::ROOM_CONTEXT_LINES_MAX] };
-        let note = place(&big, false, "abcdefghijklmnopqrstuvwxyzabcdef", &room);
+        let line = place(&big, false, "abcdefghijklmnopqrstuvwxyzabcdef", &room);
+        assert!(line.len() <= limits::PLACE_LINE_MAX_BYTES);
+        let note = format!("{line}\n{}", said_before(&room).expect("its context"));
         assert!(note.len() <= limits::PLACE_NOTE_MAX_BYTES);
         assert_eq!(note.lines().count(), 2 + limits::ROOM_CONTEXT_LINES_MAX, "a line each");
         assert_eq!(speaker("Maple", "slack", &room), format!("Maple · Slack · {big}"));
