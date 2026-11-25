@@ -285,6 +285,8 @@ struct TriggerRow {
 #[derive(Deserialize)]
 struct TriggerKindRow {
     idx: i64,
+    /// Its place in its trigger's list: 0, 1, … in order.
+    n: i64,
     kind: String,
 }
 
@@ -1360,11 +1362,16 @@ impl FragmentCell {
         // each trigger's kinds of record, in their manifest's order: bounded,
         // `TRIGGER_KINDS_MAX` a trigger of `TRIGGERS_MAX`
         let mut kinds_of: BTreeMap<i64, Vec<String>> = BTreeMap::new();
-        for k in self.typed::<TriggerKindRow>("SELECT idx, kind FROM code_trigger_kinds ORDER BY idx, n", vec![])? {
+        for k in self.typed::<TriggerKindRow>("SELECT idx, n, kind FROM code_trigger_kinds ORDER BY idx, n", vec![])? {
             if !rows.iter().any(|r| r.idx == k.idx) {
                 return Err(stored(&format!("trigger {}", k.idx), "kinds of a trigger it does not hold"));
             }
-            kinds_of.entry(k.idx).or_default().push(k.kind);
+            // written in order from 0: a gap is a lost kind, corruption
+            let kinds = kinds_of.entry(k.idx).or_default();
+            if usize::try_from(k.n).ok() != Some(kinds.len()) {
+                return Err(stored(&format!("trigger {}", k.idx), format!("its kind at place {} after {}", k.n, kinds.len())));
+            }
+            kinds.push(k.kind);
         }
         let mut out = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
@@ -1407,14 +1414,16 @@ impl FragmentCell {
         let on = TriggerOn::Channel(record.channel.clone());
         let (kind, target) = on.parts();
         // its poster and its body's kind as stored (subscriptions.rs
-        // `outbox_record` says why)
+        // `outbox_record` says why); a kind is a body's string alone, never
+        // a number or a boolean that SQLite's text affinity would turn into
+        // a name
         let seq = SqlStorageValue::Integer(record.seq);
         let rows: Vec<Run> = self.typed(
             "SELECT run FROM code_triggers t WHERE t.kind = ? AND t.target = ?
                AND (t.from_kind IS NULL OR t.from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
                AND (NOT EXISTS (SELECT 1 FROM code_trigger_kinds k WHERE k.idx = t.idx)
                  OR EXISTS (SELECT 1 FROM code_trigger_kinds k WHERE k.idx = t.idx
-                   AND k.kind = (SELECT json_extract(body, '$.kind') FROM records WHERE channel = ? AND seq = ?)))
+                   AND k.kind = (SELECT json_extract(body, '$.kind') FROM records WHERE channel = ? AND seq = ? AND json_type(body, '$.kind') = 'text')))
              GROUP BY run ORDER BY MIN(t.idx)",
             vec![kind.into(), target.into(), record.channel.as_str().into(), seq.clone(), record.channel.as_str().into(), seq],
         )?;
