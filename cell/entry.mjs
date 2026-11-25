@@ -14,6 +14,7 @@ import * as rs from "./build/index.js";
 // A SimpleX door's object and its container's egress: JavaScript of its
 // own (door.mjs), no Rust in the cell's Wasm
 import { DoorEgress as DoorCalls } from "./door.mjs";
+import { flipped } from "./door-rules.mjs";
 export { SimplexDoor } from "./door.mjs";
 
 // Every call a door's container makes to `door.fragment.internal` goes to
@@ -324,6 +325,10 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
+  // The e2e's lever `damage` (cell/src/computer.rs): the next `n` answers
+  // on one of its bridge's paths through `port` come damaged on their way
+  // out of its container, as FIN-775's handover did.
+  #damage = null;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -616,9 +621,10 @@ class ContainerHost {
   async port(port, request, usedEvery) {
     if (usedEvery > 0) this.#usedEvery = usedEvery;
     const sleeps = this.#sleeps;
+    const damaged = this.#damage?.path === new URL(request.url).pathname && this.#damage.n-- > 0;
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
-    if (!upstream) return resp;
+    if (!upstream) return damaged && resp.body ? new Response(flipped(resp.body), resp) : resp;
     const [client, server] = Object.values(new WebSocketPair());
     if (this.#sleeps !== sleeps) {
       // a sleep began as its upgrade waited: closed with its why, as the
@@ -678,6 +684,10 @@ class ContainerHost {
     await this.#report("computer/tab", { open: true });
     told = true;
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  damage(path, n) {
+    this.#damage = { path, n };
   }
 
   // A sleep (or a restart's) begins, before its hold: each open port tab

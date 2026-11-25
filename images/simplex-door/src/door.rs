@@ -25,6 +25,15 @@
 //!   bytes, never this container's disk); the runner then ends (exit 2)
 //!   and its door starts it from an older one.
 //!
+//! Every body either way names its SHA-256 (`SHA_HEADER`), as its
+//! producer hashed it, and is checked before it is used or kept (FIN-775:
+//! Cloudflare damaged two of about a dozen copies between a container and
+//! its Worker): the door's bucket keeps a save or a file only as its
+//! digest says, a restore's save and a file are used only as theirs says,
+//! and the door refuses a body damaged on its way with 422, which this
+//! runner asks again, as a call that was not answered. A save that will
+//! not restore is so only once its bytes are the ones that were saved.
+//!
 //! An effect is what moves a ratchet past a save: a send the door asked
 //! for, or a message delivered. The door numbers each (its mark) as it
 //! asks or takes it, so it knows a save is behind with no clock: a save's
@@ -47,6 +56,9 @@ pub const MARK_HEADER: &str = "x-door-mark";
 pub const BEHIND_HEADER: &str = "x-door-behind";
 pub const LIFE_HEADER: &str = "x-door-life";
 pub const SAVE_HEADER: &str = "x-door-save";
+/// A body's SHA-256, lowercase hex, either way (cell/door-rules.mjs
+/// `FILE_SHA_HEADER`).
+pub const SHA_HEADER: &str = "x-door-sha256";
 /// One call's wait for its whole answer.
 const CALL_MS_MAX: u64 = 30_000;
 /// A packed save is smaller than what it unpacks to (gzip never grows it by
@@ -55,7 +67,8 @@ const ANSWER_MAX_BYTES: usize = UNPACKED_MAX_BYTES as usize + 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DoorError {
-    /// It did not answer (connect, a timeout, a cut answer): asked again.
+    /// It did not answer (connect, a timeout, a cut answer), or what came
+    /// either way came damaged: asked again.
     Transport(String),
     /// It answered what this runner does not ask for, or refused.
     Answer { status: u16, body: String },
@@ -135,6 +148,8 @@ struct Answer {
     behind: Option<bool>,
     life: Option<u64>,
     save: Option<String>,
+    /// The SHA-256 it named, which its body is.
+    sha: Option<String>,
     body: Bytes,
 }
 
@@ -186,7 +201,7 @@ impl Door {
         // GET), and the first hosted door sat 510 s restoring (the spike)
         let body = match body {
             Some(b) => {
-                req = req.header("content-length", b.len());
+                req = req.header("content-length", b.len()).header(SHA_HEADER, crate::files::sha256_hex(&b));
                 Full::new(b)
             }
             None => Full::new(Bytes::new()),
@@ -205,9 +220,17 @@ impl Door {
             let number = |name: &str| header(name).map(|m| m.parse::<u64>().map_err(|_| DoorError::Answer { status: status.as_u16(), body: format!("{name} that is no number: {m:?}") })).transpose();
             let (mark, life) = (number(MARK_HEADER)?, number(LIFE_HEADER)?);
             let behind = header(BEHIND_HEADER).map(|b| b == "1");
-            let save = header(SAVE_HEADER);
+            let (save, sha) = (header(SAVE_HEADER), header(SHA_HEADER));
             let body = Limited::new(res.into_body(), ANSWER_MAX_BYTES).collect().await.map_err(|e| DoorError::Transport(e.to_string()))?.to_bytes();
-            Ok::<_, DoorError>(Answer { status, mark, behind, life, save, body })
+            // its door found this call's body damaged on its way, and took
+            // nothing; or its answer is not the bytes it names
+            if status == StatusCode::UNPROCESSABLE_ENTITY {
+                return Err(DoorError::Transport(format!("{path}: the door found it damaged on its way: {}", fragment_bridge::simplex::wire::cut(&String::from_utf8_lossy(&body), 200))));
+            }
+            if sha.as_deref().is_some_and(|s| s != crate::files::sha256_hex(&body)) {
+                return Err(DoorError::Transport(format!("{path}: its answer is not the {} bytes its SHA-256 names: damaged on its way", body.len())));
+            }
+            Ok::<_, DoorError>(Answer { status, mark, behind, life, save, sha, body })
         };
         match tokio::time::timeout(Duration::from_millis(CALL_MS_MAX), call).await {
             Ok(r) => r,
@@ -225,7 +248,8 @@ impl Door {
         match a.status {
             StatusCode::NO_CONTENT => Ok(Restore::None { life: a.life.ok_or_else(|| missing("life"))? }),
             StatusCode::OK => Ok(Restore::Save {
-                mark: a.mark.ok_or_else(|| missing("mark"))?,
+                // only a save checked whole is staged (`call`)
+                mark: a.sha.as_ref().and(a.mark).ok_or_else(|| missing("mark or SHA-256"))?,
                 behind: a.behind.unwrap_or(false),
                 save: a.save.clone().ok_or_else(|| missing("save"))?,
                 life: a.life.ok_or_else(|| missing("life"))?,
@@ -332,7 +356,8 @@ mod tests {
     async fn the_door_is_called_as_its_protocol_says() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let door = Door::new(&format!("http://{}", listener.local_addr().unwrap()), 7).unwrap();
-        let (asked, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-mark: 12\r\nx-door-behind: 1\r\nx-door-save: 7-3\r\nx-door-life: 8\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
+        let saved = format!("HTTP/1.1 200 OK\r\nx-door-mark: 12\r\nx-door-behind: 1\r\nx-door-save: 7-3\r\nx-door-life: 8\r\nx-door-sha256: {ABC}\r\ncontent-length: 3\r\n\r\nabc");
+        let (asked, restored) = tokio::join!(one(&listener, &saved), door.restore());
         assert!(asked.starts_with("GET /save HTTP/1.1\r\n"), "{asked}");
         assert!(!asked.to_ascii_lowercase().contains("content-length"), "a GET carries no length: {asked}");
         assert!(asked.contains("x-door-generation: 7\r\n"), "{asked}");
@@ -350,8 +375,8 @@ mod tests {
         let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-life: 8\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
         assert!(matches!(restored, Err(DoorError::Answer { status: 200, .. })), "a save with no mark or name: {restored:?}");
 
-        let (asked, saved) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"), door.save(3, 12, vec![1, 2]));
-        assert!(asked.starts_with("PUT /save?seq=3 HTTP/1.1\r\n") && asked.contains("x-door-mark: 12\r\n") && asked.contains("content-length: 2\r\n"), "{asked}");
+        let (asked, saved) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"), door.save(3, 12, b"abc".to_vec()));
+        assert!(asked.starts_with("PUT /save?seq=3 HTTP/1.1\r\n") && asked.contains("x-door-mark: 12\r\n") && asked.contains("content-length: 3\r\n") && asked.contains(&format!("x-door-sha256: {ABC}\r\n")), "a save names its SHA-256: {asked}");
         assert_eq!(saved, Ok(Saved::Taken));
         let (_, saved) = tokio::join!(one(&listener, "HTTP/1.1 409 Conflict\r\ncontent-length: 0\r\n\r\n"), door.save(4, 12, vec![1]));
         assert_eq!(saved, Ok(Saved::Superseded));
@@ -368,5 +393,40 @@ mod tests {
         assert_eq!(mark, Ok(13));
         let (_, mark) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"), door.deliver(&delivery));
         assert!(matches!(mark, Err(DoorError::Answer { .. })), "a delivery taken with no mark: {mark:?}");
+    }
+
+    /// `abc`'s SHA-256.
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// Goal: a copy damaged on its way either way (FIN-775) is never used:
+    /// a restore's save or a file that is not the bytes its SHA-256 names,
+    /// a restore that names none, and a body the door found damaged (422)
+    /// are each a transport failure, asked again (never a save that will
+    /// not restore, nor a file left out), and every body this runner sends
+    /// names its own. Method: a socket standing in for the door.
+    #[tokio::test]
+    async fn a_copy_damaged_on_its_way_is_asked_again() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let door = Door::new(&format!("http://{}", listener.local_addr().unwrap()), 7).unwrap();
+        // one byte of `abc` flipped on its way, its length kept
+        let flipped = format!("HTTP/1.1 200 OK\r\nx-door-mark: 12\r\nx-door-save: 7-3\r\nx-door-life: 8\r\nx-door-sha256: {ABC}\r\ncontent-length: 3\r\n\r\nabd");
+        let (_, restored) = tokio::join!(one(&listener, &flipped), door.restore());
+        assert!(matches!(restored, Err(DoorError::Transport(_))), "a damaged save is asked for again, never staged: {restored:?}");
+        let (_, restored) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-mark: 12\r\nx-door-save: 7-3\r\nx-door-life: 8\r\ncontent-length: 3\r\n\r\nabc"), door.restore());
+        assert!(matches!(restored, Err(DoorError::Answer { status: 200, .. })), "a save that names no SHA-256 is never staged: {restored:?}");
+        let flipped_file = format!("HTTP/1.1 200 OK\r\nx-door-sha256: {ABC}\r\ncontent-length: 3\r\n\r\nabd");
+        let (_, file) = tokio::join!(one(&listener, &flipped_file), door.file(ABC));
+        assert!(matches!(file, Err(DoorError::Transport(_))), "a damaged file is asked for again: {file:?}");
+        let (asked, saved) = tokio::join!(one(&listener, "HTTP/1.1 422 Unprocessable Entity\r\ncontent-length: 7\r\n\r\ndamaged"), door.save(3, 12, b"abc".to_vec()));
+        assert!(asked.contains(&format!("x-door-sha256: {ABC}\r\n")), "{asked}");
+        assert!(matches!(saved, Err(DoorError::Transport(_))), "a save its door found damaged is saved again: {saved:?}");
+        let (asked, given) = tokio::join!(one(&listener, "HTTP/1.1 422 Unprocessable Entity\r\ncontent-length: 0\r\n\r\n"), door.put_file(ABC, "text/plain", Bytes::from_static(b"abc")));
+        assert!(asked.contains(&format!("x-door-sha256: {ABC}\r\n")), "{asked}");
+        assert!(matches!(given, Err(DoorError::Transport(_))), "a file its door found damaged is given again later: {given:?}");
+        let inbound = Inbound { id: "c2hhcmVk".into(), kind: "text".into(), text: "hi".into(), at: "2026-11-20T10:00:00Z".into(), item: 9, file: None };
+        let delivery = Delivery::of(&inbound, None, None);
+        let (asked, _) = tokio::join!(one(&listener, "HTTP/1.1 200 OK\r\nx-door-mark: 13\r\ncontent-length: 0\r\n\r\n"), door.deliver(&delivery));
+        let body = asked.split("\r\n\r\n").nth(1).unwrap_or_default();
+        assert!(asked.contains(&format!("x-door-sha256: {}\r\n", crate::files::sha256_hex(body.as_bytes()))), "a delivery names its SHA-256: {asked}");
     }
 }

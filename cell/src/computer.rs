@@ -844,6 +844,10 @@ struct TestLever {
     /// `legacy-uses`': the month (`YYYY-MM`) it makes owed.
     #[serde(default)]
     month: Option<String>,
+    /// `damage`'s: its bridge's path whose next `times` answers through
+    /// its port come damaged on their way (FIN-775).
+    #[serde(default)]
+    path: Option<String>,
     /// `disk`'s read: its size and what is free, in bytes, and what its
     /// `/data` restores to (none: a start's read, which keeps the last).
     #[serde(default)]
@@ -3248,6 +3252,14 @@ impl ComputerCell {
                 }
                 let view = self.view().await?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
+            }
+            "damage" => {
+                // one byte of each flipped, its length kept: as FIN-775's
+                // handover came out of a container (its receiver's check refuses it)
+                let path = b.path.as_deref().filter(|p| p.starts_with('/')).ok_or_else(|| CellError::invalid("damage names its bridge's path"))?;
+                let times = b.times.unwrap_or(1);
+                self.call("damage", &[JsValue::from_str(path), JsValue::from_f64(f64::from(times))]).await?;
+                Ok(json!({ "computer": id, "damage": { "path": path, "times": times } }))
             }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;

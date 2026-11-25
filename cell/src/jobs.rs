@@ -1663,9 +1663,9 @@ impl FragmentCell {
             q.push_str(" AND status = ?");
             binds.push(s.as_str().into());
         }
-        if let Some(op) = op {
+        if let Some(op) = &op {
             q.push_str(" AND op = ?");
-            binds.push(op.into());
+            binds.push(op.as_str().into());
         }
         q.push_str(" ORDER BY id DESC LIMIT ?");
         binds.push(SqlStorageValue::Integer(limit.clamp(1, 200) as i64));
@@ -1676,8 +1676,15 @@ impl FragmentCell {
             let shown = self.input_shown(role, &run)?;
             runs.push(run_view(run, r["cost_micros"].as_i64(), None, shown));
         }
+        // every row's, not the page's: of `op`'s runs alone when it names
+        // one (the SimpleX move's way back asks whether any intake run is
+        // unfinished, cell/src/simplex_move.rs)
+        let (q, binds) = match op {
+            Some(op) => ("SELECT status, COUNT(*) AS n FROM runs WHERE op = ? GROUP BY status", vec![op.into()]),
+            None => ("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![]),
+        };
         let mut counts = BTreeMap::new();
-        for r in self.rows("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![])? {
+        for r in self.rows(q, binds)? {
             let status = r["status"].as_str().expect("runs.status is TEXT NOT NULL").to_string();
             counts.insert(status, r["n"].as_u64().expect("COUNT answers a count"));
         }

@@ -21,7 +21,9 @@
 //!   2. **imported**: its computer's link handed over (its core stopped for
 //!      good there: `computer/simplex-hand`), the answer that door's first
 //!      save, streamed into the door (`/door/import`, its SHA-256 checked
-//!      as it is stored), then the agent's computer door closed;
+//!      as it is stored), then the agent's computer door closed. An import
+//!      that fails (its copy damaged on its way each time it was asked)
+//!      goes back at once: one end always runs the link;
 //!   3. **bound**: the connector bound as the agent's door, as Settings
 //!      binds one: only now does Settings show it, its door already
 //!      holding the link, so a setup page opened then starts that door
@@ -280,7 +282,10 @@ impl Move<'_> {
 
     /// Its computer's link handed over and its save given to its door, then
     /// the agent's computer door closed: what its computer signs relays no
-    /// one now.
+    /// one now. An import that fails goes back (`back`: its door fenced,
+    /// its computer given the save its door took, or told to run its own
+    /// copy again when it took none), so its link runs at one end, never
+    /// none, and says why.
     async fn hand_over(&self, rec: &Value) -> CellResult<Value> {
         // its save, streamed out of its computer's container into its door,
         // whose bucket checks its SHA-256 as it stores it: a copy damaged on
@@ -295,10 +300,17 @@ impl Move<'_> {
             let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
             let body = save.body().map(Into::into);
             let headers = [("x-fragment-door", text(rec, "door")), ("x-door-agent", label_of(&self.agent)), ("x-door-sha256", sha.as_str()), ("x-door-length", length.as_str()), ("x-door-staged", if staged { "1" } else { "0" })];
-            let mut put = crate::routed::send(self.env, "SIMPLEX_DOOR", text(rec, "door"), crate::routed::internal_stream("door/import", Method::Put, &headers, body)?).await?;
-            match answer(&mut put, "its door's import").await {
+            let put = match crate::routed::send(self.env, "SIMPLEX_DOOR", text(rec, "door"), crate::routed::internal_stream("door/import", Method::Put, &headers, body)?).await {
+                Ok(mut put) => answer(&mut put, "its door's import").await,
+                Err(e) => Err(e),
+            };
+            match put {
                 Err(e) if e.message.contains(" 422 not_its_sha:") && asks < HAND_ASKS => continue,
-                Err(e) => return Err(e),
+                // its computer's core stopped, its door holding no link it runs
+                Err(e) => {
+                    let back = self.back().await.err().map_or_else(|| "went back: its computer runs its link again".into(), |b| format!("its way back failed too ({}): ask `back` again", b.message));
+                    return Err(CellError::new(e.code, format!("{}; {back}", e.message)));
+                }
                 Ok(_) => break (sha, length, staged),
             }
         };
@@ -391,15 +403,16 @@ impl Move<'_> {
     /// for a replay) or blocked (paused), whose file its door must keep
     /// until it is replayed or let go.
     async fn intake_waiting(&self, connector: &str) -> CellResult<bool> {
-        // one read, so a run replayed meanwhile is seen in one status or
-        // another; the newest page of its runs (its intake's, one a message)
+        // its intake's runs counted by status, every one of them (never a
+        // page: one held behind many newer is counted), in one read, so a
+        // run replayed meanwhile is seen in one status or another
         let mut url = self.url.clone();
-        url.set_query(Some("op=intake&limit=200"));
+        url.set_query(Some("op=intake&limit=1"));
         let bare = Request::new(url.as_str(), Method::Get)?;
         let routed = Routed { name: connector.into(), url, signed: Some(self.person.clone()), credential: None };
         let mut r = crate::forward(self.env, &bare, None, crate::Forward { routed, inner: "/api/runs".into(), extra: vec![] }).await?;
         let runs = answer(&mut r, &format!("{connector}'s runs")).await?;
-        Ok(runs["runs"].as_array().is_some_and(|runs| runs.iter().any(|r| matches!(r["status"].as_str(), Some("queued" | "running" | "held" | "blocked")))))
+        Ok(["queued", "running", "held", "blocked"].iter().any(|s| runs["counts"][s].as_u64().unwrap_or(0) > 0))
     }
 }
 

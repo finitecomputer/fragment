@@ -1482,9 +1482,15 @@ async fn handle(to: mpsc::Sender<Msg>, req: Request<Incoming>) -> Response<Body>
         ("POST", "/link", Some(mark)) => Asked::Link { mark },
         ("POST", "/unlink", Some(mark)) => Asked::Unlink { mark },
         ("POST", "/reply", Some(mark)) => {
+            let sha = req.headers().get(door::SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
             let Ok(body) = Limited::new(req.into_body(), REPLY_BODY_MAX_BYTES).collect().await.map(|b| b.to_bytes()) else {
                 return refuse(StatusCode::PAYLOAD_TOO_LARGE, "a reply past its bound");
             };
+            // taken only as its door hashed it: one damaged on its way
+            // (FIN-775) is refused before anything, and its door asks again
+            if sha.as_deref() != Some(files::sha256_hex(&body).as_str()) {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "a reply that is not the bytes its SHA-256 names: damaged on its way");
+            }
             match reply(&body) {
                 Ok((key, text, files)) => Asked::Reply { key, text, files, mark },
                 Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
@@ -1782,6 +1788,44 @@ mod tests {
     /// and a text at its bound fits the body's bound however it is escaped
     /// (review of #1430: 52,891 bytes of JSON-heavy text was refused 413).
     /// Method: valid, each way to be invalid, and the worst escaping.
+    /// Goal: a reply its door sends is taken only as its door hashed it:
+    /// one damaged on its way (FIN-775), or naming no SHA-256, is refused
+    /// (422) before anything reaches the runner, so its door asks again;
+    /// one whole is taken. Method: the runner's own server, one reply
+    /// sent with one byte flipped after its hashing, then whole.
+    #[tokio::test]
+    async fn a_reply_damaged_on_its_way_is_refused_before_anything() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/reply", listener.local_addr().unwrap());
+        let (to, mut asks) = mpsc::channel::<Msg>(4);
+        let (_stop, stop_rx) = watch::channel(false);
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), req), stop_rx));
+        // whatever reaches the runner is answered as taken, and kept
+        let taken = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let kept = taken.clone();
+        tokio::spawn(async move {
+            while let Some(Msg::Asked(Asked::Reply { text, .. }, tx)) = asks.recv().await {
+                kept.lock().unwrap().push(text);
+                let _ = tx.send(answer(StatusCode::OK, "{}"));
+            }
+        });
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
+        let whole = br#"{"key":"k1","text":"hello"}"#;
+        let sha = files::sha256_hex(whole);
+        let send = |body: &'static [u8], sha: Option<&str>| {
+            let mut req = Request::post(&url).header(door::MARK_HEADER, "3");
+            if let Some(sha) = sha {
+                req = req.header(door::SHA_HEADER, sha);
+            }
+            client.request(req.body(http_body_util::Full::new(Bytes::from_static(body))).unwrap())
+        };
+        let damaged = send(br#"{"key":"k1","text":"hellp"}"#, Some(&sha)).await.unwrap();
+        let unnamed = send(whole, None).await.unwrap();
+        let sent = send(whole, Some(&sha)).await.unwrap();
+        assert_eq!((damaged.status(), unnamed.status(), sent.status()), (StatusCode::UNPROCESSABLE_ENTITY, StatusCode::UNPROCESSABLE_ENTITY, StatusCode::OK));
+        assert_eq!(*taken.lock().unwrap(), ["hello"], "only the whole reply reaches the runner");
+    }
+
     #[test]
     fn a_reply_is_its_key_and_text() {
         assert_eq!(reply(&Bytes::from_static(br#"{"key":"chat:12","text":"hi"}"#)), Ok(("chat:12".into(), "hi".into(), vec![])));

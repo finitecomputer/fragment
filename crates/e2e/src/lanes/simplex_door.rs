@@ -137,6 +137,28 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     lever(api, door, "kill", json!({}))?;
     let st = until(api, door, Duration::from_secs(120), |x| ready_from(2)(x) && newest(x).0 == generation(x))?;
     s.ok("a crash starts it again from its newest save, in step (no sync)", st["runner"]["forcedSyncs"] == 0, &st);
+
+    // a copy damaged on its way (FIN-775, Codex's round on #1541), one
+    // byte flipped: its restore's save on its way out to its runner, then
+    // a save on its way in. Neither is ever taken as a save that will not
+    // restore: the restore is asked for again, the save refused and saved
+    // again, every save readable and restored
+    let unread = |st: &Value| st["saves"].as_array().into_iter().flatten().filter(|x| x["unreadable"] != 0).count();
+    lever(api, door, "damage", json!({ "on": "restore", "n": 1 }))?;
+    lever(api, door, "kill", json!({}))?;
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;
+    s.ok("a restore's save damaged on its way to its runner is asked for again: never taken as one that will not restore", unread(&st) == 0 && st["runner"]["forcedSyncs"] == 0, &st);
+    lever(api, door, "damage", json!({ "on": "save", "n": 1 }))?;
+    lever(api, door, "kill", json!({}))?;
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;
+    lever(api, door, "kill", json!({}))?;
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;
+    let used = lever(api, door, "damage", json!({ "on": "save", "n": 0 }))?;
+    s.ok(
+        "a save damaged on its way in is never kept: refused, saved again, and the newest restores",
+        unread(&st) == 0 && st["runner"]["forcedSyncs"] == 0 && used["damage"] == json!({ "restore": 0, "save": 0 }),
+        json!({ "state": st, "damage": used }),
+    );
     let crashed = generation(&st);
 
     // a save that will not restore: its runner says so and ends; it comes

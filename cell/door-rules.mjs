@@ -41,8 +41,9 @@ export const FILE_KEPT_MS = 24 * 60 * 60 * 1000;
 // A reply's files, at most: a chat record's (fragment_proto
 // `limits::FILES_PER_MESSAGE`, held to it by xtask/src/guards.rs).
 export const REPLY_FILES_MAX = 8;
-// The header a file the door answers names its SHA-256 in
-// (fragment_core::door::FILE_SHA_HEADER).
+// The header a body names its SHA-256 in, as its producer hashed it: a
+// file the door answers, and every body between a door and its runner,
+// either way (fragment_core::door::FILE_SHA_HEADER).
 export const FILE_SHA_HEADER = "x-door-sha256";
 
 // The door's schema, step by step, from 1: a step released is never edited
@@ -69,8 +70,9 @@ export const STEPS = [
   // the save it was given to begin from (`/door/import`), by its SHA-256:
   // at most one, ever
   "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL, staged INTEGER NOT NULL DEFAULT 0)",
-  // each save's SHA-256, taken as it came, which its way back carries to
-  // the computer that places it (none for a save from before it)
+  // each save's SHA-256, as its maker hashed it (its runner, or the
+  // computer that handed it over), which every copy of it given carries
+  // (none for a save from before it, hashed when it is first given)
   "ALTER TABLE saves ADD COLUMN sha TEXT",
 ];
 
@@ -208,6 +210,32 @@ export function parseSaveId(id) {
   return m ? { generation: Number(m[1]), seq: Number(m[2]) } : null;
 }
 
+const hexOf = (digest) => [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// Bytes' SHA-256, in lowercase hex.
+export async function sha256Hex(bytes) {
+  return hexOf(await crypto.subtle.digest("SHA-256", bytes));
+}
+
+// A transfer as the e2e's levers damage one on its way (`damage`, as
+// FIN-775's were between a container and its Worker): one byte flipped,
+// its length kept.
+export function flipped(body) {
+  let done = false;
+  return body.pipeThrough(
+    new TransformStream({
+      transform(chunk, c) {
+        if (!done && chunk.byteLength > 64) {
+          chunk = chunk.slice();
+          chunk[64] ^= 1;
+          done = true;
+        }
+        c.enqueue(chunk);
+      },
+    }),
+  );
+}
+
 // A stream passed through as it comes, its SHA-256 taken on the way (hex,
 // `digest` once it ends), one chunk at a time with its backpressure, never
 // the whole held at once (a save may be 64 MiB).
@@ -223,6 +251,5 @@ export function hashing() {
       await w.close();
     },
   });
-  const hex = digest.digest.then((d) => [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join(""));
-  return { stream, digest: hex };
+  return { stream, digest: digest.digest.then(hexOf) };
 }

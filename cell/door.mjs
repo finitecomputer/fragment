@@ -40,7 +40,7 @@
 // did not take at once.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { settled, startIntercepted } from "./intercepts.mjs";
-import { DELIVERIES_KEPT, FILE_KEPT_MS, FILE_SHA_HEADER, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, hashing, doorOf, doorPrefix, fenced, fileKey, fileRoom, inboxUrl, nameOk, parseSaveId, replyFiles, restoreOf, saveId, saveKey, secretOk, shaOk, stale, startable, steps, surplus, typeOf } from "./door-rules.mjs";
+import { DELIVERIES_KEPT, FILE_KEPT_MS, FILE_SHA_HEADER, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, hashing, doorOf, doorPrefix, fenced, fileKey, flipped, fileRoom, inboxUrl, nameOk, parseSaveId, replyFiles, restoreOf, saveId, saveKey, secretOk, sha256Hex, shaOk, stale, startable, steps, surplus, typeOf } from "./door-rules.mjs";
 
 const HOST = "door.fragment.internal";
 const PORT = 8080;
@@ -81,6 +81,9 @@ const END_PAGES_MAX = 10;
 
 // The header a reply's file comes with its reply's key in: its use's owner.
 const FOR_HEADER = "x-door-for";
+// An ask its runner found damaged on its way (FIN-775), asked again at
+// most this often (`#runner`).
+const DAMAGED_ASKS = 3;
 
 // The files deliveries its inbox has yet to take name: never let go.
 const WAITING_FILES = "SELECT json_extract(body, '$.file.sha256') FROM deliveries WHERE sent = 0 AND json_extract(body, '$.file.sha256') IS NOT NULL";
@@ -93,6 +96,35 @@ async function bounded(request) {
   const text = await request.text();
   if (text.length > BODY_MAX) throw Object.assign(new Error("a body past its bound"), { status: 413 });
   return text ? JSON.parse(text) : {};
+}
+
+// A copy damaged on its way (FIN-775: Cloudflare damaged two of about a
+// dozen between a container and its Worker), refused before it is used or
+// kept: asked again, never taken as a bad original.
+const damaged = (why, code = "damaged") => Object.assign(new Error(`${why}: damaged on its way`), { status: 422, code });
+
+// A runner's JSON body (at most `BODY_MAX`), used only as its runner
+// hashed it (`FILE_SHA_HEADER`).
+async function taken(request) {
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength > BODY_MAX) throw Object.assign(new Error("a body past its bound"), { status: 413 });
+  if ((await sha256Hex(bytes)) !== request.headers.get(FILE_SHA_HEADER)) throw damaged("its body is not the one its SHA-256 names");
+  return bytes.byteLength ? JSON.parse(new TextDecoder().decode(bytes)) : {};
+}
+
+// A body kept in the bucket only whole and as its producer hashed it: its
+// length (`FixedLengthStream`) and its SHA-256 (the bucket's own check, as
+// it stores it) checked, so no copy damaged on its way is kept, nor
+// anything under its key. Refused (422, `code`) when either fails.
+async function store(bucket, key, body, length, sha, code) {
+  const { readable, writable } = new FixedLengthStream(length);
+  try {
+    const [, put] = await Promise.all([body.pipeTo(writable), bucket.put(key, readable, { sha256: sha })]);
+    return put;
+  } catch (e) {
+    await bucket.delete(key).catch(() => {});
+    throw damaged(`its bytes are not the ${length} its SHA-256 names (${String((e && e.message) || e).slice(0, 200)})`, code);
+  }
 }
 
 export class SimplexDoor extends DurableObject {
@@ -116,6 +148,9 @@ export class SimplexDoor extends DurableObject {
   // before that end and delivered after it). One row says so (`over`),
   // all its storage keeps once it is released
   #over = false;
+  // the e2e's lever `damage`: how many more of each kind of transfer
+  // (`save`, `restore`) come damaged on their way, one byte flipped
+  #damage = new Map();
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -192,10 +227,19 @@ export class SimplexDoor extends DurableObject {
       }
       if (lever) return await this.#lever(lever);
       if (imports) return await this.#saveGiven(request);
+      // every body its runner sends names its SHA-256 as it hashed it
+      // (`FILE_SHA_HEADER`), checked before it is used or kept; one that
+      // names none is from a runner older than its door, refused as a
+      // superseded one is: a save refused so ends it, and the door starts
+      // it again on its deployment's image
+      if (url.pathname.startsWith("/egress/") && request.method !== "GET" && request.body && !shaOk(request.headers.get(FILE_SHA_HEADER))) {
+        await request.body?.cancel();
+        return refusal(409, "outdated", "a runner's body names its SHA-256: this runner is older than its door, and starts again");
+      }
       if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore(request);
       if (url.pathname === "/egress/save" && request.method === "PUT") return await this.#save(request, url);
-      if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await bounded(request));
-      if (url.pathname === "/egress/unreadable" && request.method === "POST") return this.#unreadable(request, await bounded(request));
+      if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await taken(request));
+      if (url.pathname === "/egress/unreadable" && request.method === "POST") return this.#unreadable(request, await taken(request));
       // a file its runner received, or one it sends (`/egress/file/<sha256>`)
       if (url.pathname.startsWith("/egress/file/")) {
         const sha = url.pathname.slice("/egress/file/".length);
@@ -207,7 +251,7 @@ export class SimplexDoor extends DurableObject {
       if (JOB_ASKS.includes(ask) && !more.length && method) return await this.#job(ask, request, sha);
       return refusal(404, "not_found", `no door route ${request.method} ${url.pathname}`);
     } catch (e) {
-      return refusal(e.status ?? 500, e.status ? "invalid" : "internal", String((e && e.message) || e).slice(0, 300));
+      return refusal(e.status ?? 500, e.code ?? (e.status ? "invalid" : "internal"), String((e && e.message) || e).slice(0, 300));
     }
   }
 
@@ -315,15 +359,8 @@ export class SimplexDoor extends DurableObject {
     this.#uploading.add(key);
     const ends = this.#ends;
     try {
-      const { readable, writable } = new FixedLengthStream(length);
-      // the bucket checks its SHA-256 as it stores it: other bytes are never kept
-      let put;
-      try {
-        [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable, { sha256: sha })]);
-      } catch (e) {
-        await this.env.BLOBS.delete(key).catch(() => {});
-        return refusal(422, "not_its_sha", `its bytes are not the save its SHA-256 names: ${String((e && e.message) || e).slice(0, 200)}`);
-      }
+      // other bytes are never kept: its move asks for it again
+      const put = await store(this.env.BLOBS, key, request.body, length, sha, "not_its_sha");
       if (this.#ends !== ends) {
         await this.env.BLOBS.delete(key);
         return refusal(410, "ended", "this door ended as its save came");
@@ -428,31 +465,14 @@ export class SimplexDoor extends DurableObject {
       const r = restoreOf(this.#saves(), d.saved);
       if (r.kind === "none") return new Response(null, { status: 204 });
       if (r.kind === "exhausted") return refusal(410, "exhausted", "this door saved, and no save of it restores");
-      let obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
-      if (ended()) return gone();
-      if (obj) {
-        // streamed (a save may be 64 MiB), with the SHA-256 taken as it
-        // came (`x-door-sha256`), as an import carries one the other way:
-        // the computer that places it checks it, so a copy damaged on its
-        // way (seen once on Cloudflare, between here and its computer's
-        // container) is refused, and asked for again
-        // a save from before its SHA-256 was kept (the door's step 9) is
-        // hashed first, read through once as a stream, and kept: every way
-        // back carries one
-        let sha = r.save.sha;
-        if (!sha) {
-          const hashed = hashing();
-          await obj.body.pipeThrough(hashed.stream).pipeTo(new WritableStream());
-          sha = await hashed.digest;
-          if (ended()) return gone();
-          this.ctx.storage.sql.exec("UPDATE saves SET sha = ? WHERE generation = ? AND seq = ? AND sha IS NULL", sha, r.save.generation, r.save.seq);
-          obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
-          if (ended()) return gone();
-          if (!obj) continue;
-        }
-        const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: sha, "content-type": "application/octet-stream" };
-        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: r.save.bytes, sha });
-        return new Response(obj.body, { status: 200, headers });
+      // streamed (a save may be 64 MiB), with its SHA-256, as an import
+      // carries one the other way: the computer that places it checks it
+      const got = await this.#given(d.door, r.save, () => !ended());
+      if (got === undefined) return gone();
+      if (got) {
+        const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: got.sha, "content-type": "application/octet-stream" };
+        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: r.save.bytes, sha: got.sha });
+        return new Response(got.obj.body, { status: 200, headers });
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
     }
@@ -660,8 +680,9 @@ export class SimplexDoor extends DurableObject {
         await request.body.cancel();
         return refusal(503, "files_full", "the door holds as many files as it may: give it again later");
       }
-      const { readable, writable } = new FixedLengthStream(length);
-      await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      // kept only as its name says: a copy damaged on its way is refused,
+      // and given again
+      await store(this.env.BLOBS, key, request.body, length, sha, "damaged");
       if (this.#ends !== ends) {
         await this.env.BLOBS.delete(key);
         return refusal(410, "ended", "this door ended as its file came");
@@ -824,19 +845,30 @@ export class SimplexDoor extends DurableObject {
     this.#log("door.stopped", { why });
   }
 
-  // A call to its runner (`PORT`, its container's own).
+  // A call to its runner (`PORT`, its container's own), its body named by
+  // its SHA-256, which its runner checks before it takes it: one it found
+  // damaged on its way (422: it took nothing) is asked again, at most
+  // `DAMAGED_ASKS` times.
   async #runner(method, path, mark, body) {
     if (!this.ctx.container?.running) return refusal(503, "starting", "the door's runner is not up");
     const headers = { "content-type": "application/json" };
     if (mark !== undefined) headers["x-door-mark"] = String(mark);
     const init = { method, headers };
-    if (body !== undefined) init.body = JSON.stringify(body);
+    if (body !== undefined) {
+      init.body = JSON.stringify(body);
+      headers[FILE_SHA_HEADER] = await sha256Hex(new TextEncoder().encode(init.body));
+    }
     let r;
-    try {
-      r = await this.ctx.container.getTcpPort(PORT).fetch(`http://door${path}`, init);
-    } catch (e) {
-      // its container started, its runner not yet listening
-      return refusal(503, "starting", String((e && e.message) || e).slice(0, 300));
+    // bounded: `DAMAGED_ASKS`
+    for (let n = 1; ; n += 1) {
+      try {
+        r = await this.ctx.container.getTcpPort(PORT).fetch(`http://door${path}`, init);
+      } catch (e) {
+        // its container started, its runner not yet listening
+        return refusal(503, "starting", String((e && e.message) || e).slice(0, 300));
+      }
+      if (r.status !== 422 || n >= DAMAGED_ASKS) break;
+      await r.body?.cancel();
     }
     return new Response(r.body, { status: r.status, headers: { "content-type": "application/json" } });
   }
@@ -865,26 +897,60 @@ export class SimplexDoor extends DurableObject {
         setTimeout(() => this.ctx.container?.running && this.ctx.container.destroy().catch(() => {}), 1000);
         return refusal(410, "exhausted", "this door saved, and no save of it restores");
       }
+      // with its SHA-256, which its runner checks before it stages it: a
+      // copy damaged on its way is asked for again, never taken as a save
+      // that will not restore
       const s = r.save;
-      const obj = await this.env.BLOBS.get(saveKey(d.door, s.generation, s.seq));
+      const got = await this.#given(d.door, s, () => this.#door()?.generation === life);
+      if (got === undefined) return refusal(409, "superseded", `life ${life} was superseded as it restored`);
       d = this.#door();
-      if (d.generation !== life) return refusal(409, "superseded", `life ${life} was superseded as it restored`);
-      if (obj) {
+      if (got) {
         this.#log("door.restoring", { save: saveId(s), mark: s.mark, marks: d.marks, life });
-        return new Response(obj.body, { status: 200, headers: { "x-door-mark": String(d.marks), "x-door-behind": behind(s, d.marks) ? "1" : "0", "x-door-save": saveId(s), "x-door-life": String(life), "content-type": "application/octet-stream" } });
+        return new Response(this.#flip("restore", got.obj.body), { status: 200, headers: { "x-door-mark": String(d.marks), "x-door-behind": behind(s, d.marks) ? "1" : "0", "x-door-save": saveId(s), "x-door-life": String(life), [FILE_SHA_HEADER]: got.sha, "content-type": "application/octet-stream" } });
       }
       // its file gone: never given again; the one before it, if any
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", s.generation, s.seq);
     }
   }
 
-  // A save of the running start: its file, then the row that names it, the
-  // start fenced again after the upload (one may have begun meanwhile).
+  // A save's file, with the SHA-256 it carries wherever it goes (a restore,
+  // a way back), whose receiver checks it before it uses it. A save from
+  // before its SHA-256 was kept (the door's step 9) is hashed first, read
+  // through once as a stream, and kept. Null: its file is gone; undefined:
+  // `current` no longer holds after a wait.
+  async #given(door, s, current) {
+    const get = () => this.env.BLOBS.get(saveKey(door, s.generation, s.seq));
+    const lost = (o) => void o?.body.cancel().catch(() => {});
+    let obj = await get();
+    if (!current()) return lost(obj);
+    if (!obj || s.sha) return obj && { obj, sha: s.sha };
+    const hashed = hashing();
+    await obj.body.pipeThrough(hashed.stream).pipeTo(new WritableStream());
+    const sha = await hashed.digest;
+    if (!current()) return undefined;
+    this.ctx.storage.sql.exec("UPDATE saves SET sha = ? WHERE generation = ? AND seq = ? AND sha IS NULL", sha, s.generation, s.seq);
+    obj = await get();
+    if (!current()) return lost(obj);
+    return obj && { obj, sha };
+  }
+
+  // A transfer as the lever's `damage` asks, or as it is.
+  #flip(on, body) {
+    const n = this.#damage.get(on) ?? 0;
+    if (!n || !body) return body;
+    this.#damage.set(on, n - 1);
+    return flipped(body);
+  }
+
+  // A save of the running start: its file, kept only as its runner hashed
+  // it, then the row that names it, the start fenced again after the
+  // upload (one may have begun meanwhile).
   async #save(request, url) {
     const generation = Number(request.headers.get("x-door-generation"));
     const mark = Number(request.headers.get("x-door-mark"));
     const seq = Number(url.searchParams.get("seq"));
     const length = Number(request.headers.get("content-length"));
+    const sha = request.headers.get(FILE_SHA_HEADER);
     let d = this.#door();
     if (!d || fenced(generation, d.generation)) return refusal(409, "superseded", `start ${generation} is not the door's running one`);
     if (!(Number.isInteger(seq) && seq > 0 && Number.isInteger(mark) && mark >= 0 && mark <= d.marks && Number.isInteger(length) && length > 0)) {
@@ -898,11 +964,10 @@ export class SimplexDoor extends DurableObject {
     this.#uploading.add(key);
     const ends = this.#ends;
     try {
-      const { readable, writable } = new FixedLengthStream(length);
-      // its SHA-256 taken on its way in, for its way back to carry
-      const hashed = hashing();
-      const [, put] = await Promise.all([request.body.pipeThrough(hashed.stream).pipeTo(writable), this.env.BLOBS.put(key, readable)]);
-      const sha = await hashed.digest;
+      // a copy damaged on its way is refused before any row names it (its
+      // runner saves again): every save a restore or a way back gives is
+      // the bytes its runner made
+      const put = await store(this.env.BLOBS, key, this.#flip("save", request.body), length, sha, "damaged");
       // the door ended during its upload: its file, which that end's
       // deletion may have missed, goes too, and nothing names it
       if (this.#ends !== ends) {
@@ -1023,6 +1088,12 @@ export class SimplexDoor extends DurableObject {
         if (this.#starting) await this.#starting.catch(() => {});
         if (this.ctx.container?.running) await this.ctx.container.signal(15);
         return json({});
+      // the next `n` of its `save`s (as they come in) or `restore`s (as
+      // they go out) damaged on their way, one byte flipped, their lengths
+      // kept: as FIN-775's were between a container and its Worker
+      case "damage":
+        this.#damage.set(String(a.on), Number(a.n) || 0);
+        return json({ damage: Object.fromEntries(this.#damage) });
       // a crash: started again, as any exit is
       case "kill":
         if (this.ctx.container?.running) await this.ctx.container.destroy();

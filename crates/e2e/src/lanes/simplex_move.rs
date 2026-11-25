@@ -8,6 +8,9 @@
 //! - its person's always-on computer runs their agent, its SimpleX linked
 //!   there by their own ticket, and the phone's message is answered in its
 //!   computer's SimpleX chat;
+//! - its save damaged on its way out of its computer each time its move
+//!   asks for it (FIN-775): never imported, and the move goes back at once,
+//!   its computer running its link again (no model call before it);
 //! - `operator simplex-move` plans it, then goes: the connector made and
 //!   bound as theirs, the link handed over and imported, its door connected
 //!   and linked with the same contact, the old chat archived; a message the
@@ -112,13 +115,32 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let linked = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["phase"] == "linked"));
     s.ok("its computer's SimpleX linked to the phone, by its owner's ticket", linking.status == 200 && linked && contact > 0, json!({ "link": linking.status, "invite": invite["phase"] }));
     let old = s.eventually(SLOW, || simplex_chat(api, &owner, &agent).is_some()).then(|| simplex_chat(api, &owner, &agent)).flatten().unwrap_or_default();
+    let mv = |act: &str| api.signed(&operator, "POST", &format!("/api/admin/people/{owner_id}/simplex-move"), Some(&json!({ "agent": agent, "act": act })));
+
+    // its link's save damaged on its way out of its computer each of the
+    // times its move asks for it (FIN-775): never imported, and the move
+    // goes back at once, its computer running its link again, never both
+    // ends stopped (Codex's round on #1541)
+    let r = lever_with(api, &id, json!({ "op": "damage", "path": "/simplex/handover", "times": 3 }))?;
+    anyhow::ensure!(r.status == 200, "the damage lever: {r}");
+    let failed = mv("go")?;
+    let again = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
+    let forgot = mv("plan")?;
+    let said = failed.body["message"].as_str().unwrap_or("");
+    s.ok(
+        "its save damaged on its way out each time its move asks: never imported, and it goes back at once, its computer running its link again",
+        failed.status != 200 && said.contains("not_its_sha") && said.contains("went back") && again && forgot.body["record"].is_null(),
+        json!({ "go": failed.body, "plan": forgot.body }),
+    );
+    if !again {
+        return Ok(());
+    }
     // its agent's answer: any word from it after the phone's (it may quote it)
     let before = answered(s, api, &owner, &mut phone, contact, "before the move", &old);
     let relayed_before = relayed(api, &owner, &old);
     s.ok("the phone's message lands in its computer's SimpleX chat, and its agent's answer reaches the phone", before.is_ok() && relayed_before == ["before the move"], json!({ "chat": old, "relayed": relayed_before, "answer": format!("{before:?}") }));
 
     // the move: planned, then gone through step by step
-    let mv = |act: &str| api.signed(&operator, "POST", &format!("/api/admin/people/{owner_id}/simplex-move"), Some(&json!({ "agent": agent, "act": act })));
     let plan = mv("plan")?;
     s.ok("its plan says what goes first, and changes nothing", plan.status == 200 && plan.body["blocked"].is_null() && plan.body["record"].is_null(), &plan);
     let t0 = Instant::now();

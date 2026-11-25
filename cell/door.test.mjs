@@ -16,6 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 
 registerHooks({
   resolve(specifier, context, next) {
@@ -47,6 +48,9 @@ if (!globalThis.crypto.DigestStream) {
 const logged = [];
 console.log = (line) => logged.push(JSON.parse(line));
 const { SimplexDoor } = await import("./door.mjs");
+
+// A text's SHA-256, lowercase hex, as a runner names what it sends.
+const hex = (text) => createHash("sha256").update(text).digest("hex");
 
 const NAME = "pat-simplex--k3x9";
 const key = (save) => `doors/${NAME}/saves/${save}`;
@@ -82,8 +86,11 @@ function storage() {
 }
 
 // The bucket: `uploading`, when set, is awaited in the middle of each put.
+// These tests name most files by stand-ins (`sha(n)`, two digits over and
+// over), each taken as the SHA-256 of the bytes first given under it
+// (`names`), as a real name is its bytes'; a real one is checked as R2 does.
 function bucket() {
-  const b = { files: new Map(), uploading: null };
+  const b = { files: new Map(), uploading: null, names: new Map() };
   // its body a stream alone: a save handed back is streamed, never read
   // whole (one may be 64 MiB: Codex's round on #1541)
   b.get = async (k) => (b.files.has(k) ? { body: new Blob([b.files.get(k)]).stream() } : null);
@@ -91,11 +98,7 @@ function bucket() {
   b.put = async (k, v, opts = {}) => {
     const bytes = typeof v === "string" ? v : await new Response(v).text();
     if (b.uploading) await b.uploading();
-    if (opts.sha256) {
-      const raw = typeof v === "string" ? new TextEncoder().encode(v) : new TextEncoder().encode(bytes);
-      const got = [...new Uint8Array(await crypto.subtle.digest("SHA-256", raw))].map((x) => x.toString(16).padStart(2, "0")).join("");
-      if (got !== opts.sha256) throw new Error(`put: the SHA-256 asked is not its bytes' (${got})`);
-    }
+    if (opts.sha256 && hex(bytes) !== opts.sha256 && b.names.get(opts.sha256) !== bytes) throw new Error(`put: the SHA-256 asked is not its bytes' (${hex(bytes)})`);
     b.files.set(k, bytes);
     return { size: bytes.length };
   };
@@ -128,7 +131,7 @@ function container() {
   c.answers = [];
   c.getTcpPort = () => ({
     fetch: async (url, init) => {
-      c.asked.push({ method: init.method, path: new URL(url).pathname, mark: Number(init.headers["x-door-mark"]), body: init.body ? JSON.parse(init.body) : null });
+      c.asked.push({ method: init.method, path: new URL(url).pathname, mark: Number(init.headers["x-door-mark"]), body: init.body ? JSON.parse(init.body) : null, sha: init.headers["x-door-sha256"] });
       const next = c.answers.shift() ?? [202, { done: false }];
       const [status, body] = typeof next === "function" ? await next() : next;
       return new Response(JSON.stringify(body), { status });
@@ -153,12 +156,16 @@ function door({ noDoors = false } = {}) {
   const ctx = { storage: st, container: c, exports: { DoorEgress: () => ({}), default: front }, blockConcurrencyWhile: (f) => f() };
   const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   const call = (method, path, headers = {}, body) => o.fetch(new Request(`http://door${path}`, { method, headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
-  const d = { o, st, c, blobs, call, inbox };
+  // a runner's call: each body named by its SHA-256, as its runner hashed it
+  const egress = (method, path, headers = {}, body) => call(method, path, body === undefined ? headers : { "x-door-sha256": hex(body), ...headers }, body);
+  // a stand-in name stands for the bytes first given under it
+  const named = (sha, bytes) => void (/^(\d\d)\1{31}$/.test(sha) && bytes !== undefined && !blobs.names.has(sha) && blobs.names.set(sha, bytes));
+  const d = { o, st, c, blobs, call, egress, named, inbox };
   // its connector's job, as the platform sends it (the door and the connector named)
   d.job = (ask, body = {}, headers = {}) => call("POST", `/job/${ask}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...headers }, JSON.stringify(body));
   d.connect = (secret = "s3cret-of-the-inbox") => d.job("connect", { name: "Juniper" }, { "x-door-secret": secret });
   // its runner's delivery of one of its owner's messages
-  d.deliver = (id, text = `text of ${id}`) => call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "text", text, at: "2026-11-21T00:00:00Z", file: null }));
+  d.deliver = (id, text = `text of ${id}`) => egress("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "text", text, at: "2026-11-21T00:00:00Z", file: null }));
   d.posted = () => d.inbox.posts.map((p) => p.body.payload.id);
   d.lever = (op, more = {}) => call("POST", "/door/lever", {}, JSON.stringify({ door: NAME, op, ...more }));
   d.start = () => d.lever("start", { agent: "Juniper" });
@@ -166,8 +173,8 @@ function door({ noDoors = false } = {}) {
   d.saves = () => st.sql.exec("SELECT generation || '-' || seq AS id, unreadable FROM saves ORDER BY generation, seq").toArray();
   // a runner's calls: a life begins (its start's generation), a save (its life's)
   d.restore = (started) => call("GET", "/egress/save", { "x-door-generation": String(started) });
-  d.save = (life, seq, bytes = `save ${life}-${seq}`) => call("PUT", `/egress/save?seq=${seq}`, { "x-door-generation": String(life), "x-door-mark": "0", "content-length": String(bytes.length) }, bytes);
-  d.unreadable = (life, save) => call("POST", "/egress/unreadable", { "x-door-generation": String(life) }, JSON.stringify({ save, why: "a test's" }));
+  d.save = (life, seq, bytes = `save ${life}-${seq}`) => egress("PUT", `/egress/save?seq=${seq}`, { "x-door-generation": String(life), "x-door-mark": "0", "content-length": String(bytes.length) }, bytes);
+  d.unreadable = (life, save) => egress("POST", "/egress/unreadable", { "x-door-generation": String(life) }, JSON.stringify({ save, why: "a test's" }));
   // its end, as the platform asks it: its connector unbound, or (`last`)
   // its connector's life over (deleted, wiped, other code)
   d.end = (name = DOOR, last = false) => call("POST", "/door/end", {}, JSON.stringify({ door: name, final: last }));
@@ -175,8 +182,8 @@ function door({ noDoors = false } = {}) {
   d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
   // a file its runner gives (`life`'s), and one its connector gives or reads
-  d.give = (life, sha, bytes, type = "audio/mp4") => call("PUT", `/egress/file/${sha}`, { "x-door-generation": String(life), "content-type": type, "content-length": String(bytes.length) }, bytes);
-  d.jobFile = (method, sha, bytes) => call(method, `/job/file/${sha}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...(bytes ? { "content-type": "application/pdf", "content-length": String(bytes.length) } : {}) }, bytes);
+  d.give = (life, sha, bytes, type = "audio/mp4") => (named(sha, bytes), egress("PUT", `/egress/file/${sha}`, { "x-door-generation": String(life), "content-type": type, "content-length": String(bytes.length) }, bytes));
+  d.jobFile = (method, sha, bytes) => (named(sha, bytes), call(method, `/job/file/${sha}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...(bytes ? { "content-type": "application/pdf", "content-length": String(bytes.length) } : {}) }, bytes));
   return d;
 }
 
@@ -186,7 +193,7 @@ const sha = (n) => String(n).padStart(2, "0").repeat(32);
 // its connector keeps and says so: one nothing uses any more.
 async function used(d, life, n, id = `u${n}`) {
   await d.give(life, sha(n), "x");
-  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "file", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(n), name: "x", type: "application/octet-stream", size: 1 } }));
+  await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "file", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(n), name: "x", type: "application/octet-stream", size: 1 } }));
   await d.jobFile("GET", sha(n));
   await d.job("kept", { id });
 }
@@ -617,7 +624,7 @@ test("files on their way in hold their room: two given at once past it, one is r
   assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 64, "never past its bound");
   // the same file given twice at once (room for one, a file none uses):
   // the second asked again later, "uploading"
-  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "u10", kind: "file", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(10), name: "x", type: "application/octet-stream", size: 1 } }));
+  await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id: "u10", kind: "file", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(10), name: "x", type: "application/octet-stream", size: 1 } }));
   await d.job("kept", { id: "u10" });
   d.blobs.uploading = () => new Promise((r) => setTimeout(r, 20));
   const [a, b] = await Promise.all([d.give(life1, sha(3), "three"), d.give(life1, sha(3), "three")]);
@@ -631,7 +638,7 @@ test("every delivery its inbox has yet to take keeps its file past a day", async
   d.inbox.status = 503;
   for (const n of [1, 2]) {
     await d.give(life1, sha(n), `voice ${n}`);
-    await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: `v${n}`, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(n), name: "memo.m4a", type: "audio/mp4", size: 7 } }));
+    await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id: `v${n}`, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(n), name: "memo.m4a", type: "audio/mp4", size: 7 } }));
   }
   await d.give(life1, sha(3), "named by no delivery");
   d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
@@ -645,7 +652,7 @@ test("every delivery its inbox has yet to take keeps its file past a day", async
 test("a reply's file is used until its reply is done, whatever its runner reads; said done again, another reply's use stays", async () => {
   const d = door();
   await d.connect();
-  const give = (key) => d.call("PUT", `/job/file/${sha(5)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF");
+  const give = (key) => (d.named(sha(5), "%PDF"), d.call("PUT", `/job/file/${sha(5)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF"));
   await give("chat:9");
   assert.deepEqual(uses(d, 5), ["r:chat:9"], "given for its reply");
   await d.call("GET", `/egress/file/${sha(5)}`);
@@ -668,7 +675,7 @@ test("a reply's file is used until its reply is done, whatever its runner reads;
   assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"]);
 });
 
-const replyFileOf = (d, n, key) => d.call("PUT", `/job/file/${sha(n)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF");
+const replyFileOf = (d, n, key) => (d.named(sha(n), "%PDF"), d.call("PUT", `/job/file/${sha(n)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF"));
 const replyFiles1 = (n) => [{ sha256: sha(n), name: "plan.pdf", type: "application/pdf", size: 4 }];
 
 test("a reply sent as its text alone (a runner that carries no files) lets go of its files once done: a full door takes a new file after (the review of #1538)", async () => {
@@ -752,7 +759,7 @@ test("an old file a waiting delivery keeps counts toward the door's bounds (the 
   const life1 = life(await d.restore(d.row().started));
   d.inbox.status = 503;
   await d.give(life1, sha(1), "voice");
-  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 } }));
+  await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 } }));
   d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
   await d.o.alarm();
   for (let n = 10; n < 10 + 63; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
@@ -769,7 +776,7 @@ test("one file two messages name: said kept for the first, twice, still there fo
   const file = { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 };
   for (const id of ["v1", "v2"]) {
     await d.give(life1, sha(1), "voice");
-    await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
+    await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
   }
   d.inbox.status = 200;
   await d.o.alarm();
@@ -789,7 +796,7 @@ test("a keep cut off before its connector has the file: never let go for room, r
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   await d.give(life1, sha(1), "voice bytes");
-  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 } }));
+  await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 } }));
   await d.o.alarm();
   // its connector's read, cut off: its answer opened and dropped, no kept said
   const cut = await d.jobFile("GET", sha(1));
@@ -811,8 +818,8 @@ test("a delivery names its file by its SHA-256; a file named otherwise (an older
   const life1 = life(await d.restore(d.row().started));
   await d.give(life1, sha(1), "voice bytes");
   const file = { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 };
-  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
-  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v2", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { name: "memo.m4a", size: 11 } }));
+  await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
+  await d.egress("POST", "/egress/deliver", {}, JSON.stringify({ id: "v2", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { name: "memo.m4a", size: 11 } }));
   await d.o.alarm();
   assert.deepEqual(d.inbox.posts.map((p) => [p.body.payload.id, p.body.payload.file]), [["v1", file], ["v2", null]]);
 });
@@ -907,6 +914,84 @@ test("a save given whose bytes are not the SHA-256 it names is never kept", asyn
   assert.deepEqual([d.saves(), d.prefixed(), d.row()], [[], [], undefined], "no row, no save, no file");
   // the same bytes under their own SHA-256: taken
   assert.equal((await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa(bytes) })).status, 200);
+});
+
+test("a save damaged on its way is never kept: refused before any row names it, none older let go; saved again whole, it is taken, named by its runner's SHA-256 (FIN-775, Codex's round on fa83432f9)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  for (let n = 1; n <= 3; n += 1) assert.equal((await d.save(life1, n)).status, 200);
+  // one byte changed after its runner hashed it, its length kept
+  const whole = `save ${life1}-4`;
+  const r = await d.call("PUT", "/egress/save?seq=4", { "x-door-generation": String(life1), "x-door-mark": "0", "content-length": String(whole.length), "x-door-sha256": hex(whole) }, `save ${life1}-5`);
+  assert.deepEqual([r.status, (await r.json()).error], [422, "damaged"]);
+  assert.deepEqual(d.saves().map((x) => x.id), [1, 2, 3].map((n) => `${life1}-${n}`), "no row names it, and none older let go");
+  assert.equal(d.blobs.files.has(key(`${life1}-4`)), false, "nor its file kept");
+  assert.equal((await d.save(life1, 4)).status, 200, "saved again whole: taken");
+  assert.equal(d.st.sql.exec("SELECT sha FROM saves WHERE seq = 4").one().sha, hex(whole), "named by its runner's SHA-256, which every way back carries");
+});
+
+test("a body of a runner's that names no SHA-256 is an older runner's: refused as a superseded one's, so its save ends it and it starts again on its deployment's image (FIN-775)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  const saved = await d.call("PUT", "/egress/save?seq=1", { "x-door-generation": String(life1), "x-door-mark": "0", "content-length": "6" }, "a save");
+  assert.deepEqual([saved.status, (await saved.json()).error], [409, "outdated"]);
+  const delivered = await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "m1", kind: "text", text: "hi", at: "2026-11-25T00:00:00Z", file: null }));
+  assert.deepEqual([delivered.status, d.saves(), d.posted()], [409, [], []], "nothing kept");
+});
+
+test("a delivery damaged on its way is refused before it is kept; whole, it is taken (FIN-775)", async () => {
+  const d = door();
+  await d.connect();
+  const sent = JSON.stringify({ id: "m1", kind: "text", text: "hello", at: "2026-11-25T00:00:00Z", file: null });
+  const r = await d.call("POST", "/egress/deliver", { "x-door-sha256": hex(sent) }, sent.replace("hello", "hellp"));
+  assert.deepEqual([r.status, (await r.json()).error], [422, "damaged"]);
+  assert.deepEqual([d.st.sql.exec("SELECT count(*) AS n FROM deliveries").one().n, d.posted()], [0, []], "never kept, never posted");
+  assert.equal((await d.egress("POST", "/egress/deliver", {}, sent)).status, 200, "delivered again whole: taken");
+  assert.deepEqual(d.posted(), ["m1"]);
+});
+
+test("a file damaged on its way is never kept under its name, from its runner or its connector; whole, it is (FIN-775)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  const name = hex("a voice memo");
+  const r = await d.call("PUT", `/egress/file/${name}`, { "x-door-generation": String(life1), "content-type": "audio/mp4", "content-length": "12", "x-door-sha256": name }, "a voice mem0");
+  assert.deepEqual([r.status, (await r.json()).error], [422, "damaged"]);
+  const pdf = hex("%PDF-1.7");
+  assert.equal((await d.jobFile("PUT", pdf, "%PDF-1.6")).status, 422, "its connector's too");
+  assert.deepEqual([d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, d.prefixed()], [0, []], "no row, no file");
+  assert.equal((await d.give(life1, name, "a voice memo")).status, 200, "given again whole: kept");
+  assert.equal((await d.jobFile("PUT", pdf, "%PDF-1.7")).status, 200);
+});
+
+test("a restore names its save's SHA-256, which its runner checks before it stages it; a save from before step 9 is hashed first and keeps it (FIN-775, Codex's round on fa83432f9)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its one save");
+  const r = await d.restore(d.row().started);
+  assert.deepEqual([r.status, r.headers.get("x-door-sha256"), await r.text()], [200, hex("its one save"), "its one save"]);
+  d.st.sql.exec("UPDATE saves SET sha = NULL");
+  const old = await d.restore(d.row().started);
+  assert.deepEqual([old.status, old.headers.get("x-door-sha256"), await old.text()], [200, hex("its one save"), "its one save"]);
+  assert.equal(d.st.sql.exec("SELECT sha FROM saves").one().sha, hex("its one save"), "kept");
+});
+
+test("an ask its runner found damaged on its way (422: it took nothing) is asked again, as its door hashed it, at most a few times (FIN-775)", async () => {
+  const d = door();
+  await d.connect();
+  await d.restore(d.row().started);
+  d.c.answers.push([422, { error: "damaged" }], [200, { done: true }]);
+  const r = await d.job("reply", { key: "k1", text: "hello" });
+  assert.equal(r.status, 200, "taken the second time");
+  const replies = d.c.asked.filter((a) => a.path === "/reply");
+  assert.equal(replies.length, 2);
+  assert.ok(replies.every((a) => a.sha === hex(JSON.stringify(a.body)) && a.mark === replies[0].mark), "the same ask, named by its SHA-256");
+  d.c.answers.push([422, {}], [422, {}], [422, {}], [200, {}]);
+  assert.equal((await d.job("reply", { key: "k2", text: "again" })).status, 422, "damaged every time: said so, after a few");
+  assert.equal(d.c.asked.filter((a) => a.path === "/reply").length, 5);
 });
 
 test("the way back: a planned stop, its runner's last save, and that save handed back; again the same", async () => {
