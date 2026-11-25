@@ -104,13 +104,14 @@ Every binding and runtime API master's cell uses, against the fork's
   workerd cannot make runs (a job sleeping through a crash).
   - **Its node's state is in RAM.** A run stages its project in
     `/dev/shm/fragment-e2e-<uid>/<run>` (`devstack::shm`), and `celld dev`
-    keeps its state beside it, so no other job's disk writes reach the
-    node (found 45). The run removes it as it ends, its Ctrl-C handler as
-    it is stopped, and the next run's start removes one a killed run left.
-    A run needs 3 GiB free there to start, and says so when it lacks it.
-    The run's logs stay in its scratch, on disk; the state is not kept for
-    a look. The cost: the e2e no longer runs celld on a slow disk. The dev
-    stack keeps its state on disk, where it survives a reboot.
+    keeps its state beside it, as does the run's OpenBao, so no other
+    job's disk writes reach the node or its secrets (found 45). The run
+    removes it as it ends, its Ctrl-C handler as it is stopped, and the
+    next run's start removes one a killed run left. A run needs 3 GiB free
+    there to start, and says so when it lacks it. The run's logs stay in
+    its scratch, on disk; the state is not kept for a look. The cost: the
+    e2e no longer runs celld on a slow disk. The dev stack keeps its state
+    on disk, where it survives a reboot.
 - **Master's path is unchanged:** nothing here branches on the runtime,
   and the cell has no code of celld's.
 

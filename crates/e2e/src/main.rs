@@ -489,9 +489,9 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
-    /// On celld, the run's directory in RAM, where `project` is staged and
-    /// so where `celld dev` keeps its state (devstack::shm): removed as the
-    /// run ends, however it ends.
+    /// On celld, the run's directory in RAM (devstack::shm), where `project`
+    /// is staged, so where `celld dev` keeps its state, and where OpenBao
+    /// keeps its: removed as the run ends, however it ends.
     ram: Option<devstack::shm::RunDir>,
     /// The identity door a node shaped `Shape::Door` signs people in
     /// through (`start_through_door`).
@@ -1561,8 +1561,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         }
         if let Some(in_ram) = &in_ram {
             match in_ram.remove() {
-                Ok(()) => println!("      (removed the node's state from RAM)"),
-                Err(e) => println!("      could not remove the node's state from RAM (the next run removes it): {e:#}"),
+                Ok(()) => println!("      (removed the run's state from RAM)"),
+                Err(e) => println!("      could not remove the run's state from RAM (the next run removes it): {e:#}"),
             }
         }
     })?;
@@ -1576,7 +1576,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // the cell's secrets: wrangler's store, or celld's node's backend, a
     // file of their values or OpenBao (celld's default)
     let (secrets, with_openbao) = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
-    let openbao = with_openbao.then(|| openbao(&scratch)).transpose()?;
+    // in the run's RAM on celld, beside the node's state: on disk, another
+    // job's writes held a secret's read past its deadline
+    let openbao = with_openbao.then(|| openbao(ram.as_ref().map_or(scratch.as_path(), |r| r.path()))).transpose()?;
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let rung = local_rung(celld.as_ref(), rehearse);
@@ -1764,15 +1766,6 @@ fn finish(s: &mut Suite) -> Result<()> {
         Ok(None) => {}
         Err(e) => s.fail("the run removes the containers its nodes left and the images they built", format!("{e:#}")),
     }
-    // the node's state, in RAM on celld: gone with the run, before an exit
-    // that runs no drop
-    if let Some(ram) = s.ram.take() {
-        let t0 = Instant::now();
-        match ram.remove() {
-            Ok(()) => println!("      (the node's state removed from RAM in {:.1?})", t0.elapsed()),
-            Err(e) => s.fail("the run removes its node's state from RAM", format!("{e:#}")),
-        }
-    }
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
@@ -1780,6 +1773,15 @@ fn finish(s: &mut Suite) -> Result<()> {
     if let Some(mut bao) = s.openbao.take() {
         if let Err(e) = bao.down() {
             s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
+        }
+    }
+    // on celld, the node's state and OpenBao's, in RAM: gone with the run,
+    // once both are stopped, and before an exit that runs no drop
+    if let Some(ram) = s.ram.take() {
+        let t0 = Instant::now();
+        match ram.remove() {
+            Ok(()) => println!("      (the run's state removed from RAM in {:.1?})", t0.elapsed()),
+            Err(e) => s.fail("the run removes its state from RAM", format!("{e:#}")),
         }
     }
     let skipped = match s.hosted() || s.on_celld() {
