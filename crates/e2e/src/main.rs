@@ -516,6 +516,10 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
+    /// On celld, the run's directory in RAM (devstack::shm), where `project`
+    /// is staged, so where `celld dev` keeps its state, and where OpenBao
+    /// keeps its: removed as the run ends, however it ends.
+    ram: Option<devstack::shm::RunDir>,
     /// The identity door a node shaped `Shape::Door` signs people in
     /// through (`start_through_door`).
     door_url: Option<String>,
@@ -542,6 +546,12 @@ impl Drop for Suite {
         drop(self.node.take());
         if let Err(e) = self.remove_containers() {
             println!("      could not remove this run's containers or images: {e:#}");
+        }
+        // its state in RAM goes with it (the field's drop), OpenBao's logs
+        // kept in the scratch first, once OpenBao is stopped
+        if let Some(ram) = &self.ram {
+            drop(self.openbao.take());
+            keep_openbao_logs(ram.path(), &self.scratch);
         }
     }
 }
@@ -1546,7 +1556,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
-    let project = devstack::stage_project(&scratch.join("cell"))?;
     // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
     let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
         Err(_) | Ok("wrangler") => None,
@@ -1554,19 +1563,52 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
         Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
     };
+    // On celld, the project is staged in RAM, and with it the node's state
+    // (devstack::shm): on the home disk, another job's writes stalled every
+    // SQLite call of the node until it fenced itself (FIN-728). The run's
+    // logs stay in its scratch, on disk.
+    let ram = match &celld {
+        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES, RAM_RUNS)?),
+        None => None,
+    };
+    if let Some(ram) = &ram {
+        // where this run's scratch is, should a later run sweep this one's
+        // RAM (`keep_gone_runs_logs`)
+        std::fs::write(ram.path().join(SCRATCH_NOTE), scratch.display().to_string()).with_context(|| format!("note the scratch in {}", ram.path().display()))?;
+        // celld bundles the project's bare imports (`@cloudflare/sandbox`)
+        // from the repo's node_modules, which esbuild looks for above the
+        // project: staged outside the repo, the run's directory links it
+        // (a link its removal takes, never what it links to)
+        let modules = root.join("node_modules");
+        std::os::unix::fs::symlink(&modules, ram.path().join("node_modules")).with_context(|| format!("link {} into {}", modules.display(), ram.path().display()))?;
+    }
+    let state = ram.as_ref().map_or(scratch.as_path(), |r| r.path()).to_path_buf();
+    let cell = state.join("cell");
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
     // kills it and all else it started (the Chromes: `on_termination`),
     // then removes the containers it left (on celld's krun engine, its VMs)
-    let leftovers = project.clone();
+    // and its state in RAM, keeping OpenBao's logs in its scratch. Installed
+    // before the project is staged, which can wait on a build.
+    let leftovers = cell.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
+    let in_ram = ram.as_ref().map(devstack::shm::RunDir::remover);
+    let (logs_from, logs_to) = (state.clone(), scratch.clone());
     devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers and images");
         match remove_leftovers(&leftovers, engine.as_ref()) {
             Ok((containers, images)) => println!("      (removed {containers} containers and {images} images of this run)"),
             Err(e) => println!("      could not remove this run's containers or images: {e:#}"),
         }
+        if let Some(in_ram) = &in_ram {
+            keep_openbao_logs(&logs_from, &logs_to);
+            match in_ram.remove() {
+                Ok(()) => println!("      (removed the run's state from RAM)"),
+                Err(e) => println!("      could not remove the run's state from RAM (the next run removes it): {e:#}"),
+            }
+        }
     })?;
+    let project = devstack::stage_project(&cell)?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
@@ -1577,7 +1619,12 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // the cell's secrets: wrangler's store, or celld's node's backend, a
     // file of their values or OpenBao (celld's default)
     let (secrets, with_openbao) = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
-    let openbao = with_openbao.then(|| openbao(&scratch)).transpose()?;
+    // in the run's RAM on celld, beside the node's state: on disk, another
+    // job's writes held a secret's read past its deadline
+    let openbao = with_openbao.then(|| openbao(&state, &scratch)).transpose()?;
+    // until the suite holds OpenBao (its drop keeps them), its logs are
+    // kept should what starts next fail
+    let logs = KeepOpenBaoLogs { state: state.clone(), scratch: scratch.clone(), armed: openbao.is_some() };
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let rung = local_rung(celld.as_ref(), rehearse);
@@ -1639,6 +1686,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cli,
         scratch,
         project,
+        ram,
         shape: Shape::Plain,
         door_url: None,
         secrets,
@@ -1646,6 +1694,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         node_computers,
         node_doors,
     };
+    // the suite holds OpenBao now, and keeps its logs as it ends
+    let mut logs = logs;
+    logs.armed = false;
     if let Some(k) = s.shard {
         println!("shard {k}/{}: {}", lanes::SHARDS.len(), lanes::SHARDS[k as usize - 1].join(", "));
     }
@@ -1716,12 +1767,73 @@ fn node_classes(planned: &[Planned]) -> (bool, bool) {
 /// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
 /// state in the run's scratch, on a free loopback port, every request in
 /// its audit log (read at the run's end: `openbao_reads`).
-fn openbao(scratch: &Path) -> Result<devstack::openbao::OpenBao> {
+fn openbao(state: &Path, scratch: &Path) -> Result<devstack::openbao::OpenBao> {
     let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
-    let opts = devstack::openbao::Options { dir: scratch.join("openbao"), port: devstack::free_port()?, audit: true };
-    let (bao, took) = devstack::openbao::OpenBao::start(&bin, opts)?;
+    let opts = devstack::openbao::Options { dir: state.join("openbao"), port: devstack::free_port()?, audit: true };
+    let (bao, took) = match devstack::openbao::OpenBao::start(&bin, opts) {
+        Ok(started) => started,
+        Err(e) => {
+            // its log goes with the run's RAM: kept in the scratch first
+            keep_openbao_logs(state, scratch);
+            return Err(anyhow!(e).context(format!("OpenBao did not start (its logs, kept: {})", scratch.join("openbao").display())));
+        }
+    };
     println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret read by the celld node)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
     Ok(bao)
+}
+
+/// A celld run's RAM directories (devstack::shm): named by run ids, and a
+/// gone run's OpenBao logs kept before its directory goes.
+const RAM_RUNS: devstack::shm::Runs = devstack::shm::Runs { is_run: hosted::sweep::is_run, before_removing: keep_gone_runs_logs };
+
+/// In a run's RAM directory: the path of its scratch, on disk.
+const SCRATCH_NOTE: &str = "scratch";
+
+/// A run killed outright kept nothing of its RAM: before a later run's
+/// sweep removes it, its OpenBao logs go to its scratch (`SCRATCH_NOTE`),
+/// as its own end would have put them.
+fn keep_gone_runs_logs(dir: &Path) {
+    let Ok(scratch) = std::fs::read_to_string(dir.join(SCRATCH_NOTE)) else { return };
+    let scratch = PathBuf::from(scratch);
+    if scratch.is_dir() {
+        keep_openbao_logs(dir, &scratch);
+    }
+}
+
+/// OpenBao's own log and its audit log, copied from `state` (the run's RAM)
+/// into `scratch` (`openbao/`), kept for a look after its RAM is removed.
+/// Copied, not written there: OpenBao answers a request only once its audit
+/// log has it, and a log on the busy disk would hold every secret's read.
+/// Nothing to copy when `state` is the scratch (a wrangler run's).
+fn keep_openbao_logs(state: &Path, scratch: &Path) {
+    if state == scratch {
+        return;
+    }
+    let (from, to) = (state.join("openbao"), scratch.join("openbao"));
+    for name in ["openbao.log", "audit.log"] {
+        if !from.join(name).is_file() {
+            continue;
+        }
+        if let Err(e) = std::fs::create_dir_all(&to).and_then(|()| std::fs::copy(from.join(name), to.join(name))) {
+            println!("      could not keep OpenBao's {name} in {}: {e}", to.display());
+        }
+    }
+}
+
+/// OpenBao's logs kept (`keep_openbao_logs`) when this drops armed: a
+/// run's setup failing between OpenBao's start and the suite that holds it.
+struct KeepOpenBaoLogs {
+    state: PathBuf,
+    scratch: PathBuf,
+    armed: bool,
+}
+
+impl Drop for KeepOpenBaoLogs {
+    fn drop(&mut self) {
+        if self.armed {
+            keep_openbao_logs(&self.state, &self.scratch);
+        }
+    }
 }
 
 /// What the run asked of OpenBao, from its audit log: the cell's reads of
@@ -1769,6 +1881,17 @@ fn finish(s: &mut Suite) -> Result<()> {
     if let Some(mut bao) = s.openbao.take() {
         if let Err(e) = bao.down() {
             s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
+        }
+    }
+    // on celld, the node's state and OpenBao's, in RAM: gone with the run,
+    // once both are stopped, and before an exit that runs no drop (OpenBao's
+    // logs kept in the scratch, with the run's own)
+    if let Some(ram) = s.ram.take() {
+        keep_openbao_logs(ram.path(), &s.scratch);
+        let t0 = Instant::now();
+        match ram.remove() {
+            Ok(()) => println!("      (the run's state removed from RAM in {:.1?})", t0.elapsed()),
+            Err(e) => s.fail("the run removes its state from RAM", format!("{e:#}")),
         }
     }
     let skipped = match s.hosted() || s.on_celld() {
