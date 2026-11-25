@@ -170,6 +170,23 @@ pub(crate) fn note_name(name: &str) -> String {
     format!("{}~{}{NOTE_SUFFIX}", &name[..cut], &blob::sha256_hex(name.as_bytes())[..NOTE_HEX])
 }
 
+/// Whether a note named `file` is the note of `name`: `note_name`'s, or
+/// `<name>.offloaded.md` whole, as older CLIs named every note (macOS
+/// keeps a name of 255 letters, past 255 bytes).
+fn is_note_of(file: &str, name: &str) -> bool {
+    file == note_name(name) || file.strip_suffix(NOTE_SUFFIX) == Some(name)
+}
+
+/// Where the note of `name` in `dir` is: `<name>.offloaded.md` whole if
+/// an older CLI wrote it so (`is_note_of`), else `note_name`'s.
+fn note_at(dir: &Path, name: &str) -> PathBuf {
+    let whole = dir.join(format!("{name}{NOTE_SUFFIX}"));
+    if fs::symlink_metadata(&whole).is_ok() {
+        return whole;
+    }
+    dir.join(note_name(name))
+}
+
 /// A path quoted for a shell.
 fn quoted(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
@@ -353,7 +370,7 @@ fn plan(path: &Path, keep: Option<&Path>) -> Result<Planned> {
     if let Some(keep) = keep.filter(|k| abs.starts_with(k) || k.starts_with(&abs)) {
         bail!(coded(Code::InvalidUsage, format!("{} is in your runtime's own home ({}), or holds it: what it keeps there (memory, skills, sessions, settings) is never moved", abs.display(), keep.display())));
     }
-    let note = dir.join(note_name(&name));
+    let note = note_at(&dir, &name);
     let m = match fs::symlink_metadata(&abs) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && note.exists() => bail!(coded(Code::InvalidUsage, format!("{} was moved already: its note is {}", abs.display(), note.display()))),
         m => m.with_context(|| format!("reading {}", abs.display()))?,
@@ -693,7 +710,7 @@ fn note_of(path: &Path) -> Result<(PathBuf, Option<String>)> {
     let (dir, name) = place(path)?;
     Ok(match name.ends_with(NOTE_SUFFIX) {
         true => (dir.join(name), None),
-        false => (dir.join(note_name(&name)), Some(name)),
+        false => (note_at(&dir, &name), Some(name)),
     })
 }
 
@@ -709,11 +726,11 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
     };
     let r = record_of(&text).with_context(|| format!("reading {}", note.display()))?;
     // the name it brings back: its record's (each path's first part), whose
-    // note this is by name (`note_name`; FIN-757: a name may end as a
+    // note this is by name (`is_note_of`; FIN-757: a name may end as a
     // note's does)
     let first = &r.files[0].path;
     let name = Path::new(first).components().next().and_then(|c| c.as_os_str().to_str()).expect("a record's paths are plain").to_string();
-    if note_name(&name) != name_of(&note)? {
+    if !is_note_of(&name_of(&note)?, &name) {
         bail!("{} names {first}, which is not under the name it is the note of", note.display());
     }
     if let Some(asked) = asked.filter(|a| *a != name) {
@@ -1174,6 +1191,12 @@ mod tests {
             assert_eq!(note_name(&long), short, "the same each time");
         }
         assert_ne!(note_name(&format!("{fits}a")), note_name(&format!("{fits}b")), "another for another name");
+        // a note is its name's by either name: `note_name`'s, or whole, as
+        // older CLIs wrote one where a file system keeps it (macOS: 255 letters)
+        let cjk = "長い題名".repeat(21);
+        assert!(cjk.len() == 252 && is_note_of(&format!("{cjk}{NOTE_SUFFIX}"), &cjk) && is_note_of(&note_name(&cjk), &cjk));
+        assert!(is_note_of("log.offloaded.md.offloaded.md", "log.offloaded.md") && !is_note_of("log.offloaded.md", "log.offloaded.md"));
+        assert!(!is_note_of(&note_name(&cjk), "長い題名") && !is_note_of("a.offloaded.md", "b"));
     }
 
     /// Goal: a folder replaced by a link before its back is refused, and
