@@ -489,6 +489,10 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
+    /// On celld, the run's directory in RAM, where `project` is staged and
+    /// so where `celld dev` keeps its state (devstack::shm): removed as the
+    /// run ends, however it ends.
+    ram: Option<devstack::shm::RunDir>,
     /// The identity door a node shaped `Shape::Door` signs people in
     /// through (`start_through_door`).
     door_url: Option<String>,
@@ -1518,7 +1522,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
-    let project = devstack::stage_project(&scratch.join("cell"))?;
     // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
     let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
         Err(_) | Ok("wrangler") => None,
@@ -1526,17 +1529,33 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
         Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
     };
+    // On celld, the project is staged in RAM, and with it the node's state
+    // (devstack::shm): on the home disk, another job's writes stalled every
+    // SQLite call of the node until it fenced itself (FIN-728). The run's
+    // logs stay in its scratch, on disk.
+    let ram = match &celld {
+        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES)?),
+        None => None,
+    };
+    let project = devstack::stage_project(&ram.as_ref().map_or(scratch.as_path(), |r| r.path()).join("cell"))?;
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
     // kills it and all else it started (the Chromes: `on_termination`),
     // then removes the containers it left (on celld's krun engine, its VMs)
     let leftovers = project.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
+    let in_ram = ram.as_ref().map(devstack::shm::RunDir::remover);
     devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers and images");
         match remove_leftovers(&leftovers, engine.as_ref()) {
             Ok((containers, images)) => println!("      (removed {containers} containers and {images} images of this run)"),
             Err(e) => println!("      could not remove this run's containers or images: {e:#}"),
+        }
+        if let Some(in_ram) = &in_ram {
+            match in_ram.remove() {
+                Ok(()) => println!("      (removed the node's state from RAM)"),
+                Err(e) => println!("      could not remove the node's state from RAM (the next run removes it): {e:#}"),
+            }
         }
     })?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
@@ -1611,6 +1630,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cli,
         scratch,
         project,
+        ram,
         shape: Shape::Plain,
         door_url: None,
         secrets,
@@ -1735,6 +1755,15 @@ fn finish(s: &mut Suite) -> Result<()> {
         Ok(Some((containers, images))) => println!("      (removed {containers} containers and {images} images of this run in {:.1?})", t0.elapsed()),
         Ok(None) => {}
         Err(e) => s.fail("the run removes the containers its nodes left and the images they built", format!("{e:#}")),
+    }
+    // the node's state, in RAM on celld: gone with the run, before an exit
+    // that runs no drop
+    if let Some(ram) = s.ram.take() {
+        let t0 = Instant::now();
+        match ram.remove() {
+            Ok(()) => println!("      (the node's state removed from RAM in {:.1?})", t0.elapsed()),
+            Err(e) => s.fail("the run removes its node's state from RAM", format!("{e:#}")),
+        }
     }
     let t0 = Instant::now();
     s.chrome.close();

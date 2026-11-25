@@ -102,6 +102,15 @@ Every binding and runtime API master's cell uses, against the fork's
   seam 2. Checks celld cannot make are skips saying why (a card's shot,
   an icon's making; found 31's 413; Telegram, below); the check local
   workerd cannot make runs (a job sleeping through a crash).
+  - **Its node's state is in RAM.** A run stages its project in
+    `/dev/shm/fragment-e2e-<uid>/<run>` (`devstack::shm`), and `celld dev`
+    keeps its state beside it, so no other job's disk writes reach the
+    node (found 45). The run removes it as it ends, its Ctrl-C handler as
+    it is stopped, and the next run's start removes one a killed run left.
+    A run needs 3 GiB free there to start, and says so when it lacks it.
+    The run's logs stay in its scratch, on disk; the state is not kept for
+    a look. The cost: the e2e no longer runs celld on a slow disk. The dev
+    stack keeps its state on disk, where it survives a reboot.
 - **Master's path is unchanged:** nothing here branches on the runtime,
   and the cell has no code of celld's.
 
@@ -485,8 +494,8 @@ The old lane's numbering is kept.
 45. **`celld dev` fences itself when one lease renewal stalls** past its
     10 s TTL (`SELF-FENCE: node lease not renewed within TTL`, exit 3): its
     store's SQLite waits on a disk busy writing back. Off that disk it does
-    not stall: an e2e run, whose state is thrown away, can keep it on
-    tmpfs.
+    not stall, so the e2e keeps its node's state in RAM (seam 1, The e2e).
+    A dev stack's state stays on disk.
 48. **No `CF-Connecting-IP` on celld:** the cell counts a CLI code's asks
     by it, so every address is `unnamed` and shares one bucket. A front
     proxy that sets the header (a tailnet's, a company's) gives each its

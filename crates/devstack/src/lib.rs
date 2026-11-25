@@ -29,6 +29,7 @@ mod node_release;
 pub mod openbao;
 mod openbao_release;
 pub mod rows;
+pub mod shm;
 pub mod signals;
 pub mod store;
 mod tree;
