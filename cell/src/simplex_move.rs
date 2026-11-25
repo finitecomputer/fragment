@@ -176,7 +176,12 @@ impl Move<'_> {
             rec = self.hand_over(&rec).await?;
         }
         if text(&rec, "step") == "imported" {
-            self.as_person(text(&rec, "connector"), Method::Post, "/api/ops/connect", Some(&json!({ "id": "simplex-move-connect", "input": { "name": label_of(&self.agent) } }))).await?;
+            // its SimpleX name its title, as Settings connects one and as its
+            // computer named it, so its person's app shows no new name
+            let status = self.as_person(&self.agent, Method::Get, "/api/status", None).await?;
+            let title = status["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(label_of(&self.agent));
+            let name: String = title.chars().take(64).collect();
+            self.as_person(text(&rec, "connector"), Method::Post, "/api/ops/connect", Some(&json!({ "id": "simplex-move-connect", "input": { "name": name } }))).await?;
             rec = self.set(json!({ "step": "connecting" })).await?;
         }
         if text(&rec, "step") == "connecting" {
