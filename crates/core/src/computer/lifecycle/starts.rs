@@ -85,8 +85,6 @@ impl Lifecycle {
     /// the sleep stopped it (it died as it was held or saved) stopped on its
     /// own: an exit.
     pub(super) fn end_life(&mut self, by: LifeEnd, now_ms: i64, step: &mut Step) {
-        // an export's ask lasts its life: one still waiting asks again
-        self.export_due_ms = None;
         let stopped = matches!(self.saving, Some(Saving::Stop { .. }));
         let by = if by == LifeEnd::Sleep && !stopped { LifeEnd::Exit } else { by };
         let saved = by == LifeEnd::Sleep && matches!(self.saving, Some(Saving::Stop { saved: true, .. }));

@@ -77,6 +77,11 @@ pub enum Unmounted {
     /// Its head will not open (FPAC's words): its start falls back past it
     /// (`Api::disk_unusable`).
     Unusable(String),
+    /// Its device is blank: its head a claim, nothing of it replayed or
+    /// mapped (a new disk's first life ended before anything shipped), so
+    /// no retry mounts it and nothing of it was kept: its start goes again
+    /// as a new disk.
+    Blank(String),
     /// Anything else: the remote, the device, the time.
     Failed(String),
 }
@@ -134,7 +139,7 @@ fn unmounted(events: &[Value], status: &str) -> Unmounted {
     let blank = events.iter().rev().find(|e| e["fpac"] == "opened").is_some_and(|o| o["new"] == false && o["extents_mapped"] == 0 && o["replayed"] == 0);
     match why {
         Some(why) if why.starts_with(UNUSABLE) => Unmounted::Unusable(why),
-        Some(why) if blank => Unmounted::Unusable(format!("a blank disk (nothing of it shipped): {why}")),
+        Some(why) if blank => Unmounted::Blank(format!("a blank disk (nothing of it shipped): {why}")),
         Some(why) => Unmounted::Failed(why),
         None => Unmounted::Failed(format!("fpac exited ({status}) saying nothing")),
     }
@@ -257,7 +262,10 @@ mod tests {
         let mount = "mount ext4 at /data: Invalid argument (os error 22)";
         // its head a claim and nothing replayed: a blank device, which no
         // retry mounts; the platform starts it again as a new disk
-        assert!(matches!(unmounted(&[opened(false, 0, 0), error(mount)], "exit status: 1"), Unmounted::Unusable(why) if why.contains("blank")));
+        assert!(matches!(unmounted(&[opened(false, 0, 0), error(mount)], "exit status: 1"), Unmounted::Blank(why) if why.contains("blank")));
+        // an open that refused a corrupt segment is unusable, never blank:
+        // what shipped is kept, never started over
+        assert!(matches!(unmounted(&[error("the disk does not open: a segment's header is corrupt")], "exit status: 1"), Unmounted::Unusable(_)));
         // anything mapped or replayed: its files are there, and a mount that
         // fails may pass (a failed start, retried)
         assert_eq!(unmounted(&[opened(false, 12, 0), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));

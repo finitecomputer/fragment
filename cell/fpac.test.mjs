@@ -145,8 +145,8 @@ test("a name outside the grammar, another life's epoch, a body past its limit or
 
 test("a boot's word that its head will not open goes on with this life's epoch and that head alone", async () => {
   const seen = [];
-  const told = async (epoch, head, why) => {
-    seen.push([epoch, head, why]);
+  const told = async (epoch, head, why, blank) => {
+    seen.push([epoch, head, why, blank]);
     return { taken: true };
   };
   const post = (body, disk = DISK) => {
@@ -155,11 +155,16 @@ test("a boot's word that its head will not open goes on with this life's epoch a
   };
   const r = await post({ why: "the disk does not open: no such checkpoint" });
   assert.deepEqual([r.status, await r.json()], [200, { taken: true }]);
-  assert.equal((await post({ why: "a new disk's" }, { ...DISK, head: null })).status, 200);
-  assert.deepEqual(seen, [[7, DISK.head, "the disk does not open: no such checkpoint"], [7, null, "a new disk's"]], "its props' life and head, never the guest's say");
+  assert.equal((await post({ why: "a blank disk", blank: true }, { ...DISK, head: null })).status, 200);
+  assert.equal((await post({ why: "said loosely", blank: "yes" })).status, 200);
+  assert.deepEqual(
+    seen,
+    [[7, DISK.head, "the disk does not open: no such checkpoint", false], [7, null, "a blank disk", true], [7, DISK.head, "said loosely", false]],
+    "its props' life and head, never the guest's say; blank only when said exactly",
+  );
   assert.equal((await post({ nope: 1 })).status, 400, "it says why");
   assert.equal((await post({ why: "x".repeat(5000) })).status, 413, "within its bound");
-  assert.equal(seen.length, 2, "neither refused one reached the DO");
+  assert.equal(seen.length, 3, "neither refused one reached the DO");
 });
 
 test("a head post goes to the DO's rules with this life's epoch, its answer passed back", async () => {

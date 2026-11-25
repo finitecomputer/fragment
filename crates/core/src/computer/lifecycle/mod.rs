@@ -229,7 +229,8 @@ pub struct Lifecycle {
     /// A disk's save its owner's export asked for (`Event::ExportAsked`):
     /// due from then, taken awake under the hold as any awake save; one
     /// that failed is due again after its pause. None once one is saved,
-    /// and as the life it was asked in ends (the export asks again).
+    /// as its export gives up, and whenever no start runs (asked asleep, or
+    /// its start or life ended): the export asks again while it waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     export_due_ms: Option<i64>,
 }
@@ -589,10 +590,11 @@ impl Lifecycle {
             // its pause), taken by its alarm once it runs (the export wakes
             // it), never in the ask's own step: the export only looks. A
             // computer with saves of its own has its newest, and asks none
-            (_, Event::ExportAsked) if self.disk => {
+            (_, Event::ExportAsked) if self.disk && self.running().is_some() => {
                 self.export_due_ms.get_or_insert(now_ms);
             }
             (_, Event::ExportAsked) => {}
+            (_, Event::ExportDropped) => self.export_due_ms = None,
             (Phase::Asleep { .. } | Phase::Failed { .. }, Event::SaveChosen) => {
                 self.failures = 0;
                 self.restore_fallbacks = 0;
@@ -958,6 +960,11 @@ impl Lifecycle {
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
+        }
+        // an export's ask is for a computer that runs: one whose start
+        // failed, or whose life ended, has none (its export asks again)
+        if self.running().is_none() {
+            self.export_due_ms = None;
         }
         step.alarm_ms = self.next_alarm().map(|at| match self.saving {
             // a stop under way is looked at every `STOP_LOOK_MS` up to its

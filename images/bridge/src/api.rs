@@ -643,9 +643,9 @@ impl Api {
     /// mount (`disk::Unmounted::Unusable`), so that start falls back past it
     /// (docs/computers.md, "A disk"). The route names its life and the head,
     /// so the word fails that start alone. Whether the platform took it.
-    pub async fn disk_unusable(&self, why: &str) -> Result<bool, ApiError> {
+    pub async fn disk_unusable(&self, why: &str, blank: bool) -> Result<bool, ApiError> {
         let why: String = why.chars().take(500).collect();
-        let v: Value = self.json(Method::POST, "/unusable", None, Some(json!({ "why": why }))).await?;
+        let v: Value = self.json(Method::POST, "/unusable", None, Some(json!({ "why": why, "blank": blank }))).await?;
         Ok(v["taken"] == true)
     }
 

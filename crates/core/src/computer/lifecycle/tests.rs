@@ -1289,15 +1289,35 @@ fn an_export_saves_a_disk_once_awake() {
     // saved: nothing more is due, however long it runs
     let (saves, _) = run_alarms(&mut l, again + IDLE_MS / 2);
     assert!(saves.is_empty(), "{saves:?}");
-    // asked asleep: due, stored, and taken once it runs
+    // asked asleep: nothing (its export wakes it, then asks); asked as it
+    // starts: kept across a restart of the object, taken once it runs
     let mut asleep = Lifecycle::new();
     asleep.set_disk();
-    assert!(asleep.apply(Event::ExportAsked, T).actions.is_empty(), "asleep, its export wakes it");
+    asleep.apply(Event::ExportAsked, T);
+    assert!(serde_json::to_value(&asleep).unwrap().get("export_due_ms").is_none(), "no ask kept for a computer that does not run");
+    let s = asleep.apply(Event::Wake { why: Wake::Owner }, T + 1_000);
+    let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+    asleep.apply(Event::ExportAsked, T + 1_100);
     let mut asleep: Lifecycle = serde_json::from_value(serde_json::to_value(&asleep).unwrap()).unwrap();
-    let g = started(&mut asleep, T + 1_000);
-    let at = asleep.next_alarm().expect("its save is due");
-    assert_eq!(at, T, "due since it was asked");
-    assert!(asleep.apply(Event::Alarm, T + 4_100).actions.contains(&Action::Hold { generation: g }));
+    asleep.apply(Event::Ready { generation: g }, T + 4_000);
+    assert!(asleep.apply(Event::Alarm, T + 4_100).actions.contains(&Action::Hold { generation: g }), "taken once it runs");
+    // its export gave up: the ask goes, whatever is due
+    let mut gave_up = Lifecycle::new();
+    gave_up.set_disk();
+    let g = started(&mut gave_up, T);
+    gave_up.apply(Event::ExportAsked, T + 5_000);
+    gave_up.apply(Event::ExportDropped, T + 5_001);
+    let (saves, _) = run_alarms(&mut gave_up, T + 5_000 + IDLE_MS / 2);
+    assert!(saves.is_empty(), "nothing taken for an export that gave up: {saves:?}");
+    let _ = g;
+    // asked as a start begins, that start failing: dropped with it
+    let mut failing = Lifecycle::new();
+    failing.set_disk();
+    let s = failing.apply(Event::Wake { why: Wake::Owner }, T);
+    let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+    failing.apply(Event::ExportAsked, T + 100);
+    failing.apply(Event::StartFailed { generation: g, why: "the test".into() }, T + 200);
+    assert!(serde_json::to_value(&failing).unwrap().get("export_due_ms").is_none(), "dropped with the start it was asked in");
     // a computer with saves of its own asks none
     let mut saves = Lifecycle::new();
     started(&mut saves, T);

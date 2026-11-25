@@ -10,7 +10,7 @@
 // R2's body handed on, a put the request's body into R2, never read here.
 // The head is the Computer DO's, moved only by the head's rules
 // (`fragment_core::computer::fpac::decide`): `postHead` carries a post to
-// it. Beside FPAC's contract, the platform's own `POST /unusable {why}`:
+// it. Beside FPAC's contract, the platform's own `POST /unusable {why, blank}`:
 // its boot's word that the head it was handed will not open, carried by
 // `postUnusable` with this life's epoch and that head, so the start it
 // fails is this one alone. `rules` are the Rust side's, one source of each: the name's grammar
@@ -48,14 +48,17 @@ export async function fpacRoute(request, bucket, disk, rules, postHead, postUnus
   if (route === "POST /unusable") {
     const declared = Number(request.headers.get("content-length"));
     if (!(declared <= UNUSABLE_MAX_BYTES)) return text(413, "a report past its limit\n");
-    let why;
+    let said;
     try {
-      why = JSON.parse(await request.text()).why;
+      said = JSON.parse(await request.text());
     } catch {
-      why = null;
+      said = {};
     }
+    const why = said && said.why;
     if (typeof why !== "string" || why.length > UNUSABLE_MAX_BYTES) return text(400, "say why ({why})\n");
-    const a = await postUnusable(disk.epoch, disk.head || null, why);
+    // its device blank (nothing of it ever shipped): only then may the
+    // platform start it as a new disk (`fragment_core::computer::fpac::fallback`)
+    const a = await postUnusable(disk.epoch, disk.head || null, why, said.blank === true);
     return new Response(JSON.stringify(a), { status: 200, headers: { "content-type": "application/json" } });
   }
   const name = url.pathname.startsWith("/o/") ? url.pathname.slice(3) : null;

@@ -743,7 +743,7 @@ export class ComputerEgress extends WorkerEntrypoint {
     if (route === "fpac") {
       const E = rs.ComputerEgress;
       const rules = { nameEpoch: (n) => E.fpac_name_epoch(n) ?? null, objectBytesMax: E.fpac_object_bytes_max(), headLineMax: E.fpac_head_line_max() };
-      return fpacRoute(request, this.env.BLOBS, this.ctx.props.disk, rules, (epoch, line) => E.disk_head(this.env, computer, epoch, line), (epoch, head, why) => E.disk_unusable(this.env, computer, epoch, head, why));
+      return fpacRoute(request, this.env.BLOBS, this.ctx.props.disk, rules, (epoch, line) => E.disk_head(this.env, computer, epoch, line), (epoch, head, why, blank) => E.disk_unusable(this.env, computer, epoch, head, why, blank));
     }
     // a relay only where one was asked for: its route, a GET that upgrades
     // (Rust strips the relay's headers from every other answer besides)

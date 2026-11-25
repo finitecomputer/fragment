@@ -117,10 +117,11 @@ fn head_number(s: &str) -> Option<u64> {
 }
 
 /// Where a disk's start goes past a head its guest found would not open
-/// (the head it tried, still the one stored): the head before it; or, for
-/// a head that names no checkpoint with none before it (a new disk's first
-/// life, which ended before its filesystem shipped), a new disk again
-/// (nothing it had was ever kept); else nowhere, a failed start.
+/// (`head`, the one it was handed, and `back`, the one before it): the
+/// one before it; or, when its guest found the device blank (`blank`:
+/// nothing of it ever shipped, so nothing was kept) and no head it had
+/// names a checkpoint, a new disk again; else nowhere, a failed start,
+/// whatever it kept left as it is for an operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fallback {
     To(Head),
@@ -128,10 +129,11 @@ pub enum Fallback {
     Nowhere,
 }
 
-pub fn fallback(head: Option<&Head>, back: Option<&Head>) -> Fallback {
+pub fn fallback(head: Option<&Head>, back: Option<&Head>, blank: bool) -> Fallback {
+    let checkpointless = |h: Option<&Head>| h.is_none_or(|h| h.checkpoint.is_none());
     match (head, back) {
+        (Some(_), _) if blank && checkpointless(head) && checkpointless(back) => Fallback::Fresh,
         (_, Some(b)) => Fallback::To(*b),
-        (Some(h), None) if h.checkpoint.is_none() => Fallback::Fresh,
         _ => Fallback::Nowhere,
     }
 }
@@ -358,11 +360,14 @@ mod tests {
         let older = Head { epoch: 3, checkpoint: ck(3, 9), clean: true };
         let newer = Head { epoch: 4, checkpoint: ck(4, 2), clean: false };
         let claim = Head { epoch: 1, checkpoint: None, clean: false };
-        assert_eq!(fallback(Some(&newer), Some(&older)), Fallback::To(older), "the head before it");
-        assert_eq!(fallback(Some(&newer), None), Fallback::Nowhere, "a checkpointed head with none before: a failed start, its files kept");
-        assert_eq!(fallback(Some(&claim), None), Fallback::Fresh, "a first life's claim, nothing checkpointed: a new disk again");
-        assert_eq!(fallback(Some(&Head { epoch: 5, checkpoint: None, clean: false }), Some(&older)), Fallback::To(older), "a claim with a head before it: that one");
-        assert_eq!(fallback(None, None), Fallback::Nowhere, "no head: a new disk that would not make, a failed start");
+        assert_eq!(fallback(Some(&newer), Some(&older), false), Fallback::To(older), "the head before it");
+        assert_eq!(fallback(Some(&newer), None, false), Fallback::Nowhere, "a checkpointed head with none before: a failed start, its files kept");
+        assert_eq!(fallback(Some(&claim), None, true), Fallback::Fresh, "a first life's claim, its device blank: a new disk again");
+        assert_eq!(fallback(Some(&claim), Some(&Head { epoch: 0, checkpoint: None, clean: false }), true), Fallback::Fresh, "blank, and no head it had a checkpoint: new again at once");
+        assert_eq!(fallback(Some(&claim), None, false), Fallback::Nowhere, "a claim whose segments would not open (corrupt, not blank): never a new disk over what shipped");
+        assert_eq!(fallback(Some(&newer), None, true), Fallback::Nowhere, "a checkpointed head is never blank: its files kept");
+        assert_eq!(fallback(Some(&Head { epoch: 5, checkpoint: None, clean: false }), Some(&older), false), Fallback::To(older), "a claim with a head before it: that one");
+        assert_eq!(fallback(None, None, false), Fallback::Nowhere, "no head: a new disk that would not make, a failed start");
     }
 
     #[test]

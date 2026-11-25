@@ -492,11 +492,15 @@ fn mount_disk(mounting: fragment_bridge::disk::Mounting, home: &Path) {
     use fragment_bridge::disk::Unmounted;
     match mounting.wait() {
         Ok(m) => ev!("boot.disk_mounted", { "ms": m.ms, "misses": m.misses }),
-        Err(Unmounted::Unusable(why)) => {
-            ev!("boot.disk_unusable", { "why": why });
+        Err(e @ (Unmounted::Unusable(_) | Unmounted::Blank(_))) => {
+            let (why, blank) = match e {
+                Unmounted::Blank(why) => (why, true),
+                Unmounted::Unusable(why) | Unmounted::Failed(why) => (why, false),
+            };
+            ev!("boot.disk_unusable", { "why": why, "blank": blank });
             let told = Api::new(fragment_bridge::disk::ROUTE).map_err(|e| e.to_string()).and_then(|api| {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-                rt.block_on(api.disk_unusable(&why)).map_err(|e| e.to_string())
+                rt.block_on(api.disk_unusable(&why, blank)).map_err(|e| e.to_string())
             });
             match told {
                 // its start destroys it (`disk::TOLD_WAIT_MS`)

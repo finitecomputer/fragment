@@ -147,6 +147,9 @@ pub enum Event {
     /// any awake save; the export wakes it. Nothing for a computer with
     /// saves of its own.
     ExportAsked,
+    /// Its owner's export stopped waiting for that save (its wait ran out):
+    /// the ask goes, so no later moment takes a save nobody waits for.
+    ExportDropped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

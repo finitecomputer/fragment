@@ -186,10 +186,14 @@ async fn mount_disk() {
     let mounted = tokio::task::spawn_blocking(|| disk::start().map_err(Unmounted::Failed).and_then(disk::Mounting::wait)).await.unwrap_or_else(|e| Err(Unmounted::Failed(e.to_string())));
     match mounted {
         Ok(m) => ev!("bridge.disk_mounted", { "ms": m.ms, "misses": m.misses }),
-        Err(Unmounted::Unusable(why)) => {
-            ev!("bridge.disk_unusable", { "why": why });
+        Err(e @ (Unmounted::Unusable(_) | Unmounted::Blank(_))) => {
+            let (why, blank) = match e {
+                Unmounted::Blank(why) => (why, true),
+                Unmounted::Unusable(why) | Unmounted::Failed(why) => (why, false),
+            };
+            ev!("bridge.disk_unusable", { "why": why, "blank": blank });
             match fragment_bridge::api::Api::new(disk::ROUTE) {
-                Ok(a) => match a.disk_unusable(&why).await {
+                Ok(a) => match a.disk_unusable(&why, blank).await {
                     // its start destroys it (`disk::TOLD_WAIT_MS`)
                     Ok(true) => tokio::time::sleep(Duration::from_millis(disk::TOLD_WAIT_MS)).await,
                     Ok(false) => ev!("bridge.disk_unusable_untold", { "error": "not taken: this life is not the one running" }),
