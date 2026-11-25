@@ -3,9 +3,11 @@
 // - A message an agent or hosted door relays from its owner is its owner's,
 //   once the members say the poster is that owner's agent or none of the
 //   chat's members (and its platform author stamp, when present, is "door").
+//   Its room and context only when that stamp is there.
 // - A message heard from an outside speaker in a room is that speaker's,
 //   never a member's and never the owner's, only when posted by a non-member
-//   carrier key (`npub1…`, author "door" when stamped) with a valid room.
+//   carrier key (`npub1…`) the platform stamped author "door", with a valid
+//   room. The bridge runs it by the same rule (images/bridge, `whose`).
 // - From any other member, from app code, or before the members are read,
 //   `relayed`, `heard`, `room`, and `context` are ignored.
 //
@@ -122,6 +124,7 @@ export function parseDoorFields(body, principal, turn, code = false) {
 }
 
 const doorAuthorOk = (m) => !m.code && (!m.author || m.author === "door");
+const byDoor = (m) => !m.code && m.author === "door";
 
 export function relayedOwner(m, members) {
   if (!m.relayed || !members.length || !doorAuthorOk(m)) return null;
@@ -130,16 +133,17 @@ export function relayedOwner(m, members) {
 }
 
 // Outside speaker in a hosted door room: only from a non-member carrier key
-// (`npub1…`, never a member or anonymous visitor) with a valid room.
+// (`npub1…`, never a member or anonymous visitor) stamped a door's, with a
+// valid room.
 export function heardSpeaker(m, members) {
-  if (!m.heard || !m.room || m.relayed || !members.length || !doorAuthorOk(m)) return null;
+  if (!m.heard || !m.room || m.relayed || !members.length || !byDoor(m)) return null;
   if (typeof m.principal !== "string" || !m.principal.startsWith("npub1")) return null;
   if (members.some((x) => x.principal === m.principal)) return null;
   return m.heard;
 }
 
 export function roomOf(m, members) {
-  if (!m.room || !members.length || !doorAuthorOk(m)) return null;
+  if (!m.room || !members.length || !byDoor(m)) return null;
   return heardSpeaker(m, members) || relayedOwner(m, members) ? m.room : null;
 }
 

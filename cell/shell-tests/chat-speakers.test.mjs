@@ -112,6 +112,13 @@ test("owner relayed in a room shows both door and room, and falls back to room i
   assert.equal(viaLabel(m, MEMBERS), "Slack · #deploys");
   assert.equal(contextOf(m, MEMBERS).length, 1);
 
+  // unstamped, its owner's still, but in no room (the bridge reads it so)
+  const bare = { ...m, author: null };
+  assert.equal(relayedOwner(bare, MEMBERS), OWNER);
+  assert.equal(roomOf(bare, MEMBERS), null);
+  assert.deepEqual(contextOf(bare, MEMBERS), []);
+  assert.equal(viaLabel(bare, MEMBERS), "Slack");
+
   const unnamed = parseDoorFields(
     {
       text: "hi",
@@ -140,6 +147,7 @@ test("anti-spoofing: members, app code, anonymous visitors, and non-door authors
     { principal: CONN, author: "person", code: false, ...parsed }, // external person on public chat
     { principal: CONN, author: "code", code: true, ...parsed }, // app code
     { principal: "anon:1234", author: "door", code: false, ...parsed }, // anonymous visitor
+    { principal: CONN, author: null, code: false, ...parsed }, // unstamped: the bridge honors no one heard
   ]) {
     assert.equal(heardSpeaker(forged, MEMBERS), null);
     assert.equal(roomOf(forged, MEMBERS), null);

@@ -650,8 +650,10 @@ impl Names {
         allowed.then_some((via, target))
     }
 
+    /// Someone a door heard: only on a record the platform stamped a door's,
+    /// as the bridge runs it (docs/chat-records.md, "A message heard in a room").
     fn heard_speaker<'a>(&self, principal: &str, author: Option<&str>, body: &'a Value) -> Option<(&'a str, String)> {
-        if author.is_some_and(|a| a != "door") || self.members.is_empty() {
+        if author != Some("door") || self.members.is_empty() {
             return None;
         }
         if !crate::npub::is_identity(principal) || self.members.contains_key(principal) {
@@ -724,6 +726,8 @@ pub fn transcript_part(r: &Said, names: &Names) -> Option<String> {
                     } else if let (RoomParsed::Valid(place), Some((via, name))) = (&room, names.heard_speaker(r.principal, r.author, r.body)) {
                         (escape_md(&name), Some(format!("{} · {}", door_name(via), escape_md(place))), true)
                     } else if let Some((via, owner)) = names.relayed_owner(r.principal, r.author, r.body) {
+                        // a relayed message's room only when stamped a door's
+                        let room = if r.author == Some("door") { room } else { RoomParsed::Absent };
                         match &room {
                             RoomParsed::Malformed => (one_line(&who), None, false),
                             RoomParsed::Valid(place) => (one_line(&names.of(owner)), Some(format!("via {} · {}", door_name(via), escape_md(place))), true),
@@ -1247,6 +1251,13 @@ mod tests {
 
         let spoof_person = transcript_part(&Said { channel: "chat", seq: 7, at: 1_791_000_360_000, principal: &conn, author: Some("person"), body: &heard_body }, &names).unwrap();
         assert!(!spoof_person.contains("Maple") && !spoof_person.contains("#deploys"), "{spoof_person}");
+
+        // Unstamped, as the bridge reads it (docs/chat-records.md): no one
+        // heard, and a relayed owner's message without its room.
+        let unstamped = transcript_part(&Said { channel: "chat", seq: 11, at: 1_791_000_480_000, principal: &conn, author: None, body: &heard_body }, &names).unwrap();
+        assert!(!unstamped.contains("Maple") && !unstamped.contains("#deploys"), "{unstamped}");
+        let unstamped_relay = transcript_part(&Said { channel: "chat", seq: 12, at: 1_791_000_540_000, principal: &conn, author: None, body: &relayed_room }, &names).unwrap();
+        assert!(unstamped_relay.contains("**paul@example.com** (via Slack) · ") && !unstamped_relay.contains("#deploys"), "{unstamped_relay}");
 
         let both = serde_json::json!({
             "text": "conflicting",
