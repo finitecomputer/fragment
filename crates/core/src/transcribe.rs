@@ -587,7 +587,7 @@ mod tests {
         let odd = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0.0001 } })).unwrap().unwrap();
         assert_eq!(usage_of(&odd, &json!({ "duration": 1.0 })), Some(cost(100)), "$0.0001 a minute: 100 sixtieths of a micro-dollar a second");
         let free = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0 } })).unwrap().unwrap();
-        assert_eq!(usage_of(&free, &json!({ "duration": 30.0 })), Some(cost(0)), "a box's own, at zero");
+        assert_eq!(usage_of(&free, &json!({ "text": "hi", "duration": 30.0 })), Some(cost(0)), "a box's own, at zero");
         let day = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": USD_A_MINUTE_MAX } })).unwrap().unwrap();
         let most = usage_of(&day, &json!({ "duration": DURATION_MAX_SECONDS })).unwrap();
         assert!(most.validate().is_ok() && keyed.price(&most).is_ok(), "a day at the dearest price is a charge the book takes: {most:?}");
