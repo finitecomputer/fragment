@@ -10,14 +10,16 @@
 //!   computer's SimpleX chat;
 //! - `operator simplex-move` plans it, then goes: the connector made and
 //!   bound as theirs, the link handed over and imported, its door connected
-//!   and linked with the same contact, the old chat archived; the phone's
-//!   next message lands in the connector's chat, once, nothing in the old
-//!   one, and the agent's answer reaches the phone through the door;
+//!   and linked with the same contact, the old chat archived; a message the
+//!   phone sends as it moves (its computer's core stopped, its door not
+//!   yet up) arrives once, in the connector's chat; the phone's next
+//!   message lands there, once, nothing in the old one, and the agent's
+//!   answer reaches the phone through the door;
 //! - back: its computer runs the link again, the phone's next message
 //!   lands in its computer's chat, and the connector is unbound and
 //!   archived, its history kept.
 //!
-//! Paid calls: the agent's answers (three turns, a few calls each).
+//! Paid calls: the agent's answers (four turns, a few calls each).
 
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,7 @@ use crate::{Need, Suite};
 
 pub const NAME: &str = "simplex-move";
 
-/// The paid calls its owner is lent: three answers.
+/// The paid calls its owner is lent: four answers.
 const PAID_CALLS: u64 = 15;
 /// A first start on a preview: the image pulled, Hermes booted.
 const WAKE: Duration = Duration::from_secs(420);
@@ -121,12 +123,20 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its plan says what goes first, and changes nothing", plan.status == 200 && plan.body["blocked"].is_null() && plan.body["record"].is_null(), &plan);
     let t0 = Instant::now();
     let mut went = Value::Null;
+    let mut during = false;
     // bounded: SLOW and a door's start
     while t0.elapsed() < SLOW * 2 {
         let r = mv("go")?;
         went = r.body.clone();
         if r.body["record"]["step"] == "done" || (r.status != 200 && r.status != 409) {
             break;
+        }
+        // as it moves: its computer's core stopped, its door starting, the
+        // connector not yet told which door is its (the cutover)
+        if !during && r.body["record"]["step"] == "connecting" {
+            phone.drain(Duration::from_secs(1))?;
+            phone.say(contact, "during the move")?;
+            during = true;
         }
         std::thread::sleep(Duration::from_secs(5));
     }
@@ -137,6 +147,16 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
         "go: its connector made and bound as its person's, the link handed over and imported, its door linked with the same contact, its computer's core stopped, the old chat archived",
         went["record"]["step"] == "done" && !connector.is_empty() && computer_off && archived,
         json!({ "went": went, "computer_off": computer_off, "archived": archived, "secs": t0.elapsed().as_secs() }),
+    );
+    // what the phone said as it moved: once, in the connector's chat alone,
+    // and answered (taken, so its answer is not the next one's)
+    let landed = during && s.eventually(SLOW, || relayed(api, &owner, &connector).iter().any(|t| t == "during the move"));
+    let heard = landed && phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty())).is_ok();
+    let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
+    s.ok(
+        "a message the phone sent as it moved (its computer's core stopped, its door starting) arrives once, in the connector's chat, and is answered",
+        landed && heard && in_door.iter().filter(|t| *t == "during the move").count() == 1 && !in_old.iter().any(|t| t == "during the move"),
+        json!({ "sent": during, "door": in_door, "old": in_old, "answered": heard }),
     );
     let after = answered(s, api, &owner, &mut phone, contact, "after the move", &connector);
     let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
