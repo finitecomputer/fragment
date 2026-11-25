@@ -5015,8 +5015,7 @@ async fn an_open_chat_lists_a_managed_skill_added_while_it_runs() {
 /// prompt (the hidden list was no prompt input). Method: an owner's skills
 /// fragment with one plain skill and one of Linear's; turns before, after
 /// a connect (juniper's credentials gain Linear) and after a disconnect,
-/// each after the refresh it asks for (`prompts.refreshed`, why
-/// `connections`).
+/// each after a refresh that follows it (`prompts.refreshed`).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn an_open_chat_lists_a_connections_skill_once_connected() {
@@ -5046,7 +5045,10 @@ async fn an_open_chat_lists_a_connections_skill_once_connected() {
         assert!(t.elapsed() < Duration::from_secs(60), "Linear's skill is never hidden from juniper: {}\n{}", config(), c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let refreshed = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed" && e["why"] == "connections").count();
+    // any refresh after the change: the models round's (why `connections`)
+    // or a skills install's, whichever runs first, since a profile's hidden
+    // list is an input of each
+    let refreshed = |c: &Container| c.logs().lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|e| e["event"] == "prompts.refreshed").count();
     let turn_of = |said: serde_json::Value| fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
     let system_of = |said: &str| {
