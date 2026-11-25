@@ -34,7 +34,7 @@ pub struct Lite {
 
 impl Lite {
     pub fn new() -> Lite {
-        let conn = rusqlite::Connection::open_in_memory().expect("an in-memory SQLite");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("an in-memory SQLite");
         let harness = Arc::new(AtomicBool::new(false));
         let open = Arc::clone(&harness);
         conn.authorizer(Some(move |ctx: AuthContext<'_>| authorized(&ctx.action, open.load(Ordering::SeqCst)))).expect("the authorizer is set");
@@ -105,7 +105,7 @@ impl Db for Lite {
 
     fn rows(&self, sql: &str) -> Result<Vec<Value>, String> {
         let mut stmt = self.conn.prepare(sql).map_err(|e| e.to_string())?;
-        let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
         let rows = stmt
             .query_map([], |r| {
                 let mut row = serde_json::Map::new();

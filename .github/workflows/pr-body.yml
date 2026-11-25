@@ -1,0 +1,46 @@
+# A pull request's body follows .github/pull_request_template.md (Paul,
+# 2026-11-24): "In plain words" (the problem, the fix, side effects), then
+# "Why this design". One that doesn't is closed, with a comment naming what
+# it lacks; its author fixes the body and reopens it. A draft is left alone
+# until it is ready for review, as is a bot's. Nothing here checks out or
+# runs the pull request's code: the body is read from the event as data, so
+# pull_request_target (whose token may close it) is safe.
+name: pr-body
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, ready_for_review]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: pr-body-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  body:
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.state == 'open' && github.event.pull_request.user.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: its body follows the template
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          missing=()
+          for part in "In plain words" "The problem" "The fix" "Side effects" "Why this design"; do
+            grep -qiF -- "$part" <<<"$BODY" || missing+=("$part")
+          done
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "the body follows the template"
+            exit 0
+          fi
+          printf 'Closed: this pull request'"'"'s body does not follow the template (`.github/pull_request_template.md`; AGENTS.md, "Proving your work"). It lacks:\n\n' > "$RUNNER_TEMP/comment.md"
+          printf -- '- %s\n' "${missing[@]}" >> "$RUNNER_TEMP/comment.md"
+          printf '\nEdit the body to follow it, then reopen this pull request.\n' >> "$RUNNER_TEMP/comment.md"
+          gh pr comment "$PR" -R "$REPO" --body-file "$RUNNER_TEMP/comment.md"
+          gh pr close "$PR" -R "$REPO"

@@ -1,27 +1,46 @@
 // cell/shell/chat-list.js's sections (Paul, 2026-10-31): a section's
-// order, its pinned chats first, then the rest, each the newest first; and
-// what it shows, its first five (pinned ones among them), the open one
-// wherever it is, each whose row says what its agent is doing (never folded
-// under More), and all of them unfolded.
+// order, its pinned chats first by title, holding their places as
+// messages come (FIN-722), then the rest, the newest first; and what it
+// shows, its first five, every pinned one, the open one wherever it is,
+// each whose row says what its agent is doing (never folded under More),
+// and all of them unfolded.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pinnedAgentsFirst, pinnedFirst, rowStatus, sectionShown } from "../shell/chat-list.js";
+import { FOLDS_MAX, foldsOf, pinnedAgentsFirst, rowStatus, sectionOrder, sectionShown } from "../shell/chat-list.js";
 
-const chat = (name, previewAt, pinned = false) => ({ name, previewAt, pinned });
+const chat = (name, previewAt, pinned = false, title = name) => ({ name, previewAt, pinned, title });
 const names = (list) => list.map((f) => f.name);
+const byTitle = sectionOrder((f) => f.title);
 
-test("pinned chats come first, then the rest, each the newest first", () => {
-  const list = [chat("old", 1), chat("pinned-old", 2, true), chat("new", 9), chat("pinned-new", 5, true), chat("made-now", undefined)];
-  assert.deepEqual(names([...list].sort(pinnedFirst)), ["pinned-new", "pinned-old", "made-now", "new", "old"]);
+test("pinned chats come first, by title, then the rest, the newest first", () => {
+  const list = [chat("old", 1), chat("pinned-b", 2, true, "Board"), chat("new", 9), chat("pinned-a", 5, true, "agenda"), chat("made-now", undefined)];
+  assert.deepEqual(names([...list].sort(byTitle)), ["pinned-a", "pinned-b", "made-now", "new", "old"]);
+});
+
+test("pinned chats hold their places as messages come; two of one title go by name; numbers in order", () => {
+  const before = [chat("x", 1, true, "Email blasts"), chat("y", 2, true, "Board"), chat("z", 3, true, "Newsletter")];
+  const after = before.map((f) => (f.name === "z" ? { ...f, previewAt: 99 } : f.name === "x" ? { ...f, previewAt: 50 } : f));
+  assert.deepEqual(names([...before].sort(byTitle)), ["y", "x", "z"]);
+  assert.deepEqual(names([...after].sort(byTitle)), ["y", "x", "z"], "a new message moves none");
+  assert.deepEqual(names([chat("b", 2, true, "Notes"), chat("a", 1, true, "Notes")].sort(byTitle)), ["a", "b"]);
+  assert.deepEqual(names([chat("ten", 1, true, "10 Plans"), chat("two", 1, true, "2 Plans")].sort(byTitle)), ["two", "ten"]);
 });
 
 test("a section shows its first five, pinned ones counted among them, and More past them", () => {
   const list = [1, 2, 3, 4, 5, 6, 7].map((n) => chat(`c${n}`, n * 10)).concat([chat("p1", 1, true), chat("p2", 2, true)]);
   const { shown, more } = sectionShown(list);
-  assert.deepEqual(names(shown), ["p2", "p1", "c7", "c6", "c5"]);
+  assert.deepEqual(names(shown), ["p1", "p2", "c7", "c6", "c5"]);
   assert.equal(more, true);
+});
+
+test("every pinned chat shows, however many, never folded under More (FIN-722)", () => {
+  const pinned = [1, 2, 3, 4, 5, 6, 7].map((n) => chat(`p${n}`, n, true));
+  const list = pinned.concat([chat("c1", 100)]);
+  assert.deepEqual(sectionShown(list), { shown: [...pinned], more: true }, "the unpinned one is folded");
+  assert.deepEqual(sectionShown(pinned), { shown: [...pinned], more: false }, "pinned alone: nothing to fold, no More");
+  assert.deepEqual(names(sectionShown(list, { title: (f) => (f.name === "p7" ? "A first" : f.title) }).shown).slice(0, 2), ["p7", "p1"], "by the titles the rows show");
 });
 
 test("the open chat shows wherever it is; unfolded, every chat in order", () => {
@@ -67,4 +86,14 @@ test("the sidebar's agents: the pinned ones first, then the rest, each in their 
   assert.deepEqual(order(["main", "b", "c", "d"]), ["main", "b", "c", "d"]);
   assert.deepEqual(order(["gone"]), ["main", "b", "c", "d"], "a pin of an agent no longer theirs moves none");
   assert.deepEqual(mine.map((a) => a.fragment), ["main", "b", "c", "d"], "their computer's order itself is untouched");
+});
+
+test("the sections a device keeps unfolded: its stored keys, the newest FOLDS_MAX; anything else none (FIN-722)", () => {
+  assert.deepEqual([...foldsOf(["npub1a", "own"])], ["npub1a", "own"]);
+  assert.deepEqual([...foldsOf(null)], [], "nothing stored");
+  assert.deepEqual([...foldsOf("npub1a")], [], "not a list");
+  assert.deepEqual([...foldsOf({ 0: "npub1a" })], [], "not a list");
+  assert.deepEqual([...foldsOf(["own", 3, null, "x".repeat(257), "shared"])], ["own", "shared"], "only keys");
+  const many = Array.from({ length: FOLDS_MAX + 5 }, (_, i) => `k${i}`);
+  assert.deepEqual([...foldsOf(many)], many.slice(5), "the newest FOLDS_MAX");
 });

@@ -41,6 +41,35 @@ back to WorkOS's own authorize URL. The routes are docs/api.md's
   unverified email dropped, and shown to its person, never used for
   access.
 
+## Pipes' own binding
+
+WorkOS Pipes binds an authorization to its session too, when asked
+(https://workos.com/docs/pipes/securing-authorizations): an authorize
+request (`POST /data-integrations/{slug}/authorize`) with a
+`code_challenge` answers `completion: "finish_required"`, the person
+returns to `return_to` with a one-time `connect_code`, and Pipes saves the
+account only when the server sends that code and the verifier to
+`POST /data-integrations/finish`. It is the guarantee this flow gives,
+which came first: `08e6d07e3`, 2026-10-20; WorkOS's Node SDK gained
+`finishConnection` on 2026-10-30 (workos/workos-node#1745).
+
+Fragment keeps its own flow because a Pipes authorize request cannot
+choose its scopes. Its body takes `account_display_name`, `user_id`,
+`organization_id`, `connection_owner`, `return_to`, `code_challenge`,
+`code_challenge_method`, `config`, `connection_intent` and
+`connected_account_id`, and nothing for scopes
+(https://workos.com/docs/reference/pipes/connected-account/get-authorize-url).
+Scopes are the provider's configuration, with an override per
+organization at the finest, so read only or read and write, picked as a
+person connects ([Access](#access)), needs the authorization request to
+be Fragment's. The import the flow ends with is WorkOS's documented one,
+`POST /user_management/users/{user_id}/connected_accounts/{slug}`.
+
+Revisit this when WorkOS lets an authorize request name its scopes.
+Pipes' own binding could then replace this flow, the second copy of the
+OAuth client's secret in the store, and a deploy's case of that secret
+missing.
+
 ## Access
 
 A person picks, as they connect, what their agents may do with the

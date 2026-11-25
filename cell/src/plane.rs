@@ -144,7 +144,14 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let (kind, target) = t.on.parts();
         let idx = SqlStorageValue::Integer(i64::try_from(i).expect("triggers are few"));
         let from = t.from.map_or(SqlStorageValue::Null, |k| k.as_str().into());
-        sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into(), from])?;
+        sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx.clone(), kind.into(), target.into(), t.run.as_str().into(), from])?;
+        // the kinds of record it starts runs for, a row each in a table of
+        // its own, in their manifest's order (crates/core/migrations/fragment)
+        assert!(t.kinds.is_empty() || matches!(t.on, TriggerOn::Channel(_)) && t.kinds.len() <= limits::TRIGGER_KINDS_MAX, "a checked manifest names a channel trigger's kinds, a bounded number");
+        for (n, k) in t.kinds.iter().enumerate() {
+            let n = SqlStorageValue::Integer(i64::try_from(n).expect("kinds are few"));
+            sql.exec("INSERT INTO code_trigger_kinds (idx, n, kind) VALUES (?, ?, ?)", vec![idx.clone(), n, k.as_str().into()])?;
+        }
     }
     // what is kept of a kind no channel keeps now goes (one kept again
     // starts from its next record): bounded, `NEWEST_KEPT_MAX` a channel
@@ -163,11 +170,12 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     assert_eq!(count("code_channel_listed")?, code.channels.values().filter(|d| d.listed.is_some()).count(), "every channel's listed is stored");
     assert_eq!(count("code_channel_newest")?, code.channels.values().filter(|d| !d.newest.is_empty()).count(), "every channel's newest is stored");
     assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
+    assert_eq!(count("code_trigger_kinds")?, code.triggers.iter().map(|t| t.kinds.len()).sum::<usize>(), "every trigger's kinds are stored");
     Ok(())
 }
 
 fn clear_installed(sql: &SqlStorage) -> Result<()> {
-    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_channel_newest", "code_triggers"] {
+    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_channel_newest", "code_triggers", "code_trigger_kinds"] {
         sql.exec(&format!("DELETE FROM {table}"), None)?;
     }
     Ok(())
@@ -272,6 +280,14 @@ struct TriggerRow {
     target: String,
     run: String,
     from_kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TriggerKindRow {
+    idx: i64,
+    /// Its place in its trigger's list: 0, 1, … in order.
+    n: i64,
+    kind: String,
 }
 
 /// A pin's move, every read done (`refresh_pin`): what its publish writes.
@@ -1343,6 +1359,20 @@ impl FragmentCell {
     /// The installed triggers this release knows, in their manifest's order.
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
         let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
+        // each trigger's kinds of record, in their manifest's order: bounded,
+        // `TRIGGER_KINDS_MAX` a trigger of `TRIGGERS_MAX`
+        let mut kinds_of: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        for k in self.typed::<TriggerKindRow>("SELECT idx, n, kind FROM code_trigger_kinds ORDER BY idx, n", vec![])? {
+            if !rows.iter().any(|r| r.idx == k.idx) {
+                return Err(stored(&format!("trigger {}", k.idx), "kinds of a trigger it does not hold"));
+            }
+            // written in order from 0: a gap is a lost kind, corruption
+            let kinds = kinds_of.entry(k.idx).or_default();
+            if usize::try_from(k.n).ok() != Some(kinds.len()) {
+                return Err(stored(&format!("trigger {}", k.idx), format!("its kind at place {} after {}", k.n, kinds.len())));
+            }
+            kinds.push(k.kind);
+        }
         let mut out = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
             if row.idx != i64::try_from(i).expect("triggers are few") {
@@ -1360,7 +1390,12 @@ impl FragmentCell {
                 None => None,
                 Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),
             };
-            out.push(TriggerDecl { on, run: row.run, from });
+            let kinds = kinds_of.remove(&row.idx).unwrap_or_default();
+            // written from a checked manifest: anything else is corruption
+            if !kinds.is_empty() && (kinds.len() > limits::TRIGGER_KINDS_MAX || !kinds.iter().all(|k| valid_listed_kind(k)) || !matches!(on, TriggerOn::Channel(_))) {
+                return Err(stored(&format!("trigger {i}"), "its kinds"));
+            }
+            out.push(TriggerDecl { on, run: row.run, from, kinds });
         }
         Ok(out)
     }
@@ -1368,7 +1403,9 @@ impl FragmentCell {
     /// The operations a record (on its channel, by its poster) starts: each
     /// once (two triggers that run one operation start it once), in their
     /// first trigger's order. A trigger that names its posters' kind
-    /// (`from`) starts one only for a member of that kind: one statement.
+    /// (`from`) starts one only for a member of that kind, and one that
+    /// names kinds of record (`kinds`) only for a record whose body's `kind`
+    /// is one of them: one statement.
     pub(crate) fn channel_triggers(&self, record: &ChannelRecord) -> CellResult<Vec<String>> {
         #[derive(Deserialize)]
         struct Run {
@@ -1376,12 +1413,19 @@ impl FragmentCell {
         }
         let on = TriggerOn::Channel(record.channel.clone());
         let (kind, target) = on.parts();
-        // its poster as stored (subscriptions.rs `outbox_record` says why)
+        // its poster and its body's kind as stored (subscriptions.rs
+        // `outbox_record` says why); a kind is a body's string alone, never
+        // a number or a boolean that SQLite's text affinity would turn into
+        // a name
+        let seq = SqlStorageValue::Integer(record.seq);
         let rows: Vec<Run> = self.typed(
-            "SELECT run FROM code_triggers WHERE kind = ? AND target = ?
-               AND (from_kind IS NULL OR from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
-             GROUP BY run ORDER BY MIN(idx)",
-            vec![kind.into(), target.into(), record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
+            "SELECT run FROM code_triggers t WHERE t.kind = ? AND t.target = ?
+               AND (t.from_kind IS NULL OR t.from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
+               AND (NOT EXISTS (SELECT 1 FROM code_trigger_kinds k WHERE k.idx = t.idx)
+                 OR EXISTS (SELECT 1 FROM code_trigger_kinds k WHERE k.idx = t.idx
+                   AND k.kind = (SELECT json_extract(body, '$.kind') FROM records WHERE channel = ? AND seq = ? AND json_type(body, '$.kind') = 'text')))
+             GROUP BY run ORDER BY MIN(t.idx)",
+            vec![kind.into(), target.into(), record.channel.as_str().into(), seq.clone(), record.channel.as_str().into(), seq],
         )?;
         Ok(rows.into_iter().map(|r| r.run).collect())
     }

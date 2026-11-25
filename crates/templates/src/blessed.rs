@@ -82,6 +82,16 @@ pub fn data(name: &str) -> Vec<&'static File> {
     template(name).map(|t| t.files.iter().filter(|f| is_data(f.path)).collect()).unwrap_or_default()
 }
 
+/// The connection a skill is for, as its frontmatter names it (`metadata:
+/// fragment: connection: <provider>`): the catalog row an agent must hold
+/// to use it (FIN-509). None for a skill of no connection.
+pub fn skill_connection(skill_md: &str) -> Option<&str> {
+    let front = skill_md.strip_prefix("---\n")?.split_once("\n---")?.0;
+    let mut metadata = front.lines().skip_while(|l| l.trim_end() != "metadata:").skip(1).take_while(|l| l.starts_with(' '));
+    metadata.by_ref().find(|l| l.trim_end() == "  fragment:")?;
+    metadata.take_while(|l| l.starts_with("    ")).find_map(|l| l.trim().strip_prefix("connection:")).map(str::trim).filter(|c| !c.is_empty())
+}
+
 /// One data file of a blessed template, when `path` is one.
 pub fn data_file(name: &str, path: &str) -> Option<&'static File> {
     template(name)?.file(path).filter(|f| is_data(f.path))
@@ -312,6 +322,29 @@ mod tests {
         assert!(CONNECTORS.iter().all(|c| fragment_proto::Visibility::made_from(Some(c)) == fragment_proto::Visibility::Members), "{CONNECTORS:?}");
     }
 
+    /// Goal (FIN-747): every door shows its agent's questions one way, as
+    /// the computer's own SimpleX shows one. Method: every connector
+    /// carries the one question module (the same bytes: Telegram's is a
+    /// link to SimpleX's), imports it, and runs its mirror on its agent's
+    /// questions on `work` alone (`kinds`), not each step of its turns.
+    #[test]
+    fn every_connector_asks_one_way() {
+        let question = |c: &str| {
+            let t = template(c).unwrap();
+            bytes_of(t, t.file("applib/question.mjs").unwrap_or_else(|| panic!("{c} carries the question module")))
+        };
+        for c in CONNECTORS {
+            assert_eq!(question(c), question(CONNECTORS[0]), "{c}'s question module is the one");
+            let t = template(c).unwrap();
+            let app = String::from_utf8(bytes_of(t, t.file("app.mjs").unwrap())).unwrap();
+            assert!(app.contains(r#"import { asked } from "./applib/question.mjs";"#), "{c} words its questions with it");
+            let m = manifest(c, &bytes_of(t, manifest_file(c).unwrap())).unwrap();
+            let asks: Vec<_> = m.triggers.iter().filter(|t| t.on == fragment_proto::TriggerOn::Channel("work".into())).collect();
+            assert_eq!(asks.len(), 1, "{c} has one trigger on work");
+            assert_eq!((asks[0].run.as_str(), asks[0].from, asks[0].kinds.as_slice()), ("mirror", Some(fragment_proto::IdentityKind::Agent), &["turn.prompt".to_string()][..]), "{c}'s mirror runs on its agent's questions alone");
+        }
+    }
+
     /// The named statics are the templates under templates/ of those names,
     /// and only the blessed ones are named.
     #[test]
@@ -361,7 +394,9 @@ mod tests {
         let total: u64 = files.iter().map(|f| f.size).sum();
         assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
         let mut names = std::collections::BTreeSet::new();
-        for f in files {
+        // each connection's skill: its folder, and the connection it names
+        let mut connections: Vec<(String, String)> = vec![];
+        for f in files.iter().copied() {
             assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
             assert!(f.size <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.size);
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
@@ -384,6 +419,10 @@ mod tests {
                 assert_eq!(name, parts[parts.len() - 2], "{}: a skill's name is its directory's", f.path);
                 assert!(front.lines().any(|l| l.starts_with("description:")), "{} says what it is for", f.path);
                 assert!(names.insert(name.to_string()), "{name} twice");
+                if let Some(connection) = skill_connection(text) {
+                    assert!(text.contains(&format!("fragment connection call {connection}")), "{}: a connection's skill calls it with `fragment connection call {connection}`", f.path);
+                    connections.push((f.path.trim_end_matches("SKILL.md").to_string(), connection.to_string()));
+                }
             }
         }
         for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "slides-finite"] {
@@ -396,7 +435,17 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
-        assert_eq!(names.len(), 19, "Fragment contracts, the six retained integrations, design-finite, the Docs and Slides guides, import-agent-home and disk-space-finite");
+        // a connection's skill is its docs and its quirks, and no code: the
+        // one caller is `fragment connection call` (FIN-509)
+        assert!(connections.iter().any(|(_, c)| c == "google"), "Google's skill names its connection");
+        for (dir, connection) in &connections {
+            let code: Vec<&str> = files.iter().map(|f| f.path).filter(|p| p.starts_with(dir.as_str()) && (p.contains("/scripts/") || [".py", ".sh", ".js"].iter().any(|e| p.ends_with(e)))).collect();
+            assert!(code.is_empty(), "{connection}'s skill carries code of its own: {code:?}");
+        }
+        assert_eq!(skill_connection("---\nname: a\nmetadata:\n  hermes:\n    tags: [A]\n  fragment:\n    connection: linear\n---\n"), Some("linear"));
+        for none in ["---\nname: a\n---\n", "---\nname: a\nmetadata:\n  hermes:\n    connection: x\n---\n", "---\nname: a\nconnection: x\n---\n", "no frontmatter"] {
+            assert_eq!(skill_connection(none), None, "{none:?}");
+        }
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 

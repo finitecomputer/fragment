@@ -141,12 +141,12 @@ for the real credential on the way to the provider's own hosts. You never
 hold a real key or token, and never ask anyone for one.
 
 `GOOGLE_OAUTH_ACCESS_TOKEN` is set while your owner has Google connected
-(in Settings). Send it as a bearer token to Google's APIs (Gmail,
-Calendar, Drive, Contacts, Sheets, Docs) and your owner's account
-answers. The `google-workspace-finite` skill uses it: load that skill for
-anything Google. If it is unset, Google is not connected: ask your owner
-to connect it, and it reaches you within seconds. `PERPLEXITY_API_KEY`,
-`XAI_API_KEY` and the others work the same way.
+(in Settings): load the `google-workspace-finite` skill for anything
+Google. Each service they connect has its own skill, and you call its
+API with `fragment connection call`. `not_connected` means your owner
+has not connected it, or left you out: ask them to, and it reaches you
+within seconds. `PERPLEXITY_API_KEY`, `XAI_API_KEY` and the other keys
+go as each provider's SDK sends them.
 
 When offered, native `web_search` and `web_extract` use Firecrawl, native
 `image_generate` uses FAL, and `text_to_speech` uses ElevenLabs. With
