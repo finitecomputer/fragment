@@ -120,8 +120,9 @@ python3 -I "<profiles>/finite-computer.brains.py" start <id> "$H.json" "$W" "$H"
 It shares only the folders the brain holds now: a folder made later in
 the old brain, or one left out, never comes in by a catch-up. It takes
 out of the push what would show a folder it doesn't share (`removed`):
-the files of one your old agent couldn't read, and any asset no page it
-shares names (a left-out folder's are in its parent's `raw/assets/`). `refused` lists pages `fragment sync`
+the files of one your old agent couldn't read, and the assets a
+left-out folder's notes name (they are in its parent's `raw/assets/`).
+An asset no note names stops it: ask your owner whose it is. `refused` lists pages `fragment sync`
 can't carry (a path over 300 bytes, say): they stay out, so name them in
 the report. Running it again before the push is safe. If it says `NO VERSIONS` (an export, a
 stage from before versions, or no name file), there is nothing to

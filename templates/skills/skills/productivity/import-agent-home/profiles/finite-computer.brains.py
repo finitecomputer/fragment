@@ -23,7 +23,7 @@
 # at an earlier commit nor `main`'s commit messages (FIN-780). Once it
 # can, the import's own commit is the base, and the file goes (technical
 # debt ledger, "A team brain's catch-up keeps its base in a file").
-import hashlib, json, os, shutil, sys, tempfile
+import hashlib, json, os, re, shutil, sys, tempfile
 
 RECORD = "imported-from-finite.json"
 MISSING = object()
@@ -139,7 +139,10 @@ def assets(root, path):
         if line.strip() == "---":
             break
         if line.startswith("resource:"):
-            name = line[len("resource:"):].strip().strip("\"'")
+            # a YAML value: quoted whole, or plain up to a comment
+            value = line[len("resource:"):].strip()
+            quoted = value[:1] in ("'", '"') and value[0] in value[1:]
+            name = value[1:value.index(value[0], 1)] if quoted else re.split(r"\s#", value, 1)[0].strip()
             asset = path.split("/", 1)[0] + "/" + name
             if name.startswith("raw/assets/") and clean(asset):
                 found.append(asset)
@@ -258,14 +261,20 @@ if mode == "start":
     if record is not MISSING and record != new:
         stop(f"{RECORD} is there already, and isn't this brain's start: push nothing")
     # Out of the push goes what would show a folder it doesn't share: the
-    # files of one (left out, or one the old agent couldn't read), and any
-    # asset no note it shares names (a left-out folder's notes keep theirs
-    # in their wiki's `raw/assets/`).
-    kept = {a for rel in files_in(work) if not outside(rel) for a in assets(work, rel)}
-    removed = sorted(
+    # files of one (left out, or one the old agent couldn't read), and the
+    # assets its notes name, here or staged, that no page it shares and
+    # sync carries names (they sit in the parent wiki's `raw/assets/`). An
+    # asset no note names at all is for a person: whose it is can't be told.
+    kept = {a for rel in files_in(work) if not outside(rel) and carried(rel) for a in assets(work, rel)}
+    theirs = {a for root in (work, staged) for rel in files_in(root) if outside(rel) for a in assets(root, rel)}
+    stray = sorted(
         rel for rel in files_in(work)
-        if outside(rel) or (rel.split("/")[1:3] == ["raw", "assets"] and rel.count("/") > 2 and rel not in kept and rel not in listed)
+        if rel.split("/")[1:3] == ["raw", "assets"] and rel.count("/") > 2 and not outside(rel)
+        and rel not in kept | theirs and rel not in listed
     )
+    if stray:
+        stop(f"no page it shares names {', '.join(stray)}: push nothing, and ask whose each is")
+    removed = sorted({rel for rel in files_in(work) if outside(rel)} | {a for a in theirs - kept if a not in listed and sha(work, a)})
     for rel in removed:
         try:
             os.unlink(os.path.join(work, *rel.split("/")))  # a link itself, never what it names
@@ -335,7 +344,11 @@ for path, (id_, revision, _) in sorted(listed.items()):
     if here == there:
         # Here already, byte for byte: settled once its assets are. Recorded
         # when the record lost it, or holds an older version.
-        heal = path in exact and (base["revision"] < revision or base["written"] is None if base else seen is None or not older(folder))
+        # Never to an older revision: what the brain took stays the base.
+        heal = path in exact and (
+            base["revision"] < revision or base["revision"] == revision and base["written"] is None
+            if base else seen is None or not older(folder)
+        )
         if plan is None:
             held["both"].append(path)
         else:
