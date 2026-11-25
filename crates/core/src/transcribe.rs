@@ -55,12 +55,13 @@ pub const WHISPER: &str = "whisper";
 /// `secrets_store::model_key`'s of it).
 pub const TRANSCRIPTION: &str = "transcription";
 /// What a transcription on an OpenAI-compatible API is charged as: its
-/// list cost in nano-dollars (its audio's seconds at its slot's price,
-/// `usage_of`), under a name with a `/`, which no catalog row's charge can
-/// take, priced at list whatever the slots (`cost_key`), so a row queued
-/// before a deploy that changed its slot's price, or moved it, is charged
-/// as it was made, as OpenRouter's cost is (`models::OPENROUTER_COST`).
-pub const COST: &str = "transcription/nanousd";
+/// list cost exactly, in sixtieths of a micro-dollar (its audio's seconds
+/// times its slot's micro-dollars a minute, `usage_of`), under a name with
+/// a `/`, which no catalog row's charge can take, priced at list whatever
+/// the slots (`cost_key`), so a row queued before a deploy that changed its
+/// slot's price, or moved it, is charged as it was made, as OpenRouter's
+/// cost is (`models::OPENROUTER_COST`), and the book rounds it once.
+pub const COST: &str = "transcription/sixtieth-microusd";
 /// The most a Workers AI slot names a minute, in neurons: far past any
 /// speech model's in its catalog (Whisper large v3 turbo's 46.63 on
 /// 2026-10-07), so one higher is a typo, refused rather than charged.
@@ -151,11 +152,11 @@ pub fn slot_of(models: &mut Value) -> Result<Option<Slot>, String> {
     Ok(Some(Slot { upstream, price }))
 }
 
-/// The book's row for `COST`: a micro-dollar a thousand nano-dollars, at
-/// list (an operator key's: the margin, no credits fee, which is
-/// Cloudflare's credits' and which a vendor billing a card bills none of).
+/// The book's row for `COST`: a micro-dollar each sixty, at list (an
+/// operator key's: the margin, no credits fee, which is Cloudflare's
+/// credits' and which a vendor billing a card bills none of).
 pub fn cost_key() -> KeyPrice {
-    KeyPrice { key: COST.to_string(), micros: 1, per: 1_000 }
+    KeyPrice { key: COST.to_string(), micros: 1, per: 60 }
 }
 
 /// Whether a transcription's first try, which answered `status` (`None`:
@@ -325,9 +326,8 @@ pub fn usage_of(slot: &Slot, answer: &Value) -> Option<Usage> {
         // a part of a thousandth of a neuron counted whole; at most a day
         // of audio at the highest price: far under QUANTITY_MAX
         Price::Neurons { milli_a_minute } => Usage::Neurons { milli: ((seconds * 1_000.0).ceil() as u64 * milli_a_minute).div_ceil(60_000) },
-        // a part of a nano-dollar counted whole; a day at USD_A_MINUTE_MAX
-        // is under 10^14
-        Price::Usd { micros_a_minute } => Usage::Key { key: COST.to_string(), units: (seconds.ceil() as u64 * micros_a_minute as u64 * 1_000).div_ceil(60) },
+        // exact: a day at USD_A_MINUTE_MAX is under 10^11
+        Price::Usd { micros_a_minute } => Usage::Key { key: COST.to_string(), units: seconds.ceil() as u64 * micros_a_minute as u64 },
     })
 }
 
@@ -503,16 +503,21 @@ mod tests {
         let mut keyed = book.clone();
         keyed.keys.push(cost_key());
         assert_eq!(keyed.validate(), Ok(()));
-        let cost = |nanos: u64| Usage::Key { key: COST.into(), units: nanos };
+        let cost = |sixtieths: u64| Usage::Key { key: COST.into(), units: sixtieths };
         let minute = usage_of(&o, &json!({ "text": "hi", "usage": { "type": "duration", "seconds": 60 } })).unwrap();
-        assert_eq!(minute, cost(6_000_000), "OpenAI's duration usage: a minute at $0.006");
+        assert_eq!(minute, cost(360_000), "OpenAI's duration usage: a minute at $0.006");
         assert_eq!(keyed.price(&minute).unwrap().list, 6_000);
         assert_eq!(keyed.price(&minute).unwrap().charge, 9_000, "with the margin, no credits fee (a vendor billing a card bills none)");
-        assert_eq!(usage_of(&o, &json!({ "text": "hi", "duration": 2.04, "segments": [] })), Some(cost(300_000)), "verbose_json's duration, a part of a second counted whole");
-        assert_eq!(keyed.price(&cost(300_000)).unwrap().list, 300);
-        assert_eq!(usage_of(&o, &json!({ "duration": 5.0, "usage": { "type": "duration", "seconds": 2 } })), Some(cost(200_000)), "its usage first");
+        assert_eq!(usage_of(&o, &json!({ "text": "hi", "duration": 2.04, "segments": [] })), Some(cost(18_000)), "verbose_json's duration, a part of a second counted whole");
+        assert_eq!(keyed.price(&cost(18_000)).unwrap().list, 300);
+        assert_eq!(usage_of(&o, &json!({ "duration": 5.0, "usage": { "type": "duration", "seconds": 2 } })), Some(cost(12_000)), "its usage first");
+        // rounded once, by the book, from the exact cost: a second at
+        // $0.005 a minute is 83.3 µ$ at list and exactly 125 µ$ with the margin
+        let fiver = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0.005 } })).unwrap().unwrap();
+        let second = keyed.price(&usage_of(&fiver, &json!({ "duration": 1.0 })).unwrap()).unwrap();
+        assert_eq!((second.list, second.charge), (84, 125));
         let odd = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0.0001 } })).unwrap().unwrap();
-        assert_eq!(usage_of(&odd, &json!({ "duration": 1.0 })), Some(cost(1_667)), "$0.0001 a minute is 1,666.7 nano-dollars a second, rounded up");
+        assert_eq!(usage_of(&odd, &json!({ "duration": 1.0 })), Some(cost(100)), "$0.0001 a minute: 100 sixtieths of a micro-dollar a second");
         let free = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0 } })).unwrap().unwrap();
         assert_eq!(usage_of(&free, &json!({ "duration": 30.0 })), Some(cost(0)), "a box's own, at zero");
         let day = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": USD_A_MINUTE_MAX } })).unwrap().unwrap();

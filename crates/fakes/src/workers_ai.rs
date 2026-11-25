@@ -234,6 +234,10 @@ pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 /// Its transcriptions' path (a deployment's transcription slot on an
 /// OpenAI-compatible API).
 pub const TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
+/// Where a redirect a test asked for may lead (`redirect_next`): a call
+/// that reaches it is kept, its model `REDIRECTED`, and answered 200.
+pub const REDIRECTED_PATH: &str = "/v1/redirected";
+pub const REDIRECTED: &str = "(followed a redirect)";
 /// The model its embeddings face serves, BGE-M3 as a self-hosted
 /// deployment names it (fragment_core::embed).
 pub const OPENAI_EMBEDDING_MODEL: &str = "BAAI/bge-m3";
@@ -381,6 +385,9 @@ struct State {
     /// The next streamed answers end before their usage, in order.
     breaks: VecDeque<bool>,
     delays: VecDeque<u64>,
+    /// Where the next transcriptions on the OpenAI-compatible face
+    /// redirect (`redirect_next`), in order: a 307 to it.
+    redirects: VecDeque<String>,
     sleep_ms: u64,
     tool_calls: u64,
     answers: u64,
@@ -1068,6 +1075,11 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if req.path == TRANSCRIPTIONS_PATH {
         return openai_transcription(s, req);
     }
+    if req.path == REDIRECTED_PATH {
+        let authorization = req.header("authorization").map(str::to_string);
+        s.calls.push(AiCall { face: Face::OpenAi, model: REDIRECTED.into(), body: json!({ "bytes": req.body.len() }), metadata: Value::Null, affinity: None, authorization });
+        return Response::json(200, &json!({ "text": "followed", "duration": 1.0 }));
+    }
     if let Some(video) = req.path.strip_prefix("/video/").filter(|_| req.method == "GET") {
         return video_served(s, video);
     }
@@ -1222,6 +1234,9 @@ fn openai_transcription(s: &mut State, req: &Request) -> Response {
     }
     if let Some(Some(status)) = s.failures.pop_front() {
         return failure(Face::OpenAi, status);
+    }
+    if let Some(location) = s.redirects.pop_front() {
+        return Response::json(307, &json!({ "error": { "message": "moved" } })).with_header("location", &location);
     }
     let Some(audio) = field("file").map(|p| p.data).filter(|a| !a.is_empty()) else { return refuse("file is the audio") };
     s.answers += 1;
@@ -1482,6 +1497,13 @@ impl WorkersAi {
     /// through by `pass_next`).
     pub fn fail_next(&self, statuses: &[u16]) {
         self.state().failures.extend(statuses.iter().map(|s| Some(*s)));
+    }
+
+    /// The next transcriptions on the OpenAI-compatible face answer a 307
+    /// to `location`, as an API moved elsewhere would; a call that follows
+    /// one to `REDIRECTED_PATH` here is kept as a call to `REDIRECTED`.
+    pub fn redirect_next(&self, location: &str) {
+        self.state().redirects.push_back(location.to_string());
     }
 
     /// The next `n` calls answer as they would, before any failure queued after.
@@ -1988,13 +2010,16 @@ mod tests {
         let call = s.calls.last().unwrap();
         assert_eq!((call.face, call.model.as_str(), call.body["filename"].clone(), call.body["file"].clone()), (Face::OpenAi, OPENAI_TRANSCRIBE_MODEL, json!("memo.wav"), json!(base64::engine::general_purpose::STANDARD.encode(&wav))));
         let slot = fragment_core::transcribe::slot_of(&mut json!({ "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:1/v1", "model": OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": 0.006 } } })).unwrap().unwrap();
-        assert_eq!(fragment_core::transcribe::usage_of(&slot, &v), Some(fragment_core::price::Usage::Key { key: fragment_core::transcribe::COST.into(), units: 300_000 }), "3 s at $0.006 a minute, in nano-dollars");
+        assert_eq!(fragment_core::transcribe::usage_of(&slot, &v), Some(fragment_core::price::Usage::Key { key: fragment_core::transcribe::COST.into(), units: 18_000 }), "3 s at $0.006 a minute, in sixtieths of a micro-dollar");
         let r = post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "text"), "Bearer tk");
         assert_eq!((r.status, r.body.as_slice()), (200, &b"hello from a voice memo"[..]));
         assert_eq!(post(&mut s, &form("whisper", "json"), "Bearer tk").status, 400, "the route's name is no model of the server's");
         assert_eq!(post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "json"), "Bearer other").status, 401);
         s.failures.push_back(Some(503));
         assert_eq!(post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "json"), "Bearer tk").status, 503);
+        s.redirects.push_back("http://127.0.0.1:1/v1/redirected".into());
+        let r = post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "json"), "Bearer tk");
+        assert_eq!((r.status, r.headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.as_str())), (307, Some("http://127.0.0.1:1/v1/redirected")));
         assert_eq!(post(&mut s, b"not a form", "Bearer tk").status, 400);
     }
 

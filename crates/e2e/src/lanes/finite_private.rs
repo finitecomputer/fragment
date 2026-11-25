@@ -47,7 +47,8 @@
 //! `base_url`, its model and its key, never Workers AI's and never the
 //! route's name; answered in OpenAI's shape, charged at the slot's dollars
 //! a minute by the second; a fast refusal for capacity tried once more and
-//! charged once; a refusal of the request passed through, charged nothing.
+//! charged once; a redirect from it never followed; a refusal of the
+//! request passed through, charged nothing.
 //!
 //! The fallback of each status (429, 5xx, a model down) and "the fallback
 //! fails too" are crates/core's (models.rs) and the ledger lane's.
@@ -166,17 +167,17 @@ fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
     let aig = || entries(api, &owner_id, "aig:");
     // the node's book, and what its slot's seconds cost at the dollars a
-    // minute it names, in nano-dollars
+    // minute it names, in sixtieths of a micro-dollar
     let models = crate::private_tier_models(&s.ai.node().url).to_string();
     let parsed = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models");
     let mut book = parsed.priced(PriceBook::defaults());
     book.keys.extend(parsed.cost_keys());
-    let nanos = |n: u64| (n as f64 * crate::TRANSCRIPTION_AUDIO_MINUTE * 1e9 / 60.0).round() as u64;
-    let seconds = |n: u64| Usage::Key { key: COST.into(), units: nanos(n) };
+    let sixtieths = |n: u64| n * (crate::TRANSCRIPTION_AUDIO_MINUTE * 1e6).round() as u64;
+    let seconds = |n: u64| Usage::Key { key: COST.into(), units: sixtieths(n) };
     let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its slot's cost").charge;
     let settled_at = |before: usize, n: u64| {
         let now = aig();
-        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(charge(&seconds(n))) && usage(e)["kind"] == "key" && usage(e)["key"] == COST && usage(e)["units"] == nanos(n))
+        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(charge(&seconds(n))) && usage(e)["kind"] == "key" && usage(e)["key"] == COST && usage(e)["units"] == sixtieths(n))
     };
     let memo = fragment_fakes::workers_ai::spoken_wav("hello from a voice memo", 3);
     let slot_key = format!("Bearer {TRANSCRIPTION_KEY}");
@@ -214,6 +215,18 @@ fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
         "a transcription its API refuses for capacity (429) is asked once more, heard, and charged once",
         r.status == 200 && s.ai.calls().len() == calls + 2 && settled,
         json!({ "status": r.status, "calls": s.ai.calls().len() - calls, "entries": aig() }),
+    );
+
+    // ---- its API redirecting elsewhere: never followed, so the slot's key
+    // and the memo reach no other server, and nothing is charged
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.redirect_next(&format!("{}{}", s.ai.node().url, fragment_fakes::workers_ai::REDIRECTED_PATH));
+    let r = transcription_call(api, &hand, &[("model", "whisper")], &memo)?;
+    let made = s.ai.calls()[calls..].to_vec();
+    s.ok(
+        "a redirect from its API is not followed: the slot's key and the memo go to its base_url alone, the redirect passed on as its answer, nothing charged",
+        r.status == 307 && made.len() == 1 && made[0].model == TRANSCRIBER && !made.iter().any(|c| c.model == fragment_fakes::workers_ai::REDIRECTED) && aig().len() == before,
+        json!({ "status": r.status, "made": made.iter().map(|c| json!({ "model": c.model, "keyed": c.authorization.is_some() })).collect::<Vec<_>>(), "entries": aig() }),
     );
 
     // ---- a refusal of the request: passed through, charged nothing

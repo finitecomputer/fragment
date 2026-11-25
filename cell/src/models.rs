@@ -489,16 +489,18 @@ async fn keyed(key: &str, base_url: &str, path: &str, body: &str) -> CellResult<
 }
 
 /// `keyed`'s call, its body `body` of `content_type` (a transcription's
-/// form: `transcribe::openai_form`). A redirect is no answer: the
+/// form: `transcribe::openai_form`). A redirect is never followed: the
 /// platform's key and the call's body go only to the API its slot names,
 /// never on to wherever that API points (a fetch that follows one sends
-/// both).
+/// both), and the redirect is that API's answer, a refusal as any other.
+/// `manual`, as workerd takes no `error` (it throws as the request is
+/// made).
 async fn keyed_as(key: &str, base_url: &str, path: &str, content_type: &str, body: worker::wasm_bindgen::JsValue) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", content_type)?;
     h.set("authorization", &format!("Bearer {key}"))?;
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(h).with_body(Some(body)).with_redirect(RequestRedirect::Error);
+    init.with_method(Method::Post).with_headers(h).with_body(Some(body)).with_redirect(RequestRedirect::Manual);
     let req = Request::new_with_init(&format!("{base_url}{path}"), &init)?;
     Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
 }
