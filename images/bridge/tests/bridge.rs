@@ -328,7 +328,7 @@ async fn a_new_life_takes_its_agents_turns() {
     let old = "0".repeat(32);
     fake.with(|w| {
         w.turns_open.insert("stale0000000000000000000".into(), ("juniper--k3x9".into(), old.clone()));
-        w.turn_lives.insert("juniper--k3x9".into(), vec![old.clone()]);
+        w.turn_lives.insert("juniper--k3x9".into(), vec![(old.clone(), 0)]);
         w.fail_turn_closes = 1;
     });
     let dir = support::dir("life-takes-turns");
@@ -340,6 +340,34 @@ async fn a_new_life_takes_its_agents_turns() {
     fake.with(|w| {
         assert_eq!(w.turns.first().map(|(_, m, _)| m.as_str()), Some("REFUSED"), "the start's word refused: {:?}", w.turns);
         assert_eq!(ran_beside(w, &pauls), Some(vec![]), "the last life's turn forgotten at this life's first word: {:?}", w.turns);
+    });
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): a retired bridge life runs no turn. A life of a newer
+/// start holds the agent's turns, so this one's word is refused (409), each
+/// naming its start: its own start's take, and its turn's open, the turn
+/// asked again and never run. Before, a retired word was answered as heard,
+/// and the turn ran with no proof held for it.
+#[tokio::test]
+async fn a_retired_life_runs_no_turn() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.with(|w| {
+        w.turn_lives.insert("juniper--k3x9".into(), vec![("f".repeat(32), 5)]);
+        w.computer["generation"] = json!(4);
+    });
+    let dir = support::dir("life-retired");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "hi" }));
+    let pauls = turn_of("juniper", &chat, seq(&said));
+    let refused = |w: &World| w.turns.iter().filter(|(_, m, v)| m == "RETIRED" && v["turn"] == pauls.as_str()).count();
+    fake.until(WAIT * 3, "its open refused, and asked again", |w| refused(w) >= 2).await;
+    fake.with(|w| {
+        assert!(w.turns.iter().any(|(_, m, v)| m == "RETIRED" && v["turn"].is_null() && v["generation"] == 4), "its start's take refused, naming its start: {:?}", w.turns);
+        assert_eq!(ran_beside(w, &pauls), None, "never ran: {:?}", w.turns);
+        assert!(replies(w, &chat).is_empty());
     });
     bridge.stop().await;
 }

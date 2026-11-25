@@ -214,11 +214,14 @@ pub struct Held<'a> {
 }
 
 /// Whether a bridge life's word on its agent's turns is heard (cell
-/// runs_on.rs `turn_life`), given the lives heard, the latest first: the
-/// latest's is; a life never heard takes over (its bridge is the computer's
-/// one now: every other life's turns are forgotten); a life heard before
-/// the latest is retired, its word (a late call from a bridge gone) not
-/// heard.
+/// runs_on.rs `turn_life`), given the lives heard, each with its
+/// computer's start (the Computer DO's generation, which its bridge read
+/// as it started), the newest first: by start, then, within one start, by
+/// when first heard. The newest's is; a life never heard of a start no
+/// older takes over (its bridge is the computer's one now: every other
+/// life's turns are forgotten); any other is retired, its word not heard:
+/// a late call from a bridge gone, its first among them (a container
+/// before's, which may come after its successor's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Heard {
     Speaks,
@@ -226,10 +229,11 @@ pub enum Heard {
     Retired,
 }
 
-pub fn heard(lives_latest_first: &[&str], life: &str) -> Heard {
-    match lives_latest_first.iter().position(|l| *l == life) {
+pub fn heard(lives_newest_first: &[(&str, u64)], life: &str, start: u64) -> Heard {
+    match lives_newest_first.iter().position(|(l, _)| *l == life) {
         Some(0) => Heard::Speaks,
         Some(_) => Heard::Retired,
+        None if lives_newest_first.first().is_some_and(|(_, newest)| *newest > start) => Heard::Retired,
         None => Heard::TakesOver,
     }
 }
@@ -409,16 +413,21 @@ mod tests {
     }
 
     /// Goal (FIN-720): one bridge life speaks for an agent's turns at a
-    /// time: the latest heard; a new one takes over; one heard before it
-    /// is retired (its late word changes nothing); the same word again is
-    /// heard the same.
+    /// time: the newest heard; a new one of its computer's start or a later
+    /// one takes over; one heard before it is retired (its late word changes
+    /// nothing), and so is one never heard of an earlier start (a container
+    /// gone, its first word late: after its successor's); the same word
+    /// again is heard the same.
     #[test]
-    fn the_latest_bridge_life_speaks_for_its_turns() {
-        assert_eq!(heard(&[], "a"), Heard::TakesOver, "the first life heard");
-        assert_eq!(heard(&["b", "a"], "b"), Heard::Speaks);
-        assert_eq!(heard(&["b", "a"], "a"), Heard::Retired, "a late word from the life before");
-        assert_eq!(heard(&["b", "a"], "c"), Heard::TakesOver, "a new life");
-        assert_eq!(heard(&["b", "a"], "b"), heard(&["b", "a"], "b"), "replay");
+    fn the_newest_bridge_life_speaks_for_its_turns() {
+        assert_eq!(heard(&[], "a", 3), Heard::TakesOver, "the first life heard");
+        let lives = [("b", 4), ("a", 3)];
+        assert_eq!(heard(&lives, "b", 4), Heard::Speaks);
+        assert_eq!(heard(&lives, "a", 3), Heard::Retired, "a late word from the life before");
+        assert_eq!(heard(&lives, "c", 4), Heard::TakesOver, "a new life of the same start (its bridge restarted)");
+        assert_eq!(heard(&lives, "c", 5), Heard::TakesOver, "a new life of a later start");
+        assert_eq!(heard(&lives, "c", 3), Heard::Retired, "a first word of an earlier start's, late");
+        assert_eq!(heard(&lives, "b", 4), heard(&lives, "b", 4), "replay");
     }
 
     /// Goal: the narrowest ask an agent's call for its owner carries while

@@ -120,7 +120,7 @@ mod tests {
     }
 
     fn rec(channel: &str, seq: u64, at: i64, by: &str, body: Value) -> Record {
-        Record { channel: channel.into(), seq, at, principal: by.into(), author: None, mandate: None, kind: "message".into(), body }
+        Record { channel: channel.into(), seq, at, principal: by.into(), author: None, asker: None, mandate: None, kind: "message".into(), body }
     }
 
     fn response(option: &str) -> Value {

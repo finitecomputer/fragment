@@ -136,8 +136,9 @@ mid-append leaves a torn last line, and the log is read up to it.
   another agent of this computer's answer), no one's for app code's
   words, and anyone else's as them. Not told, it is not this life's yet,
   and is claimed again; a platform from before (404) is told nothing.
-  Each word names this life, so the fragment forgets every other life's
-  turns and hears no retired one's. A turn is held as open from before it
+  Each word names this life and its computer's start, so the fragment
+  forgets every other life's turns and refuses a retired one's (a turn
+  this life could not tell open does not run). A turn is held as open from before it
   is told so (its answer lost, it is still told ended), its end is told as
   the engine ends it, and a close refused is told again at each step after.
   No turn reaches its runtime while one its agent ended may still be held

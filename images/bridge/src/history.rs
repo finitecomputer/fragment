@@ -104,7 +104,7 @@ mod tests {
     use serde_json::json;
 
     fn rec(seq: u64) -> Record {
-        Record { channel: "work".into(), seq, at: 1, principal: "npub1agent".into(), author: None, mandate: None, kind: "message".into(), body: json!({ "kind": "turn.end" }) }
+        Record { channel: "work".into(), seq, at: 1, principal: "npub1agent".into(), author: None, asker: None, mandate: None, kind: "message".into(), body: json!({ "kind": "turn.end" }) }
     }
 
     #[test]

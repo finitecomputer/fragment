@@ -59,6 +59,17 @@ fn platform() -> &'static Platform {
     })
 }
 
+/// What keys a caller's id: ids are the caller's, so one caller can
+/// neither replay nor block another's id. The caller is its principal, and
+/// the asker an agent acts for when that is not its owner (`other`), another
+/// entity: a mutation's ledger row and a post's record are keyed alike.
+pub(crate) fn callers_id(principal: &str, other: Option<&str>, id: &str) -> String {
+    match other {
+        None => format!("{principal}/{id}"),
+        Some(asker) => format!("{principal}~{}/{id}", npub::display(asker)),
+    }
+}
+
 /// One admitted call: who runs which operation, and how deep in a chain of
 /// triggered runs it is.
 pub(crate) struct Invocation<'a> {
@@ -339,13 +350,7 @@ impl FragmentCell {
     /// A mutation: recorded as pending, run in the facet (where it and its
     /// ledger row commit together), then settled (channels.rs).
     async fn mutate(&self, facet: &js::Facet, inv: &Invocation<'_>, input_sha: &str, input_text: &str, mut meta: Value) -> CellResult<Answered> {
-        // Ids are the caller's: the ledger keys them by principal, so one
-        // caller can neither replay nor block another's id; and by the asker
-        // an agent acts for when that is not its owner, another entity
-        let ledger_id = match inv.other {
-            None => format!("{}/{}", inv.principal, inv.id),
-            Some(asker) => format!("{}~{}/{}", inv.principal, npub::display(asker), inv.id),
-        };
+        let ledger_id = callers_id(inv.principal, inv.other, &inv.id);
         if inv.decl.ephemeral {
             return self.mutate_ephemeral(facet, inv, &ledger_id, input_sha, input_text, meta).await;
         }

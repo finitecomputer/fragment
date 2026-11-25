@@ -365,7 +365,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // what the last life told its agents' fragments ran, forgotten: its
     // turns ended with it (a restart ends a turn). Its agent's fragment
     // forgets them at this life's first word, this or a turn's
-    let turns = Turns::new(&life);
+    let turns = Turns::new(&life, computer.generation);
     for a in &computer.agents {
         if let Err(e) = turns.take(&api, &a.fragment).await {
             crate::ev!("turns.untaken", { "agent": a.fragment, "error": e.to_string() });
@@ -1367,12 +1367,14 @@ struct Claims {
 /// held as open from before it is told so (an answer lost, it is still
 /// told ended), each ended one is told ended until that lands (`due`,
 /// at each step), and no turn reaches its runtime while one its agent
-/// ended may still be held open (`settle`). Each call names this life, so
-/// the fragment forgets every other life's turns, and a late call from
-/// one before changes nothing.
+/// ended may still be held open (`settle`). Each call names this life and
+/// its computer's start, so the fragment forgets every other life's turns,
+/// and refuses a late call from one before (its turn not run).
 #[derive(Clone)]
 struct Turns {
     life: String,
+    /// Its computer's start, as the platform said it when this life began.
+    start: u64,
     /// Told open, or being told: turn → agent.
     open: Arc<Mutex<HashMap<String, String>>>,
     /// Ended by the engine, and not yet told so: (agent, turn) → a close
@@ -1392,13 +1394,13 @@ const UNSETTLED: &str = "I couldn't start: the platform didn't take that my last
 const SETTLE_WAIT: Duration = Duration::from_millis(250);
 
 impl Turns {
-    fn new(life: &str) -> Turns {
-        Turns { life: life.to_string(), open: Arc::default(), ending: Arc::default(), opening: Arc::default() }
+    fn new(life: &str, start: u64) -> Turns {
+        Turns { life: life.to_string(), start, open: Arc::default(), ending: Arc::default(), opening: Arc::default() }
     }
 
     /// `agent`'s turns taken by this life (a bridge's start).
     async fn take(&self, api: &Api, agent: &str) -> Result<(), ApiError> {
-        api.turn_close(agent, &self.life, None).await
+        api.turn_close(agent, (&self.life, self.start), None).await
     }
 
     /// `turn` of `agent` told open, held as open from before it is sent,
@@ -1406,7 +1408,7 @@ impl Turns {
     async fn open(&self, api: &Api, agent: &str, turn: &str, told: &engine::Told) -> Result<(), ApiError> {
         self.open.lock().expect("turns").insert(turn.to_string(), agent.to_string());
         self.opening.lock().expect("opening").insert(turn.to_string());
-        let opened = api.turn_open(agent, &self.life, turn, told).await;
+        let opened = api.turn_open(agent, (&self.life, self.start), turn, told).await;
         self.opening.lock().expect("opening").remove(turn);
         opened
     }
@@ -1436,7 +1438,7 @@ impl Turns {
 
     /// `turn` of `agent` told ended: no longer ending, or, refused, due again.
     async fn close(&self, api: &Api, agent: &str, turn: &str) -> Result<(), ApiError> {
-        let told = api.turn_close(agent, &self.life, Some(turn)).await;
+        let told = api.turn_close(agent, (&self.life, self.start), Some(turn)).await;
         let mut ending = self.ending.lock().expect("ending");
         let key = (agent.to_string(), turn.to_string());
         match &told {

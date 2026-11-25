@@ -4493,7 +4493,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
                 (Method::Delete, false) => "take",
                 _ => return Err(CellError::invalid("PUT a turn open, DELETE one ended, or DELETE with none to take its agent's turns")),
             };
-            let asked = json!({ "computer": computer, "op": op, "life": v["life"], "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
+            let asked = json!({ "computer": computer, "op": op, "life": v["life"], "generation": v["generation"], "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
             return json_response(&crate::fragment::ask(env, &agent, "computer/turns", &asked).await?);
         }
         // a link's ticket redeemed with its door's public key, at the agent

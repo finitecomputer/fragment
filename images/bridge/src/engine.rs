@@ -1201,6 +1201,13 @@ impl Engine {
                 let as_owner = Record { principal: agent.owner.clone(), ..record };
                 self.said(&agent, fragment, &as_owner);
             }
+            // what the platform wrote for someone (a schedule's fire, for
+            // its maker) is their words, as theirs: its turn is their ask,
+            // and they answer and stop it (FIN-720)
+            records::CHAT if record.written_for().is_some_and(|a| a != agent.identity) => {
+                let principal = record.written_for().expect("matched").to_string();
+                self.said(&agent, fragment, &Record { principal, ..record });
+            }
             // the agent's own words are not for it
             records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
             records::TASKS if fragment == agent.fragment => {

@@ -641,23 +641,24 @@ impl Api {
         Ok(c)
     }
 
-    /// `PUT /api/computer/turns {life, turn, place, asker?, mandate?}`, as the
+    /// `PUT /api/computer/turns {life, generation, turn, place, asker?, mandate?}`, as the
     /// agent (docs/computers.md, "The fragment API"): a turn its agent's
     /// fragment is told it runs, so the agent's calls for its owner carry
     /// whose ask they are. A platform from before has no such route (404:
     /// as the agent, it goes on to the platform's API, which has none), and
     /// is told nothing.
-    pub async fn turn_open(&self, agent: &str, life: &str, turn: &str, told: &crate::engine::Told) -> Result<(), ApiError> {
-        let body = json!({ "life": life, "turn": turn, "place": told.place, "asker": told.asker, "mandate": told.mandate });
+    pub async fn turn_open(&self, agent: &str, (life, start): (&str, u64), turn: &str, told: &crate::engine::Told) -> Result<(), ApiError> {
+        let body = json!({ "life": life, "generation": start, "turn": turn, "place": told.place, "asker": told.asker, "mandate": told.mandate });
         unknown_ok(self.json::<Value>(Method::PUT, "/api/computer/turns", Some(name(agent)?), Some(body)).await)
     }
 
-    /// `DELETE /api/computer/turns {life, turn?}`, as the agent: a turn
-    /// ended, or, with none named, its agent's turns taken by this life (a
-    /// bridge's start: every other life's forgotten). Each call names the
-    /// bridge life it is, and one from a life since retired changes nothing.
-    pub async fn turn_close(&self, agent: &str, life: &str, turn: Option<&str>) -> Result<(), ApiError> {
-        let body = json!({ "life": life, "turn": turn });
+    /// `DELETE /api/computer/turns {life, generation, turn?}`, as the
+    /// agent: a turn ended, or, with none named, its agent's turns taken by
+    /// this life (a bridge's start: every other life's forgotten). Each call
+    /// names the bridge life it is and its computer's start; one from a life
+    /// since retired is refused (409), and changes nothing.
+    pub async fn turn_close(&self, agent: &str, (life, start): (&str, u64), turn: Option<&str>) -> Result<(), ApiError> {
+        let body = json!({ "life": life, "generation": start, "turn": turn });
         unknown_ok(self.json::<Value>(Method::DELETE, "/api/computer/turns", Some(name(agent)?), Some(body)).await)
     }
 

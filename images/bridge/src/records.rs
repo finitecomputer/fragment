@@ -39,6 +39,11 @@ pub struct Record {
     pub kind: String,
     #[serde(default)]
     pub body: Value,
+    /// Whom the platform wrote it for (`PLATFORM`'s record: a schedule's
+    /// fire, its maker's, checked again as it fired): their words, as a
+    /// relayed message is its owner's. None on any other record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker: Option<String>,
     /// Proof of whose ask it is, for the agent that read it (docs/api.md,
     /// "Who asked: mandates"): its turn's, told to its agent's fragment as
     /// the turn starts (`TurnTold`). None from a platform before it, and
@@ -66,6 +71,12 @@ impl Record {
     /// stop and command nothing.
     pub fn by_code(&self) -> bool {
         self.author.as_deref() == Some(CODE)
+    }
+
+    /// Whom the platform wrote it for, when it wrote it for someone
+    /// (`asker`): whose words it is, as if they had said it.
+    pub fn written_for(&self) -> Option<&str> {
+        self.asker.as_deref().filter(|a| self.author.as_deref() == Some(PLATFORM) && is_identity(a))
     }
 
     /// Whether these are `who`'s own words: written as them, not by code.

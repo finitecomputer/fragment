@@ -113,8 +113,9 @@ pub struct Seen {
     /// While away it does not dial.
     pub away: bool,
     /// While deaf it stays on its socket and drops every inbound unheard
-    /// and unacked (a gateway that dies before it takes a turn).
+    /// and unacked (a gateway that dies before it takes a turn), counted.
     pub deaf: bool,
+    pub dropped: u64,
     /// Its turns' wait between drafts (ms).
     pub turn_ms: u64,
     /// How long an approval waits for its answer (Hermes'
@@ -353,7 +354,10 @@ async fn serve(seen: Arc<Mutex<Seen>>, ws: net::ClientWs, addr: std::net::Socket
                     }
                 }
                 Some("inbound") => {
-                    if seen.lock().unwrap().deaf {
+                    if seen.lock().map(|mut s| {
+                        s.dropped += u64::from(s.deaf);
+                        s.deaf
+                    }).unwrap() {
                         continue;
                     }
                     let event = f["event"].clone();

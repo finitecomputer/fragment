@@ -137,11 +137,11 @@ const POST_TRIGGERS_DEPTH: u32 = 1;
 // A post's retry within the horizon finds the runs its first try started.
 const _: () = assert!(retry_horizon_ms() < limits::RUN_RETENTION_MS);
 
-/// What keys a post: its poster and their id, for as long as its record is
-/// kept. A mutation's effects are keyed `<principal>/<id>#<run>`, so the
-/// two never meet.
-fn post_key(principal: &str, id: &str) -> String {
-    format!("post:{principal}/{id}")
+/// What keys a post: its poster and their id (`ops::callers_id`: with the
+/// asker an agent posts for), for as long as its record is kept. A
+/// mutation's effects are keyed `<ledger id>#<run>`, so the two never meet.
+fn post_key(principal: &str, other: Option<&str>, id: &str) -> String {
+    format!("post:{}", crate::ops::callers_id(principal, other, id))
 }
 
 /// A mutation the supervisor recorded before the facet ran it, not yet settled.
@@ -586,8 +586,8 @@ impl FragmentCell {
     /// caller holds the share link. The
     /// caller's standing is read once and decided twice, as a call's is
     /// (ops.rs `call_op`), and a caller holding the public floor alone
-    /// spends a public call. The same (principal, id) again answers the
-    /// record it appended and appends nothing; a retry that finds it also
+    /// spends a public call. The same caller and id again (`post_key`)
+    /// answers the record it appended and appends nothing; a retry that finds it also
     /// finishes what the first try left undone (its deliveries, its
     /// triggers' runs). Another body under that id is 409. Answers the
     /// record, and whether it was a replay.
@@ -618,7 +618,7 @@ impl FragmentCell {
         laps.lap("writable");
         // after the last await: the life it is appended to is the one read
         self.relayed_into_owners(caller, body)?;
-        let key = post_key(principal, id);
+        let key = post_key(principal, caller.signed.as_ref().and_then(|s| s.other_asker()), id);
         // its poster wrote it: a person (an anonymous visitor too), an
         // agent, or a door it relays for (`door_checked` passed it)
         let author = match (door::relays(body), caller.kind()) {
@@ -839,7 +839,7 @@ impl FragmentCell {
                 return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
             }
             let record = self
-                .append(channel, principal, author, POST_KIND, body, Some((&post_key(principal, id), POST_INDEX)))?
+                .append(channel, principal, author, POST_KIND, body, Some((&post_key(principal, None, id), POST_INDEX)))?
                 .ok_or_else(|| CellError::invalid(format!("post {id} was filled before")))?;
             self.published(&record, true, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
             newest = Some(record.seq);

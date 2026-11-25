@@ -103,10 +103,11 @@ pub struct World {
     /// The turns each agent's fragment holds open, as told: turn → (agent,
     /// the bridge life that told it).
     pub turns_open: BTreeMap<String, (String, String)>,
-    /// Each agent's bridge lives heard, the first heard first: the last
-    /// speaks for its turns, the ones before are retired (cell runs_on.rs
-    /// `turn_life`).
-    pub turn_lives: HashMap<String, Vec<String>>,
+    /// Each agent's bridge lives heard, each with its computer's start,
+    /// the first heard first: the last heard of the latest start speaks for
+    /// its turns, and every other is retired, as is a new one of an earlier
+    /// start (cell runs_on.rs `turn_life`, `mandate::heard`).
+    pub turn_lives: HashMap<String, Vec<(String, u64)>>,
     /// Each turn whose runtime spoke (its first draft or reply), with the
     /// agent's other turns its fragment held open then (whose mandates its
     /// calls would carry).
@@ -806,16 +807,18 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
         let mut w = world.lock().unwrap();
-        // as one bridge life: a new one takes the agent's turns (every other
-        // life's forgotten), and a retired one's word changes nothing
-        let life = v["life"].as_str().unwrap_or("").to_string();
+        // as one bridge life of its computer's start: a new one of that
+        // start or a later one takes the agent's turns (every other life's
+        // forgotten), and a retired one's word is refused, changing nothing
+        let (life, start) = (v["life"].as_str().unwrap_or("").to_string(), v["generation"].as_u64().unwrap_or(0));
         let lives = w.turn_lives.entry(agent.clone()).or_default();
-        if lives.last() != Some(&life) {
-            if lives.contains(&life) {
+        let newest = lives.iter().max_by_key(|(_, g)| *g).cloned();
+        if newest.as_ref().is_none_or(|(l, _)| *l != life) {
+            if lives.iter().any(|(l, _)| *l == life) || newest.is_some_and(|(_, g)| g > start) {
                 w.turns.push((agent, "RETIRED".into(), v));
-                return answer(StatusCode::OK, json!({ "ok": true, "retired": true }));
+                return refuse(StatusCode::CONFLICT, "this bridge life was retired: a newer one runs this agent's turns");
             }
-            lives.push(life.clone());
+            lives.push((life.clone(), start));
             w.turns_open.retain(|_, (a, l)| *a != agent || *l == life);
         }
         match (method.clone(), v["turn"].as_str()) {
