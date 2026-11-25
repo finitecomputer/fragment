@@ -206,7 +206,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
 /// A new disk's first life, killed this long after its daemon's claim (the
 /// head its open posts): at once, before its first flush (a second after
 /// its daemon starts) can ship anything, or later, as its flushes ship.
-const FIRST_KILLS_MS: [u64; 9] = [0, 0, 0, 0, 250, 500, 1_000, 2_000, 4_000];
+const FIRST_KILLS_MS: [u64; 14] = [0, 0, 250, 500, 600, 700, 800, 900, 1_000, 1_200, 1_500, 2_000, 4_000, 8_000];
 const FIRST_LIVES: &str = "a new disk's first life killed at once after its claim, or as its flushes ship: its next start mounts the disk, its head that start's own, each sleep after clean, and a write it acknowledged and shipped is there";
 
 /// Each kill of `FIRST_KILLS_MS`, on a new computer of its own, then a
