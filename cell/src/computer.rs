@@ -2233,8 +2233,10 @@ impl ComputerCell {
     async fn read_disk(&self, generation: u64, sizes: bool) -> Option<fragment_core::computer::ComputerDisk> {
         let at = js::now_ms();
         let (read, bound, keep) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS, fragment_core::computer::SIZES_READ_MAX_BYTES) } else { (DISK_READ.to_string(), DISK_READ_MS, 4096) };
-        // on a disk, its /data is a filesystem of its own (Codex on #1552)
-        let read = if self.lifecycle().is_ok_and(|l| l.disk()) { fragment_core::computer::read_on_disk(&read) } else { read };
+        // on a disk, its /data is a filesystem of its own (Codex on #1552),
+        // whose used bytes are its data: its own count, never a walk's
+        let on_disk = self.lifecycle().is_ok_and(|l| l.disk());
+        let read = if on_disk { fragment_core::computer::read_on_disk(&read) } else { read };
         let argv = js::to_js(&json!(["sh", "-c", read]));
         let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64), JsValue::from_f64(keep as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
         // a sizes read's answer is read whatever its exit (a walk that a
@@ -2246,7 +2248,7 @@ impl ComputerCell {
             // patterns name a person's files (Codex on #1426)
             Err(e) => (String::new(), Value::Null, Some(format!("{:?}", e.code))),
         };
-        let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
+        let disk = if on_disk { fragment_core::computer::disk_of_df_on_disk(&out, at, generation) } else if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
         // what takes its disk, its owner's Storage: a cache of its own (paths
         // of a person's files: kept, never logged)
@@ -2461,8 +2463,10 @@ impl ComputerCell {
         let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
         let _ = self.call("closeTabs", &[why.into()]).await;
         // what takes its disk, its owner's Storage, as it sleeps: a disk is
-        // never saved, so this is its measure (`read_disk`; Codex on #1552)
-        self.read_disk(generation, true).await;
+        // never saved, so this is its measure (`read_disk`; Codex on #1552):
+        // its filesystem's own count, one `df`, never a walk of its files,
+        // which grows with them (nothing in a sleep may)
+        self.read_disk(generation, false).await;
         let t0 = js::now_ms();
         let argv = js::to_js(&json!(["sh", "-c", DISK_STATUS]));
         let mut last = None;

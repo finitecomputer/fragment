@@ -390,6 +390,19 @@ pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk
     (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation, data: None })
 }
 
+/// A computer's disk on a disk (docs/computers.md, "A disk") from its
+/// `df` of `/data` (`DISK_READ_ON_DISK`, alone or a sizes read's first
+/// lines): its `/data` is a filesystem of its own, so what takes it is that
+/// filesystem's used bytes, its own count (one `statvfs`), read at once
+/// however many files it holds, where a walk of them grows with them: a
+/// sleep's measure never walks. None for an answer it cannot read.
+pub fn disk_of_df_on_disk(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
+    let disk = disk_of_df(out, at_ms, generation)?;
+    let row = out.lines().filter(|l| !l.trim().is_empty()).skip_while(|l| !l.starts_with("Filesystem")).nth(1)?;
+    let used = row.split_whitespace().nth(2)?.parse::<u64>().ok()?;
+    (used <= disk.total).then_some(ComputerDisk { data: Some(used), ..disk })
+}
+
 /// A computer's disk from `sizes_read`'s answer: its `df` (`disk_of_df`),
 /// and what a restore of its `/data` writes (`data`): for each record, the
 /// larger of its allocated and its apparent size (a restore writes each
@@ -591,6 +604,25 @@ mod tests {
         assert_eq!(disk_of_df(busybox, T, 3).map(|d| d.free), Some(536_427_945_984));
         for bad in ["", "overlay 10 5 5 50% /", "Filesystem 1-blocks Used Available Capacity Mounted on", "Filesystem x\noverlay ten 5 five 50% /", "Filesystem x\noverlay 10 0 11 0% /", "Filesystem x\noverlay 0 0 0 0% /"] {
             assert_eq!(disk_of_df(bad, T, 3), None, "{bad:?}");
+        }
+    }
+
+    /// Goal: a disk's data is its own filesystem's used bytes, from its
+    /// `df` of `/data` alone or a sizes read's first lines (GNU's and
+    /// BusyBox's), the walk's records never counted. Invalid: no `df`, used
+    /// past its size, not a number.
+    #[test]
+    fn a_disks_data_is_its_filesystems_used_bytes() {
+        let gnu = "Filesystem     1-blocks      Used   Available Capacity Mounted on\n/dev/loop0  20618805248 141561856 20477243392       1% /data\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\n/dev/loop0           20618805248  141561856 20477243392   1% /data\n";
+        let want = ComputerDisk { total: 20_618_805_248, free: 20_477_243_392, at: T, generation: 4, data: Some(141_561_856) };
+        assert_eq!(disk_of_df_on_disk(gnu, T, 4), Some(want));
+        assert_eq!(disk_of_df_on_disk(busybox, T, 4), Some(want));
+        // a sizes read's answer: its df first, its records never the data
+        let sized = format!("{gnu}home 99999999 102399998976\nwork 1 1024\nfolders\n");
+        assert_eq!(disk_of_df_on_disk(&sized, T, 4), Some(want));
+        for bad in ["", "Filesystem x\n/dev/loop0 10 11 0 100% /data", "Filesystem x\n/dev/loop0 10 lots 5 50% /data", "Filesystem x\n/dev/loop0 10 5"] {
+            assert_eq!(disk_of_df_on_disk(bad, T, 4), None, "{bad:?}");
         }
     }
 

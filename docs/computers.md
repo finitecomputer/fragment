@@ -572,8 +572,10 @@ put on disks.
   not open for any other reason keeps what shipped, for an operator, never
   started over.
 - **Its sleep is a signal and a wait.** Its port tabs close; the DO
-  measures its `/data` for its owner's Storage (the `df` and the walk an
-  awake save's measure makes, of its own filesystem); it reads its
+  reads its owner's Storage from its `/data`'s own filesystem (one `df`,
+  its used bytes its data: nothing in a sleep grows with its files, and a
+  walk of them would); what takes it, folder by folder, is the walk an
+  export's save or a file's delete makes; it reads its
   daemon's status (`fpac status`) until nothing is unshipped, at most
   `DISK_DRAIN_MS` (45 s), and a wake meanwhile cancels the sleep
   as a hold's wake does; then SIGTERM, its image's boot stops its own
