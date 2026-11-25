@@ -1457,7 +1457,7 @@ fn a_disks_sleep_whose_final_flush_did_not_finish_ends_unsaved() {
     let slept = slept.expect("it sleeps once idle");
     assert_eq!(l.apply(Event::Held { generation: g, held: true }, slept + 500).actions, vec![Action::Stop { generation: g, saved: true }]);
     let s = l.apply(Event::AsleepUnshipped { generation: g }, slept + 140_000);
-    let ended = s.ended.clone().expect("its life ends");
+    let ended = s.ended.expect("its life ends");
     assert_eq!((ended.by, ended.saved), (LifeEnd::Sleep, false), "{s:?}");
     assert!(matches!(s.note, SaveNote::Says(_)), "it says so: {:?}", s.note);
     assert!(matches!(l.phase, Phase::Asleep { .. }));
