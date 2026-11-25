@@ -317,9 +317,10 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     let list: fragment_proto::FragmentList = c.call_as(c.get("/api/fragments")?)?;
     let part_bytes = crate::session::upload_max(&list, c.agent().is_some());
 
-    // this notes folder's own place in storage: its name
-    let root = notes.file_name().and_then(|n| n.to_str()).filter(|n| RepoPath::parse(&format!("{n}/x")).is_ok()).map(str::to_string);
-    let root = root.ok_or_else(|| coded(Code::InvalidUsage, format!("{}: --notes names a folder whose name a fragment's folder can be (such as home)", notes.display())))?;
+    // this notes folder's own place in storage: its name, never `LONG`,
+    // where any notes folder's long names are kept
+    let root = notes.file_name().and_then(|n| n.to_str()).filter(|n| *n != LONG && RepoPath::parse(&format!("{n}/x")).is_ok()).map(str::to_string);
+    let root = root.ok_or_else(|| coded(Code::InvalidUsage, format!("{}: --notes names a folder whose name a fragment's folder can be (such as home), but {LONG}", notes.display())))?;
 
     // what the notes keep: each file as kept (its size and sums), and the
     // paths its parts hold, by fragment
@@ -766,6 +767,12 @@ mod tests {
         let folder = Source::open(&s.notes).unwrap();
         let e = keep(&s.c, &folder, vec![], STORE, &s.notes).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("zip the folder first"), "{e}");
+        // notes named as the place every notes folder's long names are kept
+        let other = "old-storage-4--h8j9";
+        s.mock.seed_repo(other, &[]);
+        let e = keep(&s.c, &s.src, rest.clone(), other, &s.notes.with_file_name(LONG)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains(&format!("but {LONG}")), "{e}");
+        assert!(s.mock.paths(other, "main").is_empty());
     }
 
     /// Goal: a copy whose blob is not what was kept never comes back as
@@ -901,10 +908,10 @@ mod tests {
     /// Goal (FIN-755; Codex on #1557): a file too deep for its own place
     /// whose name is too long even for the short one (243 to 255 bytes, a
     /// name a file system keeps) is kept whole under a shorter place still;
-    /// one whose note's name would be past a file name's most has a note
-    /// named short, where it was. `--back`, by the note or by where the file
-    /// was, brings each to its own name, byte for byte. Replay: kept
-    /// already, nothing committed; brought back, kept already.
+    /// a file or a folder whose note's name would be past a file name's
+    /// most has a note named short, where it was. `--back`, by the note or
+    /// by where it was, brings each to its own name, byte for byte. Replay:
+    /// kept already, nothing committed; brought back, kept already.
     #[test]
     fn a_file_whose_name_is_too_long_for_its_place_or_its_note_is_kept() {
         let deep = format!("work/x/{}", (0..6).map(|i| format!("{i}{}", "d".repeat(49))).collect::<Vec<_>>().join("/"));
@@ -912,14 +919,20 @@ mod tests {
         assert_eq!(wide.len(), 255, "the longest name a file system keeps, in letters of two bytes");
         // too deep, its name 250 bytes (in parts) and 255; and at the top, its note's name too long
         let long = [(format!("{deep}/{}", "n".repeat(250)), bytes(5 * MIB + 1, 21)), (format!("{deep}/{wide}"), b"wide".to_vec()), ("m".repeat(250), b"top".to_vec())];
+        // and a folder whose own name is too long for its note's
+        let folder = "f".repeat(250);
         let mut files = home();
         files.extend(long.iter().cloned());
+        files.push((format!("{folder}/inner.txt"), b"in".to_vec()));
         let s = setup(&files);
         let b = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
         let stored = b.stored.expect("kept");
         assert_eq!(b.files + stored.files, files.len() - 1, "every file but the key brought or kept");
         let notes = notes_under(&s.notes, &|_| false).unwrap();
         let note_of = |path: &str| notes.iter().find(|(_, r)| r.from.ends_with(path)).cloned().expect("its own note");
+        let (folder_note, r) = note_of(&folder);
+        let named = folder_note.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        assert!(named.len() <= 255 && named.ends_with(NOTE_SUFFIX) && r.at == "home" && r.dirs[0].path == folder, "{}", folder_note.display());
         for (i, (path, want)) in long.iter().enumerate() {
             let (note, r) = note_of(path);
             let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
@@ -948,6 +961,9 @@ mod tests {
             assert_eq!(std::fs::read(s.notes.join(path)).unwrap(), *want, "{path}: back");
             assert!(!note.exists());
         }
+        crate::offload::back(&s.c, &s.notes.join(&folder)).unwrap();
+        assert_eq!(std::fs::read(s.notes.join(&folder).join("inner.txt")).unwrap(), b"in");
+        assert!(!folder_note.exists());
         let after = bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap().stored.unwrap();
         assert_eq!((after.files, after.already), (0, stored.files), "brought back: kept already");
     }
@@ -1054,6 +1070,9 @@ mod tests {
         assert_eq!(alone("run/a.txt").at("home").as_deref(), Some("home/run"));
         assert_eq!(alone(&format!("{LONG}/0123/v.bin")).at("home").as_deref(), Some(&*format!("home/{LONG}/0123")));
         assert_eq!(alone(&far).at("home"), Some(format!("home/{LONG}/{}", &blob::sha256_hex(far.as_bytes())[..LONG_HEX])));
+        // under `home`, a name of 242 bytes is the longest the short place takes
+        let edge = |n: usize| alone(&format!("run/{}/{}", "d".repeat(280), "n".repeat(n))).at("home").map(|at| at.starts_with(&format!("home/{LONG}/")));
+        assert_eq!((edge(242), edge(243)), (Some(true), Some(false)));
         let named = format!("run/{}/{}", "d".repeat(280), "n".repeat(offload::NAME_MAX));
         assert_eq!(alone(&named).at("home"), Some(format!("{LONG}/{}", &blob::sha256_hex(format!("home/{named}").as_bytes())[..SHORT_HEX])));
         let root = "h".repeat(200);

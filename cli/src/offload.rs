@@ -687,18 +687,19 @@ pub struct Back {
     pub path: String,
 }
 
-/// A note's path, from it or from the path it is the note of.
-fn note_of(path: &Path) -> Result<PathBuf> {
+/// A note's path, from it or from the path it is the note of (that name,
+/// which only its own note brings back).
+fn note_of(path: &Path) -> Result<(PathBuf, Option<String>)> {
     let (dir, name) = place(path)?;
     Ok(match name.ends_with(NOTE_SUFFIX) {
-        true => dir.join(name),
-        false => dir.join(note_name(&name)),
+        true => (dir.join(name), None),
+        false => (dir.join(note_name(&name)), Some(name)),
     })
 }
 
 /// Brings back what the note at (or for) `path` moved, beside the note.
 pub fn back(c: &Client, path: &Path) -> Result<Back> {
-    let note = note_of(path)?;
+    let (note, asked) = note_of(path)?;
     let dir = note.parent().expect("a note has a folder").to_path_buf();
     let _held = lock(&dir)?;
     let text = match fs::read_to_string(&note) {
@@ -714,6 +715,9 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
     let name = Path::new(first).components().next().and_then(|c| c.as_os_str().to_str()).expect("a record's paths are plain").to_string();
     if note_name(&name) != name_of(&note)? {
         bail!("{} names {first}, which is not under the name it is the note of", note.display());
+    }
+    if let Some(asked) = asked.filter(|a| *a != name) {
+        bail!(coded(Code::Conflict, format!("{} is the note of {name}, not of {asked}: nothing was changed", note.display())));
     }
     // each path under the name the note is for; each file's folders, the
     // note's own, or ones it names
@@ -1139,6 +1143,16 @@ mod tests {
             assert!(format!("{e:#}").contains(says), "{e:#}");
         }
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "nothing made");
+        // asked for by where a long name was, a note there of another name
+        // (one named as the long name's note is) brings back nothing
+        let long = "n".repeat(250);
+        let other = note_name(&long).strip_suffix(NOTE_SUFFIX).expect("a note's name").to_string();
+        let theirs = root.join(note_name(&long));
+        let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, dirs: vec![], files: vec![file(&other)] };
+        fs::write(&theirs, note_text(&r, &theirs, &other, Said::offloaded("now"))).unwrap();
+        let e = back(&c, &root.join(&long)).unwrap_err();
+        assert!(format!("{e:#}").contains(&format!("not of {long}: nothing was changed")), "{e:#}");
+        assert!(theirs.exists() && fs::read_dir(&root).unwrap().count() == 2, "nothing made, its note kept");
     }
 
     /// Goal (FIN-755): a note's name is one a file system keeps, whatever
