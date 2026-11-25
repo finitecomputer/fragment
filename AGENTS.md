@@ -31,6 +31,20 @@ A Linear ticket is a problem statement: what hurts, for whom, and why it
 matters. It is not a plan or a list of PRs. Plans, research and notes go
 in its comments or outside the repo, never in a commit.
 
+Its title names the problem, not the fix ("People can't delete a chat",
+not "Allow deleting chats"). Its description has these bold lead-ins, in
+this order, as the team's "Problem statement" template in Linear does:
+
+- **The problem:** what hurts, in one to three plain sentences.
+- **Who it hurts:** who runs into it, and when.
+- **Why it matters:** what it costs if left, and how often.
+- **How we know:** the evidence: a report, logs, steps, file:line refs.
+- **Done when:** an outcome someone can check, not a task list.
+
+Add **What a fix must keep:**, **Out of scope:**, **Open question:** or
+**Where the work is:** (links, not plans) only when there is something to
+say. One problem per ticket: a second one gets its own.
+
 Any ticket can be built, but Paul merges no PR until he has commented on
 its root problem statement. His comment protects The Fragment Way, often
 as "yes, solve this, but don't do X, and line it up with One Right Way".
