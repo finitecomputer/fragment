@@ -53,7 +53,8 @@ from Settings, its secrets theirs, a fork no door again.
     id>, name}`), in its `room` (a channel, `#name`, or their DM, `DM`).
   A channel's message comes with what was said there just before
   (`context`: in a thread its earlier replies, otherwise the channel's
-  latest; at most 20 lines, 600 characters each, 16 KiB in all), less the
+  latest; at most 20 lines, 600 characters each, 16 KiB in all; a
+  thread's read up to its first 100 replies), less the
   bot's own words and the messages that mentioned it, which the room's
   conversation has. Slack's mentions and links are said by name.
   👀 goes on the message as it is taken.

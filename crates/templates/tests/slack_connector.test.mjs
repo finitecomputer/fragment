@@ -239,9 +239,9 @@ test("a question that asks its owner goes where their answer counts: its turn's 
 test("a turn a restart cut, continued, answers where it would have: its thread", async () => {
   const w = await paired(await connected(world()));
   await w.app.intake({ record: mention(MAPLE, "<@U0BOT> long job", "1790000500.000100") }, w.job());
-  const [next, after] = await continuations(turnOf(1));
+  const [next] = await continuations(turnOf(1));
   assert.equal(next, createHash("sha256").update(`continue\0${turnOf(1)}`).digest("hex").slice(0, 24));
-  for (const turn of [next, after]) assert.deepEqual(w.app.thread({ turn }).to, { channel: "C0DEPLOY", thread: "1790000500.000100", ts: "1790000500.000100" });
+  for (const turn of [next]) assert.deepEqual(w.app.thread({ turn }).to, { channel: "C0DEPLOY", thread: "1790000500.000100", ts: "1790000500.000100" });
 });
 
 test("a question in a channel's thread says to answer by mentioning the bot, and that answer comes in as its words alone", async () => {
@@ -254,6 +254,11 @@ test("a question in a channel's thread says to answer by mentioning the bot, and
   assert.equal(w.published.at(-1).body.text, "yes, go");
   await w.app.intake({ record: mention(PAUL, "ask <@U0BOT> later", "1790000602.000100") }, w.job());
   assert.equal(w.published.at(-1).body.text, "ask @juniper later", "a mention past its start is its words");
+  await w.app.intake({ record: mention(PAUL, "<@U0BOT>", "1790000603.000100") }, w.job());
+  assert.equal(w.published.at(-1).body.text, "@juniper", "a mention alone is still said to it");
+  w.calls.length = 0;
+  await w.app.mirror({ record: { channel: "work", principal: "npub1juniper", body: { kind: "turn.prompt", turn: turnOf(1), prompt: "q", text: "Approve?", asks: "npub1paul", options: [{ id: "yes", label: "Yes" }] } } }, w.job());
+  assert.doesNotMatch(w.calls[0].body.markdown_text, /mentioning/, "a question that takes a button alone is answered in the chat");
 });
 
 test("what a message can do without (👀, its room's context, names) failing outright publishes it all the same", async () => {

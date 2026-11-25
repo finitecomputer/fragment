@@ -68,9 +68,10 @@ const CONTEXT_TEXT_MAX = 600;
 const CONTEXT_MAX_BYTES = 16 * 1024;
 // A thread's replies read for its context, at most: Slack answers a
 // thread's oldest first, so a thread longer than this up to its mention
-// is told its first replies' newest 20 (each a few hundred bytes: within
-// a fetch's answer, FETCH_RESPONSE_MAX_BYTES, 1 MiB).
-const THREAD_READ_MAX = 200;
+// is told the newest 20 of its first 100 (at most 100 of Slack's
+// messages, a few KiB each at most, within a fetch's answer,
+// FETCH_RESPONSE_MAX_BYTES, 1 MiB).
+const THREAD_READ_MAX = 100;
 // Names, one line, as the bridge cuts them.
 const NAME_MAX = 60;
 // Connect attempts whose answer is kept, the latest last.
@@ -145,9 +146,9 @@ const sha24 = async (s) => hex(new Uint8Array(await crypto.subtle.digest("SHA-25
 /// record that started it.
 export const turnOf = (agent, fragment, seq) => sha24(`${agent}|${fragment}/chat/${seq}`);
 
-/// The turns a restart's cut makes of `turn`, each continuing the one
-/// before (docs/chat-records.md, "Turns"): their replies go where its do.
-const CONTINUATIONS = 2;
+/// The turn a restart's cut makes of `turn` (docs/chat-records.md,
+/// "Turns"; the bridge continues a turn once): its replies go where its do.
+const CONTINUATIONS = 1;
 export async function continuations(turn) {
   const out = [];
   for (let t = turn; out.length < CONTINUATIONS; ) out.push((t = await sha24(`continue\0${t}`)));
@@ -454,7 +455,8 @@ export class App extends DurableObject {
     // a mention of the bot that leads a channel's message only routes it
     // here (Slack sends nothing else of a channel): its words are the rest
     const said = m.dm ? m.text : m.text.replace(new RegExp(`^\\s*<@${bot.user}(?:\\|[^>]*)?>[\\s,:]*`), "");
-    const text = cut(readable(said, known).trim(), TEXT_IN_MAX);
+    // a mention alone is still something said to it
+    const text = cut(readable(said.trim() ? said : m.text, known).trim(), TEXT_IN_MAX);
     if (!text) return { ignored: "no text" };
     const body = { text, to: [job.door.to] };
     if (owner) body.relayed = job.door.relayed;
@@ -509,7 +511,8 @@ export class App extends DurableObject {
     if (!to && paired) to = { channel: paired.dm, thread: null, ts: null };
     if (!to) return { sent: 0, why: "nowhere to send it" };
     // a channel sends the bot only what mentions it: an answer there must
-    if (record.channel === "work" && !to.channel.startsWith("D")) text = `${text}\n\n(Answer here by mentioning @${bot?.name ?? "me"}.)`;
+    const words = Array.isArray(b.options) && b.options.some((o) => o?.words === true) && !b.options.some((o) => o?.computer === true);
+    if (record.channel === "work" && words && !to.channel.startsWith("D")) text = `${text}\n\n(Answer here by mentioning @${bot?.name ?? "me"}.)`;
     const chars = [...text];
     const size = TEXT_OUT_MAX - 64;
     let parts = 0;
