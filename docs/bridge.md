@@ -272,7 +272,9 @@ marker stays where it is.
 - **A turn in a room** of the agent's door is told no recap: a recap
   is the whole chat's, every room's. Its marker, the chat's own
   conversation's, stays where it is, so that conversation's next turn
-  is still told what it missed. What was said in the room just before
+  is still told what it missed; and that conversation's own reads (what
+  it missed, its recap, a turn cut before it) pass over every room's
+  turns and words. What was said in the room just before
   is held in memory, never in the state: a turn queued across a
   restart is told its room and who asks, not that.
 - **A read that failed** (the journal, or the recap, answered too

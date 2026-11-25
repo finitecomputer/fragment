@@ -3026,3 +3026,29 @@ async fn a_room_turn_never_spares_the_chats_own_conversation_its_recap() {
     });
     bridge.stop().await;
 }
+
+/// Goal (security): a room's turn is no turn the chat's own conversation
+/// missed. Its memory whole, the owner's next message after a Slack DM's
+/// turn is told no recap, and none of the DM's words.
+#[tokio::test]
+async fn a_rooms_turn_is_never_the_chats_own_conversation_behind() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.connector("slack", "juniper", Some("slack"));
+    let dir = support::dir("room-not-behind");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg, support::script_remembering(&dir, PACE));
+    following(&fake, 2).await;
+    said_and_ended(&fake, &chat, "hello there").await;
+    let heard = fake.say_as_door(&chat, "npub1slack", json!({
+        "text": "my salary is 999k", "to": ["npub1juniper"],
+        "heard": { "via": "slack", "from": "U123", "name": "Maple" }, "room": { "id": "D0001", "name": "DM" }
+    }));
+    let dm = turn_of("juniper", &chat, seq(&heard));
+    fake.until(WAIT, "the DM turn's end", |w| !ends_of(w, &chat, &dm).is_empty()).await;
+    let ask = said_and_ended(&fake, &chat, "anything new?").await;
+    fake.with(|w| {
+        let reply = reply_text(w, &chat, &ask);
+        assert!(!reply.contains("999k") && !reply.contains("memory of this chat is behind"), "a room's turn reached the chat's own conversation: {reply:?}");
+    });
+    bridge.stop().await;
+}

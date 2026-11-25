@@ -102,6 +102,14 @@ fn own<'a>(r: &'a Record, agent: &str, kind: &str) -> Option<&'a Value> {
     (r.by(agent) && r.body["kind"] == kind).then_some(&r.body)
 }
 
+/// Whether a record is a room's (docs/chat-records.md, "A message heard in
+/// a room"): a turn's claim or a message naming one. A room's talk is its
+/// own conversation's, never the chat's: the chat's own walks (`previous`,
+/// `behind`, `exchanges`, `recap`) pass it over.
+fn in_room(b: &Value) -> bool {
+    b.get("room").is_some_and(|r| !r.is_null())
+}
+
 /// Whether a `turn.end` is a refusal: the turn never ran.
 fn refused(end: &Value) -> bool {
     end["outcome"] == "error" && crate::engine::refusal(field(end, "error"))
@@ -121,7 +129,7 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
             continue;
         }
         let Some(start) = own(r, agent, "turn.start") else { continue };
-        if start["agent"] != agent {
+        if start["agent"] != agent || in_room(start) {
             continue;
         }
         let turn = field(start, "turn");
@@ -157,7 +165,7 @@ pub fn behind(work: &[Record], agent: &str, seen: Option<&str>, from_start: bool
             ends.push((field(end, "turn"), end));
             continue;
         }
-        let Some(start) = own(r, agent, "turn.start").filter(|s| s["agent"] == agent) else { continue };
+        let Some(start) = own(r, agent, "turn.start").filter(|s| s["agent"] == agent && !in_room(s)) else { continue };
         let turn = field(start, "turn");
         if seen == Some(turn) {
             return Some(false);
@@ -568,7 +576,7 @@ pub fn exchanges<'a>(chat: &'a [Record], me: &str, owner: &str, since: i64, unti
             begins = true;
             break;
         }
-        if r.channel == records::CHAT && r.at <= until && records::is_identity(&r.principal) && message(r).is_some() {
+        if r.channel == records::CHAT && r.at <= until && records::is_identity(&r.principal) && !in_room(&r.body) && message(r).is_some() {
             said.push(r);
         }
     }
@@ -626,7 +634,7 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
     let started: Vec<(&str, i64, Option<u64>)> = work
         .iter()
         .filter_map(|r| {
-            let b = own(r, me, "turn.start").filter(|b| b["agent"] == me)?;
+            let b = own(r, me, "turn.start").filter(|b| b["agent"] == me && !in_room(b))?;
             let here = b["cause"]["fragment"] == chat && b["cause"]["channel"] == records::CHAT;
             Some((b["turn"].as_str()?, r.at, b["cause"]["seq"].as_u64().filter(|_| here)))
         })
