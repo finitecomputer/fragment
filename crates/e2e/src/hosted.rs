@@ -8,7 +8,7 @@
 //!
 //!   --hosted --zone <zone> --branch <b> [--secret-file <file>]
 //!       [--operator-key-file <file> --operators <npub,...>]
-//!       [--offers computers,models] [--max-paid-calls <n>]
+//!       [--offers computers,disks,models] [--max-paid-calls <n>]
 //!       [--upgrade-from <image>]
 //!       [--only <section>[,...] | --except <section>[,...]]
 //!       [--dry-run | --sweep [<run>] | --sweep-all]
@@ -68,7 +68,7 @@ pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]] [--containers]
-       fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,models]
+       fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,disks,models]
                     [--max-paid-calls <n>] [--upgrade-from <image>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
 /// The suite's command line.
@@ -412,7 +412,7 @@ pub fn plan(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted) -> 
 pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> String {
     let o = offers(hosted);
     let offered: Vec<&str> =
-        [(o.levers, "levers"), (o.computers, "computers"), (o.doors, "doors"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome"), (o.operator, "operator")]
+        [(o.levers, "levers"), (o.computers, "computers"), (o.disks, "disks"), (o.doors, "doors"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome"), (o.operator, "operator")]
             .iter()
             .filter(|(on, _)| *on)
             .map(|(_, n)| *n)

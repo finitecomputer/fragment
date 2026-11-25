@@ -34,13 +34,17 @@ fn cycles() -> u32 {
     std::env::var("FRAGMENT_E2E_DISK_CYCLES").ok().and_then(|n| n.parse().ok()).unwrap_or(3).clamp(1, CYCLES_MAX)
 }
 const CYCLES_MAX: u32 = 1_000;
+/// Each `CRASH_EVERY`th cycle crashes its computer instead of sleeping it,
+/// a fill of `FILL_MIB` still shipping, its write before shipped.
+const CRASH_EVERY: u32 = 10;
+const FILL_MIB: u32 = 64;
 
 const DISK_CHECKS: [&str; 9] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
     "a wake mounts the disk as it slept: what it wrote is there, nothing restored, its line saying what its last sleep left unshipped",
-    "every write is read after the wake that follows it, each of its sleeps clean",
+    "every write is read after the wake that follows it, each sleep clean, each tenth a crash while a fill ships",
     "a crash while it runs loses no write it acknowledged: the start after it mounts the disk as that life left it",
     "a head that will not open is fallen back past: that start fails as unusable, the next mounts the head before it, no strike",
     "awake or asleep, no save of a disk is taken for itself",
@@ -48,10 +52,14 @@ const DISK_CHECKS: [&str; 9] = [
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("disks", &[Need::Disks, Need::Computers, Need::Levers, Need::Node]) {
+    if !s.section_using("disks", &[Need::Disks, Need::Computers, Need::Levers], &[Need::Node]) {
         return Ok(());
     }
-    let _ = api;
+    // hosted, the deployment's new computers are on disks already (its
+    // config's `computers.disks`); locally, a node of that shape
+    if s.hosted() {
+        return disk_checks(s, api);
+    }
     s.stop()?;
     let on = s.start_on_disks()?;
     let checked = disk_checks(s, &on);
@@ -65,6 +73,15 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200 && id.starts_with("computer:"), "a computer: {r}");
+    // its checks talk to the stub's script: hosted, a branch whose new
+    // computers are the stub's; its lines are the node's logs, local only
+    if s.hosted() && r.body["image"] != "stub" {
+        for check in DISK_CHECKS {
+            s.skip(check, "it needs the stub's scripted runtime, and this deployment's new computers run another image");
+        }
+        return Ok(());
+    }
+    let local = !s.hosted();
     let row = || lever(api, &id, "fpac").map(|r| r.body).unwrap_or(Value::Null);
     let made = row();
     s.ok(DISK_CHECKS[0], made["disk"] == true && made["volume"] == 20_000u64 << 20 && made["head"].is_null() && made["back"].is_null(), &made);
@@ -94,7 +111,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let line1 = started.iter().find(|l| l["generation"] == 1).cloned().unwrap_or(Value::Null);
     s.ok(
         DISK_CHECKS[1],
-        woke && first["restored"]["from"] == "disk" && line1["path"] == "disk" && line1["end"] == "ready" && line1["disk"]["mountMs"].is_u64() && line1.get("bytes").is_none(),
+        woke && first["restored"]["from"] == "disk" && (!local || (line1["path"] == "disk" && line1["end"] == "ready" && line1["disk"]["mountMs"].is_u64() && line1.get("bytes").is_none())),
         json!({ "view": first["restored"], "line": line1 }),
     );
 
@@ -107,7 +124,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let saves = lever(api, &id, "saves")?.body["saves"].clone();
     s.ok(
         DISK_CHECKS[2],
-        wrote == "wrote disk/first.txt" && slept && head_of(&after["head"]).is_some_and(|(epoch, clean)| epoch == 1 && clean) && sleep1["sleep"]["clean"] == true && sleep1["sleep"]["exited"] == true && saves.as_array().is_some_and(Vec::is_empty),
+        wrote == "wrote disk/first.txt" && slept && head_of(&after["head"]).is_some_and(|(epoch, clean)| epoch == 1 && clean) && (!local || (sleep1["sleep"]["clean"] == true && sleep1["sleep"]["exited"] == true)) && saves.as_array().is_some_and(Vec::is_empty),
         json!({ "wrote": wrote, "row": after, "line": sleep1, "saves": saves }),
     );
 
@@ -119,24 +136,40 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let line = lines(s).0.into_iter().find(|l| l["generation"] == generation).unwrap_or(Value::Null);
     s.ok(
         DISK_CHECKS[3],
-        woke && read == "read disk/first.txt: one" && again["restored"]["from"] == "disk" && line["path"] == "disk" && line["disk"]["sleptUnshipped"].is_u64(),
+        woke && read == "read disk/first.txt: one" && again["restored"]["from"] == "disk" && (!local || (line["path"] == "disk" && line["disk"]["sleptUnshipped"].is_u64())),
         json!({ "read": read, "restored": again["restored"], "line": line }),
     );
 
-    // every write read after the wake that follows it, each sleep clean
-    let mut cycled = vec![];
+    // every write read after the wake that follows it, each sleep clean;
+    // every `CRASH_EVERY`th a crash instead, while a fill still ships
+    let (mut failed, mut crashes, t0) = (vec![], 0u32, std::time::Instant::now());
     for i in 0..cycles() {
         let token = format!("cycle-{i}");
         let wrote = talk.said(s, &format!("write disk/cycle.txt {token}"))?;
-        let (slept, _) = put_to_sleep(s, api, &owner, &id);
-        let head = head_of(&row()["head"]);
-        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
-        let woke = awake(s);
+        let crash = i % CRASH_EVERY == CRASH_EVERY - 1;
+        let (ended, head) = if crash {
+            std::thread::sleep(SHIPPED_WITHIN);
+            let before = view()["restored"]["generation"].as_u64().unwrap_or(0);
+            let filled = talk.said(s, &format!("fill-data disk/fill.bin {FILL_MIB}"))?;
+            let killed = lever(api, &id, "kill").is_ok_and(|r| r.status == 200);
+            crashes += 1;
+            let back = s.eventually(WAKE + WAKE, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > before) && phase(api, &owner, &id) == "awake");
+            (filled.starts_with("filled ") && killed && back, None)
+        } else {
+            let (slept, _) = put_to_sleep(s, api, &owner, &id);
+            let head = head_of(&row()["head"]);
+            let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+            (slept && head.is_some_and(|(_, clean)| clean) && awake(s), head)
+        };
         let read = talk.said(s, "read disk/cycle.txt")?;
-        let ok = wrote == "wrote disk/cycle.txt" && slept && head.is_some_and(|(_, clean)| clean) && woke && read == format!("read disk/cycle.txt: {token}");
-        cycled.push(json!({ "i": i, "ok": ok, "read": read, "head": head.map(|(e, c)| json!([e, c])) }));
+        if !(wrote == "wrote disk/cycle.txt" && ended && read == format!("read disk/cycle.txt: {token}")) {
+            failed.push(json!({ "i": i, "crash": crash, "wrote": wrote, "ended": ended, "read": read, "head": head.map(|(e, c)| json!([e, c])) }));
+        }
+        if (i + 1) % 10 == 0 {
+            println!("      ({} of {} cycles, {crashes} crashes, {} failed, {:.0?})", i + 1, cycles(), failed.len(), t0.elapsed());
+        }
     }
-    s.ok(DISK_CHECKS[4], cycled.iter().all(|c| c["ok"] == true), json!(cycled));
+    s.ok(DISK_CHECKS[4], failed.is_empty(), json!({ "cycles": cycles(), "crashes": crashes, "failed": failed, "took": format!("{:.0?}", t0.elapsed()) }));
 
     // a crash while it runs: what it acknowledged, shipped, is mounted again
     let wrote = talk.said(s, "write disk/crash.txt synced")?;
@@ -162,7 +195,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let failures = lever(api, &id, "saves")?.body["failures"].clone();
     s.ok(
         DISK_CHECKS[6],
-        slept && set.status == 200 && woke && read == "read disk/crash.txt: synced" && unusable.is_some() && head_of(&fell["head"]).is_some_and(|(e, _)| e > epoch) && failures == 0,
+        slept && set.status == 200 && woke && read == "read disk/crash.txt: synced" && (!local || unusable.is_some()) && head_of(&fell["head"]).is_some_and(|(e, _)| e > epoch) && failures == 0,
         json!({ "set": set.body, "read": read, "unusable": unusable, "row": fell, "failures": failures }),
     );
 
