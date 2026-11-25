@@ -1001,6 +1001,23 @@ test("a save kept before its SHA-256 was, its door ended (unlinked) as it is has
   };
   const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
   assert.deepEqual([r.status, (await r.json()).error], [410, "ended"]);
+  // its unlink landing before the bucket answers, its save gone with it
+  // (Codex's fix-check): refused as ended too, never a 500
+  const e = door();
+  await e.connect();
+  await e.save(life(await e.restore(e.row().started)), 1, "a save");
+  e.c.signal = async () => void (e.c.running = false);
+  const eget = e.blobs.get;
+  let once = true;
+  e.blobs.get = async (k) => {
+    if (once) {
+      once = false;
+      await e.end();
+    }
+    return eget(k);
+  };
+  const gone = await e.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([gone.status, (await gone.json()).error], [410, "ended"]);
 });
 
 test("an ended door has no way back: refused (410), never a save of nothing that would run its computer's old copy, now or after a restart (Codex's round on #1541)", async () => {

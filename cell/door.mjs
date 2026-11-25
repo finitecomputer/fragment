@@ -393,6 +393,12 @@ export class SimplexDoor extends DurableObject {
     // computer run its old copy
     if (this.#over) return refusal(410, "over", "this door's connector is gone: its link went with it");
     if (this.#ended) return refusal(410, "ended", "this door has ended: its link went with it");
+    // its end (its owner's unlink) may land at any wait from here: then
+    // its link went with it, as any ended door's did, and nothing of it, or
+    // of a door begun since, is handed back or written
+    const ends = this.#ends;
+    const ended = () => this.#ends !== ends || this.#ended || this.#over;
+    const gone = () => refusal(410, "ended", "this door ended as it was handed back: its link went with it");
     let d = this.#door();
     // one never begun is fenced too: no save given after, nor start
     if (!d) {
@@ -411,7 +417,9 @@ export class SimplexDoor extends DurableObject {
       while (c.running && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
       if (c.running) await c.destroy();
     }
+    if (ended()) return gone();
     await this.#drain();
+    if (ended()) return gone();
     const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
     if (unsent > 0) return refusal(409, "busy", `${unsent} of its owner's messages still go to its connector: ask again in a moment`);
     // bounded: each pass marks one save unreadable, of at most the kept few
@@ -421,6 +429,7 @@ export class SimplexDoor extends DurableObject {
       if (r.kind === "none") return new Response(null, { status: 204 });
       if (r.kind === "exhausted") return refusal(410, "exhausted", "this door saved, and no save of it restores");
       let obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
+      if (ended()) return gone();
       if (obj) {
         // streamed (a save may be 64 MiB), with the SHA-256 taken as it
         // came (`x-door-sha256`), as an import carries one the other way:
@@ -432,18 +441,13 @@ export class SimplexDoor extends DurableObject {
         // back carries one
         let sha = r.save.sha;
         if (!sha) {
-          // its end (its owner's unlink) may land as it reads: then its
-          // link went with it, as any ended door's did, and no hash is
-          // written, nor bytes another door saved since handed back
-          const ends = this.#ends;
-          const ended = () => this.#ends !== ends || this.#ended || this.#over;
           const hashed = hashing();
           await obj.body.pipeThrough(hashed.stream).pipeTo(new WritableStream());
           sha = await hashed.digest;
-          if (ended()) return refusal(410, "ended", "this door ended as its save was read: its link went with it");
+          if (ended()) return gone();
           this.ctx.storage.sql.exec("UPDATE saves SET sha = ? WHERE generation = ? AND seq = ? AND sha IS NULL", sha, r.save.generation, r.save.seq);
           obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
-          if (ended()) return refusal(410, "ended", "this door ended as its save was read: its link went with it");
+          if (ended()) return gone();
           if (!obj) continue;
         }
         const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: sha, "content-type": "application/octet-stream" };
