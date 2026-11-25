@@ -724,6 +724,14 @@ pub(crate) struct ExportAsk {
     /// export's (`computer/export`).
     #[serde(default)]
     since: Option<i64>,
+    /// Whether a disk asleep is woken for its save (its export's last look,
+    /// past its wait, wakes nothing).
+    #[serde(default = "woken")]
+    wake: bool,
+}
+
+fn woken() -> bool {
+    true
 }
 
 /// `computer/export-read`: a range of one of that save's records.
@@ -1903,6 +1911,10 @@ impl ComputerCell {
                 // moved since is not this start's to roll back (Codex on
                 // #1552), and the start goes again at once on it
                 let tried = self.disk_tried.borrow_mut().take().filter(|(g, _)| *g == generation).map(|(_, head)| head);
+                // and while this start is still the one that runs: one after it,
+                // begun as this one awaited (its exit heard, a wake), is not
+                // this start's to roll back under (Codex round 2 on #1552)
+                let tried = tried.filter(|_| self.lifecycle().ok().and_then(|l| l.running()) == Some(generation));
                 let disk = self.disk().ok().flatten();
                 let stored = disk.and_then(|d| d.head).map(|h| h.encode());
                 let (fell, older) = match (disk, &tried) {
@@ -3671,6 +3683,9 @@ impl ComputerCell {
                     }
                     if matches!(life.phase, Phase::Failed { .. }) {
                         return json_response(&json!({ "save": null, "setAside": null, "unsaved": "it would not wake" }));
+                    }
+                    if !b.wake {
+                        return json_response(&json!({ "pending": true }));
                     }
                     // due, its alarm takes it: this ask only looks (Codex on #1552)
                     self.drive(Event::ExportAsked).await?;

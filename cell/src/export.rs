@@ -1765,13 +1765,14 @@ impl PrincipalCell {
                 };
                 // either may be missing: a save set aside is exported though
                 // none it may restore is usable (Codex on the no-room PR)
-                let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person, "since": run.job.made_at })).await?;
                 // a disk's save, taken awake for this export: looked for again
-                // after a wait, a bounded number of times, then without it
-                let now = js::now_ms();
-                let waited_from = *run.job.computer_waited_from.get_or_insert(now);
-                if v["pending"] == true && now - waited_from < limits::COMPUTER_WAIT_MAX_MS {
-                    run.job.wait_until = now + limits::COMPUTER_WAIT_MS;
+                // after a wait, until its bound from the first look (a cold
+                // wake that look runs counts), the last look waking nothing
+                let waited_from = *run.job.computer_waited_from.get_or_insert(js::now_ms());
+                let open = js::now_ms() - waited_from < limits::COMPUTER_WAIT_MAX_MS;
+                let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person, "since": run.job.made_at, "wake": open })).await?;
+                if v["pending"] == true && open && js::now_ms() - waited_from < limits::COMPUTER_WAIT_MAX_MS {
+                    run.job.wait_until = js::now_ms() + limits::COMPUTER_WAIT_MS;
                     return Ok(());
                 }
                 run.job.computer_waited_from = None;
