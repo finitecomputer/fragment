@@ -609,12 +609,12 @@ impl VaultCell {
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec(
             "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret, claim = NULL",
-            vec![name.into(), sealed.into(), text.as_str().into()],
+            vec![name.into(), sealed.as_str().into(), text.as_str().into()],
         )?;
         if let Some(r) = receipt {
             self.sql().exec("INSERT INTO receipts (key, at) VALUES (?, ?)", vec![r.into(), SqlStorageValue::Integer(js::now_ms())])?;
         }
-        Ok(text)
+        answered(secret, &sealed, &text)
     }
 
     /// Its person's `PUT /api/vault/{name}`: `put`, and with its `held`,
@@ -640,14 +640,15 @@ impl VaultCell {
     /// nothing here yields, so nothing is put, moved or removed between
     /// its read and its write. One not held is refused, never made.
     fn place(&self, name: &str, put: &PutSecret) -> CellResult<String> {
-        let rows = self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        let rows = self.rows("SELECT sealed, secret FROM secrets WHERE name = ?", vec![name.into()])?;
         let held: Option<Secret> = rows.first().map(stored).transpose()?;
+        let sealed = rows.first().and_then(|r| r["sealed"].as_str()).unwrap_or_default().to_string();
         let checked = rules::check(name, put, held.as_ref().map(|s| &s.place), &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
         let held = held.ok_or_else(|| CellError::host("the rules kept a value for a secret not held"))?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: held.set_at, revision: None };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec("UPDATE secrets SET secret = ? WHERE name = ?", vec![text.as_str().into(), name.into()])?;
-        Ok(text)
+        answered(secret, &sealed, &text)
     }
 
     /// Every secret held, by name, as `SecretList`'s JSON: what each says
@@ -1118,6 +1119,13 @@ fn revision_of(sealed: &str) -> String {
 /// A kept secret's revision: its seal and what it says, together.
 fn revision_at(row: &Value) -> String {
     revision_of(&format!("{}\n{}", row["sealed"].as_str().unwrap_or_default(), row["secret"].as_str().unwrap_or_default()))
+}
+
+/// `secret`, just written as `text` beside `sealed`, as its writer is
+/// answered: with its revision, as the list would read it.
+fn answered(mut secret: Secret, sealed: &str, text: &str) -> CellResult<String> {
+    secret.revision = Some(revision_of(&format!("{sealed}\n{text}")));
+    serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))
 }
 
 /// What a row's kept `Secret` says, read as `T`.

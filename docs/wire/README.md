@@ -1197,7 +1197,7 @@ out. A secret as its person reads it: everything but its value.
 | `hosts` | `array` of `string` | required |  |
 | `name` | `string` | required |  |
 | `place` | [`Place`](#place) | required |  |
-| `revision` | `string` or `null` | optional | Which one it is (a new value, or a change to its hosts, place or agents, makes another), as `GET /api/vault` lists it: what a `PutSecret::held` names. |
+| `revision` | `string` or `null` | optional | Which one it is (a new value, or a change to its hosts, place or agents, makes another), in every answer that reads it: what a `PutSecret::held` names. Never kept with it. |
 | `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
 
 ### `SecretAsk`

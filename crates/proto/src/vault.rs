@@ -80,8 +80,8 @@ pub struct Secret {
     /// When its value was set, in ms since the epoch.
     pub set_at: i64,
     /// Which one it is (a new value, or a change to its hosts, place or
-    /// agents, makes another), as `GET /api/vault` lists it: what a
-    /// `PutSecret::held` names.
+    /// agents, makes another), in every answer that reads it: what a
+    /// `PutSecret::held` names. Never kept with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub revision: Option<String>,

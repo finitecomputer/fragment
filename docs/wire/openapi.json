@@ -2959,7 +2959,7 @@
           },
           "revision": {
             "default": null,
-            "description": "Which one it is (a new value, or a change to its hosts, place or\nagents, makes another), as `GET /api/vault` lists it: what a\n`PutSecret::held` names.",
+            "description": "Which one it is (a new value, or a change to its hosts, place or\nagents, makes another), in every answer that reads it: what a\n`PutSecret::held` names. Never kept with it.",
             "type": [
               "string",
               "null"
