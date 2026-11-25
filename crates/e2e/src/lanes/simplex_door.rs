@@ -14,6 +14,14 @@
 //! names `doors`. Run by name: a local stack builds the door's image for
 //! it alone (devstack::Fleet::doors).
 //!
+//! With `simplex-link` named too (`--only simplex-door,simplex-link`; hosted,
+//! a door on Cloudflare's containers), its files against the real thing
+//! (`files_for_real`): a door of the run's linked to a SimpleX app of the
+//! run's on SimpleX's preset servers; the app's voice message, past what
+//! goes inline, reaches the door whole through its XFTP relay, and the
+//! door sends the same bytes back, which the app receives whole. Its
+//! levers alone: no connector, no agent, no model call.
+//!
 //! `connector` (in the computers lane, whose stub agent it binds, on a
 //! stack that runs doors: `--only computers,simplex-door`): the SimpleX connector
 //! (templates/simplex) end to end on a door. Its owner's `connect` starts
@@ -22,8 +30,12 @@
 //! delivers it reaches the connector's inbox, is published there as its
 //! owner's to the agent, whose computer, asleep, wakes and answers; the
 //! answer goes to the door's runner (which has no SimpleX link here, and
-//! says so); a delivery without the inbox's secret is refused, and one once
-//! its owner unbound it reaches no one.
+//! says so); its owner's voice message (a file its runner gave the door)
+//! is kept as one of the connector's blobs and published as its
+//! attachment; its agent's reply's file (uploaded there by its agent, a
+//! viewer) is given to the door, which holds those very bytes (hashed
+//! again there); a delivery without the inbox's secret is refused, and
+//! one once its owner unbound it reaches no one.
 
 use std::time::{Duration, Instant};
 
@@ -104,6 +116,8 @@ fn door_name(label: &str) -> String {
 }
 
 pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
+    // named before the section's own check, so a plan knows the name
+    let real = s.names(super::simplex_setup::LINK);
     if !s.section_by_name(NAME, &[Need::Levers, Need::Doors], "its stack builds the door's image (SimpleX's core and its runner)") {
         return Ok(());
     }
@@ -198,6 +212,86 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     ensure!(deleted.status == 200, "deleting their connector: {deleted}");
     let (gone, files) = ended(api, &theirs, Duration::from_secs(60))?;
     s.ok("their connector deleted while its door runs: its door ends, its files gone", gone && files.as_array().is_some_and(Vec::is_empty), json!({ "ended": gone, "files": files }));
+    if real {
+        files_for_real(s, api)?;
+    }
+    Ok(())
+}
+
+/// A lever's ask whose door answers other than 200 (a reply taken, 202):
+/// its status and body.
+fn ask(api: &Api, door: &str, op: &str, more: Value) -> Result<(u16, Value)> {
+    let mut body = json!({ "door": door, "op": op });
+    body.as_object_mut().expect("an object").extend(more.as_object().cloned().unwrap_or_default());
+    let r = api.unsigned("POST", "/api/test/door", Some(&body))?;
+    Ok((r.status, r.body))
+}
+
+/// How long SimpleX's own servers, a door's start, or a file over XFTP
+/// take, at most.
+const REAL: Duration = Duration::from_secs(300);
+
+/// S1 against the real thing (module doc): a door of the run's, linked
+/// by its invitation to a SimpleX app of the run's (the lab's client on
+/// SimpleX's preset servers, as a phone's app is), carries a voice message
+/// in and the same bytes back out, each whole, its core's file traffic
+/// through its relay alone (on Cloudflare, a container's own TLS hello to
+/// an XFTP server is reset).
+fn files_for_real(s: &mut Suite, api: &Api) -> Result<()> {
+    use super::simplex_setup::{tag, Phone};
+    let door = door_name(&s.name("door-files"));
+    let door = door.as_str();
+    lever(api, door, "start", json!({ "agent": "Juniper" }))?;
+    until(api, door, REAL, ready_from(1))?;
+    let (asked, _) = ask(api, door, "link", json!({}))?;
+    ensure!(asked == 202, "the door's link: {asked}");
+    let st = until(api, door, REAL, |x| x["runner"]["phase"] == "inviting" && x["runner"]["link"].is_string())?;
+    let link = st["runner"]["short"].as_str().or(st["runner"]["link"].as_str()).unwrap_or_default().to_string();
+    let dir = s.dir("simplex-door-phone");
+    let mut phone = Phone::start(&dir, &s.name("door-phone"))?;
+    let r = phone.cmd(&format!("/c {link}"))?;
+    ensure!(!tag(&r).contains("rror"), "the phone's connect: {r}");
+    let contact = phone.wait(REAL, |e| tag(e) == "contactConnected")?["contact"]["contactId"].as_i64().unwrap_or(0);
+    until(api, door, REAL, |x| x["runner"]["phase"] == "linked")?;
+
+    // its voice message, past what goes inline (over XFTP), whole at the door
+    let memo: Vec<u8> = (0..400_000u32).map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    let sha = fragment_core::blob::sha256_hex(&memo);
+    std::fs::write(dir.join("files").join("memo.m4a"), &memo)?;
+    let body = json!([{ "filePath": "/data/files/memo.m4a", "msgContent": { "type": "voice", "text": "", "duration": 5 } }]);
+    let sent = phone.cmd(&format!("/_send @{contact} json {body}"))?;
+    let t0 = Instant::now();
+    let delivered = s.eventually(REAL, || lever(api, door, "deliveries", json!({})).is_ok_and(|d| d.as_array().is_some_and(|d| d.iter().any(|m| m["file"]["sha256"] == sha.as_str()))));
+    let came_ms = t0.elapsed().as_millis();
+    let held = lever(api, door, "file", json!({ "sha": sha })).unwrap_or_default();
+    s.ok(
+        "a SimpleX app's voice message (over XFTP, SimpleX's own servers) reaches the door whole through its relay, and is delivered naming it",
+        tag(&sent) == "newChatItems" && delivered && held["sha256"] == sha.as_str() && held["size"] == memo.len(),
+        json!({ "sent": tag(&sent), "delivered": delivered, "ms": came_ms, "held": held, "logs": if delivered { String::new() } else { phone.logs() } }),
+    );
+
+    // the same bytes back, as a reply's file, whole at the app
+    let files = json!([{ "sha256": sha, "name": "echo.bin", "type": "application/octet-stream", "size": memo.len() }]);
+    let t0 = Instant::now();
+    let done = s.eventually(REAL, || ask(api, door, "reply", json!({ "key": "files-echo", "text": "your memo, back", "files": files })).is_ok_and(|(status, _)| status == 200));
+    let back = (|| -> Result<Vec<u8>> {
+        let is = |ci: &Value| ci["chatItem"]["chatDir"]["type"] == "directRcv" && ci["chatItem"]["file"]["fileId"].is_i64();
+        let e = phone.wait(REAL, |e| tag(e) == "newChatItems" && e["chatItems"].as_array().is_some_and(|cs| cs.iter().any(is)))?;
+        let id = e["chatItems"].as_array().and_then(|cs| cs.iter().find(|c| is(c))).map(|c| c["chatItem"]["file"]["fileId"].clone()).unwrap_or_default();
+        phone.wait(REAL, |e| tag(e) == "rcvFileDescrReady" && e["chatItem"]["chatItem"]["file"]["fileId"] == id)?;
+        let r = phone.cmd(&format!("/freceive {id}"))?;
+        ensure!(!tag(&r).contains("rror"), "/freceive {id}: {r}");
+        let done = phone.wait(REAL, |e| tag(e) == "rcvFileComplete" && e["chatItem"]["chatItem"]["file"]["fileId"] == id)?;
+        let path = done["chatItem"]["chatItem"]["file"]["fileSource"]["filePath"].as_str().unwrap_or_default().to_string();
+        Ok(std::fs::read(dir.join("files").join(path.rsplit('/').next().unwrap_or(&path)))?)
+    })();
+    let back_ms = t0.elapsed().as_millis();
+    s.ok(
+        "the door sends the same bytes back as a reply's file (over XFTP, through its relay), whole at the app",
+        done && back.as_ref().is_ok_and(|b| *b == memo),
+        json!({ "done": done, "ms": back_ms, "received": back.as_ref().map(Vec::len).map_err(|e| format!("{e:#}")), "logs": if back.is_ok() { String::new() } else { phone.logs() } }),
+    );
+    lever(api, door, "stop", json!({}))?;
     Ok(())
 }
 
@@ -233,6 +327,19 @@ fn newest_run(api: &Api, owner: &Keys, name: &str, op: &str, within: Duration) -
 /// One of its owner's messages, as the door's runner delivers it.
 fn deliver(api: &Api, door: &str, id: &str, text: &str) -> Result<Value> {
     lever(api, door, "deliver", json!({ "message": { "id": id, "kind": "text", "text": text, "at": "2026-11-21T00:00:00Z", "file": null } }))
+}
+
+/// A file as the door's runner gives one (`bytes`, typed `type`): its
+/// SHA-256, which a delivery then names.
+fn give(api: &Api, door: &str, bytes: &[u8], kind: &str) -> Result<String> {
+    use base64::Engine as _;
+    let r = lever(api, door, "file", json!({ "bytes": base64::engine::general_purpose::STANDARD.encode(bytes), "type": kind }))?;
+    r["sha256"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("the door's file: {r}"))
+}
+
+/// One of its owner's messages carrying file `sha256`, as its runner delivers it.
+fn deliver_file(api: &Api, door: &str, id: &str, kind: &str, file: Value) -> Result<Value> {
+    lever(api, door, "deliver", json!({ "message": { "id": id, "kind": kind, "text": "", "at": "2026-11-24T00:00:00Z", "file": file } }))
 }
 
 /// A SimpleX connector of `owner`'s named `name`, its inbox's `secret`
@@ -312,6 +419,42 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
         "its agent's computer, asleep, wakes for it and answers; the answer goes to the door's runner, which has no SimpleX link here and says so",
         answered && mirror["output"] == json!({ "sent": 0, "why": "not linked" }),
         json!({ "replies": super::computers::agent_replies(&chat(), a.identity), "mirror": mirror }),
+    );
+
+    // its owner's voice message: its file, which its runner gave the door,
+    // kept as one of the connector's blobs and published as its attachment
+    // within a lever's body as base64 (cell/door.mjs `BODY_MAX`)
+    let memo: Vec<u8> = (0..150_000u32).map(|n| (n % 253) as u8).collect();
+    let sha = give(api, &door, &memo, "audio/mp4")?;
+    let named = json!({ "sha256": sha, "name": "memo.m4a", "type": "audio/mp4", "size": memo.len() });
+    deliver_file(api, &door, "sx-e2e-voice", "voice", named)?;
+    let intake = newest("intake");
+    let voiced = chat().into_iter().find(|r| r["body"]["attachments"][0]["sha256"] == sha.as_str()).unwrap_or_default();
+    let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
+    s.ok(
+        "its owner's voice message reaches their agent with its file, kept from the door as one of the connector's blobs, whole",
+        intake["output"] == json!({ "relayed": true, "file": true })
+            && voiced["body"]["attachments"] == json!([{ "sha256": sha, "size": memo.len(), "type": "audio/mp4", "name": "memo.m4a" }])
+            && voiced["body"]["relayed"]["via"] == "simplex"
+            && blob.status == 200
+            && blob.bytes == memo,
+        json!({ "intake": intake, "record": voiced, "blob": blob.status, "bytes": blob.bytes.len() }),
+    );
+
+    // its agent's reply's file (a drawing), uploaded there by its agent, a
+    // viewer: given to the door, which holds those very bytes
+    deliver(api, &door, "sx-e2e-draw", "draw me something")?;
+    let drew = s.eventually(a.wake, || super::computers::agent_replies(&chat(), a.identity).iter().any(|r| r["body"]["attachments"][0]["sha256"].is_string()));
+    let drawn = super::computers::agent_replies(&chat(), a.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
+    let file = drawn["body"]["attachments"][0].clone();
+    let fsha = file["sha256"].as_str().unwrap_or("").to_string();
+    let look = || api.unsigned("POST", "/api/test/door", Some(&json!({ "door": door, "op": "file", "sha": fsha }))).map(|r| r.body).unwrap_or_default();
+    let held = s.eventually(a.wake, || look()["sha256"] == fsha.as_str());
+    let mirror = newest("mirror");
+    s.ok(
+        "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes, and the door holds those very bytes",
+        drew && held && look()["size"] == file["size"] && mirror["output"] == json!({ "sent": 0, "why": "not linked" }) && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
+        json!({ "reply": drawn, "held": look(), "mirror": mirror }),
     );
 
     // a delivery without the inbox's secret, from anyone, starts nothing
