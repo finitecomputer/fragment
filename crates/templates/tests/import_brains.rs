@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-const HELPER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/skills/skills/productivity/import-agent-home/profiles/finite-computer.brains.py");
+/// The helper, from this package's folder, where cargo runs its tests.
+const HELPER: &str = "../../templates/skills/skills/productivity/import-agent-home/profiles/finite-computer.brains.py";
 const OLD: &str = "brain-1";
 const RECORD: &str = "brain/imported-from-finite.json";
 
@@ -88,7 +89,8 @@ impl Dir {
     /// The helper, as the profile runs it: its answer, or what it said
     /// when it refused. Never a traceback.
     fn run(&self, args: &[&str]) -> Result<Value, String> {
-        let out = Command::new("python3").arg("-I").arg(HELPER).args(args).current_dir(&self.0).output().expect("python3 runs");
+        let helper = std::fs::canonicalize(HELPER).expect("the helper, from crates/templates");
+        let out = Command::new("python3").arg("-I").arg(helper).args(args).current_dir(&self.0).output().expect("python3 runs");
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         assert!(!said.contains("Traceback"), "{args:?}: {said}");
         match out.status.success() {
